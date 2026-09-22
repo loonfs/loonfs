@@ -265,6 +265,8 @@ pub(crate) fn append_rows_to_metadata(
             MetadataRowFamily::CommitReceipts => metadata_state.push_commit_receipt(
                 row_decode::commit_receipt_from_manifest_row(row.clone()).map_err(mismatch)?,
             ),
+            MetadataRowFamily::Commits => metadata_state
+                .push_commit(row_decode::commit_from_manifest_row(row.clone()).map_err(mismatch)?),
             MetadataRowFamily::Attributes => metadata_state.push_attributes_revision(
                 row_decode::attributes_revision_from_manifest_row(row.clone()).map_err(mismatch)?,
             ),

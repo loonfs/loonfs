@@ -242,6 +242,16 @@ impl MetadataState {
                 &delta.delta,
             );
         }
+        self.push_commit_record(WalCommitPayload {
+            seq: receipt.committed_seq,
+            commit_id: receipt.commit_id.clone(),
+            committed_by: receipt.committed_by.clone(),
+            semantic_commit_fingerprint: receipt.semantic_commit_fingerprint.clone(),
+            committed_at_ms: receipt.committed_at_ms,
+            message: receipt.message.clone(),
+            deltas: deltas.to_vec(),
+            inline_content: Vec::new(),
+        });
         self.push_commit_receipt_record(receipt);
     }
 }

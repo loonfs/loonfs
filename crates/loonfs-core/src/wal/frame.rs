@@ -3,7 +3,7 @@
 
 use crate::namespace::state::NamespaceReadState;
 use loonfs_api::wire::wal::{
-    WalCommitDelta, WalCommitPayload, WalInlineContent, WalSegmentEnvelope, WalSegmentPayload,
+    WalCommitDelta, WalInlineContent, WalSegmentEnvelope, WalSegmentPayload,
 };
 use loonfs_api::{ChangeSeq, CommitId, NamespaceId, WalNo, WriterEpoch};
 use serde::{Deserialize, Serialize};
@@ -92,10 +92,6 @@ impl ValidatedWalSegment {
 
     pub(crate) fn envelope(&self) -> &WalSegmentEnvelope {
         &self.envelope
-    }
-
-    pub(crate) fn records(&self) -> &[WalCommitPayload] {
-        &self.envelope.payload().records
     }
 
     pub(crate) fn decoded_records(&self) -> impl Iterator<Item = DecodedWalRecord<'_>> {

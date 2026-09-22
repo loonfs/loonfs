@@ -673,23 +673,10 @@ pub(super) async fn list_changes(
                 )
                 .with_param("after_seq"));
             }
-            let mut page = reader
-                .list_changes(
-                    &namespace_id,
-                    after_seq,
-                    ListChangesOptions { limit: Some(limit) },
-                )
+            snapshot
+                .list_changes(after_seq, limit)
                 .await
-                .map_err(ApiResponseError::for_namespace(&namespace_id))?;
-            page.changes
-                .retain(|change| change.committed_seq <= captured_seq);
-            page.through_seq = captured_seq;
-            page.next_after_seq = page
-                .changes
-                .last()
-                .map(|change| change.committed_seq)
-                .filter(|last_seq| *last_seq < captured_seq);
-            page
+                .map_err(ApiResponseError::for_namespace(&namespace_id))?
         }
         ReadTarget::Live {
             reader,

@@ -13,8 +13,8 @@ use crate::{
     SnapshotId, StatPathOptions,
 };
 use loonfs_api::{
-    AbsolutePath, DirectoryPageCursor, FileRevisionsPageCursor, PageCursor, PageRequest,
-    PaginationPolicy, TrashPageCursor,
+    AbsolutePath, DirectoryPageCursor, EffectiveLimit, FileRevisionsPageCursor, PageCursor,
+    PageRequest, PaginationPolicy, TrashPageCursor,
 };
 use loonfs_core::{NamespaceReaderEngine, RuntimeReadContext};
 use tracing::Instrument;
@@ -94,6 +94,19 @@ impl FsReadSnapshot {
     /// Returns the head sequence this snapshot is pinned to.
     pub fn head_seq(&self) -> ChangeSeq {
         self.context.head.seq
+    }
+
+    /// Reads the ordered change feed through this snapshot's captured head.
+    pub async fn list_changes(
+        &self,
+        after_seq: ChangeSeq,
+        limit: EffectiveLimit,
+    ) -> Result<ListChangesResponse> {
+        self.engine.require_administrator(&self.context).await?;
+        Ok(self
+            .engine
+            .list_changes_after(after_seq, limit, &self.context)
+            .await?)
     }
 
     /// Resolves an absolute path against this snapshot.
@@ -1192,20 +1205,16 @@ impl FsReader {
         options: ListChangesOptions,
     ) -> Result<ListChangesResponse> {
         self.core.record_trace_context(&tracing::Span::current());
-        if self.core.subject.is_some() {
-            let (engine, context) = self.core.pinned_metadata_read(namespace_id).await?;
-            engine.require_administrator(&context).await?;
-        }
+        let (engine, context) = self.core.pinned_metadata_read(namespace_id).await?;
+        engine.require_administrator(&context).await?;
         let limit = match options.limit {
             Some(limit) => limit,
             None => PaginationPolicy::default()
                 .resolve_limit(None)
                 .map_err(|error| RuntimeError::Config(error.to_string()))?,
         };
-        Ok(self
-            .core
-            .reader_engine(namespace_id)
-            .list_changes_after(after_seq, limit)
+        Ok(engine
+            .list_changes_after(after_seq, limit, &context)
             .await?)
     }
 

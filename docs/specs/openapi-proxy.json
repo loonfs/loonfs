@@ -225,7 +225,7 @@
             "description": "Sequence number where the commit became visible."
           },
           "events": {
-            "description": "Always present on the change feed. Absent only from a replayed\n`POST /commits` response whose WAL record has been retired.",
+            "description": "Present on the change feed and on a replayed commit response.",
             "items": {
               "$ref": "#/components/schemas/FilesystemChange"
             },

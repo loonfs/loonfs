@@ -225,6 +225,7 @@ pub(crate) fn bootstrap_metadata_state(
         Vec::new(),
         Vec::new(),
         Vec::new(),
+        Vec::new(),
         access_revisions,
     )
 }

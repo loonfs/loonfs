@@ -344,6 +344,18 @@ async fn a_base_rebuild_drops_what_the_floor_covers_and_keeps_what_it_does_not()
         row,
         MetadataRow::CommitReceipt (crate::metadata::CommitReceiptRecord { committed_seq, .. }) if *committed_seq == floor
     )));
+    let commits =
+        manifest_rows_for_family(&materialized.metadata_state, ApiMetadataRowFamily::Commits);
+    assert!(!commits.is_empty());
+    assert!(commits.iter().all(|row| matches!(
+        row,
+        MetadataRow::Commit(record) if record.seq >= floor
+    )));
+    assert!(commits.iter().any(|row| matches!(
+        row,
+        MetadataRow::Commit(record) if record.seq == floor
+    )));
+    assert_eq!(commits.len(), receipts.len());
 
     let revisions = manifest_rows_for_family(
         &materialized.metadata_state,
@@ -561,6 +573,62 @@ async fn manifest_load_rejects_unequal_index_descriptor_counts() {
         Err(other) => panic!("expected run manifest mismatch, got {other:?}"),
         Ok(_) => panic!("tampered descriptor counts must not load"),
     }
+}
+
+#[tokio::test]
+async fn manifest_load_rejects_unequal_commit_and_receipt_counts() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context)
+        .await
+        .expect("bootstrap");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/hello.txt",
+        b"hello\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write hello");
+    let checkpoint = create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("create checkpoint");
+    let manifest =
+        load_manifest_materialization_for_inspection(&store, &namespace_id, checkpoint.manifest_no)
+            .await
+            .expect("load manifest")
+            .manifest;
+    let mut payload = manifest.payload().clone();
+    let descriptor = payload
+        .runs
+        .iter_mut()
+        .flat_map(|run| &mut run.segments)
+        .find(|descriptor| descriptor.family == ApiMetadataRowFamily::Commits)
+        .expect("commit descriptor");
+    descriptor.row_count += 1;
+    let manifest_number = payload.manifest_no;
+    overwrite_manifest(
+        &store,
+        &namespace_id,
+        encode_namespace_manifest_json(payload)
+            .expect("encode changed manifest")
+            .into_envelope(),
+    )
+    .await;
+
+    let Err(error) =
+        load_manifest_segments_for_inspection(&store, None, &namespace_id, &manifest_number).await
+    else {
+        panic!("unequal commit history counts must not load")
+    };
+    let ManifestLoadError::RunManifestMismatch { message, .. } = error else {
+        panic!("expected run manifest mismatch, got {error:?}")
+    };
+    assert!(message.contains("commit rows"), "{message}");
 }
 
 #[tokio::test]

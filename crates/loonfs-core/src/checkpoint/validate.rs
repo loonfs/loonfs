@@ -253,6 +253,8 @@ fn validate_run_index_parity(
         let ordered = ordered_manifest_segments(object_key, &run.segments)?;
         let mut direntry_bind_rows = 0u64;
         let mut direntry_child_bind_rows = 0u64;
+        let mut commit_rows = 0u64;
+        let mut commit_receipt_rows = 0u64;
         for family_segments in ordered {
             let rows = family_segments
                 .segments
@@ -262,12 +264,13 @@ fn validate_run_index_parity(
             match family_segments.family {
                 MetadataRowFamily::DirentryBinds => direntry_bind_rows = rows,
                 MetadataRowFamily::DirentryChildBinds => direntry_child_bind_rows = rows,
+                MetadataRowFamily::Commits => commit_rows = rows,
+                MetadataRowFamily::CommitReceipts => commit_receipt_rows = rows,
                 MetadataRowFamily::Revisions
                 | MetadataRowFamily::Inodes
                 | MetadataRowFamily::DirentryUnbinds
                 | MetadataRowFamily::Tombstones
                 | MetadataRowFamily::ActiveDeletions
-                | MetadataRowFamily::CommitReceipts
                 | MetadataRowFamily::ContentPublications
                 | MetadataRowFamily::Attributes
                 | MetadataRowFamily::Access => {}
@@ -278,6 +281,15 @@ fn validate_run_index_parity(
                 object_key: object_key.to_owned(),
                 message: format!(
                     "metadata run `{}` has {direntry_bind_rows} direntry bind rows but {direntry_child_bind_rows} child-bind index rows",
+                    run.run_no
+                ),
+            });
+        }
+        if commit_rows != commit_receipt_rows {
+            return Err(ManifestLoadError::RunManifestMismatch {
+                object_key: object_key.to_owned(),
+                message: format!(
+                    "metadata run `{}` has {commit_rows} commit rows but {commit_receipt_rows} commit receipt rows",
                     run.run_no
                 ),
             });

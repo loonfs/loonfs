@@ -57,7 +57,7 @@ impl<S: ObjectStore + ?Sized> PublishMetadataView<'_, S> {
         committed_seq: ChangeSeq,
     ) -> Result<Option<Commit>> {
         super::changes::find_committed_change_at(
-            self.manifest_segments.store(),
+            &self.metadata_view(),
             &self.head.namespace_id,
             committed_seq,
         )

@@ -143,7 +143,11 @@ async fn reads_commits_and_change_feed_never_list() {
         .expect("read");
     assert_eq!(bytes.bytes, b"hello\n");
     let changes = engine
-        .list_changes_after(ChangeSeq(0), loonfs_test_support::ids::page_limit(1024))
+        .list_changes_after(
+            ChangeSeq(0),
+            loonfs_test_support::ids::page_limit(1024),
+            &ctx,
+        )
         .await
         .expect("change feed");
     assert!(!changes.changes.is_empty());

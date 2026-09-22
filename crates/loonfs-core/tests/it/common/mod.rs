@@ -199,8 +199,13 @@ pub(crate) mod commit_split_support {
         namespace_id: &NamespaceId,
         after_seq: ChangeSeq,
     ) -> Result<loonfs_api::v0::ListChangesResponse, CoreError> {
+        let context = read_context(store, namespace_id).await;
         namespace_engine(store, namespace_id, &mutation_context())
-            .list_changes_after(after_seq, page_limit(loonfs_api::DEFAULT_PAGE_LIMIT))
+            .list_changes_after(
+                after_seq,
+                page_limit(loonfs_api::DEFAULT_PAGE_LIMIT),
+                &context,
+            )
             .await
     }
 

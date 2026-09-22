@@ -170,26 +170,6 @@ pub(super) async fn load_wal_tail<S: ObjectStore + ?Sized>(
     Ok(ValidatedWalTail::new(segments))
 }
 
-/// Loads every retained segment, from the retention floor through the head.
-pub(crate) async fn load_retained_wal_tail<S: ObjectStore + ?Sized>(
-    store: &S,
-    head: &NamespaceReadState,
-    retention_floor_seq: ChangeSeq,
-) -> Result<ValidatedWalTail, WalTailLoadError> {
-    load_wal_tail(
-        store,
-        WalTailLoadRequest {
-            namespace_id: &head.namespace_id,
-            base_seq: retention_floor_seq,
-            head_seq: head.seq,
-            base_wal_no: head.retention_floor_wal_no,
-            tip_wal_no: head.wal_no,
-            writer_epoch: head.writer_epoch,
-        },
-    )
-    .await
-}
-
 pub(crate) async fn load_replayed_wal_tail<S: ObjectStore + ?Sized>(
     store: &S,
     base_head: &NamespaceReadState,

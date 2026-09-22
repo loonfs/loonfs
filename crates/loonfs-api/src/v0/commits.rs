@@ -24,8 +24,7 @@ pub struct Commit {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub message: Option<String>,
-    /// Always present on the change feed. Absent only from a replayed
-    /// `POST /commits` response whose WAL record has been retired.
+    /// Present on the change feed and on a replayed commit response.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub events: Option<Vec<FilesystemChange>>,

@@ -405,14 +405,17 @@ async fn snapshot_change_feed_stops_at_the_captured_sequence() {
             Some(snapshot.snapshot_id.as_str()),
         ))
         .expect("snapshot change page");
-        assert_eq!(page.through_seq, snapshot.captured_seq);
         seen.extend(page.changes.iter().map(|change| change.committed_seq));
         match page.next_after_seq {
             Some(next) => {
+                assert_eq!(page.through_seq, next);
                 assert!(next < snapshot.captured_seq);
                 after_seq = next;
             }
-            None => break,
+            None => {
+                assert_eq!(page.through_seq, snapshot.captured_seq);
+                break;
+            }
         }
     }
     assert_eq!(

@@ -10,12 +10,14 @@ use crate::metadata::{
     active_tombstone_from_records, MetadataStateBuilder, SubtreeTombstoneRecord, TombstoneRowAction,
 };
 use crate::path::read::load_current_metadata_view;
+use crate::{NamespaceEngine, RuntimeReadContext};
 use loonfs_api::v0::DirectoryBinding;
 use loonfs_api::wire::manifest::{
     ActiveDeletionRowAction, DeletedDirentry, InodeRecord, TombstoneGeneration,
 };
 use loonfs_api::{AttributeInclusion, InodeKind};
 use loonfs_api::{DisplayName, Page, PageRequest, TrashEntry, TrashPageCursor};
+use std::sync::Arc;
 
 fn generation(seq: u64) -> TombstoneGeneration {
     TombstoneGeneration {
@@ -938,4 +940,159 @@ async fn a_deletion_committed_after_the_last_manifest_lists_immediately() {
         "an unflushed undelete must hide the durable row it cancels: {entries:?}"
     );
     assert_eq!(entries[0].deletion_seq, fresh.committed_seq);
+}
+
+async fn fresh_read_context<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+) -> RuntimeReadContext {
+    let loaded = crate::namespace::read_anchor::load_head_and_metadata_basis(store, namespace_id)
+        .await
+        .expect("load read basis");
+    RuntimeReadContext {
+        head: loaded.head,
+        basis: loaded.basis,
+        segment_cache: Arc::new(MetadataSegmentCache::new(Default::default())),
+        tail_cache: Arc::new(crate::checkpoint::WalTailProjectionCache::new(
+            crate::checkpoint::WalTailProjectionCacheConfig {
+                max_entries: 4,
+                max_rows: usize::MAX,
+                max_decoded_bytes: usize::MAX,
+            },
+            None,
+        )),
+    }
+}
+
+#[tokio::test]
+async fn a_change_feed_page_costs_the_page_not_the_namespaces_history() {
+    async fn page_reads(commits: u32) -> usize {
+        let temp = tempdir().expect("tempdir");
+        let store = RecordingStore::new(
+            LocalFsStore::new(temp.path()).expect("create local-fs store"),
+            KeyPredicate::any(),
+        );
+        let namespace_id = NamespaceId::parse("changes-bounded").expect("namespace id");
+        let context = mutation_context("writer-1", 5_000);
+        bootstrap_namespace(&store, &namespace_id, &context)
+            .await
+            .expect("bootstrap namespace");
+        for index in 0..commits {
+            write_test_file(
+                &store,
+                &namespace_id,
+                &format!("/file-{index}.txt"),
+                &format!("com_change{index:023}"),
+                &context,
+            )
+            .await;
+        }
+        create_checkpoint(&store, &namespace_id, &context)
+            .await
+            .expect("create checkpoint");
+        drain_reorganization(
+            &store,
+            &namespace_id,
+            MetadataLsmPolicy {
+                max_delta_runs: NonZeroUsize::MIN,
+                ..MetadataLsmPolicy::default()
+            },
+        )
+        .await;
+        let read_context = fresh_read_context(&store, &namespace_id).await;
+        let engine = NamespaceEngine::reader(&store, namespace_id);
+
+        store.reset();
+        let page = engine
+            .list_changes_after(
+                ChangeSeq(1),
+                EffectiveLimit::new(NonZeroU32::new(4).expect("nonzero")),
+                &read_context,
+            )
+            .await
+            .expect("list changes");
+        assert_eq!(page.changes.len(), 4);
+        assert!(
+            store.snapshot().iter().all(|operation| !matches!(
+                loonfs_objectstore::layout::parse_object_key(operation.key()),
+                Some(key)
+                    if key.family()
+                        == loonfs_objectstore::layout::DurableObjectFamily::WalSegment
+            )),
+            "{:?}",
+            store.snapshot()
+        );
+        store.count(OperationClass::Read)
+    }
+
+    let small = page_reads(8).await;
+    let large = page_reads(64).await;
+    assert_eq!(small, large);
+    assert!(large < 64, "a bounded page read {large} metadata objects");
+}
+
+#[tokio::test]
+async fn a_page_crossing_the_fold_boundary_reads_folded_then_tail_commits() {
+    let temp = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp.path()).expect("create local-fs store");
+    let namespace_id = NamespaceId::parse("changes-boundary").expect("namespace id");
+    let context = mutation_context("writer-1", 5_000);
+    bootstrap_namespace(&store, &namespace_id, &context)
+        .await
+        .expect("bootstrap namespace");
+    for index in 1..=5u32 {
+        write_test_file(
+            &store,
+            &namespace_id,
+            &format!("/file-{index}.txt"),
+            &format!("com_fold{index:025}"),
+            &context,
+        )
+        .await;
+    }
+    flush::flush_wal(&store, &namespace_id)
+        .await
+        .expect("flush commits");
+    for index in 6..=8u32 {
+        write_test_file(
+            &store,
+            &namespace_id,
+            &format!("/file-{index}.txt"),
+            &format!("com_tail{index:025}"),
+            &context,
+        )
+        .await;
+    }
+    let read_context = fresh_read_context(&store, &namespace_id).await;
+    let engine = NamespaceEngine::reader(&store, namespace_id);
+    let limit = EffectiveLimit::new(NonZeroU32::new(4).expect("nonzero"));
+
+    let first = engine
+        .list_changes_after(ChangeSeq(3), limit, &read_context)
+        .await
+        .expect("list first page");
+    assert_eq!(
+        first
+            .changes
+            .iter()
+            .map(|change| change.committed_seq)
+            .collect::<Vec<_>>(),
+        [ChangeSeq(4), ChangeSeq(5), ChangeSeq(6), ChangeSeq(7)]
+    );
+    assert_eq!(first.next_after_seq, Some(ChangeSeq(7)));
+
+    let second = engine
+        .list_changes_after(ChangeSeq(7), limit, &read_context)
+        .await
+        .expect("list second page");
+    assert_eq!(
+        second
+            .changes
+            .iter()
+            .map(|change| change.committed_seq)
+            .collect::<Vec<_>>(),
+        [ChangeSeq(8)]
+    );
+    assert_eq!(second.through_seq, ChangeSeq(8));
+    assert_eq!(second.next_after_seq, None);
 }

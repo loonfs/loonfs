@@ -18,6 +18,7 @@ use crate::metadata::{
 use crate::namespace::state::NamespaceReadState;
 use loonfs_api::wire::manifest::lookup_keys;
 use loonfs_api::wire::sst_blocks::string_prefix_upper_bound;
+use loonfs_api::wire::wal::WalCommitPayload;
 use loonfs_api::{
     AbsolutePath, AccessRevisionNo, AttributeRevisionNo, Attributes, ChangeSeq, CommitId, InodeId,
     InodeKind, NameKey, RevisionNo,
@@ -568,6 +569,56 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
             .into_iter()
             .chain(manifest_receipt)
             .max_by_key(|receipt| receipt.committed_seq))
+    }
+
+    pub(crate) async fn commit_at_seq(
+        &self,
+        seq: ChangeSeq,
+    ) -> Result<Option<WalCommitPayload>, CoreError> {
+        if seq > self.visible_seq() {
+            return Ok(None);
+        }
+        if let Some(record) = self
+            .row_states()
+            .flat_map(MetadataState::commits)
+            .find(|record| record.seq == seq)
+        {
+            return Ok(Some(record.clone()));
+        }
+        match self.manifest_segments() {
+            Some(segments) => manifest_index::commit_at_seq(segments, seq).await,
+            None => Ok(None),
+        }
+    }
+
+    pub(crate) async fn commits_after(
+        &self,
+        after_seq: ChangeSeq,
+        limit: usize,
+    ) -> Result<Vec<WalCommitPayload>, CoreError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let visible_seq = self.visible_seq();
+        let durable = if let Some(segments) = self.manifest_segments() {
+            manifest_index::commits_after_page(segments, after_seq, limit)
+                .await?
+                .into_iter()
+                .filter(|record| record.seq <= visible_seq)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let mut tail: Vec<_> = self
+            .row_states()
+            .flat_map(MetadataState::commits)
+            .filter(|record| after_seq < record.seq && record.seq <= visible_seq)
+            .cloned()
+            .collect();
+        tail.sort_by_key(|record| record.seq);
+        // Every manifest row is at or below the basis head and every tail or overlay row is
+        // above it, so no sort across the two sides is needed.
+        Ok(durable.into_iter().chain(tail).take(limit).collect())
     }
 
     pub(crate) async fn current_parent_binding_for_child(

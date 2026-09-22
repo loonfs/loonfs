@@ -535,6 +535,8 @@ Suppose request A creates `/reports` and request B also tries to create `/report
 
 Every WAL commit and commit receipt stores a `semantic_commit_fingerprint`. It represents the logical request: `namespace_id`, `actor_id`, ordered operations with their inline preconditions, request-level preconditions, and optional message. It excludes publication details such as the writer epoch and timestamp. Appendix B specifies the exact canonical bytes.
 
+The materialized file set also stores each retained commit's record in the `commits` family, keyed by sequence. A replay rebuilds its response from that row.
+
 While the receipt is retained, an equal fingerprint under the same `commit_id` identifies a replay of the original commit. A different fingerprint returns `commit_id_reuse_conflict`. A replay does not execute the mutation again or reevaluate its original preconditions against current state.
 
 Inline content is identified by its bytes. While the commit receipt is retained, retrying the same request with the same inline bytes returns the original commit, even if a new content ID was assigned. Changed bytes or a different subject return `commit_id_reuse_conflict`.
@@ -563,7 +565,7 @@ Each delta has a `delta_index`, and its wrapper has a `semantic_op_index` identi
 
 The change feed is ordered by logical commit, not by physical WAL object. A segment containing three commits contains three commit boundaries in the feed. Within a commit, semantic filesystem events follow request-operation order; one operation can produce several events.
 
-A consumer resuming after sequence N locates later commits by reading retained WAL headers from the retention boundary. Fence objects produce no change events. If its cursor is older than the retention floor, it must bootstrap from a fresh checkpoint instead. The API's event shapes and cursor contract are specified in [the API specification][api-spec].
+A consumer resuming after sequence N reads the `commits` family of the current file set and then the commits in the unfolded WAL after it. Fence objects produce no change events. If its cursor is older than the retention floor, it must bootstrap from a fresh checkpoint instead. The API's event shapes and cursor contract are specified in [the API specification][api-spec].
 
 A consumer that requires permanent event history must retain its own copy before the floor advances. Use `(namespace_id, committed_seq)` for a commit's position and `inode_id` for item identity. A commit ID is useful for correlation, but is not a permanent unique event key because it can be reused after receipt reclamation.
 
@@ -584,6 +586,8 @@ Each run records `run_seq`, `tier`, and its segment descriptors. Within one run,
 The manifest must not contain duplicate run numbers or a run number at or above `next_run_no`. A family's segment ranges must not overlap or descend. Metadata producers must not write the same logical row key twice within one run.
 
 Metadata rows describe immutable facts at specific positions. Reads merge those facts and apply the visibility rules, rather than choosing arbitrary values for a conflicting row key. The parent-and-name binding family and child-binding index contain the same bind records in different orders. Manifest validation checks their per-run row counts; reorganization checks full row-level equality across its selected complete input runs.
+
+The `commits` and `commit_receipts` families hold one row each per retained commit; manifest validation checks their per-run row counts the same way.
 
 ### 7.2 Publishing a materialized file set
 
@@ -787,7 +791,7 @@ The following rules apply only when the selected inputs include the group's olde
 | `revisions` | Retain every file revision, including revisions of deleted files. |
 | `tombstones` | Retain all set and revoke events. |
 | `active_deletions` | Retain listed deletions until revoked. Remove a cancelled `listed`/`removed` pair together. The floor does not expire a recoverable deletion. |
-| `commit_receipts` | Remove receipts strictly below the floor. |
+| `commits`, `commit_receipts` | Remove rows strictly below the floor. |
 | `content_publications` | Retain all publication evidence, regardless of floor. |
 | `attributes` | For each inode, retain all revisions above the floor and the newest revision at or below it; remove earlier revisions. |
 | `access` | For each inode, retain all revisions above the floor and the newest revision at or below it; remove earlier revisions. |
@@ -1204,9 +1208,12 @@ Rows are kind-tagged CBOR objects in the data blocks. The row-kind schema and th
 | `tombstone` | `root_inode_id`, `generation`, `commit_id`, `action`, `deleted_at_ms`, `deleted_by` |
 | `active_deletion` | `root_inode_id`, `deletion_seq`, `action` |
 | `commit_receipt` | `commit_id`, `committed_by`, `semantic_commit_fingerprint`, `committed_seq`, `committed_at_ms`, `message?` |
+| `commit` | `seq`, `commit_id`, `committed_by`, `semantic_commit_fingerprint`, `committed_at_ms`, `message?`, `deltas` |
 | `content_publication` | `content_id`, `committed_seq`, `delta_index` |
 | `attributes_revision` | `inode_id`, `attributes_revision_no`, `committed_seq`, `commit_id`, `delta_index`, `updated_by`, `updated_at_ms`, `attributes` |
 | `access_revision` | `inode_id`, `access_revision_no`, `committed_seq`, `commit_id`, `delta_index`, `updated_by`, `updated_at_ms`, `boundary`, `grants` |
+
+A `commit` row is the WAL commit record of A.5 without its inline content. The `inline_content` field is omitted, and a row that carries one is invalid.
 
 For a tombstone, `generation` is `{seq, delta_index}`. A set action is `{"kind":"set","deleted_direntry":...}`. A revoke action is `{"kind":"revoke","target":...}`. The event actor and timestamp describe that event, including when the action is a revoke, despite the field names `deleted_by` and `deleted_at_ms`.
 
@@ -1226,6 +1233,7 @@ In the following grammar, `u64::MAX - x` and `u32::MAX - x` mean subtraction bef
 | `tombstones` | `tombstone-{root_inode_id:020}-{generation.seq:020}-{generation.delta_index:010}` |
 | `active_deletions` | `active-deletion-{deletion_seq:020}-{root_inode_id:020}-{sort_rank:010}` |
 | `commit_receipts` | `commit-receipt-{commit_id_hex}-{committed_seq:020}` |
+| `commits` | `commit-{seq:020}` |
 | `content_publications` | `content-publication-{content_id}-{committed_seq:020}` |
 | `attributes` | `attribute-{inode_id:020}-{u64::MAX - attributes_revision_no:020}-{u64::MAX - committed_seq:020}-{u32::MAX - delta_index:010}` |
 | `access` | `access-{inode_id:020}-{u64::MAX - access_revision_no:020}-{u64::MAX - committed_seq:020}-{u32::MAX - delta_index:010}` |
@@ -1244,6 +1252,7 @@ Bloom filters use the following keys, which are not always full row keys:
 | `tombstones` | `tombstone-{root_inode_id:020}` |
 | `active_deletions` | Complete row key |
 | `commit_receipts` | `commit-receipt-{commit_id_hex}` |
+| `commits` | Complete row key |
 | `content_publications` | `content-publication-{content_id}` |
 | `attributes` | `attribute-{inode_id:020}` |
 | `access` | `access-{inode_id:020}` |
@@ -1259,7 +1268,7 @@ The family groups are fixed:
 | `inodes` | `inodes` |
 | `tombstones` | `tombstones` |
 | `active_deletions` | `active_deletions` |
-| `commit_receipts` | `commit_receipts` |
+| `commits` | `commits`, `commit_receipts` |
 | `content_publications` | `content_publications` |
 | `attributes` | `attributes` |
 | `access` | `access` |

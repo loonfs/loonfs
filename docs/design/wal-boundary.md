@@ -34,7 +34,7 @@ Numbered WAL keys, segment construction, reads, and publication are handled in `
 | `replay.rs` | Reconstruction of metadata state from committed records |
 | `reclaim.rs` | Identification of WAL objects still required by retention |
 
-Commit publication uses the current namespace head and accepted commits to prepare the next segment. Reads use a base head and current head to load and replay the intervening WAL. For the change feed, the retained segments are loaded through the current head, then converted into filesystem events. The numbered ranges for these reads are calculated inside `wal/`.
+Commit publication uses the current namespace head and accepted commits to prepare the next segment. Reads use a base head and current head to load and replay the intervening WAL. The change feed and commit replay read the `commits` metadata family and the projected tail; they do not load retained segments.
 
 The numbered-key builder is restricted by `clippy.toml`, with explicit exceptions for WAL storage code and tests that inspect physical objects. The envelope codecs remain available for format validation and tests.
 

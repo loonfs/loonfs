@@ -861,8 +861,10 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         &self,
         after_seq: ChangeSeq,
         limit: EffectiveLimit,
+        context: &RuntimeReadContext,
     ) -> Result<ListChangesResponse> {
-        crate::protocol::list_changes_after(&self.store, &self.namespace_id, after_seq, limit).await
+        let view = self.load_read_view(context).await?;
+        crate::protocol::list_changes_after(&view, after_seq, limit).await
     }
 }
 
@@ -1313,6 +1315,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::checkpoint::WalTailProjectionCacheConfig;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use tempfile::tempdir;
 
@@ -1349,12 +1352,32 @@ mod tests {
             LocalFsStore::new(temp_dir.path()).expect("store"),
             namespace_id.clone(),
         );
+        let loaded = crate::namespace::read_anchor::load_head_and_metadata_basis(
+            &reader.store,
+            &namespace_id,
+        )
+        .await
+        .expect("read basis");
+        let context = RuntimeReadContext {
+            head: loaded.head,
+            basis: loaded.basis,
+            segment_cache: Arc::new(MetadataSegmentCache::new(Default::default())),
+            tail_cache: Arc::new(WalTailProjectionCache::new(
+                WalTailProjectionCacheConfig {
+                    max_entries: 1,
+                    max_rows: usize::MAX,
+                    max_decoded_bytes: usize::MAX,
+                },
+                None,
+            )),
+        };
         let changes = reader
             .list_changes_after(
                 ChangeSeq(0),
                 loonfs_api::PaginationPolicy::default()
                     .resolve_limit(None)
                     .expect("default limit"),
+                &context,
             )
             .await
             .expect("a reader-built engine serves reads");

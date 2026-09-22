@@ -308,7 +308,7 @@ async fn batch_commit_writes_one_segment_and_expands_change_feed() {
 }
 
 #[tokio::test]
-async fn change_feed_validates_wal_tail_before_current_manifest() {
+async fn change_feed_does_not_read_folded_wal_before_current_manifest() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -333,10 +333,11 @@ async fn change_feed_validates_wal_tail_before_current_manifest() {
     resolve_path(&store, &namespace_id, "/docs")
         .await
         .expect("checkpoint-backed read should not read pre-checkpoint wal");
-    let error = list_changes_after(&store, &namespace_id, ChangeSeq(0))
+    let changes = list_changes_after(&store, &namespace_id, ChangeSeq(0))
         .await
-        .expect_err("corrupt WAL tail");
-    assert_eq!(error.code(), ErrorCode::NamespaceCorrupt);
+        .expect("read folded commit metadata");
+    assert_eq!(changes.changes.len(), 1);
+    assert_eq!(changes.changes[0].committed_seq, ChangeSeq(1));
 }
 
 #[tokio::test]
@@ -864,7 +865,7 @@ async fn visible_commit_id_retry_aliases_across_writer_takeover() {
 }
 
 #[tokio::test]
-async fn checkpoint_receipt_keeps_actor_identity_after_the_commit_wal_is_compacted() {
+async fn checkpoint_commit_row_keeps_the_response_after_the_commit_wal_is_compacted() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -896,15 +897,12 @@ async fn checkpoint_receipt_keeps_actor_identity_after_the_commit_wal_is_compact
     create_checkpoint(&store, &namespace_id, &first_context)
         .await
         .expect("compact commit into receipt row");
-    // Retire the commit's history, which is what leaves the receipt as the
-    // only record of it.
     namespace_engine(&store, &namespace_id, &first_context)
         .advance_retention_floor()
         .await
         .expect("advance retention floor past the commit");
 
-    // Corrupt the original WAL so the checks below can only use the commit
-    // receipt stored in the checkpoint.
+    // Corrupt the original WAL so the checks below can only use the commit metadata.
     let wal_keys = data_wal_keys(&store).await;
     assert_eq!(wal_keys.len(), 1);
     store
@@ -927,18 +925,8 @@ async fn checkpoint_receipt_keeps_actor_identity_after_the_commit_wal_is_compact
     )
     .await
     .expect("same actor and request replay from receipt");
-    assert_eq!(replay.committed_seq, first.committed_seq);
-    assert_eq!(replay.commit_id, first.commit_id);
-    assert_eq!(replay.committed_by, first.committed_by);
-    assert_eq!(
-        replay.committed_at_ms, first.committed_at_ms,
-        "committed_at_ms is outside identity"
-    );
-    assert_eq!(replay.message, first.message);
-    // The retired commit's events are gone with its history, so the receipt
-    // answers without them.
-    assert_eq!(replay.events, None);
-    assert!(first.events.is_some());
+    assert_eq!(replay, first);
+    assert!(replay.events.is_some());
 
     let error = submit_commit(
         &store,

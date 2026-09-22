@@ -385,6 +385,7 @@ mod tests {
                 Vec::new(),
                 Vec::new(),
                 Vec::new(),
+                Vec::new(),
             );
             cache.insert(key.clone(), Arc::new(ProjectedWalTail::from_rows(rows)));
             assert_eq!(

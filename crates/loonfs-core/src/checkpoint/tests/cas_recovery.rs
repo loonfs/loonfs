@@ -539,9 +539,11 @@ async fn namespace_status_and_change_feed_reload_a_head_behind_the_floor() {
         key: hint(&namespace_id),
         stale: std::sync::Mutex::new(Some(stale_head)),
     };
+    let view = load_current_metadata_view(&feed_store, &namespace_id)
+        .await
+        .expect("load feed view");
     let changes = list_changes_after(
-        &feed_store,
-        &namespace_id,
+        &view,
         ChangeSeq(1),
         EffectiveLimit::new(NonZeroU32::new(10).expect("nonzero")),
     )

@@ -3,9 +3,10 @@
 
 use super::row_decode::{
     access_revision_from_manifest_row, active_deletion_from_manifest_row,
-    attributes_revision_from_manifest_row, commit_receipt_from_manifest_row,
-    direntry_bind_from_manifest_row, direntry_unbind_from_manifest_row, inode_from_manifest_row,
-    revision_from_manifest_row, tombstone_from_manifest_row,
+    attributes_revision_from_manifest_row, commit_from_manifest_row,
+    commit_receipt_from_manifest_row, direntry_bind_from_manifest_row,
+    direntry_unbind_from_manifest_row, inode_from_manifest_row, revision_from_manifest_row,
+    tombstone_from_manifest_row,
 };
 use crate::checkpoint::{ManifestLoadError, Readahead, VerifiedMetadataSegments};
 use crate::error::MetadataProjectionLoadError;
@@ -18,6 +19,7 @@ use crate::metadata::{
 use loonfs_api::wire::manifest::lookup_keys;
 use loonfs_api::wire::manifest::{MetadataRow, MetadataRowFamily};
 use loonfs_api::wire::sst_blocks::string_prefix_upper_bound;
+use loonfs_api::wire::wal::WalCommitPayload;
 use loonfs_api::{ChangeSeq, CommitId, InodeId, NameKey, RevisionNo};
 use loonfs_objectstore::ObjectStore;
 
@@ -36,6 +38,38 @@ pub(super) async fn inode_at_seq<S: ObjectStore + ?Sized>(
         .map_err(manifest_error_to_core)?
         .map(inode_from_manifest_row)
         .transpose()
+}
+
+pub(super) async fn commit_at_seq<S: ObjectStore + ?Sized>(
+    segments: &VerifiedMetadataSegments<'_, S>,
+    seq: ChangeSeq,
+) -> Result<Option<WalCommitPayload>> {
+    let key = lookup_keys::commit_row_key(seq);
+    segments
+        .get_for_lookup(MetadataRowFamily::Commits, &key, &key)
+        .await
+        .map_err(manifest_error_to_core)?
+        .map(commit_from_manifest_row)
+        .transpose()
+}
+
+pub(super) async fn commits_after_page<S: ObjectStore + ?Sized>(
+    segments: &VerifiedMetadataSegments<'_, S>,
+    after_seq: ChangeSeq,
+    limit: usize,
+) -> Result<Vec<WalCommitPayload>> {
+    segments
+        .scan_range_page(
+            MetadataRowFamily::Commits,
+            &lookup_keys::after_row_key(&lookup_keys::commit_row_key(after_seq)),
+            string_prefix_upper_bound(lookup_keys::COMMIT_ROW_PREFIX).as_deref(),
+            limit,
+        )
+        .await
+        .map_err(manifest_error_to_core)?
+        .into_iter()
+        .map(commit_from_manifest_row)
+        .collect()
 }
 
 pub(super) struct ManifestDirentryBindCandidate {
