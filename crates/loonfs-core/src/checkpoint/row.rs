@@ -73,6 +73,12 @@ pub(super) fn manifest_rows_for_family(
             .cloned()
             .map(MetadataRow::CommitReceipt)
             .collect::<Vec<_>>(),
+        MetadataRowFamily::Commits => metadata_state
+            .commits()
+            .iter()
+            .cloned()
+            .map(MetadataRow::Commit)
+            .collect::<Vec<_>>(),
         MetadataRowFamily::Attributes => metadata_state
             .attributes_revisions()
             .iter()
@@ -115,6 +121,7 @@ pub(super) fn manifest_row_commit_seq(row: &MetadataRow) -> ChangeSeq {
             ActiveDeletionRowAction::Removed { revocation_seq } => *revocation_seq,
         },
         MetadataRow::CommitReceipt(record) => record.committed_seq,
+        MetadataRow::Commit(record) => record.seq,
         MetadataRow::ContentPublication(record) => record.committed_seq,
         MetadataRow::AttributesRevision(record) => record.committed_seq,
         MetadataRow::AccessRevision(record) => record.committed_seq,
@@ -131,6 +138,7 @@ pub(super) fn manifest_row_kind(row: &MetadataRow) -> &'static str {
         MetadataRow::Tombstone(_) => "tombstone",
         MetadataRow::ActiveDeletion(_) => "active_deletion",
         MetadataRow::CommitReceipt(_) => "commit_receipt",
+        MetadataRow::Commit(_) => "commit",
         MetadataRow::ContentPublication(_) => "content_publication",
         MetadataRow::AttributesRevision(_) => "attributes_revision",
         MetadataRow::AccessRevision(_) => "access_revision",

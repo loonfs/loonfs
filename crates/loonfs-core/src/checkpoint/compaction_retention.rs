@@ -18,8 +18,8 @@ pub(super) type KeptRow = (MetadataRowFamily, MetadataRow);
 pub(super) enum RetentionRule {
     /// Retain every row in the group.
     KeepEveryRow,
-    /// A receipt is decided by its own sequence against the floor.
-    Receipts,
+    /// A commit row or its receipt is decided by its own commit sequence against the floor.
+    CommitHistory,
     /// Every revision above the floor, plus the newest at or below it, per
     /// inode.
     WholeState,
@@ -36,7 +36,7 @@ impl RetentionRule {
     pub(super) fn operator(self) -> RetentionOperator {
         match self {
             Self::KeepEveryRow => RetentionOperator::KeepEveryRow,
-            Self::Receipts => RetentionOperator::Receipts,
+            Self::CommitHistory => RetentionOperator::CommitHistory,
             Self::WholeState => RetentionOperator::WholeState(WholeStateRetention::default()),
             Self::ActiveDeletions => {
                 RetentionOperator::ActiveDeletions(ActiveDeletionRetention::default())
@@ -53,7 +53,7 @@ impl RetentionRule {
 #[derive(Debug)]
 pub(super) enum RetentionOperator {
     KeepEveryRow,
-    Receipts,
+    CommitHistory,
     WholeState(WholeStateRetention),
     ActiveDeletions(ActiveDeletionRetention),
     ForwardBindings(Box<BindingRetention>),
@@ -70,7 +70,7 @@ impl RetentionOperator {
     ) -> Result<Option<KeptRow>> {
         let kept = match self {
             Self::KeepEveryRow => Some(row),
-            Self::Receipts => keep_receipt(row, floor_seq),
+            Self::CommitHistory => keep_commit_history_row(row, floor_seq),
             Self::WholeState(state) => state.push(family, row, floor_seq)?,
             Self::ActiveDeletions(state) => state.push(row),
             Self::ForwardBindings(state) => state.push(row, floor_seq),
@@ -81,7 +81,7 @@ impl RetentionOperator {
     /// Finishes the current key group and returns any retained row.
     pub(super) fn close_group(&mut self, floor_seq: ChangeSeq) -> Result<Option<KeptRow>> {
         match self {
-            Self::KeepEveryRow | Self::Receipts => Ok(None),
+            Self::KeepEveryRow | Self::CommitHistory => Ok(None),
             Self::WholeState(state) => {
                 state.close_group();
                 Ok(None)
@@ -100,7 +100,7 @@ impl RetentionOperator {
     pub(super) fn held_rows(&self) -> usize {
         match self {
             Self::KeepEveryRow
-            | Self::Receipts
+            | Self::CommitHistory
             | Self::WholeState(_)
             | Self::ActiveDeletions(_) => 0,
             Self::ForwardBindings(state) => usize::from(state.held_bind.is_some()),
@@ -108,16 +108,12 @@ impl RetentionOperator {
     }
 }
 
-/// Keeps commit receipts at or above the retention floor.
-///
-/// A commit ID is idempotent only while its receipt is retained. After a
-/// receipt below the floor is removed, retrying that commit ID creates a new
-/// mutation (format spec, section 6.5).
-fn keep_receipt(row: MetadataRow, floor_seq: ChangeSeq) -> Option<MetadataRow> {
+fn keep_commit_history_row(row: MetadataRow, floor_seq: ChangeSeq) -> Option<MetadataRow> {
     match &row {
         MetadataRow::CommitReceipt(crate::metadata::CommitReceiptRecord {
             committed_seq, ..
         }) if *committed_seq < floor_seq => None,
+        MetadataRow::Commit(record) if record.seq < floor_seq => None,
         _ => Some(row),
     }
 }

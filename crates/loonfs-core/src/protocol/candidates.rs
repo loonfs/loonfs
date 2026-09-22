@@ -109,15 +109,7 @@ pub(super) async fn prepare_candidate_request<S: ObjectStore + ?Sized>(
         Ok(semantic_identity) => semantic_identity,
         Err(error) => return CandidateAdmission::independent(Err(error)),
     };
-    match resolve_commit_id_reuse(
-        namespace_id,
-        view,
-        dedup,
-        index,
-        &mutation.commit_id,
-        &semantic_identity,
-    )
-    .await
+    match resolve_commit_id_reuse(view, dedup, index, &mutation.commit_id, &semantic_identity).await
     {
         Ok(Some(admission)) => return admission,
         Ok(None) => {}
@@ -186,7 +178,6 @@ pub(super) fn validate_candidate_content_references(
 
 /// Resolves a commit ID against durable receipts and earlier requests in the batch.
 async fn resolve_commit_id_reuse<S: ObjectStore + ?Sized>(
-    namespace_id: &NamespaceId,
     view: &PublishMetadataView<'_, S>,
     dedup: &mut BatchDedup,
     index: usize,
@@ -204,18 +195,15 @@ async fn resolve_commit_id_reuse<S: ObjectStore + ?Sized>(
                     ),
                 })
             } else {
-                commit_response_from_commit_receipt(namespace_id, view, &existing).await
+                commit_response_from_commit_receipt(view, &existing).await
             },
         )));
     }
     Ok(dedup.admit(index, commit_id, semantic_identity))
 }
 
-/// Builds a replay response from the commit receipt and retained WAL record.
-/// A recent replay usually reads one WAL segment. If the WAL record has been
-/// retired but the receipt remains, the response omits `events`.
+/// Builds a replay response from the commit receipt and its retained commit row.
 async fn commit_response_from_commit_receipt<S: ObjectStore + ?Sized>(
-    namespace_id: &NamespaceId,
     view: &PublishMetadataView<'_, S>,
     record: &CommitReceiptRecord,
 ) -> Result<Commit> {
@@ -226,17 +214,6 @@ async fn commit_response_from_commit_receipt<S: ObjectStore + ?Sized>(
             "commit receipt for `{}` names sequence `{}`, where the change feed reports no commit",
             record.commit_id, record.committed_seq
         )))
-        }
-        Err(CoreError::RebootstrapRequired { .. }) => {
-            return Ok(Commit {
-                namespace_id: namespace_id.clone(),
-                commit_id: record.commit_id.clone(),
-                committed_seq: record.committed_seq,
-                committed_by: record.committed_by.clone(),
-                committed_at_ms: record.committed_at_ms,
-                message: record.message.clone(),
-                events: None,
-            })
         }
         Err(error) => return Err(error),
     };

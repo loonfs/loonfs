@@ -664,12 +664,18 @@ const PUBLICATION_CLUSTERS: [RetentionCluster; 1] =
     [row_cluster(&[MetadataRowFamily::ContentPublications])];
 const INODE_CLUSTERS: [RetentionCluster; 1] = [row_cluster(&[MetadataRowFamily::Inodes])];
 const TOMBSTONE_CLUSTERS: [RetentionCluster; 1] = [row_cluster(&[MetadataRowFamily::Tombstones])];
-/// A receipt is kept or dropped by its own sequence against the floor.
-const RECEIPT_CLUSTERS: [RetentionCluster; 1] = [RetentionCluster {
-    families: &[MetadataRowFamily::CommitReceipts],
-    locality: LocalityGrouping::Row,
-    rule: RetentionRule::Receipts,
-}];
+const COMMIT_CLUSTERS: [RetentionCluster; 2] = [
+    RetentionCluster {
+        families: &[MetadataRowFamily::Commits],
+        locality: LocalityGrouping::Row,
+        rule: RetentionRule::CommitHistory,
+    },
+    RetentionCluster {
+        families: &[MetadataRowFamily::CommitReceipts],
+        locality: LocalityGrouping::Row,
+        rule: RetentionRule::CommitHistory,
+    },
+];
 const ACTIVE_DELETION_CLUSTERS: [RetentionCluster; 1] = [RetentionCluster {
     families: &[MetadataRowFamily::ActiveDeletions],
     locality: LocalityGrouping::LeadingKeyComponents(2),
@@ -693,7 +699,7 @@ pub(super) fn retention_clusters(group: MetadataFamilyGroup) -> &'static [Retent
         MetadataFamilyGroup::Inodes => &INODE_CLUSTERS,
         MetadataFamilyGroup::Tombstones => &TOMBSTONE_CLUSTERS,
         MetadataFamilyGroup::ActiveDeletions => &ACTIVE_DELETION_CLUSTERS,
-        MetadataFamilyGroup::CommitReceipts => &RECEIPT_CLUSTERS,
+        MetadataFamilyGroup::Commits => &COMMIT_CLUSTERS,
         MetadataFamilyGroup::ContentPublications => &PUBLICATION_CLUSTERS,
         MetadataFamilyGroup::Attributes => &ATTRIBUTE_CLUSTERS,
         MetadataFamilyGroup::Access => &ACCESS_CLUSTERS,
@@ -1192,7 +1198,7 @@ fn index_pair(group: MetadataFamilyGroup) -> Option<(MetadataRowFamily, Metadata
         | MetadataFamilyGroup::Inodes
         | MetadataFamilyGroup::Tombstones
         | MetadataFamilyGroup::ActiveDeletions
-        | MetadataFamilyGroup::CommitReceipts
+        | MetadataFamilyGroup::Commits
         | MetadataFamilyGroup::ContentPublications
         | MetadataFamilyGroup::Attributes
         | MetadataFamilyGroup::Access => None,

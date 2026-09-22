@@ -1309,6 +1309,7 @@ fn metadata_row_family_wire_tags_are_pinned() {
         MetadataRowFamily::Tombstones,
         MetadataRowFamily::ActiveDeletions,
         MetadataRowFamily::CommitReceipts,
+        MetadataRowFamily::Commits,
         MetadataRowFamily::ContentPublications,
         MetadataRowFamily::Attributes,
         MetadataRowFamily::Access,
@@ -1327,6 +1328,7 @@ fn metadata_row_family_wire_tags_are_pinned() {
             "\"tombstones\"",
             "\"active_deletions\"",
             "\"commit_receipts\"",
+            "\"commits\"",
             "\"content_publications\"",
             "\"attributes\"",
             "\"access\"",
@@ -1982,6 +1984,39 @@ fn sample_commit_receipt_row() -> MetadataRow {
     })
 }
 
+fn sample_commit_row() -> MetadataRow {
+    MetadataRow::Commit(WalCommitPayload {
+        seq: ChangeSeq(9),
+        commit_id: commit_id(),
+        committed_by: actor(),
+        semantic_commit_fingerprint: serde_json::from_str(r#""fp:golden""#).expect("fingerprint"),
+        committed_at_ms: 9_000,
+        message: None,
+        deltas: vec![
+            WalCommitDelta {
+                semantic_op_index: 0,
+                delta: WalDelta::CreateInode {
+                    delta_index: 0,
+                    inode_id: InodeId(2),
+                    inode_kind: InodeKind::Directory,
+                },
+            },
+            WalCommitDelta {
+                semantic_op_index: 0,
+                delta: WalDelta::BindDirentry {
+                    delta_index: 1,
+                    parent_inode_id: InodeId(1),
+                    name_key: name_key("reports"),
+                    display_name: loonfs_api::DisplayName::parse("Reports")
+                        .expect("valid display name"),
+                    child_inode_id: InodeId(2),
+                },
+            },
+        ],
+        inline_content: Vec::new(),
+    })
+}
+
 fn sample_inode_rows() -> [MetadataRow; 2] {
     [
         MetadataRow::Inode(loonfs_api::wire::manifest::InodeRecord {
@@ -2298,6 +2333,17 @@ fn sst_block_data_commit_receipt_rows_match_golden_bytes() {
 fn sst_block_data_commit_receipt_golden_decodes_to_sample_row() {
     let block = decode_golden_data_block("sst_block_data_commit_receipts.v1.bin");
     assert_eq!(block.rows, [sample_commit_receipt_row()]);
+}
+
+#[test]
+fn sst_block_data_commit_rows_match_golden_bytes() {
+    assert_rows_match_single_block_golden("sst_block_data_commits.v1.bin", &[sample_commit_row()]);
+}
+
+#[test]
+fn sst_block_data_commit_golden_decodes_to_sample_row() {
+    let block = decode_golden_data_block("sst_block_data_commits.v1.bin");
+    assert_eq!(block.rows, [sample_commit_row()]);
 }
 
 #[test]

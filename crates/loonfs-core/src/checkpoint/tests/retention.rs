@@ -82,6 +82,23 @@ fn metadata_states_equivalent_ignoring_content_identity(
                             committed_at_ms,
                             message,
                         }),
+                        MetadataRow::Commit(mut record) => {
+                            record.semantic_commit_fingerprint =
+                                serde_json::from_str(r#""<normalized>""#).expect("fingerprint");
+                            for delta in &mut record.deltas {
+                                if let loonfs_api::wire::wal::WalDelta::AppendFileRevision {
+                                    content_ref,
+                                    ..
+                                } = &mut delta.delta
+                                {
+                                    content_ref.content_id = loonfs_api::ContentId::parse(
+                                        "con_00000000000000000000000000000000",
+                                    )
+                                    .expect("placeholder content id");
+                                }
+                            }
+                            MetadataRow::Commit(record)
+                        }
                         MetadataRow::ContentPublication(mut record) => {
                             record.content_id = loonfs_api::ContentId::parse(
                                 "con_00000000000000000000000000000000",
@@ -1013,9 +1030,11 @@ async fn publish_backpressure_rejects_at_the_longest_tail_the_head_describes() {
     );
 
     // Reads never gate: the change feed still serves the whole tail.
+    let view = load_current_metadata_view(&store, &namespace_id)
+        .await
+        .expect("load feed view");
     let changes = list_changes_after(
-        &store,
-        &namespace_id,
+        &view,
         ChangeSeq(0),
         EffectiveLimit::new(NonZeroU32::new(200).expect("nonzero")),
     )
@@ -1796,6 +1815,7 @@ async fn select_reorganization_window<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     policy: MetadataLsmPolicy,
+    requested_group: Option<MetadataFamilyGroup>,
 ) -> (
     MetadataFamilyGroup,
     super::reorganize::ReorganizationSelection,
@@ -1805,13 +1825,15 @@ async fn select_reorganization_window<S: ObjectStore + ?Sized>(
         load_manifest_segments_for_inspection(store, None, namespace_id, &manifest_number)
             .await
             .expect("load manifest segments");
-    let group = super::reorganize::select_family_group(
-        segments.scan_runs.as_ref(),
-        segments.manifest().payload(),
-        MetadataCompactionPolicy::default(),
-        policy,
-    )
-    .expect("a family group with delta rows to fold");
+    let group = requested_group.unwrap_or_else(|| {
+        super::reorganize::select_family_group(
+            segments.scan_runs.as_ref(),
+            segments.manifest().payload(),
+            MetadataCompactionPolicy::default(),
+            policy,
+        )
+        .expect("a family group with delta rows to fold")
+    });
     let frozen_floor_seq = read_floor_seq(store, namespace_id).await;
     let selection = super::reorganize::select_reorganization_input(
         &segments,
@@ -1907,14 +1929,15 @@ async fn comparable_runs_over_the_step_budget_plan_a_base_compaction() {
     .await
     .expect("load the parked manifest");
     let (group, _) =
-        select_reorganization_window(&store, &namespace_id, MetadataLsmPolicy::default()).await;
+        select_reorganization_window(&store, &namespace_id, MetadataLsmPolicy::default(), None)
+            .await;
     let base = base_tier(&before.manifest);
     let base_rows = group_run_rows(&base, group.families());
     let base_segments = group_segment_object_keys(&base, group.families());
     assert!(base_rows > 1, "the base run must hold rows in this group");
     let policy = policy_that_cannot_fold_the_base(base_rows);
 
-    let (_, selection) = select_reorganization_window(&store, &namespace_id, policy).await;
+    let (_, selection) = select_reorganization_window(&store, &namespace_id, policy, None).await;
     let bottom = selection
         .group_bottom_over_budget
         .expect("a base run over the budget must raise the alarm");
@@ -2050,8 +2073,13 @@ async fn a_merge_above_the_base_keeps_the_rows_that_shadow_it() {
     )
     .await
     .expect("load the manifest before the fold");
-    let (group, _) =
-        select_reorganization_window(&store, &namespace_id, MetadataLsmPolicy::default()).await;
+    let (group, _) = select_reorganization_window(
+        &store,
+        &namespace_id,
+        MetadataLsmPolicy::default(),
+        Some(MetadataFamilyGroup::Bindings),
+    )
+    .await;
     assert!(
         group
             .families()
@@ -2061,7 +2089,13 @@ async fn a_merge_above_the_base_keeps_the_rows_that_shadow_it() {
     let base_rows = group_run_rows(&base_tier(&before.manifest), group.families());
     let policy = policy_that_cannot_fold_the_base(base_rows);
 
-    let (_, selection) = select_reorganization_window(&store, &namespace_id, policy).await;
+    let (_, selection) = select_reorganization_window(
+        &store,
+        &namespace_id,
+        policy,
+        Some(MetadataFamilyGroup::Bindings),
+    )
+    .await;
     let input = bounded_merge(selection).expect("the delta runs must still merge");
     let newest_input = input
         .runs
@@ -2084,7 +2118,13 @@ async fn a_merge_above_the_base_keeps_the_rows_that_shadow_it() {
         max_decoded_input_bytes_per_step: NonZeroUsize::MIN,
         ..policy
     };
-    let (_, selection) = select_reorganization_window(&store, &namespace_id, job_policy).await;
+    let (_, selection) = select_reorganization_window(
+        &store,
+        &namespace_id,
+        job_policy,
+        Some(MetadataFamilyGroup::Bindings),
+    )
+    .await;
     let super::reorganize::ReorganizationPlan::StreamingCompaction(spec) = selection.plan else {
         panic!("one byte cannot admit a synchronous merge");
     };
@@ -2185,7 +2225,8 @@ async fn a_run_in_the_middle_over_the_budget_stops_the_window() {
     .await
     .expect("load the manifest");
     let (group, _) =
-        select_reorganization_window(&store, &namespace_id, MetadataLsmPolicy::default()).await;
+        select_reorganization_window(&store, &namespace_id, MetadataLsmPolicy::default(), None)
+            .await;
     let base_rows = group_run_rows(&base_tier(&before.manifest), group.families());
     let mut delta_rows = delta_runs(&before.manifest)
         .iter()
@@ -2211,7 +2252,7 @@ async fn a_run_in_the_middle_over_the_budget_stops_the_window() {
         ..MetadataLsmPolicy::default()
     };
 
-    let (_, selection) = select_reorganization_window(&store, &namespace_id, policy).await;
+    let (_, selection) = select_reorganization_window(&store, &namespace_id, policy, None).await;
     assert!(
         selection.group_bottom_over_budget.is_none(),
         "the base run fits here, so nothing should claim it does not"

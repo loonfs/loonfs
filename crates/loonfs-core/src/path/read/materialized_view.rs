@@ -171,9 +171,12 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             .is_some())
     }
 
-    #[cfg(test)]
     pub(crate) fn head(&self) -> &NamespaceReadState {
         &self.head
+    }
+
+    pub(crate) fn retention_floor_seq(&self) -> ChangeSeq {
+        self.segments.manifest().payload().retention_floor_seq
     }
 
     #[cfg(test)]

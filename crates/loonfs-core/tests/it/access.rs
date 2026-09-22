@@ -1278,7 +1278,7 @@ async fn the_feed_and_content_refs_need_an_administrator_or_no_subject() {
             .await
             .expect("feed authorized");
         assert!(!engine
-            .list_changes_after(ChangeSeq(0), read_page::<()>(100).limit)
+            .list_changes_after(ChangeSeq(0), read_page::<()>(100).limit, &context)
             .await
             .expect("feed")
             .changes

@@ -52,11 +52,6 @@ pub(crate) struct VerifiedMetadataSegments<'a, S: ObjectStore + ?Sized> {
 }
 
 impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
-    /// Returns the store the segments were loaded from.
-    pub(crate) fn store(&self) -> &'a S {
-        self.store
-    }
-
     pub(super) fn from_runs(
         store: &'a S,
         segment_cache: &'a MetadataSegmentCache,

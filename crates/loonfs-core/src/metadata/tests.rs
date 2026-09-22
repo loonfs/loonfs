@@ -2,8 +2,9 @@
 //! index maintenance, and seq-gated queries.
 
 use super::*;
+use crate::error::CoreError;
 use loonfs_api::wire::manifest::DeletedDirentry;
-use loonfs_api::wire::wal::{WalCommitDelta, WalCommitPayload, WalDelta};
+use loonfs_api::wire::wal::{WalCommitDelta, WalCommitPayload, WalDelta, WalInlineContent};
 use loonfs_api::ContentId;
 use loonfs_api::{
     AbsolutePath, AccessGrants, AccessRevisionNo, ActorId, AttributeKey, AttributeRevisionNo,
@@ -33,6 +34,39 @@ fn deleted_direntry(parent_inode_id: InodeId, display_name: &str) -> DeletedDire
         name_key: name_key(display_name),
         display_name: loonfs_api::DisplayName::parse(display_name).expect("valid display name"),
     }
+}
+
+#[test]
+fn commit_rows_reject_inline_content_and_decode_without_it() {
+    let record = WalCommitPayload {
+        seq: ChangeSeq(9),
+        commit_id: commit_id(9),
+        committed_by: actor(),
+        semantic_commit_fingerprint: fingerprint("v1:sha256:commit-row"),
+        committed_at_ms: 9_000,
+        message: None,
+        deltas: Vec::new(),
+        inline_content: Vec::new(),
+    };
+    assert_eq!(
+        row_decode::commit_from_manifest_row(loonfs_api::wire::manifest::MetadataRow::Commit(
+            record.clone()
+        ))
+        .expect("decode commit row"),
+        record
+    );
+
+    let mut invalid = record;
+    invalid.inline_content.push(WalInlineContent {
+        content_id: ContentId::generate(),
+        bytes: b"inline".to_vec(),
+    });
+    let error = row_decode::commit_from_manifest_row(
+        loonfs_api::wire::manifest::MetadataRow::Commit(invalid),
+    )
+    .expect_err("commit rows must not carry inline content");
+    assert!(matches!(error, CoreError::NamespaceCorrupt(_)), "{error:?}");
+    assert!(error.to_string().contains("sequence `9`"), "{error}");
 }
 
 #[test]
@@ -168,6 +202,7 @@ fn child_lookup_uses_persisted_name_key_without_recanonicalizing() {
         Vec::new(),
         Vec::new(),
         Vec::new(),
+        Vec::new(),
     );
 
     assert!(metadata_state
@@ -226,6 +261,7 @@ fn maintained_indexes_track_bind_unbind_rename_and_tombstone() {
                 bind_delta_index: 0,
             },
         ],
+        Vec::new(),
         Vec::new(),
         Vec::new(),
         Vec::new(),
@@ -385,6 +421,7 @@ fn stale_binding_is_not_active_after_newer_bind_claims_same_name() {
         Vec::new(),
         Vec::new(),
         Vec::new(),
+        Vec::new(),
     );
 
     assert_eq!(
@@ -432,6 +469,7 @@ fn resolve_visible_path_folds_names_and_uses_stored_display_name() {
             bind_seq: ChangeSeq(1),
             bind_delta_index: 0,
         }],
+        Vec::new(),
         Vec::new(),
         Vec::new(),
         Vec::new(),
@@ -488,6 +526,7 @@ fn find_commit_receipt_returns_latest_matching_receipt() {
                 message: Some("new message".to_owned()),
             },
         ],
+        Vec::new(),
         Vec::new(),
         Vec::new(),
         Vec::new(),
@@ -842,6 +881,7 @@ fn churned_binding_state_rebuilt() -> MetadataState {
         incremental.revisions().to_vec(),
         incremental.subtree_tombstones().to_vec(),
         incremental.commit_receipts().to_vec(),
+        incremental.commits().to_vec(),
         Vec::new(),
         Vec::new(),
         Vec::new(),
@@ -962,6 +1002,7 @@ fn has_visible_children_sees_through_unbinds() {
         Vec::new(),
         Vec::new(),
         Vec::new(),
+        Vec::new(),
     );
     let view = InMemoryMetadataView::in_memory(&state, None, ChangeSeq(2));
     assert!(
@@ -987,6 +1028,7 @@ fn has_visible_children_sees_through_unbinds() {
             unbind_seq: ChangeSeq(3),
             unbind_delta_index: 0,
         }],
+        Vec::new(),
         Vec::new(),
         Vec::new(),
         Vec::new(),

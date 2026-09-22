@@ -2,25 +2,23 @@
 //! commit's durable WAL deltas mapped to semantic filesystem events.
 
 use crate::binding_generation::BindingGeneration;
-use crate::error::{CoreError, MetadataProjectionLoadError, Result};
-use crate::namespace::read_anchor::load_head_and_retention_floor;
-use crate::wal::load_retained_wal_tail;
+use crate::error::{CoreError, Result};
+use crate::metadata::MetadataView;
+use crate::path::read::LoadedMetadataView;
 use loonfs_api::v0::{Commit, FilesystemChange, ListChangesResponse};
 use loonfs_api::wire::wal::{WalCommitDelta, WalCommitPayload, WalDelta};
 use loonfs_api::{ChangeSeq, EffectiveLimit, NamespaceId};
 use loonfs_objectstore::ObjectStore;
-use std::num::NonZeroU32;
 
 pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
+    view: &LoadedMetadataView<'_, S>,
     after_seq: ChangeSeq,
     limit: EffectiveLimit,
 ) -> Result<ListChangesResponse> {
-    let (head, retention_floor_seq) = load_head_and_retention_floor(store, namespace_id)
-        .await
-        .map_err(CoreError::ControlObjectLoad)?;
-    crate::namespace::control::ensure_namespace_live(&head)?;
+    let head = view.head();
+    let retention_floor_seq = view.retention_floor_seq();
+    let namespace_id = &head.namespace_id;
+    crate::namespace::control::ensure_namespace_live(head)?;
 
     if after_seq < retention_floor_seq {
         return Err(CoreError::RebootstrapRequired {
@@ -44,29 +42,26 @@ pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(
         });
     }
 
-    let wal_tail = load_retained_wal_tail(store, &head, retention_floor_seq)
-        .await
-        .map_err(|error| {
-            CoreError::MetadataProjection(MetadataProjectionLoadError::WalTailLoad(error))
-        })?;
-    let mut changes = Vec::with_capacity(limit.as_usize());
-    let mut through_seq = head.seq;
-    let mut next_after_seq = None;
-    'segments: for segment in wal_tail.segments() {
-        for record in segment.records() {
-            if record.seq > after_seq {
-                let committed_seq = record.seq;
-                changes.push(committed_change_from_wal_record(namespace_id, record)?);
-                if changes.len() == limit.as_usize() {
-                    through_seq = committed_seq;
-                    if committed_seq < head.seq {
-                        next_after_seq = Some(committed_seq);
-                    }
-                    break 'segments;
-                }
-            }
-        }
-    }
+    let records = view
+        .metadata_view()
+        .commits_after(after_seq, limit.as_usize())
+        .await?;
+    let changes = records
+        .iter()
+        .map(|record| committed_change_from_wal_record(namespace_id, record))
+        .collect::<Result<Vec<_>>>()?;
+    let (through_seq, next_after_seq) = if changes.len() == limit.as_usize() {
+        let committed_seq = changes
+            .last()
+            .expect("a full change page should contain a change")
+            .committed_seq;
+        (
+            committed_seq,
+            (committed_seq < head.seq).then_some(committed_seq),
+        )
+    } else {
+        (head.seq, None)
+    };
 
     Ok(ListChangesResponse {
         namespace_id: namespace_id.clone(),
@@ -77,25 +72,16 @@ pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(
     })
 }
 
-/// Reads the committed change at `committed_seq` through the normal change
-/// feed path. Returns `None` when no commit exists at that sequence and
-/// `RebootstrapRequired` when its WAL history is no longer retained.
 pub(super) async fn find_committed_change_at<S: ObjectStore + ?Sized>(
-    store: &S,
+    view: &MetadataView<'_, '_, S>,
     namespace_id: &NamespaceId,
     committed_seq: ChangeSeq,
 ) -> Result<Option<Commit>> {
-    let page = list_changes_after(
-        store,
-        namespace_id,
-        ChangeSeq(committed_seq.0.saturating_sub(1)),
-        EffectiveLimit::new(NonZeroU32::MIN),
-    )
-    .await?;
-    Ok(page
-        .changes
-        .into_iter()
-        .find(|change| change.committed_seq == committed_seq))
+    view.commit_at_seq(committed_seq)
+        .await?
+        .as_ref()
+        .map(|record| committed_change_from_wal_record(namespace_id, record))
+        .transpose()
 }
 
 /// Converts one WAL commit record into the shared API change shape.
@@ -307,10 +293,15 @@ fn binding_generation(
 
 #[cfg(test)]
 mod tests {
-    use super::{event_from_op_deltas, list_changes_after};
+    use super::event_from_op_deltas;
+    use crate::checkpoint::{
+        MetadataSegmentCache, WalTailProjectionCache, WalTailProjectionCacheConfig,
+    };
     use crate::context::MutationContext;
     use crate::error::CoreError;
     use crate::namespace::bootstrap::bootstrap_namespace;
+    use crate::namespace::read_anchor::load_head_and_metadata_basis;
+    use crate::{NamespaceEngine, RuntimeReadContext};
     use loonfs_api::v0::FilesystemChange;
     use loonfs_api::wire::wal::WalDelta;
     use loonfs_api::{
@@ -319,6 +310,7 @@ mod tests {
     };
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use std::num::NonZeroU32;
+    use std::sync::Arc;
     use tempfile::tempdir;
 
     fn namespace_id() -> NamespaceId {
@@ -361,14 +353,33 @@ mod tests {
         .await
         .expect("bootstrap");
         let limit = EffectiveLimit::new(NonZeroU32::MIN);
+        let loaded = load_head_and_metadata_basis(&store, &namespace_id)
+            .await
+            .expect("load read basis");
+        let context = RuntimeReadContext {
+            head: loaded.head,
+            basis: loaded.basis,
+            segment_cache: Arc::new(MetadataSegmentCache::new(Default::default())),
+            tail_cache: Arc::new(WalTailProjectionCache::new(
+                WalTailProjectionCacheConfig {
+                    max_entries: 1,
+                    max_rows: usize::MAX,
+                    max_decoded_bytes: usize::MAX,
+                },
+                None,
+            )),
+        };
+        let engine = NamespaceEngine::reader(&store, namespace_id);
 
-        let caught_up = list_changes_after(&store, &namespace_id, ChangeSeq(0), limit)
+        let caught_up = engine
+            .list_changes_after(ChangeSeq(0), limit, &context)
             .await
             .expect("the head is a valid cursor");
         assert!(caught_up.changes.is_empty());
         assert_eq!(caught_up.through_seq, ChangeSeq(0));
 
-        let error = list_changes_after(&store, &namespace_id, ChangeSeq(1), limit)
+        let error = engine
+            .list_changes_after(ChangeSeq(1), limit, &context)
             .await
             .expect_err("an unpublished sequence cannot be a valid cursor");
         assert!(matches!(error, CoreError::InvalidCursor(_)), "{error}");

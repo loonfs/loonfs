@@ -17,7 +17,7 @@ pub use loonfs_api::MetadataFamilyGroup;
 
 pub(super) const MAX_MAINTENANCE_SEGMENT_IO: usize = 8;
 
-pub(super) const CHECKPOINT_ROW_FAMILIES: [MetadataRowFamily; 11] = [
+pub(super) const CHECKPOINT_ROW_FAMILIES: [MetadataRowFamily; 12] = [
     MetadataRowFamily::Inodes,
     MetadataRowFamily::DirentryBinds,
     MetadataRowFamily::DirentryChildBinds,
@@ -26,6 +26,7 @@ pub(super) const CHECKPOINT_ROW_FAMILIES: [MetadataRowFamily; 11] = [
     MetadataRowFamily::Tombstones,
     MetadataRowFamily::ActiveDeletions,
     MetadataRowFamily::CommitReceipts,
+    MetadataRowFamily::Commits,
     MetadataRowFamily::ContentPublications,
     MetadataRowFamily::Attributes,
     MetadataRowFamily::Access,

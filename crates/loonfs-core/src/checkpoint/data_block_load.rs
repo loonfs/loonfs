@@ -21,6 +21,7 @@ use loonfs_api::wire::manifest::{
     SubtreeTombstoneRecord, TombstoneRowAction,
 };
 use loonfs_api::wire::sst_blocks::{decode_data_block, DecodedDataBlock, SegmentIndexEntry};
+use loonfs_api::wire::wal::{WalCommitPayload, WalDelta};
 use loonfs_api::ActorId;
 use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::ObjectStore;
@@ -319,6 +320,10 @@ fn direntry_bytes(direntry: &DeletedDirentry) -> usize {
     direntry.name_key.as_str().len() + direntry.display_name.as_str().len()
 }
 
+fn content_ref_bytes(content_ref: &loonfs_api::ContentRef) -> usize {
+    content_ref.content_id.as_str().len() + content_ref.checksum.value.len()
+}
+
 impl DecodedRowWeight for MetadataRow {
     fn decoded_weight(&self) -> usize {
         match self {
@@ -329,6 +334,7 @@ impl DecodedRowWeight for MetadataRow {
             MetadataRow::Tombstone(record) => record.decoded_weight(),
             MetadataRow::ActiveDeletion(record) => record.decoded_weight(),
             MetadataRow::CommitReceipt(record) => record.decoded_weight(),
+            MetadataRow::Commit(record) => record.decoded_weight(),
             MetadataRow::ContentPublication(record) => record.decoded_weight(),
             MetadataRow::AttributesRevision(record) => record.decoded_weight(),
             MetadataRow::AccessRevision(record) => record.decoded_weight(),
@@ -359,8 +365,7 @@ impl DecodedRowWeight for RevisionRecord {
         ALLOCATED_ROW_OVERHEAD
             + self.commit_id.as_str().len()
             + actor_bytes(&self.committed_by)
-            + self.content_ref.content_id.as_str().len()
-            + self.content_ref.checksum.value.len()
+            + content_ref_bytes(&self.content_ref)
     }
 }
 
@@ -405,6 +410,48 @@ impl DecodedRowWeight for CommitReceiptRecord {
             + actor_bytes(&self.committed_by)
             + self.semantic_commit_fingerprint.as_str().len()
             + self.message.as_ref().map_or(0, String::len)
+    }
+}
+
+impl DecodedRowWeight for WalCommitPayload {
+    fn decoded_weight(&self) -> usize {
+        let delta_bytes = self
+            .deltas
+            .iter()
+            .map(|delta| {
+                let variable_bytes = match &delta.delta {
+                    WalDelta::CreateInode { .. } | WalDelta::RevokeSubtreeTombstone { .. } => 0,
+                    WalDelta::BindDirentry {
+                        name_key,
+                        display_name,
+                        ..
+                    }
+                    | WalDelta::UnbindDirentry {
+                        name_key,
+                        display_name,
+                        ..
+                    } => name_key.as_str().len() + display_name.as_str().len(),
+                    WalDelta::AppendFileRevision { content_ref, .. } => {
+                        content_ref_bytes(content_ref)
+                    }
+                    WalDelta::TombstoneSubtree {
+                        deleted_direntry, ..
+                    } => direntry_bytes(deleted_direntry),
+                    WalDelta::AppendAttributesRevision { attributes, .. } => {
+                        attributes.logical_bytes()
+                    }
+                    WalDelta::AppendAccessRevision { grants, .. } => grants.logical_bytes(),
+                };
+                ALLOCATED_ROW_OVERHEAD + variable_bytes
+            })
+            .fold(0usize, usize::saturating_add);
+        FIXED_ROW_OVERHEAD
+            + ALLOCATED_ROW_OVERHEAD
+            + self.commit_id.as_str().len()
+            + actor_bytes(&self.committed_by)
+            + self.semantic_commit_fingerprint.as_str().len()
+            + self.message.as_ref().map_or(0, String::len)
+            + delta_bytes
     }
 }
 

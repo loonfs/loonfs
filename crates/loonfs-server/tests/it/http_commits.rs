@@ -345,7 +345,7 @@ async fn a_commit_returns_the_change_it_committed_and_replays_it() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_replay_below_the_retention_floor_omits_its_events() {
+async fn a_replay_from_retained_commit_metadata_keeps_its_events() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(
         temp_dir.path().join("store"),
@@ -428,14 +428,8 @@ async fn a_replay_below_the_retention_floor_omits_its_events() {
         .create_commit(&namespace, &request(), &loonfs_test_support::test_actor())
         .await
         .expect("an identical resubmission still replays");
-    assert_eq!(replayed.committed_seq, committed.committed_seq);
-    assert_eq!(replayed.commit_id, committed.commit_id);
-    // The receipt keeps the commit's own attribution and annotation; only
-    // the events are gone.
-    assert_eq!(replayed.committed_by, committed.committed_by);
-    assert_eq!(replayed.committed_at_ms, committed.committed_at_ms);
-    assert_eq!(replayed.message, committed.message);
-    assert_eq!(replayed.events, None);
+    assert_eq!(replayed, committed);
+    assert!(replayed.events.is_some());
 
     harness.server.abort();
 }

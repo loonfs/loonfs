@@ -5,6 +5,7 @@
 use crate::control::{ForkBasis, NamespaceStatus, WriterBlock};
 use crate::envelope::EnvelopeCodecError;
 use crate::sst_blocks::BlockHandle;
+use crate::wal::WalCommitPayload;
 use crate::{
     AccessGrants, AccessRevisionNo, ActorId, AttributeRevisionNo, Attributes, ChangeSeq, CommitId,
     ContentId, ContentRef, DisplayName, InodeId, InodeKind, ManifestNo, MetadataSegmentId, NameKey,
@@ -60,6 +61,8 @@ pub enum MetadataRowFamily {
     ActiveDeletions,
     /// Preserves commit idempotency evidence independently of retained WAL history.
     CommitReceipts,
+    /// Stores each retained commit's record in sequence order.
+    Commits,
     /// Preserves evidence that content was published.
     ContentPublications,
     /// Stores inode attribute revisions newest-first.
@@ -88,8 +91,8 @@ pub enum MetadataFamilyGroup {
     Tombstones,
     /// Active deletions.
     ActiveDeletions,
-    /// Commit receipts.
-    CommitReceipts,
+    /// Commit records and their idempotency receipts, one row each per commit.
+    Commits,
     /// Preserves evidence that content was published.
     ContentPublications,
     /// Attributes.
@@ -106,7 +109,7 @@ impl MetadataFamilyGroup {
         Self::Inodes,
         Self::Tombstones,
         Self::ActiveDeletions,
-        Self::CommitReceipts,
+        Self::Commits,
         Self::ContentPublications,
         Self::Attributes,
         Self::Access,
@@ -120,7 +123,7 @@ impl MetadataFamilyGroup {
             Self::Inodes => "inodes",
             Self::Tombstones => "tombstones",
             Self::ActiveDeletions => "active_deletions",
-            Self::CommitReceipts => "commit_receipts",
+            Self::Commits => "commits",
             Self::ContentPublications => "content_publications",
             Self::Attributes => "attributes",
             Self::Access => "access",
@@ -139,7 +142,10 @@ impl MetadataFamilyGroup {
             Self::Inodes => &[MetadataRowFamily::Inodes],
             Self::Tombstones => &[MetadataRowFamily::Tombstones],
             Self::ActiveDeletions => &[MetadataRowFamily::ActiveDeletions],
-            Self::CommitReceipts => &[MetadataRowFamily::CommitReceipts],
+            Self::Commits => &[
+                MetadataRowFamily::Commits,
+                MetadataRowFamily::CommitReceipts,
+            ],
             Self::ContentPublications => &[MetadataRowFamily::ContentPublications],
             Self::Attributes => &[MetadataRowFamily::Attributes],
             Self::Access => &[MetadataRowFamily::Access],
@@ -236,6 +242,9 @@ pub enum MetadataRow {
     ActiveDeletion(ActiveDeletionRecord),
     /// Preserves the evidence needed to answer a retried logical commit.
     CommitReceipt(CommitReceiptRecord),
+    /// One committed logical commit as its WAL record carries it, without inline bytes.
+    /// The change feed and commit replay read this row.
+    Commit(WalCommitPayload),
     /// Records a published content identity independently of its revisions.
     ContentPublication(ContentPublicationRecord),
     /// Publishes one inode's complete attribute map at one revision.
@@ -552,6 +561,7 @@ impl MetadataRowFamily {
             Self::Tombstones => "tombstones",
             Self::ActiveDeletions => "active_deletions",
             Self::CommitReceipts => "commit_receipts",
+            Self::Commits => "commits",
             Self::ContentPublications => "content_publications",
             Self::Attributes => "attributes",
             Self::Access => "access",
@@ -571,6 +581,7 @@ impl MetadataRowFamily {
             Self::Tombstones => lookup_keys::TOMBSTONE_ROW_PREFIX,
             Self::ActiveDeletions => lookup_keys::ACTIVE_DELETION_ROW_PREFIX,
             Self::CommitReceipts => lookup_keys::COMMIT_RECEIPT_ROW_PREFIX,
+            Self::Commits => lookup_keys::COMMIT_ROW_PREFIX,
             Self::ContentPublications => lookup_keys::CONTENT_PUBLICATION_ROW_PREFIX,
             Self::Attributes => lookup_keys::ATTRIBUTE_ROW_PREFIX,
             Self::Access => lookup_keys::ACCESS_ROW_PREFIX,
@@ -591,6 +602,7 @@ impl MetadataRow {
             Self::Tombstone(_) => MetadataRowFamily::Tombstones,
             Self::ActiveDeletion(_) => MetadataRowFamily::ActiveDeletions,
             Self::CommitReceipt(_) => MetadataRowFamily::CommitReceipts,
+            Self::Commit(_) => MetadataRowFamily::Commits,
             Self::ContentPublication(_) => MetadataRowFamily::ContentPublications,
             Self::AttributesRevision(_) => MetadataRowFamily::Attributes,
             Self::AccessRevision(_) => MetadataRowFamily::Access,
@@ -625,6 +637,7 @@ impl MetadataRow {
                 | MetadataRowFamily::Tombstones
                 | MetadataRowFamily::ActiveDeletions
                 | MetadataRowFamily::CommitReceipts
+                | MetadataRowFamily::Commits
                 | MetadataRowFamily::ContentPublications
                 | MetadataRowFamily::Attributes
                 | MetadataRowFamily::Access => None,
@@ -655,6 +668,7 @@ impl MetadataRow {
             Self::CommitReceipt(record) => {
                 lookup_keys::commit_receipt_row_key(record.commit_id.as_str(), record.committed_seq)
             }
+            Self::Commit(record) => lookup_keys::commit_row_key(record.seq),
             Self::ContentPublication(record) => {
                 lookup_keys::content_publication_row_key(&record.content_id, record.committed_seq)
             }
@@ -691,6 +705,7 @@ impl MetadataRow {
                 | MetadataRowFamily::Tombstones
                 | MetadataRowFamily::ActiveDeletions
                 | MetadataRowFamily::CommitReceipts
+                | MetadataRowFamily::Commits
                 | MetadataRowFamily::ContentPublications
                 | MetadataRowFamily::Attributes
                 | MetadataRowFamily::Access => None,
@@ -707,6 +722,7 @@ impl MetadataRow {
             Self::CommitReceipt(record) => {
                 lookup_keys::commit_receipt_probe(record.commit_id.as_str())
             }
+            Self::Commit(_) => self.row_key_for_family(family),
             Self::ContentPublication(record) => {
                 lookup_keys::content_publication_probe(&record.content_id)
             }
@@ -736,6 +752,9 @@ pub mod lookup_keys {
     /// Prefix for revision row keys.
     pub const REVISION_ROW_PREFIX: &str = "revision-";
 
+    /// Prefix for commit row keys.
+    pub const COMMIT_ROW_PREFIX: &str = "commit-";
+
     pub(super) const DIRENTRY_BIND_ROW_PREFIX: &str = "direntry-bind-";
     pub(super) const DIRENTRY_CHILD_BIND_ROW_PREFIX: &str = "direntry-child-bind-";
     pub(super) const DIRENTRY_UNBIND_ROW_PREFIX: &str = "direntry-unbind-";
@@ -748,6 +767,11 @@ pub mod lookup_keys {
     /// Builds the exclusive lower bound after `row_key`.
     pub fn after_row_key(row_key: &str) -> String {
         format!("{row_key}\0")
+    }
+
+    /// Builds a commit row key.
+    pub fn commit_row_key(seq: ChangeSeq) -> String {
+        format!("{COMMIT_ROW_PREFIX}{:020}", seq.0)
     }
 
     /// Builds an inode row key.

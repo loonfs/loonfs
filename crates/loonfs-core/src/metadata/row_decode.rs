@@ -11,6 +11,7 @@ use crate::metadata::{
     RevisionRecord, SubtreeTombstoneRecord,
 };
 use loonfs_api::wire::manifest::MetadataRow;
+use loonfs_api::wire::wal::WalCommitPayload;
 
 /// The scanned segment can only hold `expected_kind` rows; the foreign row's
 /// self-keyed row key names its actual kind and identity.
@@ -86,6 +87,17 @@ pub(crate) fn commit_receipt_from_manifest_row(
     match row {
         MetadataRow::CommitReceipt(record) => Ok(record),
         other => Err(foreign_row("commit_receipt", &other)),
+    }
+}
+
+pub(crate) fn commit_from_manifest_row(row: MetadataRow) -> Result<WalCommitPayload, CoreError> {
+    match row {
+        MetadataRow::Commit(record) if record.inline_content.is_empty() => Ok(record),
+        MetadataRow::Commit(record) => Err(CoreError::NamespaceCorrupt(format!(
+            "commit row at sequence `{}` carries inline content",
+            record.seq
+        ))),
+        other => Err(foreign_row("commit", &other)),
     }
 }
 

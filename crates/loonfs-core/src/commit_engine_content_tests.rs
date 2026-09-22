@@ -369,15 +369,19 @@ async fn content_expiring_after_the_put_starts_does_not_undo_the_commit() {
 
 #[tokio::test]
 async fn swap_accepts_any_valid_matching_proof_and_expired_receipt_replays_without_content_io() {
+    use crate::checkpoint::{
+        MetadataCompactionPolicy, MetadataLsmPolicy, MetadataReorganizeOutcome,
+    };
     use crate::content::{mint_content_token, verify_content_token};
     use crate::namespace::catalog::load_namespace_catalog_entry;
-    use loonfs_test_support::stores::RecordingStore;
+    use loonfs_test_support::stores::{RecordedOperation, RecordingStore};
+    use std::num::NonZeroUsize;
 
     let directory = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let store = RecordingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
-        KeyPredicate::prefix("content-stores/"),
+        KeyPredicate::any(),
     );
     let setup = context(1_000);
     bootstrap_namespace(
@@ -428,23 +432,73 @@ async fn swap_accepts_any_valid_matching_proof_and_expired_receipt_replays_witho
         .await;
     let original = result.results[0]
         .as_ref()
-        .expect("proof is valid at its exact deadline");
+        .expect("proof is valid at its exact deadline")
+        .clone();
     result.results[1]
         .as_ref()
         .expect("unused proofs do not constrain metadata");
     assert_eq!(original.committed_at_ms, publication.now_ms);
-    assert_eq!(store.count(OperationClass::Any), 0);
+    assert!(original.events.is_some(), "a new commit returns its events");
+    assert!(
+        store.snapshot().iter().all(|operation| !matches!(
+            loonfs_objectstore::layout::parse_object_key(operation.key()),
+            Some(key)
+                if key.family() == loonfs_objectstore::layout::DurableObjectFamily::ContentBlob
+        )),
+        "{:?}",
+        store.snapshot()
+    );
+    crate::checkpoint::flush_wal(&store, &namespace_id)
+        .await
+        .expect("flush commits");
+    loop {
+        let outcome = crate::checkpoint::reorganize_metadata_step(
+            &store,
+            &namespace_id,
+            0,
+            MetadataLsmPolicy {
+                max_delta_runs: NonZeroUsize::MIN,
+                ..MetadataLsmPolicy::default()
+            },
+            MetadataCompactionPolicy::default(),
+        )
+        .await
+        .expect("reorganize metadata");
+        if matches!(outcome, MetadataReorganizeOutcome::UnitPublished { .. }) {
+            continue;
+        }
+        assert!(
+            matches!(outcome, MetadataReorganizeOutcome::NotNeeded { .. }),
+            "unexpected reorganization outcome: {outcome:?}"
+        );
+        break;
+    }
     let expired = context(setup.now_ms + CONTENT_RECLAMATION_GRACE_MS + 1);
     let later = CommitCandidate::new(directory_request("later", "later"));
+    store.reset();
     let replay = engine
         .publish_batch(&store, vec![candidate, later], &expired, &options)
         .await;
     assert_eq!(
         replay.results[0].as_ref().expect("durable replay"),
-        original
+        &original
     );
     replay.results[1].as_ref().expect("new metadata commit");
-    assert_eq!(store.count(OperationClass::Any), 0);
+    assert!(
+        store.snapshot().iter().all(|operation| {
+            let family = loonfs_objectstore::layout::parse_object_key(operation.key())
+                .map(|key| key.family());
+            let reads_wal = matches!(
+                operation,
+                RecordedOperation::Get { .. } | RecordedOperation::GetWithMetadata { .. }
+            ) && family
+                == Some(loonfs_objectstore::layout::DurableObjectFamily::WalSegment);
+            family != Some(loonfs_objectstore::layout::DurableObjectFamily::ContentBlob)
+                && !reads_wal
+        }),
+        "{:?}",
+        store.snapshot()
+    );
 }
 
 #[tokio::test]

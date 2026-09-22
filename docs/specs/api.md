@@ -673,10 +673,8 @@ so a late retry may apply the operation again. For example, a replacing put
 may append another revision with the same content. Applications that retry
 beyond this window must check whether the original operation took effect.
 
-A replay includes the original response fields from the retained WAL record.
-If the record has been retired but its receipt remains, the response omits
-`events`. The commit ID, sequence, actor, timestamp, and message are still
-returned. A reuse conflict also reports the original `committed_seq` when
+A replay returns the original response, including `events`, from the retained
+commit record. A reuse conflict also reports the original `committed_seq` when
 it was resolved from a receipt.
 
 **File content.** A commit can refer to an upload or include the file's bytes
