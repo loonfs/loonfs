@@ -396,9 +396,9 @@ async fn completion_content_token_passes_unchanged_into_http_commit() {
     assert_eq!(change.commit_id, put_request.commit_id);
     assert_eq!(change.message.as_deref(), Some("upload over http"));
     // The commit emits one file-created event with its initial revision.
-    assert_eq!(change.events.as_ref().expect("change feed events").len(), 1);
+    assert_eq!(change.events.len(), 1);
     assert!(matches!(
-        &change.events.as_ref().expect("change feed events")[0],
+        &change.events[0],
         FilesystemChange::FileCreated {
             inode_id: InodeId(2),
             parent_inode_id: InodeId(1),

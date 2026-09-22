@@ -140,14 +140,7 @@ async fn a_batch_commits_once_and_matches_the_same_batch_embedded() {
     assert_eq!(remote_changes.changes.len(), 1, "{remote_changes:?}");
     // One event per operation, in request order: the directory, then the
     // two files created under it.
-    assert_eq!(
-        remote_changes.changes[0]
-            .events
-            .as_ref()
-            .expect("change feed events")
-            .len(),
-        3
-    );
+    assert_eq!(remote_changes.changes[0].events.len(), 3);
 
     // Every path the batch named is visible, and only because the whole
     // batch committed.
@@ -276,10 +269,7 @@ async fn a_commit_returns_the_change_it_committed_and_replays_it() {
         .expect("the put commits");
     assert_eq!(committed.committed_by, loonfs_test_support::test_actor());
     assert_eq!(committed.message.as_deref(), Some("the first report"));
-    let events = committed
-        .events
-        .clone()
-        .expect("a fresh commit reports its events");
+    let events = committed.events.clone();
     let created_inode_id = match events.as_slice() {
         [FilesystemChange::FileCreated {
             inode_id,
@@ -320,7 +310,7 @@ async fn a_commit_returns_the_change_it_committed_and_replays_it() {
     assert_eq!(row.committed_by, committed.committed_by);
     assert_eq!(row.committed_at_ms, committed.committed_at_ms);
     assert_eq!(row.message, committed.message);
-    assert_eq!(row.events, Some(events));
+    assert_eq!(row.events, events);
 
     // The replay answers with the same row, events included, and commits
     // nothing new.
@@ -388,7 +378,7 @@ async fn a_replay_from_retained_commit_metadata_keeps_its_events() {
         .await
         .expect("the put commits");
     assert!(
-        committed.events.is_some(),
+        !committed.events.is_empty(),
         "the fresh commit reports its events"
     );
 
@@ -429,7 +419,7 @@ async fn a_replay_from_retained_commit_metadata_keeps_its_events() {
         .await
         .expect("an identical resubmission still replays");
     assert_eq!(replayed, committed);
-    assert!(replayed.events.is_some());
+    assert!(!replayed.events.is_empty());
 
     harness.server.abort();
 }

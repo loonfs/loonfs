@@ -1210,8 +1210,7 @@ async fn run_inode_mutations(harness: &Harness, case: &Case) {
         .first()
         .expect("moved change")
         .events
-        .as_deref()
-        .expect("change feed events")
+        .as_slice()
     {
         [FilesystemChange::Moved {
             binding_generation, ..
@@ -1861,7 +1860,7 @@ async fn run_changes(harness: &Harness, case: &Case) {
     assert_eq!(change.commit_id.as_str(), request.commit_id);
     assert_eq!(change.committed_by, request.actor_id);
     assert!(matches!(
-        change.events.as_deref().expect("change feed events"),
+        change.events.as_slice(),
         [FilesystemChange::DirectoryCreated { .. }]
     ));
 }

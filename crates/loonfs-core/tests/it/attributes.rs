@@ -148,7 +148,7 @@ async fn attribute_events<S: ObjectStore + ?Sized>(
         .expect("read the change feed")
         .changes
         .into_iter()
-        .flat_map(|change| change.events.expect("change feed events"))
+        .flat_map(|change| change.events)
         .filter_map(|event| match event {
             FilesystemChange::AttributesChanged {
                 inode_id,
@@ -1296,8 +1296,6 @@ async fn a_copy_to_a_vacant_destination_inherits_the_sources_attributes() {
         .find(|change| change.committed_seq == response.committed_seq)
         .expect("the copy's commit")
         .events
-        .as_ref()
-        .expect("change feed events")
         .iter()
         .map(|event| match event {
             FilesystemChange::FileCreated { .. } => "file_created",

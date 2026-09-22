@@ -470,16 +470,9 @@ async fn http_restore_revision_appends_new_head_and_reports_change() {
         CommitId::parse("req-restore-restore").expect("valid commit id")
     );
     // Restoring a revision emits the same event as a regular content update.
-    assert_eq!(
-        changes.changes[2]
-            .events
-            .as_ref()
-            .expect("change feed events")
-            .len(),
-        1
-    );
+    assert_eq!(changes.changes[2].events.len(), 1);
     assert!(matches!(
-        &changes.changes[2].events.as_ref().expect("change feed events")[0],
+        &changes.changes[2].events[0],
         FilesystemChange::ContentChanged {
             inode_id: event_inode,
             revision_no,

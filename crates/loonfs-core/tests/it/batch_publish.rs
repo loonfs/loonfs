@@ -289,16 +289,9 @@ async fn batch_commit_writes_one_segment_and_expands_change_feed() {
         changes.changes[1].commit_id,
         CommitId::parse("req-batch-b").expect("valid commit id")
     );
-    assert_eq!(
-        changes.changes[0]
-            .events
-            .as_ref()
-            .expect("change feed events")
-            .len(),
-        1
-    );
+    assert_eq!(changes.changes[0].events.len(), 1);
     assert!(matches!(
-        &changes.changes[0].events.as_ref().expect("change feed events")[0],
+        &changes.changes[0].events[0],
         FilesystemChange::DirectoryCreated {
             parent_inode_id: InodeId(1),
             display_name,
@@ -926,7 +919,7 @@ async fn checkpoint_commit_row_keeps_the_response_after_the_commit_wal_is_compac
     .await
     .expect("same actor and request replay from receipt");
     assert_eq!(replay, first);
-    assert!(replay.events.is_some());
+    assert!(!replay.events.is_empty());
 
     let error = submit_commit(
         &store,

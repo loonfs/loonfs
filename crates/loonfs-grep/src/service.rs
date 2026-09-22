@@ -555,10 +555,7 @@ async fn tail_revisions(
                     .map_err(|_| {
                         CoreError::Internal("grep event cursor does not fit in memory".to_owned())
                     })?;
-            let events = change
-                .events
-                .as_ref()
-                .expect("change feed commits should carry events");
+            let events = &change.events;
             if start_event_index > events.len() {
                 let next_event_index = resume.next_event_index();
                 return Err(GrepError::CorruptIndex {

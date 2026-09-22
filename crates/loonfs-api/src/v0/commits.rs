@@ -24,10 +24,8 @@ pub struct Commit {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub message: Option<String>,
-    /// Present on the change feed and on a replayed commit response.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "openapi", schema(nullable = false))]
-    pub events: Option<Vec<FilesystemChange>>,
+    /// The semantic filesystem operations the commit applied, in request order.
+    pub events: Vec<FilesystemChange>,
 }
 
 /// A directory entry's parent and name.
@@ -205,7 +203,7 @@ mod tests {
             committed_by: crate::ActorId::loonfs(),
             committed_at_ms: 1_752_624_000_000,
             message: None,
-            events: Some(Vec::new()),
+            events: Vec::new(),
         };
 
         assert_eq!(
@@ -230,12 +228,12 @@ mod tests {
             committed_by: crate::ActorId::loonfs(),
             committed_at_ms: 1_752_624_000_000,
             message: Some("import the reports".to_owned()),
-            events: Some(vec![FilesystemChange::DirectoryCreated {
+            events: vec![FilesystemChange::DirectoryCreated {
                 inode_id: InodeId(43),
                 parent_inode_id: InodeId(1),
                 display_name: crate::DisplayName::parse("docs").expect("valid display name"),
                 binding_generation: binding_generation(),
-            }]),
+            }],
         };
 
         assert_eq!(
@@ -259,7 +257,7 @@ mod tests {
     }
 
     #[test]
-    fn a_commit_omits_absent_events_and_message() {
+    fn a_commit_omits_an_absent_message() {
         let response = Commit {
             namespace_id: crate::NamespaceId::parse("demo").expect("valid namespace id"),
             commit_id: crate::CommitId::parse("example-commit").expect("valid commit id"),
@@ -267,7 +265,12 @@ mod tests {
             committed_by: crate::ActorId::loonfs(),
             committed_at_ms: 1_752_624_000_000,
             message: None,
-            events: None,
+            events: vec![FilesystemChange::DirectoryCreated {
+                inode_id: InodeId(43),
+                parent_inode_id: InodeId(1),
+                display_name: crate::DisplayName::parse("docs").expect("valid display name"),
+                binding_generation: binding_generation(),
+            }],
         };
 
         assert_eq!(
@@ -278,6 +281,13 @@ mod tests {
                 "committed_seq": 419,
                 "committed_by": "loonfs",
                 "committed_at_ms": 1_752_624_000_000_u64,
+                "events": [{
+                    "kind": "directory_created",
+                    "inode_id": "ino_43",
+                    "parent_inode_id": "ino_1",
+                    "display_name": "docs",
+                    "binding_generation": binding_generation(),
+                }],
             })
         );
     }

@@ -96,11 +96,7 @@ pub(super) fn committed_change_from_wal_record(
         committed_by: record.committed_by.clone(),
         committed_at_ms: record.committed_at_ms,
         message: record.message.clone(),
-        events: Some(events_from_wal_deltas(
-            namespace_id,
-            record.seq,
-            &record.deltas,
-        )?),
+        events: events_from_wal_deltas(namespace_id, record.seq, &record.deltas)?,
     })
 }
 

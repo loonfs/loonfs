@@ -222,12 +222,7 @@ pub(super) fn human_changes(response: &ListChangesResponse) -> String {
             "{}\t{}\t{}\t{}",
             change.committed_seq.0,
             format_utc_ms(change.committed_at_ms),
-            event_summary(
-                change
-                    .events
-                    .as_deref()
-                    .expect("change feed commits should carry events")
-            ),
+            event_summary(&change.events),
             change.message.as_deref().unwrap_or("-")
         ));
     }

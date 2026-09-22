@@ -359,7 +359,7 @@
             "description": "Sequence number where the commit became visible."
           },
           "events": {
-            "description": "Present on the change feed and on a replayed commit response.",
+            "description": "The semantic filesystem operations the commit applied, in request order.",
             "items": {
               "$ref": "#/components/schemas/FilesystemChange"
             },
@@ -379,7 +379,8 @@
           "commit_id",
           "committed_seq",
           "committed_by",
-          "committed_at_ms"
+          "committed_at_ms",
+          "events"
         ],
         "type": "object"
       },

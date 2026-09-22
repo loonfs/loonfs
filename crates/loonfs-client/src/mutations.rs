@@ -768,7 +768,7 @@ mod tests {
             committed_by: loonfs_test_support::test_actor(),
             committed_at_ms: 1_752_624_000_000,
             message: None,
-            events: Some(Vec::new()),
+            events: Vec::new(),
         };
         let transport = crate::transport::test_transport::failure_then_success(
             serde_json::to_vec(&response).expect("serialize response"),

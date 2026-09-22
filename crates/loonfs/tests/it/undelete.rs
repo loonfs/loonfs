@@ -529,7 +529,7 @@ fn change_feed_reports_the_deletion_generation_an_undelete_takes() {
     let mut deleted_seq = None;
     let mut undeleted = None;
     for change in &changes.changes {
-        for event in change.events.as_ref().expect("change feed events") {
+        for event in &change.events {
             match event {
                 loonfs::FilesystemChange::Deleted {
                     inode_id: deleted_inode_id,
@@ -589,7 +589,7 @@ fn the_feed_names_deleted_entries_and_their_writer() {
     let deleted_name = changes
         .changes
         .iter()
-        .flat_map(|change| change.events.as_ref().expect("change feed events"))
+        .flat_map(|change| &change.events)
         .find_map(|event| match event {
             loonfs::FilesystemChange::Deleted {
                 deleted_binding, ..

@@ -92,7 +92,7 @@ async fn an_update_replaces_the_row_and_advances_the_revision() {
     .expect("root access");
     assert_eq!(
         root.events,
-        Some(vec![event(ROOT_INODE_ID, 1, false, root_grants)])
+        vec![event(ROOT_INODE_ID, 1, false, root_grants)]
     );
 
     commit_as(
@@ -120,12 +120,7 @@ async fn an_update_replaces_the_row_and_advances_the_revision() {
     .expect("directory access");
     assert_eq!(
         directory.events,
-        Some(vec![event(
-            directory_inode,
-            1,
-            true,
-            directory_grants.clone()
-        )])
+        vec![event(directory_inode, 1, true, directory_grants.clone())]
     );
 
     let stale = submit_operation(
@@ -184,10 +179,10 @@ async fn an_update_replaces_the_row_and_advances_the_revision() {
     .expect("sequential access updates");
     assert_eq!(
         batch.events,
-        Some(vec![
+        vec![
             event(batch_inode, 1, true, directory_grants),
             event(batch_inode, 2, false, AccessGrants::default()),
-        ])
+        ]
     );
 }
 
@@ -282,12 +277,7 @@ async fn access_rows_survive_a_flush_and_the_counter_keeps_going() {
     .expect("update after flush");
     assert_eq!(
         after.events,
-        Some(vec![event(
-            ROOT_INODE_ID,
-            2,
-            false,
-            AccessGrants::default()
-        )])
+        vec![event(ROOT_INODE_ID, 2, false, AccessGrants::default())]
     );
 }
 

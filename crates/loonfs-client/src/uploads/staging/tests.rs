@@ -309,7 +309,7 @@ fn commit_landed() -> Outcome {
         committed_by: loonfs_test_support::test_actor(),
         committed_at_ms: 1_752_624_000_000,
         message: None,
-        events: Some(Vec::new()),
+        events: Vec::new(),
     })
 }
 

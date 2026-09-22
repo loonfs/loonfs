@@ -854,10 +854,7 @@ async fn collect_incremental_unit(
             .map_err(|_| {
                 CoreError::Internal("grep event cursor does not fit in memory".to_owned())
             })?;
-        let events = change
-            .events
-            .as_ref()
-            .expect("change feed commits should carry events");
+        let events = &change.events;
         if start_event_index > events.len() {
             return Err(GrepError::CorruptIndex {
                 message: format!(
