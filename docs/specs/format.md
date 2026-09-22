@@ -229,7 +229,7 @@ Creation and fork write the hint before manifest 1, nothing deletes a live names
 
 The current manifest is authoritative for the namespace's identity, status, writer epoch, and compactor epoch. Its runs describe materialized metadata through `head_seq`, and `last_folded_wal_no` identifies the WAL boundary already included in those runs.
 
-Later data WAL objects provide the current sequence, commit ID, and inode allocation high-water mark. A fence advances the WAL number and writer epoch without adding a logical commit. If the tail contains only fences, the commit ID remains the last data commit's ID, or the manifest's ID when no later data commit exists.
+Every WAL object records the head sequence, head commit ID, and inode allocation high-water mark after it. A fence advances the WAL number and writer epoch without adding a logical commit, and repeats the head commit ID and allocator it received.
 
 The counters have different meanings:
 
@@ -335,7 +335,7 @@ This example assumes 12 is the discovered WAL tip. Manifest and WAL discovery mu
 
 After selecting a manifest, discover the WAL tip by probing consecutive numbers. If the hint names a WAL number above `last_folded_wal_no`, load that object and probe forward from it; otherwise probe from the folded boundary. The first absent successor ends discovery. Replay still requires every WAL number between the folded boundary and the discovered tip, including numbers below the hint.
 
-Each data segment must contain contiguous commits following its `base_head_seq`. Namespace identity, WAL number, sequence range, allocation state, and writer epoch must validate. Empty fence segments contain no metadata changes. Epochs cannot decrease along the log or exceed the current manifest's epoch. If a WAL object exposes a newer epoch, reload the manifest before deciding that the object is invalid.
+Each data segment must contain contiguous commits following its `base_head_seq`. Namespace identity, WAL number, sequence range, head commit ID, allocation state, and writer epoch must validate. Empty fence segments contain no metadata changes. Epochs cannot decrease along the log or exceed the current manifest's epoch. If a WAL object exposes a newer epoch, reload the manifest before deciding that the object is invalid.
 
 After WAL discovery, check for a successor to the selected manifest and reload if one appeared. This prevents a concurrent fold or retention advance from making a reclaimed WAL number look unused. Required missing or malformed objects fail the read.
 
@@ -468,7 +468,7 @@ A writer session acquires authority lazily, before its first semantic publicatio
 
 Another session can acquire a higher epoch. Its numbered fence prevents an older writer from extending the log using a previously observed tip: the stale writer's put collides, discovery observes the higher epoch, and the session returns `writer_fenced`. A fenced session does not automatically reacquire authority.
 
-A fence has equal `base_head_seq`, `start_seq`, and `end_seq`, preserves `next_inode_id`, and contains no commit records. It advances WAL position without advancing logical history. Concurrent attempts are serialized by conditional creation of the next number.
+A fence has equal `base_head_seq`, `start_seq`, and `end_seq`, preserves `next_inode_id` and `head_commit_id`, and contains no commit records. It advances WAL position without advancing logical history. Concurrent attempts are serialized by conditional creation of the next number.
 
 There is no writer lease or writer-expiry timestamp. The `writer_id` and `acquired_at_ms` fields describe the acquisition; the epoch determines authority. An acquisition retried after an uncertain outcome can advance the epoch again. Commit retry identity is separate and uses durable receipts.
 
@@ -1223,9 +1223,9 @@ The owner and segment ID determine the object key. The descriptor stores no sepa
 
 `MAX_WAL_SEGMENT_BYTES` is 512 MiB (536,870,912 bytes) for the complete decompressed WAL document, including its envelope. Writers keep every segment within this limit through request and batch admission; readers refuse larger documents. A writer composes each batch so the sum of its requests' bounds plus the document overhead stays within the limit. This is a format constraint because every successful publication must remain readable with bounded decompression.
 
-A WAL segment's payload contains `namespace_id`, `wal_no`, `next_inode_id`, `writer_epoch`, `base_head_seq`, `start_seq`, `end_seq`, and `records`.
+A WAL segment's payload contains `namespace_id`, `wal_no`, `next_inode_id`, `head_commit_id`, `writer_epoch`, `base_head_seq`, `start_seq`, `end_seq`, and `records`.
 
-For a data segment, `records` covers the sequence interval contiguously; the first commit follows `base_head_seq`. The WAL number must match the key, and the allocation high-water mark must agree with replay. A fence has an empty record list, equal base/start/end sequences, and an unchanged allocator. Fences participate in WAL numbering and epoch validation but produce no logical changes.
+For a data segment, `records` covers the sequence interval contiguously; the first commit follows `base_head_seq`. The WAL number must match the key, and the allocation high-water mark and head commit ID must agree with replay. A fence has an empty record list, equal base/start/end sequences, and an unchanged allocator and head commit ID. Fences participate in WAL numbering and epoch validation but produce no logical changes.
 
 Each commit contains `seq`, `commit_id`, `committed_by`, `semantic_commit_fingerprint`, `committed_at_ms`, optional `message`, `deltas`, and optional `inline_content`. A delta wrapper contains `semantic_op_index` and `delta`. The latter is a kind-tagged object with these fields:
 

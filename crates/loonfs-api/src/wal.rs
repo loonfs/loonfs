@@ -43,6 +43,10 @@ pub const WAL_SEGMENT_OVERHEAD_BYTES: usize = cbor_map_bytes(&[
     ("namespace_id", cbor_string_bytes(crate::ids::MAX_ID_BYTES)),
     ("wal_no", 9),
     ("next_inode_id", 9),
+    (
+        "head_commit_id",
+        cbor_string_bytes(crate::ids::MAX_ID_BYTES),
+    ),
     ("writer_epoch", 9),
     ("base_head_seq", 9),
     ("start_seq", 9),
@@ -290,6 +294,8 @@ pub struct WalSegmentPayload {
     pub wal_no: WalNo,
     /// Allocation high-water mark after this segment.
     pub next_inode_id: InodeId,
+    /// Head commit ID after this segment; a fence repeats the one it received.
+    pub head_commit_id: CommitId,
     /// Fencing epoch of the writer that proposed this segment.
     pub writer_epoch: WriterEpoch,
     /// Head sequence the writer materialized against before adding these records.
@@ -482,7 +488,7 @@ mod tests {
 
     fn inline_segment(lengths: &[usize]) -> WalSegmentPayload {
         let namespace_id = NamespaceId::parse("bounded").expect("namespace");
-        let records = lengths
+        let records: Vec<WalCommitPayload> = lengths
             .iter()
             .enumerate()
             .map(|(index, &length)| {
@@ -515,10 +521,16 @@ mod tests {
                 }
             })
             .collect();
+        let head_commit_id = records
+            .last()
+            .expect("inline segment should contain a record")
+            .commit_id
+            .clone();
         WalSegmentPayload {
             namespace_id,
             wal_no: WalNo(1),
             next_inode_id: InodeId(3),
+            head_commit_id,
             writer_epoch: WriterEpoch(1),
             base_head_seq: ChangeSeq(0),
             start_seq: ChangeSeq(1),
@@ -673,6 +685,7 @@ mod tests {
             namespace_id: NamespaceId::parse("bounded").expect("namespace"),
             wal_no: WalNo(1),
             next_inode_id: InodeId(2),
+            head_commit_id: crate::control::genesis_commit_id(),
             writer_epoch: WriterEpoch(1),
             base_head_seq: ChangeSeq(0),
             start_seq: ChangeSeq(0),

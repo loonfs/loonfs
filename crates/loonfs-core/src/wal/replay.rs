@@ -31,6 +31,9 @@ pub(crate) fn project_validated_wal_tail(
         if replayed.resulting_head.next_inode_id != payload.next_inode_id {
             return Err(WalSegmentError::SegmentSummaryMismatch);
         }
+        if replayed.resulting_head.head_commit_id != payload.head_commit_id {
+            return Err(WalSegmentError::SegmentSummaryMismatch);
+        }
         replayed.resulting_head.wal_no = payload.wal_no;
     }
     Ok(replayed)
@@ -183,6 +186,12 @@ pub(crate) fn validate_wal_segment_for_replay(
         != Some(envelope.payload().start_seq)
         || envelope.payload().records.last().map(|record| record.seq)
             != Some(envelope.payload().end_seq)
+        || envelope
+            .payload()
+            .records
+            .last()
+            .map(|record| &record.commit_id)
+            != Some(&envelope.payload().head_commit_id)
     {
         return Err(WalSegmentError::SegmentSummaryMismatch);
     }

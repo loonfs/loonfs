@@ -582,6 +582,7 @@ async fn inline_checksum_failures_match_object_validation() {
     }
     record.inline_content[0].content_id = corrupt_ref.content_id.clone();
     record.inline_content[0].bytes = b"wrong".to_vec();
+    payload.head_commit_id = payload.records[0].commit_id.clone();
     let key = wal_segment(&publisher.namespace_id, &payload.wal_no);
     let bytes = loonfs_api::wire::wal::encode_wal_segment_envelope_zstd(payload)
         .expect("codec does not hash")
