@@ -19,7 +19,7 @@ A generation boundary is therefore a lifecycle transition on the existing manife
 | Manifest field | At a generation boundary |
 | --- | --- |
 | `manifest_no` | Continues. |
-| `last_folded_wal_no` | Becomes the discovered WAL tip, so no earlier WAL object replays into the new tree. |
+| `last_folded_wal_no` | Copied from the tombstone, which records the WAL tip at deletion, so no earlier WAL object replays into the new tree. |
 | `head_seq`, `base_seq`, `retention_floor_seq` | Become the tombstone's `head_seq` plus one. Recreation consumes one sequence. |
 | `next_inode_id`, `next_run_no` | Continue. Every inode id other than the root is allocated once per namespace id. |
 | `writer_epoch`, `compactor_epoch` | Increment. Sessions and compactors that captured the previous generation are fenced. |
@@ -40,11 +40,11 @@ Consuming a sequence is what makes the boundary visible to every consumer that r
 Creating a namespace whose current manifest is deleted recreates it. There is no separate operation and no flag. The create response and the namespace object carry `generation`.
 
 1. Load the current manifest. Active status answers `namespace_exists`, or the current summary with `allow_existing`. Deleted status continues below. An absent namespace takes the ordinary creation path.
-2. Discover the WAL tip by probing forward from the greater of the hint's WAL number and the tombstone's folded number. Publishing the tombstone acquired the writer epoch, so no further WAL object can be published under it.
+2. Take the WAL tip from the tombstone's folded WAL number. Deletion stamps the discovered tip there, and publishing the tombstone acquired the writer epoch, so no further WAL object can be published under it. Recreation reads no WAL object, which matters because the deleted generation's WAL objects are unprotected and may already be collected.
 3. Write a retired pin over the tombstone with put-if-absent. Its id is `pin_{tombstone_no:020}-` followed by sixteen hex characters derived from the namespace id and the tombstone number, so repeated attempts land on one record. The next section describes the pin.
 4. Write the content-store descriptor for the fresh domain with put-if-absent.
 5. Build the new manifest from the table above and publish it at the tombstone's number plus one with put-if-absent, within the metadata publication budget measured from step 1.
-6. Raise the hint to the new manifest number. A failed raise does not fail the creation.
+6. Publication raises the hint to the new manifest number. A failed raise does not fail the creation.
 
 A losing manifest put reads the winner. An active winner is a concurrent recreation and answers `namespace_exists`, or the winner with `allow_existing`. Nothing else publishes a successor to a tombstone, so any other winner is corruption. A put with an unknown transport outcome confirms its own success only by reading back the exact proposed manifest.
 

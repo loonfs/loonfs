@@ -3,7 +3,7 @@
 use super::cache::MetadataSegmentCache;
 use super::error::ManifestLoadError;
 use super::load::{head_from_manifest, load_manifest_segments};
-use super::record::load_checkpoint_record;
+use super::record::{checkpoint_is_visible, load_checkpoint_record};
 use super::scan::VerifiedMetadataSegments;
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::namespace::basis::MetadataBasis;
@@ -70,6 +70,9 @@ pub async fn load_checkpoint_read_basis<S: ObjectStore + ?Sized>(
     live_head: &NamespaceReadState,
     checkpoint_id: &CheckpointId,
 ) -> Result<CheckpointReadBasis> {
+    if !checkpoint_is_visible(live_head, checkpoint_id) {
+        return Err(missing_checkpoint(&live_head.namespace_id, checkpoint_id));
+    }
     let record =
         load_pinning_checkpoint_record(store, &live_head.namespace_id, checkpoint_id).await?;
     load_checkpoint_read_basis_from_record(store, segment_cache, live_head, record).await
@@ -100,9 +103,13 @@ async fn load_pinning_checkpoint_record<S: ObjectStore + ?Sized>(
         .await?
         .map(|loaded| loaded.state)
     else {
-        return Err(CoreError::CheckpointUnavailable(format!(
-            "checkpoint `{checkpoint_id}` does not exist in namespace `{namespace_id}`"
-        )));
+        return Err(missing_checkpoint(namespace_id, checkpoint_id));
     };
     Ok(record)
+}
+
+fn missing_checkpoint(namespace_id: &NamespaceId, checkpoint_id: &CheckpointId) -> CoreError {
+    CoreError::CheckpointUnavailable(format!(
+        "checkpoint `{checkpoint_id}` does not exist in namespace `{namespace_id}`"
+    ))
 }

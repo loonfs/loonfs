@@ -145,6 +145,82 @@ async fn a_namespace_that_does_not_exist_is_not_a_namespace_without_checkpoints(
 }
 
 #[tokio::test]
+async fn prior_generation_checkpoints_and_snapshots_are_hidden_after_recreation() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("recreated").expect("namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context)
+        .await
+        .expect("bootstrap namespace");
+    let checkpoint_id = pin_named(&store, &namespace_id, "checkpoint", None, &context).await;
+    let snapshot_id = create::create_checkpoint(
+        &store,
+        &namespace_id,
+        CheckpointOwner::Snapshot {
+            name: "snapshot".to_owned(),
+            expires_at_ms: context.now_ms + 10_000,
+        },
+        &context,
+    )
+    .await
+    .expect("create snapshot")
+    .checkpoint_id;
+    crate::commit_engine::delete_namespace(&store, &namespace_id, Default::default(), &context)
+        .await
+        .expect("delete namespace");
+    crate::namespace::bootstrap::bootstrap_namespace(
+        &store,
+        &namespace_id,
+        &context,
+        &loonfs_test_support::test_actor(),
+        &loonfs_api::NamespaceAccess::Unrestricted {},
+        false,
+    )
+    .await
+    .expect("recreate namespace");
+    let head = load_namespace_read_state(&store, &namespace_id)
+        .await
+        .expect("recreated head");
+
+    assert!(list_all_checkpoints(&store, &namespace_id)
+        .await
+        .expect("list checkpoints")
+        .checkpoints
+        .is_empty());
+    assert!(matches!(
+        super::super::load_checkpoint_read_basis(&store, None, &head, &checkpoint_id).await,
+        Err(CoreError::CheckpointUnavailable(_))
+    ));
+    assert!(matches!(
+        super::super::load_snapshot_read_basis(&store, None, &head, &snapshot_id, context.now_ms,)
+            .await,
+        Err(CoreError::SnapshotNotFound { .. })
+    ));
+    assert!(matches!(
+        super::super::delete::delete_checkpoint(&store, &namespace_id, &checkpoint_id).await,
+        Err(CoreError::CheckpointNotFound { .. })
+    ));
+    assert!(matches!(
+        super::super::snapshot::delete_snapshot(&store, &namespace_id, &snapshot_id).await,
+        Err(CoreError::SnapshotNotFound { .. })
+    ));
+    let fork_id = NamespaceId::parse("fork-from-old-snapshot").expect("namespace id");
+    assert!(matches!(
+        crate::namespace::fork::fork_namespace(
+            &store,
+            &namespace_id,
+            &fork_id,
+            &loonfs_test_support::test_actor(),
+            Some(&snapshot_id),
+            &context,
+        )
+        .await,
+        Err(CoreError::SnapshotNotFound { .. })
+    ));
+}
+
+#[tokio::test]
 async fn pages_concatenate_to_every_checkpoint_once_in_id_order() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");

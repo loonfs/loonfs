@@ -736,6 +736,7 @@ mod tests {
             created_by: loonfs_test_support::test_actor(),
             fork_basis: None,
             namespace_id: namespace_id.clone(),
+            generation: loonfs_api::NamespaceGeneration(1),
             head_seq: ChangeSeq(3),
             retention_floor_seq: ChangeSeq(1),
             current_manifest_no: None,
@@ -797,6 +798,7 @@ mod tests {
             created_by: loonfs_test_support::test_actor(),
             fork_basis: None,
             namespace_id: namespace_id.clone(),
+            generation: loonfs_api::NamespaceGeneration(1),
             head_seq: ChangeSeq(0),
             retention_floor_seq: ChangeSeq(0),
         };

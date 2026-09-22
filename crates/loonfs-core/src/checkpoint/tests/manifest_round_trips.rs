@@ -826,6 +826,8 @@ async fn manifest_run_rejects_rows_after_run_seq() {
         compactor_epoch: 0,
         namespace_id: namespace_id.clone(),
         manifest_no: manifest_no(materialization.head.seq),
+        generation: materialization.head.generation,
+        generation_first_manifest_no: materialization.head.generation_first_manifest_no,
 
         head_seq: materialization.head.seq,
         head_commit_id: materialization.head.head_commit_id.clone(),

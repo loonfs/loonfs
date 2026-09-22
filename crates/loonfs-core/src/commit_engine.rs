@@ -655,6 +655,7 @@ impl NamespaceCommitEngine {
             &self.namespace_id,
             options,
             acquired_writer,
+            context,
         )
         .await;
         self.invalidate_projection();

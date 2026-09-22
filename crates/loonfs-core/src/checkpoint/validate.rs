@@ -65,6 +65,23 @@ pub(super) fn validate_manifest_materialization_ranges(
     object_key: &str,
     payload: &NamespaceManifestPayload,
 ) -> Result<(), ManifestLoadError> {
+    if payload.generation.0 == 0
+        || payload.generation_first_manifest_no.0 == 0
+        || payload.generation_first_manifest_no > payload.manifest_no
+    {
+        return Err(ManifestLoadError::RunManifestMismatch {
+            object_key: object_key.to_owned(),
+            message: "namespace generation fields are outside the manifest range".to_owned(),
+        });
+    }
+    if payload.manifest_no == ManifestNo(1)
+        && (payload.generation.0 != 1 || payload.generation_first_manifest_no != ManifestNo(1))
+    {
+        return Err(ManifestLoadError::RunManifestMismatch {
+            object_key: object_key.to_owned(),
+            message: "manifest 1 must begin namespace generation 1".to_owned(),
+        });
+    }
     if payload.retention_floor_seq > payload.head_seq {
         return Err(ManifestLoadError::RunManifestMismatch {
             object_key: object_key.to_owned(),
@@ -83,17 +100,15 @@ pub(super) fn validate_manifest_materialization_ranges(
 
     if payload.runs.is_empty() {
         if payload.status.is_deleted()
-            || (payload.head_seq == ChangeSeq(0)
-                && payload.base_seq == ChangeSeq(0)
-                && payload.head_commit_id == loonfs_api::wire::control::genesis_commit_id()
-                && payload.next_inode_id == loonfs_api::FIRST_ALLOCATABLE_INODE_ID
-                && payload.next_run_no == RunNo(0))
+            || (payload.head_seq == payload.base_seq
+                && payload.head_seq == payload.retention_floor_seq
+                && payload.head_commit_id == loonfs_api::wire::control::genesis_commit_id())
         {
             return Ok(());
         }
         return Err(ManifestLoadError::RunManifestMismatch {
             object_key: object_key.to_owned(),
-            message: "an empty active manifest must describe genesis".to_owned(),
+            message: "an empty active manifest must describe a generation's genesis".to_owned(),
         });
     }
 

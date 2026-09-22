@@ -390,6 +390,8 @@ fn sample_manifest_payload() -> NamespaceManifestPayload {
         compactor_epoch: 0,
         namespace_id: namespace_id(),
         manifest_no: ManifestNo(2),
+        generation: loonfs_api::NamespaceGeneration(1),
+        generation_first_manifest_no: ManifestNo(1),
 
         head_seq: ChangeSeq(2),
         head_commit_id: commit_id(),
@@ -469,6 +471,7 @@ fn sample_acl_manifest() -> NamespaceManifestPayload {
 fn sample_deleted_manifest() -> NamespaceManifestPayload {
     NamespaceManifestPayload {
         status: NamespaceStatus::Deleted {
+            deleted_at_ms: 1_500_000,
             reclaim_after_ms: None,
         },
         ..sample_manifest_payload()
@@ -629,12 +632,17 @@ fn manifest_status_reading_is_fail_closed_on_unknown_statuses() {
         .expect_err("an unknown status must fail closed");
 
     let deleted = serde_json::to_string(&sample_deleted_manifest()).expect("encode deleted");
-    assert!(deleted.contains("\"status\":{\"kind\":\"deleted\"}"));
+    assert!(deleted.contains("\"status\":{\"kind\":\"deleted\",\"deleted_at_ms\":1500000}"));
 }
 
 #[test]
 fn manifest_without_required_fields_is_rejected() {
-    for field in ["status", "created_by"] {
+    for field in [
+        "status",
+        "created_by",
+        "generation",
+        "generation_first_manifest_no",
+    ] {
         let mut document = serde_json::to_value(sample_manifest_payload())
             .expect("encode active manifest as a document");
         document
@@ -716,6 +724,21 @@ fn control_objects_match_golden_bytes() {
             owner: CheckpointOwner::Fork {
                 target_namespace_id: NamespaceId::parse("clone").expect("valid namespace id"),
             },
+        },
+    );
+    let retired_manifest_no = ManifestNo(5);
+    check_control_golden(
+        "control_checkpoint_record_retired.v1.json",
+        ControlObjectKind::CheckpointRecord,
+        CheckpointRecordState {
+            pin_id: CheckpointId::retired(&namespace_id(), retired_manifest_no),
+            namespace_id: namespace_id(),
+            manifest_no: retired_manifest_no,
+            manifest_head_seq: ChangeSeq(5),
+            manifest_payload_checksum: sample_manifest_ref(5).manifest_payload_checksum,
+            head_commit_id: commit_id(),
+            created_at_ms: 3_000,
+            owner: CheckpointOwner::Retired {},
         },
     );
     check_control_golden(
@@ -2966,6 +2989,7 @@ fn name_folding_matches_the_fixed_unicode_corpus() {
 fn namespace_manifest_lifecycle_variants_match_golden_bytes() {
     let mut retired = sample_deleted_manifest();
     retired.status = NamespaceStatus::Deleted {
+        deleted_at_ms: 1_500_000,
         reclaim_after_ms: Some(2_000_000),
     };
     for (name, payload) in [

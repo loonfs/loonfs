@@ -110,7 +110,8 @@ pub(crate) async fn create_checkpoint_at_basis<S: ObjectStore + ?Sized>(
     let within_budget =
         timer.monotonic_now_ms().saturating_sub(verify_started_ms) <= CHECKPOINT_VERIFY_BUDGET_MS;
     if verification == CheckpointBasisVerification::Verified && within_budget {
-        return Ok(super::checkpoint_summary(record));
+        return Ok(super::checkpoint_summary(record)
+            .expect("a caller-created checkpoint should have a public owner"));
     }
 
     // Overrunning the budget counts as verification failure: the record
@@ -137,6 +138,7 @@ fn validate_checkpoint_owner(owner: &CheckpointOwner) -> Result<()> {
             Ok(())
         }
         CheckpointOwner::Fork { .. } => Ok(()),
+        CheckpointOwner::Retired {} => Ok(()),
     }
 }
 

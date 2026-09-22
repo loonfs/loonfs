@@ -29,10 +29,11 @@ pub(super) fn human_namespace_status(namespace: &Namespace) -> String {
         }
     };
     format!(
-        "{} @ seq {} (retention floor {})\ncreated_by: {}\naccess: {access}",
+        "{} @ seq {} (retention floor {})\ngeneration: {}\ncreated_by: {}\naccess: {access}",
         namespace.namespace_id,
         namespace.head_seq.0,
         namespace.retention_floor_seq.0,
+        namespace.generation.0,
         namespace.created_by
     )
 }

@@ -26,7 +26,7 @@ use loonfs_test_support::ids::namespace_id;
 use tempfile::tempdir;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn delete_namespace_is_terminal_and_retires_the_id() {
+async fn delete_namespace_blocks_operations_until_create_starts_the_next_generation() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(
         temp_dir.path().join("store"),
@@ -92,8 +92,7 @@ async fn delete_namespace_is_terminal_and_retires_the_id() {
     assert_eq!(response.namespace_id.as_str(), "doomed");
     assert_eq!(response.head_seq, ChangeSeq(1));
 
-    // Terminal: status is 410, reads fail, repeat deletes report
-    // deleted, and the id is retired.
+    // Status is 410, reads fail, and repeat deletes report deleted.
     let status = harness
         .client
         .get_namespace(&namespace)
@@ -127,7 +126,7 @@ async fn delete_namespace_is_terminal_and_retires_the_id() {
         }
         other => panic!("expected namespace_deleted, got {other:?}"),
     }
-    let recreate = harness
+    let recreated = harness
         .client
         .create_namespace(
             &namespace,
@@ -135,14 +134,8 @@ async fn delete_namespace_is_terminal_and_retires_the_id() {
             loonfs_api::NamespaceAccess::unrestricted(),
         )
         .await
-        .expect_err("the id is retired");
-    match recreate {
-        ClientError::Api { status, code, .. } => {
-            assert_eq!(status, 410);
-            assert_eq!(code, "namespace_deleted");
-        }
-        other => panic!("expected namespace_deleted, got {other:?}"),
-    }
+        .expect("recreate namespace");
+    assert_eq!(recreated.generation, loonfs_api::NamespaceGeneration(2));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
