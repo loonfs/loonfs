@@ -600,7 +600,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
             return Ok(Vec::new());
         }
         let visible_seq = self.visible_seq();
-        let durable = if let Some(segments) = self.manifest_segments() {
+        let mut page: Vec<WalCommitPayload> = if let Some(segments) = self.manifest_segments() {
             manifest_index::commits_after_page(segments, after_seq, limit)
                 .await?
                 .into_iter()
@@ -609,16 +609,20 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         } else {
             Vec::new()
         };
-        let mut tail: Vec<_> = self
+        let remaining = limit.saturating_sub(page.len());
+        if remaining == 0 {
+            return Ok(page);
+        }
+        let mut tail: Vec<&WalCommitPayload> = self
             .row_states()
             .flat_map(MetadataState::commits)
             .filter(|record| after_seq < record.seq && record.seq <= visible_seq)
-            .cloned()
             .collect();
         tail.sort_by_key(|record| record.seq);
         // Every manifest row is at or below the basis head and every tail or overlay row is
         // above it, so no sort across the two sides is needed.
-        Ok(durable.into_iter().chain(tail).take(limit).collect())
+        page.extend(tail.into_iter().take(remaining).cloned());
+        Ok(page)
     }
 
     pub(crate) async fn current_parent_binding_for_child(
