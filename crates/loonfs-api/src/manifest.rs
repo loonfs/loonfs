@@ -1089,6 +1089,62 @@ impl NamespaceAccess {
     }
 }
 
+/// Stores a counter within the public integer bound.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(transparent)]
+pub struct ActivityCounter(u64);
+
+impl ActivityCounter {
+    /// Rejects values above [`crate::MAX_PUBLIC_INTEGER`].
+    pub fn parse(value: u64) -> Result<Self, crate::PublicOrdinalRangeError> {
+        if value > crate::MAX_PUBLIC_INTEGER {
+            return Err(crate::PublicOrdinalRangeError);
+        }
+        Ok(Self(value))
+    }
+
+    /// Returns the validated integer.
+    pub fn get(self) -> u64 {
+        self.0
+    }
+
+    /// Returns `None` if the sum exceeds the public integer bound.
+    pub fn checked_add(self, value: u64) -> Option<Self> {
+        Self::parse(self.0.checked_add(value)?).ok()
+    }
+}
+
+impl<'de> Deserialize<'de> for ActivityCounter {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Self::parse(u64::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+    }
+}
+
+/// Activity committed in this namespace through a manifest's folded position.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManifestActivity {
+    /// Full content length of every committed file revision, including reused content.
+    pub content_bytes: ActivityCounter,
+    /// Number of committed file revisions, including empty revisions.
+    pub file_revisions: ActivityCounter,
+    /// Number of durable semantic operations, rather than requests or raw deltas.
+    pub mutations: ActivityCounter,
+}
+
+impl ManifestActivity {
+    /// Adds activity, returning `None` if any counter overflows.
+    pub fn checked_add(self, other: Self) -> Option<Self> {
+        Some(Self {
+            content_bytes: self.content_bytes.checked_add(other.content_bytes.get())?,
+            file_revisions: self
+                .file_revisions
+                .checked_add(other.file_revisions.get())?,
+            mutations: self.mutations.checked_add(other.mutations.get())?,
+        })
+    }
+}
+
 /// Carries one complete namespace file-set description inside a manifest envelope.
 ///
 /// See [manifest publication](../../../docs/specs/format.md#72-publishing-a-materialized-file-set).
@@ -1123,10 +1179,12 @@ pub struct NamespaceManifestPayload {
     /// Streaming compaction rebuilds a whole family group and publishes once at the end.
     /// Grep publishes each bounded step, so a lost race costs only one step.
     pub compactor_epoch: u64,
-    /// Materialized head sequence, or the final namespace sequence on deletion.
+    /// Materialized head sequence, including the final sequence on deletion.
     pub head_seq: ChangeSeq,
     /// Commit identity used when no newer data segment exists.
     pub head_commit_id: CommitId,
+    /// Activity committed in this namespace through `head_seq`.
+    pub activity: ManifestActivity,
     /// Oldest run sequence still represented by `runs`.
     pub base_seq: ChangeSeq,
     /// Current writer fencing epoch.
@@ -1184,6 +1242,7 @@ impl NamespaceManifestPayload {
             compactor_epoch: 0,
             head_seq: ChangeSeq(0),
             head_commit_id: crate::control::genesis_commit_id(),
+            activity: ManifestActivity::default(),
             base_seq: ChangeSeq(0),
             writer_epoch: WriterEpoch(0),
             next_inode_id: crate::FIRST_ALLOCATABLE_INODE_ID,
@@ -1193,6 +1252,14 @@ impl NamespaceManifestPayload {
             retention_floor_seq: ChangeSeq(0),
             runs: Vec::new(),
         }
+    }
+
+    /// Whether a successor preserves folded activity or advances it with the head.
+    pub fn preserves_activity(&self, successor: &Self) -> bool {
+        successor.activity.content_bytes >= self.activity.content_bytes
+            && successor.activity.file_revisions >= self.activity.file_revisions
+            && successor.activity.mutations >= self.activity.mutations
+            && (successor.head_seq > self.head_seq || successor.activity == self.activity)
     }
 
     /// Rejects changes to permanent identity and terminal lifecycle state.
@@ -1286,6 +1353,67 @@ mod tests {
             parent_inode_id: InodeId(9),
             name_key: NameKey::parse("report.txt").expect("valid name key"),
             display_name: crate::DisplayName::parse("report.txt").expect("valid display name"),
+        }
+    }
+
+    #[test]
+    fn activity_arithmetic_and_successors_reject_invalid_totals() {
+        let counter = super::ActivityCounter::parse(crate::MAX_PUBLIC_INTEGER).expect("maximum");
+        let maximum = super::ManifestActivity {
+            content_bytes: counter,
+            file_revisions: counter,
+            mutations: counter,
+        };
+        let initial = NamespaceManifestPayload::initial(
+            NamespaceId::parse("activity").expect("namespace"),
+            crate::ContentStoreId::parse("cs_00000000000000000000000000000001").expect("store"),
+            0,
+            crate::ActorId::parse("test").expect("actor"),
+            super::NamespaceAccess::unrestricted(),
+        );
+        assert!(initial.preserves_activity(&initial));
+        assert_eq!(maximum.checked_add(Default::default()), Some(maximum));
+        let mut successor = initial.clone();
+        successor.activity = maximum;
+        assert!(!initial.preserves_activity(&successor));
+        successor.head_seq = ChangeSeq(1);
+        assert!(initial.preserves_activity(&successor));
+        let (envelope, encoded) = encode_namespace_manifest_json(successor.clone())
+            .expect("encode")
+            .into_parts();
+        assert_eq!(
+            decode_namespace_manifest_json(&encoded).expect("decode"),
+            envelope
+        );
+
+        for field in ["content_bytes", "file_revisions", "mutations"] {
+            let mut increment =
+                serde_json::to_value(super::ManifestActivity::default()).expect("value");
+            increment[field] = 1.into();
+            let increment = serde_json::from_value(increment).expect("increment");
+            assert_eq!(maximum.checked_add(increment), None);
+
+            let mut payload = serde_json::to_value(&successor).expect("value");
+            payload["activity"][field] = (crate::MAX_PUBLIC_INTEGER - 1).into();
+            let mut regression: NamespaceManifestPayload =
+                serde_json::from_value(payload.clone()).expect("regression");
+            regression.head_seq = ChangeSeq(2);
+            assert!(!successor.preserves_activity(&regression));
+            assert_eq!(regression.activity.checked_add(increment), Some(maximum));
+
+            payload["activity"][field] = (crate::MAX_PUBLIC_INTEGER + 1).into();
+            let (_, encoded) = crate::envelope::encode_json_envelope(
+                super::NamespaceManifestKind::NamespaceManifest.as_str(),
+                super::NAMESPACE_MANIFEST_FORMAT_VERSION,
+                payload,
+            )
+            .expect("encode invalid payload")
+            .into_parts();
+            assert!(matches!(
+                decode_namespace_manifest_json(&encoded),
+                Err(crate::envelope::EnvelopeCodecError::PayloadDecode(message))
+                    if message.contains(&crate::PublicOrdinalRangeError.to_string())
+            ));
         }
     }
 
@@ -1415,6 +1543,7 @@ mod tests {
     #[test]
     fn namespace_manifest_codec_round_trips_base_only_materialization() {
         let (envelope, encoded) = encode_namespace_manifest_json(NamespaceManifestPayload {
+            activity: Default::default(),
             content_store_id: crate::ContentStoreId::parse("cs_0123456789abcdef0123456789abcdef")
                 .expect("content store"),
             created_at_ms: 1_000,
@@ -1463,6 +1592,7 @@ mod tests {
     #[test]
     fn namespace_manifest_codec_round_trips_inherited_source_segments() {
         let (envelope, encoded) = encode_namespace_manifest_json(NamespaceManifestPayload {
+            activity: Default::default(),
             content_store_id: crate::ContentStoreId::parse("cs_0123456789abcdef0123456789abcdef")
                 .expect("content store"),
             created_at_ms: 1_000,

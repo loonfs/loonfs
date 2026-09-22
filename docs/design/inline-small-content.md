@@ -251,7 +251,7 @@ Tests pin contracts a reviewer would otherwise have to trust, using the request-
 - A small embedded write issues one store write, and a read before the fold issues no content request.
 - A fold interrupted after materialization and before publication repeats cleanly: no missing content, no unreferenced objects.
 - Two folds racing over the same tail write identical keys and one manifest.
-- In a live namespace, collection never deletes a WAL object whose inline value lacks a content object, across interleavings of inline commits, folds, retention advances, and collection passes. This is a simulator property. A deleted namespace may drop never-folded values with their WAL objects.
+- In a live namespace, collection never deletes a WAL object whose inline value lacks a content object, across interleavings of inline commits, folds, retention advances, and collection passes. This is a simulator property. Namespace deletion first folds its remaining WAL, then records terminal status. The final fold includes inline content and cumulative activity.
 - Copy and restore of tail content, reads across a reader restart, and reads after the fold return the same verified bytes.
 - A full budget sends the write down the staged path without an error.
 - A corrupted inline value fails the read as content corruption and stops the fold before publication.

@@ -557,7 +557,7 @@ A replacing move deletes the destination file and rebinds the source within the 
 
 The WAL stores the resulting metadata changes, not the original request bodies or validation inputs. The delta kinds are `create_inode`, `bind_direntry`, `unbind_direntry`, `append_file_revision`, `tombstone_subtree`, `revoke_subtree_tombstone`, `append_attributes_revision`, and `append_access_revision`.
 
-Each delta has a `delta_index`, and its wrapper has a `semantic_op_index` identifying the request operation that produced it. Actor and timestamp are recorded once per commit and copied into the appropriate rows during materialization. The complete stored fields appear in Appendix A.
+Each delta has a `delta_index`, and its wrapper has a `semantic_op_index` identifying the internal operation that produced it. A convenience request can expand into several internal operations, such as creating missing parent directories. Each operation's deltas are contiguous within its commit. Actor and timestamp are recorded once per commit and copied into the appropriate rows during materialization. The complete stored fields appear in Appendix A.
 
 ### 6.7 Change feed
 
@@ -593,7 +593,7 @@ Before writing segments or publishing the manifest, a flush writes every inline 
 
 Publication uses put-if-absent at `predecessor.manifest_no + 1`. A lost put loads the winning manifest. A flush already covered by the winner needs no further publication; coverage includes WAL position as well as sequence. Otherwise it rebuilds against the new predecessor. Reorganization and compaction additionally require their selected inputs to remain valid.
 
-Successors preserve namespace identity and cannot lower head sequence, writer epoch, folded WAL number, or either retention floor. Compaction must also use the current compactor epoch. Deletion is terminal, and an established retirement deadline never changes.
+Successors preserve namespace identity and cannot lower head sequence, writer epoch, folded WAL number, either retention floor, or cumulative activity counters. A successor at the same head must preserve those counters exactly. Compaction must also use the current compactor epoch. Deletion is terminal, and an established retirement deadline never changes.
 
 The bounded metadata publication budget runs from before the first output segment write until initiation of the manifest put. An expired attempt publishes nothing further. Its unreferenced output remains subject to segment-age collection rules. Streaming compaction has the longer bound in section 10.4.
 
@@ -608,6 +608,41 @@ After the corresponding WAL is reclaimed, metadata segments are required recover
 Implementations can flush automatically as the WAL grows. The reference defaults request a flush at 32 unflushed segments and reject new commits with `maintenance_required` at 128. The commit that triggers a flush can finish before the flush completes. Reads and retained-receipt lookup remain available at the threshold.
 
 Flushing does not advance retention. An operator separately decides when older replay history may be discarded. Appendix C lists the reference implementation's sizing defaults.
+
+### 7.4 Statistics
+
+Each manifest stores three cumulative activity counters in a required `activity` object:
+
+| Counter | What counts |
+| --- | --- |
+| `content_bytes` | Full content length of every committed file revision, including overwrites and revisions that reuse stored content. |
+| `file_revisions` | Every committed file-revision append, including an empty revision. |
+| `mutations` | Each semantic operation group in a committed WAL record, identified by `semantic_op_index`. |
+
+For example, writing a 10-byte file and then replacing it with a 6-byte revision adds 16 bytes, two revisions, and two mutations. Creating a directory adds one mutation. Recursively deleting that directory adds one mutation, regardless of how many descendants it hides. Convenience requests can contain several internal operations, so mutation totals can exceed request counts.
+
+A fold adds only the activity after its predecessor's covered position. It publishes the counters, runs, head sequence, and folded WAL number together. A competing publication requires the fold to reload the predecessor and count only the remaining tail. A recognized commit retry adds nothing again. If an expired receipt allows a new durable commit, that commit counts as new activity.
+
+Uploads alone, fence records, pins, inline-content extraction, and compaction add no activity. Retention and deletion do not subtract past activity. Every publisher carries forward the counters from the predecessor it actually updates, including when compaction races a newer fold.
+
+Two footprint values are calculated from the manifest's segment descriptors:
+
+| Value | Calculation |
+| --- | --- |
+| `inode_record_count` | Sum of `row_count` for `inodes` segments. |
+| `metadata_stored_bytes` | Sum of `index_block.offset + index_block.stored_len` for all referenced segments. |
+
+The inode count includes retained deleted records. An implicit root counts as zero until stored as an inode record. Metadata bytes exclude content, WAL, manifest and pin JSON, unreferenced outputs, and segments referenced only by other manifests. Shared segments count in each referencing manifest; these totals do not measure unique physical storage.
+
+Statistics reads use one validated manifest without reading segments or replaying newer WAL. Observations include namespace identity, lifecycle status, manifest number, head sequence, and folded WAL number. A pin selects its exact manifest. Compaction can change footprint without changing the logical head, so the manifest number matters too.
+
+A fork inherits the source manifest's segment descriptors, so its footprint values begin as the source's. Its counters begin at zero. Activity committed in the source stays in the source's manifests.
+
+Meters compare observations for the same namespace. Billing cursors and policy belong to the application.
+
+The counters are public integers within the bound in the API specification; exceeding it is an error, and a counter that regresses is corruption.
+
+Grep reports its own referenced segment bytes under Appendix D. Its manifest and indexing position are independent of the core observation. A new fork starts without an index; a failed index read must not be reported as zero bytes.
 
 ## 8. Checkpoints and snapshots
 
@@ -675,7 +710,7 @@ Retirement is a deleted manifest with `reclaim_after_ms`, not a separate status 
 
 Read existing namespace state before allocating or writing a descriptor. An existing active namespace returns `namespace_exists`, or its current summary with `allow_existing`. Deleted status returns `namespace_deleted`. Corruption and read errors are not absence. These completed-namespace checks write nothing.
 
-For an absent namespace, build manifest 1 with a new content-store ID, the namespace's creation time and application-supplied `created_by`, no fork basis, active status, the genesis commit ID, next inode ID 2, and no runs or writer block. Head sequence, base sequence, both retention floors, folded WAL number, next run number, and both epochs start at zero.
+For an absent namespace, build manifest 1 with a new content-store ID, the namespace's creation time and application-supplied `created_by`, no fork basis, active status, the genesis commit ID, next inode ID 2, and no runs or writer block. Head sequence, base sequence, both retention floors, folded WAL number, next run number, both epochs, and all three activity counters start at zero.
 
 Write the content-store descriptor, hint naming manifest 1 and WAL 0, then manifest 1, all with put-if-absent. Descriptor and hint collisions are permitted. The manifest put decides which installation wins. A hint left before that put does not establish namespace existence.
 
@@ -686,7 +721,7 @@ A fork starts independent history in the source's content domain:
 1. Create a verified source pin whose owner names the target namespace, either from the source head or a live snapshot under section 8.2.
 2. Load and verify the pinned manifest.
 3. Copy its run references, head sequence, head commit ID, inode allocator, next run number, and content-store ID into target manifest 1. Preserve every segment's owner.
-4. Set target identity, creation time, and `created_by` from the fork request, immutable `fork_basis`, active status, no writer block, and both epochs zero. Local folded WAL and WAL retention floor start at zero; the sequence retention floor starts at the fork point.
+4. Set target identity, creation time, and `created_by` from the fork request, immutable `fork_basis`, active status, no writer block, and both epochs zero. Activity counters start at zero. Local folded WAL and WAL retention floor start at zero; the sequence retention floor starts at the fork point.
 5. Within the fork-installation budget, write the shared descriptor, target hint naming manifest 1 and WAL 0, and target manifest 1, in that order.
 
 The target copies no file bytes or metadata segments. Its WAL starts at number 1, and its first data commit is one sequence above the fork point. It can itself be forked immediately because its manifest already lists its inherited runs.
@@ -703,7 +738,7 @@ Abandoned attempts can leave a descriptor, hint, or fork pin. Descriptor and hin
 
 ### 9.4 Deleting a namespace
 
-Deletion uses the acquired writer epoch and publishes the next manifest with terminal deleted status. The manifest records the final sequence, commit ID, and inode allocator; its runs and folded WAL boundary remain the last materialized file set. Previously committed data remains committed.
+Deletion uses the acquired writer epoch. After admitted commits finish, it folds the remaining WAL, then publishes the next manifest with terminal deleted status. The final runs, counters, and folded WAL boundary cover the final head. A failed fold leaves the namespace active; deletion can be retried. Previously committed data remains committed.
 
 An operation that observes deletion returns `namespace_deleted`. A cached reader can still use its active view until the next manifest revalidation is due. Deletion neither immediately removes content nor deletes the shared content domain.
 
@@ -1131,6 +1166,7 @@ A namespace manifest contains:
 | `compactor_epoch` | Current compaction authority. |
 | `head_seq` | Materialized head sequence; on deletion, the final namespace sequence. |
 | `head_commit_id` | Commit ID at the recorded head. |
+| `activity` | Required cumulative activity counters defined in section 7.4. |
 | `base_seq` | Oldest run sequence represented by the file set. |
 | `writer_epoch` | Current writer authority. |
 | `next_inode_id` | First inode ID available at the recorded boundary. |
@@ -1590,6 +1626,8 @@ namespaces/{namespace_id}/extensions/grep/
 The `grep_hint` version-1 JSON payload contains `namespace_id` and `manifest_no`. Enabling writes a hint naming manifest 1, then creates manifest 1 with put-if-absent. A hint collision is permitted; the manifest put decides installation. Later publications use the next contiguous number.
 
 A `grep_manifest` version-1 payload contains `namespace_id`, `manifest_no`, `status`, `index`, and `segments`. Its namespace and number must agree with the key. Both envelopes verify their stored payload checksum and reject unknown kinds, versions, fields, and invalid nested state. The hint contains no separate manifest checksum.
+
+`index_stored_bytes` is the sum of `index_block.offset + index_block.stored_len` for its referenced segments, using checked arithmetic. This calculation needs no segment reads. Report it with the grep manifest number and full indexing status, including any partial-commit position. Confirmed absence means zero referenced index bytes; a read failure remains an error.
 
 Discovery loads the hinted manifest and probes successive numbers until not-found. A missing hint or missing manifest 1 means grep is not enabled. A missing higher hinted manifest is corruption. Queries validate a cached manifest with a HEAD of its successor on every query; a present successor reloads discovery. Decoded manifests can be cached by namespace and number.
 

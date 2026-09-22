@@ -2776,6 +2776,10 @@ async fn a_flush_landing_during_finalization_is_retried_over() {
 
     // A write with no checkpoint behind it leaves a WAL tail, which is what
     // the competing flush publishes.
+    let activity_before = crate::control::load_namespace_statistics(&store, &namespace_id)
+        .await
+        .expect("activity")
+        .activity;
     let visible_before = visible_namespace(&store, &namespace_id).await;
     write_file_bytes(
         &store,
@@ -2812,6 +2816,20 @@ async fn a_flush_landing_during_finalization_is_retried_over() {
 
     let segments = load_current_manifest_segments(&store, &namespace_id).await;
     assert_eq!(segments.manifest().payload().manifest_no, manifest_no);
+    assert_eq!(
+        segments.manifest().payload().activity,
+        loonfs_api::wire::manifest::ManifestActivity {
+            content_bytes: activity_before
+                .content_bytes
+                .checked_add(b"raced the finalizer\n".len() as u64)
+                .expect("bytes"),
+            file_revisions: activity_before
+                .file_revisions
+                .checked_add(1)
+                .expect("revisions"),
+            mutations: activity_before.mutations.checked_add(1).expect("mutations"),
+        }
+    );
     let runs = input_runs_for_group(segments.manifest(), group);
     drop(segments);
     // Two runs: the base run the job built, and the delta run the flush

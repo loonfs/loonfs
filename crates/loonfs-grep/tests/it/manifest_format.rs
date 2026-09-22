@@ -286,3 +286,27 @@ fn constructor_rejects_a_segment_with_no_rows() {
         Err(GrepManifestStateError::EmptySegment { .. })
     ));
 }
+
+#[test]
+fn index_bytes_reject_overflow_and_disabled_indexes_have_no_bytes() {
+    assert_eq!(
+        sample_disabled_manifest()
+            .index_stored_bytes()
+            .expect("disabled"),
+        0
+    );
+    let source = sample_active_manifest(ChangeSeq(11), 1);
+    let mut segments = source.segments().to_vec();
+    for segment in &mut segments {
+        segment.index_block.offset = u64::MAX / 2;
+    }
+    let oversized = GrepManifestState::new(
+        source.namespace_id().clone(),
+        source.manifest_no(),
+        source.status().clone(),
+        source.index().clone(),
+        segments,
+    )
+    .expect("descriptors");
+    assert!(oversized.index_stored_bytes().is_err());
+}

@@ -879,6 +879,7 @@ pub(crate) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
     };
 
     encode_namespace_manifest_json(NamespaceManifestPayload {
+        activity: Default::default(),
         content_store_id: head.content_store_id.clone(),
         created_at_ms: head.created_at_ms,
         created_by: head.created_by.clone(),
@@ -958,6 +959,7 @@ pub(super) async fn publish_manifest_with_segments<S: ObjectStore + ?Sized>(
 ) -> ManifestNo {
     let manifest_number = manifest_no;
     let manifest = encode_namespace_manifest_json(NamespaceManifestPayload {
+        activity: Default::default(),
         content_store_id: loonfs_api::ContentStoreId::parse("cs_0123456789abcdef0123456789abcdef")
             .expect("content store"),
         created_at_ms: 1_000,

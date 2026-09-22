@@ -1911,6 +1911,24 @@ async fn fork_of_grep_enabled_namespace_starts_unmaterialized_without_manifest_s
         .manifest_state()
         .clone();
 
+    let mut stored_bytes = 0_u64;
+    for segment in source_manifest_before.segments() {
+        let key = loonfs_grep::keyspace::segment_key(&source, &segment.segment_id);
+        stored_bytes += store
+            .get(&key, None)
+            .await
+            .expect("segment")
+            .expect("present")
+            .len() as u64;
+    }
+    assert!(stored_bytes > 0);
+    assert_eq!(
+        source_manifest_before
+            .index_stored_bytes()
+            .expect("index bytes"),
+        stored_bytes
+    );
+
     writer
         .fork_namespace(
             &source,

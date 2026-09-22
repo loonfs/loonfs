@@ -76,6 +76,7 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
         writer: None,
         compactor_epoch: 0,
         status: NamespaceStatus::Active {},
+        activity: Default::default(),
         ..source_manifest.payload().clone()
     };
     match install_namespace_manifest(store, &manifest, || {
