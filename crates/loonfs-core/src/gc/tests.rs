@@ -391,20 +391,17 @@ async fn deleted_namespace_reclaims_down_to_its_tombstone() {
             .expect("manifests"),
         vec![current.object_key]
     );
-    assert_eq!(
-        bootstrap_namespace(
-            &store,
-            &namespace_id,
-            &setup,
-            &loonfs_test_support::test_actor(),
-            &loonfs_api::NamespaceAccess::Unrestricted {},
-            false
-        )
-        .await
-        .expect_err("retired id")
-        .code(),
-        loonfs_api::ErrorCode::NamespaceDeleted
-    );
+    let recreated = bootstrap_namespace(
+        &store,
+        &namespace_id,
+        &setup,
+        &loonfs_test_support::test_actor(),
+        &loonfs_api::NamespaceAccess::Unrestricted {},
+        false,
+    )
+    .await
+    .expect("recreate collected namespace");
+    assert_eq!(recreated.generation, loonfs_api::NamespaceGeneration(2));
 }
 
 #[tokio::test]

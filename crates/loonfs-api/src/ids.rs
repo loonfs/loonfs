@@ -468,8 +468,8 @@ fn is_allowed_id_tail_char(ch: char) -> bool {
 string_id! {
     /// Durable id for one namespace.
     ///
-    /// A namespace is one filesystem history. This id is not a display name and
-    /// should not be reused after destruction. Its serialized form is 1 to 128
+    /// A namespace id names successive filesystem generations. This id is not a display name.
+    /// Its serialized form is 1 to 128
     /// lowercase ASCII letters, digits, dots, underscores, or hyphens, starting
     /// with a letter or digit; the `loonfs-` prefix is reserved for system use.
     NamespaceId,
@@ -592,6 +592,14 @@ impl CheckpointId {
         let entropy = generated_id("pin");
         Self::parse(format!("pin_{:020}-{}", manifest_no.0, &entropy[4..20]))
             .expect("the pinned manifest number should be valid")
+    }
+
+    /// Derives the pin for a deleted namespace generation.
+    pub fn retired(namespace_id: &NamespaceId, manifest_no: ManifestNo) -> Self {
+        let input = format!("retired\n{namespace_id}\n{:020}", manifest_no.0);
+        let digest = crate::digest::sha256_hex(input.as_bytes());
+        Self::parse(format!("pin_{:020}-{}", manifest_no.0, &digest[..16]))
+            .expect("the retired manifest number should be valid")
     }
 
     /// Returns the manifest number encoded in this id.
@@ -801,6 +809,13 @@ numeric_id! {
     ManifestNo,
     public_ordinal,
     schema_description = "Monotonic manifest counter for one namespace. It can increase when metadata changes, even if no namespace commit is written."
+}
+
+numeric_id! {
+    /// Which generation of its id a namespace is.
+    NamespaceGeneration,
+    public_ordinal,
+    schema_description = "Which generation of its id a namespace is. A newly created namespace is generation 1; each recreation after a deletion increments it."
 }
 
 numeric_id! {

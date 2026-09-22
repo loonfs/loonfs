@@ -891,6 +891,8 @@ pub(crate) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
         compactor_epoch: 0,
         namespace_id: namespace_id.clone(),
         manifest_no,
+        generation: head.generation,
+        generation_first_manifest_no: head.generation_first_manifest_no,
 
         head_seq,
         head_commit_id: head.head_commit_id.clone(),
@@ -971,6 +973,8 @@ pub(super) async fn publish_manifest_with_segments<S: ObjectStore + ?Sized>(
         compactor_epoch: 0,
         namespace_id: namespace_id.clone(),
         manifest_no,
+        generation: loonfs_api::NamespaceGeneration(1),
+        generation_first_manifest_no: ManifestNo(1),
 
         head_seq,
         head_commit_id: CommitId::parse("c_00000000000000000000000000000001").expect("commit id"),

@@ -721,6 +721,7 @@ async fn maintenance_namespace_diagnostics_route_answers_storage_fields() {
     let diagnostics: loonfs_api::NamespaceDiagnostics =
         serde_json::from_slice(&body).expect("namespace diagnostics response");
     assert_eq!(diagnostics.namespace_id, namespace_id);
+    assert_eq!(diagnostics.generation, loonfs_api::NamespaceGeneration(1));
     assert_eq!(diagnostics.head_seq, ChangeSeq(1));
     assert_eq!(diagnostics.retention_floor_seq, ChangeSeq(0));
     assert_eq!(
@@ -730,6 +731,108 @@ async fn maintenance_namespace_diagnostics_route_answers_storage_fields() {
     assert_eq!(diagnostics.wal_tail_segments, 2);
     assert_eq!(diagnostics.live_snapshots, 0);
     assert_eq!(diagnostics.live_checkpoints, 0);
+
+    state.writer.shutdown().await.expect("shutdown writer");
+}
+
+#[tokio::test]
+async fn http_create_recreates_a_deleted_namespace_but_fork_does_not() {
+    use tower::ServiceExt;
+
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
+    let (router, state) = app(
+        test_config(temp_dir.path(), "namespace-recreation-writer"),
+        options_with_store(store),
+    )
+    .await
+    .expect("build app");
+    let source_id = namespace_id("source");
+    state
+        .writer
+        .create_namespace(
+            &source_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("create fork source");
+
+    let create = || {
+        axum::http::Request::builder()
+            .method(axum::http::Method::POST)
+            .uri("/v0/namespaces")
+            .header(axum::http::header::AUTHORIZATION, "Bearer test-token")
+            .header("Loonfs-Actor", "test-actor")
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(r#"{"namespace_id":"demo"}"#))
+            .expect("create request")
+    };
+    let first = router
+        .clone()
+        .oneshot(create())
+        .await
+        .expect("first create response");
+    assert_eq!(first.status(), StatusCode::OK);
+    let first_body = axum::body::to_bytes(first.into_body(), usize::MAX)
+        .await
+        .expect("first create body");
+    let first_namespace: loonfs_api::Namespace =
+        serde_json::from_slice(&first_body).expect("first namespace");
+    assert_eq!(
+        first_namespace.generation,
+        loonfs_api::NamespaceGeneration(1)
+    );
+
+    let deleted = router
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method(axum::http::Method::DELETE)
+                .uri("/v0/namespaces/demo")
+                .header(axum::http::header::AUTHORIZATION, "Bearer test-token")
+                .header("Loonfs-Actor", "test-actor")
+                .body(axum::body::Body::empty())
+                .expect("delete request"),
+        )
+        .await
+        .expect("delete response");
+    assert_eq!(deleted.status(), StatusCode::OK);
+
+    let fork = router
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method(axum::http::Method::POST)
+                .uri("/v0/namespaces/source/forks")
+                .header(axum::http::header::AUTHORIZATION, "Bearer test-token")
+                .header("Loonfs-Actor", "test-actor")
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(axum::body::Body::from(r#"{"new_namespace_id":"demo"}"#))
+                .expect("fork request"),
+        )
+        .await
+        .expect("fork response");
+    assert_eq!(fork.status(), StatusCode::GONE);
+    let fork_body = axum::body::to_bytes(fork.into_body(), usize::MAX)
+        .await
+        .expect("fork body");
+    let fork_error: loonfs_api::ApiError = serde_json::from_slice(&fork_body).expect("fork error");
+    assert_eq!(fork_error.code, ErrorCode::NamespaceDeleted.as_str());
+
+    let second = router
+        .oneshot(create())
+        .await
+        .expect("second create response");
+    assert_eq!(second.status(), StatusCode::OK);
+    let second_body = axum::body::to_bytes(second.into_body(), usize::MAX)
+        .await
+        .expect("second create body");
+    let second_namespace: loonfs_api::Namespace =
+        serde_json::from_slice(&second_body).expect("second namespace");
+    assert_eq!(
+        second_namespace.generation,
+        loonfs_api::NamespaceGeneration(2)
+    );
 
     state.writer.shutdown().await.expect("shutdown writer");
 }

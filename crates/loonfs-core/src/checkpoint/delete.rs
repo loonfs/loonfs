@@ -3,8 +3,9 @@
 //! Forks and snapshots have separate lifecycle rules and cannot be deleted
 //! through this operation.
 
-use super::record::{delete_checkpoint_record, load_checkpoint_record};
+use super::record::{checkpoint_is_visible, delete_checkpoint_record, load_checkpoint_record};
 use crate::error::{CoreError, Result};
+use crate::namespace::control::load_namespace_read_state;
 use loonfs_api::wire::control::CheckpointOwner;
 use loonfs_api::{CheckpointId, DeleteCheckpointResponse, NamespaceId};
 use loonfs_objectstore::ObjectStore;
@@ -14,6 +15,7 @@ pub(super) enum CheckpointOwnerKind {
     User,
     Fork,
     Snapshot,
+    Retired,
 }
 
 impl CheckpointOwnerKind {
@@ -22,6 +24,7 @@ impl CheckpointOwnerKind {
             CheckpointOwner::User { .. } => Self::User,
             CheckpointOwner::Fork { .. } => Self::Fork,
             CheckpointOwner::Snapshot { .. } => Self::Snapshot,
+            CheckpointOwner::Retired {} => Self::Retired,
         }
     }
 
@@ -32,6 +35,7 @@ impl CheckpointOwnerKind {
             Self::Snapshot => {
                 "it is deleted through the snapshot delete operation or by its expiry"
             }
+            Self::Retired => "it is deleted when its generation is reclaimed",
         }
     }
 }
@@ -60,6 +64,7 @@ fn owner_description(owner: &CheckpointOwner) -> String {
             ..
         } => format!("owned by fork target `{target_namespace_id}`"),
         CheckpointOwner::Snapshot { .. } => "a snapshot".to_owned(),
+        CheckpointOwner::Retired {} => "a retired generation record".to_owned(),
     }
 }
 
@@ -69,18 +74,28 @@ pub(super) async fn delete_owned_checkpoint<S: ObjectStore + ?Sized>(
     checkpoint_id: &CheckpointId,
     expected: CheckpointOwnerKind,
 ) -> Result<()> {
+    let head = load_namespace_read_state(store, namespace_id)
+        .await
+        .map_err(CoreError::ControlObjectLoad)?;
+    if !checkpoint_is_visible(&head, checkpoint_id) {
+        return Err(not_found(checkpoint_id, expected));
+    }
     let Some(loaded) = load_checkpoint_record(store, namespace_id, checkpoint_id).await? else {
-        return Err(match expected {
-            CheckpointOwnerKind::Snapshot => CoreError::SnapshotNotFound {
-                snapshot_id: checkpoint_id.clone(),
-            },
-            _ => CoreError::CheckpointNotFound {
-                checkpoint_id: checkpoint_id.clone(),
-            },
-        });
+        return Err(not_found(checkpoint_id, expected));
     };
     ensure_owner_is(checkpoint_id, &loaded.state.owner, expected)?;
     delete_checkpoint_record(store, namespace_id, checkpoint_id).await
+}
+
+fn not_found(checkpoint_id: &CheckpointId, expected: CheckpointOwnerKind) -> CoreError {
+    match expected {
+        CheckpointOwnerKind::Snapshot => CoreError::SnapshotNotFound {
+            snapshot_id: checkpoint_id.clone(),
+        },
+        _ => CoreError::CheckpointNotFound {
+            checkpoint_id: checkpoint_id.clone(),
+        },
+    }
 }
 
 pub(crate) async fn delete_checkpoint<S: ObjectStore + ?Sized>(

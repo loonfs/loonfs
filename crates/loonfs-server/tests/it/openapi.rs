@@ -1084,6 +1084,7 @@ fn openapi_publishes_namespace_diagnostics_in_the_maintenance_api_group() {
         BTreeSet::from([
             "created_at_ms",
             "created_by",
+            "generation",
             "head_seq",
             "live_checkpoints",
             "live_snapshots",

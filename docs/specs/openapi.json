@@ -1079,7 +1079,7 @@
         "description": "Checkpoint record counts deleted by one garbage-collection pass, grouped by owner.",
         "properties": {
           "expired": {
-            "description": "User-owned records deleted after expiry or terminal namespace deletion.",
+            "description": "User-owned records deleted after expiry or namespace deletion.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
@@ -1091,7 +1091,7 @@
             "type": "integer"
           },
           "snapshot": {
-            "description": "Snapshot-owned records deleted after expiry or terminal namespace deletion.",
+            "description": "Snapshot-owned records deleted after expiry or namespace deletion.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
@@ -2986,6 +2986,10 @@
             "$ref": "#/components/schemas/NamespaceForkBasis",
             "description": "Present only for a fork: the source it was forked from."
           },
+          "generation": {
+            "$ref": "#/components/schemas/NamespaceGeneration",
+            "description": "Which generation of its id this namespace is. Recreating a deleted id increments it."
+          },
           "head_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
             "description": "Current visible namespace sequence."
@@ -3002,6 +3006,7 @@
         "required": [
           "access",
           "namespace_id",
+          "generation",
           "created_at_ms",
           "created_by",
           "head_seq",
@@ -3141,6 +3146,10 @@
             "$ref": "#/components/schemas/NamespaceForkBasis",
             "description": "Present only for a fork: the source it was forked from."
           },
+          "generation": {
+            "$ref": "#/components/schemas/NamespaceGeneration",
+            "description": "Which generation of its id this namespace is. Recreating a deleted id increments it."
+          },
           "head_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
             "description": "Current visible namespace sequence."
@@ -3174,6 +3183,7 @@
         },
         "required": [
           "namespace_id",
+          "generation",
           "created_at_ms",
           "created_by",
           "head_seq",
@@ -3202,8 +3212,15 @@
         ],
         "type": "object"
       },
+      "NamespaceGeneration": {
+        "description": "Which generation of its id a namespace is. A newly created namespace is generation 1; each recreation after a deletion increments it.",
+        "format": "int64",
+        "maximum": 9007199254740991,
+        "minimum": 0,
+        "type": "integer"
+      },
       "NamespaceId": {
-        "description": "Durable id for one namespace.\n\nA namespace is one filesystem history. This id is not a display name and\nshould not be reused after destruction. Its serialized form is 1 to 128\nlowercase ASCII letters, digits, dots, underscores, or hyphens, starting\nwith a letter or digit; the `loonfs-` prefix is reserved for system use.",
+        "description": "Durable id for one namespace.\n\nA namespace id names successive filesystem generations. This id is not a display name.\nIts serialized form is 1 to 128\nlowercase ASCII letters, digits, dots, underscores, or hyphens, starting\nwith a letter or digit; the `loonfs-` prefix is reserved for system use.",
         "example": "demo",
         "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$",
         "type": "string"

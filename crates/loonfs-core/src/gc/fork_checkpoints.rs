@@ -5,7 +5,7 @@ use crate::control_object::ControlObjectLoadError;
 use crate::error::{CoreError, Result};
 use crate::namespace::control::load_current_manifest;
 use loonfs_api::wire::control::{CheckpointRecordState, ForkBasis};
-use loonfs_api::NamespaceId;
+use loonfs_api::{NamespaceGeneration, NamespaceId};
 use loonfs_objectstore::ObjectStore;
 
 pub(super) enum ForkCheckpointReachability {
@@ -71,8 +71,11 @@ pub(super) async fn classify_fork_checkpoint<S: ObjectStore + ?Sized>(
             }
         },
     };
-    // A target that names another pin, or none, was installed by a later
-    // attempt or a plain create; this pin is an abandoned attempt's.
+    // A first-generation target that names another pin, or none, was
+    // installed by a later attempt or a plain create; this pin is an
+    // abandoned attempt's. A recreated target may still depend on this pin
+    // through an earlier generation, so it is retained until the collector
+    // can read that generation's tombstone.
     let Some(basis) = target
         .envelope
         .payload()
@@ -80,6 +83,11 @@ pub(super) async fn classify_fork_checkpoint<S: ObjectStore + ?Sized>(
         .as_ref()
         .filter(|basis| basis.source_checkpoint_id == record.pin_id)
     else {
+        if target.envelope.payload().generation > NamespaceGeneration(1) {
+            return Ok(ForkCheckpointReachability::Retained {
+                reason: "target_recreated",
+            });
+        }
         return Ok(ForkCheckpointReachability::Reclaimable);
     };
     if basis.manifest != record.manifest() {

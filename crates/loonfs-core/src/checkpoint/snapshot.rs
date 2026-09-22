@@ -2,7 +2,9 @@
 
 use super::delete::{delete_owned_checkpoint, ensure_owner_is, CheckpointOwnerKind};
 use super::read_basis::{load_checkpoint_read_basis_from_record, CheckpointReadBasis};
-use super::record::{encode_checkpoint_record, load_checkpoint_record, LoadedCheckpointRecord};
+use super::record::{
+    checkpoint_is_visible, encode_checkpoint_record, load_checkpoint_record, LoadedCheckpointRecord,
+};
 use super::MetadataSegmentCache;
 use crate::context::MutationContext;
 use crate::control_update::{retry_while_contended, CasAttempt, WriteEvidence};
@@ -21,6 +23,11 @@ pub async fn load_snapshot_read_basis<S: ObjectStore + ?Sized>(
     snapshot_id: &CheckpointId,
     now_ms: u64,
 ) -> Result<CheckpointReadBasis> {
+    if !checkpoint_is_visible(live_head, snapshot_id) {
+        return Err(CoreError::SnapshotNotFound {
+            snapshot_id: snapshot_id.clone(),
+        });
+    }
     let loaded = classify_live_snapshot(
         load_checkpoint_record(store, &live_head.namespace_id, snapshot_id).await?,
         snapshot_id,
@@ -37,6 +44,14 @@ pub(crate) async fn extend_snapshot_expiry<S: ObjectStore + ?Sized>(
     max_lifetime_ms: u64,
     context: &MutationContext,
 ) -> Result<Checkpoint> {
+    let head = crate::namespace::control::load_namespace_read_state(store, namespace_id)
+        .await
+        .map_err(CoreError::ControlObjectLoad)?;
+    if !checkpoint_is_visible(&head, checkpoint_id) {
+        return Err(CoreError::SnapshotNotFound {
+            snapshot_id: checkpoint_id.clone(),
+        });
+    }
     let object_key = checkpoint_record(namespace_id, checkpoint_id);
     retry_while_contended(
         || async {
@@ -53,7 +68,10 @@ pub(crate) async fn extend_snapshot_expiry<S: ObjectStore + ?Sized>(
                 .min(lifetime_ceiling)
                 .max(*expires_at_ms);
             if *expires_at_ms == new_expires_at_ms {
-                return Ok(CasAttempt::Settled(super::checkpoint_summary(next)));
+                return Ok(CasAttempt::Settled(
+                    super::checkpoint_summary(next)
+                        .expect("a classified snapshot should have a public owner"),
+                ));
             }
             *expires_at_ms = new_expires_at_ms;
             let encoded = encode_checkpoint_record(&next)?;
@@ -61,7 +79,10 @@ pub(crate) async fn extend_snapshot_expiry<S: ObjectStore + ?Sized>(
                 .compare_and_swap(&object_key, &loaded.etag, encoded)
                 .await
             {
-                Ok(_) => Ok(CasAttempt::Settled(super::checkpoint_summary(next))),
+                Ok(_) => Ok(CasAttempt::Settled(
+                    super::checkpoint_summary(next)
+                        .expect("a classified snapshot should have a public owner"),
+                )),
                 Err(ObjectStoreError::PreconditionFailed { .. }) => Ok(CasAttempt::Contended(
                     CoreError::contention_exhausted(&object_key),
                 )),
@@ -85,9 +106,10 @@ pub(crate) async fn extend_snapshot_expiry<S: ObjectStore + ?Sized>(
                     .expires_at_ms()
                     .expect("a classified snapshot should carry an expiry");
                 if expires_at_ms >= new_expires_at_ms {
-                    Ok(WriteEvidence::Landed(super::checkpoint_summary(
-                        current.state,
-                    )))
+                    Ok(WriteEvidence::Landed(
+                        super::checkpoint_summary(current.state)
+                            .expect("a classified snapshot should have a public owner"),
+                    ))
                 } else {
                     Ok(WriteEvidence::Lost(CoreError::contention_exhausted(
                         &object_key,
@@ -146,7 +168,9 @@ pub(crate) fn classify_live_snapshot(
 fn snapshot_expiry_mut(owner: &mut CheckpointOwner) -> Option<&mut u64> {
     match owner {
         CheckpointOwner::Snapshot { expires_at_ms, .. } => Some(expires_at_ms),
-        CheckpointOwner::User { .. } | CheckpointOwner::Fork { .. } => None,
+        CheckpointOwner::User { .. }
+        | CheckpointOwner::Fork { .. }
+        | CheckpointOwner::Retired {} => None,
     }
 }
 

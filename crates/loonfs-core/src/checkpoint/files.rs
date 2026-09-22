@@ -2,6 +2,7 @@
 
 use super::cache::MetadataSegmentCache;
 use super::read_basis::{load_pinned_checkpoint_basis, PinnedCheckpointBasis};
+use super::record::checkpoint_is_visible;
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::metadata::MetadataView;
 use loonfs_api::wire::manifest::{lookup_keys, MetadataRow, MetadataRowFamily};
@@ -57,6 +58,14 @@ pub(crate) async fn list_checkpoint_files_page<S: ObjectStore + ?Sized>(
     checkpoint_id: &CheckpointId,
     request: PageRequest<CheckpointFilesPageCursor>,
 ) -> Result<CheckpointFilesPage> {
+    let head = crate::namespace::control::load_namespace_read_state(store, namespace_id)
+        .await
+        .map_err(CoreError::ControlObjectLoad)?;
+    if !checkpoint_is_visible(&head, checkpoint_id) {
+        return Err(CoreError::CheckpointUnavailable(format!(
+            "checkpoint `{checkpoint_id}` does not exist in namespace `{namespace_id}`"
+        )));
+    }
     let PinnedCheckpointBasis { manifest, segments } =
         load_pinned_checkpoint_basis(store, segment_cache, namespace_id, checkpoint_id).await?;
 

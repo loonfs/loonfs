@@ -433,7 +433,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         .await
     }
 
-    /// Deletes the namespace by publishing a manifest with terminal deleted status.
+    /// Deletes the current namespace generation by publishing a tombstone manifest.
     /// Earlier committed changes remain durable. Later operations return `namespace_deleted`.
     pub async fn delete_namespace(
         &self,

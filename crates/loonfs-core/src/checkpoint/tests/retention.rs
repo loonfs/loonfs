@@ -472,7 +472,7 @@ async fn read_checkpoint_files<S: ObjectStore + ?Sized>(
 }
 
 #[tokio::test]
-async fn deletion_is_terminal_and_the_next_pin_is_a_different_record() {
+async fn deleting_a_pin_never_reuses_its_id() {
     // A deleted pin id is never reused. A caller asking for
     // a pin again — even at the same instant, over the same basis, under the
     // same owner name — gets a brand new record, so the delete can never be
@@ -808,9 +808,15 @@ async fn checkpoint_verification_rejects_a_deleted_namespace() {
     let acquired = acquire_writer_epoch(&store, &namespace_id, &context)
         .await
         .expect("writer");
-    crate::namespace::delete::delete_namespace(&store, &namespace_id, Default::default(), acquired)
-        .await
-        .expect("delete");
+    crate::namespace::delete::delete_namespace(
+        &store,
+        &namespace_id,
+        Default::default(),
+        acquired,
+        &context,
+    )
+    .await
+    .expect("delete");
 
     let verified = super::record::verify_checkpoint_basis(&store, &record)
         .await
