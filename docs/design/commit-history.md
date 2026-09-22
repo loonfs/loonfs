@@ -40,7 +40,7 @@ WAL replay pushes one commit row per record into the projected tail, next to the
 
 **A snapshot feed.** A snapshot reads through its pinned manifest. Its feed reads that manifest's `commits` family and nothing later, so the page ends at the captured sequence without reading the live history.
 
-A page costs the blocks it returns. A replay costs two point reads. Neither opens a WAL object.
+A page costs the blocks it returns, and a replay costs two point reads, on top of the pinned view that every read shares. Neither reads retained history. The only WAL a cold view replays is the unfolded tail, and the fold trigger bounds it.
 
 ## The WAL after this change
 
