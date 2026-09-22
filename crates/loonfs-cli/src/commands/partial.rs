@@ -196,6 +196,7 @@ mod tests {
         PartialMeta::describe(
             &ContentRef::blob_v1(
                 loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
+                loonfs_api::NamespaceGeneration(1),
                 ContentId::generate(),
                 bytes,
             ),
@@ -207,6 +208,7 @@ mod tests {
         ContentRef {
             kind: ContentRefKind::BlobV1,
             owner_namespace_id: loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
+            owner_generation: loonfs_api::NamespaceGeneration(1),
             content_id: ContentId::generate(),
             size_bytes: bytes.len() as u64,
             checksum: Checksum::crc32c(bytes),

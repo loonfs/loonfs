@@ -84,6 +84,7 @@ fn every_provenance_row_copies_the_wal_payload_commit_id() {
             revision_no: RevisionNo(1),
             content_ref: ContentRef::blob_v1(
                 loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
+                loonfs_api::NamespaceGeneration(1),
                 ContentId::generate(),
                 b"revision",
             ),
@@ -543,11 +544,13 @@ fn find_commit_receipt_returns_latest_matching_receipt() {
 fn metadata_builder_tracks_the_highest_row_sequence() {
     let content_ref = ContentRef::blob_v1(
         loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
+        loonfs_api::NamespaceGeneration(1),
         ContentId::generate(),
         b"first revision bytes",
     );
     let replacement_ref = ContentRef::blob_v1(
         loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
+        loonfs_api::NamespaceGeneration(1),
         ContentId::generate(),
         b"second revision bytes",
     );

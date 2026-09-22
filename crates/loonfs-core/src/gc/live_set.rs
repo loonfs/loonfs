@@ -6,7 +6,7 @@ use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::namespace::read_anchor::NamespaceReadAnchor;
 use crate::wal::{object_is_required, required_from};
 use futures::StreamExt;
-use loonfs_api::{ContentStoreId, ManifestNo, NamespaceId, WalNo};
+use loonfs_api::{ContentStoreId, ManifestNo, NamespaceGeneration, NamespaceId, WalNo};
 use loonfs_objectstore::keys::{
     checkpoint_prefix, metadata_manifest_object, metadata_segment_object_key,
 };
@@ -15,6 +15,7 @@ use std::collections::BTreeSet;
 
 pub(super) struct LiveSet {
     pub(super) content_store_id: ContentStoreId,
+    pub(super) owner_generation: NamespaceGeneration,
     pub(super) namespace_deleted: bool,
     pub(super) reclaim_after_ms: Option<u64>,
     pub(super) discovery_start_manifest_no: ManifestNo,
@@ -31,6 +32,7 @@ impl LiveSet {
         let head = &anchor.read_state;
         let mut live = Self {
             content_store_id: head.content_store_id.clone(),
+            owner_generation: head.generation,
             namespace_deleted: head.status.is_deleted(),
             reclaim_after_ms: head.status.reclaim_after_ms(),
             discovery_start_manifest_no: anchor.manifest.discovery_start_manifest_no,

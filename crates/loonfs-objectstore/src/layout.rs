@@ -30,6 +30,7 @@ pub enum DurableObjectFamily {
 pub struct ParsedObjectKey<'a> {
     family: DurableObjectFamily,
     owner_namespace_id: Option<&'a str>,
+    owner_generation: Option<&'a str>,
     identifier: Option<&'a str>,
 }
 
@@ -42,6 +43,11 @@ impl<'a> ParsedObjectKey<'a> {
     /// Returns the namespace path component, or `None` for the content-store descriptor.
     pub fn owner_namespace_id(&self) -> Option<&'a str> {
         self.owner_namespace_id
+    }
+
+    /// Returns the content owner's generation path component.
+    pub fn owner_generation(&self) -> Option<&'a str> {
+        self.owner_generation
     }
 
     /// Returns the family-specific identifier when the key carries one.
@@ -60,13 +66,19 @@ pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
         ["content-stores", content_store_id, "store.json"] => Some(parsed(
             DurableObjectFamily::ContentStore,
             None,
+            None,
             Some(content_store_id),
         )),
-        ["content-stores", _, "objects", owner_namespace_id, _, _, content_id] => Some(parsed(
-            DurableObjectFamily::ContentBlob,
-            Some(owner_namespace_id),
-            Some(content_id),
-        )),
+        ["content-stores", _, "objects", owner_namespace_id, owner_generation, _, _, content_id]
+            if valid_generation(owner_generation) =>
+        {
+            Some(parsed(
+                DurableObjectFamily::ContentBlob,
+                Some(owner_namespace_id),
+                Some(owner_generation),
+                Some(content_id),
+            ))
+        }
         ["namespaces", namespace, "wal", segment] => segment
             .strip_suffix(".wal.zst")
             .filter(|identifier| parse_wal_no(identifier).is_some())
@@ -74,17 +86,22 @@ pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
                 parsed(
                     DurableObjectFamily::WalSegment,
                     Some(namespace),
+                    None,
                     Some(identifier),
                 )
             }),
-        ["namespaces", namespace, "hint.json"] => {
-            Some(parsed(DurableObjectFamily::Hint, Some(namespace), None))
-        }
+        ["namespaces", namespace, "hint.json"] => Some(parsed(
+            DurableObjectFamily::Hint,
+            Some(namespace),
+            None,
+            None,
+        )),
         ["namespaces", namespace, "manifests", manifest] => {
             manifest.strip_suffix(".json").map(|identifier| {
                 parsed(
                     DurableObjectFamily::MetadataManifest,
                     Some(namespace),
+                    None,
                     Some(identifier),
                 )
             })
@@ -94,6 +111,7 @@ pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
                 parsed(
                     DurableObjectFamily::MetadataSegment,
                     Some(namespace),
+                    None,
                     Some(identifier),
                 )
             })
@@ -103,6 +121,7 @@ pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
                 parsed(
                     DurableObjectFamily::CheckpointRecord,
                     Some(namespace),
+                    None,
                     Some(identifier),
                 )
             })
@@ -112,12 +131,19 @@ pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
                 parsed(
                     DurableObjectFamily::UploadSession,
                     Some(namespace),
+                    None,
                     Some(identifier),
                 )
             })
         }
         _ => None,
     }
+}
+
+fn valid_generation(generation: &str) -> bool {
+    !generation.is_empty()
+        && !generation.starts_with('0')
+        && generation.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 /// Parses the fixed-width WAL number in a segment key.
@@ -161,11 +187,13 @@ pub fn upload_id_of(key: &str) -> Option<UploadId> {
 fn parsed<'a>(
     family: DurableObjectFamily,
     owner_namespace_id: Option<&'a str>,
+    owner_generation: Option<&'a str>,
     identifier: Option<&'a str>,
 ) -> ParsedObjectKey<'a> {
     ParsedObjectKey {
         family,
         owner_namespace_id,
+        owner_generation,
         identifier,
     }
 }
@@ -182,8 +210,8 @@ mod tests {
         wal_segment, wal_segment_prefix,
     };
     use loonfs_api::{
-        CheckpointId, ContentId, ContentStoreId, ManifestNo, MetadataSegmentId, NamespaceId,
-        UploadId, WalNo,
+        CheckpointId, ContentId, ContentStoreId, ManifestNo, MetadataSegmentId,
+        NamespaceGeneration, NamespaceId, UploadId, WalNo,
     };
 
     #[test]
@@ -233,7 +261,12 @@ mod tests {
                 Some(upload_id.as_str()),
             ),
             (
-                content_blob(&content_store_id, &namespace_id, &content_id),
+                content_blob(
+                    &content_store_id,
+                    &namespace_id,
+                    NamespaceGeneration(7),
+                    &content_id,
+                ),
                 DurableObjectFamily::ContentBlob,
                 Some(content_id.as_str()),
             ),
@@ -247,23 +280,28 @@ mod tests {
                 (!matches!(family, DurableObjectFamily::ContentStore)).then_some("ns-1")
             );
             assert_eq!(parsed.identifier(), identifier);
+            assert_eq!(
+                parsed.owner_generation(),
+                (family == DurableObjectFamily::ContentBlob).then_some("7")
+            );
         }
         let a = NamespaceId::parse("a").expect("owner");
         let ab = NamespaceId::parse("ab").expect("owner");
-        let a_prefix = content_owner_prefix(&content_store_id, &a);
-        let ab_prefix = content_owner_prefix(&content_store_id, &ab);
+        let generation = NamespaceGeneration(7);
+        let a_prefix = content_owner_prefix(&content_store_id, &a, generation);
+        let ab_prefix = content_owner_prefix(&content_store_id, &ab, generation);
         assert_eq!(
             a_prefix,
-            format!("content-stores/{content_store_id}/objects/a/")
+            format!("content-stores/{content_store_id}/objects/a/7/")
         );
         assert_eq!(
             ab_prefix,
-            format!("content-stores/{content_store_id}/objects/ab/")
+            format!("content-stores/{content_store_id}/objects/ab/7/")
         );
         assert!(!ab_prefix.starts_with(&a_prefix));
         for owner in [a, ab] {
-            let key = content_blob(&content_store_id, &owner, &content_id);
-            assert!(key.starts_with(&content_owner_prefix(&content_store_id, &owner)));
+            let key = content_blob(&content_store_id, &owner, generation, &content_id);
+            assert!(key.starts_with(&content_owner_prefix(&content_store_id, &owner, generation,)));
             assert_eq!(
                 parse_object_key(&key)
                     .expect("content key")
@@ -272,9 +310,15 @@ mod tests {
             );
         }
         assert!(parse_object_key(&format!(
-            "content-stores/{content_store_id}/objects/ab/cd/{content_id}"
+            "content-stores/{content_store_id}/objects/ab/ab/cd/{content_id}"
         ))
         .is_none());
+        for generation in ["0", "01", "future"] {
+            assert!(parse_object_key(&format!(
+                "content-stores/{content_store_id}/objects/ab/{generation}/ab/cd/{content_id}"
+            ))
+            .is_none());
+        }
     }
 
     #[test]

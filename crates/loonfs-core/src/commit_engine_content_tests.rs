@@ -58,7 +58,6 @@ async fn completed_upload<S: ObjectStore + ?Sized>(
     let completed = complete_upload(
         store,
         namespace_id,
-        &content_store_id,
         &upload.upload_id,
         None,
         ResolvedUploadCompletion::KnownContent,
@@ -189,6 +188,7 @@ async fn content_reclaimed_during_view_load_cannot_be_published() {
     let content_key = content_blob(
         &content_store_id,
         &namespace_id,
+        completed.prepared.content_ref().owner_generation,
         &completed.prepared.content_ref().content_id,
     );
     let publication = context(setup.now_ms + COMPLETED_UPLOAD_ADMISSION_WINDOW_MS - 1);

@@ -17,6 +17,7 @@
       "content_ref": {
         "kind": "blob_v1",
         "owner_namespace_id": "demo",
+        "owner_generation": 1,
         "content_id": "con_0123456789abcdef0123456789abcdef",
         "size_bytes": 16,
         "checksum": {
@@ -50,6 +51,7 @@
       "content_ref": {
         "kind": "blob_v1",
         "owner_namespace_id": "demo",
+        "owner_generation": 1,
         "content_id": "con_0123456789abcdef0123456789abcdef",
         "size_bytes": 16,
         "checksum": {
@@ -70,6 +72,7 @@
       "content_ref": {
         "kind": "blob_v1",
         "owner_namespace_id": "demo",
+        "owner_generation": 1,
         "content_id": "con_0123456789abcdef0123456789abcdef",
         "size_bytes": 16,
         "checksum": {
@@ -207,6 +210,7 @@
       "content_ref": {
         "kind": "blob_v1",
         "owner_namespace_id": "demo",
+        "owner_generation": 1,
         "content_id": "con_0123456789abcdef0123456789abcdef",
         "size_bytes": 16,
         "checksum": {
@@ -444,6 +448,7 @@
       "content_ref": {
         "kind": "blob_v1",
         "owner_namespace_id": "demo",
+        "owner_generation": 1,
         "content_id": "con_0123456789abcdef0123456789abcdef",
         "size_bytes": 16,
         "checksum": {
@@ -492,6 +497,7 @@
       "content_ref": {
         "kind": "blob_v1",
         "owner_namespace_id": "demo",
+        "owner_generation": 1,
         "content_id": "con_0123456789abcdef0123456789abcdef",
         "size_bytes": 16,
         "checksum": {
@@ -517,6 +523,7 @@
       "content_ref": {
         "kind": "blob_v1",
         "owner_namespace_id": "demo",
+        "owner_generation": 1,
         "content_id": "con_0123456789abcdef0123456789abcdef",
         "size_bytes": 16,
         "checksum": {
@@ -540,6 +547,7 @@
       "content_ref": {
         "kind": "blob_v1",
         "owner_namespace_id": "demo",
+        "owner_generation": 1,
         "content_id": "con_0123456789abcdef0123456789abcdef",
         "size_bytes": 16,
         "checksum": {

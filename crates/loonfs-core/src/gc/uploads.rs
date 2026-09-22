@@ -192,6 +192,7 @@ pub(super) async fn sweep_upload_session<S: ObjectStore + ?Sized>(
                         sweep.store,
                         &sweep.content_store_id,
                         &state.namespace_id,
+                        state.owner_generation,
                         &state.content_id,
                     )
                     .await

@@ -224,6 +224,7 @@ async fn write_upload_session(store: &LocalFsStore, namespace_id: &NamespaceId) 
         .expect("valid upload id");
     let state = loonfs_api::wire::control::UploadSessionState {
         namespace_id: namespace_id.clone(),
+        owner_generation: loonfs_api::NamespaceGeneration(1),
         upload_id: upload_id.clone(),
         content_id: loonfs_api::ContentId::generate(),
         created_at_ms: 1_000,
@@ -510,6 +511,7 @@ async fn upload_gc_aborts_an_expired_session_then_reaps_it() {
     let content_key = loonfs_objectstore::keys::content_blob(
         &content_store_id,
         &content_ref.owner_namespace_id,
+        content_ref.owner_generation,
         &content_ref.content_id,
     );
 
@@ -712,14 +714,9 @@ async fn complete_staged_upload<S: ObjectStore + ?Sized>(
     upload_id: &UploadId,
     context: &MutationContext,
 ) {
-    let content_store_id =
-        crate::namespace::catalog::load_namespace_content_store_id(store, namespace_id)
-            .await
-            .expect("content store id");
     crate::protocol::complete_upload(
         store,
         namespace_id,
-        &content_store_id,
         upload_id,
         None,
         crate::protocol::ResolvedUploadCompletion::KnownContent,
@@ -782,6 +779,7 @@ async fn upload_completion_wins_before_gc_abort_and_the_session_is_retained() {
     let content_key = loonfs_objectstore::keys::content_blob(
         &content_store_id,
         &content_ref.owner_namespace_id,
+        content_ref.owner_generation,
         &content_ref.content_id,
     );
     let store = blocking_control_cas_store(store, BlockingControlCasTarget::UploadAborted);
@@ -792,7 +790,6 @@ async fn upload_completion_wins_before_gc_abort_and_the_session_is_retained() {
         let result = crate::protocol::complete_upload(
             &store,
             &namespace_id,
-            &content_store_id,
             &upload_id,
             None,
             crate::protocol::ResolvedUploadCompletion::KnownContent,
@@ -841,13 +838,13 @@ async fn gc_abort_wins_before_completion_and_completion_reports_not_found() {
     let content_key = loonfs_objectstore::keys::content_blob(
         &content_store_id,
         &content_ref.owner_namespace_id,
+        content_ref.owner_generation,
         &content_ref.content_id,
     );
     let store = blocking_control_cas_store(store, BlockingControlCasTarget::UploadCompleted);
     let completion = crate::protocol::complete_upload(
         &store,
         &namespace_id,
-        &content_store_id,
         &upload_id,
         None,
         crate::protocol::ResolvedUploadCompletion::KnownContent,
@@ -903,7 +900,6 @@ async fn complete_upload_for_gc<S: ObjectStore + ?Sized>(
     let completed = crate::protocol::complete_upload(
         store,
         namespace_id,
-        &content_store_id,
         &begin.upload_id,
         None,
         crate::protocol::ResolvedUploadCompletion::KnownContent,
@@ -977,6 +973,7 @@ async fn content_gc_retains_completed_content_inside_its_grace() {
     let content_key = loonfs_objectstore::keys::content_blob(
         &content_store_id,
         &content_ref.owner_namespace_id,
+        content_ref.owner_generation,
         &content_ref.content_id,
     );
 
@@ -1015,6 +1012,7 @@ async fn content_gc_reclaims_completed_content_nothing_references() {
     let content_key = loonfs_objectstore::keys::content_blob(
         &content_store_id,
         &content_ref.owner_namespace_id,
+        content_ref.owner_generation,
         &content_ref.content_id,
     );
 
@@ -1060,6 +1058,7 @@ async fn completed_content_delete_failure_keeps_the_session_for_retry() {
     let content_key = loonfs_objectstore::keys::content_blob(
         &content_store_id,
         &content_ref.owner_namespace_id,
+        content_ref.owner_generation,
         &content_ref.content_id,
     );
     let past = context(setup.now_ms + CONTENT_RECLAMATION_GRACE_MS + 1);
@@ -1137,6 +1136,7 @@ async fn completed_uploads_use_publication_lookups_without_scanning_segments() {
         let orphan_key = loonfs_objectstore::keys::content_blob(
             &content_store_id,
             &namespace_id,
+            orphan.owner_generation,
             &orphan.content_id,
         );
         let publication_keys: BTreeSet<_> = if materialize {
@@ -1164,6 +1164,7 @@ async fn completed_uploads_use_publication_lookups_without_scanning_segments() {
         let content_key = loonfs_objectstore::keys::content_blob(
             &content_store_id,
             &content_ref.owner_namespace_id,
+            content_ref.owner_generation,
             &content_ref.content_id,
         );
 
@@ -2561,8 +2562,12 @@ async fn owned_content_keys<S: ObjectStore>(
     for number in [2, 3, 4] {
         let content_id =
             loonfs_api::ContentId::parse(format!("con_{number:032x}")).expect("content id");
-        let key =
-            loonfs_objectstore::keys::content_blob(content_store_id, namespace_id, &content_id);
+        let key = loonfs_objectstore::keys::content_blob(
+            content_store_id,
+            namespace_id,
+            loonfs_api::NamespaceGeneration(1),
+            &content_id,
+        );
         store
             .put_if_absent(&key, Bytes::from_static(b"content"))
             .await
@@ -2605,6 +2610,7 @@ async fn completed_upload_waits_for_namespace_retirement_then_reclaims() {
         let key = loonfs_objectstore::keys::content_blob(
             &content_store_id,
             &namespace_id,
+            content.owner_generation,
             &content.content_id,
         );
         assert!(store.head(&key).await.expect("object").is_some());
@@ -2865,6 +2871,49 @@ async fn retired_owner_calls_restart_retry_deletes_and_collect_late_writes() {
         .head(&hint(&namespace_id))
         .await
         .expect("tombstone")
+        .is_some());
+}
+
+#[tokio::test]
+async fn retired_owner_sweep_only_deletes_its_generation() {
+    let directory = tempdir().expect("directory");
+    let namespace_id = NamespaceId::parse("owner-generation-sweep").expect("namespace");
+    let store = LocalFsStore::new(directory.path()).expect("store");
+    let (content_store_id, deadline) = retired_content_namespace(&store, &namespace_id).await;
+    let content_id =
+        loonfs_api::ContentId::parse("con_00000000000000000000000000000002").expect("content id");
+    let retired_key = loonfs_objectstore::keys::content_blob(
+        &content_store_id,
+        &namespace_id,
+        loonfs_api::NamespaceGeneration(1),
+        &content_id,
+    );
+    let later_key = loonfs_objectstore::keys::content_blob(
+        &content_store_id,
+        &namespace_id,
+        loonfs_api::NamespaceGeneration(2),
+        &content_id,
+    );
+    for key in [&retired_key, &later_key] {
+        store
+            .put_if_absent(key, Bytes::from_static(b"content"))
+            .await
+            .expect("content");
+    }
+
+    let report = gc_namespace(&store, &namespace_id, &config(), &deadline)
+        .await
+        .expect("owner sweep");
+    assert_eq!(report.deleted.retired_content_objects, 1);
+    assert!(store
+        .head(&retired_key)
+        .await
+        .expect("retired object")
+        .is_none());
+    assert!(store
+        .head(&later_key)
+        .await
+        .expect("later object")
         .is_some());
 }
 

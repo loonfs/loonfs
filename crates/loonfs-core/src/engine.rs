@@ -976,11 +976,10 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         subject: Option<&Subject>,
         completion: ResolvedUploadCompletion,
     ) -> Result<CompletedUpload> {
-        let catalog = self.own_catalog(catalog)?;
+        self.own_catalog(catalog)?;
         crate::protocol::complete_upload(
             &self.store,
             &self.namespace_id,
-            catalog.content_store_id(),
             upload_id,
             subject,
             completion,
@@ -1004,11 +1003,10 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     where
         F: FnOnce(UploadMode) -> std::result::Result<ResolvedUploadCompletion, String>,
     {
-        let catalog = self.own_catalog(catalog)?;
+        self.own_catalog(catalog)?;
         crate::protocol::complete_upload_for_mode(
             &self.store,
             &self.namespace_id,
-            catalog.content_store_id(),
             upload_id,
             subject,
             resolve,
@@ -1122,10 +1120,8 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         .await?;
         crate::protocol::abort_upload(
             &self.store,
-            &self.namespace_id,
-            catalog.content_store_id(),
+            &catalog,
             upload_id,
-            catalog.access(),
             subject,
             &self.mutation_context()?,
         )

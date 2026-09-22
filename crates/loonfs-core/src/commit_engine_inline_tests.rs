@@ -51,7 +51,12 @@ async fn setup() -> (
 }
 
 fn inline(namespace_id: &NamespaceId, bytes: Bytes) -> InlineContent {
-    InlineContent::new(namespace_id.clone(), ContentId::generate(), bytes)
+    InlineContent::new(
+        namespace_id.clone(),
+        loonfs_api::NamespaceGeneration(1),
+        ContentId::generate(),
+        bytes,
+    )
 }
 
 fn put(path: &str, content_ref: &ContentRef) -> FilesystemOperation {
@@ -221,6 +226,7 @@ async fn inline_retry_identity_uses_bytes_and_distinguishes_staged_content() {
     );
     let inline = InlineContent::new(
         engine.namespace_id.clone(),
+        loonfs_api::NamespaceGeneration(1),
         staged.content_ref().content_id.clone(),
         Bytes::from_static(b"hello"),
     );
@@ -276,6 +282,7 @@ async fn invalid_inline_candidates_write_nothing() {
         .expect("stage");
     let different = InlineContent::new(
         engine.namespace_id.clone(),
+        loonfs_api::NamespaceGeneration(1),
         staged.content_ref().content_id.clone(),
         Bytes::from_static(b"inline bytes"),
     );

@@ -607,6 +607,10 @@
             "$ref": "#/components/schemas/ContentRefKind",
             "description": "Content strategy used by the referenced object."
           },
+          "owner_generation": {
+            "$ref": "#/components/schemas/NamespaceGeneration",
+            "description": "Generation of the owner namespace that wrote the bytes."
+          },
           "owner_namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
             "description": "Namespace that originally wrote the bytes."
@@ -621,6 +625,7 @@
         "required": [
           "kind",
           "owner_namespace_id",
+          "owner_generation",
           "content_id",
           "size_bytes",
           "checksum"
@@ -2214,6 +2219,13 @@
         "description": "Name-policy-derived directory entry key.\n\nUse this for exact name preconditions. Keep user-facing spelling in\n`DisplayName`.",
         "example": "report.txt",
         "type": "string"
+      },
+      "NamespaceGeneration": {
+        "description": "Which generation of its id a namespace is. A newly created namespace is generation 1; each recreation after a deletion increments it.",
+        "format": "int64",
+        "maximum": 9007199254740991,
+        "minimum": 0,
+        "type": "integer"
       },
       "NamespaceId": {
         "description": "Durable id for one namespace.\n\nA namespace id names successive filesystem generations. This id is not a display name.\nIts serialized form is 1 to 128\nlowercase ASCII letters, digits, dots, underscores, or hyphens, starting\nwith a letter or digit; the `loonfs-` prefix is reserved for system use.",

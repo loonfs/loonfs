@@ -9,9 +9,12 @@ use bytes::Bytes;
 use loonfs_api::v0::CompleteMultipartUploadRequest;
 use loonfs_api::{
     wire::control::{ControlObjectKind, UploadSessionMode, UploadSessionState},
-    ContentRef, DestinationBehavior, NamespaceId, UploadId,
+    AbsolutePath, ContentId, ContentRef, DestinationBehavior, NamespaceGeneration, NamespaceId,
+    UploadId,
 };
 use loonfs_api::{Checksum, ChecksumAlgorithm};
+use loonfs_core::content::{mint_content_token, verify_content_token};
+use loonfs_core::publish::{CommitCandidate, CommitRequest, FilesystemOperation, InlineContent};
 use loonfs_core::{
     BeginDirectPutUploadTargetResponse, Error as CoreError, ErrorCode, MutationContext,
     ResolvedUploadCompletion,
@@ -75,6 +78,60 @@ async fn complete_upload<S: ObjectStore + ?Sized>(
         )
         .await
         .map(|completed| completed.response)
+}
+
+async fn publish_inline<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    path: &str,
+    commit_id: &str,
+    bytes: &'static [u8],
+    context: &MutationContext,
+) -> ContentRef {
+    let catalog = loonfs_core::control::load_namespace_catalog_entry(store, namespace_id)
+        .await
+        .expect("catalog");
+    let inline = InlineContent::new(
+        namespace_id.clone(),
+        catalog.generation(),
+        ContentId::generate(),
+        Bytes::from_static(bytes),
+    );
+    let content_ref = inline.content_ref().clone();
+    let request = CommitRequest::single(
+        test_commit_id(Some(commit_id)),
+        loonfs_test_support::test_actor(),
+        None,
+        FilesystemOperation::PutFile {
+            path: AbsolutePath::parse(path).expect("path"),
+            content_ref: Some(content_ref.clone()),
+            inline_content: None,
+            behavior: DestinationBehavior::NoReplace,
+            expected_inode_id: None,
+            expected_revision_no: None,
+        },
+    );
+    publish_namespace_commits_batch(
+        store,
+        namespace_id,
+        vec![CommitCandidate::with_inline_content(
+            request,
+            Vec::new(),
+            vec![inline],
+        )],
+        context,
+    )
+    .await
+    .pop()
+    .expect("commit result")
+    .expect("publish inline content");
+    let entry = resolve_path(store, namespace_id, path)
+        .await
+        .expect("resolve inline file");
+    match entry.kind {
+        loonfs_api::v0::PathEntryKind::File { content_ref, .. } => content_ref,
+        kind => panic!("expected file, got {kind:?}"),
+    }
 }
 
 fn replay_read_guard_store(root: impl AsRef<Path>, namespace: &str) -> FailStore<LocalFsStore> {
@@ -150,6 +207,153 @@ async fn begin_direct_put_mints_the_target_object_up_front() {
         second.object_key.rsplit('/').next().expect("content id")
     );
     assert_ne!(first.object_key, second.object_key);
+}
+
+#[tokio::test]
+async fn a_completed_direct_upload_is_missing_and_not_prepared_after_recreation() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let context = mutation_context();
+    bootstrap_namespace(&store, &namespace_id, &context)
+        .await
+        .expect("bootstrap");
+
+    let target =
+        begin_direct_put_upload_target(&store, &namespace_id, ChecksumAlgorithm::Sha256, &context)
+            .await
+            .expect("begin direct put");
+    let bytes = b"generation one";
+    store
+        .put_if_absent(&target.object_key, Bytes::from_static(bytes))
+        .await
+        .expect("put direct bytes");
+    let completion = ResolvedUploadCompletion::DirectPut {
+        content: loonfs_api::v0::UploadContentClaim {
+            size_bytes: bytes.len() as u64,
+            checksum: Checksum::sha256(bytes),
+        },
+    };
+    let catalog = loonfs_core::control::load_namespace_catalog_entry(&store, &namespace_id)
+        .await
+        .expect("generation one catalog");
+    let completed = namespace_engine(&store, &namespace_id, &context)
+        .complete_upload(
+            &catalog,
+            &target.session.upload_id,
+            None,
+            completion.clone(),
+        )
+        .await
+        .expect("complete direct put");
+    let token = mint_content_token(
+        "generation-test-secret",
+        completed.receipt.as_ref().expect("completion receipt"),
+        context.now_ms,
+    )
+    .expect("mint token");
+    let prepared = verify_content_token("generation-test-secret", &catalog, &token, context.now_ms)
+        .expect("verify token");
+    let content_ref = completed
+        .response
+        .content_ref()
+        .expect("completed content")
+        .clone();
+
+    namespace_engine(&store, &namespace_id, &context)
+        .delete_namespace(Default::default())
+        .await
+        .expect("delete namespace");
+    let recreated = bootstrap_namespace(&store, &namespace_id, &context)
+        .await
+        .expect("recreate namespace");
+    assert_eq!(recreated.generation, loonfs_api::NamespaceGeneration(2));
+
+    let request = CommitRequest::single(
+        test_commit_id(Some("stale-direct-upload")),
+        loonfs_test_support::test_actor(),
+        None,
+        FilesystemOperation::PutFile {
+            path: AbsolutePath::parse("/stale.txt").expect("path"),
+            content_ref: Some(content_ref),
+            inline_content: None,
+            behavior: DestinationBehavior::NoReplace,
+            expected_inode_id: None,
+            expected_revision_no: None,
+        },
+    );
+    let result = publish_namespace_commits_batch(
+        &store,
+        &namespace_id,
+        vec![CommitCandidate::prepared(request, vec![prepared])],
+        &context,
+    )
+    .await
+    .pop()
+    .expect("commit result")
+    .expect_err("generation one content is not prepared for generation two");
+    assert_eq!(result.code(), ErrorCode::ContentNotPrepared);
+
+    let engine = namespace_engine(&store, &namespace_id, &context);
+    let status = engine
+        .get_upload_status(&target.session.upload_id, None)
+        .await
+        .expect_err("generation one session status is missing");
+    assert_eq!(status.code(), ErrorCode::UploadNotFound);
+    let current_catalog = loonfs_core::control::load_namespace_catalog_entry(&store, &namespace_id)
+        .await
+        .expect("generation two catalog");
+    let completion = engine
+        .complete_upload(
+            &current_catalog,
+            &target.session.upload_id,
+            None,
+            completion,
+        )
+        .await
+        .expect_err("generation one session completion is missing");
+    assert_eq!(completion.code(), ErrorCode::UploadNotFound);
+}
+
+#[tokio::test]
+async fn inline_puts_carry_the_current_generation_after_recreation() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let context = mutation_context();
+    bootstrap_namespace(&store, &namespace_id, &context)
+        .await
+        .expect("bootstrap");
+
+    let first = publish_inline(
+        &store,
+        &namespace_id,
+        "/first.txt",
+        "inline-generation-one",
+        b"first",
+        &context,
+    )
+    .await;
+    assert_eq!(first.owner_generation, NamespaceGeneration(1));
+
+    namespace_engine(&store, &namespace_id, &context)
+        .delete_namespace(Default::default())
+        .await
+        .expect("delete namespace");
+    bootstrap_namespace(&store, &namespace_id, &context)
+        .await
+        .expect("recreate namespace");
+
+    let second = publish_inline(
+        &store,
+        &namespace_id,
+        "/second.txt",
+        "inline-generation-two",
+        b"second",
+        &context,
+    )
+    .await;
+    assert_eq!(second.owner_generation, NamespaceGeneration(2));
 }
 
 #[tokio::test]
@@ -343,6 +547,10 @@ mod streamed_content {
                 .content_ref()
                 .expect("staged content")
                 .owner_namespace_id,
+            first
+                .content_ref()
+                .expect("staged content")
+                .owner_generation,
             &first.content_ref().expect("staged content").content_id,
         );
         assert_eq!(
@@ -444,6 +652,10 @@ mod streamed_content {
                 .content_ref()
                 .expect("staged content")
                 .owner_namespace_id,
+            staged
+                .content_ref()
+                .expect("staged content")
+                .owner_generation,
             &staged.content_ref().expect("staged content").content_id,
         );
         let stored = blocking
@@ -460,6 +672,10 @@ mod streamed_content {
                     .clone()
                     .owner_namespace_id
                     .clone(),
+                staged
+                    .content_ref()
+                    .expect("staged content")
+                    .owner_generation,
                 staged
                     .content_ref()
                     .expect("staged content")
@@ -537,6 +753,7 @@ mod direct_multipart {
         let object_key = content_blob(
             catalog.content_store_id(),
             &state.namespace_id,
+            state.owner_generation,
             &state.content_id,
         );
 

@@ -1594,6 +1594,7 @@ mod tests {
     fn file_revision_provenance_fields_are_pinned_on_the_wire() {
         let content_ref = ContentRef::blob_v1(
             crate::NamespaceId::parse("demo").expect("namespace id"),
+            crate::NamespaceGeneration(1),
             crate::ContentId::generate(),
             b"hello",
         );
@@ -1631,6 +1632,7 @@ mod tests {
     fn sample_content_ref() -> ContentRef {
         ContentRef::blob_v1(
             crate::NamespaceId::parse("demo").expect("namespace id"),
+            crate::NamespaceGeneration(1),
             ContentId::parse("con_0123456789abcdef0123456789abcdef").expect("valid content id"),
             b"hello",
         )
@@ -1903,6 +1905,7 @@ mod tests {
             "content_ref": {
                 "kind": "blob_v1",
                 "owner_namespace_id": "demo",
+                "owner_generation": 1,
                 "content_id": "con_0123456789abcdef0123456789abcdef",
                 "size_bytes": 1,
                 "checksum": {
@@ -1999,6 +2002,7 @@ mod tests {
     fn filesystem_operation_paths_keep_the_plain_string_wire_shape() {
         let content_ref = ContentRef::blob_v1(
             crate::NamespaceId::parse("demo").expect("namespace id"),
+            crate::NamespaceGeneration(1),
             ContentId::generate(),
             b"hello",
         );
@@ -2074,7 +2078,7 @@ mod tests {
             serde_json::json!({
                 "kind": "put_file",
                 "path": "relative",
-                "content_ref": ContentRef::blob_v1(crate::NamespaceId::parse("demo").expect("namespace id"), ContentId::generate(), b"hello")
+                "content_ref": ContentRef::blob_v1(crate::NamespaceId::parse("demo").expect("namespace id"), crate::NamespaceGeneration(1), ContentId::generate(), b"hello")
             }),
             serde_json::json!({"kind": "delete_path", "path": "relative"}),
             serde_json::json!({

@@ -4,16 +4,14 @@
 pub(crate) use super::content_location::ContentLocation;
 use crate::error::CoreError;
 #[cfg(any(test, feature = "test-support"))]
-use crate::namespace::catalog::load_namespace_content_store_id;
-#[cfg(any(test, feature = "test-support"))]
-use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
+use crate::namespace::catalog::{load_namespace_catalog_entry, VerifiedNamespaceCatalogEntry};
 #[cfg(any(test, feature = "test-support"))]
 use crate::storage::content_admission::PreparedContent;
 use bytes::Bytes;
 use futures::StreamExt;
 use loonfs_api::{
     Checksum, ContentId, ContentRef, ContentRefValidationError, ContentStoreId, ErrorCode,
-    NamespaceId, PathEntry, Sha256, StreamingChecksum,
+    NamespaceGeneration, NamespaceId, PathEntry, Sha256, StreamingChecksum,
 };
 use loonfs_objectstore::keys::content_blob;
 use loonfs_objectstore::{
@@ -227,9 +225,15 @@ pub(crate) async fn create_content_multipart_upload<S: ObjectStore + ?Sized>(
     store: &S,
     content_store_id: &ContentStoreId,
     owner_namespace_id: &NamespaceId,
+    owner_generation: NamespaceGeneration,
     content_id: &ContentId,
 ) -> crate::error::Result<String> {
-    let object_key = content_blob(content_store_id, owner_namespace_id, content_id);
+    let object_key = content_blob(
+        content_store_id,
+        owner_namespace_id,
+        owner_generation,
+        content_id,
+    );
     store
         .create_multipart_upload(&object_key)
         .await
@@ -250,6 +254,7 @@ pub(crate) async fn complete_content_multipart_upload<S: ObjectStore + ?Sized>(
     let object_key = content_blob(
         content_store_id,
         &expected.owner_namespace_id,
+        expected.owner_generation,
         &expected.content_id,
     );
     store
@@ -273,9 +278,15 @@ pub(crate) async fn delete_unpublished_content_object<S: ObjectStore + ?Sized>(
     store: &S,
     content_store_id: &ContentStoreId,
     owner_namespace_id: &NamespaceId,
+    owner_generation: NamespaceGeneration,
     content_id: &ContentId,
 ) -> bool {
-    let object_key = content_blob(content_store_id, owner_namespace_id, content_id);
+    let object_key = content_blob(
+        content_store_id,
+        owner_namespace_id,
+        owner_generation,
+        content_id,
+    );
     match store.delete(&object_key).await {
         Ok(()) => true,
         Err(error) => {
@@ -302,10 +313,16 @@ pub(crate) async fn abort_unpublished_multipart_upload<S: ObjectStore + ?Sized>(
     store: &S,
     content_store_id: &ContentStoreId,
     owner_namespace_id: &NamespaceId,
+    owner_generation: NamespaceGeneration,
     content_id: &ContentId,
     provider_upload_id: &str,
 ) -> bool {
-    let object_key = content_blob(content_store_id, owner_namespace_id, content_id);
+    let object_key = content_blob(
+        content_store_id,
+        owner_namespace_id,
+        owner_generation,
+        content_id,
+    );
     match store
         .abort_multipart_upload(&object_key, provider_upload_id)
         .await
@@ -628,6 +645,7 @@ pub(crate) fn content_object_key_for_ref(
     Ok(content_blob(
         content_store_id,
         &content_ref.owner_namespace_id,
+        content_ref.owner_generation,
         &content_ref.content_id,
     ))
 }
@@ -739,9 +757,15 @@ pub async fn store_bytes_as_content<S: ObjectStore + ?Sized>(
     owner_namespace_id: &NamespaceId,
     bytes: &[u8],
 ) -> Result<StoredContent, CoreError> {
-    let content_store_id = load_namespace_content_store_id(store, owner_namespace_id).await?;
-    store_bytes_as_content_with_store_id(store, content_store_id, owner_namespace_id.clone(), bytes)
-        .await
+    let catalog = load_namespace_catalog_entry(store, owner_namespace_id).await?;
+    store_bytes_as_content_with_store_id(
+        store,
+        catalog.content_store_id().clone(),
+        owner_namespace_id.clone(),
+        catalog.generation(),
+        bytes,
+    )
+    .await
 }
 
 /// Test fixture for planting durable content without an upload session.
@@ -754,12 +778,14 @@ pub(crate) async fn store_bytes_as_content_with_store_id<S: ObjectStore + ?Sized
     store: &S,
     content_store_id: ContentStoreId,
     owner_namespace_id: NamespaceId,
+    owner_generation: NamespaceGeneration,
     bytes: &[u8],
 ) -> Result<StoredContent, CoreError> {
     stage_bytes_under_content_id(
         store,
         content_store_id,
         owner_namespace_id,
+        owner_generation,
         ContentId::generate(),
         bytes,
     )
@@ -790,11 +816,17 @@ pub(crate) async fn stage_streamed_under_content_id<S: ObjectStore + ?Sized>(
     store: &S,
     content_store_id: ContentStoreId,
     owner_namespace_id: NamespaceId,
+    owner_generation: NamespaceGeneration,
     content_id: ContentId,
     body: ByteStream,
     payload_kind: StreamedPayloadKind,
 ) -> Result<StagedStream, CoreError> {
-    let object_key = content_blob(&content_store_id, &owner_namespace_id, &content_id);
+    let object_key = content_blob(
+        &content_store_id,
+        &owner_namespace_id,
+        owner_generation,
+        &content_id,
+    );
     let observed = Arc::new(Mutex::new(StreamedPayload::default()));
     let hashed = {
         let observed = Arc::clone(&observed);
@@ -834,6 +866,7 @@ pub(crate) async fn stage_streamed_under_content_id<S: ObjectStore + ?Sized>(
     Ok(StagedStream {
         content_ref: ContentRef::blob_v1_streamed(
             owner_namespace_id,
+            owner_generation,
             content_id,
             observed.size_bytes,
             observed.digest,
@@ -845,6 +878,7 @@ pub(crate) async fn stage_streamed_under_content_id<S: ObjectStore + ?Sized>(
 /// Reads and hashes a stream without storing it.
 pub(crate) async fn identify_streamed_payload(
     owner_namespace_id: NamespaceId,
+    owner_generation: NamespaceGeneration,
     content_id: ContentId,
     mut body: ByteStream,
 ) -> Result<ContentRef, CoreError> {
@@ -856,6 +890,7 @@ pub(crate) async fn identify_streamed_payload(
     }
     Ok(ContentRef::blob_v1_streamed(
         owner_namespace_id,
+        owner_generation,
         content_id,
         observed.size_bytes,
         observed.digest,
@@ -875,13 +910,15 @@ pub(crate) async fn stage_bytes_under_content_id<S: ObjectStore + ?Sized>(
     store: &S,
     content_store_id: ContentStoreId,
     owner_namespace_id: NamespaceId,
+    owner_generation: NamespaceGeneration,
     content_id: ContentId,
     bytes: &[u8],
 ) -> Result<StoredContent, CoreError> {
-    let content_ref = ContentRef::blob_v1(owner_namespace_id, content_id, bytes);
+    let content_ref = ContentRef::blob_v1(owner_namespace_id, owner_generation, content_id, bytes);
     let object_key = content_blob(
         &content_store_id,
         &content_ref.owner_namespace_id,
+        content_ref.owner_generation,
         &content_ref.content_id,
     );
     // Create-only plus the byte check stay on this write even though a
@@ -1026,6 +1063,7 @@ mod tests {
         // content, so the checksum has to.
         let planted = ContentRef::blob_v1(
             expected.owner_namespace_id.clone(),
+            expected.owner_generation,
             expected.content_id.clone(),
             b"mismatch",
         );
@@ -1047,6 +1085,7 @@ mod tests {
         let content_ref = ContentRef {
             kind: ContentRefKind::BlobV1,
             owner_namespace_id: loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
+            owner_generation: loonfs_api::NamespaceGeneration(1),
             content_id: ContentId::generate(),
             size_bytes: bytes.len() as u64,
             checksum: Checksum::crc32c(bytes),
@@ -1080,6 +1119,7 @@ mod tests {
         let content_ref = ContentRef {
             kind: ContentRefKind::BlobV1,
             owner_namespace_id: loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
+            owner_generation: loonfs_api::NamespaceGeneration(1),
             content_id: ContentId::generate(),
             size_bytes: bytes.len() as u64,
             checksum: Checksum::crc64nvme(bytes),
@@ -1184,6 +1224,7 @@ mod tests {
             &store,
             content_store_id.clone(),
             loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
+            loonfs_api::NamespaceGeneration(1),
             bytes,
         )
         .await
@@ -1192,6 +1233,7 @@ mod tests {
             &store,
             content_store_id,
             loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
+            loonfs_api::NamespaceGeneration(1),
             bytes,
         )
         .await
@@ -1244,6 +1286,7 @@ mod tests {
                 size_bytes: 0,
                 content_ref: ContentRef::blob_v1(
                     loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
+                    loonfs_api::NamespaceGeneration(1),
                     loonfs_api::ContentId::generate(),
                     b"",
                 ),
@@ -1531,6 +1574,7 @@ mod tests {
         let content_ref = ContentRef {
             kind: ContentRefKind::BlobV1,
             owner_namespace_id: loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
+            owner_generation: loonfs_api::NamespaceGeneration(1),
             content_id: ContentId::generate(),
             size_bytes: bytes.len() as u64,
             checksum: Checksum::crc32c(&bytes),
@@ -1592,6 +1636,7 @@ mod tests {
         let content_ref = ContentRef {
             kind: ContentRefKind::BlobV1,
             owner_namespace_id: loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
+            owner_generation: loonfs_api::NamespaceGeneration(1),
             content_id: ContentId::generate(),
             size_bytes: bytes.len() as u64,
             checksum: checksum(&bytes),
@@ -1655,6 +1700,7 @@ mod tests {
         planted[0] ^= 0xff;
         let planted_ref = ContentRef::blob_v1(
             expected.owner_namespace_id.clone(),
+            expected.owner_generation,
             expected.content_id.clone(),
             &planted,
         );
@@ -1729,6 +1775,7 @@ mod tests {
         let key = content_blob(
             content_store_id,
             &content_ref.owner_namespace_id,
+            content_ref.owner_generation,
             &content_ref.content_id,
         );
         store

@@ -673,6 +673,7 @@ async fn publisher_splits_batches_at_the_inline_limit_without_failing_commits() 
                 .map(|_| {
                     InlineContent::new(
                         namespace_id.clone(),
+                        loonfs_api::NamespaceGeneration(1),
                         loonfs_api::ContentId::generate(),
                         Bytes::from(vec![1; MAX_WAL_INLINE_CONTENT_BYTES]),
                     )
@@ -2274,6 +2275,7 @@ async fn a_runtime_fold_materializes_inline_content_and_reloads_an_empty_tail() 
     .expect("seed tail");
     let value = InlineContent::new(
         namespace_id.clone(),
+        loonfs_api::NamespaceGeneration(1),
         loonfs_api::ContentId::generate(),
         Bytes::from_static(b"folded inline bytes"),
     );

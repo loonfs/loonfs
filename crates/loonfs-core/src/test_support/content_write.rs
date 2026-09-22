@@ -20,6 +20,7 @@ pub(super) async fn store_file_bytes_before_metadata_publish<S: ObjectStore + ?S
         store,
         catalog.content_store_id().clone(),
         catalog.namespace_id().clone(),
+        catalog.generation(),
         bytes,
     )
     .await?;

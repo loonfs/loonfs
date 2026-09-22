@@ -31,6 +31,7 @@ async fn publish_inline(
 ) -> ContentRef {
     let value = InlineContent::new(
         namespace_id.clone(),
+        loonfs_api::NamespaceGeneration(1),
         ContentId::generate(),
         Bytes::from_static(b"inline content"),
     );
@@ -130,6 +131,7 @@ async fn reader_downloads_materialize_tail_content_by_path_and_inode() {
             content_blob(
                 catalog.content_store_id(),
                 &namespace_id,
+                content_ref.owner_generation,
                 &content_ref.content_id
             )
         );
@@ -198,7 +200,12 @@ async fn imports_read_the_owners_tail_before_folding_and_object_after_folding() 
     let catalog = loonfs_core::control::load_namespace_catalog_entry(&store, &source)
         .await
         .expect("catalog");
-    let source_key = content_blob(catalog.content_store_id(), &source, &content_ref.content_id);
+    let source_key = content_blob(
+        catalog.content_store_id(),
+        &source,
+        content_ref.owner_generation,
+        &content_ref.content_id,
+    );
     assert!(store.head(&source_key).await.expect("head").is_none());
     for folded in [false, true] {
         if folded {
@@ -385,6 +392,7 @@ async fn imports_of_fork_content_read_the_deleted_owners_content_store() {
         let source_key = content_blob(
             source_catalog.content_store_id(),
             &source,
+            content_ref.owner_generation,
             &content_ref.content_id,
         );
         recording.reset();

@@ -54,6 +54,7 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
     let content_ref = ContentRef {
         kind: ContentRefKind::BlobV1,
         owner_namespace_id: namespace_id.clone(),
+        owner_generation: loonfs_api::NamespaceGeneration(1),
         content_id: ContentId::parse("con_0123456789abcdef0123456789abcdef").expect("content id"),
         size_bytes: u64::MAX,
         checksum: Checksum::sha256(b"content"),
@@ -101,6 +102,7 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
     for kind in ["attributes", "copy", "put", "inline"] {
         let inline = InlineContent::new(
             namespace_id.clone(),
+            loonfs_api::NamespaceGeneration(1),
             ContentId::generate(),
             bytes::Bytes::from(vec![0; loonfs_api::wire::wal::MAX_WAL_INLINE_CONTENT_BYTES]),
         );

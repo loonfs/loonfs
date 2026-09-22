@@ -338,12 +338,14 @@ async fn foreign_references_resolve_to_objects_and_object_downloads_do_not_write
     let engine = NamespaceEngine::reader(&store, publisher.namespace_id.clone());
     let foreign = ContentRef::blob_v1(
         NamespaceId::parse("foreign").expect("owner"),
+        loonfs_api::NamespaceGeneration(1),
         value.content_ref().content_id.clone(),
         b"foreign",
     );
     let key = content_blob(
         &context.head.content_store_id,
         &foreign.owner_namespace_id,
+        foreign.owner_generation,
         &foreign.content_id,
     );
     store
@@ -440,6 +442,7 @@ async fn direct_downloads_materialize_once_and_do_not_write_after_a_flush() {
         let key = content_blob(
             &context.head.content_store_id,
             &publisher.namespace_id,
+            value.content_ref().owner_generation,
             &value.content_ref().content_id,
         );
         store.reset();
@@ -611,6 +614,7 @@ async fn inline_checksum_failures_match_object_validation() {
     let key = content_blob(
         &context.head.content_store_id,
         &publisher.namespace_id,
+        corrupt_ref.owner_generation,
         &corrupt_ref.content_id,
     );
     store

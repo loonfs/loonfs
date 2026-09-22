@@ -95,6 +95,7 @@ async fn content_key(
     loonfs_objectstore::keys::content_blob(
         &content_store_id,
         &content_ref.owner_namespace_id,
+        content_ref.owner_generation,
         &content_ref.content_id,
     )
 }

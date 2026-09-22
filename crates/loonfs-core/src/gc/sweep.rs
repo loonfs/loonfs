@@ -51,9 +51,11 @@ impl<S: ObjectStore + ?Sized> Sweep<'_, '_, S> {
             CandidateFamily::UploadSessions => self.process_upload_session(key).await,
             CandidateFamily::OwnedContent => {
                 let prefix = family.prefix(self.namespace_id, self.live);
+                let owner_generation = self.live.owner_generation.to_string();
                 if !key.starts_with(&prefix)
                     || loonfs_objectstore::layout::parse_object_key(key).is_none_or(|parsed| {
                         parsed.owner_namespace_id() != Some(self.namespace_id.as_str())
+                            || parsed.owner_generation() != Some(owner_generation.as_str())
                     })
                 {
                     self.report.retain(RetainedReason::UnrecognizedKey);
