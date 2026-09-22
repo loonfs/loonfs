@@ -87,9 +87,6 @@ pub const CHECKPOINT_VERIFY_BUDGET_MS: u64 = 60_000;
 /// garbage-collection candidates.
 pub const METADATA_PUBLICATION_BUDGET_MS: u64 = 15 * 60 * 1000;
 
-/// Bounds elapsed time from the collection call clock to retirement publication.
-pub const RETIREMENT_PUBLICATION_BUDGET_MS: u64 = METADATA_PUBLICATION_BUDGET_MS;
-
 /// Combined allowance for age overstatement from host-to-provider or
 /// host-to-host clock error and scheduling delay around publication checks.
 /// Direct expiry comparisons do not add this margin to stored deadlines.
@@ -113,14 +110,6 @@ pub const GC_MIN_GRACE_WINDOW_MS: u64 = max_u64(
     + PROVIDER_ATTEMPT_TIMEOUT_MS
     + GC_SAFETY_MARGIN_MS;
 
-const _: () = assert!(
-    RETIREMENT_PUBLICATION_BUDGET_MS
-        <= max_u64(
-            max_u64(WAL_PUBLISH_BUDGET_MS, CHECKPOINT_VERIFY_BUDGET_MS),
-            METADATA_PUBLICATION_BUDGET_MS,
-        )
-);
-
 /// Minimum provider age of a metadata segment no manifest lists before
 /// garbage collection may delete it. A streaming compaction writes its
 /// output under `segments/` as it goes and publishes at the end, so its
@@ -140,12 +129,9 @@ pub const METADATA_COMPACTION_BUDGET_MS: u64 =
 /// Lifetime of a direct download or upload capability.
 pub const DIRECT_TRANSFER_URL_TTL_MS: u64 = 15 * 60 * 1000;
 
-/// Covers outstanding reads and direct capabilities after retirement.
-///
-/// The deadline is measured from the collection call's clock, and the call
-/// may spend up to the retirement publication budget before it publishes,
-/// so the budget is added in front of the longest thing the grace covers.
-pub const NAMESPACE_RETIREMENT_GRACE_MS: u64 = RETIREMENT_PUBLICATION_BUDGET_MS
+/// Covers tombstone publication, outstanding reads, and direct capabilities
+/// from the deletion call's clock.
+pub const NAMESPACE_RETIREMENT_GRACE_MS: u64 = METADATA_PUBLICATION_BUDGET_MS
     + max_u64(
         GC_MIN_GRACE_WINDOW_MS,
         DIRECT_TRANSFER_URL_TTL_MS
@@ -155,9 +141,9 @@ pub const NAMESPACE_RETIREMENT_GRACE_MS: u64 = RETIREMENT_PUBLICATION_BUDGET_MS
     );
 
 const fn covers_namespace_retirement(grace_ms: u64) -> bool {
-    grace_ms >= RETIREMENT_PUBLICATION_BUDGET_MS + GC_MIN_GRACE_WINDOW_MS
+    grace_ms >= METADATA_PUBLICATION_BUDGET_MS + GC_MIN_GRACE_WINDOW_MS
         && grace_ms
-            >= RETIREMENT_PUBLICATION_BUDGET_MS
+            >= METADATA_PUBLICATION_BUDGET_MS
                 + DIRECT_TRANSFER_URL_TTL_MS
                 + PROVIDER_OPERATION_DEADLINE_MS
                 + PROVIDER_ATTEMPT_TIMEOUT_MS

@@ -1188,6 +1188,8 @@ pub struct DeletedCheckpointsByOwner {
     pub expired: u64,
     /// Snapshot-owned records deleted after expiry or namespace deletion.
     pub snapshot: u64,
+    /// Retired records deleted after their generations are reclaimed.
+    pub retired: u64,
 }
 
 impl DeletedCheckpointsByOwner {
@@ -1197,10 +1199,12 @@ impl DeletedCheckpointsByOwner {
             fork,
             expired,
             snapshot,
+            retired,
         } = other;
         self.fork += fork;
         self.expired += expired;
         self.snapshot += snapshot;
+        self.retired += retired;
     }
 }
 
@@ -1216,11 +1220,11 @@ pub struct GcResponse {
     pub deleted_checkpoints_by_owner: DeletedCheckpointsByOwner,
     /// Candidates retained at deletion time, grouped by reason.
     pub retained: RetainedCandidates,
-    /// The earliest known future reclamation time observed by this pass.
+    /// The earliest pending generation deadline or future upload cleanup time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub next_reclamation_at_ms: Option<u64>,
-    /// The deleted head's irrevocable owner-prefix collection deadline.
+    /// The current tombstone's deletion time plus the configured retirement grace.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub reclaim_after_ms: Option<u64>,

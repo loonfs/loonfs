@@ -599,7 +599,7 @@ Before writing segments or publishing the manifest, a flush writes every inline 
 
 Publication uses put-if-absent at `predecessor.manifest_no + 1`. A lost put loads the winning manifest. A flush already covered by the winner needs no further publication; coverage includes WAL position as well as sequence. Otherwise it rebuilds against the new predecessor. Reorganization and compaction additionally require their selected inputs to remain valid.
 
-Successors preserve namespace identity and cannot lower head sequence, writer epoch, folded WAL number, the retention floor, or cumulative activity counters. The one exception is a generation boundary, where the next generation starts every activity counter at zero. A successor at the same head must preserve those counters exactly. Compaction must also use the current compactor epoch. Deletion is terminal, and an established retirement deadline never changes.
+Successors preserve namespace identity and cannot lower head sequence, writer epoch, folded WAL number, the retention floor, or cumulative activity counters. The one exception is a generation boundary, where the next generation starts every activity counter at zero. A successor at the same head must preserve those counters exactly. Compaction must also use the current compactor epoch. Deletion is terminal within a generation.
 
 The bounded metadata publication budget runs from before the first output segment write until initiation of the manifest put. An expired attempt publishes nothing further. Its unreferenced output remains subject to segment-age collection rules. Streaming compaction has the longer bound in section 10.4.
 
@@ -696,23 +696,17 @@ An unexpired snapshot's expiry can be extended by compare-and-swap. The manifest
 
 ## 9. Namespace lifecycle and forks
 
-Namespace installation, deletion, recreation, and retirement publish numbered manifests. They do not create intermediate lifecycle statuses.
+Namespace installation, deletion, and recreation publish numbered manifests. Retirement is derived from a generation's tombstone and the complete pin listing. It publishes no manifest.
 
 ```text
-absent ── create manifest 1 ──> active ── publish deletion ──> deleted
-                                  ^                            │
-                                  └──── recreate generation ───┤
-                                              no retained pins │
-                                                               v
-                                                  retirement deadline set
-                                                               │
-                                                     deadline reached
-                                                               v
-                                             collect this owner's content
-                                             retain the manifest tombstone
+absent → create generation 1 → active → publish deletion → deleted
+                                ↑                           │
+                                └── recreate generation ────┤
+                                                            │
+                                      deadline and pin checks pass
+                                                            ↓
+                                      reclaim the deleted generation
 ```
-
-Retirement is a deleted manifest with `reclaim_after_ms`, not a separate status kind.
 
 ### 9.1 Creating a namespace
 
@@ -751,7 +745,7 @@ The fixed creation grace on the source pin protects installation. Before initiat
 
 ### 9.3 Conflicting and unknown installations
 
-A losing manifest-1 put reads the winner and verifies its namespace identity. Current active status means `namespace_exists`; current deleted status enters the recreation procedure. A recreation manifest put that loses reloads the current manifest. An active winner means another recreation succeeded. A newer tombstone means a concurrent retirement publication won, so recreation retries over that tombstone. Invalid bytes or key/payload disagreement are corruption. No loser overwrites the winner.
+A losing manifest-1 put reads the winner and verifies its namespace identity. Current active status means `namespace_exists`; current deleted status enters the recreation procedure. A recreation manifest put that loses reloads the current manifest. An active winner means another recreation succeeded. A newer tombstone means another generation was created and deleted, so recreation retries over that tombstone. Invalid bytes or key/payload disagreement are corruption. No loser overwrites the winner.
 
 A confirmed precondition failure is a conflict. A put with an unknown transport outcome can confirm its own success only by reading back the exact proposed manifest 1. An explicit `allow_existing` retry can instead return an existing active namespace.
 
@@ -759,7 +753,7 @@ Abandoned attempts can leave a descriptor, hint, or fork pin. Descriptor and hin
 
 ### 9.4 Deleting a namespace
 
-Deletion uses the acquired writer epoch. After admitted commits finish, it folds the remaining WAL, then publishes the next manifest with deleted status. The manifest records `deleted_at_ms` from the deletion call's clock. Its runs, counters, and folded WAL boundary cover the final head, so every WAL object of the deleted generation is at or below `last_folded_wal_no`. A failed fold leaves the namespace active; deletion can be retried. Retirement successors copy `deleted_at_ms` unchanged. Previously committed data remains committed.
+Deletion uses the acquired writer epoch. After admitted commits finish, it folds the remaining WAL, then publishes the next manifest with deleted status. The manifest records `deleted_at_ms` from the deletion call's clock. Deletion initiates tombstone publication within `METADATA_PUBLICATION_BUDGET_MS` of capturing that clock. Its runs, counters, and folded WAL boundary cover the final head, so every WAL object of the deleted generation is at or below `last_folded_wal_no`. A failed fold leaves the namespace active; deletion can be retried. Previously committed data remains committed.
 
 An operation that observes deletion returns `namespace_deleted`. A cached reader can still use its active view until the next manifest revalidation is due. Deletion neither immediately removes content nor deletes the shared content domain.
 
@@ -767,34 +761,24 @@ The current deleted manifest is the generation's tombstone. It protects no curre
 
 ### 9.5 Retirement
 
-A deleted namespace without `reclaim_after_ms` retains its content dependencies. A collector can establish retirement only after a complete pin sweep encounters no retained pin. Unrecognized keys or uncertain pin evidence prevent retirement.
-
-The collector reloads the current manifest and conditionally publishes a successor whose only payload changes are its number and the new retirement deadline:
+Retirement is derived, not stored. For a tombstone `T`, the deadline is:
 
 ```text
-reclaim_after_ms = call.now_ms
-                  + max(configured_grace, NAMESPACE_RETIREMENT_GRACE_MS)
+deadline(T) = T.deleted_at_ms
+              + max(configured_grace, NAMESPACE_RETIREMENT_GRACE_MS)
 ```
 
-The deadline uses the call's fixed clock. A collector establishes retirement only while its elapsed monotonic time since capturing that clock is within `RETIREMENT_PUBLICATION_BUDGET_MS`. This bounds how far the call clock can lag publication, as the retirement grace calculation requires. A concurrent collector's established deadline wins; it must never be cleared or moved. An uncertain publication requires readback. Every successor remains deleted.
+A generation is eligible when the pass clock reaches its deadline and the complete pin listing contains no pin in `[T.generation_first_manifest_no, T.manifest_no]` except its own retired pin. A pin's manifest number comes from its key. Pins deleted later in the same pass still count. An unrecognized key under the pin prefix makes every generation ineligible.
 
-Retirement itself deletes no content. After the deadline, collection can sweep the namespace generation's owner prefix and delete its source pin. The shared descriptor, other generations, and other owners' content remain outside that sweep.
+The current deleted manifest and each retired pin's tombstone provide independent reclamation evidence. No manifest is published to retire a generation. Eligible generations release their own content and source pins under section 11.8. Other generations, other owners, and the shared descriptor remain outside that sweep.
 
 ### 9.6 Fork dependencies after deletion
 
-A source pin remains required while a target refers to it, including a deleted target that has not finished retirement. Rewriting a target's metadata does not transfer ownership of inherited file bytes.
+A source pin remains required while a target's current manifest or a retired pin's tombstone refers to it. Rewriting a target's metadata does not transfer ownership of inherited file bytes.
 
-Consider `A → B → C`. C's fork pin on B prevents B from retiring. B's pin on A remains until B's own retirement deadline passes and its collector deletes that pin. After C retires, C deletes its pin on B; B can then retire, and eventually delete its pin on A.
+For `A → B → C`, C's fork pin on B prevents B's generation from being reclaimed. B's pin on A remains until B's generation is reclaimed. Reclaiming C deletes C's pin on B. B can then be reclaimed once its deadline and pin checks pass, releasing its pin on A.
 
-```text
-source A <── pin owned by B ── B <── pin owned by C ── C
-
-retire C and delete C's pin on B
-    → retire B and delete B's pin on A
-        → A can retire when no other pins remain
-```
-
-Pin deletion proceeds from descendants to ancestors. Each retired target's collector repeats the source-pin deletion on later passes, using the identity preserved in the generation's tombstone, so a failed delete can be retried.
+Pin deletion proceeds from descendants to ancestors. A failed source-pin deletion leaves the target tombstone available for another pass, through the current manifest or its retired pin.
 
 ### 9.7 Cross-namespace copies and moves
 
@@ -891,8 +875,8 @@ Every age decision uses the call's fixed `now_ms`. A later call reads fresh root
 | Evidence captured for the pass | Objects protected |
 | --- | --- |
 | Current active namespace manifest | The manifest and every segment in its runs. |
-| Current deleted manifest | The current tombstone itself; its runs are not roots. |
-| Every recognized pin key in the complete listing | The numbered manifest in its ID and every segment in that manifest. |
+| Current deleted manifest or a retired pin's tombstone | The tombstone itself; its runs are not roots. |
+| Every recognized pin key in the complete listing | The numbered manifest in its ID and every segment in that manifest when it is active. |
 | Hint's observed manifest number | All manifest numbers at or above it, so discovery can probe forward. Intermediate numbers do not protect additional runs. |
 | Current active manifest's folded boundary | Every WAL number above `last_folded_wal_no`. |
 
@@ -912,7 +896,7 @@ Being unreferenced makes an object a candidate; it does not make it immediately 
 | Metadata segment | No root lists it, and its provider age is strictly greater than 24 hours. |
 | Pin record | Owner-specific rules in section 11.7. |
 | Upload session and its content | Status-specific rules in section 11.6. |
-| Retired namespace's owned content | Retirement deadline reached and owner checks in section 11.8 passed. |
+| Any eligible generation's owned content | Deadline and pin checks in section 9.5 pass, followed by the evidence and owner checks in section 11.8. |
 
 The hint and current manifest are never swept. Content-store descriptors are never collected. Unrecognized keys are retained by core GC. On an age-gated candidate, a missing provider timestamp or one in the future cannot establish sufficient age. If a manifest's successor is absent, that absence does not itself prevent deleting the predecessor.
 
@@ -942,7 +926,7 @@ A failed required-root read stops collection. An uncertain fork-target read reta
 
 ### 11.6 Upload-session cleanup
 
-Uploads are collected through their session records. A live namespace's published-content prefix is not enumerated.
+Uploads are collected through their session records. The active current generation's published-content prefix is not enumerated. Pending and reclaimed generation rules take precedence over the session status rules.
 
 | Session and namespace | Action |
 | --- | --- |
@@ -951,12 +935,15 @@ Uploads are collected through their session records. A live namespace's publishe
 | Aborted session | Retry content and provider cleanup; remove the record after abort time plus `T`. |
 | Completed session in an active namespace, before content grace | Retain. |
 | Completed session in an active namespace, after content grace | Check publication evidence. Keep published content; delete unreferenced content. Remove the session after successful cleanup or a confirmed publication. |
-| Completed session in a deleted but unretired namespace | Retain; dependencies are not yet released. |
-| Completed session in a retired namespace whose deadline has passed | Delete content, then the record; no publication lookup or additional completion grace is required. |
+| Current-generation session in a deleted namespace, generation pending | Retain; report the generation's derived deadline. |
+| Completed session in an eligible current deleted generation | Delete content, then the record; no publication lookup or additional completion grace is required. |
+| Prior-generation session, generation pending | Retain; report that generation's derived deadline. |
+| Prior-generation session, generation eligible | Use the retired namespace rules with the session's generation and the tombstone's content-store ID. Open and aborted sessions keep their expiry, abort grace, and provider cleanup rules. Completed sessions delete content, then the record. |
+| Prior-generation session, generation reclaimed | Its content prefix is already gone. For open and aborted sessions, run provider cleanup with the session's generation and the head's content-store ID. Then delete the record. |
 
-Before completion, a session owns its random content identity exclusively and cannot issue admission evidence. Cleanup first wins the terminal transition, then removes its content and any provider-side transfer. A failed cleanup leaves the record for another attempt. Open and aborted sessions still require provider cleanup after namespace retirement because provider upload state can exist outside object listings.
+Before completion, a session owns its random content identity exclusively and cannot issue admission evidence. In current or eligible generations, cleanup first wins the terminal transition, then removes content and any provider transfer. A failed cleanup leaves the record for another attempt. Open and aborted sessions still require provider cleanup after namespace retirement because provider upload state can exist outside object listings.
 
-Cleanup derives every content key from the generation recorded on the session. It processes sessions from every generation because an earlier-generation session can still hold an object.
+Cleanup derives every content key from the generation recorded on the session. An active current generation uses its current content store. A pass records each generation with a retained session and keeps that generation's retired pin until a pass leaves no session behind. A generation below the head with no retired pin is reclaimed: recreation writes the pin before publishing the new head.
 
 For eligible completed uploads on an active namespace, the collector loads a metadata view lazily and looks up `content_id` in the WAL projection and `content_publications` family. It does not scan every revision. These publication rows are retained permanently, independently of commit receipts and the retention floor. If publication is found, only the session record is removed. If no publication exists, content is deleted before the session. An error permits neither a speculative content deletion nor removal of retry evidence.
 
@@ -983,7 +970,7 @@ Every token mint checks the original completion time. A retained receipt cannot 
 
 ### 11.7 Pin cleanup
 
-User and snapshot pins become collectable after expiry plus `T`, or creation plus `T` on a deleted namespace. A user pin with no expiry remains until explicit deletion on an active namespace. Pin deletion is direct; IDs are never reused.
+User and snapshot pins become collectable after expiry plus `T`, or creation plus `T` on a deleted namespace. A pin whose manifest number is below the head's `generation_first_manifest_no` also uses creation plus `T`. A user pin with no expiry remains until explicit deletion only within the active current generation. Pin deletion is direct; IDs are never reused.
 
 A retired pin is retained before any age check. Reclaiming its generation removes it.
 
@@ -994,31 +981,29 @@ Fork pins use this decision table:
 | Pin younger than `T` | Retain without reading the target. |
 | Aged pin, target absent | Delete the abandoned installation's pin. |
 | Target names the exact source, pin ID, and manifest reference | Retain, including if the target is deleted. |
-| Target at its first generation has no fork basis or names another pin | Delete the pin from the abandoned attempt. |
-| Target at a later generation does not name this pin | Retain; an earlier generation of the target may still depend on it. |
+| Target does not name this pin, generation above 1, and a retired pin's tombstone names it | Retain as `referenced_by_prior_generation`. |
+| Target does not name this pin and no retired tombstone names it | Delete the pin from the abandoned attempt. |
+| A retired tombstone cannot be loaded | Retain the source pin. |
 | Target names this pin but disagrees on source or manifest | Report corruption. |
 | Target cannot be read | Retain the pin. |
 | Target data is invalid | Report corruption. |
 
-The source discovers the target's current manifest through its hint; it does not read the target WAL. An absent target does not need a tombstone. A matching target's collector deletes the source pin after its own retirement deadline, repeating that deletion on later passes.
+The source discovers the target's current manifest through its hint; it does not read the target WAL. An absent target does not need a tombstone. When the current target does not name the pin and its generation is above 1, list its pin prefix. Select keys whose ID equals `CheckpointId::retired(target, manifest_no)` for their own manifest number and load those tombstones without reading pin bodies. Generation 1 needs no extra reads. A matching target's collector deletes the source pin when it reclaims the generation.
 
-An unrecognized key, retained pin, or uncertain pin read prevents namespace retirement. A candidate pin written too late to verify must be deleted by its creator; if that creator crashes first, its installation grace and owner rules still apply.
+An unrecognized key prevents reclamation of every generation. Any other listed pin prevents reclamation of the generation whose manifest range contains it, even if the pass later deletes that pin. A candidate pin written too late to verify must be deleted by its creator; if that creator crashes first, its installation grace and owner rules still apply.
 
 ### 11.8 Sweeping a retired owner's content
 
-After session cleanup, a pass can enumerate the captured namespace generation's owner prefix only when it observed a deleted manifest with `reclaim_after_ms <= now_ms`. Before that deadline it reports the future reclamation time and skips the prefix.
+After session cleanup, reclaim each eligible generation: the current tombstone first, then retired pins in key order. Use the deadline and complete pin listing captured for the pass, as specified in section 9.5.
 
-Before listing, reload the manifest once and require deleted status, the same generation, the same content-store ID, and a retirement deadline no later than the fixed call clock. A mismatch is corruption and a failed read stops the sweep. Retirement cannot regress, so this check covers the family for the call.
+For each eligible tombstone `T`:
 
-Every deleted key must parse as a content blob, belong to the exact namespace owner, and lie under:
+1. Confirm the evidence. For a retired pin, `head` its key and require it to be present. For the current tombstone, reload the current manifest and require the same manifest number. A mismatch skips this generation without error. A failed read stops the call.
+2. List and sweep `content-stores/{T.content_store_id}/objects/{namespace_id}/{T.generation}/`. Every deleted key must parse as a content blob with the exact namespace owner and generation. Retain and report every other key. No additional age check is required. A deletion failure ends the call.
+3. If `T.fork_basis` is present, delete its source pin. Count the deletion when the pin was present.
+4. For a retired pin, delete it only if this pass left no upload session of its generation behind. Count it under `deleted_checkpoints_by_owner.retired`. A retained session leaves the pin for the next pass.
 
-```text
-content-stores/{content_store_id}/objects/{namespace_id}/{generation}/
-```
-
-Other owners, descriptors, and unrecognized keys are retained. Recognized blobs can be deleted without a further age check because the retirement deadline covers this sweep. A deletion failure ends the call; the next call starts at the beginning.
-
-Later passes continue listing even after an empty pass. This catches late writes from previously issued capabilities, including keys that sort before a prior pass's last key. The deleted manifest rejects new capabilities and commits, but a capability already issued may remain usable until it expires.
+Content and source-pin cleanup are idempotent. Deleting the retired pin last preserves the tombstone until cleanup finishes. The current tombstone remains when the namespace is never recreated. Later passes repeat its owner-prefix sweep, including keys that sort before those examined by earlier passes.
 
 ## 12. Encodings, versions, and extensions
 
@@ -1172,7 +1157,7 @@ The following tables list the durable payload fields. Their transition rules are
 | Pin record | `namespace_id`, `pin_id`, `manifest_no`, `manifest_head_seq`, `manifest_payload_checksum`, `head_commit_id`, `created_at_ms`, `owner` |
 | Upload session | `namespace_id`, `owner_generation`, `upload_id`, `content_id`, `created_at_ms`, optional `subject_id`, `mode`, `status` |
 
-Namespace status is `{"kind":"active"}` or `{"kind":"deleted"}` with required `deleted_at_ms` and optional `reclaim_after_ms` only on the deleted variant. Missing status is invalid. The genesis commit ID is `c_00000000000000000000000000000000`.
+Namespace status is `{"kind":"active"}` or `{"kind":"deleted"}` with required `deleted_at_ms` only on the deleted variant. Missing status is invalid. The genesis commit ID is `c_00000000000000000000000000000000`.
 
 Pin owners have the fields in section 8.1. The `retired` owner has no fields. There is no status field on a pin. Upload status is `open` with `expires_at_ms`, `completed` with `completed_at_ms` and `content_ref`, or `aborted` with `aborted_at_ms`. The mode remains present in every status. A service-proxied mode contains `staging`; direct PUT contains `checksum_algorithm`; direct multipart contains `provider_upload_id`, `part_size_bytes`, and `checksum_algorithm`. Staging is `idle`, `claimed`, or `staged` with `content_ref`. All these variants use `kind` tags.
 
@@ -1544,7 +1529,6 @@ Publication and collection use the timing relationships below. Configurable sizi
 | `WAL_PUBLISH_BUDGET_MS` | 60,000 | Observing the planning tip through initiation of its next numbered put. |
 | `CHECKPOINT_VERIFY_BUDGET_MS` | 60,000 | Pin write through completion of post-write verification. |
 | `METADATA_PUBLICATION_BUDGET_MS` | 900,000 | First output through initiation of a bounded manifest publication. |
-| `RETIREMENT_PUBLICATION_BUDGET_MS` | 900,000 | Capturing the collection call clock through initiation of retirement publication. |
 | `PROVIDER_OPERATION_DEADLINE_MS` | 120,000 | Shared client-operation retry budget. |
 | `PROVIDER_ATTEMPT_TIMEOUT_MS` | 30,000 | One control-operation attempt. |
 | `GC_SAFETY_MARGIN_MS` | 180,000 | Combined relative-clock, timestamp-precision, and scheduling allowance. |
@@ -1554,7 +1538,7 @@ Publication and collection use the timing relationships below. Configurable sizi
 | `METADATA_COMPACTION_BUDGET_MS` | 85,170,000 | Maximum elapsed time before initiating streaming publication. |
 | `FORK_INSTALL_BUDGET_MS` | 900,000 | Fork installation before initiating target manifest publication. |
 | `DIRECT_TRANSFER_URL_TTL_MS` | 900,000 | Lifetime of a direct transfer capability. |
-| `NAMESPACE_RETIREMENT_GRACE_MS` | 2,130,000 | Minimum grace after establishing retirement. |
+| `NAMESPACE_RETIREMENT_GRACE_MS` | 2,130,000 | Minimum grace from the deletion call clock. |
 
 A provider attempt can begin before its operation deadline and finish within its separate timeout. The grace therefore includes both terms. This client-side calculation does not prove that a timed-out remote mutation had no effect.
 
@@ -1569,11 +1553,6 @@ GC_MIN_GRACE_WINDOW_MS
 METADATA_COMPACTION_BUDGET_MS
     = UNREFERENCED_SEGMENT_MIN_AGE_MS - GC_MIN_GRACE_WINDOW_MS
 
-RETIREMENT_PUBLICATION_BUDGET_MS
-    = METADATA_PUBLICATION_BUDGET_MS
-    <= max(WAL_PUBLISH_BUDGET_MS, CHECKPOINT_VERIFY_BUDGET_MS,
-           METADATA_PUBLICATION_BUDGET_MS)
-
 FORK_INSTALL_BUDGET_MS
     = METADATA_PUBLICATION_BUDGET_MS
 
@@ -1582,7 +1561,7 @@ GC_MIN_GRACE_WINDOW_MS
        + PROVIDER_ATTEMPT_TIMEOUT_MS + GC_SAFETY_MARGIN_MS
 
 NAMESPACE_RETIREMENT_GRACE_MS
-    = RETIREMENT_PUBLICATION_BUDGET_MS
+    = METADATA_PUBLICATION_BUDGET_MS
       + max(GC_MIN_GRACE_WINDOW_MS,
             DIRECT_TRANSFER_URL_TTL_MS + PROVIDER_OPERATION_DEADLINE_MS
             + PROVIDER_ATTEMPT_TIMEOUT_MS + GC_SAFETY_MARGIN_MS)

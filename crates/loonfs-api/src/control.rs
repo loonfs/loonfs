@@ -224,9 +224,6 @@ pub enum NamespaceStatus {
     Deleted {
         /// Unix-millisecond call clock of the deletion.
         deleted_at_ms: u64,
-        /// Earliest owner-prefix collection time once dependencies are gone.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        reclaim_after_ms: Option<u64>,
     },
 }
 
@@ -239,15 +236,6 @@ impl NamespaceStatus {
     pub const fn deleted_at_ms(&self) -> Option<u64> {
         match self {
             Self::Deleted { deleted_at_ms, .. } => Some(*deleted_at_ms),
-            Self::Active {} => None,
-        }
-    }
-    /// Returns the irrevocable collection deadline, if retirement is established.
-    pub const fn reclaim_after_ms(&self) -> Option<u64> {
-        match self {
-            Self::Deleted {
-                reclaim_after_ms, ..
-            } => *reclaim_after_ms,
             Self::Active {} => None,
         }
     }

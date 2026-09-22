@@ -1,6 +1,7 @@
 //! Age checks and pin deletion decisions.
 
 use super::fork_checkpoints::{classify_fork_checkpoint, ForkCheckpointReachability};
+use super::live_set::LiveSet;
 use crate::checkpoint::record::load_checkpoint_record_at_key;
 use crate::context::MutationContext;
 use crate::control_object::ControlObjectLoadError;
@@ -21,7 +22,7 @@ pub(super) async fn sweep_checkpoint_record<S: ObjectStore + ?Sized>(
     store: &S,
     key: &str,
     grace_window_ms: u64,
-    namespace_deleted: bool,
+    live: &LiveSet,
     context: &MutationContext,
 ) -> Result<CheckpointSweep> {
     let record = match load_checkpoint_record_at_key(store, key).await {
@@ -58,8 +59,9 @@ pub(super) async fn sweep_checkpoint_record<S: ObjectStore + ?Sized>(
     let expired = record.owner.expires_at_ms().is_some_and(|expiry| {
         context.now_ms >= expiry && context.now_ms.saturating_sub(expiry) >= grace_window_ms
     });
-    let deleted =
-        namespace_deleted && context.now_ms.saturating_sub(record.created_at_ms) >= grace_window_ms;
+    let deleted = (live.namespace_deleted
+        || record.pin_id.manifest_no() < live.generation_first_manifest_no)
+        && context.now_ms.saturating_sub(record.created_at_ms) >= grace_window_ms;
     Ok(if expired || deleted {
         deletion
     } else {

@@ -1,11 +1,14 @@
 //! Collection rules for fork pins.
 
+use crate::checkpoint::load_namespace_manifest_envelope_if_present;
+use crate::checkpoint::record::checkpoint_key_ids;
 use crate::context::MutationContext;
 use crate::control_object::ControlObjectLoadError;
 use crate::error::{CoreError, Result};
 use crate::namespace::control::load_current_manifest;
+use futures::StreamExt;
 use loonfs_api::wire::control::{CheckpointRecordState, ForkBasis};
-use loonfs_api::{NamespaceGeneration, NamespaceId};
+use loonfs_api::{CheckpointId, NamespaceGeneration, NamespaceId};
 use loonfs_objectstore::ObjectStore;
 
 pub(super) enum ForkCheckpointReachability {
@@ -71,11 +74,6 @@ pub(super) async fn classify_fork_checkpoint<S: ObjectStore + ?Sized>(
             }
         },
     };
-    // A first-generation target that names another pin, or none, was
-    // installed by a later attempt or a plain create; this pin is an
-    // abandoned attempt's. A recreated target may still depend on this pin
-    // through an earlier generation, so it is retained until the collector
-    // can read that generation's tombstone.
     let Some(basis) = target
         .envelope
         .payload()
@@ -84,9 +82,7 @@ pub(super) async fn classify_fork_checkpoint<S: ObjectStore + ?Sized>(
         .filter(|basis| basis.source_checkpoint_id == record.pin_id)
     else {
         if target.envelope.payload().generation > NamespaceGeneration(1) {
-            return Ok(ForkCheckpointReachability::Retained {
-                reason: "target_recreated",
-            });
+            return classify_prior_generations(store, target_namespace_id, &record.pin_id).await;
         }
         return Ok(ForkCheckpointReachability::Reclaimable);
     };
@@ -99,4 +95,56 @@ pub(super) async fn classify_fork_checkpoint<S: ObjectStore + ?Sized>(
     Ok(ForkCheckpointReachability::Retained {
         reason: "referenced_by_target",
     })
+}
+
+async fn classify_prior_generations<S: ObjectStore + ?Sized>(
+    store: &S,
+    target_namespace_id: &NamespaceId,
+    pin_id: &CheckpointId,
+) -> Result<ForkCheckpointReachability> {
+    let prefix = loonfs_objectstore::keys::checkpoint_prefix(target_namespace_id);
+    let mut listing = store.list_prefix_stream(&prefix);
+    while let Some(key) = listing.next().await {
+        let Ok(key) = key else {
+            return Ok(ForkCheckpointReachability::Retained {
+                reason: "target_head_unreadable",
+            });
+        };
+        let Ok((_, retired_id)) = checkpoint_key_ids(&key) else {
+            continue;
+        };
+        if retired_id != CheckpointId::retired(target_namespace_id, retired_id.manifest_no()) {
+            continue;
+        }
+        let manifest_key = loonfs_objectstore::keys::metadata_manifest_object(
+            target_namespace_id,
+            &retired_id.manifest_no(),
+        );
+        let tombstone = match load_namespace_manifest_envelope_if_present(
+            store,
+            target_namespace_id,
+            &retired_id.manifest_no(),
+            &manifest_key,
+        )
+        .await
+        {
+            Ok(Some(tombstone)) if tombstone.payload().status.is_deleted() => tombstone,
+            _ => {
+                return Ok(ForkCheckpointReachability::Retained {
+                    reason: "target_head_unreadable",
+                })
+            }
+        };
+        if tombstone
+            .payload()
+            .fork_basis
+            .as_ref()
+            .is_some_and(|basis| &basis.source_checkpoint_id == pin_id)
+        {
+            return Ok(ForkCheckpointReachability::Retained {
+                reason: "referenced_by_prior_generation",
+            });
+        }
+    }
+    Ok(ForkCheckpointReachability::Reclaimable)
 }

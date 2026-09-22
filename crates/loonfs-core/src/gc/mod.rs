@@ -6,6 +6,7 @@ mod families;
 mod fork_checkpoints;
 mod live_set;
 mod reap;
+mod reclaim;
 mod sweep;
 #[cfg(test)]
 mod tests;

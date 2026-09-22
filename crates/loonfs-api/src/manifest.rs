@@ -1318,11 +1318,6 @@ impl NamespaceManifestPayload {
             if self.status.is_deleted() && !successor.status.is_deleted() {
                 return drift("status");
             }
-            if self.status.reclaim_after_ms().is_some()
-                && self.status.reclaim_after_ms() != successor.status.reclaim_after_ms()
-            {
-                return drift("reclaim_after_ms");
-            }
             if self.status.is_deleted()
                 && self.status.deleted_at_ms() != successor.status.deleted_at_ms()
             {
@@ -1552,33 +1547,9 @@ mod tests {
         let mut deleted = initial.clone();
         deleted.status = crate::control::NamespaceStatus::Deleted {
             deleted_at_ms: 1_500,
-            reclaim_after_ms: None,
         };
         initial.ensure_successor_identity(&deleted).expect("delete");
         assert!(deleted.ensure_successor_identity(&initial).is_err());
-        let mut retired = deleted.clone();
-        retired.status = crate::control::NamespaceStatus::Deleted {
-            deleted_at_ms: 1_500,
-            reclaim_after_ms: Some(2_000),
-        };
-        deleted.ensure_successor_identity(&retired).expect("retire");
-        retired
-            .ensure_successor_identity(&retired)
-            .expect("same deadline");
-        for deadline in [None, Some(1_999), Some(2_001)] {
-            let mut successor = retired.clone();
-            successor.status = crate::control::NamespaceStatus::Deleted {
-                deleted_at_ms: 1_500,
-                reclaim_after_ms: deadline,
-            };
-            assert_eq!(
-                retired
-                    .ensure_successor_identity(&successor)
-                    .expect_err("fixed deadline")
-                    .field,
-                "reclaim_after_ms"
-            );
-        }
     }
 
     #[test]
@@ -1605,7 +1576,6 @@ mod tests {
         });
         deleted.status = crate::control::NamespaceStatus::Deleted {
             deleted_at_ms: 1_500,
-            reclaim_after_ms: Some(2_000),
         };
 
         let mut recreated = NamespaceManifestPayload::initial(
