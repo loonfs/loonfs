@@ -281,7 +281,7 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | `route_not_found` | 404 | No route matches the request path. |
 | `method_not_allowed` | 405 | The path exists but does not serve this HTTP method. |
 | `namespace_not_found` | 404 | The namespace has no installed manifest, so it does not exist. |
-| `namespace_deleted` | 410 | The namespace's current manifest is deleted. Ordinary operations and a fork into the id fail. Creating the id starts its next generation. |
+| `namespace_deleted` | 410 | The namespace's current manifest is deleted. Ordinary operations fail. A create or a fork into the id starts its next generation. |
 | `checkpoint_not_found` | 404 | The checkpoint id names no existing pin. |
 | `snapshot_not_found` | 404 | The snapshot id names no checkpoint record. Refresh state or choose another snapshot. |
 | `snapshot_gone` | 410 | The snapshot has expired, or was deleted while a fork was verifying its selected snapshot. |
@@ -1512,9 +1512,8 @@ or emit a namespace `name` alias.
 
 Create and fork install descriptor, hint, and manifest 1 in order. The
 conditional put of manifest 1 decides first-generation existence ([format: namespace lifecycle](format.md#9-namespace-lifecycle-and-forks)). A create or fork that loses that write to
-another active namespace answers `namespace_exists` (409). Creating an id
-whose current manifest is deleted publishes its next generation. Forking into
-that id answers `namespace_deleted` (410). There is no partially created
+another active namespace answers `namespace_exists` (409). A create or a fork into an id
+whose current manifest is deleted publishes its next generation. There is no partially created
 namespace, so there is no third answer and nothing to repair.
 
 A new request after a lost creation acknowledgement returns
@@ -1557,7 +1556,7 @@ The `Namespace` object has exactly these fields:
 | `access` | Access mode: `{"kind": "unrestricted"}` or `{"kind": "acl", "principal_scope": "..."}`. |
 | `created_at_ms` | Time the namespace was created, in Unix milliseconds. |
 | `created_by` | Actor that created or forked the namespace, as supplied by the application. |
-| `fork_basis` | Present only for a fork. Contains `source_namespace_id` and the captured `source_head_seq`. |
+| `fork_basis` | Present only for a fork. Contains `source_namespace_id`, the captured `source_generation`, and `source_head_seq`. |
 | `head_seq` | Current visible namespace sequence. |
 | `retention_floor_seq` | Oldest sequence still promised for incremental replay. |
 
@@ -1592,7 +1591,7 @@ namespace state plus storage details used by maintenance:
 | `generation` | Generation of the namespace id. The first creation is 1, and each recreation increments it. |
 | `created_at_ms` | Time the namespace was created, in Unix milliseconds. |
 | `created_by` | Actor that created or forked the namespace, as supplied by the application. |
-| `fork_basis` | Present only for a fork. Contains `source_namespace_id` and the captured `source_head_seq`. |
+| `fork_basis` | Present only for a fork. Contains `source_namespace_id`, the captured `source_generation`, and `source_head_seq`. |
 | `head_seq` | Current visible namespace sequence. |
 | `retention_floor_seq` | Oldest sequence still promised for incremental replay. |
 | `current_manifest_no` | Current manifest number, present from namespace creation. |
@@ -1621,12 +1620,13 @@ In an ACL namespace this operation requires an administrator subject; a request
 with no subject headers acts as the token holder.
 
 Deletion is a fenced manifest publication that ends the current generation ([format: namespace deletion](format.md#94-deleting-a-namespace)). It linearizes at the manifest put: commits acknowledged before it
-stay committed; reads, commits, forks, status, and another deletion fail with
-`namespace_deleted` (410) while the tombstone is current. Creating the id
-publishes the next generation, whose sequences and inode ids start over. A
-client that holds cursors, inode ids, or expected sequences from the earlier
-generation must compare `generation` on the namespace object before reusing
-them, as it would after a table is dropped and recreated under one name.
+stay committed; reads, commits, forks from the id, status, and another deletion fail with
+`namespace_deleted` (410) while the tombstone is current. A create or a fork into the id
+publishes the next generation, whose sequences and inode ids start over for a plain
+create and begin at the captured source sequence for a fork. A client that holds
+cursors, inode ids, or expected sequences from the earlier generation must compare
+`generation` on the namespace object before reusing them, as it would after a table
+is dropped and recreated under one name.
 
 Checkpoint listing and user-checkpoint deletion are explicit exceptions. They
 remain available because permanent user pins must stay discoverable and
@@ -2881,12 +2881,21 @@ Representative response:
   "created_by": "usr_8f3c",
   "fork_basis": {
     "source_namespace_id": "demo",
+    "source_generation": 1,
     "source_head_seq": 418
   },
   "head_seq": 418,
   "retention_floor_seq": 418
 }
 ```
+
+The `fork_basis` object identifies the captured source:
+
+| Field | Meaning |
+| --- | --- |
+| `source_namespace_id` | Namespace the fork captured. |
+| `source_generation` | Generation of the pinned source manifest at fork time. |
+| `source_head_seq` | Captured source sequence. |
 
 The optional `snapshot_id` request field selects a live user snapshot of the
 source namespace. Without it, the server captures the current head. The
@@ -2905,13 +2914,13 @@ target may still read them. It renews the checkpoint with compare-and-swap,
 then installs the target namespace's head in one conditional write. That head
 records the source checkpoint for the target's lifetime.
 
-The response contains the new namespace's initial state. Its head
-sequence and retention floor are set to the captured basis's sequence. For a
-fresh fork, `head_seq` reports the captured basis, including a current-head fork.
+The response contains the new namespace's initial state. Its head sequence and
+retention floor equal the captured basis sequence, for a fresh id and for a
+deleted id alike. The target's first data commit is one sequence above that head.
 
 If the target ID is active, the server returns `namespace_exists`. If it is
-deleted, the server returns `namespace_deleted`; forking never recreates a
-target id.
+deleted, the fork recreates the id as its next generation with the source
+runs and content-store id.
 If the source checkpoint cannot be renewed, the server returns
 `checkpoint_unavailable` and no target namespace is installed.
 

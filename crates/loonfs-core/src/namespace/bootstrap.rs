@@ -1,7 +1,7 @@
-//! Installs manifest 1 after the content descriptor and discovery hint.
+//! Creates namespaces and recreates deleted ids as their next generation.
 
+use super::recreation::{write_retired_pin, GenerationSuccessor};
 use crate::checkpoint::publish::{encode_manifest, publish_manifest, ManifestPublicationOutcome};
-use crate::checkpoint::record::write_checkpoint_record_if_absent;
 use crate::context::MutationContext;
 use crate::error::CoreError;
 use crate::metadata::{AccessRevisionRecord, InodeRecord, MetadataState};
@@ -11,15 +11,14 @@ use crate::namespace::control::{
 use crate::time::{MonotonicTimer, StdMonotonicTimer};
 use bytes::Bytes;
 use loonfs_api::wire::control::{
-    encode_control_state, CheckpointOwner, CheckpointRecordState, ContentStoreState,
-    ControlObjectKind, HintState,
+    encode_control_state, ContentStoreState, ControlObjectKind, HintState,
 };
 use loonfs_api::wire::manifest::{
     encode_namespace_manifest_json, NamespaceAccess, NamespaceManifestPayload,
 };
 use loonfs_api::{
-    AccessRevisionNo, ActorId, ChangeSeq, CheckpointId, ContentStoreId, ErrorCode, InodeKind,
-    ManifestNo, Namespace, NamespaceId, WalNo, ROOT_INODE_ID,
+    AccessRevisionNo, ActorId, ChangeSeq, ContentStoreId, ErrorCode, InodeKind, ManifestNo,
+    Namespace, NamespaceId, WalNo, ROOT_INODE_ID,
 };
 use loonfs_objectstore::keys::{content_store, hint, metadata_manifest_object};
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
@@ -187,7 +186,7 @@ pub(super) async fn install_namespace_manifest<
     }
 }
 
-async fn write_content_store_descriptor<S: ObjectStore + ?Sized>(
+pub(super) async fn write_content_store_descriptor<S: ObjectStore + ?Sized>(
     store: &S,
     content_store_id: &ContentStoreId,
     created_at_ms: u64,
@@ -236,52 +235,24 @@ async fn recreate_namespace<S: ObjectStore + ?Sized>(
             });
         }
 
-        let retired = CheckpointRecordState {
-            namespace_id: namespace_id.clone(),
-            pin_id: CheckpointId::retired(namespace_id, tombstone.manifest_no),
-            manifest_no: tombstone.manifest_no,
-            manifest_head_seq: tombstone.head_seq,
-            manifest_payload_checksum: current.state.manifest.manifest_payload_checksum.clone(),
-            head_commit_id: tombstone.head_commit_id.clone(),
-            created_at_ms: context.now_ms,
-            owner: CheckpointOwner::Retired {},
-        };
-        write_checkpoint_record_if_absent(store, &retired).await?;
-
-        let content_store_id = ContentStoreId::generate();
-        write_content_store_descriptor(store, &content_store_id, context.now_ms).await?;
-
-        let manifest_no = tombstone
-            .manifest_no
-            .successor()
-            .map_err(|error| CoreError::Internal(format!("manifest number {error}")))?;
-        let generation = tombstone
-            .generation
-            .successor()
-            .map_err(|error| CoreError::Internal(format!("namespace generation {error}")))?;
-        let writer_epoch = tombstone
-            .writer_epoch
-            .successor()
-            .map_err(|error| CoreError::Internal(format!("writer epoch {error}")))?;
-        let compactor_epoch = tombstone
-            .compactor_epoch
-            .checked_add(1)
-            .ok_or_else(|| CoreError::Internal("compactor epoch overflow".to_owned()))?;
+        let successor = GenerationSuccessor::from_tombstone(tombstone)?;
         let mut payload = NamespaceManifestPayload::initial(
             namespace_id.clone(),
-            content_store_id,
+            ContentStoreId::generate(),
             context.now_ms,
             actor_id.clone(),
             access.clone(),
         );
-        payload.manifest_no = manifest_no;
-        payload.generation = generation;
-        payload.generation_first_manifest_no = manifest_no;
-        payload.last_folded_wal_no = tombstone.last_folded_wal_no;
-        payload.writer_epoch = writer_epoch;
-        payload.compactor_epoch = compactor_epoch;
+        successor.apply_to(&mut payload);
 
         let manifest = encode_manifest(payload)?;
+        write_retired_pin(store, &current, context.now_ms).await?;
+        write_content_store_descriptor(
+            store,
+            &manifest.envelope().payload().content_store_id,
+            context.now_ms,
+        )
+        .await?;
         if let ManifestPublicationOutcome::Published(_) = publish_manifest(
             store,
             namespace_id,

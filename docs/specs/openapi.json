@@ -3209,6 +3209,10 @@
       "NamespaceForkBasis": {
         "description": "The source a forked namespace started from.",
         "properties": {
+          "source_generation": {
+            "$ref": "#/components/schemas/NamespaceGeneration",
+            "description": "The source generation captured at fork time."
+          },
           "source_head_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
             "description": "Source sequence the fork captured."
@@ -3220,6 +3224,7 @@
         },
         "required": [
           "source_namespace_id",
+          "source_generation",
           "source_head_seq"
         ],
         "type": "object"
@@ -5666,17 +5671,7 @@
                 }
               }
             },
-            "description": "Namespace already exists or is partial"
-          },
-          "410": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "Namespace id was deleted and retired"
+            "description": "Namespace already exists"
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"

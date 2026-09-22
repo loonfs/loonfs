@@ -216,8 +216,7 @@ pub(super) async fn get_capabilities(
             (status = 200, description = "Namespace created", body = loonfs_api::Namespace),
             (status = 400, description = "Invalid namespace id", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
-            (status = 409, description = "Namespace already exists or is partial", body = ApiError),
-            (status = 410, description = "Namespace id was deleted and retired", body = ApiError),
+            (status = 409, description = "Namespace already exists", body = ApiError),
             crate::http::openapi::UnavailableResponses
         )
     )

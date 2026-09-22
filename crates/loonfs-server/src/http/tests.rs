@@ -736,7 +736,7 @@ async fn maintenance_namespace_diagnostics_route_answers_storage_fields() {
 }
 
 #[tokio::test]
-async fn http_create_recreates_a_deleted_namespace_but_fork_does_not() {
+async fn http_create_and_fork_recreate_deleted_namespaces() {
     use tower::ServiceExt;
 
     let temp_dir = tempdir().expect("tempdir");
@@ -812,12 +812,29 @@ async fn http_create_recreates_a_deleted_namespace_but_fork_does_not() {
         )
         .await
         .expect("fork response");
-    assert_eq!(fork.status(), StatusCode::GONE);
+    assert_eq!(fork.status(), StatusCode::OK);
     let fork_body = axum::body::to_bytes(fork.into_body(), usize::MAX)
         .await
         .expect("fork body");
-    let fork_error: loonfs_api::ApiError = serde_json::from_slice(&fork_body).expect("fork error");
-    assert_eq!(fork_error.code, ErrorCode::NamespaceDeleted.as_str());
+    let fork_namespace: loonfs_api::Namespace =
+        serde_json::from_slice(&fork_body).expect("fork namespace");
+    assert_eq!(
+        fork_namespace.generation,
+        loonfs_api::NamespaceGeneration(2)
+    );
+    assert_eq!(
+        fork_namespace.fork_basis,
+        Some(loonfs_api::NamespaceForkBasis {
+            source_namespace_id: source_id,
+            source_generation: loonfs_api::NamespaceGeneration(1),
+            source_head_seq: loonfs_api::ChangeSeq(0),
+        })
+    );
+    state
+        .writer
+        .delete_namespace(&namespace_id("demo"), Default::default())
+        .await
+        .expect("delete fork");
 
     let second = router
         .oneshot(create())
@@ -831,7 +848,7 @@ async fn http_create_recreates_a_deleted_namespace_but_fork_does_not() {
         serde_json::from_slice(&second_body).expect("second namespace");
     assert_eq!(
         second_namespace.generation,
-        loonfs_api::NamespaceGeneration(2)
+        loonfs_api::NamespaceGeneration(3)
     );
 
     state.writer.shutdown().await.expect("shutdown writer");

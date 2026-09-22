@@ -542,3 +542,175 @@ async fn recreating_a_namespace_fences_the_session_that_deleted_it() {
         .expect_err("old session is fenced");
     assert_eq!(error.code(), ErrorCode::WriterFenced);
 }
+
+#[tokio::test]
+async fn a_fork_below_the_tombstone_starts_at_its_next_sequence() {
+    assert_fork_recreation(1, 3).await;
+}
+
+#[tokio::test]
+async fn a_fork_above_the_tombstone_starts_at_the_source_sequence() {
+    assert_fork_recreation(3, 1).await;
+}
+
+async fn assert_fork_recreation(source_commits: u64, target_commits: u64) {
+    let directory = tempdir().expect("directory");
+    let store = LocalFsStore::new(directory.path()).expect("store");
+    let source_id = NamespaceId::parse("source").expect("source");
+    let target_id = NamespaceId::parse("target").expect("target");
+    let context = context();
+    for (namespace_id, commits) in [(&source_id, source_commits), (&target_id, target_commits)] {
+        bootstrap_namespace(
+            &store,
+            namespace_id,
+            &context,
+            &loonfs_test_support::test_actor(),
+            &loonfs_api::NamespaceAccess::Unrestricted {},
+            false,
+        )
+        .await
+        .expect("create");
+        for index in 0..commits {
+            crate::test_support::ops::write_file_bytes(
+                &store,
+                namespace_id,
+                &format!("/file-{index}.txt"),
+                b"inherited",
+                &context,
+                None,
+            )
+            .await
+            .expect("write file");
+        }
+    }
+    NamespaceCommitEngine::new(target_id.clone())
+        .delete_namespace(&store, Default::default(), &context)
+        .await
+        .expect("delete target");
+    let deleted = load_current_manifest(&store, &target_id)
+        .await
+        .expect("tombstone");
+    let tombstone = deleted.envelope.payload();
+    let fork = fork_namespace(
+        &store,
+        &source_id,
+        &target_id,
+        &loonfs_test_support::test_actor(),
+        None,
+        &context,
+    )
+    .await
+    .expect("fork into deleted target");
+    let source = load_current_manifest(&store, &source_id)
+        .await
+        .expect("source manifest");
+    let source = source.envelope.payload();
+    let current = load_current_manifest(&store, &target_id)
+        .await
+        .expect("fork manifest");
+    let payload = current.envelope.payload();
+    let head_seq = source.head_seq;
+    assert_eq!(fork.generation, NamespaceGeneration(2));
+    assert_eq!(payload.generation, NamespaceGeneration(2));
+    assert_eq!(
+        payload.manifest_no,
+        tombstone.manifest_no.successor().expect("next manifest")
+    );
+    assert_eq!(payload.generation_first_manifest_no, payload.manifest_no);
+    assert_eq!(payload.head_seq, head_seq);
+    assert_eq!(payload.retention_floor_seq, head_seq);
+    assert_eq!(payload.base_seq, source.base_seq);
+    assert_eq!(payload.head_commit_id, source.head_commit_id);
+    assert_eq!(payload.runs, source.runs);
+    assert_eq!(payload.content_store_id, source.content_store_id);
+    assert_eq!(payload.next_inode_id, source.next_inode_id);
+    assert_eq!(payload.next_run_no, source.next_run_no);
+    assert_eq!(
+        payload.writer_epoch,
+        tombstone.writer_epoch.successor().expect("next epoch")
+    );
+    assert_eq!(payload.compactor_epoch, tombstone.compactor_epoch + 1);
+    assert_eq!(payload.last_folded_wal_no, tombstone.last_folded_wal_no);
+    assert!(payload.writer.is_none());
+    assert_eq!(payload.activity, Default::default());
+    let basis = payload.fork_basis.as_ref().expect("fork basis");
+    assert_eq!(basis.source_generation, source.generation);
+    assert_eq!(basis.manifest.owner_namespace_id, source_id);
+    assert_eq!(basis.manifest.manifest_head_seq, source.head_seq);
+    let reported_basis = fork.fork_basis.expect("reported fork basis");
+    assert_eq!(reported_basis.source_namespace_id, source_id);
+    assert_eq!(reported_basis.source_generation, source.generation);
+    let retired = load_checkpoint_record(
+        &store,
+        &target_id,
+        &CheckpointId::retired(&target_id, tombstone.manifest_no),
+    )
+    .await
+    .expect("load retired pin")
+    .expect("retired pin");
+    assert_eq!(retired.state.owner, CheckpointOwner::Retired {});
+    assert_eq!(retired.state.manifest(), deleted.state.manifest);
+    let raised = load_namespace_hint(&store, &target_id)
+        .await
+        .expect("raised hint");
+    assert_eq!(raised.state.manifest_no, payload.manifest_no);
+    assert_eq!(raised.state.wal_no, tombstone.last_folded_wal_no);
+
+    let view = load_current_metadata_view(&store, &target_id)
+        .await
+        .expect("fork view");
+    for index in 0..source_commits {
+        let file = view
+            .get_file_bytes(
+                &store,
+                &format!("/file-{index}.txt"),
+                None,
+                &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
+            )
+            .await
+            .expect("inherited file");
+        assert_eq!(file.bytes, b"inherited");
+    }
+    let changes = crate::protocol::list_changes_after(
+        &view,
+        source.head_seq,
+        loonfs_test_support::ids::page_limit(10),
+    )
+    .await;
+    assert!(changes
+        .expect("the fork's head is the captured source sequence")
+        .changes
+        .is_empty());
+    let stale = crate::protocol::list_changes_after(
+        &view,
+        tombstone.head_seq,
+        loonfs_test_support::ids::page_limit(10),
+    )
+    .await;
+    if source_commits < target_commits {
+        assert!(tombstone.head_seq > head_seq);
+        assert!(matches!(
+            stale.expect_err("a cursor above the fork's head"),
+            crate::error::CoreError::InvalidCursor(_)
+        ));
+    } else {
+        assert!(matches!(
+            stale.expect_err("a cursor below the fork's floor"),
+            crate::error::CoreError::RebootstrapRequired { .. }
+        ));
+    }
+    let commit = crate::test_support::ops::write_file_bytes(
+        &store,
+        &target_id,
+        "/next.txt",
+        b"next",
+        &context,
+        None,
+    )
+    .await
+    .expect("first target commit");
+    assert_eq!(
+        commit.committed_seq,
+        head_seq.successor().expect("next sequence")
+    );
+}

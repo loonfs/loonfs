@@ -414,6 +414,7 @@ async fn http_namespace_fork_shares_content_and_diverges() {
     assert_eq!(
         forked.fork_basis,
         Some(loonfs_api::NamespaceForkBasis {
+            source_generation: loonfs_api::NamespaceGeneration(1),
             source_namespace_id: namespace_id("demo"),
             source_head_seq: ChangeSeq(1),
         })
@@ -553,6 +554,7 @@ async fn http_namespace_fork_uses_the_snapshot_sequence() {
     assert_eq!(
         fork.fork_basis,
         Some(loonfs_api::NamespaceForkBasis {
+            source_generation: loonfs_api::NamespaceGeneration(1),
             source_namespace_id: source,
             source_head_seq: snapshot.captured_seq,
         })

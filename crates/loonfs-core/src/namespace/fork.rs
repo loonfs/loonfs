@@ -1,5 +1,7 @@
-//! Fork installation copies pinned source runs into target manifest 1.
+//! Fork installation copies pinned source runs into a new target generation.
 
+use super::recreation::{write_retired_pin, GenerationSuccessor};
+use crate::checkpoint::publish::{encode_manifest, publish_manifest, ManifestPublicationOutcome};
 use crate::checkpoint::record::{
     checkpoint_is_visible, delete_checkpoint_record, write_checkpoint_record,
 };
@@ -11,11 +13,15 @@ use crate::context::MutationContext;
 use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, Result};
 use crate::limits::{CHECKPOINT_VERIFY_BUDGET_MS, FORK_INSTALL_BUDGET_MS};
-use crate::namespace::bootstrap::{install_namespace_manifest, NamespaceInstall};
+use crate::namespace::bootstrap::{
+    install_namespace_manifest, write_content_store_descriptor, NamespaceInstall,
+};
+use crate::namespace::control::load_current_manifest;
 use crate::time::{MonotonicTimer, StdMonotonicTimer};
 use loonfs_api::wire::control::{
     CheckpointOwner, CheckpointRecordState, ForkBasis, NamespaceStatus,
 };
+use loonfs_api::wire::manifest::NamespaceManifestPayload;
 use loonfs_api::{
     CheckpointId, ManifestNo, Namespace, NamespaceGeneration, NamespaceId, WriterEpoch,
 };
@@ -64,10 +70,11 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
     let fork_basis = ForkBasis {
         manifest: source_record.manifest(),
         source_checkpoint_id: source_record.pin_id.clone(),
+        source_generation: source_manifest.payload().generation,
     };
     let fork_seq = fork_basis.manifest.manifest_head_seq;
 
-    let manifest = loonfs_api::wire::manifest::NamespaceManifestPayload {
+    let manifest = NamespaceManifestPayload {
         namespace_id: new_namespace_id.clone(),
         created_at_ms: context.now_ms,
         created_by: actor_id.clone(),
@@ -84,14 +91,15 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
         activity: Default::default(),
         ..source_manifest.payload().clone()
     };
-    match install_namespace_manifest(store, &manifest, || {
+    let validate_install = || {
         if timer.monotonic_now_ms().saturating_sub(started_ms) > FORK_INSTALL_BUDGET_MS {
             return Err(CoreError::CheckpointUnavailable(format!(
                 "fork of `{source_namespace_id}` into `{new_namespace_id}` exceeded its installation budget"
             )));
         }
         Ok(())
-    }).await? {
+    };
+    match install_namespace_manifest(store, &manifest, validate_install).await? {
         NamespaceInstall::Landed => {}
         NamespaceInstall::Exists => {
             return Err(CoreError::NamespaceExists {
@@ -99,13 +107,55 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
             })
         }
         NamespaceInstall::Deleted => {
-            return Err(CoreError::NamespaceDeleted {
-                namespace_id: new_namespace_id.clone(),
-            })
+            recreate_fork_namespace(store, &manifest, &timer, started_ms, validate_install).await?;
         }
     }
 
     crate::namespace::status::load_namespace(store, new_namespace_id).await
+}
+
+async fn recreate_fork_namespace<S: ObjectStore + ?Sized>(
+    store: &S,
+    fork_manifest: &NamespaceManifestPayload,
+    timer: &dyn MonotonicTimer,
+    started_ms: u64,
+    validate_install: impl Fn() -> Result<()>,
+) -> Result<()> {
+    loop {
+        let current = load_current_manifest(store, &fork_manifest.namespace_id).await?;
+        let tombstone = current.envelope.payload();
+        if !tombstone.status.is_deleted() {
+            return Err(CoreError::NamespaceExists {
+                namespace_id: fork_manifest.namespace_id.clone(),
+            });
+        }
+        let successor = GenerationSuccessor::from_tombstone(tombstone)?;
+        let mut payload = fork_manifest.clone();
+        successor.apply_to(&mut payload);
+        let manifest = encode_manifest(payload)?;
+
+        validate_install()?;
+        write_retired_pin(store, &current, fork_manifest.created_at_ms).await?;
+        write_content_store_descriptor(
+            store,
+            &fork_manifest.content_store_id,
+            fork_manifest.created_at_ms,
+        )
+        .await?;
+        validate_install()?;
+        if let ManifestPublicationOutcome::Published(_) = publish_manifest(
+            store,
+            &fork_manifest.namespace_id,
+            manifest,
+            Some(tombstone.manifest_no),
+            timer,
+            started_ms,
+        )
+        .await?
+        {
+            return Ok(());
+        }
+    }
 }
 
 async fn create_snapshot_fork_checkpoint<S: ObjectStore + ?Sized>(

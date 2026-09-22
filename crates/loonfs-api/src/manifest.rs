@@ -1198,7 +1198,7 @@ pub struct NamespaceManifestPayload {
     /// Streaming compaction rebuilds a whole family group and publishes once at the end.
     /// Grep publishes each bounded step, so a lost race costs only one step.
     pub compactor_epoch: u64,
-    /// Materialized head sequence, including the final sequence on deletion.
+    /// Materialized head sequence, or the final namespace sequence on deletion.
     pub head_seq: ChangeSeq,
     /// Commit identity used when no newer data segment exists.
     pub head_commit_id: CommitId,
@@ -1334,34 +1334,39 @@ impl NamespaceManifestPayload {
         if successor.generation_first_manifest_no != successor.manifest_no {
             return drift("generation_first_manifest_no");
         }
-        if successor.fork_basis.is_some() {
-            return drift("fork_basis");
-        }
-        if successor.content_store_id == self.content_store_id {
+        let is_fork = successor.fork_basis.is_some();
+        if !is_fork && successor.content_store_id == self.content_store_id {
             return drift("content_store_id");
         }
-        if !successor.runs.is_empty() {
+        if !is_fork && !successor.runs.is_empty() {
             return drift("runs");
         }
         if successor.writer.is_some() {
             return drift("writer");
         }
-        if successor.head_commit_id != crate::control::genesis_commit_id() {
+        if !is_fork && successor.head_commit_id != crate::control::genesis_commit_id() {
             return drift("head_commit_id");
         }
-        if successor.head_seq != ChangeSeq(0)
-            || successor.base_seq != ChangeSeq(0)
-            || successor.retention_floor_seq != ChangeSeq(0)
+        if (!is_fork
+            && (successor.head_seq != ChangeSeq(0)
+                || successor.base_seq != ChangeSeq(0)
+                || successor.retention_floor_seq != ChangeSeq(0)))
+            || (is_fork
+                && (successor.retention_floor_seq != successor.head_seq
+                    || successor.base_seq > successor.head_seq
+                    || successor.fork_basis.as_ref().is_some_and(|basis| {
+                        basis.manifest.manifest_head_seq != successor.head_seq
+                    })))
         {
             return drift("head_seq");
         }
         if successor.last_folded_wal_no != self.last_folded_wal_no {
             return drift("last_folded_wal_no");
         }
-        if successor.next_inode_id != crate::FIRST_ALLOCATABLE_INODE_ID {
+        if !is_fork && successor.next_inode_id != crate::FIRST_ALLOCATABLE_INODE_ID {
             return drift("next_inode_id");
         }
-        if successor.next_run_no != RunNo(0) {
+        if !is_fork && successor.next_run_no != RunNo(0) {
             return drift("next_run_no");
         }
         if self.writer_epoch.successor().ok() != Some(successor.writer_epoch) {
@@ -1517,6 +1522,7 @@ mod tests {
                 2 => successor.created_at_ms += 1,
                 3 => {
                     successor.fork_basis = Some(crate::control::ForkBasis {
+                        source_generation: crate::NamespaceGeneration(1),
                         manifest: crate::control::ManifestRef {
                             owner_namespace_id: NamespaceId::parse("source").expect("namespace"),
                             manifest_no: ManifestNo(1),
@@ -1563,6 +1569,7 @@ mod tests {
             super::NamespaceAccess::Unrestricted {},
         );
         deleted.fork_basis = Some(crate::control::ForkBasis {
+            source_generation: crate::NamespaceGeneration(1),
             manifest: crate::control::ManifestRef {
                 owner_namespace_id: NamespaceId::parse("source").expect("namespace"),
                 manifest_no: ManifestNo(1),

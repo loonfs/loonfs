@@ -1124,7 +1124,7 @@ fn external_remote_profile_executes_through_http() {
             "generation": 1,
             "created_at_ms": json_data(&fork)["created_at_ms"],
             "created_by": "loonfs-cli",
-            "fork_basis": {"source_namespace_id": "demo", "source_head_seq": 0},
+            "fork_basis": {"source_namespace_id": "demo", "source_generation": 1, "source_head_seq": 0},
             "head_seq": 0,
             "retention_floor_seq": 0
         })
