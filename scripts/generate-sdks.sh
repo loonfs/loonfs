@@ -266,6 +266,18 @@ start = source.index("def parse_sse_obj(")
 end = source.index("_type_adapter_cache")
 path.write_text(source[:start] + source[end:])
 
+serialization_path = pathlib.Path("generated/python/core/serialization.py")
+source = serialization_path.read_text()
+source = replace_once(
+    source,
+    "    # Models / TypedDicts: a field alias here means we must dealias; otherwise recurse into fields.\n",
+    "    # Class variables are not response fields (including Pydantic's model_config).\n"
+    "    if typing_extensions.get_origin(clean_type) is typing.ClassVar:\n"
+    "        return False\n\n"
+    "    # Models / TypedDicts: a field alias here means we must dealias; otherwise recurse into fields.\n",
+)
+serialization_path.write_text(source)
+
 request_options_path = pathlib.Path("generated/python/core/request_options.py")
 source = request_options_path.read_text()
 source = replace_once(

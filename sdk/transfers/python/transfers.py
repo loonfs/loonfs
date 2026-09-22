@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextvars
 import hashlib
 import io
 import typing
@@ -103,7 +104,7 @@ class InlinePreparedContent:
 
 
 # Preserve PreparedContent's existing staged constructor and fields.
-PreparedFile = PreparedContent | InlinePreparedContent
+PreparedFile = typing.Union[PreparedContent, InlinePreparedContent]
 
 
 _TRANSFER_CHUNK_BYTES = 64 * 1024
@@ -1197,7 +1198,9 @@ class _AsyncReader:
     async def read(self, size: int) -> bytes:
         size = min(size, _TRANSFER_CHUNK_BYTES)
         if self._iterator is None:
-            return await asyncio.to_thread(self._content.read, size)
+            return await asyncio.get_running_loop().run_in_executor(
+                None, contextvars.copy_context().run, self._content.read, size
+            )
         while not self._pending:
             try:
                 chunk = await self._iterator.__anext__()
