@@ -293,7 +293,7 @@ async fn recovery_restores_an_administrator_and_keeps_the_other_root_grants() {
     let root_rows: Vec<_> = feed
         .changes
         .iter()
-        .flat_map(|commit| commit.events.iter().flatten())
+        .flat_map(|commit| &commit.events)
         .filter_map(|event| match event {
             FilesystemChange::AccessChanged {
                 inode_id,

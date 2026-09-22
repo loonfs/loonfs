@@ -438,7 +438,10 @@ async fn swap_accepts_any_valid_matching_proof_and_expired_receipt_replays_witho
         .as_ref()
         .expect("unused proofs do not constrain metadata");
     assert_eq!(original.committed_at_ms, publication.now_ms);
-    assert!(original.events.is_some(), "a new commit returns its events");
+    assert!(
+        !original.events.is_empty(),
+        "a new commit returns its events"
+    );
     assert!(
         store.snapshot().iter().all(|operation| !matches!(
             loonfs_objectstore::layout::parse_object_key(operation.key()),

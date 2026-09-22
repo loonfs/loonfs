@@ -927,7 +927,6 @@ impl crate::FsWriter {
         let access_revision_no = commit
             .events
             .iter()
-            .flatten()
             .find_map(|event| match event {
                 FilesystemChange::AccessChanged {
                     access_revision_no, ..

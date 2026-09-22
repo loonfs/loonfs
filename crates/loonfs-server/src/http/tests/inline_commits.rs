@@ -139,7 +139,7 @@ fn inline_request(commit_id: &str, path: &str, encoded: &str) -> Value {
 
 fn created_content(response: &Value) -> (InodeId, ContentRef) {
     let commit: Commit = serde_json::from_value(response.clone()).expect("commit");
-    match &commit.events.expect("events")[0] {
+    match &commit.events[0] {
         FilesystemChange::FileCreated {
             inode_id,
             content_ref,

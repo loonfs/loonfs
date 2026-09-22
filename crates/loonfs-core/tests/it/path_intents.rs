@@ -1406,7 +1406,7 @@ async fn path_move_writes_unbind_and_old_binding_stops_resolving() {
         .expect("change feed")
         .changes
         .iter()
-        .flat_map(|change| change.events.as_ref().expect("change feed events"))
+        .flat_map(|change| &change.events)
         .filter(|event| matches!(event, FilesystemChange::Moved { .. }))
         .count();
     assert_eq!(move_count, 1);
