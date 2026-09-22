@@ -1,10 +1,10 @@
 //! Metadata rows and inline content from the unfolded WAL tail.
 
 use super::frame::WalSegmentError;
-use crate::metadata::{CommitReceiptRecord, MetadataState};
+use crate::metadata::MetadataState;
 use bytes::Bytes;
 use loonfs_api::wire::manifest::ManifestActivity;
-use loonfs_api::wire::wal::{committed_activity, WalCommitDelta, WalCommitPayload};
+use loonfs_api::wire::wal::{committed_activity, WalCommitPayload};
 use loonfs_api::{ContentId, ContentRef};
 use std::collections::HashMap;
 
@@ -37,29 +37,10 @@ impl ProjectedWalTail {
         &mut self,
         record: &WalCommitPayload,
     ) -> Result<(), WalSegmentError> {
-        self.apply_commit_parts(
-            CommitReceiptRecord {
-                commit_id: record.commit_id.clone(),
-                committed_by: record.committed_by.clone(),
-                semantic_commit_fingerprint: record.semantic_commit_fingerprint.clone(),
-                committed_seq: record.seq,
-                committed_at_ms: record.committed_at_ms,
-                message: record.message.clone(),
-            },
-            &record.deltas,
-        )
-    }
-
-    pub(crate) fn apply_commit_parts(
-        &mut self,
-        receipt: CommitReceiptRecord,
-        deltas: &[WalCommitDelta],
-    ) -> Result<(), WalSegmentError> {
-        let activity = committed_activity(deltas)
+        let activity = committed_activity(&record.deltas)
             .and_then(|activity| self.activity.checked_add(activity))
             .ok_or(WalSegmentError::ActivityOverflow)?;
-        self.rows
-            .apply_committed_wal_record_parts_mut(receipt, deltas);
+        self.rows.apply_committed_wal_record_mut(record);
         self.activity = activity;
         Ok(())
     }

@@ -68,19 +68,13 @@ fn metadata_states_equivalent_ignoring_content_identity(
                         }),
                         MetadataRow::CommitReceipt(crate::metadata::CommitReceiptRecord {
                             commit_id,
-                            committed_by,
                             semantic_commit_fingerprint: _,
                             committed_seq,
-                            committed_at_ms,
-                            message,
                         }) => MetadataRow::CommitReceipt(crate::metadata::CommitReceiptRecord {
                             commit_id,
-                            committed_by,
+                            committed_seq,
                             semantic_commit_fingerprint: serde_json::from_str(r#""<normalized>""#)
                                 .expect("fingerprint"),
-                            committed_seq,
-                            committed_at_ms,
-                            message,
                         }),
                         MetadataRow::Commit(mut record) => {
                             record.semantic_commit_fingerprint =

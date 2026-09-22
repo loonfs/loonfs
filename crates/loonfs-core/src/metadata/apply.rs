@@ -7,7 +7,7 @@ use super::{
     SubtreeTombstoneRecord, TombstoneRowAction,
 };
 use loonfs_api::wire::manifest::TombstoneGeneration;
-use loonfs_api::wire::wal::{WalCommitDelta, WalCommitPayload, WalDelta};
+use loonfs_api::wire::wal::{WalCommitPayload, WalDelta};
 use loonfs_api::{ActorId, ChangeSeq, CommitId};
 
 impl MetadataState {
@@ -215,43 +215,29 @@ impl MetadataState {
     }
 
     pub fn apply_committed_wal_record_mut(&mut self, record: &WalCommitPayload) {
-        self.apply_committed_wal_record_parts_mut(
-            CommitReceiptRecord {
-                commit_id: record.commit_id.clone(),
-                committed_by: record.committed_by.clone(),
-                semantic_commit_fingerprint: record.semantic_commit_fingerprint.clone(),
-                committed_seq: record.seq,
-                committed_at_ms: record.committed_at_ms,
-                message: record.message.clone(),
-            },
-            &record.deltas,
-        )
-    }
-
-    pub(crate) fn apply_committed_wal_record_parts_mut(
-        &mut self,
-        receipt: CommitReceiptRecord,
-        deltas: &[WalCommitDelta],
-    ) {
-        for delta in deltas {
+        for delta in &record.deltas {
             self.apply_committed_wal_delta_mut(
-                receipt.committed_seq,
-                &receipt.commit_id,
-                &receipt.committed_by,
-                receipt.committed_at_ms,
+                record.seq,
+                &record.commit_id,
+                &record.committed_by,
+                record.committed_at_ms,
                 &delta.delta,
             );
         }
         self.push_commit_record(WalCommitPayload {
-            seq: receipt.committed_seq,
-            commit_id: receipt.commit_id.clone(),
-            committed_by: receipt.committed_by.clone(),
-            semantic_commit_fingerprint: receipt.semantic_commit_fingerprint.clone(),
-            committed_at_ms: receipt.committed_at_ms,
-            message: receipt.message.clone(),
-            deltas: deltas.to_vec(),
+            seq: record.seq,
+            commit_id: record.commit_id.clone(),
+            committed_by: record.committed_by.clone(),
+            semantic_commit_fingerprint: record.semantic_commit_fingerprint.clone(),
+            committed_at_ms: record.committed_at_ms,
+            message: record.message.clone(),
+            deltas: record.deltas.clone(),
             inline_content: Vec::new(),
         });
-        self.push_commit_receipt_record(receipt);
+        self.push_commit_receipt_record(CommitReceiptRecord {
+            commit_id: record.commit_id.clone(),
+            committed_seq: record.seq,
+            semantic_commit_fingerprint: record.semantic_commit_fingerprint.clone(),
+        });
     }
 }

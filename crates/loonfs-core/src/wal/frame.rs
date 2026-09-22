@@ -2,12 +2,9 @@
 //! replay paths.
 
 use crate::namespace::state::NamespaceReadState;
-use loonfs_api::wire::wal::{
-    WalCommitDelta, WalInlineContent, WalSegmentEnvelope, WalSegmentPayload,
-};
-use loonfs_api::{ChangeSeq, CommitId, NamespaceId, WalNo, WriterEpoch};
+use loonfs_api::wire::wal::{WalSegmentEnvelope, WalSegmentPayload};
+use loonfs_api::{ChangeSeq, NamespaceId, WalNo, WriterEpoch};
 use serde::{Deserialize, Serialize};
-use std::borrow::Cow;
 use thiserror::Error;
 
 pub(crate) type PreparedWalSegment = loonfs_api::wire::envelope::EncodedEnvelope<WalSegmentPayload>;
@@ -66,20 +63,6 @@ pub(crate) struct ValidatedWalSegment {
     envelope: WalSegmentEnvelope,
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct DecodedWalRecord<'a> {
-    pub(crate) namespace_id: &'a NamespaceId,
-    pub(crate) seq: ChangeSeq,
-    pub(crate) writer_epoch: WriterEpoch,
-    pub(crate) commit_id: &'a CommitId,
-    pub(crate) committed_by: &'a loonfs_api::ActorId,
-    pub(crate) committed_at_ms: u64,
-    pub(crate) semantic_commit_fingerprint: &'a loonfs_api::CommitFingerprint,
-    pub(crate) message: Option<&'a str>,
-    pub(crate) deltas: Cow<'a, [WalCommitDelta]>,
-    pub(crate) inline_content: &'a [WalInlineContent],
-}
-
 impl ValidatedWalSegment {
     pub(crate) fn new(object_key: String, envelope: WalSegmentEnvelope) -> Self {
         Self {
@@ -94,27 +77,6 @@ impl ValidatedWalSegment {
 
     pub(crate) fn envelope(&self) -> &WalSegmentEnvelope {
         &self.envelope
-    }
-
-    pub(crate) fn decoded_records(&self) -> impl Iterator<Item = DecodedWalRecord<'_>> {
-        let namespace_id = &self.envelope.payload().namespace_id;
-        let writer_epoch = self.envelope.payload().writer_epoch;
-        self.envelope
-            .payload()
-            .records
-            .iter()
-            .map(move |record| DecodedWalRecord {
-                namespace_id,
-                seq: record.seq,
-                writer_epoch,
-                commit_id: &record.commit_id,
-                committed_by: &record.committed_by,
-                committed_at_ms: record.committed_at_ms,
-                semantic_commit_fingerprint: &record.semantic_commit_fingerprint,
-                message: record.message.as_deref(),
-                deltas: Cow::Borrowed(&record.deltas),
-                inline_content: &record.inline_content,
-            })
     }
 }
 

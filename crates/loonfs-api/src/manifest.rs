@@ -395,23 +395,16 @@ pub struct ContentPublicationRecord {
     pub delta_index: u32,
 }
 
-/// One durable commit idempotency receipt.
+/// Indexes one retained commit by the caller's idempotency key.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CommitReceiptRecord {
     /// Caller idempotency key whose later reuse is checked against this row.
     pub commit_id: CommitId,
-    /// Actor that committed the change, as supplied by the application.
-    pub committed_by: crate::ActorId,
-    /// Digest used to distinguish a safe retry from conflicting ID reuse.
-    pub semantic_commit_fingerprint: crate::CommitFingerprint,
     /// Namespace sequence assigned to the accepted commit.
     pub committed_seq: ChangeSeq,
-    /// The commit's observational wall-clock stamp.
-    pub committed_at_ms: u64,
-    /// Caller annotation preserved for idempotent response reconstruction.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
+    /// Digest used to distinguish a safe retry from conflicting ID reuse.
+    pub semantic_commit_fingerprint: crate::CommitFingerprint,
 }
 
 /// One inode's complete attribute map at one revision.
@@ -1891,12 +1884,9 @@ mod tests {
                 super::MetadataRow::CommitReceipt(super::CommitReceiptRecord {
                     commit_id: CommitId::parse("c_00000000000000000000000000000001")
                         .expect("commit id"),
-                    committed_by: crate::ActorId::loonfs(),
+                    committed_seq: ChangeSeq(12),
                     semantic_commit_fingerprint: serde_json::from_str(r#""sha256:unused""#)
                         .expect("fingerprint"),
-                    committed_seq: ChangeSeq(12),
-                    committed_at_ms: 12_000,
-                    message: None,
                 }),
             ),
             (

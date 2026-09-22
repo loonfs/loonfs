@@ -407,9 +407,7 @@ impl DecodedRowWeight for CommitReceiptRecord {
     fn decoded_weight(&self) -> usize {
         ALLOCATED_ROW_OVERHEAD
             + self.commit_id.as_str().len()
-            + actor_bytes(&self.committed_by)
             + self.semantic_commit_fingerprint.as_str().len()
-            + self.message.as_ref().map_or(0, String::len)
     }
 }
 

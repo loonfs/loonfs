@@ -1975,11 +1975,8 @@ fn sample_populated_access_row() -> MetadataRow {
 fn sample_commit_receipt_row() -> MetadataRow {
     MetadataRow::CommitReceipt(loonfs_api::wire::manifest::CommitReceiptRecord {
         commit_id: commit_id(),
-        committed_by: actor(),
-        semantic_commit_fingerprint: serde_json::from_str(r#""fp:golden""#).expect("fingerprint"),
         committed_seq: ChangeSeq(9),
-        committed_at_ms: 9_000,
-        message: None,
+        semantic_commit_fingerprint: serde_json::from_str(r#""fp:golden""#).expect("fingerprint"),
     })
 }
 
@@ -2547,18 +2544,6 @@ fn provenance_rows_reject_every_missing_required_field() {
         (
             sample_populated_attributes_row(),
             &["commit_id", "updated_by", "updated_at_ms"][..],
-        ),
-        (
-            MetadataRow::CommitReceipt(loonfs_api::wire::manifest::CommitReceiptRecord {
-                commit_id: commit_id(),
-                committed_by: actor(),
-                semantic_commit_fingerprint: serde_json::from_str(r#""v1:sha256:receipt""#)
-                    .expect("fingerprint"),
-                committed_seq: ChangeSeq(9),
-                committed_at_ms: 9_000,
-                message: None,
-            }),
-            &["committed_by"][..],
         ),
     ];
 
