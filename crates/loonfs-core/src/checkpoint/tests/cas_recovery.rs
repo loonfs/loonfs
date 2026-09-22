@@ -378,15 +378,16 @@ async fn a_checkpoint_losing_manifest_publication_pins_the_winner() {
         .expect("record")
         .expect("present");
     assert_eq!(losing.state.manifest(), winning.state.manifest());
-    let stats = crate::control::load_namespace_statistics(&store, &namespace_id)
+    let statistics = crate::control::load_namespace_statistics(&store, &namespace_id)
         .await
         .expect("statistics");
     assert_eq!(
-        stats.stats,
-        loonfs_api::wire::manifest::ManifestStats {
-            committed_content_bytes_total: 4,
-            committed_file_revisions_total: 1,
-            committed_mutations_total: 1,
+        statistics.activity,
+        loonfs_api::wire::manifest::ManifestActivity {
+            content_bytes: loonfs_api::wire::manifest::ActivityCounter::parse(4).expect("activity"),
+            file_revisions: loonfs_api::wire::manifest::ActivityCounter::parse(1)
+                .expect("activity"),
+            mutations: loonfs_api::wire::manifest::ActivityCounter::parse(1).expect("activity"),
         }
     );
 }

@@ -30,8 +30,8 @@ pub enum WalSegmentError {
     Codec(String),
     #[error("sequence number cannot exceed 9007199254740991")]
     SeqOverflow,
-    #[error("committed activity exceeds the statistics counter range")]
-    StatsOverflow,
+    #[error("activity counter cannot exceed 9007199254740991")]
+    ActivityOverflow,
     #[error("WAL number cannot exceed 9007199254740991")]
     NumberOverflow,
     #[error("WAL segment base head seq mismatch: expected `{expected}`, actual `{actual}`")]

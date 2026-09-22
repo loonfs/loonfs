@@ -174,7 +174,7 @@ pub(crate) async fn load_current_manifest_if_present<S: ObjectStore + ?Sized>(
                 || before.last_folded_wal_no > after.last_folded_wal_no
                 || before.retention_floor_wal_no > after.retention_floor_wal_no
                 || before.writer_epoch > after.writer_epoch
-                || !before.preserves_stats(after)
+                || !before.preserves_activity(after)
             {
                 return Err(ControlObjectLoadError::Codec {
                     object_key: manifest.object_key,

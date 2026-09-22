@@ -3,8 +3,8 @@
 use super::frame::WalSegmentError;
 use crate::metadata::{CommitReceiptRecord, MetadataState};
 use bytes::Bytes;
-use loonfs_api::wire::manifest::ManifestStats;
-use loonfs_api::wire::wal::{committed_stats, WalCommitDelta, WalCommitPayload};
+use loonfs_api::wire::manifest::ManifestActivity;
+use loonfs_api::wire::wal::{committed_activity, WalCommitDelta, WalCommitPayload};
 use loonfs_api::{ContentId, ContentRef};
 use std::collections::HashMap;
 
@@ -14,7 +14,7 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProjectedWalTail {
     pub(crate) rows: MetadataState,
-    pub(crate) stats: ManifestStats,
+    pub(crate) activity: ManifestActivity,
     inline_content: HashMap<ContentId, ProjectedInlineContent>,
     inline_bytes: usize,
 }
@@ -55,12 +55,12 @@ impl ProjectedWalTail {
         receipt: CommitReceiptRecord,
         deltas: &[WalCommitDelta],
     ) -> Result<(), WalSegmentError> {
-        let stats = committed_stats(deltas)
-            .and_then(|activity| self.stats.checked_add(activity))
-            .ok_or(WalSegmentError::StatsOverflow)?;
+        let activity = committed_activity(deltas)
+            .and_then(|activity| self.activity.checked_add(activity))
+            .ok_or(WalSegmentError::ActivityOverflow)?;
         self.rows
             .apply_committed_wal_record_parts_mut(receipt, deltas);
-        self.stats = stats;
+        self.activity = activity;
         Ok(())
     }
 

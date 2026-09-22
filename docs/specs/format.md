@@ -611,13 +611,13 @@ Flushing does not advance retention. An operator separately decides when older r
 
 ### 7.4 Statistics
 
-Each manifest stores three cumulative activity counters in a required `stats` object:
+Each manifest stores three cumulative activity counters in a required `activity` object:
 
 | Counter | What counts |
 | --- | --- |
-| `committed_content_bytes_total` | Full content length of every committed file revision, including overwrites and revisions that reuse stored content. |
-| `committed_file_revisions_total` | Every committed file-revision append, including an empty revision. |
-| `committed_mutations_total` | Each semantic operation group in a committed WAL record, identified by `semantic_op_index`. |
+| `content_bytes` | Full content length of every committed file revision, including overwrites and revisions that reuse stored content. |
+| `file_revisions` | Every committed file-revision append, including an empty revision. |
+| `mutations` | Each semantic operation group in a committed WAL record, identified by `semantic_op_index`. |
 
 For example, writing a 10-byte file and then replacing it with a 6-byte revision adds 16 bytes, two revisions, and two mutations. Creating a directory adds one mutation. Recursively deleting that directory adds one mutation, regardless of how many descendants it hides. Convenience requests can contain several internal operations, so mutation totals can exceed request counts.
 
@@ -636,11 +636,11 @@ The inode count includes retained deleted records. An implicit root counts as ze
 
 Statistics reads use one validated manifest without reading segments or replaying newer WAL. Observations include namespace identity, lifecycle status, manifest number, head sequence, and folded WAL number. A pin selects its exact manifest. Compaction can change footprint without changing the logical head, so the manifest number matters too.
 
-A fork inherits the selected source manifest's counters and descriptors. Its own activity is its current counters minus the counters in `fork_basis.manifest`, after verifying that immutable reference. For example, a fork that inherits 100 bytes and later reaches 120 bytes has committed 20 bytes of its own. Nested forks need only their immediate source manifest. Pins store no separate statistics.
+A fork inherits the source manifest's segment descriptors, so its footprint values begin as the source's. Its counters begin at zero. Activity committed in the source stays in the source's manifests.
 
-Meters compare observations for the same namespace and start a fork from its inherited baseline, even if the first observation follows new writes. They must retain that baseline before retirement permits its source pin to be reclaimed. Billing cursors and policy belong to the application.
+Meters compare observations for the same namespace. Billing cursors and policy belong to the application.
 
-Counters use unsigned 64-bit integers. Addition and subtraction must detect overflow or regression; missing counters are invalid. A JSON consumer must preserve integer precision, including values above JavaScript's exact-number range.
+The counters are public integers within the bound in the API specification; exceeding it is an error, and a counter that regresses is corruption.
 
 Grep reports its own referenced segment bytes under Appendix D. Its manifest and indexing position are independent of the core observation. A new fork starts without an index; a failed index read must not be reported as zero bytes.
 
@@ -720,8 +720,8 @@ A fork starts independent history in the source's content domain:
 
 1. Create a verified source pin whose owner names the target namespace, either from the source head or a live snapshot under section 8.2.
 2. Load and verify the pinned manifest.
-3. Copy its run references, activity counters, head sequence, head commit ID, inode allocator, next run number, and content-store ID into target manifest 1. Preserve every segment's owner.
-4. Set target identity, creation time, and `created_by` from the fork request, immutable `fork_basis`, active status, no writer block, and both epochs zero. Local folded WAL and WAL retention floor start at zero; the sequence retention floor starts at the fork point.
+3. Copy its run references, head sequence, head commit ID, inode allocator, next run number, and content-store ID into target manifest 1. Preserve every segment's owner.
+4. Set target identity, creation time, and `created_by` from the fork request, immutable `fork_basis`, active status, no writer block, and both epochs zero. Activity counters start at zero. Local folded WAL and WAL retention floor start at zero; the sequence retention floor starts at the fork point.
 5. Within the fork-installation budget, write the shared descriptor, target hint naming manifest 1 and WAL 0, and target manifest 1, in that order.
 
 The target copies no file bytes or metadata segments. Its WAL starts at number 1, and its first data commit is one sequence above the fork point. It can itself be forked immediately because its manifest already lists its inherited runs.
@@ -1166,7 +1166,7 @@ A namespace manifest contains:
 | `compactor_epoch` | Current compaction authority. |
 | `head_seq` | Materialized head sequence; on deletion, the final namespace sequence. |
 | `head_commit_id` | Commit ID at the recorded head. |
-| `stats` | Required cumulative activity counters defined in section 7.4. |
+| `activity` | Required cumulative activity counters defined in section 7.4. |
 | `base_seq` | Oldest run sequence represented by the file set. |
 | `writer_epoch` | Current writer authority. |
 | `next_inode_id` | First inode ID available at the recorded boundary. |

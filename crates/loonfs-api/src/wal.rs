@@ -223,21 +223,19 @@ pub fn semantic_operation_groups(
 
 /// Counts activity represented by one committed delta vector.
 /// Returns `None` if a counter overflows.
-pub fn committed_stats(deltas: &[WalCommitDelta]) -> Option<crate::manifest::ManifestStats> {
-    let mut stats = crate::manifest::ManifestStats::default();
+pub fn committed_activity(deltas: &[WalCommitDelta]) -> Option<crate::manifest::ManifestActivity> {
+    let mut activity = crate::manifest::ManifestActivity::default();
     for group in semantic_operation_groups(deltas) {
-        stats.committed_mutations_total = stats.committed_mutations_total.checked_add(1)?;
+        activity.mutations = activity.mutations.checked_add(1)?;
         for delta in group {
             if let WalDelta::AppendFileRevision { content_ref, .. } = &delta.delta {
-                stats.committed_content_bytes_total = stats
-                    .committed_content_bytes_total
-                    .checked_add(content_ref.size_bytes)?;
-                stats.committed_file_revisions_total =
-                    stats.committed_file_revisions_total.checked_add(1)?;
+                activity.content_bytes =
+                    activity.content_bytes.checked_add(content_ref.size_bytes)?;
+                activity.file_revisions = activity.file_revisions.checked_add(1)?;
             }
         }
     }
-    Some(stats)
+    Some(activity)
 }
 
 /// Carries bytes named by a revision delta in the same commit.
@@ -457,7 +455,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn committed_statistics_count_full_revisions_and_semantic_groups() {
+    fn committed_activity_counts_full_revisions_and_semantic_groups() {
         let mut deltas: Vec<_> = inline_segment(&[5, 5, 0])
             .records
             .into_iter()
@@ -468,18 +466,18 @@ mod tests {
         deltas[1].semantic_op_index = 2;
         deltas[2].semantic_op_index = 9;
         assert_eq!(
-            committed_stats(&deltas),
-            Some(crate::manifest::ManifestStats {
-                committed_content_bytes_total: 10,
-                committed_file_revisions_total: 3,
-                committed_mutations_total: 2,
+            committed_activity(&deltas),
+            Some(crate::manifest::ManifestActivity {
+                content_bytes: crate::manifest::ActivityCounter::parse(10).expect("activity"),
+                file_revisions: crate::manifest::ActivityCounter::parse(3).expect("activity"),
+                mutations: crate::manifest::ActivityCounter::parse(2).expect("activity"),
             })
         );
-        assert_eq!(committed_stats(&[]), Some(Default::default()));
+        assert_eq!(committed_activity(&[]), Some(Default::default()));
         if let WalDelta::AppendFileRevision { content_ref, .. } = &mut deltas[0].delta {
-            content_ref.size_bytes = u64::MAX;
+            content_ref.size_bytes = crate::MAX_PUBLIC_INTEGER;
         }
-        assert_eq!(committed_stats(&deltas), None);
+        assert_eq!(committed_activity(&deltas), None);
     }
 
     fn inline_segment(lengths: &[usize]) -> WalSegmentPayload {

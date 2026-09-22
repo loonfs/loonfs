@@ -368,10 +368,13 @@ fn sample_wal_inline_content_payload() -> WalSegmentPayload {
 
 fn sample_manifest_payload() -> NamespaceManifestPayload {
     let mut manifest = NamespaceManifestPayload {
-        stats: loonfs_api::wire::manifest::ManifestStats {
-            committed_content_bytes_total: 100_000_000_000,
-            committed_file_revisions_total: 10_000,
-            committed_mutations_total: 14_000,
+        activity: loonfs_api::wire::manifest::ManifestActivity {
+            content_bytes: loonfs_api::wire::manifest::ActivityCounter::parse(100_000_000_000)
+                .expect("activity"),
+            file_revisions: loonfs_api::wire::manifest::ActivityCounter::parse(10_000)
+                .expect("activity"),
+            mutations: loonfs_api::wire::manifest::ActivityCounter::parse(14_000)
+                .expect("activity"),
         },
         content_store_id: content_store_id(),
         created_at_ms: 1_000,
@@ -1614,20 +1617,15 @@ fn control_object_decode_rejects_tampered_payload_as_checksum_mismatch() {
 }
 
 #[test]
-fn namespace_manifest_requires_every_statistics_counter() {
-    for field in [
-        "stats",
-        "committed_content_bytes_total",
-        "committed_file_revisions_total",
-        "committed_mutations_total",
-    ] {
+fn namespace_manifest_requires_every_activity_counter() {
+    for field in ["activity", "content_bytes", "file_revisions", "mutations"] {
         let encoded = control_document_with_payload_edit("namespace_manifest.v1.json", |payload| {
-            if field == "stats" {
+            if field == "activity" {
                 payload.as_object_mut().expect("object").remove(field);
             } else {
-                payload["stats"]
+                payload["activity"]
                     .as_object_mut()
-                    .expect("stats")
+                    .expect("activity")
                     .remove(field);
             }
         });
@@ -1690,7 +1688,7 @@ fn namespace_manifest_decode_rejects_unknown_fields_at_every_level() {
     for path in [
         "",
         "/access",
-        "/stats",
+        "/activity",
         "/runs/0",
         "/runs/0/segments/0",
         "/runs/0/segments/0/index_block",

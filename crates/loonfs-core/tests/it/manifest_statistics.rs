@@ -1,6 +1,6 @@
 use crate::common::commit_split_support::*;
 use crate::common::namespace_engine;
-use loonfs_api::wire::manifest::ManifestStats;
+use loonfs_api::wire::manifest::{ActivityCounter, ManifestActivity};
 use loonfs_api::{AbsolutePath, ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior};
 use loonfs_core::content::store_bytes_as_content;
 use loonfs_core::control::{
@@ -26,13 +26,15 @@ async fn cached_and_replayed_folds_count_commits_once_and_reads_use_only_manifes
             LocalFsStore::new(dir.path()).expect("store"),
             KeyPredicate::any(),
         );
-        let ns = namespace_id("stats");
+        let ns = namespace_id("activity");
         let context = mutation_context();
         bootstrap_namespace(&store, &ns, &context)
             .await
             .expect("bootstrap");
-        let initial = load_namespace_statistics(&store, &ns).await.expect("stats");
-        assert_eq!(initial.stats, ManifestStats::default());
+        let initial = load_namespace_statistics(&store, &ns)
+            .await
+            .expect("activity");
+        assert_eq!(initial.activity, ManifestActivity::default());
         assert_eq!(
             (initial.inode_record_count, initial.metadata_stored_bytes),
             (0, 0)
@@ -76,7 +78,7 @@ async fn cached_and_replayed_folds_count_commits_once_and_reads_use_only_manifes
         let mut engine = NamespaceCommitEngine::new(ns.clone());
         for (index, operation) in operations.into_iter().enumerate() {
             let request = CommitRequest::single(
-                CommitId::parse(format!("stats-{index}")).expect("id"),
+                CommitId::parse(format!("activity-{index}")).expect("id"),
                 loonfs_test_support::test_actor(),
                 None,
                 operation,
@@ -106,13 +108,13 @@ async fn cached_and_replayed_folds_count_commits_once_and_reads_use_only_manifes
                 .expect("retry");
             assert_eq!(first, retry);
         }
-        // Publishing commits and staging content do not advance folded statistics.
+        // Publishing commits and staging content do not advance folded activity.
         assert_eq!(
             load_namespace_statistics(&store, &ns)
                 .await
                 .expect("unfolded")
-                .stats,
-            initial.stats
+                .activity,
+            initial.activity
         );
         let input = cached.then(|| engine.wal_fold_input().expect("cached projection"));
         loonfs_core::fold_wal_tail(
@@ -124,15 +126,15 @@ async fn cached_and_replayed_folds_count_commits_once_and_reads_use_only_manifes
         )
         .await
         .expect("fold");
-        let expected = ManifestStats {
-            committed_content_bytes_total: 10,
-            committed_file_revisions_total: 3,
-            committed_mutations_total: 5,
+        let expected = ManifestActivity {
+            content_bytes: ActivityCounter::parse(10).expect("activity"),
+            file_revisions: ActivityCounter::parse(3).expect("activity"),
+            mutations: ActivityCounter::parse(5).expect("activity"),
         };
         let folded = load_namespace_statistics(&store, &ns)
             .await
-            .expect("folded stats");
-        assert_eq!(folded.stats, expected);
+            .expect("folded activity");
+        assert_eq!(folded.activity, expected);
         assert_eq!(folded.manifest.manifest_head_seq, ChangeSeq(4));
         assert_eq!(folded.inode_record_count, 5); // Root, two directories, two files.
                                                   // A stale cached fold and a fresh engine both see already-covered activity.
@@ -147,8 +149,8 @@ async fn cached_and_replayed_folds_count_commits_once_and_reads_use_only_manifes
         let current = load_namespace_current_manifest(&store, &ns)
             .await
             .expect("manifest");
-        let observed = current.statistics().expect("stats");
-        assert_eq!(observed.stats, expected);
+        let observed = current.statistics().expect("activity");
+        assert_eq!(observed.activity, expected);
         let manifest_prefix = loonfs_objectstore::keys::metadata_manifest_prefix(&ns);
         assert!(store.take().iter().all(|op| {
             matches!(op,
@@ -157,7 +159,7 @@ async fn cached_and_replayed_folds_count_commits_once_and_reads_use_only_manifes
             )
         }));
         store.reset();
-        assert_eq!(current.statistics().expect("loaded stats"), observed);
+        assert_eq!(current.statistics().expect("loaded activity"), observed);
         assert!(store.take().is_empty());
         let mut stored_bytes = 0;
         for segment in current
@@ -180,12 +182,9 @@ async fn cached_and_replayed_folds_count_commits_once_and_reads_use_only_manifes
 }
 
 #[tokio::test]
-async fn forks_use_the_selected_checkpoint_and_only_the_immediate_baseline() {
+async fn forks_start_activity_at_zero_and_inherit_the_selected_checkpoint_footprint() {
     let dir = tempdir().expect("tempdir");
-    let store = RecordingStore::new(
-        LocalFsStore::new(dir.path()).expect("store"),
-        KeyPredicate::any(),
-    );
+    let store = LocalFsStore::new(dir.path()).expect("store");
     let parent = namespace_id("parent");
     let child = namespace_id("child");
     let grandchild = namespace_id("grandchild");
@@ -203,7 +202,7 @@ async fn forks_use_the_selected_checkpoint_and_only_the_immediate_baseline() {
         .expect("snapshot");
     let baseline = load_checkpoint_statistics(&store, &parent, &snapshot.checkpoint_id)
         .await
-        .expect("pin stats");
+        .expect("pin activity");
     write_file_bytes(&store, &parent, "/file", b"newer", &context, Some("newer"))
         .await
         .expect("write");
@@ -218,19 +217,17 @@ async fn forks_use_the_selected_checkpoint_and_only_the_immediate_baseline() {
         .expect("fork old snapshot");
     let inherited = load_namespace_statistics(&store, &child)
         .await
-        .expect("child stats");
-    assert_eq!(inherited.stats, baseline.stats);
+        .expect("child activity");
+    assert_eq!(baseline.activity.content_bytes.get(), 3);
+    assert_eq!(inherited.activity, ManifestActivity::default());
+    assert_eq!(
+        inherited.fork_basis.as_ref().expect("fork basis").manifest,
+        baseline.manifest
+    );
     assert_eq!(inherited.inode_record_count, baseline.inode_record_count);
     assert_eq!(
         inherited.metadata_stored_bytes,
         baseline.metadata_stored_bytes
-    );
-    assert_eq!(
-        inherited
-            .activity_since_creation(&store)
-            .await
-            .expect("baseline"),
-        ManifestStats::default()
     );
     write_file_bytes(
         &store,
@@ -248,14 +245,11 @@ async fn forks_use_the_selected_checkpoint_and_only_the_immediate_baseline() {
         .await
         .expect("first metered observation");
     assert_eq!(
-        observed
-            .activity_since_creation(&store)
-            .await
-            .expect("child activity"),
-        ManifestStats {
-            committed_content_bytes_total: 5,
-            committed_file_revisions_total: 1,
-            committed_mutations_total: 1
+        observed.activity,
+        ManifestActivity {
+            content_bytes: ActivityCounter::parse(5).expect("activity"),
+            file_revisions: ActivityCounter::parse(1).expect("activity"),
+            mutations: ActivityCounter::parse(1).expect("activity")
         }
     );
     child_engine
@@ -264,19 +258,14 @@ async fn forks_use_the_selected_checkpoint_and_only_the_immediate_baseline() {
         .expect("nested fork");
     let nested = load_namespace_statistics(&store, &grandchild)
         .await
-        .expect("nested stats");
-    assert_eq!(nested.stats, observed.stats);
-    store.reset();
+        .expect("nested activity");
+    assert_eq!(nested.activity, ManifestActivity::default());
+    assert_eq!(nested.inode_record_count, observed.inode_record_count);
+    assert_eq!(nested.metadata_stored_bytes, observed.metadata_stored_bytes);
     assert_eq!(
-        nested
-            .activity_since_creation(&store)
-            .await
-            .expect("immediate baseline"),
-        ManifestStats::default()
+        nested.fork_basis.as_ref().expect("fork basis").manifest,
+        observed.manifest
     );
-    let reads = store.take_get_keys();
-    assert_eq!(reads.len(), 1);
-    assert!(reads[0].starts_with("namespaces/child/"));
     assert_eq!(
         load_checkpoint_statistics(&store, &parent, &snapshot.checkpoint_id)
             .await
@@ -289,7 +278,7 @@ async fn forks_use_the_selected_checkpoint_and_only_the_immediate_baseline() {
 async fn deleting_and_undeleting_a_subtree_preserves_retained_inodes() {
     let dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(dir.path()).expect("store");
-    let ns = namespace_id("stats");
+    let ns = namespace_id("activity");
     let context = mutation_context();
     bootstrap_namespace(&store, &ns, &context)
         .await
@@ -308,7 +297,9 @@ async fn deleting_and_undeleting_a_subtree_preserves_retained_inodes() {
         .inode_id;
     let engine = namespace_engine(&store, &ns, &context);
     engine.flush_wal().await.expect("fold");
-    let before = load_namespace_statistics(&store, &ns).await.expect("stats");
+    let before = load_namespace_statistics(&store, &ns)
+        .await
+        .expect("activity");
     let deleted = submit_operation(
         &store,
         &ns,
@@ -323,7 +314,9 @@ async fn deleting_and_undeleting_a_subtree_preserves_retained_inodes() {
     .await
     .expect("delete subtree");
     engine.flush_wal().await.expect("fold delete");
-    let during = load_namespace_statistics(&store, &ns).await.expect("stats");
+    let during = load_namespace_statistics(&store, &ns)
+        .await
+        .expect("activity");
     submit_operation(
         &store,
         &ns,
@@ -338,7 +331,9 @@ async fn deleting_and_undeleting_a_subtree_preserves_retained_inodes() {
     .await
     .expect("undelete");
     engine.flush_wal().await.expect("fold undelete");
-    let after = load_namespace_statistics(&store, &ns).await.expect("stats");
+    let after = load_namespace_statistics(&store, &ns)
+        .await
+        .expect("activity");
     assert_eq!(
         (
             before.inode_record_count,
@@ -348,10 +343,10 @@ async fn deleting_and_undeleting_a_subtree_preserves_retained_inodes() {
         (4, 4, 4)
     );
     assert_eq!(
-        after.stats.checked_sub(before.stats).expect("delta"),
-        ManifestStats {
-            committed_mutations_total: 2,
-            ..Default::default()
+        after.activity,
+        ManifestActivity {
+            mutations: before.activity.mutations.checked_add(2).expect("mutations"),
+            ..before.activity
         }
     );
 }
@@ -365,7 +360,7 @@ async fn namespace_deletion_requires_a_successful_final_fold() {
         OperationClass::Put,
         InjectedError::PermissionDenied("fold unavailable".to_owned()),
     );
-    let ns = namespace_id("stats");
+    let ns = namespace_id("activity");
     let context = mutation_context();
     bootstrap_namespace(&store, &ns, &context)
         .await
@@ -389,9 +384,9 @@ async fn namespace_deletion_requires_a_successful_final_fold() {
     assert_eq!(
         load_namespace_statistics(&store, &ns)
             .await
-            .expect("stats")
-            .stats,
-        ManifestStats::default()
+            .expect("activity")
+            .activity,
+        ManifestActivity::default()
     );
     store.clear();
     engine
@@ -403,11 +398,14 @@ async fn namespace_deletion_requires_a_successful_final_fold() {
         .expect("deleted manifest");
     assert!(final_manifest.envelope.payload().status.is_deleted());
     assert_eq!(
-        final_manifest.statistics().expect("final stats").stats,
-        ManifestStats {
-            committed_content_bytes_total: 5,
-            committed_file_revisions_total: 1,
-            committed_mutations_total: 1
+        final_manifest
+            .statistics()
+            .expect("final activity")
+            .activity,
+        ManifestActivity {
+            content_bytes: ActivityCounter::parse(5).expect("activity"),
+            file_revisions: ActivityCounter::parse(1).expect("activity"),
+            mutations: ActivityCounter::parse(1).expect("activity")
         }
     );
     assert_eq!(final_manifest.envelope.payload().head_seq, ChangeSeq(1));
@@ -418,7 +416,7 @@ async fn namespace_deletion_requires_a_successful_final_fold() {
 async fn failed_and_unacknowledged_fold_publications_do_not_double_count() {
     for applied in [false, true] {
         let dir = tempdir().expect("tempdir");
-        let ns = namespace_id("stats");
+        let ns = namespace_id("activity");
         let context = mutation_context();
         let inner = LocalFsStore::new(dir.path()).expect("store");
         bootstrap_namespace(&inner, &ns, &context)
@@ -449,7 +447,7 @@ async fn failed_and_unacknowledged_fold_publications_do_not_double_count() {
             .await
             .expect("statistics");
         assert_eq!(
-            observed.stats.committed_content_bytes_total,
+            observed.activity.content_bytes.get(),
             if applied { 4 } else { 0 }
         );
         store.clear();
@@ -463,11 +461,11 @@ async fn failed_and_unacknowledged_fold_publications_do_not_double_count() {
             load_namespace_statistics(&store, &ns)
                 .await
                 .expect("statistics")
-                .stats,
-            ManifestStats {
-                committed_content_bytes_total: 4,
-                committed_file_revisions_total: 1,
-                committed_mutations_total: 1,
+                .activity,
+            ManifestActivity {
+                content_bytes: ActivityCounter::parse(4).expect("activity"),
+                file_revisions: ActivityCounter::parse(1).expect("activity"),
+                mutations: ActivityCounter::parse(1).expect("activity"),
             }
         );
     }

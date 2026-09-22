@@ -396,15 +396,15 @@ async fn build_namespace_manifest_for_projection<S: ObjectStore + ?Sized>(
     projection: &ManifestProjection<'_, S>,
     manifest_no: ManifestNo,
 ) -> Result<NamespaceManifestPayload> {
-    let stats = projection
+    let activity = projection
         .manifest_segments
         .manifest()
         .payload()
-        .stats
-        .checked_add(projection.tail_state.stats)
+        .activity
+        .checked_add(projection.tail_state.activity)
         .ok_or_else(|| {
             CoreError::NamespaceCorrupt(
-                "committed activity exceeds the statistics counter range".to_owned(),
+                "activity counter cannot exceed 9007199254740991".to_owned(),
             )
         })?;
     let head_seq = projection.head.seq;
@@ -467,7 +467,7 @@ async fn build_namespace_manifest_for_projection<S: ObjectStore + ?Sized>(
     };
 
     Ok(NamespaceManifestPayload {
-        stats,
+        activity,
         manifest_no,
         head_seq,
         head_commit_id: projection.head.head_commit_id.clone(),

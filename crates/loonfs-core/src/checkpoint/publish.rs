@@ -88,10 +88,10 @@ pub(crate) async fn publish_manifest<S: ObjectStore + ?Sized>(
         if !current
             .envelope
             .payload()
-            .preserves_stats(manifest.envelope().payload())
+            .preserves_activity(manifest.envelope().payload())
         {
             return Err(CoreError::NamespaceCorrupt(
-                "manifest changes statistics without folding new activity or lowers a counter"
+                "manifest changes activity without folding new activity or lowers a counter"
                     .to_owned(),
             ));
         }

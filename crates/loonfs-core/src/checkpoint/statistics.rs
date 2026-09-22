@@ -1,18 +1,17 @@
 //! Activity and referenced storage at one immutable manifest.
 
 use super::block_fetch::segment_object_len;
-use super::load::{ensure_manifest_reference_matches, load_namespace_manifest_envelope};
 use super::publish::manifest_ref_for;
 use super::read_basis::load_pinned_checkpoint_basis;
-use crate::error::{CoreError, MetadataProjectionLoadError, Result};
+use crate::error::{CoreError, Result};
 use crate::namespace::control::{load_current_manifest, LoadedManifest};
 use loonfs_api::wire::control::{ForkBasis, ManifestRef, NamespaceStatus};
-use loonfs_api::wire::manifest::{ManifestStats, MetadataRowFamily, NamespaceManifestEnvelope};
+use loonfs_api::wire::manifest::{ManifestActivity, MetadataRowFamily, NamespaceManifestEnvelope};
 use loonfs_api::{CheckpointId, NamespaceId, WalNo};
 use loonfs_objectstore::ObjectStore;
 
 /// Statistics through the selected manifest's folded head. Newer WAL commits
-/// are excluded. All counters are exact `u64` values.
+/// are excluded.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NamespaceStatistics {
     /// Namespace, manifest number, head sequence, and checksum of this observation.
@@ -23,8 +22,8 @@ pub struct NamespaceStatistics {
     pub status: NamespaceStatus,
     /// Highest namespace-local WAL number included in this observation.
     pub last_folded_wal_no: WalNo,
-    /// Historical activity, including any inherited lineage.
-    pub stats: ManifestStats,
+    /// Activity committed in this namespace.
+    pub activity: ManifestActivity,
     /// Explicit retained inode records. An implicit genesis root counts as zero.
     pub inode_record_count: u64,
     /// Stored lengths of referenced metadata segments. Shared objects count in
@@ -32,37 +31,6 @@ pub struct NamespaceStatistics {
     pub metadata_stored_bytes: u64,
     /// Exact source manifest at fork creation, if this namespace is a fork.
     pub fork_basis: Option<ForkBasis>,
-}
-
-impl NamespaceStatistics {
-    /// Activity committed in this namespace, excluding inherited activity.
-    /// A fork reads only its immediate source manifest and verifies the stored
-    /// reference. Later source writes cannot change that baseline.
-    pub async fn activity_since_creation<S: ObjectStore + ?Sized>(
-        &self,
-        store: &S,
-    ) -> Result<ManifestStats> {
-        let baseline = if let Some(basis) = &self.fork_basis {
-            let manifest = load_namespace_manifest_envelope(
-                store,
-                &basis.manifest.owner_namespace_id,
-                &basis.manifest.manifest_no,
-            )
-            .await
-            .map_err(|error| {
-                CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
-            })?;
-            ensure_manifest_reference_matches("fork baseline", &basis.manifest, &manifest)?;
-            manifest.payload().stats
-        } else {
-            ManifestStats::default()
-        };
-        self.stats.checked_sub(baseline).ok_or_else(|| {
-            CoreError::NamespaceCorrupt(
-                "manifest statistics are below the fork baseline".to_owned(),
-            )
-        })
-    }
 }
 
 impl LoadedManifest {
@@ -118,7 +86,7 @@ fn manifest_statistics(manifest: &NamespaceManifestEnvelope) -> Result<Namespace
         created_at_ms: payload.created_at_ms,
         status: payload.status,
         last_folded_wal_no: payload.last_folded_wal_no,
-        stats: payload.stats,
+        activity: payload.activity,
         inode_record_count,
         metadata_stored_bytes,
         fork_basis: payload.fork_basis.clone(),

@@ -1089,47 +1089,58 @@ impl NamespaceAccess {
     }
 }
 
-/// Cumulative committed activity through a manifest's folded position.
-/// Forks inherit these totals; retention and compaction never subtract from them.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ManifestStats {
-    /// Full content length of every committed file revision, including reused content.
-    pub committed_content_bytes_total: u64,
-    /// Number of committed file revisions, including empty revisions.
-    pub committed_file_revisions_total: u64,
-    /// Number of durable semantic operations, rather than requests or raw deltas.
-    pub committed_mutations_total: u64,
+/// Stores a counter within the public integer bound.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(transparent)]
+pub struct ActivityCounter(u64);
+
+impl ActivityCounter {
+    /// Rejects values above [`crate::MAX_PUBLIC_INTEGER`].
+    pub fn parse(value: u64) -> Result<Self, crate::PublicOrdinalRangeError> {
+        if value > crate::MAX_PUBLIC_INTEGER {
+            return Err(crate::PublicOrdinalRangeError);
+        }
+        Ok(Self(value))
+    }
+
+    /// Returns the validated integer.
+    pub fn get(self) -> u64 {
+        self.0
+    }
+
+    /// Returns `None` if the sum exceeds the public integer bound.
+    pub fn checked_add(self, value: u64) -> Option<Self> {
+        Self::parse(self.0.checked_add(value)?).ok()
+    }
 }
 
-impl ManifestStats {
+impl<'de> Deserialize<'de> for ActivityCounter {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Self::parse(u64::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+    }
+}
+
+/// Activity committed in this namespace through a manifest's folded position.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManifestActivity {
+    /// Full content length of every committed file revision, including reused content.
+    pub content_bytes: ActivityCounter,
+    /// Number of committed file revisions, including empty revisions.
+    pub file_revisions: ActivityCounter,
+    /// Number of durable semantic operations, rather than requests or raw deltas.
+    pub mutations: ActivityCounter,
+}
+
+impl ManifestActivity {
     /// Adds activity, returning `None` if any counter overflows.
     pub fn checked_add(self, other: Self) -> Option<Self> {
         Some(Self {
-            committed_content_bytes_total: self
-                .committed_content_bytes_total
-                .checked_add(other.committed_content_bytes_total)?,
-            committed_file_revisions_total: self
-                .committed_file_revisions_total
-                .checked_add(other.committed_file_revisions_total)?,
-            committed_mutations_total: self
-                .committed_mutations_total
-                .checked_add(other.committed_mutations_total)?,
-        })
-    }
-
-    /// Subtracts a baseline, returning `None` if any counter regressed.
-    pub fn checked_sub(self, baseline: Self) -> Option<Self> {
-        Some(Self {
-            committed_content_bytes_total: self
-                .committed_content_bytes_total
-                .checked_sub(baseline.committed_content_bytes_total)?,
-            committed_file_revisions_total: self
-                .committed_file_revisions_total
-                .checked_sub(baseline.committed_file_revisions_total)?,
-            committed_mutations_total: self
-                .committed_mutations_total
-                .checked_sub(baseline.committed_mutations_total)?,
+            content_bytes: self.content_bytes.checked_add(other.content_bytes.get())?,
+            file_revisions: self
+                .file_revisions
+                .checked_add(other.file_revisions.get())?,
+            mutations: self.mutations.checked_add(other.mutations.get())?,
         })
     }
 }
@@ -1172,8 +1183,8 @@ pub struct NamespaceManifestPayload {
     pub head_seq: ChangeSeq,
     /// Commit identity used when no newer data segment exists.
     pub head_commit_id: CommitId,
-    /// Committed activity, including inherited activity, through `head_seq`.
-    pub stats: ManifestStats,
+    /// Activity committed in this namespace through `head_seq`.
+    pub activity: ManifestActivity,
     /// Oldest run sequence still represented by `runs`.
     pub base_seq: ChangeSeq,
     /// Current writer fencing epoch.
@@ -1231,7 +1242,7 @@ impl NamespaceManifestPayload {
             compactor_epoch: 0,
             head_seq: ChangeSeq(0),
             head_commit_id: crate::control::genesis_commit_id(),
-            stats: ManifestStats::default(),
+            activity: ManifestActivity::default(),
             base_seq: ChangeSeq(0),
             writer_epoch: WriterEpoch(0),
             next_inode_id: crate::FIRST_ALLOCATABLE_INODE_ID,
@@ -1244,9 +1255,11 @@ impl NamespaceManifestPayload {
     }
 
     /// Whether a successor preserves folded activity or advances it with the head.
-    pub fn preserves_stats(&self, successor: &Self) -> bool {
-        successor.stats.checked_sub(self.stats).is_some()
-            && (successor.head_seq > self.head_seq || successor.stats == self.stats)
+    pub fn preserves_activity(&self, successor: &Self) -> bool {
+        successor.activity.content_bytes >= self.activity.content_bytes
+            && successor.activity.file_revisions >= self.activity.file_revisions
+            && successor.activity.mutations >= self.activity.mutations
+            && (successor.head_seq > self.head_seq || successor.activity == self.activity)
     }
 
     /// Rejects changes to permanent identity and terminal lifecycle state.
@@ -1344,46 +1357,64 @@ mod tests {
     }
 
     #[test]
-    fn statistics_arithmetic_and_successors_reject_invalid_totals() {
-        let maximum = super::ManifestStats {
-            committed_content_bytes_total: u64::MAX,
-            committed_file_revisions_total: u64::MAX,
-            committed_mutations_total: u64::MAX,
+    fn activity_arithmetic_and_successors_reject_invalid_totals() {
+        let counter = super::ActivityCounter::parse(crate::MAX_PUBLIC_INTEGER).expect("maximum");
+        let maximum = super::ManifestActivity {
+            content_bytes: counter,
+            file_revisions: counter,
+            mutations: counter,
         };
-        for increment in [
-            super::ManifestStats {
-                committed_content_bytes_total: 1,
-                ..Default::default()
-            },
-            super::ManifestStats {
-                committed_file_revisions_total: 1,
-                ..Default::default()
-            },
-            super::ManifestStats {
-                committed_mutations_total: 1,
-                ..Default::default()
-            },
-        ] {
-            assert_eq!(maximum.checked_add(increment), None);
-            assert_eq!(super::ManifestStats::default().checked_sub(increment), None);
-        }
-        assert_eq!(maximum.checked_sub(maximum), Some(Default::default()));
         let initial = NamespaceManifestPayload::initial(
-            NamespaceId::parse("stats").expect("namespace"),
+            NamespaceId::parse("activity").expect("namespace"),
             crate::ContentStoreId::parse("cs_00000000000000000000000000000001").expect("store"),
             0,
             crate::ActorId::parse("test").expect("actor"),
             super::NamespaceAccess::unrestricted(),
         );
+        assert!(initial.preserves_activity(&initial));
+        assert_eq!(maximum.checked_add(Default::default()), Some(maximum));
         let mut successor = initial.clone();
-        successor.stats = maximum;
-        assert!(!initial.preserves_stats(&successor));
+        successor.activity = maximum;
+        assert!(!initial.preserves_activity(&successor));
         successor.head_seq = ChangeSeq(1);
-        assert!(initial.preserves_stats(&successor));
-        let mut regression = successor.clone();
-        regression.stats.committed_mutations_total -= 1;
-        regression.head_seq = ChangeSeq(2);
-        assert!(!successor.preserves_stats(&regression));
+        assert!(initial.preserves_activity(&successor));
+        let (envelope, encoded) = encode_namespace_manifest_json(successor.clone())
+            .expect("encode")
+            .into_parts();
+        assert_eq!(
+            decode_namespace_manifest_json(&encoded).expect("decode"),
+            envelope
+        );
+
+        for field in ["content_bytes", "file_revisions", "mutations"] {
+            let mut increment =
+                serde_json::to_value(super::ManifestActivity::default()).expect("value");
+            increment[field] = 1.into();
+            let increment = serde_json::from_value(increment).expect("increment");
+            assert_eq!(maximum.checked_add(increment), None);
+
+            let mut payload = serde_json::to_value(&successor).expect("value");
+            payload["activity"][field] = (crate::MAX_PUBLIC_INTEGER - 1).into();
+            let mut regression: NamespaceManifestPayload =
+                serde_json::from_value(payload.clone()).expect("regression");
+            regression.head_seq = ChangeSeq(2);
+            assert!(!successor.preserves_activity(&regression));
+            assert_eq!(regression.activity.checked_add(increment), Some(maximum));
+
+            payload["activity"][field] = (crate::MAX_PUBLIC_INTEGER + 1).into();
+            let (_, encoded) = crate::envelope::encode_json_envelope(
+                super::NamespaceManifestKind::NamespaceManifest.as_str(),
+                super::NAMESPACE_MANIFEST_FORMAT_VERSION,
+                payload,
+            )
+            .expect("encode invalid payload")
+            .into_parts();
+            assert!(matches!(
+                decode_namespace_manifest_json(&encoded),
+                Err(crate::envelope::EnvelopeCodecError::PayloadDecode(message))
+                    if message.contains(&crate::PublicOrdinalRangeError.to_string())
+            ));
+        }
     }
 
     #[test]
@@ -1512,7 +1543,7 @@ mod tests {
     #[test]
     fn namespace_manifest_codec_round_trips_base_only_materialization() {
         let (envelope, encoded) = encode_namespace_manifest_json(NamespaceManifestPayload {
-            stats: Default::default(),
+            activity: Default::default(),
             content_store_id: crate::ContentStoreId::parse("cs_0123456789abcdef0123456789abcdef")
                 .expect("content store"),
             created_at_ms: 1_000,
@@ -1561,7 +1592,7 @@ mod tests {
     #[test]
     fn namespace_manifest_codec_round_trips_inherited_source_segments() {
         let (envelope, encoded) = encode_namespace_manifest_json(NamespaceManifestPayload {
-            stats: Default::default(),
+            activity: Default::default(),
             content_store_id: crate::ContentStoreId::parse("cs_0123456789abcdef0123456789abcdef")
                 .expect("content store"),
             created_at_ms: 1_000,

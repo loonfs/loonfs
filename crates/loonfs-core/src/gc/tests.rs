@@ -322,10 +322,10 @@ async fn deleted_namespace_reclaims_down_to_its_tombstone() {
     .await
     .expect("delete namespace");
 
-    let final_stats = crate::control::load_namespace_statistics(&store, &namespace_id)
+    let final_activity = crate::control::load_namespace_statistics(&store, &namespace_id)
         .await
         .expect("final statistics")
-        .stats;
+        .activity;
     let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
     let report = gc_namespace(&store, &namespace_id, &config(), &aged)
         .await
@@ -360,7 +360,7 @@ async fn deleted_namespace_reclaims_down_to_its_tombstone() {
         .await
         .expect("tombstone");
     assert!(current.envelope.payload().status.is_deleted());
-    assert_eq!(current.envelope.payload().stats, final_stats);
+    assert_eq!(current.envelope.payload().activity, final_activity);
     assert!(current
         .envelope
         .payload()
