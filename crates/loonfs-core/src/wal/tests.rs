@@ -84,7 +84,7 @@ async fn readers_reject_invalid_numbers_epochs_sequences_and_allocation_summarie
 }
 
 #[tokio::test]
-async fn fences_fold_and_reclaim_by_both_wal_numbers_without_advancing_sequence() {
+async fn fences_fold_and_are_reclaimed_at_the_folded_boundary() {
     let directory = tempfile::tempdir().expect("directory");
     let store = MetadataMapStore::aged(
         LocalFsStore::new(directory.path()).expect("store"),
@@ -108,9 +108,6 @@ async fn fences_fold_and_reclaim_by_both_wal_numbers_without_advancing_sequence(
     crate::checkpoint::flush_wal(&store, &namespace_id)
         .await
         .expect("fold fence");
-    crate::checkpoint::advance_retention_floor(&store, &namespace_id)
-        .await
-        .expect("advance WAL floor at sequence zero");
     acquire_writer_epoch(&store, &namespace_id, &setup)
         .await
         .expect("second fence");
@@ -119,7 +116,6 @@ async fn fences_fold_and_reclaim_by_both_wal_numbers_without_advancing_sequence(
         .expect("manifest");
     assert_eq!(current.envelope.payload().head_seq, ChangeSeq(0));
     assert_eq!(current.envelope.payload().last_folded_wal_no, WalNo(1));
-    assert_eq!(current.envelope.payload().retention_floor_wal_no, WalNo(1));
     let config = crate::gc::GcConfig {
         grace_window_ms: crate::limits::GC_MIN_GRACE_WINDOW_MS,
     };
@@ -138,20 +134,6 @@ async fn fences_fold_and_reclaim_by_both_wal_numbers_without_advancing_sequence(
         .await
         .expect("second")
         .is_some());
-    crate::checkpoint::flush_wal(&store, &namespace_id)
-        .await
-        .expect("fold second fence");
-    let retained = crate::gc::gc_namespace(&store, &namespace_id, &config, &aged)
-        .await
-        .expect("floor retains");
-    assert_eq!(retained.deleted.wal_segments, 0);
-    crate::checkpoint::advance_retention_floor(&store, &namespace_id)
-        .await
-        .expect("advance second floor");
-    let reclaimed = crate::gc::gc_namespace(&store, &namespace_id, &config, &aged)
-        .await
-        .expect("reclaim second fence");
-    assert_eq!(reclaimed.deleted.wal_segments, 1);
     load_current_metadata_view(&store, &namespace_id)
         .await
         .expect("genesis remains readable");

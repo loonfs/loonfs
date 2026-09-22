@@ -202,7 +202,7 @@ The key layout is part of the format. Other objects must not collide with these 
 
 | Object | Role | How it changes |
 | --- | --- | --- |
-| Namespace manifest | Namespace identity, lifecycle, writer authority, materialized file set, and retention floors | Publish the next immutable number. |
+| Namespace manifest | Namespace identity, lifecycle, writer authority, materialized file set, and retention floor | Publish the next immutable number. |
 | WAL segment | Ordered commits or a writer fence after the materialized boundary | Create the next immutable number. |
 | Hint | Starting point for manifest and WAL discovery | Compare-and-swap; neither number decreases. |
 | Metadata segment | Sorted metadata rows referenced by a manifest | Write a new immutable object. |
@@ -577,7 +577,7 @@ This changes the physical representation, not the namespace's visible history. A
 
 ### 7.1 Manifests, runs, and segments
 
-A namespace manifest describes one complete metadata file set through `head_seq`. It includes the head commit ID, inode allocator, folded WAL number, retention floors, and all metadata runs required to reconstruct that state. Its `manifest_no` determines its immutable key; only one publication can succeed at that number.
+A namespace manifest describes one complete metadata file set through `head_seq`. It includes the head commit ID, inode allocator, folded WAL number, retention floor, and all metadata runs required to reconstruct that state. Its `manifest_no` determines its immutable key; only one publication can succeed at that number.
 
 A run is the collection of segments produced together. `run_no` is allocated from the manifest's `next_run_no`, which advances when that run is published. A WAL flush allocates one run number across the families it writes. A compaction allocates a run number for its selected family group.
 
@@ -597,7 +597,7 @@ Before writing segments or publishing the manifest, a flush writes every inline 
 
 Publication uses put-if-absent at `predecessor.manifest_no + 1`. A lost put loads the winning manifest. A flush already covered by the winner needs no further publication; coverage includes WAL position as well as sequence. Otherwise it rebuilds against the new predecessor. Reorganization and compaction additionally require their selected inputs to remain valid.
 
-Successors preserve namespace identity and cannot lower head sequence, writer epoch, folded WAL number, either retention floor, or cumulative activity counters. A successor at the same head must preserve those counters exactly. Compaction must also use the current compactor epoch. Deletion is terminal, and an established retirement deadline never changes.
+Successors preserve namespace identity and cannot lower head sequence, writer epoch, folded WAL number, the retention floor, or cumulative activity counters. A successor at the same head must preserve those counters exactly. Compaction must also use the current compactor epoch. Deletion is terminal, and an established retirement deadline never changes.
 
 The bounded metadata publication budget runs from before the first output segment write until initiation of the manifest put. An expired attempt publishes nothing further. Its unreferenced output remains subject to segment-age collection rules. Streaming compaction has the longer bound in section 10.4.
 
@@ -714,7 +714,7 @@ Retirement is a deleted manifest with `reclaim_after_ms`, not a separate status 
 
 Read existing namespace state before allocating or writing a descriptor. An existing active namespace returns `namespace_exists`, or its current summary with `allow_existing`. Deleted status returns `namespace_deleted`. Corruption and read errors are not absence. These completed-namespace checks write nothing.
 
-For an absent namespace, build manifest 1 with a new content-store ID, the namespace's creation time and application-supplied `created_by`, no fork basis, active status, the genesis commit ID, next inode ID 2, and no runs or writer block. Head sequence, base sequence, both retention floors, folded WAL number, next run number, both epochs, and all three activity counters start at zero.
+For an absent namespace, build manifest 1 with a new content-store ID, the namespace's creation time and application-supplied `created_by`, no fork basis, active status, the genesis commit ID, next inode ID 2, and no runs or writer block. Head sequence, base sequence, the retention floor, folded WAL number, next run number, both epochs, and all three activity counters start at zero.
 
 Write the content-store descriptor, hint naming manifest 1 and WAL 0, then manifest 1, all with put-if-absent. Descriptor and hint collisions are permitted. The manifest put decides which installation wins. A hint left before that put does not establish namespace existence.
 
@@ -725,7 +725,7 @@ A fork starts independent history in the source's content domain:
 1. Create a verified source pin whose owner names the target namespace, either from the source head or a live snapshot under section 8.2.
 2. Load and verify the pinned manifest.
 3. Copy its run references, head sequence, head commit ID, inode allocator, next run number, and content-store ID into target manifest 1. Preserve every segment's owner.
-4. Set target identity, creation time, and `created_by` from the fork request, immutable `fork_basis`, active status, no writer block, and both epochs zero. Activity counters start at zero. Local folded WAL and WAL retention floor start at zero; the sequence retention floor starts at the fork point.
+4. Set target identity, creation time, and `created_by` from the fork request, immutable `fork_basis`, active status, no writer block, and both epochs zero. Activity counters start at zero. The local folded WAL number starts at zero; the retention floor starts at the fork point.
 5. Within the fork-installation budget, write the shared descriptor, target hint naming manifest 1 and WAL 0, and target manifest 1, in that order.
 
 The target copies no file bytes or metadata segments. Its WAL starts at number 1, and its first data commit is one sequence above the fork point. It can itself be forked immediately because its manifest already lists its inherited runs.
@@ -795,11 +795,11 @@ Retention determines which historical views remain available under the format gu
 
 ### 10.1 Advancing the retention floor
 
-The floor bounds incremental replay, superseded binding history, old attribute states, and commit receipts. It does not expire file revisions or content-publication evidence.
+The floor bounds incremental replay, superseded binding history, old attribute states, and commit receipts. It does not expire file revisions or content-publication evidence. WAL objects are not retained by the floor; collection removes them once folded.
 
 Floor advancement is explicit. The initial sequence floor is 0 for a new root namespace and the fork point for a fork. Automatic flushes do not advance it.
 
-A floor advance loads the current manifest and verifies that its referenced segments exist. It publishes a successor with the same runs, head summary, allocators, and authority, setting `retention_floor_seq` to the predecessor's `head_seq` and `retention_floor_wal_no` to its `last_folded_wal_no`. Neither floor can decrease.
+A floor advance loads the current manifest and verifies that its referenced segments exist. It publishes a successor with the same runs, head summary, allocators, and authority, setting `retention_floor_seq` to the predecessor's `head_seq`. The floor cannot decrease.
 
 The existence check detects missing recovery material before abandoning the corresponding replay guarantee. It is not a multi-object transaction or a substitute for collection's reference rules. Read paths still verify checksums. A pin below the new sequence floor continues to protect its own manifest and runs.
 
@@ -877,7 +877,7 @@ Every age decision uses the call's fixed `now_ms`. A later call reads fresh root
 | Current deleted manifest | The permanent tombstone itself; its current runs are not roots. |
 | Every recognized pin key in the complete listing | The numbered manifest in its ID and every segment in that manifest. |
 | Hint's observed manifest number | All manifest numbers at or above it, so discovery can probe forward. Intermediate numbers do not protect additional runs. |
-| Current active manifest's WAL boundaries | Every WAL number above either the folded boundary or the WAL retention floor. |
+| Current active manifest's folded boundary | Every WAL number above `last_folded_wal_no`. |
 
 Pin bodies are not needed to identify these roots: the manifest number is part of the pin key. Bodies are read later for owner and expiry decisions. A pin naming a missing manifest is corruption. Each listed pin protects its files for the whole pass, even if that pass deletes the pin.
 
@@ -890,7 +890,7 @@ Being unreferenced makes an object a candidate; it does not make it immediately 
 | Family | Conditions for deletion |
 | --- | --- |
 | Namespace manifest | Below the observed hint and unpinned; its provider age is at least `T`, and its immediate successor, if present, is also at least `T` old. |
-| WAL object in an active namespace | At or below both `last_folded_wal_no` and `retention_floor_wal_no`, with provider age at least `T`. |
+| WAL object in an active namespace | At or below `last_folded_wal_no`, with provider age at least `T`. |
 | WAL object in a deleted namespace | Provider age at least `T`; no current WAL is protected. |
 | Metadata segment | No root lists it, and its provider age is strictly greater than 24 hours. |
 | Pin record | Owner-specific rules in section 11.7. |
@@ -917,7 +917,7 @@ Direct expiry checks do not add GC grace to the requested lifetime. A host ahead
 
 A new pin from the current head is acknowledged only after its manifest identity is checked again following the pin write. This closes the race between collection's current-manifest read and its complete pin listing. A snapshot fork is protected by the snapshot pin or by the new fork pin written before the snapshot recheck.
 
-A collector protects every WAL number above its captured folded or retention boundary. Writers must refresh a cached tip within the publication budget before attempting its successor. They cannot treat a much later reclaimed WAL number as a free publication slot.
+A collector protects every WAL number above its captured folded boundary. Writers must refresh a cached tip within the publication budget before attempting its successor. They cannot treat a much later reclaimed WAL number as a free publication slot.
 
 New metadata segments remain protected by their minimum age while a publisher writes and verifies them. Streaming compaction must initiate publication before its budget expires, and every compaction checks its epoch and selected inputs. These rules apply to output that is not yet listed by a root captured earlier in the pass.
 
@@ -1165,7 +1165,6 @@ A namespace manifest contains:
 | `status` | Active or terminal deleted state. |
 | `writer?` | Diagnostic writer block. |
 | `last_folded_wal_no` | Highest local WAL number incorporated into the file set. |
-| `retention_floor_wal_no` | WAL boundary used for retained replay and collection. |
 | `manifest_no` | Positive number matching the object key. |
 | `compactor_epoch` | Current compaction authority. |
 | `head_seq` | Materialized head sequence; on deletion, the final namespace sequence. |
@@ -1175,7 +1174,7 @@ A namespace manifest contains:
 | `writer_epoch` | Current writer authority. |
 | `next_inode_id` | First inode ID available at the recorded boundary. |
 | `next_run_no` | Next run number to allocate. |
-| `retention_floor_seq` | Earliest sequence covered by incremental replay guarantees. |
+| `retention_floor_seq` | Earliest sequence covered by incremental replay and row retention. |
 | `runs` | Complete list of materialized metadata runs. |
 
 A run contains `run_no`, `run_seq`, `tier`, and `segments`. Tier is `delta` or `base`. A segment descriptor contains:

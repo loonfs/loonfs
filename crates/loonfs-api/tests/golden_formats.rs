@@ -387,7 +387,6 @@ fn sample_manifest_payload() -> NamespaceManifestPayload {
             acquired_at_ms: 2_000,
         }),
         last_folded_wal_no: WalNo(2),
-        retention_floor_wal_no: WalNo(0),
         compactor_epoch: 0,
         namespace_id: namespace_id(),
         manifest_no: ManifestNo(2),

@@ -259,7 +259,6 @@ async fn retention_publishes_only_a_number_and_floor_change_and_writers_read_it(
     let mut expected = before.envelope.into_payload();
     expected.manifest_no = expected.manifest_no.successor().expect("next");
     expected.retention_floor_seq = expected.head_seq;
-    expected.retention_floor_wal_no = expected.last_folded_wal_no;
     assert_eq!(after.envelope.payload(), &expected);
     assert_eq!(advanced.retention_floor_seq, expected.head_seq);
     let (_, writer_floor) =

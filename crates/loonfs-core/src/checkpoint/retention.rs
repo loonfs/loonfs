@@ -61,10 +61,7 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
                 .map_err(CoreError::ControlObjectLoad)?;
             let current = anchor.manifest;
             let target = current.envelope.payload().head_seq;
-            if current.state.retention_floor_seq >= target
-                && current.envelope.payload().retention_floor_wal_no
-                    == current.envelope.payload().last_folded_wal_no
-            {
+            if current.state.retention_floor_seq >= target {
                 return Result::Ok(CasAttempt::Settled(current.state.retention_floor_seq));
             }
             verify_manifest_segments_exist(store, &current.envelope)
@@ -75,7 +72,6 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
             let mut payload = current.envelope.payload().clone();
             payload.manifest_no = next_manifest_no_after(payload.manifest_no)?;
             payload.retention_floor_seq = target;
-            payload.retention_floor_wal_no = payload.last_folded_wal_no;
             let manifest = encode_manifest(payload)?;
             match publish_manifest(
                 store,

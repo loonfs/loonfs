@@ -1195,8 +1195,6 @@ pub struct NamespaceManifestPayload {
     pub writer: Option<WriterBlock>,
     /// Highest WAL number represented by the runs.
     pub last_folded_wal_no: WalNo,
-    /// WAL number covered by the manifest whose head established the floor.
-    pub retention_floor_wal_no: WalNo,
     /// Positive publication number matching the manifest object key.
     pub manifest_no: ManifestNo,
     /// Stops a stale streaming compactor at its next check when a newer runtime claims it.
@@ -1272,7 +1270,6 @@ impl NamespaceManifestPayload {
             next_inode_id: crate::FIRST_ALLOCATABLE_INODE_ID,
             next_run_no: RunNo(0),
             last_folded_wal_no: WalNo(0),
-            retention_floor_wal_no: WalNo(0),
             retention_floor_seq: ChangeSeq(0),
             runs: Vec::new(),
         }
@@ -1577,7 +1574,6 @@ mod tests {
             status: crate::control::NamespaceStatus::Active {},
             writer: None,
             last_folded_wal_no: crate::WalNo(0),
-            retention_floor_wal_no: crate::WalNo(0),
             compactor_epoch: 0,
             namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
             manifest_no: ManifestNo(10),
@@ -1626,7 +1622,6 @@ mod tests {
             status: crate::control::NamespaceStatus::Active {},
             writer: None,
             last_folded_wal_no: crate::WalNo(0),
-            retention_floor_wal_no: crate::WalNo(0),
             compactor_epoch: 0,
             namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
             manifest_no: ManifestNo(12),

@@ -172,7 +172,6 @@ pub(crate) async fn load_current_manifest_if_present<S: ObjectStore + ?Sized>(
             if before.head_seq > after.head_seq
                 || before.retention_floor_seq > after.retention_floor_seq
                 || before.last_folded_wal_no > after.last_folded_wal_no
-                || before.retention_floor_wal_no > after.retention_floor_wal_no
                 || before.writer_epoch > after.writer_epoch
                 || !before.preserves_activity(after)
             {
