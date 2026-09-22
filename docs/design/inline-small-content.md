@@ -118,7 +118,7 @@ A view already replays the unfolded WAL tail into a projection of its rows. That
 
 The bytes are resident wherever the projected tail is: in the reader's tail cache, in the writer's own projection, and in the input a fold consumes. A reader that holds a projected tail already downloaded those bytes while replaying it, so keeping them costs memory and no request. The existing projection budgets count them and evict whole projections as they do today. A reader that lost its projection replays the tail again, as it does today for rows. There is no second cache and no read of a WAL object on demand.
 
-A long-lived view can outlast its tail: a later fold publishes, retention advances, and collection deletes the WAL objects. Rebuilding that view fails as a stale view fails today. There is no fallback to the content object, and none is needed, because a view that still holds its projection still holds the bytes.
+A long-lived view can outlast its tail: a later fold publishes and collection deletes the WAL objects. Rebuilding that view fails as a stale view fails today. There is no fallback to the content object, and none is needed, because a view that still holds its projection still holds the bytes.
 
 About a dozen call sites turn a reference into a key or bytes today, in `engine.rs`, `path/read/materialized_view.rs`, and `storage/content.rs`. They go through one resolver on the view. Reading by reference, which the search indexer and bulk reads use with references taken from the change feed, consults the projected tail of its read context.
 
@@ -161,12 +161,12 @@ A fold becomes due when the unfolded tail reaches 32 segments, as today, or when
 
 No candidate family is added. The existing deletion rules remain, provided the invariants in this document hold: publication records the content ID, the fold materializes before it publishes, one content ID has one lifecycle, and materialization stops at deletion.
 
-- **WAL objects** keep their rule: at or below both `last_folded_wal_no` and the WAL retention floor, and old enough. The fold invariant makes the first condition sufficient for inline bytes.
+- **WAL objects** are collected at or below `last_folded_wal_no` once old enough. The fold invariant makes this safe for inline bytes.
 - **Content objects** written by a fold are published content. They produce the same permanent `content_publications` rows. A live namespace's content prefix is still never enumerated.
 - **Upload sessions** are not involved in an inline write. Unpublished inline content cannot exist, so the ownership question that sessions answer does not arise. A write that falls back uses a session as today.
 - **Deleted namespaces** sweep WAL objects and the owner's content prefix as today. Inline bytes that were never folded are removed with their WAL object. No object was written for them, and nothing needs one.
 
-The WAL is retained until the retention floor advances, and advancing it is opt-in. By default, then, every inline value is stored twice for as long as the namespace lives: once in its WAL object and once in its content object. The per-object budget bounds one WAL object, not how many are retained. Ten million 4 KiB files duplicate about 38 GiB. Inline bytes also make change-feed reads larger.
+A WAL object is collected once folded and past the collection grace, so an inline value is stored twice only until then: once in its WAL object and once in its content object. The per-object budget bounds one WAL object, not how many are retained. Inline bytes also make change-feed reads larger.
 
 ## Pins, forks, copies, and imports
 
@@ -208,7 +208,7 @@ An import reads a reference owned by another namespace and writes the bytes unde
 - Commits share WAL objects. Inline bytes make an object larger and its PUT slower, and every commit in the batch waits, including commits with no content. The per-object budget is small for this reason.
 - A fold does more work: up to thousands of small writes, off the commit path. Sustained fold throughput decides how fast small writes can arrive before they fall back to staging. Request cost falls overall, from four writes per small file to two.
 - Inline bytes pass through WAL compression and CBOR encoding on the commit path.
-- Retained WAL objects hold a second copy of small content, by default for the life of the namespace.
+- A WAL object holds a second copy of small content until it is folded and collected.
 - The first direct download of a small file written since the last fold costs one extra content write.
 - The fingerprint contract gains a second content form, with its own pinned test vectors. A rerun of `put_file_bytes` replays for inline content and conflicts for uploaded content.
 - Every reader, writer, and folder of a namespace must understand the record field before any writer uses it.
@@ -251,7 +251,7 @@ Tests pin contracts a reviewer would otherwise have to trust, using the request-
 - A small embedded write issues one store write, and a read before the fold issues no content request.
 - A fold interrupted after materialization and before publication repeats cleanly: no missing content, no unreferenced objects.
 - Two folds racing over the same tail write identical keys and one manifest.
-- In a live namespace, collection never deletes a WAL object whose inline value lacks a content object, across interleavings of inline commits, folds, retention advances, and collection passes. This is a simulator property. Namespace deletion first folds its remaining WAL, then records terminal status. The final fold includes inline content and cumulative activity.
+- In a live namespace, collection never deletes a WAL object whose inline value lacks a content object, across interleavings of inline commits, folds, and collection passes. This is a simulator property. Namespace deletion first folds its remaining WAL, then records terminal status. The final fold includes inline content and cumulative activity.
 - Copy and restore of tail content, reads across a reader restart, and reads after the fold return the same verified bytes.
 - A full budget sends the write down the staged path without an error.
 - A corrupted inline value fails the read as content corruption and stops the fold before publication.

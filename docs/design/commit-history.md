@@ -44,7 +44,7 @@ A page costs the blocks it returns, and a replay costs two point reads, on top o
 
 ## The WAL after this change
 
-Once history lives in the file set, no reader needs a WAL object below `last_folded_wal_no`. The WAL retention floor is removed from the manifest, and collection deletes a WAL object once it is at or below the folded boundary and old enough. The remaining floor, `retention_floor_seq`, governs rows: replay after a cursor, receipt lifetime, superseded bindings, old attribute and access states, and commit rows. Advancing it is still explicit.
+Once history lives in the file set, no reader needs a WAL object below `last_folded_wal_no`. The separate WAL floor is removed from the manifest, and collection deletes a WAL object once it is at or below the folded boundary and old enough. The remaining floor, `retention_floor_seq`, governs rows: replay after a cursor, receipt lifetime, superseded bindings, old attribute and access states, and commit rows. Advancing it is still explicit.
 
 This is the arrangement SlateDB and turbopuffer use. The log makes a write durable and is read only until its contents are in the tree. History, where it is kept, is kept in the tree. It also ends the double storage of inline content: a small file's bytes stay in the WAL only until the fold that writes its content object.
 

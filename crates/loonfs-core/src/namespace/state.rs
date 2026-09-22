@@ -24,7 +24,6 @@ pub struct NamespaceReadState {
     pub next_inode_id: InodeId,
     pub wal_no: WalNo,
     pub last_folded_wal_no: WalNo,
-    pub retention_floor_wal_no: WalNo,
 }
 
 impl NamespaceReadState {
@@ -51,7 +50,6 @@ impl From<&NamespaceManifestPayload> for NamespaceReadState {
             next_inode_id: manifest.next_inode_id,
             wal_no: manifest.last_folded_wal_no,
             last_folded_wal_no: manifest.last_folded_wal_no,
-            retention_floor_wal_no: manifest.retention_floor_wal_no,
         }
     }
 }

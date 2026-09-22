@@ -8,7 +8,7 @@ The main objects have separate roles:
 
 | Object | Role |
 | --- | --- |
-| Numbered namespace manifest | Records namespace identity, lifecycle, writer authority, materialized metadata runs, and retention floors. |
+| Numbered namespace manifest | Records namespace identity, lifecycle, writer authority, materialized metadata runs, and the retention floor. |
 | Numbered WAL object | Publishes logical commits or a writer fence after the materialized boundary. |
 | Hint | Records a starting point for forward discovery of manifests and WAL. |
 | Pin record | Retains one manifest for a user, snapshot, or fork. |
@@ -73,7 +73,7 @@ User checkpoints and snapshots use the same pin representation with different ow
 | --- | --- |
 | Flush | Materializes the WAL tail into segments and publishes the next manifest. |
 | Compaction | Merges selected runs and applies eligible row-retention rules while preserving retained views. |
-| Retention advance | Explicitly advances sequence and WAL floors after verifying the materialized basis. |
+| Retention advance | Explicitly advances the sequence floor after verifying the materialized basis. |
 | Garbage collection | Completes one pass over eligible objects using fresh roots and an in-memory live set. |
 
 A file deletion records a recoverable subtree tombstone. A namespace deletion publishes terminal deleted status in its next manifest. Neither immediately removes shared content.

@@ -97,8 +97,6 @@ pub(crate) async fn publish_manifest<S: ObjectStore + ?Sized>(
         }
         if manifest.envelope().payload().last_folded_wal_no
             < current.envelope.payload().last_folded_wal_no
-            || manifest.envelope().payload().retention_floor_wal_no
-                < current.envelope.payload().retention_floor_wal_no
         {
             return Err(CoreError::NamespaceCorrupt(
                 "manifest lowers a WAL counter".to_owned(),

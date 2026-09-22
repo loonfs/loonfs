@@ -106,7 +106,7 @@ Moves, deletes, and undeletes do not publish new content revisions in those even
 
 The default build budget is 256 files or 64 MiB per step. Build batches are bounded, but the total cost of backfilling a namespace still depends on the eligible corpus. Failed attempts or a restarted backfill can read content again.
 
-The index does not prevent the namespace's WAL retention floor from advancing. If incremental history required by the worker has been removed, the worker rebuilds from a new checkpoint.
+The index does not prevent the namespace's retention floor from advancing. If incremental history required by the worker has been removed, the worker rebuilds from a new checkpoint.
 
 ## Maintenance scheduling
 

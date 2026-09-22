@@ -447,9 +447,7 @@ async fn retention_floor_advancement_preserves_writer_identity() {
         .head;
 
     assert_eq!(read_floor_seq(&store, &namespace_id).await, ChangeSeq(1));
-    let mut expected = before;
-    expected.retention_floor_wal_no = expected.last_folded_wal_no;
-    assert_eq!(after, expected);
+    assert_eq!(after, before);
 }
 
 /// Reads the files one checkpoint pins, or the error that says it no longer

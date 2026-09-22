@@ -81,12 +81,6 @@ pub(super) fn validate_manifest_materialization_ranges(
         });
     }
 
-    if payload.retention_floor_wal_no > payload.last_folded_wal_no {
-        return Err(ManifestLoadError::RunManifestMismatch {
-            object_key: object_key.to_owned(),
-            message: "WAL retention floor is beyond the folded number".to_owned(),
-        });
-    }
     if payload.runs.is_empty() {
         if payload.status.is_deleted()
             || (payload.head_seq == ChangeSeq(0)

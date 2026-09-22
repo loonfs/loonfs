@@ -70,7 +70,6 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
         fork_basis: Some(fork_basis),
         manifest_no: loonfs_api::ManifestNo(1),
         retention_floor_seq: fork_seq,
-        retention_floor_wal_no: loonfs_api::WalNo(0),
         last_folded_wal_no: loonfs_api::WalNo(0),
         writer_epoch: WriterEpoch(0),
         writer: None,
