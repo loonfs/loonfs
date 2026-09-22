@@ -362,7 +362,7 @@ too. Embedded hosts set the same limits with `FsWriterBuilder::publication_limit
 Hosted servers use the `[inline_content]` table with the settings below. Inline
 writes are enabled by default at a 64 KiB threshold. Set
 `inline_content_threshold_bytes = false` to disable them. Capability discovery
-advertises `filesystem.commits.inline_content` and `commit.max_inline_content_bytes`
+advertises `filesystem.commits.inline_content` and `commit.max_inline_content_bytes_per_operation`
 by default and omits both when disabled.
 
 Embedded hosts configure inline writes with `FsWriterBuilder::inline_content`

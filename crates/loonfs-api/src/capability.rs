@@ -73,30 +73,34 @@ macro_rules! limit_keys {
 }
 
 limit_keys! {
-    /// Advisory limit: the largest request body accepted for service-proxied
-    /// upload content requests. This is the proxy's cap, not the provider's.
-    LIMIT_UPLOAD_MAX_CONTENT_BYTES = "upload.max_content_bytes";
+    /// Advisory limit: the largest request body accepted by one service-proxied
+    /// upload content request. This is the proxy's cap, not the provider's, and not a
+    /// maximum file size.
+    LIMIT_UPLOAD_SERVICE_PROXIED_MAX_CONTENT_BYTES = "upload.service_proxied.max_content_bytes";
     /// Advisory limit: the largest object this deployment's provider accepts in
     /// one presigned `direct_put` request.
     ///
-    /// Unrelated to [`LIMIT_UPLOAD_MAX_CONTENT_BYTES`], which bounds what the
-    /// service will buffer on a client's behalf. This one is the provider's own
+    /// Unrelated to [`LIMIT_UPLOAD_SERVICE_PROXIED_MAX_CONTENT_BYTES`],
+    /// which bounds what the service will proxy on a client's behalf. This one is
+    /// the provider's own
     /// single-request ceiling, and it is typically far larger; a claim above it
     /// answers `content_too_large` at begin rather than being signed into a
     /// write the provider would reject.
-    LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES = "upload.direct_put_max_content_bytes";
+    LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES = "upload.direct_put.max_content_bytes";
     /// Advisory limit: the largest JSON body accepted when completing an upload.
     /// It is large enough for the maximum number of multipart entries.
-    LIMIT_UPLOAD_COMPLETION_MAX_BODY_BYTES = "upload.completion_max_body_bytes";
-    /// Advisory limit: the largest file content a service-proxied read will
-    /// buffer and return in one response.
-    LIMIT_DOWNLOAD_MAX_CONTENT_BYTES = "download.max_content_bytes";
-    /// Advisory limit: how many service-proxied upload bodies the deployment
-    /// buffers at once; requests past the cap answer `server_busy`.
-    LIMIT_UPLOAD_MAX_CONCURRENT = "upload.max_concurrent";
-    /// Advisory limit: how many service-proxied content reads the deployment
-    /// materializes at once; requests past the cap answer `server_busy`.
-    LIMIT_DOWNLOAD_MAX_CONCURRENT = "download.max_concurrent";
+    LIMIT_UPLOAD_COMPLETE_MAX_REQUEST_BODY_BYTES = "upload.complete.max_request_body_bytes";
+    /// Advisory limit: the largest file content one service-proxied read will stream.
+    /// The check is against the whole file, so a larger file needs a download grant.
+    LIMIT_DOWNLOAD_SERVICE_PROXIED_MAX_CONTENT_BYTES = "download.service_proxied.max_content_bytes";
+    /// Advisory limit: how many service-proxied upload requests a serving process
+    /// streams at once. The cap is shared by all callers and is not a per-caller
+    /// allowance; requests past it answer `server_busy`.
+    LIMIT_UPLOAD_SERVICE_PROXIED_MAX_CONCURRENT_REQUESTS = "upload.service_proxied.max_concurrent_requests";
+    /// Advisory limit: how many service-proxied content reads a serving process
+    /// streams at once. The cap is shared by all callers and is not a per-caller
+    /// allowance; requests past it answer `server_busy`.
+    LIMIT_DOWNLOAD_SERVICE_PROXIED_MAX_CONCURRENT_REQUESTS = "download.service_proxied.max_concurrent_requests";
     /// Advisory limit: the largest snapshot TTL one request may ask for.
     LIMIT_SNAPSHOT_MAX_TTL_MS = "snapshot.max_ttl_ms";
     /// Advisory limit: the largest snapshot expiry measured from record creation.
@@ -106,10 +110,14 @@ limit_keys! {
     /// Advisory limit: the most path operations one commit may carry; a longer
     /// list answers `invalid_request` before planning.
     LIMIT_COMMIT_MAX_OPERATIONS = "commit.max_operations";
-    /// Largest inline value accepted on a commit operation.
-    LIMIT_COMMIT_MAX_INLINE_CONTENT_BYTES = "commit.max_inline_content_bytes";
-    /// Most principal ids one request may act as.
-    LIMIT_ACCESS_MAX_PRINCIPALS = "access.max_principals";
+    /// Advisory limit: the largest `inline_content` value on one commit operation,
+    /// measured before base64 encoding.
+    LIMIT_COMMIT_MAX_INLINE_CONTENT_BYTES_PER_OPERATION = "commit.max_inline_content_bytes_per_operation";
+    /// Advisory limit: the largest JSON body accepted on a commit request,
+    /// base64 inline content included.
+    LIMIT_COMMIT_MAX_REQUEST_BODY_BYTES = "commit.max_request_body_bytes";
+    /// Advisory limit: the most principal ids one request may act as.
+    LIMIT_ACCESS_MAX_PRINCIPALS_PER_REQUEST = "access.max_principals_per_request";
     /// Counts precondition entries, not resources; a longer list answers
     /// `invalid_request` before planning.
     LIMIT_COMMIT_MAX_PRECONDITIONS = "commit.max_preconditions";

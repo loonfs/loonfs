@@ -6192,7 +6192,7 @@
                 }
               }
             },
-            "description": "Content exceeds the advertised `download.max_content_bytes` limit"
+            "description": "Content exceeds the advertised `download.service_proxied.max_content_bytes` limit"
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
@@ -6212,7 +6212,7 @@
     },
     "/v0/namespaces/{namespace_id}/filesystem/downloads": {
       "post": {
-        "description": "Authorizes one direct read of a file's content object and returns a short-lived presigned GET capability, the resolved revision, and the content reference the client checks the arriving bytes against. `Range` is outside the signature, so one grant serves ranged, resumed, and parallel reads. Deployments that cannot presign answer 501 `not_supported`; the proxied `GET /filesystem/content` route stays available and is capped by `download.max_content_bytes`.",
+        "description": "Authorizes one direct read of a file's content object and returns a short-lived presigned GET capability, the resolved revision, and the content reference the client checks the arriving bytes against. `Range` is outside the signature, so one grant serves ranged, resumed, and parallel reads. Deployments that cannot presign answer 501 `not_supported`; the proxied `GET /filesystem/content` route stays available and is capped by `download.service_proxied.max_content_bytes`.",
         "operationId": "create_download",
         "parameters": [
           {
@@ -7567,7 +7567,7 @@
                 }
               }
             },
-            "description": "Content exceeds the advertised `download.max_content_bytes` limit"
+            "description": "Content exceeds the advertised `download.service_proxied.max_content_bytes` limit"
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
@@ -8500,7 +8500,7 @@
                 }
               }
             },
-            "description": "Completion body exceeds the advertised `upload.completion_max_body_bytes` limit"
+            "description": "Completion body exceeds the advertised `upload.complete.max_request_body_bytes` limit"
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
@@ -8626,7 +8626,7 @@
                 }
               }
             },
-            "description": "Body exceeds the advertised `upload.max_content_bytes` limit"
+            "description": "Body exceeds the advertised `upload.service_proxied.max_content_bytes` limit"
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"

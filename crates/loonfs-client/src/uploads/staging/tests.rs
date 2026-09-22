@@ -179,7 +179,10 @@ fn capabilities_for(advertised: Advertised) -> Outcome {
     }
     let mut limits = std::collections::BTreeMap::new();
     if let Some(cap) = advertised.proxy_max_bytes {
-        limits.insert(LIMIT_UPLOAD_MAX_CONTENT_BYTES.to_owned(), cap);
+        limits.insert(
+            LIMIT_UPLOAD_SERVICE_PROXIED_MAX_CONTENT_BYTES.to_owned(),
+            cap,
+        );
     }
     if let Some(cap) = advertised.direct_put_max_bytes {
         limits.insert(LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES.to_owned(), cap);
@@ -1123,7 +1126,7 @@ fn inline_capabilities() -> Outcome {
         api_groups: vec![API_GROUP_FILESYSTEM_V0.to_owned()],
         features: [(loonfs_api::FEATURE_COMMIT_INLINE_CONTENT.to_owned(), true)].into(),
         limits: [(
-            loonfs_api::LIMIT_COMMIT_MAX_INLINE_CONTENT_BYTES.to_owned(),
+            loonfs_api::LIMIT_COMMIT_MAX_INLINE_CONTENT_BYTES_PER_OPERATION.to_owned(),
             4,
         )]
         .into(),

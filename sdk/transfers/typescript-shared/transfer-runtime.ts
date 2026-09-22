@@ -461,7 +461,7 @@ export function inlineContentLimit(capabilities: {
     features?: Record<string, boolean>;
     limits?: Record<string, number>;
 }): number | undefined {
-    const limit = capabilities.limits?.["commit.max_inline_content_bytes"];
+    const limit = capabilities.limits?.["commit.max_inline_content_bytes_per_operation"];
     if (
         !capabilities.features?.["filesystem.commits.inline_content"] ||
         limit === undefined ||

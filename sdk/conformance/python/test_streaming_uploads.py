@@ -70,13 +70,13 @@ def test_streaming_uploads(fixture):
                     "filesystem.uploads.direct_put": mode == "direct_put",
                     "filesystem.uploads.direct_multipart": mode == "direct_multipart",
                 },
-                "limits": {"upload.max_content_bytes": 0}
+                "limits": {"upload.service_proxied.max_content_bytes": 0}
                 if mode == "direct_put"
                 else {},
             }
             if "inline_limit" in fixture:
                 value["features"]["filesystem.commits.inline_content"] = True
-                value["limits"]["commit.max_inline_content_bytes"] = fixture["inline_limit"]
+                value["limits"]["commit.max_inline_content_bytes_per_operation"] = fixture["inline_limit"]
         elif path.endswith("/uploads"):
             assert json.loads(request.content)["mode"] == mode
             value = {

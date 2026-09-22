@@ -18,7 +18,7 @@ def test_prepare_small_file_from_capabilities(asynchronous):
                 "protocol_version": "v0",
                 "api_groups": ["filesystem/v0"],
                 "features": {"filesystem.commits.inline_content": True},
-                "limits": {"commit.max_inline_content_bytes": 65536},
+                "limits": {"commit.max_inline_content_bytes_per_operation": 65536},
             },
         )
 

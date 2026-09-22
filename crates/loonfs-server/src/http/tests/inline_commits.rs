@@ -3,7 +3,8 @@
 use super::*;
 use loonfs_api::v0::FilesystemChange;
 use loonfs_api::{
-    Commit, ContentRef, FEATURE_COMMIT_INLINE_CONTENT, LIMIT_COMMIT_MAX_INLINE_CONTENT_BYTES,
+    Commit, ContentRef, FEATURE_COMMIT_INLINE_CONTENT,
+    LIMIT_COMMIT_MAX_INLINE_CONTENT_BYTES_PER_OPERATION,
 };
 use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
 use loonfs_test_support::stores::{RecordedOperation, RecordingStore};
@@ -163,7 +164,7 @@ async fn default_inline_commits_write_only_wal_and_replay_by_bytes() {
     assert_eq!(
         capabilities
             .limits
-            .get(LIMIT_COMMIT_MAX_INLINE_CONTENT_BYTES),
+            .get(LIMIT_COMMIT_MAX_INLINE_CONTENT_BYTES_PER_OPERATION),
         Some(&(64 * 1024))
     );
     let request = inline_request("small", "/file", "c2FtZQ==");
@@ -268,7 +269,7 @@ async fn inline_sources_and_capabilities_follow_the_policy_before_any_write() {
         assert_eq!(
             capabilities
                 .limits
-                .get(LIMIT_COMMIT_MAX_INLINE_CONTENT_BYTES)
+                .get(LIMIT_COMMIT_MAX_INLINE_CONTENT_BYTES_PER_OPERATION)
                 .copied(),
             threshold.map(|limit| limit as u64)
         );

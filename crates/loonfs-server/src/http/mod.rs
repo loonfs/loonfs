@@ -39,7 +39,7 @@ use self::error::{ApiResponseError, ServedErrorCode};
 use self::extractors::{
     acquire_download_permit, authorize, AppJson, AppPath, AppQuery, NamespaceIdPath, NoQuery,
     OptionalAppJson, UploadBodyBytes, UploadBodyStream, UploadControlJson,
-    MAX_COMPLETION_BODY_BYTES, MAX_UPLOAD_CONTROL_BODY_BYTES,
+    MAX_COMPLETION_BODY_BYTES, MAX_JSON_BODY_BYTES, MAX_UPLOAD_CONTROL_BODY_BYTES,
 };
 use self::handlers_downloads::{create_download, create_download_by_inode};
 use self::handlers_filesystem::{
@@ -363,7 +363,7 @@ fn router(state: AppState, surface: RouterSurface) -> Router {
             // No body-limit layer: the upload route never buffers its
             // body, so a framework limit measured against a buffered read
             // would never fire. `UploadBodyStream` counts the bytes as it
-            // forwards them and enforces `upload.max_content_bytes` itself.
+            // forwards them and enforces `upload.service_proxied.max_content_bytes` itself.
             put(put_upload_content),
         )
         .route(

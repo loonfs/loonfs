@@ -7,7 +7,7 @@ use crate::transport::test_transport::{self, Outcome};
 use loonfs_api::v0::ObjectTransferAccess;
 use loonfs_api::{
     CapabilityDocument, ContentId, ContentRef, API_GROUP_FILESYSTEM_V0,
-    LIMIT_DOWNLOAD_MAX_CONTENT_BYTES, PROTOCOL_VERSION,
+    LIMIT_DOWNLOAD_SERVICE_PROXIED_MAX_CONTENT_BYTES, PROTOCOL_VERSION,
 };
 use std::collections::BTreeMap;
 
@@ -32,7 +32,12 @@ fn capabilities(direct_get: bool, proxy_cap_bytes: Option<u64>) -> Outcome {
         api_groups: vec![API_GROUP_FILESYSTEM_V0.to_owned()],
         features: BTreeMap::from([(FEATURE_DOWNLOADS_DIRECT_GET.to_owned(), direct_get)]),
         limits: proxy_cap_bytes
-            .map(|cap| BTreeMap::from([(LIMIT_DOWNLOAD_MAX_CONTENT_BYTES.to_owned(), cap)]))
+            .map(|cap| {
+                BTreeMap::from([(
+                    LIMIT_DOWNLOAD_SERVICE_PROXIED_MAX_CONTENT_BYTES.to_owned(),
+                    cap,
+                )])
+            })
             .unwrap_or_default(),
     };
     Outcome::Success(serde_json::to_vec(&document).expect("serialize capability document"))

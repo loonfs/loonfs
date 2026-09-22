@@ -61,7 +61,7 @@ calculates that checksum while uploading and sends it at completion. AWS S3
 and R2 use CRC-64/NVME; GCS uses CRC-32C.
 
 The capability document also returns the provider's single-request limit as
-`upload.direct_put_max_content_bytes`. The current limits are 5 GiB for AWS
+`upload.direct_put.max_content_bytes`. The current limits are 5 GiB for AWS
 S3, 5 MiB less for R2, and 5 TiB for GCS.[^1]
 
 Every provider that supports direct writes also supports direct reads. This

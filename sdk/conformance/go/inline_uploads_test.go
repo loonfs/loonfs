@@ -56,7 +56,7 @@ func TestInlinePreparationAndRetry(t *testing.T) {
 						t.Fatal(err)
 					}
 				}
-				limits["commit.max_inline_content_bytes"] = limit
+				limits["commit.max_inline_content_bytes_per_operation"] = limit
 			}
 			feature := fixture.Feature == nil || *fixture.Feature
 			session := map[string]any{"namespace_id": "demo", "upload_id": "upl_test", "mode": "service_proxied"}
@@ -189,7 +189,7 @@ func TestInlinePeekCancellation(t *testing.T) {
 		if r.URL.Path != "/v0/capabilities" {
 			t.Error("mutation started during cancelled peek")
 		}
-		fmt.Fprint(w, `{"protocol_version":"v0","api_groups":[],"features":{"filesystem.commits.inline_content":true},"limits":{"commit.max_inline_content_bytes":65536}}`)
+		fmt.Fprint(w, `{"protocol_version":"v0","api_groups":[],"features":{"filesystem.commits.inline_content":true},"limits":{"commit.max_inline_content_bytes_per_operation":65536}}`)
 	}))
 	defer endpoint.Close()
 	client := server.NewClient(option.WithBaseURL(endpoint.URL))

@@ -19,7 +19,7 @@ const RUNNER_SKIP = "run scripts/run-sdk-conformance.sh typescript";
 const CRC64_NVME_POLYNOMIAL = 0x9a6c9329ac4bc9b5n;
 const CRC64_MASK = 0xffffffffffffffffn;
 const BROWSER_MULTIPART_MIN_BYTES = 8 * 1024 * 1024;
-const PROXY_UPLOAD_MAX_BYTES = "upload.max_content_bytes";
+const PROXY_UPLOAD_MAX_BYTES = "upload.service_proxied.max_content_bytes";
 const CASE_FIELDS = ["expected", "intent", "name", "request"];
 const EXPECTED_CASES = [
     "changes",
@@ -2307,7 +2307,7 @@ test("proxy", { skip: environmentSkip }, async (context) => {
     const proxyUploadMaxBytes = capabilities.limits?.[PROXY_UPLOAD_MAX_BYTES];
     assert.ok(proxyUploadMaxBytes !== undefined, "browser proxy upload limit is not advertised");
     assert.ok(Number.isSafeInteger(proxyUploadMaxBytes) && proxyUploadMaxBytes >= 0);
-    const inlineMaxBytes = capabilities.limits?.["commit.max_inline_content_bytes"] ?? 0;
+    const inlineMaxBytes = capabilities.limits?.["commit.max_inline_content_bytes_per_operation"] ?? 0;
     const directPutLength = Math.max(proxyUploadMaxBytes, inlineMaxBytes) + 1;
     assert.ok(directPutLength < BROWSER_MULTIPART_MIN_BYTES);
     const directPutBytes = bytePattern({ length: directPutLength, modulus: 251 });
