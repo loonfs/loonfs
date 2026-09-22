@@ -3,6 +3,7 @@ package files
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"hash"
@@ -51,9 +52,9 @@ func (c *Client) UploadStream(ctx context.Context, in StreamUploadInput, opts ..
 	}, opts...)
 }
 
-// PrepareStream stages a source once with bounded memory and no payload
+// PrepareStream retains small content inline or stages it once, with no payload
 // retries. Retain its result for UploadPrepared publication retries.
-func (c *Client) PrepareStream(ctx context.Context, namespaceID loonfs.NamespaceID, source io.Reader, sizeBytes *int64) (*PreparedContent, error) {
+func (c *Client) PrepareStream(ctx context.Context, namespaceID loonfs.NamespaceID, source io.Reader, sizeBytes *int64) (PreparedFile, error) {
 	if c == nil {
 		return nil, fmt.Errorf("transfers: client is nil")
 	}
@@ -95,6 +96,22 @@ func (c *Client) PrepareStream(ctx context.Context, namespaceID loonfs.Namespace
 		} else {
 			source = io.MultiReader(bytes.NewReader(first[:n]), source)
 		}
+	}
+	if limit, ok := capabilities.Limits["commit.max_inline_content_bytes"]; ok && limit >= 0 && capabilities.Features["filesystem.commits.inline_content"] {
+		// Bound lookahead even if a deployment advertises a larger inline budget.
+		if limit > maxInlineBytes {
+			limit = maxInlineBytes
+		}
+		reader := &uploadReader{ctx: ctx, source: source, expected: sizeBytes}
+		prefix, err := io.ReadAll(io.LimitReader(reader, limit+1))
+		if err != nil {
+			return nil, err
+		}
+		if int64(len(prefix)) <= limit {
+			return &InlinePreparedContent{content: base64.StdEncoding.EncodeToString(prefix)}, nil
+		}
+		// Preserve one-pass sources and the exact prefix when falling back to staging.
+		source = io.MultiReader(bytes.NewReader(prefix), source)
 	}
 	var request *loonfs.CreateUploadRequest
 	if sizeBytes != nil {

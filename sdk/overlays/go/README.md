@@ -68,7 +68,16 @@ requests carry only the presigned headers, and do not follow redirects.
 accepts an in-memory byte slice through the same transfer path.
 `client.Files.PrepareStream(ctx, namespaceID, reader, sizeBytes)` consumes an
 `io.Reader` once and returns prepared content for publication retries. Pass nil
-for an unknown size; multipart retains one provider-sized part.
+for an unknown size. Small sources are prepared inline when advertised, up to the
+smaller of the server limit and 64 KiB. Lookahead consumes at most that limit plus
+one byte and preserves the prefix when continuing through an upload. Larger
+unknown-size sources use multipart, retaining one provider-sized part plus the
+lookahead prefix.
+
+Preparation returns `files.PreparedFile`, either `*files.InlinePreparedContent`
+(immutable bytes with no upload or expiry) or the existing `*files.PreparedContent`
+(uploaded reference and token). Pass either to `UploadPrepared`. Use a type switch
+before inspecting staged fields; existing staged struct literals remain supported.
 `client.Files.UploadStream(ctx, files.StreamUploadInput{...})` prepares and
 publishes in one operation. The context covers metadata, bytes and publication;
 source and payload failures abort without replaying bytes. The caller owns and
@@ -117,12 +126,14 @@ status alone. It never retries operations that LoonFS marks `not_idempotent`.
 Use `option.WithMaxAttempts` to tune the attempt count.
 
 For publication retries, call `client.Files.Prepare(ctx, namespaceID,
-payload)` once and retain the returned `*files.PreparedContent`. Publish it
+payload)` once and retain the returned `files.PreparedFile`. Publish it
 with `client.Files.UploadPrepared(ctx, files.PreparedUploadInput{...})`, keeping
 the prepared content, commit ID, path, actor, and options identical on every
 attempt. Preparation does not create a visible file or extend the upload
-lifetime. Calling `Upload` again starts a fresh upload and cannot replay a
-previously committed ID.
+lifetime. Calling `Upload` again prepares the source again: it may create a fresh
+upload or select a different representation if capabilities changed. Retain the
+prepared value for retries, including inline content, and never switch
+representations after a failed or uncertain commit.
 
 ## Generated code
 

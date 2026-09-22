@@ -7,7 +7,7 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { test } from "node:test";
 
-import { LoonFS, LoonFSClient, type PreparedContent } from "../../../generated/typescript/index.js";
+import { LoonFS, LoonFSClient, type PreparedFile } from "../../../generated/typescript/index.js";
 import {
     LoonFS as BrowserLoonFS,
     LoonFSClient as BrowserLoonFSClient,
@@ -1276,8 +1276,8 @@ conformanceTest("commit_replay", async (activeHarness, testCase) => {
         (error: unknown) =>
             error instanceof LoonFS.ConflictError && error.body.code === "commit_id_reuse_conflict",
     );
-    const prepared: PreparedContent = await activeHarness.client.files.prepareStream({
-        namespace_id: request.namespace_id, content: new Blob(["original bytes"]),
+    const prepared: PreparedFile = await activeHarness.client.files.prepareStream({
+        namespace_id: request.namespace_id, content: new Blob(["original bytes".repeat(6000)]),
     });
     const input = {
         namespace_id: request.namespace_id,
@@ -1320,7 +1320,7 @@ conformanceTest("commit_replay", async (activeHarness, testCase) => {
     }
     const fresh = await activeHarness.client.files.prepare({
         namespace_id: request.namespace_id,
-        content: new TextEncoder().encode("original bytes"),
+        content: new TextEncoder().encode("original bytes".repeat(6000)),
     });
     await assert.rejects(
         activeHarness.client.files.uploadPrepared(
@@ -2299,15 +2299,16 @@ test("proxy", { skip: environmentSkip }, async (context) => {
         browserPath,
         payload,
         `${request.commit_ids.proxied}-browser`,
-        "browser service-proxied transfer",
+        "browser inline transfer",
     );
-    assert.deepEqual(beginModes, ["service_proxied"]);
+    assert.deepEqual(beginModes, []);
 
     const capabilities = await browserClient.capabilities.retrieve();
     const proxyUploadMaxBytes = capabilities.limits?.[PROXY_UPLOAD_MAX_BYTES];
     assert.ok(proxyUploadMaxBytes !== undefined, "browser proxy upload limit is not advertised");
     assert.ok(Number.isSafeInteger(proxyUploadMaxBytes) && proxyUploadMaxBytes >= 0);
-    const directPutLength = proxyUploadMaxBytes + 1;
+    const inlineMaxBytes = capabilities.limits?.["commit.max_inline_content_bytes"] ?? 0;
+    const directPutLength = Math.max(proxyUploadMaxBytes, inlineMaxBytes) + 1;
     assert.ok(directPutLength < BROWSER_MULTIPART_MIN_BYTES);
     const directPutBytes = bytePattern({ length: directPutLength, modulus: 251 });
     await assertBrowserTransfer(
@@ -2318,7 +2319,7 @@ test("proxy", { skip: environmentSkip }, async (context) => {
         `${request.commit_ids.direct}-browser`,
         "browser direct-PUT transfer",
     );
-    assert.deepEqual(beginModes, ["service_proxied", "direct_put"]);
+    assert.deepEqual(beginModes, ["direct_put"]);
 
     const multipartBytes = bytePattern({
         length: BROWSER_MULTIPART_MIN_BYTES + 1,
@@ -2332,7 +2333,7 @@ test("proxy", { skip: environmentSkip }, async (context) => {
         `${request.commit_ids.direct}-browser-multipart`,
         "browser multipart transfer",
     );
-    assert.deepEqual(beginModes, ["service_proxied", "direct_put", "direct_multipart"]);
+    assert.deepEqual(beginModes, ["direct_put", "direct_multipart"]);
 
     const prepared = await browserClient.files.prepareStream({
         namespace_alias: request.namespace_alias,

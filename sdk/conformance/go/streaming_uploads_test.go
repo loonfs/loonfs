@@ -16,15 +16,17 @@ import (
 	"time"
 
 	loonfs "github.com/loonfs/loonfs-sdk-go"
+	"github.com/loonfs/loonfs-sdk-go/files"
 	"github.com/loonfs/loonfs-sdk-go/option"
 	"github.com/loonfs/loonfs-sdk-go/server"
 )
 
 type uploadCase struct {
 	streamCase
-	Mode  string `json:"mode"`
-	Size  *int64 `json:"size"`
-	Fault string `json:"fault"`
+	Mode        string `json:"mode"`
+	Size        *int64 `json:"size"`
+	Fault       string `json:"fault"`
+	InlineLimit *int   `json:"inline_limit"`
 }
 type uploadSource struct {
 	reader   *strings.Reader
@@ -86,7 +88,10 @@ func TestStreamingUploads(t *testing.T) {
 					if fixture.Mode == "direct_put" {
 						limits["upload.max_content_bytes"] = 0
 					}
-					value = map[string]any{"protocol_version": "v0", "api_groups": []string{"filesystem/v0"}, "features": map[string]bool{"filesystem.uploads.direct_put": fixture.Mode == "direct_put", "filesystem.uploads.direct_multipart": fixture.Mode == "direct_multipart"}, "limits": limits}
+					if fixture.InlineLimit != nil {
+						limits["commit.max_inline_content_bytes"] = *fixture.InlineLimit
+					}
+					value = map[string]any{"protocol_version": "v0", "api_groups": []string{"filesystem/v0"}, "features": map[string]bool{"filesystem.commits.inline_content": fixture.InlineLimit != nil, "filesystem.uploads.direct_put": fixture.Mode == "direct_put", "filesystem.uploads.direct_multipart": fixture.Mode == "direct_multipart"}, "limits": limits}
 				case strings.HasSuffix(path, "/uploads"):
 					var body struct {
 						Mode string `json:"mode"`
@@ -198,7 +203,8 @@ func TestStreamingUploads(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if prepared.ContentToken.Token != "retained-token" || bodies.String() != fixture.Content {
+				staged, ok := prepared.(*files.PreparedContent)
+				if !ok || staged.ContentToken.Token != "retained-token" || bodies.String() != fixture.Content {
 					t.Error("wrong prepared result or bytes")
 				}
 				if complete.Load() != 1 || abort.Load() != 0 {

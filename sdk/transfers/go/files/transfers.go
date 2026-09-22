@@ -20,6 +20,7 @@ import (
 )
 
 const (
+	maxInlineBytes        = 64 * 1024
 	multipartMinimumBytes = 8 * 1024 * 1024
 
 	featureDirectGet           = "filesystem.downloads.direct_get"
@@ -62,11 +63,26 @@ type PreparedContent struct {
 	ContentToken *loonfs.ContentToken
 }
 
+// PreparedFile retains the original content representation for publication retries.
+// It is either *PreparedContent (an uploaded reference) or *InlinePreparedContent.
+type PreparedFile interface {
+	preparedFile()
+}
+
+func (*PreparedContent) preparedFile() {}
+
+// InlinePreparedContent retains immutable base64 bytes, without an upload or expiry.
+type InlinePreparedContent struct {
+	content string
+}
+
+func (*InlinePreparedContent) preparedFile() {}
+
 // PreparedUploadInput publishes completed content without uploading again.
 type PreparedUploadInput struct {
 	NamespaceID        loonfs.NamespaceID
 	Path               loonfs.AbsolutePath
-	Prepared           *PreparedContent
+	Prepared           PreparedFile
 	CommitID           loonfs.CommitID
 	Message            *string
 	Behavior           loonfs.DestinationBehavior
@@ -102,7 +118,7 @@ func (c *Client) Upload(ctx context.Context, in UploadInput, opts ...core.Reques
 	}, opts...)
 }
 
-func (c *Client) Prepare(ctx context.Context, namespaceID loonfs.NamespaceID, content []byte) (*PreparedContent, error) {
+func (c *Client) Prepare(ctx context.Context, namespaceID loonfs.NamespaceID, content []byte) (PreparedFile, error) {
 	size := int64(len(content))
 	return c.PrepareStream(ctx, namespaceID, bytes.NewReader(content), &size)
 }
@@ -115,17 +131,30 @@ func (c *Client) UploadPrepared(ctx context.Context, in PreparedUploadInput, opt
 	if err != nil {
 		return nil, err
 	}
-	if in.Prepared == nil || in.Prepared.ContentRef == nil {
+	var contentRef *loonfs.ContentRef
+	var inlineContent *string
+	var contentTokens []*loonfs.ContentToken
+	switch prepared := in.Prepared.(type) {
+	case *InlinePreparedContent:
+		if prepared == nil {
+			return nil, fmt.Errorf("transfers: prepared content is required")
+		}
+		inlineContent = &prepared.content
+	case *PreparedContent:
+		if prepared == nil || prepared.ContentRef == nil {
+			return nil, fmt.Errorf("transfers: prepared content is required")
+		}
+		contentRef = prepared.ContentRef
+		if prepared.ContentToken != nil {
+			contentTokens = []*loonfs.ContentToken{prepared.ContentToken}
+		}
+	default:
 		return nil, fmt.Errorf("transfers: prepared content is required")
 	}
 	commitsClient := commits.NewClient(c.options)
 	behavior := in.Behavior
 	if behavior == "" {
 		behavior = loonfs.DestinationBehaviorNoReplace
-	}
-	contentTokens := []*loonfs.ContentToken(nil)
-	if in.Prepared.ContentToken != nil {
-		contentTokens = []*loonfs.ContentToken{in.Prepared.ContentToken}
 	}
 	committed, err := commitsClient.Create(ctx, &loonfs.CommitRequest{
 		NamespaceID:   string(in.NamespaceID),
@@ -136,7 +165,8 @@ func (c *Client) UploadPrepared(ctx context.Context, in PreparedUploadInput, opt
 			{
 				PutFile: &loonfs.FilesystemOperationPutFile{
 					Behavior:           &behavior,
-					ContentRef:         in.Prepared.ContentRef,
+					ContentRef:         contentRef,
+					InlineContent:      inlineContent,
 					ExpectedInodeID:    in.ExpectedInodeID,
 					ExpectedRevisionNo: in.ExpectedRevisionNo,
 					Path:               in.Path,

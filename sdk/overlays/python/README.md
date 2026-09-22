@@ -63,11 +63,21 @@ with open("large.bin", "rb") as source:
 ```
 
 Pass `size_bytes` when known to validate the source and choose the usual transport.
-Unknown nonempty sources use multipart when available; memory is bounded by a
-provider-sized part. `upload_stream` prepares and publishes in one operation.
+Small files and streams are prepared inline when advertised, up to the smaller
+of the server limit and 64 KiB. Preparation reads at most that limit plus one byte
+before deciding; it preserves the prefix when continuing through an upload.
+Larger unknown-size sources use multipart when available; memory is bounded by a
+provider-sized part plus the lookahead prefix. `upload_stream` prepares and
+publishes in one operation.
 The HTTP I/O timeout applies to both transports. Source and payload failures abort
 without replaying bytes. The caller owns the source and must interrupt any
 blocking source read; an HTTP timeout cannot interrupt arbitrary Python code.
+
+Preparation returns `PreparedFile`: either `InlinePreparedContent` (immutable
+bytes, no upload or expiry) or the existing `PreparedContent` (uploaded reference
+and token). Pass either to `upload_prepared`. If inspecting `content_ref` or
+`content_token`, first check `isinstance(prepared, PreparedContent)`; those fields
+exist only after an upload. Existing staged constructors remain supported.
 
 `AsyncLoonFS` provides the same generated API and `files` helpers for async applications.
 
@@ -107,12 +117,14 @@ marks `not_idempotent`. Use the `max_retries` client or request option to
 tune the retry count.
 
 For publication retries, call `client.files.prepare(namespace_id,
-content=payload)` once and retain its `PreparedContent`. Pass it to
+content=payload)` once and retain its `PreparedFile`. Pass it to
 `client.files.upload_prepared(namespace_id, path=path, prepared=prepared,
 commit_id=commit_id, request_options={"additional_headers": {"Loonfs-Actor": actor_id}})` on each attempt, keeping all publication
 inputs identical. Preparation does not create a visible file or extend the
-upload lifetime. Calling `upload` again starts a fresh upload and cannot replay
-a previously committed ID.
+upload lifetime. Calling `upload` again prepares the source again: it may create a
+fresh upload or select a different representation if capabilities changed. Retain the prepared
+value for retries, including inline content, and never switch representations
+after a failed or uncertain commit.
 
 ## Generated code
 

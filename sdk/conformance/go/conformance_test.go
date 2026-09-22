@@ -327,7 +327,7 @@ func runCommitReplay(t *testing.T, h *harness, testCase conformanceCase) {
 	if !errors.As(err, &preconditionConflict) || preconditionConflict.Body == nil || preconditionConflict.Body.Code != "commit_id_reuse_conflict" {
 		t.Fatalf("changed preconditions: got %v, want commit_id_reuse_conflict", err)
 	}
-	prepared, err := h.client.Files.PrepareStream(context.Background(), loonfs.NamespaceID(request.NamespaceID), strings.NewReader("original bytes"), nil)
+	prepared, err := h.client.Files.PrepareStream(context.Background(), loonfs.NamespaceID(request.NamespaceID), strings.NewReader(strings.Repeat("original bytes", 6000)), nil)
 	if err != nil {
 		t.Fatalf("prepare: %v", err)
 	}
@@ -356,7 +356,7 @@ func runCommitReplay(t *testing.T, h *harness, testCase conformanceCase) {
 	if !errors.As(err, &conflict) || conflict.Body.Code != "commit_id_reuse_conflict" {
 		t.Fatalf("changed publication: %v", err)
 	}
-	fresh, err := h.client.Files.Prepare(context.Background(), input.NamespaceID, []byte("original bytes"))
+	fresh, err := h.client.Files.Prepare(context.Background(), input.NamespaceID, []byte(strings.Repeat("original bytes", 6000)))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1,6 +1,7 @@
 /** Shared by server and browser transfers; no Node-only APIs or whole-file hashing. */
 type ChecksumAlgorithm = "sha256" | "crc32c" | "crc64nvme";
 const TRANSFER_CHUNK_BYTES = 64 * 1024;
+const MAX_INLINE_BYTES = 64 * 1024;
 
 interface TransferRequestOptions {
     timeoutInSeconds?: number;
@@ -301,11 +302,12 @@ async function withAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T
     }
 }
 
-/** One source chunk and one bounded consumer chunk; no replay or whole-source copy. */
+/** Bounded inline lookahead plus the current source chunk. */
 export class UploadSource {
     readonly expected?: number;
     private readonly iterator: AsyncIterator<Uint8Array>;
     private pending?: Uint8Array;
+    private prefix = new Uint8Array(0);
     private offset = 0;
     private closed = false;
     count = 0;
@@ -329,7 +331,27 @@ export class UploadSource {
                   : content[Symbol.asyncIterator]();
     }
 
+    /** Inspect only the inline limit plus one byte, retaining overflow for staging. */
+    async tryInline(limit: number): Promise<string | undefined> {
+        const bytes = new Uint8Array(limit + 1);
+        let length = 0;
+        while (length < bytes.length) {
+            const chunk = await this.read(bytes.length - length);
+            if (chunk === undefined) {
+                let binary = "";
+                for (const byte of bytes.subarray(0, length)) binary += String.fromCharCode(byte);
+                return btoa(binary);
+            }
+            bytes.set(chunk, length);
+            length += chunk.length;
+        }
+        this.prefix = bytes;
+        this.count = 0;
+        return undefined;
+    }
+
     async empty(): Promise<boolean> {
+        if (this.prefix.length) return false;
         await this.fill();
         return this.ended;
     }
@@ -352,13 +374,17 @@ export class UploadSource {
     }
 
     async read(maximum = TRANSFER_CHUNK_BYTES): Promise<Uint8Array | undefined> {
-        await this.fill();
-        if (this.ended) return undefined;
-        const chunk = this.pending!.subarray(
-            this.offset,
-            this.offset + Math.min(maximum, TRANSFER_CHUNK_BYTES),
-        );
-        this.offset += chunk.length;
+        this.scope.check();
+        let chunk: Uint8Array;
+        if (this.prefix.length) {
+            chunk = this.prefix.subarray(0, Math.min(maximum, TRANSFER_CHUNK_BYTES));
+            this.prefix = this.prefix.subarray(chunk.length);
+        } else {
+            await this.fill();
+            if (this.ended) return undefined;
+            chunk = this.pending!.subarray(this.offset, this.offset + Math.min(maximum, TRANSFER_CHUNK_BYTES));
+            this.offset += chunk.length;
+        }
         this.count += chunk.length;
         if (this.expected !== undefined && this.count > this.expected)
             throw new Error("source does not match declared size");
@@ -396,6 +422,7 @@ export class UploadSource {
         // must not hold up transport cancellation indefinitely.
         void this.iterator.return?.().catch(() => {});
         this.pending = undefined;
+        this.prefix = new Uint8Array(0);
     }
 }
 
@@ -427,4 +454,20 @@ export async function uploadBody(source: UploadSource): Promise<BodyInit> {
         bytes.set(chunk, offset);
         offset += chunk.length;
     }
+}
+
+/** The convenience helpers retain at most 64 KiB inline, within the server limit. */
+export function inlineContentLimit(capabilities: {
+    features?: Record<string, boolean>;
+    limits?: Record<string, number>;
+}): number | undefined {
+    const limit = capabilities.limits?.["commit.max_inline_content_bytes"];
+    if (
+        !capabilities.features?.["filesystem.commits.inline_content"] ||
+        limit === undefined ||
+        !Number.isSafeInteger(limit) ||
+        limit < 0
+    )
+        return undefined;
+    return Math.min(limit, MAX_INLINE_BYTES);
 }

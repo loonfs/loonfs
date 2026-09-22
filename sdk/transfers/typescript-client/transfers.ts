@@ -7,6 +7,7 @@ import {
     type UploadContent,
     streamingFetch,
     uploadBody,
+    inlineContentLimit,
 } from "./transfer-runtime.js";
 import { LoonFSClient as GeneratedLoonFSClient } from "./Client.js";
 import { FilesClient as GeneratedFilesClient } from "./api/resources/files/client/Client.js";
@@ -43,7 +44,7 @@ export interface PrepareStreamInput {
 }
 
 export interface PreparedUploadInput extends Omit<UploadInput, "content"> {
-    prepared: PreparedContent;
+    prepared: PreparedFile;
 }
 
 export interface DownloadInput {
@@ -70,6 +71,14 @@ export interface PreparedContent {
     readonly contentRef: LoonFS.ContentRef;
     readonly contentToken?: LoonFS.ContentToken;
 }
+
+/** Immutable base64 bytes, retained without an upload or expiry. */
+export interface InlinePreparedContent {
+    readonly inlineContent: string;
+}
+
+/** Keep the prepared representation unchanged when retrying publication. */
+export type PreparedFile = PreparedContent | InlinePreparedContent;
 
 export declare namespace LoonFSClient {
     /** The generated client options with `baseUrl` in place of `environment`. */
@@ -132,18 +141,18 @@ export class FilesClient extends GeneratedFilesClient {
     public async prepare(
         input: Pick<UploadInput, "namespace_alias" | "content">,
         requestOptions: FilesClient.RequestOptions = {},
-    ): Promise<PreparedContent> {
+    ): Promise<PreparedFile> {
         return this.prepareStream(
             { ...input, content: bytesSource(input.content), size_bytes: input.content.length },
             requestOptions,
         );
     }
 
-    /** Stage a source once with bounded memory; retain the result for publication retries. */
+    /** Prepare inline bytes or stage once; retain the result for publication retries. */
     public async prepareStream(
         input: PrepareStreamInput,
         requestOptions: FilesClient.RequestOptions = {},
-    ): Promise<PreparedContent> {
+    ): Promise<PreparedFile> {
         const scope = new TransferScope(requestOptions, this._options.timeoutInSeconds);
         let source: UploadSource | undefined;
         try {
@@ -167,15 +176,20 @@ export class FilesClient extends GeneratedFilesClient {
         input: PreparedUploadInput,
         requestOptions: FilesClient.RequestOptions = {},
     ): Promise<LoonFS.Commit> {
+        const content =
+            "inlineContent" in input.prepared
+                ? { inline_content: input.prepared.inlineContent }
+                : { content_ref: input.prepared.contentRef };
+        const token = "contentRef" in input.prepared ? input.prepared.contentToken : undefined;
         const request: LoonFS.CommitRequest = {
             namespace_alias: input.namespace_alias,
             ...this.publicationIds(input),
-            content_tokens: input.prepared.contentToken === undefined ? [] : [input.prepared.contentToken],
+            content_tokens: token === undefined ? [] : [token],
             operations: [
                 {
                     kind: "put_file",
                     path: input.path,
-                    content_ref: input.prepared.contentRef,
+                    ...content,
                     behavior: input.behavior ?? "no_replace",
                     expected_inode_id: input.expected_inode_id,
                     expected_revision_no: input.expected_revision_no,
@@ -340,9 +354,14 @@ async function stageStream(
     scope: TransferScope,
     options: FilesClient.RequestOptions,
     send: typeof fetch,
-): Promise<PreparedContent> {
+): Promise<PreparedFile> {
     scope.check();
     const capabilities = await client.capabilities.retrieve(options);
+    const limit = inlineContentLimit(capabilities);
+    if (limit !== undefined) {
+        const inlineContent = await source.tryInline(limit);
+        if (inlineContent !== undefined) return Object.freeze({ inlineContent });
+    }
     const size = source.expected ?? ((await source.empty()) ? 0 : undefined);
     const features = capabilities.features ?? {},
         limits = capabilities.limits ?? {};

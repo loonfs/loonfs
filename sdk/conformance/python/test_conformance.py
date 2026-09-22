@@ -1958,7 +1958,7 @@ def test_prepared_upload_replays_after_a_rename(harness: Harness) -> None:
     client = harness.client
     namespace_id = "conf-python-prepared"
     client.namespaces.create(namespace_id=namespace_id, request_options={"additional_headers": {"Loonfs-Actor": "conformance"}})
-    prepared = client.files.prepare_stream(namespace_id, content=io.BytesIO(b"original bytes"))
+    prepared = client.files.prepare_stream(namespace_id, content=io.BytesIO(b"original bytes" * 6000))
     assert isinstance(prepared, PreparedContent)
     inputs = dict(path="/original", prepared=prepared,
                   request_options={"additional_headers": {"Loonfs-Actor": "prepared-user"}}, commit_id="prepared-put")
@@ -1974,7 +1974,7 @@ def test_prepared_upload_replays_after_a_rename(harness: Harness) -> None:
         with pytest.raises(ConflictError) as conflict:
             client.files.upload_prepared(namespace_id, **(inputs | changed))
         assert conflict.value.body.code == "commit_id_reuse_conflict"
-    fresh = client.files.prepare(namespace_id, content=b"original bytes")
+    fresh = client.files.prepare(namespace_id, content=b"original bytes" * 6000)
     with pytest.raises(ConflictError):
         client.files.upload_prepared(namespace_id, **(inputs | dict(prepared=fresh)))
     entry = client.files.retrieve(namespace_id, path="/renamed")

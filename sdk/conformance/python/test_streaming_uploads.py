@@ -74,6 +74,9 @@ def test_streaming_uploads(fixture):
                 if mode == "direct_put"
                 else {},
             }
+            if "inline_limit" in fixture:
+                value["features"]["filesystem.commits.inline_content"] = True
+                value["limits"]["commit.max_inline_content_bytes"] = fixture["inline_limit"]
         elif path.endswith("/uploads"):
             assert json.loads(request.content)["mode"] == mode
             value = {
