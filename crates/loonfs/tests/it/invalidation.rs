@@ -561,3 +561,82 @@ async fn read_after_write_only_probes_the_next_wal_number_without_replay() {
         before_read.wal_tail_projection_cache_hits + 1
     );
 }
+
+#[tokio::test]
+async fn a_warm_reader_survives_a_recreation_inside_its_revalidation_interval() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store: SharedObjectStore =
+        Arc::new(LocalFsStore::new(temp_dir.path()).expect("create store"));
+    let namespace_id = NamespaceId::parse("recreated").expect("valid namespace id");
+
+    let writer = writer(&store, "writer").await;
+    writer
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("create namespace");
+    writer
+        .put_file_bytes(
+            &namespace_id,
+            "/old.txt",
+            b"old",
+            PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("write in the first generation");
+
+    let warm = writer_with_cache(
+        &store,
+        "warm-reader",
+        RuntimeCacheConfig {
+            manifest_revalidation_interval_ms: 60_000,
+            ..RuntimeCacheConfig::default()
+        },
+    )
+    .await;
+    let reader = warm.reader();
+    let before = reader
+        .get_path_entry(&namespace_id, "/old.txt", Default::default())
+        .await
+        .expect("warm the reader on the first generation");
+
+    writer
+        .delete_namespace(&namespace_id, DeleteNamespaceOptions::default())
+        .await
+        .expect("delete the first generation");
+    writer
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("recreate the namespace");
+    writer
+        .put_file_bytes(
+            &namespace_id,
+            "/new.txt",
+            b"new",
+            PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("write in the second generation");
+
+    // The cached head still sees the first generation's sequence, and the
+    // next WAL object now belongs to a generation whose sequences start over.
+    let after = reader
+        .get_path_entry(&namespace_id, "/new.txt", Default::default())
+        .await
+        .expect("the warm reader reloads instead of reporting corruption");
+    assert!(after.head_seq < before.head_seq || after.head_seq == loonfs_api::ChangeSeq(1));
+    let namespace = reader
+        .get_namespace(&namespace_id)
+        .await
+        .expect("namespace after recreation");
+    assert_eq!(namespace.generation, loonfs_api::NamespaceGeneration(2));
+    assert!(reader
+        .get_path_entry(&namespace_id, "/old.txt", Default::default())
+        .await
+        .is_err());
+}

@@ -141,7 +141,17 @@ pub async fn probe_namespace_wal<S: ObjectStore + ?Sized>(
     let mut projected_tail = None;
     let mut last_record = None;
     let mut walk = WalWalk::after(&context.head.namespace_id, state.wal_no, state.seq);
-    while let Some(segment) = walk.next(store).await.map_err(wal_error)? {
+    loop {
+        let segment = match walk.next(store).await {
+            Ok(Some(segment)) => segment,
+            Ok(None) => break,
+            // A segment the cached head cannot explain belongs to a manifest
+            // published after it, such as a recreated generation whose
+            // sequences start over. The fresh load is authoritative for
+            // corruption.
+            Err(WalTailLoadError::Replay { .. }) => return Ok(false),
+            Err(error) => return Err(wal_error(error)),
+        };
         if segment.envelope().payload().writer_epoch != state.writer_epoch {
             return Ok(false);
         }

@@ -39,7 +39,7 @@ This specification defines the storage layout, encodings, read and write protoco
 
 A namespace is a directory tree with its own ordered metadata history. Its `namespace_id` names a sequence of generations. Generation 1 begins when the id is first created. Creating an id whose current manifest is deleted begins the next generation. Each generation starts with an empty tree and continues the id's counters.
 
-Each namespace id starts with manifest number 1. Its current manifest records the generation, identity, content-store ID, creation time, lifecycle, and writer authority. The manifest and later WAL objects together describe the current metadata state. Creating manifest 1 with put-if-absent installs the first generation. Manifest, WAL, and sequence numbers continue across generations. Every generation after the first begins one sequence above the previous generation's tombstone.
+Each namespace id starts with manifest number 1. Its current manifest records the generation, identity, content-store ID, creation time, lifecycle, and writer authority. The manifest and later WAL objects together describe the current metadata state. Creating manifest 1 with put-if-absent installs the first generation. Manifest and WAL numbers continue across generations. Each generation starts at sequence zero with inode ID 2 available; sequences and inode IDs identify state within one generation.
 
 An item within a namespace is identified by `(namespace_id, inode_id)`. Inode IDs are integers in storage. The public API represents the same IDs as strings such as `ino_42`.
 
@@ -565,7 +565,7 @@ Each delta has a `delta_index`, and its wrapper has a `semantic_op_index` identi
 
 The change feed is ordered by logical commit, not by physical WAL object. A segment containing three commits contains three commit boundaries in the feed. Within a commit, semantic filesystem events follow request-operation order; one operation can produce several events.
 
-A consumer resuming after sequence N reads the `commits` family of the current file set and then the commits in the unfolded WAL after it. Fence objects produce no change events. If its cursor is older than the retention floor, it must bootstrap from a fresh checkpoint instead. The API's event shapes and cursor contract are specified in [the API specification][api-spec].
+A consumer resuming after sequence N reads the `commits` family of the current file set and then the commits in the unfolded WAL after it. Fence objects produce no change events. If its cursor is older than the retention floor, it must bootstrap from a fresh checkpoint instead. Sequences restart when a deleted namespace ID is recreated, so a cursor from an earlier generation is refused only while it is above the new head; a consumer that can span a recreation compares the namespace's generation. The API's event shapes and cursor contract are specified in [the API specification][api-spec].
 
 A consumer that requires permanent event history must retain its own copy before the floor advances. Use `(namespace_id, committed_seq)` for a commit's position and `inode_id` for item identity. A commit ID is useful for correlation, but is not a permanent unique event key because it can be reused after receipt reclamation.
 
@@ -725,7 +725,7 @@ Creating an id whose current manifest is a tombstone recreates it:
 1. Load the current manifest. If it is active, return `namespace_exists`, or its current summary with `allow_existing`. Otherwise it is the tombstone, and its folded WAL number is the WAL tip of the deleted generation.
 2. Write a retired pin over the tombstone with put-if-absent. An existing record at its derived id is success.
 3. Write a descriptor for a fresh content-store id with put-if-absent.
-4. Build the next manifest number with the next generation and its own number as `generation_first_manifest_no`. Set head, base, and retention floor to the tombstone head plus one. Copy the tombstone's folded WAL number. Continue the inode and run allocators. Increment both epochs. Use the request's creation time, creator, and access mode. The manifest is active, has no fork basis or writer, has no runs, carries the genesis commit id, and starts every activity counter at zero.
+4. Build the next manifest number with the next generation and its own number as `generation_first_manifest_no`. Head, base, and retention floor start at zero, and the inode and run allocators start over. Copy the tombstone's folded WAL number. Increment both epochs. Use the request's creation time, creator, and access mode. The manifest is active, has no fork basis or writer, has no runs, carries the genesis commit id, and starts every activity counter at zero.
 5. Publish the manifest after the tombstone within the metadata publication budget. Reload and retry when another manifest wins.
 6. Publication raises the hint to the new manifest and its folded WAL number. A failed hint raise does not fail creation.
 
@@ -1653,7 +1653,7 @@ namespaces/{namespace_id}/extensions/grep/
 
 The `grep_hint` version-1 JSON payload contains `namespace_id` and `manifest_no`. Enabling writes a hint naming manifest 1, then creates manifest 1 with put-if-absent. A hint collision is permitted; the manifest put decides installation. Later publications use the next contiguous number.
 
-A `grep_manifest` version-1 payload contains `namespace_id`, `manifest_no`, `status`, `index`, and `segments`. Its namespace and number must agree with the key. Both envelopes verify their stored payload checksum and reject unknown kinds, versions, fields, and invalid nested state. The hint contains no separate manifest checksum.
+A `grep_manifest` version-1 payload contains `namespace_id`, `generation`, `manifest_no`, `status`, `index`, and `segments`. The generation is the namespace generation the index was built for; an index from another generation is rebuilt from a fresh checkpoint. Its namespace and number must agree with the key. Both envelopes verify their stored payload checksum and reject unknown kinds, versions, fields, and invalid nested state. The hint contains no separate manifest checksum.
 
 `index_stored_bytes` is the sum of `index_block.offset + index_block.stored_len` for its referenced segments, using checked arithmetic. This calculation needs no segment reads. Report it with the grep manifest number and full indexing status, including any partial-commit position. Confirmed absence means zero referenced index bytes; a read failure remains an error.
 

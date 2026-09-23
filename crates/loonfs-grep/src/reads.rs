@@ -11,8 +11,8 @@ use loonfs::{
 use loonfs_api::v0::{FilesystemChange, ListChangesResponse};
 use loonfs_api::{
     decode_cursor, AbsolutePath, ChangeSeq, CheckpointId, ContentRef, DirectoryPageCursor,
-    EffectiveLimit, InodeId, LimitError, NamespaceId, Page, PageRequest, PaginationPolicy,
-    PathEntry, RevisionNo, Subject,
+    EffectiveLimit, InodeId, LimitError, Namespace, NamespaceGeneration, NamespaceId, Page,
+    PageRequest, PaginationPolicy, PathEntry, RevisionNo, Subject,
 };
 
 /// Filesystem reads for one namespace.
@@ -59,9 +59,8 @@ impl<'a> NamespaceReads<'a> {
         })
     }
 
-    /// Returns the namespace's current head sequence.
-    pub async fn head_seq(&self) -> Result<ChangeSeq> {
-        Ok(self.reader.get_namespace(self.namespace_id).await?.head_seq)
+    pub async fn head(&self) -> Result<Namespace> {
+        Ok(self.reader.get_namespace(self.namespace_id).await?)
     }
 
     /// Reads one page of the files a checkpoint pins, in ascending inode-id
@@ -139,6 +138,10 @@ impl PinnedNamespaceReads<'_> {
     /// Returns the head sequence shared by every metadata read.
     pub(crate) fn head_seq(&self) -> ChangeSeq {
         self.snapshot.head_seq()
+    }
+
+    pub(crate) fn generation(&self) -> NamespaceGeneration {
+        self.snapshot.generation()
     }
 
     /// Reads committed changes after `after_seq`, capped at the pinned head.

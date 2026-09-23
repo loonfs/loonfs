@@ -49,6 +49,7 @@ pub(crate) async fn publish_manifest<S: ObjectStore + ?Sized>(
 ) -> Result<ManifestPublicationOutcome> {
     let candidate = CurrentManifest {
         manifest: manifest_ref_for(namespace_id, manifest.envelope()),
+        generation: manifest.envelope().payload().generation,
         retention_floor_seq: manifest.envelope().payload().retention_floor_seq,
         last_folded_wal_no: manifest.envelope().payload().last_folded_wal_no,
         compactor_epoch: manifest.envelope().payload().compactor_epoch,
@@ -73,8 +74,9 @@ pub(crate) async fn publish_manifest<S: ObjectStore + ?Sized>(
     if predecessor_no.successor().ok() != Some(candidate.manifest.manifest_no)
         || manifest.envelope().payload().namespace_id != *namespace_id
         || current.as_ref().is_some_and(|loaded| {
-            candidate.manifest.manifest_head_seq < loaded.state.manifest.manifest_head_seq
-                || candidate.retention_floor_seq < loaded.state.retention_floor_seq
+            loaded.state.generation == candidate.generation
+                && (candidate.manifest.manifest_head_seq < loaded.state.manifest.manifest_head_seq
+                    || candidate.retention_floor_seq < loaded.state.retention_floor_seq)
         })
     {
         return Err(CoreError::Internal(format!("manifest `{}` is not a legal successor of `{predecessor_no}` in namespace `{namespace_id}`", candidate.manifest.manifest_no)));
@@ -163,6 +165,14 @@ fn classify_current(
         ManifestPublicationOutcome::Published(current.clone())
     } else if current.compactor_epoch > candidate.compactor_epoch {
         ManifestPublicationOutcome::PredecessorChanged(current.clone())
+    } else if candidate.generation > current.generation {
+        // A new generation starts its own sequence space, so its head says
+        // nothing about coverage; only the predecessor number decides.
+        if Some(current.manifest.manifest_no) == expected_predecessor {
+            ManifestPublicationOutcome::Installable
+        } else {
+            ManifestPublicationOutcome::PredecessorChanged(current.clone())
+        }
     } else if current.last_folded_wal_no >= candidate.last_folded_wal_no
         && (current.manifest.manifest_head_seq > candidate.manifest.manifest_head_seq
             || (current.manifest.manifest_head_seq == candidate.manifest.manifest_head_seq

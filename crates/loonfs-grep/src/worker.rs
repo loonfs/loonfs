@@ -33,7 +33,7 @@ use loonfs_api::wire::sst_blocks::{
 };
 use loonfs_api::{
     sha256_digest, ChangeSeq, CheckpointId, ContentRef, ErrorCode, IndexSegmentId, InodeId,
-    ManifestNo, NamespaceId, RevisionNo, RunNo,
+    ManifestNo, NamespaceGeneration, NamespaceId, RevisionNo, RunNo,
 };
 use loonfs_objectstore::timing::{MonotonicTimer, StdMonotonicTimer};
 use loonfs_objectstore::{ImmutableWriteError, ObjectStore, ObjectStoreError};
@@ -222,13 +222,15 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
     /// Enables grep by pinning a checkpoint and publishing a numbered
     /// backfilling manifest. Enabling an active manifest is idempotent.
     pub async fn enable(&self, namespace_id: &NamespaceId) -> Result<GrepEnableOutcome> {
-        ensure_live_namespace(&self.reads(namespace_id)).await?;
+        let head = self.reads(namespace_id).head().await?;
         let current = load_current_grep_manifest(&self.store, namespace_id).await?;
         if let Some(current) = &current {
-            if !matches!(
-                current.manifest_state().status(),
-                GrepIndexStatus::Disabled {}
-            ) {
+            if current.manifest_state().generation() == head.generation
+                && !matches!(
+                    current.manifest_state().status(),
+                    GrepIndexStatus::Disabled {}
+                )
+            {
                 return Ok(GrepEnableOutcome::AlreadyEnabled {
                     state: current.manifest_state().status().clone(),
                 });
@@ -241,6 +243,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         });
         let next = match backfilling_manifest(
             namespace_id,
+            head.generation,
             manifest_no,
             checkpoint.captured_seq,
             checkpoint.checkpoint_id.clone(),
@@ -292,6 +295,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         };
         let next = GrepManifestState::new(
             namespace_id.clone(),
+            current.manifest_state().generation(),
             next_manifest_no(Some(&current))?,
             GrepIndexStatus::Disabled {},
             GrepIndexState {
@@ -333,7 +337,19 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         let Some(current) = load_current_grep_manifest(&self.store, namespace_id).await? else {
             return Ok(GrepBuildOutcome::NotEnabled);
         };
+        if matches!(
+            current.manifest_state().status(),
+            GrepIndexStatus::Disabled {}
+        ) {
+            return Ok(GrepBuildOutcome::NotEnabled);
+        }
         let reads = self.reads(namespace_id);
+        let head = reads.head().await?;
+        if current.manifest_state().generation() != head.generation {
+            return self
+                .restart_backfill(namespace_id, &current, head.generation)
+                .await;
+        }
 
         let unit = match current.manifest_state().status() {
             GrepIndexStatus::Backfilling {
@@ -351,7 +367,9 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             {
                 Ok(unit) => unit,
                 Err(error) if rebootstrap_required(&error) => {
-                    return self.restart_backfill(namespace_id, &current).await;
+                    return self
+                        .restart_backfill(namespace_id, &current, head.generation)
+                        .await;
                 }
                 Err(error) => return Err(error),
             },
@@ -367,10 +385,14 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                         });
                     }
                     Ok(IncrementalWork::Restart) => {
-                        return self.restart_backfill(namespace_id, &current).await;
+                        return self
+                            .restart_backfill(namespace_id, &current, head.generation)
+                            .await;
                     }
                     Err(error) if rebootstrap_required(&error) => {
-                        return self.restart_backfill(namespace_id, &current).await;
+                        return self
+                            .restart_backfill(namespace_id, &current, head.generation)
+                            .await;
                     }
                     Err(error) => return Err(error),
                 }
@@ -403,7 +425,14 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
 
     /// Returns the grep index's state and maintenance progress.
     pub async fn get_grep_index(&self, namespace_id: &NamespaceId) -> Result<GrepIndex> {
-        let manifest = self.manifest_state(namespace_id).await?;
+        let head = self.reads(namespace_id).head().await?;
+        let manifest = self.manifest_state(namespace_id).await?.filter(|manifest| {
+            manifest.generation() == head.generation
+                && manifest
+                    .status()
+                    .active_watermark()
+                    .is_none_or(|resume| resume.built_through_seq() <= head.head_seq)
+        });
         let (lifecycle, next_run_no, reorganize_pending) = match &manifest {
             Some(manifest) => (
                 GrepIndexLifecycle::from(manifest.status()),
@@ -456,6 +485,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         &self,
         namespace_id: &NamespaceId,
         current: &LoadedGrepManifest,
+        generation: NamespaceGeneration,
     ) -> Result<GrepBuildOutcome> {
         let previous_checkpoint_id = match current.manifest_state().status() {
             GrepIndexStatus::Backfilling { checkpoint_id, .. } => Some(checkpoint_id.clone()),
@@ -465,6 +495,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         let checkpoint = self.create_backfill_checkpoint(namespace_id).await?;
         let next = match backfilling_manifest(
             namespace_id,
+            generation,
             manifest_no,
             checkpoint.captured_seq,
             checkpoint.checkpoint_id.clone(),
@@ -586,6 +617,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         };
         let next = GrepManifestState::new(
             namespace_id.clone(),
+            current.manifest_state().generation(),
             manifest_no,
             status,
             GrepIndexState {
@@ -625,6 +657,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
 
 fn backfilling_manifest(
     namespace_id: &NamespaceId,
+    generation: NamespaceGeneration,
     manifest_no: ManifestNo,
     target_seq: ChangeSeq,
     checkpoint_id: CheckpointId,
@@ -632,6 +665,7 @@ fn backfilling_manifest(
 ) -> Result<GrepManifestState> {
     GrepManifestState::new(
         namespace_id.clone(),
+        generation,
         manifest_no,
         GrepIndexStatus::Backfilling {
             target_seq,
@@ -1185,6 +1219,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         };
         let next = GrepManifestState::new(
             namespace_id.clone(),
+            current.manifest_state().generation(),
             manifest_no,
             current.manifest_state().status().clone(),
             GrepIndexState {
@@ -1372,7 +1407,7 @@ async fn ensure_live_namespace(reads: &NamespaceReads<'_>) -> Result<()> {
 }
 
 async fn live_namespace_probe(reads: &NamespaceReads<'_>) -> Result<()> {
-    reads.head_seq().await?;
+    reads.head().await?;
     Ok(())
 }
 

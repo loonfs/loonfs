@@ -20,9 +20,6 @@ pub const GREP_INDEX_JOB: MaintenanceJobId = MaintenanceJobId::new("grep_index")
 /// Identity of the grep-collection job wherever it is registered.
 pub const GREP_GC_JOB: MaintenanceJobId = MaintenanceJobId::new("grep_gc");
 
-/// One change is all a probe needs to see to know there is work.
-const PROBE_CHANGE_LIMIT: usize = 1;
-
 /// Keeps one namespace's grep index moving, one bounded step at a time.
 ///
 /// The job owns the step policy — how many revisions a build examines, how
@@ -81,9 +78,7 @@ impl<S: ObjectStore + Clone + Send + Sync + 'static> MaintenanceJob for GrepMain
         )))
     }
 
-    /// Reports whether the index is behind its namespace. This reads the
-    /// grep manifest and, for an active index at a commit boundary, at most one
-    /// page of the change feed.
+    /// Reports whether the index needs a build step from its manifest and namespace head.
     async fn probe(&self, namespace_id: &NamespaceId) -> Result<MaintenanceProbe> {
         let Some(manifest) = load_current_grep_manifest(self.worker.store(), namespace_id)
             .await
@@ -106,19 +101,14 @@ impl<S: ObjectStore + Clone + Send + Sync + 'static> MaintenanceJob for GrepMain
                 built_through_seq, ..
             } => {
                 let built_through_seq = *built_through_seq;
-                match self
-                    .worker
-                    .reads(namespace_id)
-                    .list_changes_after(built_through_seq, PROBE_CHANGE_LIMIT)
-                    .await
-                {
-                    Ok(changes) if changes.changes.is_empty() => Ok(MaintenanceProbe::Idle),
-                    Ok(_) => Ok(MaintenanceProbe::Due),
-                    // The watermark fell below the retention floor: the next
-                    // step rebuilds from a fresh checkpoint, which is work.
-                    Err(error) if error.code() == ErrorCode::RebootstrapRequired => {
-                        Ok(MaintenanceProbe::Due)
+                match self.worker.reads(namespace_id).head().await {
+                    Ok(head)
+                        if head.generation == manifest.manifest_state().generation()
+                            && head.head_seq == built_through_seq =>
+                    {
+                        Ok(MaintenanceProbe::Idle)
                     }
+                    Ok(_) => Ok(MaintenanceProbe::Due),
                     Err(error) if has_nothing_to_index(&error) => Ok(MaintenanceProbe::Idle),
                     Err(error) => Err(probe_failure(namespace_id, error)),
                 }

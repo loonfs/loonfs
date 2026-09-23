@@ -1361,19 +1361,19 @@ impl NamespaceManifestPayload {
         if successor.head_commit_id != crate::control::genesis_commit_id() {
             return drift("head_commit_id");
         }
-        if self.head_seq.successor().ok() != Some(successor.head_seq)
-            || successor.base_seq != successor.head_seq
-            || successor.retention_floor_seq != successor.head_seq
+        if successor.head_seq != ChangeSeq(0)
+            || successor.base_seq != ChangeSeq(0)
+            || successor.retention_floor_seq != ChangeSeq(0)
         {
             return drift("head_seq");
         }
         if successor.last_folded_wal_no != self.last_folded_wal_no {
             return drift("last_folded_wal_no");
         }
-        if successor.next_inode_id != self.next_inode_id {
+        if successor.next_inode_id != crate::FIRST_ALLOCATABLE_INODE_ID {
             return drift("next_inode_id");
         }
-        if successor.next_run_no != self.next_run_no {
+        if successor.next_run_no != RunNo(0) {
             return drift("next_run_no");
         }
         if self.writer_epoch.successor().ok() != Some(successor.writer_epoch) {
@@ -1629,22 +1629,19 @@ mod tests {
         recreated.manifest_no = ManifestNo(2);
         recreated.generation = crate::NamespaceGeneration(2);
         recreated.generation_first_manifest_no = ManifestNo(2);
-        recreated.head_seq = ChangeSeq(1);
-        recreated.base_seq = ChangeSeq(1);
-        recreated.retention_floor_seq = ChangeSeq(1);
         recreated.writer_epoch = WriterEpoch(1);
         recreated.compactor_epoch = 1;
         deleted
             .ensure_successor_identity(&recreated)
             .expect("deleted generation boundary");
-        let mut kept_head = recreated.clone();
-        kept_head.head_seq = ChangeSeq(0);
-        kept_head.base_seq = ChangeSeq(0);
-        kept_head.retention_floor_seq = ChangeSeq(0);
+        let mut continued_head = recreated.clone();
+        continued_head.head_seq = ChangeSeq(1);
+        continued_head.base_seq = ChangeSeq(1);
+        continued_head.retention_floor_seq = ChangeSeq(1);
         assert_eq!(
             deleted
-                .ensure_successor_identity(&kept_head)
-                .expect_err("a generation begins one sequence above the tombstone")
+                .ensure_successor_identity(&continued_head)
+                .expect_err("a generation starts its own sequence space")
                 .field,
             "head_seq"
         );

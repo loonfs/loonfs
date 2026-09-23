@@ -13,8 +13,8 @@ use crate::{
     SnapshotId, StatPathOptions,
 };
 use loonfs_api::{
-    AbsolutePath, DirectoryPageCursor, EffectiveLimit, FileRevisionsPageCursor, PageCursor,
-    PageRequest, PaginationPolicy, TrashPageCursor,
+    AbsolutePath, DirectoryPageCursor, EffectiveLimit, FileRevisionsPageCursor,
+    NamespaceGeneration, PageCursor, PageRequest, PaginationPolicy, TrashPageCursor,
 };
 use loonfs_core::{NamespaceReaderEngine, RuntimeReadContext};
 use tracing::Instrument;
@@ -94,6 +94,11 @@ impl FsReadSnapshot {
     /// Returns the head sequence this snapshot is pinned to.
     pub fn head_seq(&self) -> ChangeSeq {
         self.context.head.seq
+    }
+
+    /// Identifies the namespace lifetime shared by this snapshot's reads.
+    pub fn generation(&self) -> NamespaceGeneration {
+        self.context.head.generation
     }
 
     /// Reads the ordered change feed through this snapshot's captured head.

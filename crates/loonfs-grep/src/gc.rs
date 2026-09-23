@@ -35,7 +35,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         namespace_id: &NamespaceId,
         now_ms: u64,
     ) -> Result<GrepGcReport> {
-        let gone = match self.reads(namespace_id).head_seq().await {
+        let gone = match self.reads(namespace_id).head().await {
             Ok(_) => false,
             Err(error)
                 if matches!(

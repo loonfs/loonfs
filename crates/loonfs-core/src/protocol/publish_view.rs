@@ -276,7 +276,6 @@ mod tests {
             tail_state: Arc::new(ProjectedWalTail::from_rows(bootstrap_metadata_state(
                 1_000,
                 &loonfs_api::NamespaceAccess::Unrestricted {},
-                ChangeSeq(0),
             ))),
         }
     }
