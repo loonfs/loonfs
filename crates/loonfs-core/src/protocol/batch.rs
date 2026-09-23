@@ -258,7 +258,11 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
                 .next()
                 .expect("accepted slot count should match WAL record count");
             *slot = BatchOutcomeSlot::Settled {
-                outcome: committed_change_from_wal_record(namespace_id, record),
+                outcome: committed_change_from_wal_record(
+                    namespace_id,
+                    view.head.generation,
+                    record,
+                ),
                 depends_on_batch: false,
             };
         }

@@ -489,7 +489,7 @@ async fn first_page_loads_only_the_records_needed_to_fill_it() {
 }
 
 #[tokio::test]
-async fn checkpoint_cursor_is_bound_to_its_namespace() {
+async fn checkpoint_cursor_is_bound_to_its_namespace_and_generation() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let source = NamespaceId::parse("source").expect("namespace id");
@@ -519,12 +519,43 @@ async fn checkpoint_cursor_is_bound_to_its_namespace() {
         &target,
         PageRequest {
             limit: page_limit(1),
-            cursor: source_page.next_cursor,
+            cursor: source_page.next_cursor.clone(),
         },
     )
     .await
     .expect_err("foreign cursor should fail");
     assert_eq!(error.code(), ErrorCode::InvalidRequest);
+
+    crate::commit_engine::delete_namespace(&store, &source, Default::default(), &context)
+        .await
+        .expect("delete source namespace");
+    crate::namespace::bootstrap::bootstrap_namespace(
+        &store,
+        &source,
+        &context,
+        &loonfs_test_support::test_actor(),
+        &loonfs_api::NamespaceAccess::Unrestricted {},
+        false,
+    )
+    .await
+    .expect("recreate source namespace");
+    let store = RecordingStore::new(store, KeyPredicate::any());
+    let stale_error = list_checkpoints_page(
+        &store,
+        &source,
+        PageRequest {
+            limit: page_limit(1),
+            cursor: source_page.next_cursor,
+        },
+    )
+    .await
+    .expect_err("prior generation cursor should fail");
+    assert_eq!(stale_error.code(), error.code());
+    assert_eq!(stale_error.to_string(), error.to_string());
+    let counts = store.counts();
+    assert_eq!(counts.lists, 0);
+    assert_eq!(counts.puts, 0);
+    assert_eq!(counts.deletes, 0);
 }
 
 #[tokio::test]

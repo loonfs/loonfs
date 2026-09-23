@@ -14,7 +14,7 @@ use loonfs::{
 use loonfs_api::ApiError;
 use loonfs_api::ChangeSeq;
 use loonfs_api::{
-    decode_namespace_cursor, AccessRight, CapabilityDocument, Checkpoint, CreateCheckpointRequest,
+    decode_cursor, AccessRight, CapabilityDocument, Checkpoint, CreateCheckpointRequest,
     CreateNamespaceRequest, CreateSnapshotRequest, DeleteCheckpointResponse,
     DeleteSnapshotResponse, ErrorCode, ExtendSnapshotRequest, ForkNamespaceRequest,
     ListCheckpointsResponse, ListSnapshotsResponse, NamespaceAccess, PageRequest, PaginationPolicy,
@@ -522,7 +522,7 @@ pub(super) async fn list_snapshots(
 ) -> Result<Json<ListSnapshotsResponse>, ApiResponseError> {
     let scoped_reader = subject.map(|subject| state.reader.as_subject(subject));
     let reader = scoped_reader.as_ref().unwrap_or(&state.reader);
-    let cursor = decode_checkpoint_cursor(query.cursor.as_deref(), &namespace_id)?;
+    let cursor = decode_checkpoint_cursor(query.cursor.as_deref())?;
     let response = reader
         .list_snapshots_page(
             &namespace_id,
@@ -532,7 +532,8 @@ pub(super) async fn list_snapshots(
             },
         )
         .await
-        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
+        .map_err(ApiResponseError::for_namespace(&namespace_id))
+        .map_err(|error| error.with_invalid_request_param("cursor"))?;
     Ok(Json(response))
 }
 
@@ -742,7 +743,7 @@ pub(super) async fn list_checkpoints(
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(query): AppQuery<CheckpointPageQuery>,
 ) -> Result<Json<ListCheckpointsResponse>, ApiResponseError> {
-    let cursor = decode_checkpoint_cursor(query.cursor.as_deref(), &namespace_id)?;
+    let cursor = decode_checkpoint_cursor(query.cursor.as_deref())?;
     let response = state
         .maintenance
         .list_checkpoints_page(
@@ -753,7 +754,8 @@ pub(super) async fn list_checkpoints(
             },
         )
         .await
-        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
+        .map_err(ApiResponseError::for_namespace(&namespace_id))
+        .map_err(|error| error.with_invalid_request_param("cursor"))?;
     Ok(Json(response))
 }
 
@@ -802,10 +804,9 @@ pub(super) struct CheckpointPathParams {
 
 fn decode_checkpoint_cursor(
     cursor: Option<&str>,
-    namespace_id: &loonfs_api::NamespaceId,
 ) -> Result<Option<CheckpointPageCursor>, ApiResponseError> {
     cursor
-        .map(|cursor| decode_namespace_cursor::<CheckpointPageCursor>(cursor, namespace_id))
+        .map(decode_cursor::<CheckpointPageCursor>)
         .transpose()
         .map_err(|error| {
             ApiResponseError::new(ErrorCode::InvalidRequest, &error.to_string())

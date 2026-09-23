@@ -524,9 +524,9 @@ and is not an endpoint name in the move and copy family. `local` and
 
 Commit bodies reject unknown fields so a misspelled precondition cannot be ignored. For example, dropping a letter from `expected_revision_no` returns `invalid_request` instead of applying a write without that precondition.
 
-Every named entry includes a `binding_generation`, an opaque token identifying its current parent/name binding. Creating, moving, or undeleting an entry produces a new token; content and attribute writes do not. Clients must not parse or order these tokens.
+Every named entry includes a `binding_generation`, an opaque token identifying its current parent/name binding. Creating, moving, or undeleting an entry produces a new token; content and attribute writes do not. Clients must not parse or order these tokens. A token is valid only for the namespace generation that issued it; a recreated namespace rejects tokens from earlier generations as it rejects those of another namespace.
 
-Inode-addressed moves and deletes require the token as `expected_binding_generation`. A valid token that no longer matches returns `binding_generation_mismatch`; a malformed token or one from another namespace returns `invalid_request`. The precondition is part of the commit's identity and is evaluated after any earlier operations in the same request.
+Inode-addressed moves and deletes require the token as `expected_binding_generation`. A valid token that no longer matches returns `binding_generation_mismatch`; a malformed token or one from another namespace or generation returns `invalid_request`. The precondition is part of the commit's identity and is evaluated after any earlier operations in the same request.
 
 The server validates each request against authoritative namespace state and
 may reject it immediately. A tentatively accepted request becomes one
@@ -1047,7 +1047,7 @@ A missing id, including one already deleted, returns `checkpoint_not_found`.
 
 `limit` follows the advertised pagination limits. `next_cursor` is omitted
 after the final page. Cursors are opaque and tied to this namespace and
-operation; clients should only return them unchanged.
+operation; clients should only return them unchanged. A namespace-scoped cursor is valid only for the namespace generation that issued it; a recreated namespace rejects cursors from earlier generations as it rejects those of another namespace, with `invalid_request`.
 
 This is a live listing, not a snapshot. Checkpoints created, deleted, or
 collected while a client is paging can affect later pages.

@@ -703,12 +703,7 @@ impl EmbeddedBackend {
         let request = loonfs_api::PageRequest {
             limit: resolve_cli_page_limit(limit)?,
             cursor: cursor
-                .map(|cursor| {
-                    loonfs_api::decode_namespace_cursor::<CheckpointPageCursor>(
-                        cursor,
-                        namespace_id,
-                    )
-                })
+                .map(loonfs_api::decode_cursor::<CheckpointPageCursor>)
                 .transpose()
                 .map_err(|error| {
                     CliError::invalid_request(error.to_string()).with_param("cursor")
@@ -718,6 +713,7 @@ impl EmbeddedBackend {
             .list_snapshots_page(namespace_id, request)
             .await
             .scoped(namespace_id)
+            .map_err(|error| error.with_invalid_request_param("cursor"))
     }
 
     pub(super) async fn extend_snapshot(
@@ -764,12 +760,7 @@ impl EmbeddedBackend {
         let request = loonfs_api::PageRequest {
             limit: resolve_cli_page_limit(limit)?,
             cursor: cursor
-                .map(|cursor| {
-                    loonfs_api::decode_namespace_cursor::<CheckpointPageCursor>(
-                        cursor,
-                        namespace_id,
-                    )
-                })
+                .map(loonfs_api::decode_cursor::<CheckpointPageCursor>)
                 .transpose()
                 .map_err(|error| {
                     CliError::new(ErrorCode::InvalidRequest.as_str(), error.to_string())
