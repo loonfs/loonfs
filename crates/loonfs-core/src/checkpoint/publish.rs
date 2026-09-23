@@ -2,7 +2,9 @@
 
 use crate::control_update::{settle_control_write, CasAttempt, WriteEvidence};
 use crate::error::{CoreError, Result};
-use crate::namespace::control::{load_current_manifest_if_present, raise_hint, CurrentManifest};
+use crate::namespace::control::{
+    load_current_manifest_if_present, load_discovered_manifest, raise_hint, CurrentManifest,
+};
 use crate::time::MonotonicTimer;
 use bytes::Bytes;
 use loonfs_api::wire::control::ManifestRef;
@@ -117,6 +119,20 @@ pub(crate) async fn publish_manifest<S: ObjectStore + ?Sized>(
             settle_control_write::<_, CoreError, (), CoreError, _, _>(
                 CasAttempt::Ambiguous(error, ()),
                 |_, ()| async {
+                    // Only the exact manifest at this number confirms the put;
+                    // a later manifest may already cover it.
+                    let landed = load_discovered_manifest(
+                        store,
+                        namespace_id,
+                        candidate.manifest.manifest_no,
+                    )
+                    .await
+                    .map_err(CoreError::ControlObjectLoad)?;
+                    if landed.is_some_and(|landed| landed.state.manifest == candidate.manifest) {
+                        return Ok(WriteEvidence::Landed(
+                            ManifestPublicationOutcome::Published(candidate.clone()),
+                        ));
+                    }
                     match classify_current_manifest(
                         store,
                         namespace_id,
