@@ -1,7 +1,6 @@
 # LoonFS Go SDK
 
-One module for LoonFS server and proxy applications. SDK v0.2.x targets LoonFS
-API v0.3.x.
+One module for LoonFS server and proxy applications.
 
 ## Install
 

@@ -184,6 +184,33 @@ retrier_path = module_root / "internal/retrier.go"
 source = retrier_path.read_text()
 source = replace_once(
     source,
+    "type Retrier struct {\n\tattempts uint\n}",
+    "type Retrier struct {\n\tattempts uint\n\tdisabled bool\n}",
+)
+source = replace_once(
+    source,
+    "\t\tattempts: attempts,\n",
+    "\t\tattempts: attempts,\n\t\tdisabled: options.disabled,\n",
+)
+source = replace_once(source, "\tif options.disabled {", "\tif r.disabled || options.disabled {")
+source = replace_once(
+    source,
+    "\tif r.shouldRetry(response) {",
+    "\tif retryAttempt+1 < maxRetryAttempts && r.shouldRetry(response) {",
+)
+source = replace_once(
+    source,
+    "\t\ttime.Sleep(delay)",
+    "\t\ttimer := time.NewTimer(delay)\n"
+    "\t\tdefer timer.Stop()\n"
+    "\t\tselect {\n"
+    "\t\tcase <-request.Context().Done():\n"
+    "\t\t\treturn nil, request.Context().Err()\n"
+    "\t\tcase <-timer.C:\n"
+    "\t\t}",
+)
+source = replace_once(
+    source,
     "// shouldRetry returns true if the request should be retried based on the given\n"
     "// response status code.\n"
     "func (r *Retrier) shouldRetry(response *http.Response) bool {\n"
@@ -507,6 +534,51 @@ def replace_once(source, old, new):
 
 package_root = pathlib.Path("generated") / sys.argv[1]
 
+signals_path = package_root / "core/fetcher/signals.ts"
+source = signals_path.read_text()
+source = replace_once(source, 'const TIMEOUT = "timeout";', 'export class RequestTimeoutError extends Error {}')
+source = replace_once(source, 'controller.abort(TIMEOUT)', 'controller.abort(new RequestTimeoutError("Request timed out"))')
+signals_path.write_text(source)
+
+request_path = package_root / "core/fetcher/makeRequest.ts"
+source = request_path.read_text()
+source = replace_once(
+    source,
+    '''    const response = await fetchFn(url, {
+        method: method,
+        headers,
+        body: requestBody,
+        signal: newSignals,
+        credentials: withCredentials ? "include" : undefined,
+        // @ts-ignore
+        duplex,
+        ...(disableCache && isCacheNoStoreSupported() ? { cache: "no-store" as RequestCache } : {}),
+    });
+
+    if (timeoutAbortId != null) {
+        clearTimeout(timeoutAbortId);
+    }
+
+    return response;''',
+    '''    try {
+        return await fetchFn(url, {
+            method: method,
+            headers,
+            body: requestBody,
+            signal: newSignals,
+            credentials: withCredentials ? "include" : undefined,
+            // @ts-ignore
+            duplex,
+            ...(disableCache && isCacheNoStoreSupported() ? { cache: "no-store" as RequestCache } : {}),
+        });
+    } finally {
+        if (timeoutAbortId != null) {
+            clearTimeout(timeoutAbortId);
+        }
+    }''',
+)
+request_path.write_text(source)
+
 retry_path = package_root / "core/fetcher/requestWithRetries.ts"
 source = retry_path.read_text()
 source = replace_once(
@@ -551,6 +623,16 @@ response_path.write_text(source)
 
 fetcher_path = package_root / "core/fetcher/Fetcher.ts"
 source = fetcher_path.read_text()
+source = replace_once(
+    source,
+    'import { makeRequest } from "./makeRequest.js";',
+    'import { makeRequest } from "./makeRequest.js";\nimport { RequestTimeoutError } from "./signals.js";',
+)
+source = replace_once(
+    source,
+    'error instanceof Error && error.name === "AbortError"',
+    'error instanceof RequestTimeoutError',
+)
 source = replace_once(source, 'import { createRequestUrl } from "./createRequestUrl.js";\n', "")
 source = replace_once(
     source,
