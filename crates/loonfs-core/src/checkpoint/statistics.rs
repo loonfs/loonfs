@@ -58,6 +58,14 @@ pub async fn load_checkpoint_statistics<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     checkpoint_id: &CheckpointId,
 ) -> Result<NamespaceStatistics> {
+    let head = crate::namespace::control::load_namespace_read_state(store, namespace_id)
+        .await
+        .map_err(CoreError::ControlObjectLoad)?;
+    if !super::record::checkpoint_is_visible(&head, checkpoint_id) {
+        return Err(CoreError::CheckpointUnavailable(format!(
+            "checkpoint `{checkpoint_id}` does not exist in namespace `{namespace_id}`"
+        )));
+    }
     let pinned = load_pinned_checkpoint_basis(store, None, namespace_id, checkpoint_id).await?;
     manifest_statistics(pinned.segments.manifest())
 }

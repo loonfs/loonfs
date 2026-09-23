@@ -9,7 +9,7 @@ use crate::wal::WalCommitPayload;
 use crate::{
     AccessGrants, AccessRevisionNo, ActorId, AttributeRevisionNo, Attributes, ChangeSeq, CommitId,
     ContentId, ContentRef, DisplayName, InodeId, InodeKind, ManifestNo, MetadataSegmentId, NameKey,
-    NamespaceId, RevisionNo, RunNo,
+    NamespaceGeneration, NamespaceId, RevisionNo, RunNo,
 };
 use crate::{ContentStoreId, PrincipalScope, WalNo, WriterEpoch};
 use serde::{Deserialize, Serialize};
@@ -1177,18 +1177,18 @@ impl ManifestActivity {
 pub struct NamespaceManifestPayload {
     /// Namespace whose materialized state this manifest describes.
     pub namespace_id: NamespaceId,
-    /// Content domain shared by this namespace and its forks.
+    /// Content domain shared by this generation and its forks.
     pub content_store_id: ContentStoreId,
-    /// Namespace creation stamp in Unix milliseconds.
+    /// Current generation's creation stamp in Unix milliseconds.
     pub created_at_ms: u64,
-    /// Actor that created the namespace, as supplied by the application.
+    /// Actor that created the current generation, as supplied by the application.
     pub created_by: ActorId,
-    /// Access mode, fixed at creation.
+    /// Access mode, fixed within the current generation.
     pub access: NamespaceAccess,
-    /// Permanent fork provenance and source checkpoint identity.
+    /// Fork provenance and source checkpoint identity for this generation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fork_basis: Option<ForkBasis>,
-    /// Terminal deletion and retirement state.
+    /// Lifecycle state of this generation.
     pub status: NamespaceStatus,
     /// Writer that acquired the current epoch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1197,6 +1197,10 @@ pub struct NamespaceManifestPayload {
     pub last_folded_wal_no: WalNo,
     /// Positive publication number matching the manifest object key.
     pub manifest_no: ManifestNo,
+    /// Which generation of this namespace id the manifest describes.
+    pub generation: NamespaceGeneration,
+    /// First manifest number published for this generation.
+    pub generation_first_manifest_no: ManifestNo,
     /// Stops a stale streaming compactor at its next check when a newer runtime claims it.
     /// Streaming compaction rebuilds a whole family group and publishes once at the end.
     /// Grep publishes each bounded step, so a lost race costs only one step.
@@ -1221,9 +1225,7 @@ pub struct NamespaceManifestPayload {
     pub runs: Vec<MetadataRunRef>,
 }
 
-/// A successor manifest changed one of the namespace's immutable identity
-/// fields. Every manifest a namespace ever publishes carries them forward
-/// verbatim from the manifest that created it.
+/// A successor manifest changed identity outside a legal generation boundary.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ManifestIdentityDrift {
     /// Which field the successor changed.
@@ -1261,6 +1263,8 @@ impl NamespaceManifestPayload {
             status: NamespaceStatus::Active {},
             writer: None,
             manifest_no: ManifestNo(1),
+            generation: NamespaceGeneration(1),
+            generation_first_manifest_no: ManifestNo(1),
             compactor_epoch: 0,
             head_seq: ChangeSeq(0),
             head_commit_id: crate::control::genesis_commit_id(),
@@ -1277,13 +1281,16 @@ impl NamespaceManifestPayload {
 
     /// Whether a successor preserves folded activity or advances it with the head.
     pub fn preserves_activity(&self, successor: &Self) -> bool {
+        if successor.generation != self.generation {
+            return successor.activity == ManifestActivity::default();
+        }
         successor.activity.content_bytes >= self.activity.content_bytes
             && successor.activity.file_revisions >= self.activity.file_revisions
             && successor.activity.mutations >= self.activity.mutations
             && (successor.head_seq > self.head_seq || successor.activity == self.activity)
     }
 
-    /// Rejects changes to permanent identity and terminal lifecycle state.
+    /// Rejects identity drift except at a legal generation boundary.
     pub fn ensure_successor_identity(
         &self,
         successor: &NamespaceManifestPayload,
@@ -1296,28 +1303,84 @@ impl NamespaceManifestPayload {
         if successor.namespace_id != self.namespace_id {
             return drift("namespace_id");
         }
-        if successor.content_store_id != self.content_store_id {
-            return drift("content_store_id");
+        if successor.generation == self.generation {
+            if successor.generation_first_manifest_no != self.generation_first_manifest_no {
+                return drift("generation_first_manifest_no");
+            }
+            if successor.content_store_id != self.content_store_id {
+                return drift("content_store_id");
+            }
+            if successor.created_at_ms != self.created_at_ms {
+                return drift("created_at_ms");
+            }
+            if successor.created_by != self.created_by {
+                return drift("created_by");
+            }
+            if successor.access != self.access {
+                return drift("access");
+            }
+            if successor.fork_basis != self.fork_basis {
+                return drift("fork_basis");
+            }
+            if self.status.is_deleted() && !successor.status.is_deleted() {
+                return drift("status");
+            }
+            if self.status.reclaim_after_ms().is_some()
+                && self.status.reclaim_after_ms() != successor.status.reclaim_after_ms()
+            {
+                return drift("reclaim_after_ms");
+            }
+            if self.status.is_deleted()
+                && self.status.deleted_at_ms() != successor.status.deleted_at_ms()
+            {
+                return drift("deleted_at_ms");
+            }
+            return Ok(());
         }
-        if successor.created_at_ms != self.created_at_ms {
-            return drift("created_at_ms");
+        if self.generation.successor().ok() != Some(successor.generation) {
+            return drift("generation");
         }
-        if successor.created_by != self.created_by {
-            return drift("created_by");
-        }
-        if successor.access != self.access {
-            return drift("access");
-        }
-        if successor.fork_basis != self.fork_basis {
-            return drift("fork_basis");
-        }
-        if self.status.is_deleted() && !successor.status.is_deleted() {
+        if !self.status.is_deleted() || successor.status.is_deleted() {
             return drift("status");
         }
-        if self.status.reclaim_after_ms().is_some()
-            && self.status.reclaim_after_ms() != successor.status.reclaim_after_ms()
+        if successor.generation_first_manifest_no != successor.manifest_no {
+            return drift("generation_first_manifest_no");
+        }
+        if successor.fork_basis.is_some() {
+            return drift("fork_basis");
+        }
+        if successor.content_store_id == self.content_store_id {
+            return drift("content_store_id");
+        }
+        if !successor.runs.is_empty() {
+            return drift("runs");
+        }
+        if successor.writer.is_some() {
+            return drift("writer");
+        }
+        if successor.head_commit_id != crate::control::genesis_commit_id() {
+            return drift("head_commit_id");
+        }
+        if self.head_seq.successor().ok() != Some(successor.head_seq)
+            || successor.base_seq != successor.head_seq
+            || successor.retention_floor_seq != successor.head_seq
         {
-            return drift("reclaim_after_ms");
+            return drift("head_seq");
+        }
+        if successor.last_folded_wal_no != self.last_folded_wal_no {
+            return drift("last_folded_wal_no");
+        }
+        if successor.next_inode_id != self.next_inode_id {
+            return drift("next_inode_id");
+        }
+        if successor.next_run_no != self.next_run_no {
+            return drift("next_run_no");
+        }
+        if self.writer_epoch.successor().ok() != Some(successor.writer_epoch) {
+            return drift("writer_epoch");
+        }
+        if self.compactor_epoch.checked_add(1) != Some(successor.compactor_epoch) {
+            return drift("compactor_epoch");
         }
         Ok(())
     }
@@ -1439,7 +1502,7 @@ mod tests {
     }
 
     #[test]
-    fn successor_preserves_identity_and_terminal_status() {
+    fn successor_preserves_identity_within_a_generation() {
         let initial = NamespaceManifestPayload::initial(
             NamespaceId::parse("original").expect("namespace"),
             crate::ContentStoreId::parse("cs_00000000000000000000000000000001")
@@ -1495,12 +1558,14 @@ mod tests {
         }
         let mut deleted = initial.clone();
         deleted.status = crate::control::NamespaceStatus::Deleted {
+            deleted_at_ms: 1_500,
             reclaim_after_ms: None,
         };
         initial.ensure_successor_identity(&deleted).expect("delete");
         assert!(deleted.ensure_successor_identity(&initial).is_err());
         let mut retired = deleted.clone();
         retired.status = crate::control::NamespaceStatus::Deleted {
+            deleted_at_ms: 1_500,
             reclaim_after_ms: Some(2_000),
         };
         deleted.ensure_successor_identity(&retired).expect("retire");
@@ -1510,6 +1575,7 @@ mod tests {
         for deadline in [None, Some(1_999), Some(2_001)] {
             let mut successor = retired.clone();
             successor.status = crate::control::NamespaceStatus::Deleted {
+                deleted_at_ms: 1_500,
                 reclaim_after_ms: deadline,
             };
             assert_eq!(
@@ -1520,6 +1586,94 @@ mod tests {
                 "reclaim_after_ms"
             );
         }
+    }
+
+    #[test]
+    fn successor_identity_accepts_only_the_next_generation_from_a_tombstone() {
+        let mut deleted = NamespaceManifestPayload::initial(
+            NamespaceId::parse("original").expect("namespace"),
+            crate::ContentStoreId::parse("cs_00000000000000000000000000000001")
+                .expect("content store"),
+            1_000,
+            crate::ActorId::parse("first").expect("actor"),
+            super::NamespaceAccess::Unrestricted {},
+        );
+        deleted.fork_basis = Some(crate::control::ForkBasis {
+            manifest: crate::control::ManifestRef {
+                owner_namespace_id: NamespaceId::parse("source").expect("namespace"),
+                manifest_no: ManifestNo(1),
+                manifest_head_seq: ChangeSeq(0),
+                manifest_payload_checksum: "sha256:source".to_owned(),
+            },
+            source_checkpoint_id: crate::CheckpointId::parse(
+                "pin_00000000000000000001-0000000000000001",
+            )
+            .expect("checkpoint"),
+        });
+        deleted.status = crate::control::NamespaceStatus::Deleted {
+            deleted_at_ms: 1_500,
+            reclaim_after_ms: Some(2_000),
+        };
+
+        let mut recreated = NamespaceManifestPayload::initial(
+            deleted.namespace_id.clone(),
+            crate::ContentStoreId::parse("cs_00000000000000000000000000000002")
+                .expect("content store"),
+            3_000,
+            crate::ActorId::parse("second").expect("actor"),
+            super::NamespaceAccess::Acl {
+                principal_scope: crate::PrincipalScope::parse("org_test").expect("scope"),
+                root_grants: crate::AccessGrants::default(),
+            },
+        );
+        recreated.manifest_no = ManifestNo(2);
+        recreated.generation = crate::NamespaceGeneration(2);
+        recreated.generation_first_manifest_no = ManifestNo(2);
+        recreated.head_seq = ChangeSeq(1);
+        recreated.base_seq = ChangeSeq(1);
+        recreated.retention_floor_seq = ChangeSeq(1);
+        recreated.writer_epoch = WriterEpoch(1);
+        recreated.compactor_epoch = 1;
+        deleted
+            .ensure_successor_identity(&recreated)
+            .expect("deleted generation boundary");
+        let mut kept_head = recreated.clone();
+        kept_head.head_seq = ChangeSeq(0);
+        kept_head.base_seq = ChangeSeq(0);
+        kept_head.retention_floor_seq = ChangeSeq(0);
+        assert_eq!(
+            deleted
+                .ensure_successor_identity(&kept_head)
+                .expect_err("a generation begins one sequence above the tombstone")
+                .field,
+            "head_seq"
+        );
+        deleted.activity = super::ManifestActivity {
+            mutations: super::ActivityCounter::parse(7).expect("counter"),
+            ..Default::default()
+        };
+        assert!(deleted.preserves_activity(&recreated));
+        recreated.activity = deleted.activity;
+        assert!(!deleted.preserves_activity(&recreated));
+        recreated.activity = Default::default();
+
+        let mut active = deleted.clone();
+        active.status = crate::control::NamespaceStatus::Active {};
+        assert_eq!(
+            active
+                .ensure_successor_identity(&recreated)
+                .expect_err("active predecessor")
+                .field,
+            "status"
+        );
+        recreated.generation = crate::NamespaceGeneration(3);
+        assert_eq!(
+            deleted
+                .ensure_successor_identity(&recreated)
+                .expect_err("skipped generation")
+                .field,
+            "generation"
+        );
     }
 
     #[test]
@@ -1577,6 +1731,8 @@ mod tests {
             compactor_epoch: 0,
             namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
             manifest_no: ManifestNo(10),
+            generation: crate::NamespaceGeneration(1),
+            generation_first_manifest_no: ManifestNo(1),
 
             head_seq: ChangeSeq(10),
             head_commit_id: CommitId::parse("c_00000000000000000000000000000001")
@@ -1625,6 +1781,8 @@ mod tests {
             compactor_epoch: 0,
             namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
             manifest_no: ManifestNo(12),
+            generation: crate::NamespaceGeneration(1),
+            generation_first_manifest_no: ManifestNo(1),
 
             head_seq: ChangeSeq(12),
             head_commit_id: CommitId::parse("c_00000000000000000000000000000002")

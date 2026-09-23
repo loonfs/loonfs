@@ -166,7 +166,7 @@ hoc.
 | `maintenance.grep.index` | Maintaining a namespace's grep index: `GET /v0/maintenance/namespaces/{ns}/grep/index` and its `enable`, `disable`, and `gc` routes. | The maintenance half of the grep capability, and independent of `query.grep`: searching an index and keeping one built are separately deployable, so a deployment may advertise either key alone. A deployment that maintains no index answers all four routes `not_supported` with this key. |
 | `filesystem.namespaces.create` | Creating namespaces (`POST /v0/namespaces`). | |
 | `filesystem.namespaces.fork` | Forking namespaces (`POST /v0/namespaces/{ns}/forks`). | |
-| `filesystem.namespaces.delete` | Deleting namespaces (`DELETE /v0/namespaces/{ns}`). | Terminal, and the id is permanently retired. Metadata and the namespace's own content become conditionally reclaimable through maintenance runs with `kind` set to `gc` (section 6.3). A deployment may still advertise `false` and answer `not_supported`. |
+| `filesystem.namespaces.delete` | Deleting namespaces (`DELETE /v0/namespaces/{ns}`). | Ends the current generation. Creating the id again starts its next generation. Metadata and the namespace's own content become conditionally reclaimable through maintenance runs with `kind` set to `gc` (section 6.3). A deployment may still advertise `false` and answer `not_supported`. |
 | `filesystem.snapshots` | Creating, listing, extending, and releasing snapshots under `/v0/namespaces/{ns}/snapshots`. | |
 | `filesystem.attributes` | Writing inode attributes (`update_attributes`) and projecting them onto `GET /filesystem/entry` and `GET /filesystem/entries`. | Implemented by the core runtime rather than composed by a host, so a deployment serving `filesystem/v0` advertises it. |
 | `filesystem.inodes.list_children` | Listing a directory's children by parent inode ID (`GET /v0/namespaces/{ns}/inodes/{inode_id}/children`). | Implemented by the core runtime rather than composed by a host, so a deployment serving `filesystem/v0` advertises it. The key exists so inode-driven sync clients can gate on deployments built before the route existed. |
@@ -281,7 +281,7 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | `route_not_found` | 404 | No route matches the request path. |
 | `method_not_allowed` | 405 | The path exists but does not serve this HTTP method. |
 | `namespace_not_found` | 404 | The namespace has no installed manifest, so it does not exist. |
-| `namespace_deleted` | 410 | The namespace's current manifest records terminal deleted status. The id is permanently retired, so a create or fork against it fails here rather than as a conflict. |
+| `namespace_deleted` | 410 | The namespace's current manifest is deleted. Ordinary operations and a fork into the id fail. Creating the id starts its next generation. |
 | `checkpoint_not_found` | 404 | The checkpoint id names no existing pin. |
 | `snapshot_not_found` | 404 | The snapshot id names no checkpoint record. Refresh state or choose another snapshot. |
 | `snapshot_gone` | 410 | The snapshot has expired, or was deleted while a fork was verifying its selected snapshot. |
@@ -1006,6 +1006,8 @@ floor has advanced.
 
 A checkpoint name is a label, not a key. Every create call generates a new record, so the same name may identify multiple checkpoints. Create and list use one checkpoint object with `namespace_id`, `checkpoint_id`, `owner`, `created_at_ms`, optional `expires_at_ms`, `captured_seq`, and `manifest_no`. Create returns this object directly. For API-created checkpoints, `owner` is `user` with the requested `name`, and `created_at_ms` is the durable record timestamp.
 
+Checkpoint and snapshot records from a prior namespace generation are not listed. Reading, deleting, extending, listing files through, or forking from one answers exactly as if that record had been deleted. Internal retired pins are never exposed by checkpoint or snapshot operations.
+
 The id is `pin_{manifest_no:020}-{16 lowercase hex}`. It identifies the
 manifest used by checkpoint and snapshot reads. Every pin has a fresh id.
 
@@ -1520,6 +1522,7 @@ starts at sequence 0 with a retention floor of 0:
 ```json
 {
   "namespace_id": "demo",
+  "generation": 1,
   "created_at_ms": 1752623000000,
   "created_by": "usr_8f3c",
   "head_seq": 0,
@@ -1533,12 +1536,11 @@ only path parameter names for the same namespace id value; v0 does not accept
 or emit a namespace `name` alias.
 
 Create and fork install descriptor, hint, and manifest 1 in order. The
-conditional put of manifest 1 decides namespace existence ([format: namespace lifecycle](format.md#9-namespace-lifecycle-and-forks)), so they
-answer conflicts the same way. A create or fork that loses that write to
-another namespace answers `namespace_exists` (409). A create or fork against
-a deleted id answers `namespace_deleted` (410): the id is retired and never
-comes back. There is no partially created namespace, so there is no third
-answer and nothing to repair.
+conditional put of manifest 1 decides first-generation existence ([format: namespace lifecycle](format.md#9-namespace-lifecycle-and-forks)). A create or fork that loses that write to
+another active namespace answers `namespace_exists` (409). Creating an id
+whose current manifest is deleted publishes its next generation. Forking into
+that id answers `namespace_deleted` (410). There is no partially created
+namespace, so there is no third answer and nothing to repair.
 
 A new request after a lost creation acknowledgement returns
 `namespace_exists`, unless it explicitly allows an existing namespace.
@@ -1562,6 +1564,7 @@ namespace returns `410` with `namespace_deleted`.
 ```json
 {
   "namespace_id": "demo",
+  "generation": 1,
   "access": {"kind": "unrestricted"},
   "created_at_ms": 1752623000000,
   "created_by": "usr_8f3c",
@@ -1575,6 +1578,7 @@ The `Namespace` object has exactly these fields:
 | Field | Meaning |
 | --- | --- |
 | `namespace_id` | Durable namespace id. |
+| `generation` | Generation of the namespace id. The first creation is 1, and each recreation increments it. |
 | `access` | Access mode: `{"kind": "unrestricted"}` or `{"kind": "acl", "principal_scope": "..."}`. |
 | `created_at_ms` | Time the namespace was created, in Unix milliseconds. |
 | `created_by` | Actor that created or forked the namespace, as supplied by the application. |
@@ -1610,6 +1614,7 @@ namespace state plus storage details used by maintenance:
 | Field | Meaning |
 | --- | --- |
 | `namespace_id` | Durable namespace id. |
+| `generation` | Generation of the namespace id. The first creation is 1, and each recreation increments it. |
 | `created_at_ms` | Time the namespace was created, in Unix milliseconds. |
 | `created_by` | Actor that created or forked the namespace, as supplied by the application. |
 | `fork_basis` | Present only for a fork. Contains `source_namespace_id` and the captured `source_head_seq`. |
@@ -1623,6 +1628,7 @@ namespace state plus storage details used by maintenance:
 ```json
 {
   "namespace_id": "demo",
+  "generation": 1,
   "created_at_ms": 1752623000000,
   "created_by": "usr_8f3c",
   "head_seq": 418,
@@ -1639,11 +1645,10 @@ namespace state plus storage details used by maintenance:
 In an ACL namespace this operation requires an administrator subject; a request
 with no subject headers acts as the token holder.
 
-Deletion is a fenced, terminal manifest publication ([format: namespace deletion](format.md#94-deleting-a-namespace)). It linearizes at the manifest put: commits acknowledged before it
-stay committed; everything that observes the deleted namespace afterwards —
-reads, commits, forks, status, re-creation of the id — fails with
-`namespace_deleted` (410). Deleting an already-deleted namespace is also
-`namespace_deleted`.
+Deletion is a fenced manifest publication that ends the current generation ([format: namespace deletion](format.md#94-deleting-a-namespace)). It linearizes at the manifest put: commits acknowledged before it
+stay committed; reads, commits, forks, status, and another deletion fail with
+`namespace_deleted` (410) while the tombstone is current. Creating the id
+publishes the next generation.
 
 Checkpoint listing and user-checkpoint deletion are explicit exceptions. They
 remain available because permanent user pins must stay discoverable and
@@ -2881,6 +2886,7 @@ Representative response:
 ```json
 {
   "namespace_id": "demo-branch",
+  "generation": 1,
   "created_at_ms": 1752625000000,
   "created_by": "usr_8f3c",
   "fork_basis": {
@@ -2913,8 +2919,9 @@ The response contains the new namespace's initial state. Its head
 sequence and retention floor are set to the captured basis's sequence. For a
 fresh fork, `head_seq` reports the captured basis, including a current-head fork.
 
-If the target ID already exists or has been deleted, the server returns the
-same `namespace_exists` or `namespace_deleted` error as namespace creation.
+If the target ID is active, the server returns `namespace_exists`. If it is
+deleted, the server returns `namespace_deleted`; forking never recreates a
+target id.
 If the source checkpoint cannot be renewed, the server returns
 `checkpoint_unavailable` and no target namespace is installed.
 

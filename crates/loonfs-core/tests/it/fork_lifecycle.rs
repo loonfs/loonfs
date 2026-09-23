@@ -1215,7 +1215,7 @@ async fn a_create_losing_to_a_foreign_head_reports_the_id_as_taken() {
 }
 
 #[tokio::test]
-async fn namespace_delete_is_terminal_for_reads_writes_creation_and_forks() {
+async fn namespace_delete_blocks_reads_writes_and_forks_but_creation_recreates() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
@@ -1259,8 +1259,7 @@ async fn namespace_delete_is_terminal_for_reads_writes_creation_and_forks() {
         .expect("delete namespace");
     assert_eq!(response.head_seq, ChangeSeq(1));
 
-    // Terminal: reads, commits, status, repeat deletes, re-creation, and forks
-    // all observe the deleted head.
+    // Reads, commits, status, repeat deletes, and forks observe the deleted head.
     let read = resolve_path(&store, &namespace_id, "/")
         .await
         .expect_err("read after delete");
@@ -1287,23 +1286,20 @@ async fn namespace_delete_is_terminal_for_reads_writes_creation_and_forks() {
         .await
         .expect_err("repeat delete");
     assert_eq!(again.code(), ErrorCode::NamespaceDeleted);
-    let recreate = bootstrap_namespace(&store, &namespace_id, &context).await;
-    assert!(matches!(
-        recreate,
-        Err(loonfs_core::BootstrapNamespaceError::NamespaceDeleted { .. })
-    ));
-    // Even `allow_existing` cannot revive a retired id.
-    let adopt = bootstrap_namespace_allowing_existing(&store, &namespace_id, &context).await;
-    assert!(matches!(
-        adopt,
-        Err(loonfs_core::BootstrapNamespaceError::NamespaceDeleted { .. })
-    ));
     let fork_target = NamespaceId::parse("fork-of-deleted").expect("valid namespace id");
     let fork = fork_namespace(&store, &namespace_id, &fork_target, &context).await;
     assert_eq!(
         fork.expect_err("fork of deleted source").code(),
         ErrorCode::NamespaceDeleted
     );
+    let recreated = bootstrap_namespace(&store, &namespace_id, &context)
+        .await
+        .expect("recreate namespace");
+    assert_eq!(recreated.generation, loonfs_api::NamespaceGeneration(2));
+    let adopted = bootstrap_namespace_allowing_existing(&store, &namespace_id, &context)
+        .await
+        .expect("adopt recreated namespace");
+    assert_eq!(adopted.generation, recreated.generation);
 }
 
 #[tokio::test]
@@ -1489,7 +1485,7 @@ async fn creation_and_fork_install_descriptor_hint_and_manifest_in_order() {
 }
 
 #[tokio::test]
-async fn bootstrap_of_a_deleted_namespace_writes_nothing() {
+async fn bootstrap_of_a_deleted_namespace_recreates_it_once() {
     let directory = tempdir().expect("tempdir");
     let store = RecordingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
@@ -1504,15 +1500,31 @@ async fn bootstrap_of_a_deleted_namespace_writes_nothing() {
         .delete_namespace(loonfs_core::DeleteNamespaceOptions::default())
         .await
         .expect("delete");
+    store.reset();
+    let recreated = bootstrap_namespace(&store, &namespace_id, &context)
+        .await
+        .expect("recreate namespace");
+    assert_eq!(recreated.generation, loonfs_api::NamespaceGeneration(2));
+    assert!(store.counts().puts > 0);
+
     for allow_existing in [false, true] {
         store.reset();
-        let error = (if allow_existing {
+        let result = if allow_existing {
             bootstrap_namespace_allowing_existing(&store, &namespace_id, &context).await
         } else {
             bootstrap_namespace(&store, &namespace_id, &context).await
-        })
-        .expect_err("retired id");
-        assert_eq!(error.code(), ErrorCode::NamespaceDeleted);
+        };
+        if allow_existing {
+            assert_eq!(
+                result.expect("allow existing").generation,
+                recreated.generation
+            );
+        } else {
+            assert_eq!(
+                result.expect_err("active id").code(),
+                ErrorCode::NamespaceExists
+            );
+        }
         let counts = store.counts();
         assert_eq!(
             (counts.puts, counts.compare_and_swaps, counts.deletes),

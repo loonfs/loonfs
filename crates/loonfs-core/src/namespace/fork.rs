@@ -1,6 +1,8 @@
 //! Fork installation copies pinned source runs into target manifest 1.
 
-use crate::checkpoint::record::{delete_checkpoint_record, write_checkpoint_record};
+use crate::checkpoint::record::{
+    checkpoint_is_visible, delete_checkpoint_record, write_checkpoint_record,
+};
 use crate::checkpoint::{
     classify_live_snapshot, create_checkpoint, load_checkpoint_record,
     load_namespace_manifest_envelope,
@@ -14,7 +16,9 @@ use crate::time::{MonotonicTimer, StdMonotonicTimer};
 use loonfs_api::wire::control::{
     CheckpointOwner, CheckpointRecordState, ForkBasis, NamespaceStatus,
 };
-use loonfs_api::{CheckpointId, Namespace, NamespaceId, WriterEpoch};
+use loonfs_api::{
+    CheckpointId, ManifestNo, Namespace, NamespaceGeneration, NamespaceId, WriterEpoch,
+};
 use loonfs_objectstore::ObjectStore;
 
 pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
@@ -68,7 +72,9 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
         created_at_ms: context.now_ms,
         created_by: actor_id.clone(),
         fork_basis: Some(fork_basis),
-        manifest_no: loonfs_api::ManifestNo(1),
+        manifest_no: ManifestNo(1),
+        generation: NamespaceGeneration(1),
+        generation_first_manifest_no: ManifestNo(1),
         retention_floor_seq: fork_seq,
         last_folded_wal_no: loonfs_api::WalNo(0),
         writer_epoch: WriterEpoch(0),
@@ -111,6 +117,16 @@ async fn create_snapshot_fork_checkpoint<S: ObjectStore + ?Sized>(
 ) -> Result<CheckpointRecordState> {
     let timer = StdMonotonicTimer::default();
     let started_ms = timer.monotonic_now_ms();
+    let source_head =
+        crate::namespace::control::load_namespace_read_state(store, source_namespace_id)
+            .await
+            .map_err(CoreError::ControlObjectLoad)?;
+    crate::namespace::control::ensure_namespace_live(&source_head)?;
+    if !checkpoint_is_visible(&source_head, snapshot_id) {
+        return Err(CoreError::SnapshotNotFound {
+            snapshot_id: snapshot_id.clone(),
+        });
+    }
     let snapshot = classify_live_snapshot(
         load_checkpoint_record(store, source_namespace_id, snapshot_id)
             .await?

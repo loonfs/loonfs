@@ -100,13 +100,12 @@ fn maintenance_gc_reclaims_a_deleted_namespace_instead_of_refusing() {
     assert_success(&gc);
     assert_eq!(json_data(&gc)["kind"], "gc");
 
-    // Everything that is not the GC-only step still reports the deletion.
     let metadata = harness.run(&["--json", "maintenance", "metadata"]);
     assert_failure(&metadata);
     assert_eq!(json_error(&metadata)["code"], "namespace_deleted");
     let recreate = harness.run(&["--json", "namespace", "create", "demo"]);
-    assert_failure(&recreate);
-    assert_eq!(json_error(&recreate)["code"], "namespace_deleted");
+    assert_success(&recreate);
+    assert_eq!(json_data(&recreate)["generation"], 2);
 }
 
 #[test]

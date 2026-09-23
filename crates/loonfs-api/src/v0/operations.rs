@@ -5,7 +5,7 @@ use crate::SnapshotId;
 use crate::{
     AbsolutePath, AccessGrants, AccessRevisionNo, ActorId, AttributeKey, AttributeRevisionNo,
     AttributeValue, BindingGeneration, ChangeSeq, CheckpointId, CommitId, ContentRef, DisplayName,
-    InodeId, ManifestNo, NamespaceId, RevisionNo, WriterEpoch, WriterId,
+    InodeId, ManifestNo, NamespaceGeneration, NamespaceId, RevisionNo, WriterEpoch, WriterId,
 };
 use crate::{NamespaceAccess, PrincipalId, PrincipalScope};
 use serde::{Deserialize, Serialize};
@@ -198,6 +198,8 @@ pub struct Namespace {
     pub access: NamespaceAccessMode,
     /// Namespace ID.
     pub namespace_id: NamespaceId,
+    /// Which generation of its id this namespace is. Recreating a deleted id increments it.
+    pub generation: NamespaceGeneration,
     /// Time the namespace was created, in Unix milliseconds.
     pub created_at_ms: u64,
     /// Actor that created the namespace, as supplied by the application.
@@ -255,6 +257,8 @@ pub struct NamespaceForkBasis {
 pub struct NamespaceDiagnostics {
     /// Namespace ID.
     pub namespace_id: NamespaceId,
+    /// Which generation of its id this namespace is. Recreating a deleted id increments it.
+    pub generation: NamespaceGeneration,
     /// Time the namespace was created, in Unix milliseconds.
     pub created_at_ms: u64,
     /// Actor that created the namespace, as supplied by the application.
@@ -1180,9 +1184,9 @@ impl DeletedObjectCounts {
 pub struct DeletedCheckpointsByOwner {
     /// Fork-owned records deleted because their target namespaces are gone.
     pub fork: u64,
-    /// User-owned records deleted after expiry or terminal namespace deletion.
+    /// User-owned records deleted after expiry or namespace deletion.
     pub expired: u64,
-    /// Snapshot-owned records deleted after expiry or terminal namespace deletion.
+    /// Snapshot-owned records deleted after expiry or namespace deletion.
     pub snapshot: u64,
 }
 
@@ -1637,6 +1641,7 @@ mod tests {
         let namespace = Namespace {
             access: NamespaceAccessMode::Unrestricted {},
             namespace_id: NamespaceId::parse("demo").expect("namespace id"),
+            generation: crate::NamespaceGeneration(2),
             created_at_ms: 1_000,
             created_by: crate::ActorId::parse("test").expect("actor"),
             fork_basis: None,
@@ -1647,6 +1652,7 @@ mod tests {
             serde_json::to_value(namespace).expect("serialize namespace"),
             serde_json::json!({
                 "namespace_id": "demo",
+                "generation": 2,
                 "access": {"kind": "unrestricted"},
                 "created_at_ms": 1000,
                 "created_by": "test",
@@ -1660,6 +1666,7 @@ mod tests {
     fn namespace_diagnostics_wire_shape_keeps_storage_fields() {
         let diagnostics = NamespaceDiagnostics {
             namespace_id: NamespaceId::parse("demo").expect("namespace id"),
+            generation: crate::NamespaceGeneration(2),
             created_at_ms: 1_000,
             created_by: crate::ActorId::parse("test").expect("actor"),
             fork_basis: None,
@@ -1674,6 +1681,7 @@ mod tests {
             serde_json::to_value(diagnostics).expect("serialize namespace diagnostics"),
             serde_json::json!({
                 "namespace_id": "demo",
+                "generation": 2,
                 "created_at_ms": 1000,
                 "created_by": "test",
                 "head_seq": 11,

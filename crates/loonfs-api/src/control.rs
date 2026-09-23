@@ -135,6 +135,8 @@ pub enum CheckpointOwner {
         /// When garbage collection may release the pin.
         expires_at_ms: u64,
     },
+    /// Keeps a deleted generation discoverable until it is reclaimed.
+    Retired {},
 }
 
 impl CheckpointOwner {
@@ -144,6 +146,7 @@ impl CheckpointOwner {
             Self::User { expires_at_ms, .. } => *expires_at_ms,
             Self::Fork { .. } => None,
             Self::Snapshot { expires_at_ms, .. } => Some(*expires_at_ms),
+            Self::Retired {} => None,
         }
     }
 }
@@ -205,9 +208,9 @@ pub struct AcquiredWriter {
     pub writer_epoch: WriterEpoch,
 }
 
-/// Terminal namespace status.
+/// Namespace lifecycle status.
 ///
-/// A namespace is either active or permanently deleted. Missing and unknown
+/// A namespace is either active or deleted. Missing and unknown
 /// status values fail decoding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -217,9 +220,10 @@ pub enum NamespaceStatus {
     /// The braces make serde reject a stray field; a unit variant would
     /// silently accept and discard one.
     Active {},
-    /// Terminal: the namespace's history has ended. Reads, commits, forks,
-    /// and re-creation of the same id are all refused.
+    /// The current generation has ended.
     Deleted {
+        /// Unix-millisecond call clock of the deletion.
+        deleted_at_ms: u64,
         /// Earliest owner-prefix collection time once dependencies are gone.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reclaim_after_ms: Option<u64>,
@@ -227,14 +231,23 @@ pub enum NamespaceStatus {
 }
 
 impl NamespaceStatus {
-    /// Returns whether the namespace is permanently deleted.
+    /// Returns whether the current namespace generation is deleted.
     pub const fn is_deleted(&self) -> bool {
         matches!(self, Self::Deleted { .. })
+    }
+    /// Returns the deletion stamp for a deleted generation.
+    pub const fn deleted_at_ms(&self) -> Option<u64> {
+        match self {
+            Self::Deleted { deleted_at_ms, .. } => Some(*deleted_at_ms),
+            Self::Active {} => None,
+        }
     }
     /// Returns the irrevocable collection deadline, if retirement is established.
     pub const fn reclaim_after_ms(&self) -> Option<u64> {
         match self {
-            Self::Deleted { reclaim_after_ms } => *reclaim_after_ms,
+            Self::Deleted {
+                reclaim_after_ms, ..
+            } => *reclaim_after_ms,
             Self::Active {} => None,
         }
     }

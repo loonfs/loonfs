@@ -63,7 +63,7 @@ pub(crate) async fn list_checkpoints_page<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     request: PageRequest<CheckpointPageCursor>,
 ) -> Result<Page<Checkpoint, CheckpointPageCursor>> {
-    load_namespace_read_state(store, namespace_id)
+    let head = load_namespace_read_state(store, namespace_id)
         .await
         .map_err(CoreError::ControlObjectLoad)?;
 
@@ -72,12 +72,15 @@ pub(crate) async fn list_checkpoints_page<S: ObjectStore + ?Sized>(
     }
 
     let prefix = checkpoint_prefix(namespace_id);
+    let generation_start = format!("{prefix}pin_{:020}", head.generation_first_manifest_no.0);
     let start_after = request
         .cursor
         .as_ref()
-        .map(|cursor| cursor.last_key.as_str());
+        .map_or(generation_start.clone(), |cursor| {
+            cursor.last_key.clone().max(generation_start)
+        });
     let keys = store
-        .list_prefix_from_stream(&prefix, start_after)
+        .list_prefix_from_stream(&prefix, Some(&start_after))
         .peekable();
     futures::pin_mut!(keys);
     let mut checkpoints = Vec::with_capacity(request.limit.as_usize());
@@ -95,7 +98,9 @@ pub(crate) async fn list_checkpoints_page<S: ObjectStore + ?Sized>(
             Err(error) => return Err(CoreError::ControlObjectLoad(error)),
         };
         let record = loaded.state;
-        checkpoints.push(super::checkpoint_summary(record));
+        if let Some(checkpoint) = super::checkpoint_summary(record) {
+            checkpoints.push(checkpoint);
+        }
     }
     let has_more = if checkpoints.len() == request.limit.as_usize() {
         match keys.as_mut().peek().await {

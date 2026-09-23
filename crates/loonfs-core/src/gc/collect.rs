@@ -99,6 +99,7 @@ pub(super) async fn gc_namespace_with_timer<S: ObjectStore + ?Sized>(
             crate::namespace::delete::retire_namespace(
                 store,
                 namespace_id,
+                anchor.read_state.generation,
                 config.grace_window_ms,
                 context.now_ms,
                 timer,

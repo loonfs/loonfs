@@ -194,6 +194,7 @@ async fn namespace_deletion_during_pin_verification_deletes_the_pin() {
                 &namespace_id,
                 Default::default(),
                 writer,
+                &context,
             )
             .await
             .expect("delete namespace during verification");
