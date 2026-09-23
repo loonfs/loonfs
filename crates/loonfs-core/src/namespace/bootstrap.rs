@@ -1,27 +1,16 @@
-//! Creates namespaces and recreates deleted ids as their next generation.
+//! Creates namespaces, including a deleted id's next generation.
 
-use super::recreation::{write_retired_pin, GenerationSuccessor};
-use crate::checkpoint::publish::{encode_manifest, publish_manifest, ManifestPublicationOutcome};
+use super::generation::{publish_generation, GenerationPublication};
 use crate::context::MutationContext;
 use crate::error::CoreError;
 use crate::metadata::{AccessRevisionRecord, InodeRecord, MetadataState};
-use crate::namespace::control::{
-    load_current_manifest, load_current_manifest_if_present, load_discovered_manifest,
-};
 use crate::time::{MonotonicTimer, StdMonotonicTimer};
-use bytes::Bytes;
-use loonfs_api::wire::control::{
-    encode_control_state, ContentStorePayload, ControlObjectKind, HintPayload,
-};
-use loonfs_api::wire::manifest::{
-    encode_namespace_manifest_json, NamespaceAccess, NamespaceManifestPayload,
-};
+use loonfs_api::wire::manifest::{NamespaceAccess, NamespaceManifestPayload};
 use loonfs_api::{
-    AccessRevisionNo, ActorId, ChangeSeq, ContentStoreId, ErrorCode, InodeKind, ManifestNo,
-    Namespace, NamespaceId, WalNo, ROOT_INODE_ID,
+    AccessRevisionNo, ActorId, ChangeSeq, ContentStoreId, ErrorCode, InodeKind, Namespace,
+    NamespaceId, ROOT_INODE_ID,
 };
-use loonfs_objectstore::keys::{content_store, hint, metadata_manifest_object};
-use loonfs_objectstore::{ObjectStore, ObjectStoreError};
+use loonfs_objectstore::ObjectStore;
 use thiserror::Error;
 
 #[derive(Debug, Clone, Error)]
@@ -72,203 +61,25 @@ pub(crate) async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
     access: &NamespaceAccess,
     allow_existing: bool,
 ) -> Result<Namespace, BootstrapNamespaceError> {
-    let manifest = NamespaceManifestPayload::initial(
+    let timer = StdMonotonicTimer::default();
+    let started_ms = timer.monotonic_now_ms();
+    let start = NamespaceManifestPayload::initial(
         namespace_id.clone(),
         ContentStoreId::generate(),
         context.now_ms,
         actor_id.clone(),
         access.clone(),
     );
-    match install_namespace_manifest(store, &manifest, || Ok(())).await? {
-        NamespaceInstall::Landed => {}
-        NamespaceInstall::Exists if allow_existing => {}
-        NamespaceInstall::Exists => {
-            return Err(BootstrapNamespaceError::NamespaceAlreadyExists {
-                namespace_id: namespace_id.clone(),
-            })
-        }
-        NamespaceInstall::Deleted => {
-            return recreate_namespace(
-                store,
-                namespace_id,
-                context,
-                actor_id,
-                access,
-                allow_existing,
-            )
-            .await
-        }
+    if publish_generation(store, &start, &timer, started_ms).await? == GenerationPublication::Exists
+        && !allow_existing
+    {
+        return Err(BootstrapNamespaceError::NamespaceAlreadyExists {
+            namespace_id: namespace_id.clone(),
+        });
     }
     super::status::load_namespace(store, namespace_id)
         .await
         .map_err(Into::into)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum NamespaceInstall {
-    Landed,
-    Exists,
-    Deleted,
-}
-
-pub(super) async fn install_namespace_manifest<
-    S: ObjectStore + ?Sized,
-    F: Fn() -> Result<(), CoreError>,
->(
-    store: &S,
-    manifest: &NamespaceManifestPayload,
-    validate_install: F,
-) -> Result<NamespaceInstall, CoreError> {
-    let timer = StdMonotonicTimer::default();
-    let started_ms = timer.monotonic_now_ms();
-    let namespace_id = &manifest.namespace_id;
-    if let Some(current) = load_current_manifest_if_present(store, namespace_id).await? {
-        return Ok(if current.envelope.payload().status.is_deleted() {
-            NamespaceInstall::Deleted
-        } else {
-            NamespaceInstall::Exists
-        });
-    }
-    validate_install()?;
-    write_content_store_descriptor(store, &manifest.content_store_id, manifest.created_at_ms)
-        .await?;
-    let hint_key = hint(namespace_id);
-    let hint = HintPayload {
-        namespace_id: namespace_id.clone(),
-        manifest_no: ManifestNo(1),
-        wal_no: WalNo(0),
-    };
-    let hint_bytes =
-        encode_control_state(ControlObjectKind::Hint, &hint).map_err(|error| CoreError::Codec {
-            object_key: hint_key.clone(),
-            message: error.to_string(),
-        })?;
-    let manifest_key = metadata_manifest_object(namespace_id, &ManifestNo(1));
-    let bytes = encode_namespace_manifest_json(manifest.clone())
-        .map_err(|error| CoreError::Codec {
-            object_key: manifest_key.clone(),
-            message: error.to_string(),
-        })?
-        .into_bytes();
-    match store
-        .put_if_absent(&hint_key, Bytes::from(hint_bytes))
-        .await
-    {
-        Ok(_) | Err(ObjectStoreError::PreconditionFailed { .. }) => {}
-        Err(error) => return Err(CoreError::store(&hint_key, &error)),
-    }
-    crate::checkpoint::ensure_metadata_publication_budget(&timer, started_ms, namespace_id)?;
-    validate_install()?;
-    match store.put_if_absent(&manifest_key, Bytes::from(bytes)).await {
-        Ok(_) => Ok(NamespaceInstall::Landed),
-        Err(
-            error @ (ObjectStoreError::PreconditionFailed { .. }
-            | ObjectStoreError::Transport { .. }),
-        ) => {
-            let Some(installed) =
-                load_discovered_manifest(store, namespace_id, ManifestNo(1)).await?
-            else {
-                return Err(CoreError::store(&manifest_key, &error));
-            };
-            let current = load_current_manifest(store, namespace_id).await?;
-            if current.envelope.payload().status.is_deleted() {
-                return Ok(NamespaceInstall::Deleted);
-            }
-            if matches!(error, ObjectStoreError::Transport { .. })
-                && installed.envelope.payload() == manifest
-            {
-                Ok(NamespaceInstall::Landed)
-            } else {
-                Ok(NamespaceInstall::Exists)
-            }
-        }
-        Err(error) => Err(CoreError::store(&manifest_key, &error)),
-    }
-}
-
-pub(super) async fn write_content_store_descriptor<S: ObjectStore + ?Sized>(
-    store: &S,
-    content_store_id: &ContentStoreId,
-    created_at_ms: u64,
-) -> Result<(), CoreError> {
-    let object_key = content_store(content_store_id);
-    let descriptor = ContentStorePayload {
-        content_store_id: content_store_id.clone(),
-        created_at_ms,
-    };
-    let bytes =
-        encode_control_state(ControlObjectKind::ContentStore, &descriptor).map_err(|error| {
-            CoreError::Codec {
-                object_key: object_key.clone(),
-                message: error.to_string(),
-            }
-        })?;
-    match store.put_if_absent(&object_key, Bytes::from(bytes)).await {
-        Ok(_) | Err(ObjectStoreError::PreconditionFailed { .. }) => Ok(()),
-        Err(error) => Err(CoreError::store(&object_key, &error)),
-    }
-}
-
-async fn recreate_namespace<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    context: &MutationContext,
-    actor_id: &ActorId,
-    access: &NamespaceAccess,
-    allow_existing: bool,
-) -> Result<Namespace, BootstrapNamespaceError> {
-    let timer = StdMonotonicTimer::default();
-    let started_ms = timer.monotonic_now_ms();
-    loop {
-        let current = load_current_manifest(store, namespace_id)
-            .await
-            .map_err(CoreError::ControlObjectLoad)?;
-        let tombstone = current.envelope.payload();
-        if !tombstone.status.is_deleted() {
-            if allow_existing {
-                return super::status::load_namespace(store, namespace_id)
-                    .await
-                    .map_err(Into::into);
-            }
-            return Err(BootstrapNamespaceError::NamespaceAlreadyExists {
-                namespace_id: namespace_id.clone(),
-            });
-        }
-
-        let successor = GenerationSuccessor::from_tombstone(tombstone)?;
-        let mut payload = NamespaceManifestPayload::initial(
-            namespace_id.clone(),
-            ContentStoreId::generate(),
-            context.now_ms,
-            actor_id.clone(),
-            access.clone(),
-        );
-        successor.apply_to(&mut payload);
-
-        let manifest = encode_manifest(payload)?;
-        crate::checkpoint::ensure_metadata_publication_budget(&timer, started_ms, namespace_id)?;
-        write_retired_pin(store, &current, context.now_ms).await?;
-        write_content_store_descriptor(
-            store,
-            &manifest.envelope().payload().content_store_id,
-            context.now_ms,
-        )
-        .await?;
-        if let ManifestPublicationOutcome::Published(_) = publish_manifest(
-            store,
-            namespace_id,
-            manifest,
-            Some(tombstone.manifest_no),
-            &timer,
-            started_ms,
-        )
-        .await?
-        {
-            return super::status::load_namespace(store, namespace_id)
-                .await
-                .map_err(Into::into);
-        }
-    }
 }
 
 pub(crate) fn bootstrap_metadata_state(

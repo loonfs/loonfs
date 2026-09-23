@@ -45,7 +45,7 @@ Creating a namespace whose current manifest is deleted recreates it. A fork into
 2. Take the WAL tip from the tombstone's folded WAL number. Deletion stamps the discovered tip there, and publishing the tombstone acquired the writer epoch, so no further WAL object can be published under it. Recreation reads no WAL object, which matters because the deleted generation's WAL objects are unprotected and may already be collected.
 3. Write a retired pin over the tombstone with put-if-absent. Its id is `pin_{tombstone_no:020}-` followed by sixteen hex characters derived from the namespace id and the tombstone number, so repeated attempts land on one record. The next section describes the pin.
 4. Write the content-store descriptor with put-if-absent, for a fresh domain on a plain recreation or the source's domain on a fork.
-5. Build the new manifest from the table above and publish it at the tombstone's number plus one with put-if-absent, within the metadata publication budget measured from step 1. A fork also stays within its installation budget, measured before creating the source pin.
+5. Build the new manifest from the table above and publish it at the tombstone's number plus one with put-if-absent, within the metadata publication budget, measured from step 1 or, for a fork, from before it creates its source pin.
 6. Publication raises the hint to the new manifest number. A failed raise does not fail the creation.
 
 A losing manifest put reads the winner. An active winner is a concurrent recreation and answers `namespace_exists`, or the winner with `allow_existing`. A newer tombstone means another generation was created and deleted, so recreation retries over that tombstone. A put with an unknown transport outcome confirms its own success only by reading back the exact proposed manifest.
@@ -72,7 +72,7 @@ reclaim_after_ms = deleted_at_ms + max(configured_grace, NAMESPACE_RETIREMENT_GR
 
 A generation is reclaimable in a collection pass when the pass's clock is at or past that deadline and the pass's complete pin listing holds no pin over the generation's manifest range other than the retired pin itself. The range runs from the tombstone's `generation_first_manifest_no` through the tombstone's own number. A pin's manifest number is part of its id, so this check reads no pin bodies.
 
-The grace constant covers a publication budget, the provider operation deadline and attempt timeout, the direct transfer capability lifetime, and the clock safety margin. Those terms bound how far the deleter's clock can lag the tombstone it publishes. A fork whose installation was in flight when the deletion published writes its pin within the fork installation budget, which the grace also covers, so a listing taken after the deadline either sees that pin or the fork failed.
+The grace constant covers a publication budget, the provider operation deadline and attempt timeout, the direct transfer capability lifetime, and the clock safety margin. Those terms bound how far the deleter's clock can lag the tombstone it publishes. A fork whose installation was in flight when the deletion published writes its pin within the metadata publication budget of its start, which the grace also covers, so a listing taken after the deadline either sees that pin or the fork failed.
 
 Nothing creates a new pin over a prior generation after the deadline. The deleted manifest refuses checkpoint and fork creation while it is current, and after recreation the checkpoint surface refuses a basis below the current generation.
 

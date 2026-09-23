@@ -547,7 +547,7 @@ async fn recreating_a_namespace_fences_the_session_that_deleted_it() {
 }
 
 #[tokio::test]
-async fn a_fork_below_the_tombstone_starts_at_its_next_sequence() {
+async fn a_fork_below_the_tombstone_starts_at_the_source_sequence() {
     assert_fork_recreation(1, 3).await;
 }
 
