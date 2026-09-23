@@ -106,11 +106,15 @@ async fn prior_generation_pin_blocks_reclamation_for_the_whole_pass_that_deletes
     let retired_id = retired_pin(&store, &namespace_id).await;
     create(&store, &namespace_id, 3_000).await;
     let deadline = 2_000 + GRACE_MS;
-    let waiting = gc_namespace(&store, &namespace_id, &config(), &context(deadline + 1))
+    let held = gc_namespace(&store, &namespace_id, &config(), &context(deadline + 1))
         .await
         .expect("pin still young");
-    assert_eq!(waiting.next_reclamation_at_ms, Some(deadline));
-    assert_eq!(waiting.deleted.retired_content_objects, 0);
+    assert_eq!(
+        held.next_reclamation_at_ms,
+        Some(2_100 + GRACE_MS),
+        "the collector wakes when the pin holding the generation ages out"
+    );
+    assert_eq!(held.deleted.retired_content_objects, 0);
     assert!(checkpoint_exists(&store, &namespace_id, &pin.checkpoint_id).await);
     let aged = context(2_100 + GRACE_MS);
     let reaped = gc_namespace(&store, &namespace_id, &config(), &aged)

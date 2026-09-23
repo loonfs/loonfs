@@ -44,7 +44,7 @@ pub async fn gc_namespace<S: ObjectStore + ?Sized>(
         .tombstones()
         .filter_map(
             |tombstone| match live.generation_state(tombstone.generation) {
-                GenerationState::Pending { deadline_ms } => Some(deadline_ms),
+                GenerationState::Waiting { deadline_ms } => Some(deadline_ms),
                 _ => None,
             },
         )
