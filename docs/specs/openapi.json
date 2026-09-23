@@ -3851,7 +3851,7 @@
             "description": "Namespace the pass ran against."
           },
           "next_reclamation_at_ms": {
-            "description": "The earliest future retirement deadline or upload cleanup time.",
+            "description": "The earliest future retirement deadline, pin deletion time, or upload cleanup time.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"

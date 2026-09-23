@@ -123,8 +123,9 @@ impl<S: ObjectStore + ?Sized> Sweep<'_, '_, S> {
             }
             CheckpointSweep::DeleteRetired => &mut self.report.deleted_checkpoints_by_owner.retired,
             CheckpointSweep::Gone => return Ok(()),
-            CheckpointSweep::Retain => {
+            CheckpointSweep::Retain { reclaimable_at_ms } => {
                 self.report.retain(RetainedReason::CheckpointNotDeletable);
+                self.note_reclamation_deadline(reclaimable_at_ms);
                 return Ok(());
             }
         };

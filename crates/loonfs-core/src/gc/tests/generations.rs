@@ -110,8 +110,9 @@ async fn prior_generation_pin_blocks_reclamation_for_the_whole_pass_that_deletes
         .await
         .expect("pin still young");
     assert_eq!(
-        held.next_reclamation_at_ms, None,
-        "a held generation has no time to wake the collector at"
+        held.next_reclamation_at_ms,
+        Some(2_100 + GRACE_MS),
+        "the collector wakes when the pin holding the generation ages out"
     );
     assert_eq!(held.deleted.retired_content_objects, 0);
     assert!(checkpoint_exists(&store, &namespace_id, &pin.checkpoint_id).await);

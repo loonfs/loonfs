@@ -937,7 +937,7 @@ Uploads are collected through their session records. The active current generati
 | Completed session in an active namespace, before content grace | Retain. |
 | Completed session in an active namespace, after content grace | Check publication evidence. Keep published content; delete unreferenced content. Remove the session after successful cleanup or a confirmed publication. |
 | Session in a deleted generation inside its retirement grace | Retain; report the generation's derived deadline. |
-| Session in a deleted generation that pins hold after its grace | Retain; report no time. |
+| Session in a deleted generation that pins hold after its grace | Retain; report no time of its own. |
 | Completed session in an eligible current deleted generation | Delete content, then the record; no publication lookup or additional completion grace is required. |
 | Prior-generation session, generation eligible | Use the retired namespace rules with the session's generation and content-store ID. Open and aborted sessions keep their expiry, abort grace, and provider cleanup rules. Completed sessions delete content, then the record. |
 | Prior-generation session, generation reclaimed | Its content prefix is already gone. For open and aborted sessions, run provider cleanup with the session's generation and content-store ID. Then delete the record. |
@@ -971,7 +971,7 @@ Every token mint checks the original completion time. A retained receipt cannot 
 
 ### 11.7 Pin cleanup
 
-User and snapshot pins become collectable after expiry plus `T`, or creation plus `T` on a deleted namespace. A pin whose manifest number is below the head's `generation_first_manifest_no` also uses creation plus `T`. A user pin with no expiry remains until explicit deletion only within the active current generation. Pin deletion is direct; IDs are never reused.
+User and snapshot pins become collectable after expiry plus `T`, or creation plus `T` on a deleted namespace. A pin whose manifest number is below the head's `generation_first_manifest_no` also uses creation plus `T`. A user pin with no expiry remains until explicit deletion only within the active current generation. A retained user or snapshot pin reports the earlier of those times in `next_reclamation_at_ms`, so a generation it holds is collected once it goes. Pin deletion is direct; IDs are never reused.
 
 A retired pin with a present manifest is retained before any age check. Reclaiming its generation removes it. A retired pin whose manifest is absent is deleted in the pin sweep.
 

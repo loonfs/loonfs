@@ -1219,7 +1219,7 @@ pub struct GcResponse {
     pub deleted_checkpoints_by_owner: DeletedCheckpointsByOwner,
     /// Candidates retained at deletion time, grouped by reason.
     pub retained: RetainedCandidates,
-    /// The earliest future retirement deadline or upload cleanup time.
+    /// The earliest future retirement deadline, pin deletion time, or upload cleanup time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub next_reclamation_at_ms: Option<u64>,

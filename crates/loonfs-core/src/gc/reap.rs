@@ -16,7 +16,10 @@ pub(super) enum CheckpointSweep {
     DeleteSnapshot,
     DeleteRetired,
     Gone,
-    Retain,
+    /// Kept; a user or snapshot pin says when it becomes deletable.
+    Retain {
+        reclaimable_at_ms: Option<u64>,
+    },
 }
 
 pub(super) async fn sweep_checkpoint_record<S: ObjectStore + ?Sized>(
@@ -36,7 +39,9 @@ pub(super) async fn sweep_checkpoint_record<S: ObjectStore + ?Sized>(
             return Ok(if live.missing_retired_pins.contains(key) {
                 CheckpointSweep::DeleteRetired
             } else {
-                CheckpointSweep::Retain
+                CheckpointSweep::Retain {
+                    reclaimable_at_ms: None,
+                }
             });
         }
         PinOwner::User { .. } => CheckpointSweep::DeleteUser,
@@ -57,22 +62,25 @@ pub(super) async fn sweep_checkpoint_record<S: ObjectStore + ?Sized>(
                     ForkCheckpointReachability::Reclaimable => CheckpointSweep::DeleteFork,
                     ForkCheckpointReachability::Retained { reason } => {
                         tracing::debug!(object_key = key, reason, "retaining fork pin");
-                        CheckpointSweep::Retain
+                        CheckpointSweep::Retain {
+                            reclaimable_at_ms: None,
+                        }
                     }
                 },
             );
         }
     };
-    let expired = record.owner.expires_at_ms().is_some_and(|expiry| {
-        context.now_ms >= expiry && context.now_ms.saturating_sub(expiry) >= grace_window_ms
-    });
-    let deleted = (live.namespace_deleted
+    let expires_at_ms = record
+        .owner
+        .expires_at_ms()
+        .map(|expiry| expiry.saturating_add(grace_window_ms));
+    let ages_out_at_ms = (live.namespace_deleted
         || record.pin_id.manifest_no() < live.generation_first_manifest_no)
-        && context.now_ms.saturating_sub(record.created_at_ms) >= grace_window_ms;
-    Ok(if expired || deleted {
-        deletion
-    } else {
-        CheckpointSweep::Retain
+        .then(|| record.created_at_ms.saturating_add(grace_window_ms));
+    let reclaimable_at_ms = expires_at_ms.into_iter().chain(ages_out_at_ms).min();
+    Ok(match reclaimable_at_ms {
+        Some(at_ms) if context.now_ms >= at_ms => deletion,
+        _ => CheckpointSweep::Retain { reclaimable_at_ms },
     })
 }
 
