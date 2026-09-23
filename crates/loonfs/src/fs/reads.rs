@@ -5,12 +5,12 @@ use crate::downloads::{DirectDownloadByInodeTarget, DirectDownloadTarget};
 use crate::FsReader;
 use crate::Result;
 use crate::{
-    ChangeSeq, CheckpointFilesPage, CheckpointFilesPageCursor, CheckpointId, ContentRef, CoreError,
+    ChangeSeq, CheckpointFilesPage, CheckpointFilesPageCursor, ContentRef, CoreError,
     CurrentFileState, FileBytes, FileContentStream, InodeId, ListChangesOptions,
     ListChangesResponse, ListFileRevisionsResponse, ListInodeChildrenOptions,
     ListInodeChildrenResponse, ListPathEntriesOptions, ListPathEntriesResponse, Namespace,
-    NamespaceId, PathEntry, ReadFileStreamOptions, RevisionNo, RuntimeError, SharedObjectStore,
-    SnapshotId, StatPathOptions,
+    NamespaceId, PathEntry, PinId, ReadFileStreamOptions, RevisionNo, RuntimeError,
+    SharedObjectStore, StatPathOptions,
 };
 use loonfs_api::{
     AbsolutePath, DirectoryPageCursor, EffectiveLimit, FileRevisionsPageCursor,
@@ -20,7 +20,7 @@ use loonfs_core::{NamespaceReaderEngine, RuntimeReadContext};
 use tracing::Instrument;
 
 /// Runtime readers require callers to pin snapshots explicitly.
-fn reject_snapshot_option(snapshot_id: &Option<SnapshotId>, reader: &str) -> Result<()> {
+fn reject_snapshot_option(snapshot_id: &Option<PinId>, reader: &str) -> Result<()> {
     if snapshot_id.is_some() {
         return Err(loonfs_core::Error::InvalidCheckpointRequest(format!(
             "snapshot_id is not supported by {reader}"
@@ -33,7 +33,7 @@ fn reject_snapshot_option(snapshot_id: &Option<SnapshotId>, reader: &str) -> Res
 fn validate_pinned_directory_cursor(
     cursor: Option<&DirectoryPageCursor>,
     pinned_head_seq: ChangeSeq,
-    snapshot_id: Option<&SnapshotId>,
+    snapshot_id: Option<&PinId>,
 ) -> Result<()> {
     let Some(cursor) = cursor else {
         return Ok(());
@@ -81,7 +81,7 @@ fn reject_snapshot_bound_directory_cursor(cursor: Option<&DirectoryPageCursor>) 
 pub struct FsReadSnapshot {
     engine: NamespaceReaderEngine<SharedObjectStore>,
     context: RuntimeReadContext,
-    snapshot_id: Option<SnapshotId>,
+    snapshot_id: Option<PinId>,
     max_read_content_bytes: Option<u64>,
 }
 
@@ -334,7 +334,7 @@ impl FsReader {
         &self,
         engine: NamespaceReaderEngine<SharedObjectStore>,
         context: RuntimeReadContext,
-        snapshot_id: Option<SnapshotId>,
+        snapshot_id: Option<PinId>,
     ) -> FsReadSnapshot {
         FsReadSnapshot {
             engine,
@@ -389,7 +389,7 @@ impl FsReader {
     pub async fn pin_namespace_at_checkpoint(
         &self,
         namespace_id: &NamespaceId,
-        checkpoint_id: &CheckpointId,
+        checkpoint_id: &PinId,
     ) -> Result<FsReadSnapshot> {
         self.core.record_trace_context(&tracing::Span::current());
         let (engine, context) = self
@@ -417,7 +417,7 @@ impl FsReader {
     pub async fn pin_namespace_at_snapshot(
         &self,
         namespace_id: &NamespaceId,
-        snapshot_id: &SnapshotId,
+        snapshot_id: &PinId,
     ) -> Result<FsReadSnapshot> {
         self.core.record_trace_context(&tracing::Span::current());
         let now_ms = loonfs_core::time::current_time_ms()?;
@@ -844,7 +844,7 @@ impl FsReader {
     pub async fn list_checkpoint_files_page(
         &self,
         namespace_id: &NamespaceId,
-        checkpoint_id: &CheckpointId,
+        checkpoint_id: &PinId,
         request: PageRequest<CheckpointFilesPageCursor>,
     ) -> Result<CheckpointFilesPage> {
         self.core.record_trace_context(&tracing::Span::current());

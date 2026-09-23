@@ -90,7 +90,7 @@ impl NamespaceStorageDiagnostics {
 fn fork_basis(basis: Option<ForkBasis>) -> Option<NamespaceForkBasis> {
     basis.map(|basis| NamespaceForkBasis {
         source_namespace_id: basis.manifest.owner_namespace_id,
-        source_head_seq: basis.manifest.manifest_head_seq,
+        source_head_seq: basis.manifest.head_seq,
     })
 }
 

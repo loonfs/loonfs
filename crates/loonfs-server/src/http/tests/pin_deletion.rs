@@ -2,7 +2,7 @@
 
 use super::*;
 use axum::http::Method;
-use loonfs_api::CheckpointId;
+use loonfs_api::PinId;
 use loonfs_test_support::stores::{KeyPredicate, RecordingStore};
 use serde_json::{json, Value};
 use tower::ServiceExt;
@@ -82,8 +82,8 @@ async fn delete_routes_require_the_owner_and_delete_each_pin_once() {
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{created}");
-        let checkpoint_id = CheckpointId::parse(created[id_field].as_str().expect("pin id"))
-            .expect("checkpoint id");
+        let checkpoint_id =
+            PinId::parse(created[id_field].as_str().expect("pin id")).expect("checkpoint id");
         let uri = format!("{collection}/{checkpoint_id}");
         for (method, path, expected_status, error_code) in [
             (

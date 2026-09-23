@@ -1600,7 +1600,7 @@ mod tests {
         crate::checkpoint::create_checkpoint(
             &store,
             &namespace_id,
-            loonfs_api::wire::control::CheckpointOwner::User {
+            loonfs_api::wire::control::PinOwner::User {
                 name: "test-pin".to_owned(),
                 expires_at_ms: None,
             },

@@ -4,8 +4,8 @@
 
 use loonfs_api::wire::manifest::MetadataSegmentRef;
 use loonfs_api::{
-    CheckpointId, ContentId, ContentStoreId, ManifestNo, MetadataSegmentId, NamespaceGeneration,
-    NamespaceId, UploadId, WalNo,
+    ContentId, ContentStoreId, ManifestNo, MetadataSegmentId, NamespaceGeneration, NamespaceId,
+    PinId, UploadId, WalNo,
 };
 
 /// Builds the listing prefix containing every durable object owned by one namespace.
@@ -60,11 +60,11 @@ pub fn metadata_segment_object_key(descriptor: &MetadataSegmentRef) -> String {
 }
 
 /// Builds a pin key with its manifest number in the id.
-pub fn checkpoint_record(namespace_id: &NamespaceId, checkpoint_id: &CheckpointId) -> String {
+pub fn checkpoint_record(namespace_id: &NamespaceId, checkpoint_id: &PinId) -> String {
     format!("namespaces/{namespace_id}/pins/{checkpoint_id}.json")
 }
 
-/// Builds the listing prefix containing checkpoint records for one namespace.
+/// Builds the listing prefix containing pins for one namespace.
 pub fn checkpoint_prefix(namespace_id: &NamespaceId) -> String {
     format!("namespaces/{namespace_id}/pins/")
 }
@@ -117,8 +117,8 @@ mod tests {
     use loonfs_api::wire::manifest::{MetadataRowFamily, MetadataSegmentRef};
     use loonfs_api::wire::sst_blocks::BlockHandle;
     use loonfs_api::{
-        CheckpointId, ContentId, ContentStoreId, ManifestNo, MetadataSegmentId,
-        NamespaceGeneration, NamespaceId, UploadId, WalNo,
+        ContentId, ContentStoreId, ManifestNo, MetadataSegmentId, NamespaceGeneration, NamespaceId,
+        PinId, UploadId, WalNo,
     };
 
     const CONTENT_ID: &str = "con_abcdef0123456789abcdef0123456789";
@@ -136,9 +136,8 @@ mod tests {
             .expect("valid content store id")
     }
 
-    fn checkpoint_id() -> CheckpointId {
-        CheckpointId::parse("pin_00000000000000000001-0000000000000001")
-            .expect("valid checkpoint id")
+    fn pin_id() -> PinId {
+        PinId::parse("pin_00000000000000000001-0000000000000001").expect("valid pin id")
     }
 
     fn metadata_segment_id() -> MetadataSegmentId {
@@ -213,10 +212,7 @@ mod tests {
                 "Namespace manifests",
                 metadata_manifest_object(&namespace_id(), &ManifestNo(400)),
             ),
-            (
-                "Pin records",
-                checkpoint_record(&namespace_id(), &checkpoint_id()),
-            ),
+            ("Pin records", checkpoint_record(&namespace_id(), &pin_id())),
             (
                 "Metadata segments",
                 metadata_segment(&namespace_id(), &metadata_segment_id()),

@@ -283,7 +283,7 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | `namespace_not_found` | 404 | The namespace has no installed manifest, so it does not exist. |
 | `namespace_deleted` | 410 | The namespace's current manifest is deleted. Ordinary operations fail. A create or a fork into the id starts its next generation. |
 | `checkpoint_not_found` | 404 | The checkpoint id names no existing pin. |
-| `snapshot_not_found` | 404 | The snapshot id names no checkpoint record. Refresh state or choose another snapshot. |
+| `snapshot_not_found` | 404 | The snapshot id names no pin. Refresh state or choose another snapshot. |
 | `snapshot_gone` | 410 | The snapshot has expired, or was deleted while a fork was verifying its selected snapshot. |
 | `path_not_found` | 404 | No visible entry at the path. |
 | `inode_not_found` | 404 | The requested visible or retained inode does not exist. |
@@ -966,7 +966,7 @@ A maintenance run body names exactly one job with `kind`:
 | `recover_administrator` | `principal_id` | `commit_id`, `committed_seq`, and the root row's new `access_revision_no`. Grants `admin` on the root row to the principal and keeps every other root grant, through a commit that checks no subject and is attributed to `Loonfs-Actor`. Use it when an ACL namespace has lost every administrator. |
 
 The response carries the same `kind`, the addressed `namespace_id`, and that
-job's result. None of the jobs creates a checkpoint record.
+job's result. None of the jobs creates a pin.
 
 ```json
 {"kind":"gc"}
@@ -1058,7 +1058,7 @@ namespace requires explicit deletion.
 
 #### Snapshots
 
-A snapshot is a time-bounded view of a namespace. Its checkpoint record id is
+A snapshot is a time-bounded view of a namespace. Its pin id is
 its `snapshot_id`. The `captured_seq` is the namespace sequence the snapshot captured.
 Creation requires `name` and `ttl_ms`. The ttl cannot exceed
 `snapshot.max_ttl_ms` or `snapshot.max_lifetime_ms`.
@@ -1132,8 +1132,8 @@ Every call reads the current manifest and uses one fixed clock. It keeps its liv
 A GC response groups related counts. `deleted` contains `wal_segments`,
 `metadata_segments`, `manifests`, `upload_sessions`, `content_objects`, and
 `retired_content_objects`. `deleted_checkpoints_by_owner` contains `fork`,
-`expired`, `snapshot`, and `retired` counts for checkpoint records deleted in the pass. A retired pin is counted when reclamation deletes it after its generation has no retained upload sessions, or when the pin sweep deletes a pin whose manifest is absent.
-Their sum is the total number of checkpoint records deleted. Each deletion
+`expired`, `snapshot`, and `retired` counts for pins deleted in the pass. A retired pin is counted when reclamation deletes it after its generation has no retained upload sessions, or when the pin sweep deletes a pin whose manifest is absent.
+Their sum is the total number of pins deleted. Each deletion
 is counted once. A target's deletion of its source pin contributes to `fork`
 when the pin was present before deletion. Repeating that deletion on an
 absent pin adds no count. Every count field is present, including zero values.
@@ -1658,7 +1658,7 @@ reclamation. Deletion itself reclaims nothing. Dependent forks, retained
 checkpoints, grace windows, and maintenance not running can all delay
 reclamation. Continued writes through already-issued capabilities can also
 leave objects for later passes. A maintenance run with `kind` set to `gc` ages out unneeded WAL,
-metadata, and checkpoint records. GC derives `reclaim_after_ms` from the current tombstone's deletion stamp and the retirement grace. After recreation, retired pins preserve prior tombstones for the same checks. Once a generation's deadline passes and the complete pin listing contains no other pin in its manifest range, the pass reclaims its owned content and source pin. It deletes the retired pin last, only when no upload session of that generation remains. It publishes no retirement manifest. A pass can reclaim multiple generations independently. The current manifest survives, and the shared content-store descriptor, other owners' objects, and generations that are not eligible remain.
+metadata, and pins. GC derives `reclaim_after_ms` from the current tombstone's deletion stamp and the retirement grace. After recreation, retired pins preserve prior tombstones for the same checks. Once a generation's deadline passes and the complete pin listing contains no other pin in its manifest range, the pass reclaims its owned content and source pin. It deletes the retired pin last, only when no upload session of that generation remains. It publishes no retirement manifest. A pass can reclaim multiple generations independently. The current manifest survives, and the shared content-store descriptor, other owners' objects, and generations that are not eligible remain.
 
 Run GC repeatedly to catch late writes and keep the provider's incomplete
 multipart-upload lifecycle rule. Deleting an object key does not erase

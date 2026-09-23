@@ -24,8 +24,8 @@ use clap::ValueEnum;
 use loonfs::{MaintenanceJobId, NamespaceId};
 use loonfs_api::v0::{GrepGcRequest, GrepIndexLifecycle};
 use loonfs_api::{
-    AdvanceRetentionRequest, ChangeSeq, CheckpointId, CreateCheckpointRequest, ErrorCode,
-    GcRequest, MetadataCompactionRequest, MetadataMaintenanceRequest, PrincipalId,
+    AdvanceRetentionRequest, ChangeSeq, CreateCheckpointRequest, ErrorCode, GcRequest,
+    MetadataCompactionRequest, MetadataMaintenanceRequest, PinId, PrincipalId,
     RecoverAdministratorRequest, RunMaintenanceRequest,
 };
 use loonfs_grep::{GREP_GC_JOB, GREP_INDEX_JOB};
@@ -211,7 +211,7 @@ async fn run_maintenance_checkpoint_delete(
     args: MaintenanceCheckpointDeleteArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, config_path, &args.target).await?;
-    let checkpoint_id = CheckpointId::parse(&args.checkpoint_id).map_err(|error| {
+    let checkpoint_id = PinId::parse(&args.checkpoint_id).map_err(|error| {
         context.fail(
             kind,
             crate::error::CliError::new(ErrorCode::InvalidRequest.as_str(), error.to_string())

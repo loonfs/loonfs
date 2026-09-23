@@ -8,7 +8,7 @@ use crate::common::namespace_engine;
 use bytes::Bytes;
 use loonfs_api::v0::CompleteMultipartUploadRequest;
 use loonfs_api::{
-    wire::control::{ControlObjectKind, UploadSessionMode, UploadSessionState},
+    wire::control::{ControlObjectKind, UploadSessionMode, UploadSessionPayload},
     AbsolutePath, ContentId, ContentRef, DestinationBehavior, NamespaceGeneration, NamespaceId,
     UploadId,
 };
@@ -774,14 +774,14 @@ mod direct_multipart {
         store: &S,
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
-    ) -> UploadSessionState {
+    ) -> UploadSessionPayload {
         let key = upload_session(namespace_id, upload_id);
         let bytes = store
             .get(&key, None)
             .await
             .expect("read session")
             .expect("session exists");
-        decode_control_object::<UploadSessionState>(&bytes, ControlObjectKind::UploadSession)
+        decode_control_object::<UploadSessionPayload>(&bytes, ControlObjectKind::UploadSession)
             .expect("decode session")
             .into_payload()
     }

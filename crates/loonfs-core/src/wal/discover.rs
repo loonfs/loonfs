@@ -110,7 +110,7 @@ pub async fn probe_namespace_wal<S: ObjectStore + ?Sized>(
     let mut cache_key = WalTailProjectionCacheKey {
         namespace_id: state.namespace_id.clone(),
         manifest_no: context.basis.manifest_no(),
-        manifest_head_seq: context.basis.manifest().manifest_head_seq,
+        manifest_head_seq: context.basis.manifest().head_seq,
         head_seq: state.seq,
     };
     let mut projected_tail = None;

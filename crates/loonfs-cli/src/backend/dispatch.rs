@@ -15,11 +15,11 @@ use loonfs_api::{
         ListSnapshotsResponse, SnapshotSummary, StoreProbeRequest, StoreProbeResponse,
         UploadSession,
     },
-    AbsolutePath, ActorId, CapabilityDocument, ChangeSeq, Checkpoint, CheckpointId, Commit,
-    ContentRef, CreateCheckpointRequest, DeleteCheckpointResponse, DeleteNamespaceResponse,
-    GrepRequest, GrepResponse, InodeId, ListCheckpointsResponse, ListFileRevisionsResponse,
-    ListPathEntriesResponse, ListTrashResponse, Namespace, NamespaceId, PathEntry, RevisionNo,
-    RunMaintenanceRequest, RunMaintenanceResponse, SnapshotId, Subject, UploadId,
+    AbsolutePath, ActorId, CapabilityDocument, ChangeSeq, Checkpoint, Commit, ContentRef,
+    CreateCheckpointRequest, DeleteCheckpointResponse, DeleteNamespaceResponse, GrepRequest,
+    GrepResponse, InodeId, ListCheckpointsResponse, ListFileRevisionsResponse,
+    ListPathEntriesResponse, ListTrashResponse, Namespace, NamespaceId, PathEntry, PinId,
+    RevisionNo, RunMaintenanceRequest, RunMaintenanceResponse, Subject, UploadId,
 };
 use loonfs_client::{
     ClientError, CopyOptions, CreateDirectoryOptions, DeleteOptions, DownloadOptions,
@@ -190,7 +190,7 @@ impl ResolvedTarget {
         spec: &NamespacePath,
         limit: Option<u32>,
         cursor: Option<&str>,
-        snapshot_id: Option<&SnapshotId>,
+        snapshot_id: Option<&PinId>,
     ) -> Result<ListPathEntriesResponse, CliError> {
         match self {
             Self::Embedded(target) => {
@@ -218,7 +218,7 @@ impl ResolvedTarget {
     pub(crate) async fn get_path_entry_at_snapshot(
         &self,
         spec: &NamespacePath,
-        snapshot_id: Option<&SnapshotId>,
+        snapshot_id: Option<&PinId>,
     ) -> Result<PathEntry, CliError> {
         self.get_path_entry_projected(
             spec,
@@ -235,7 +235,7 @@ impl ResolvedTarget {
         &self,
         namespace_id: &NamespaceId,
         inode_id: InodeId,
-        snapshot_id: Option<&SnapshotId>,
+        snapshot_id: Option<&PinId>,
     ) -> Result<PathEntry, CliError> {
         match self {
             Self::Embedded(target) => {
@@ -280,7 +280,7 @@ impl ResolvedTarget {
     pub(crate) async fn get_path_entry_without_attributes_at_snapshot(
         &self,
         spec: &NamespacePath,
-        snapshot_id: Option<&SnapshotId>,
+        snapshot_id: Option<&PinId>,
     ) -> Result<PathEntry, CliError> {
         self.get_path_entry_projected(
             spec,
@@ -309,7 +309,7 @@ impl ResolvedTarget {
         &self,
         spec: &NamespacePath,
         revision_no: Option<RevisionNo>,
-        snapshot_id: Option<&SnapshotId>,
+        snapshot_id: Option<&PinId>,
         start_offset: u64,
     ) -> Result<FileDownload, CliError> {
         match self {
@@ -795,7 +795,7 @@ impl ResolvedTarget {
     pub(crate) async fn extend_snapshot(
         &self,
         namespace_id: &NamespaceId,
-        snapshot_id: &SnapshotId,
+        snapshot_id: &PinId,
         ttl_ms: u64,
     ) -> Result<SnapshotSummary, CliError> {
         match self {
@@ -816,7 +816,7 @@ impl ResolvedTarget {
     pub(crate) async fn delete_snapshot(
         &self,
         namespace_id: &NamespaceId,
-        snapshot_id: &SnapshotId,
+        snapshot_id: &PinId,
     ) -> Result<DeleteSnapshotResponse, CliError> {
         match self {
             Self::Embedded(target) => target
@@ -880,7 +880,7 @@ impl ResolvedTarget {
     pub(crate) async fn delete_checkpoint(
         &self,
         namespace_id: &NamespaceId,
-        checkpoint_id: &CheckpointId,
+        checkpoint_id: &PinId,
     ) -> Result<DeleteCheckpointResponse, CliError> {
         match self {
             Self::Embedded(target) => target
@@ -986,7 +986,7 @@ impl ResolvedTarget {
         namespace_id: &NamespaceId,
         after_seq: ChangeSeq,
         limit: Option<u32>,
-        snapshot_id: Option<&SnapshotId>,
+        snapshot_id: Option<&PinId>,
     ) -> Result<ListChangesResponse, CliError> {
         match self {
             Self::Embedded(target) => {

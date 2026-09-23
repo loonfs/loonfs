@@ -17,14 +17,11 @@ async fn create<S: ObjectStore + ?Sized>(store: &S, namespace_id: &NamespaceId, 
     .expect("create");
 }
 
-async fn retired_pin<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-) -> CheckpointId {
+async fn retired_pin<S: ObjectStore + ?Sized>(store: &S, namespace_id: &NamespaceId) -> PinId {
     let head = crate::namespace::control::load_current_manifest(store, namespace_id)
         .await
         .expect("tombstone");
-    CheckpointId::retired(namespace_id, head.envelope.payload().manifest_no)
+    PinId::retired(namespace_id, head.envelope.payload().manifest_no)
 }
 
 #[tokio::test]
@@ -151,7 +148,7 @@ async fn fork_pins_follow_recreated_targets_until_the_prior_generation_is_reclai
     let abandoned = crate::checkpoint::create_checkpoint(
         &store,
         &source,
-        CheckpointOwner::Fork {
+        PinOwner::Fork {
             target_namespace_id: unrelated.clone(),
         },
         &context(1_000),

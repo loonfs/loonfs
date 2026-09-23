@@ -8,7 +8,7 @@ use crate::namespace::read_anchor::NamespaceReadAnchor;
 use crate::wal::{object_is_required, required_from};
 use futures::StreamExt;
 use loonfs_api::wire::manifest::NamespaceManifestPayload;
-use loonfs_api::{CheckpointId, ManifestNo, NamespaceGeneration, NamespaceId, WalNo};
+use loonfs_api::{ManifestNo, NamespaceGeneration, NamespaceId, PinId, WalNo};
 use loonfs_objectstore::keys::{
     checkpoint_prefix, metadata_manifest_object, metadata_segment_object_key,
 };
@@ -25,7 +25,7 @@ pub(super) enum GenerationState {
 
 pub(super) struct RetiredPin {
     pub(super) key: String,
-    pub(super) id: CheckpointId,
+    pub(super) id: PinId,
     pub(super) tombstone: NamespaceManifestPayload,
 }
 
@@ -38,7 +38,7 @@ pub(super) struct LiveSet {
     pub(super) missing_retired_pins: BTreeSet<String>,
     pub(super) discovery_start_manifest_no: ManifestNo,
     pub(super) objects: BTreeSet<String>,
-    listed_pins: BTreeSet<CheckpointId>,
+    listed_pins: BTreeSet<PinId>,
     unrecognized_pin: bool,
     grace_window_ms: u64,
     now_ms: u64,
@@ -193,7 +193,7 @@ impl LiveSet {
             .find(|tombstone| tombstone.generation == generation)
         {
             let deadline_ms = self.deadline(tombstone);
-            let retired_id = CheckpointId::retired(&tombstone.namespace_id, tombstone.manifest_no);
+            let retired_id = PinId::retired(&tombstone.namespace_id, tombstone.manifest_no);
             let pinned = self.listed_pins.iter().any(|id| {
                 id != &retired_id
                     && id.manifest_no() >= tombstone.generation_first_manifest_no

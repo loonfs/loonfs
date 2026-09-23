@@ -8,8 +8,8 @@ use super::scan::VerifiedMetadataSegments;
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::namespace::basis::MetadataBasis;
 use crate::namespace::state::NamespaceReadState;
-use loonfs_api::wire::control::{CheckpointRecordState, ManifestRef};
-use loonfs_api::{CheckpointId, NamespaceId};
+use loonfs_api::wire::control::{ManifestRef, PinPayload};
+use loonfs_api::{NamespaceId, PinId};
 use loonfs_objectstore::ObjectStore;
 
 /// The manifest a checkpoint pins, loaded and verified.
@@ -33,7 +33,7 @@ pub(crate) async fn load_pinned_checkpoint_basis<'a, S: ObjectStore + ?Sized>(
     store: &'a S,
     segment_cache: Option<&'a MetadataSegmentCache>,
     namespace_id: &NamespaceId,
-    checkpoint_id: &CheckpointId,
+    checkpoint_id: &PinId,
 ) -> Result<PinnedCheckpointBasis<'a, S>> {
     let record = load_pinning_checkpoint_record(store, namespace_id, checkpoint_id).await?;
     load_pinned_checkpoint_basis_from_record(store, segment_cache, record).await
@@ -42,7 +42,7 @@ pub(crate) async fn load_pinned_checkpoint_basis<'a, S: ObjectStore + ?Sized>(
 pub(crate) async fn load_pinned_checkpoint_basis_from_record<'a, S: ObjectStore + ?Sized>(
     store: &'a S,
     segment_cache: Option<&'a MetadataSegmentCache>,
-    record: CheckpointRecordState,
+    record: PinPayload,
 ) -> Result<PinnedCheckpointBasis<'a, S>> {
     let checkpoint_id = &record.pin_id;
     let manifest = record.manifest();
@@ -68,7 +68,7 @@ pub async fn load_checkpoint_read_basis<S: ObjectStore + ?Sized>(
     store: &S,
     segment_cache: Option<&MetadataSegmentCache>,
     live_head: &NamespaceReadState,
-    checkpoint_id: &CheckpointId,
+    checkpoint_id: &PinId,
 ) -> Result<CheckpointReadBasis> {
     if !checkpoint_is_visible(live_head, checkpoint_id) {
         return Err(missing_checkpoint(&live_head.namespace_id, checkpoint_id));
@@ -82,7 +82,7 @@ pub(crate) async fn load_checkpoint_read_basis_from_record<S: ObjectStore + ?Siz
     store: &S,
     segment_cache: Option<&MetadataSegmentCache>,
     live_head: &NamespaceReadState,
-    record: CheckpointRecordState,
+    record: PinPayload,
 ) -> Result<CheckpointReadBasis> {
     let PinnedCheckpointBasis { manifest, segments } =
         load_pinned_checkpoint_basis_from_record(store, segment_cache, record).await?;
@@ -96,12 +96,12 @@ pub(crate) async fn load_checkpoint_read_basis_from_record<S: ObjectStore + ?Siz
     })
 }
 
-/// Loads an active checkpoint record.
+/// Loads an active pin.
 async fn load_pinning_checkpoint_record<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    checkpoint_id: &CheckpointId,
-) -> Result<CheckpointRecordState> {
+    checkpoint_id: &PinId,
+) -> Result<PinPayload> {
     let Some(record) = load_checkpoint_record(store, namespace_id, checkpoint_id)
         .await?
         .map(|loaded| loaded.state)
@@ -111,7 +111,7 @@ async fn load_pinning_checkpoint_record<S: ObjectStore + ?Sized>(
     Ok(record)
 }
 
-fn missing_checkpoint(namespace_id: &NamespaceId, checkpoint_id: &CheckpointId) -> CoreError {
+fn missing_checkpoint(namespace_id: &NamespaceId, checkpoint_id: &PinId) -> CoreError {
     CoreError::CheckpointUnavailable(format!(
         "checkpoint `{checkpoint_id}` does not exist in namespace `{namespace_id}`"
     ))

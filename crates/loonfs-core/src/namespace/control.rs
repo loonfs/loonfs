@@ -7,7 +7,7 @@ use crate::error::CoreError;
 use crate::namespace::basis::MetadataBasis;
 use crate::namespace::read_anchor::load_head_and_metadata_basis;
 use crate::namespace::state::NamespaceReadState;
-use loonfs_api::wire::control::{ControlObjectKind, HintState, ManifestRef};
+use loonfs_api::wire::control::{ControlObjectKind, HintPayload, ManifestRef};
 use loonfs_api::NamespaceId;
 use loonfs_objectstore::keys::hint;
 use loonfs_objectstore::ObjectStore;
@@ -39,7 +39,7 @@ pub(crate) fn ensure_namespace_live(head: &NamespaceReadState) -> crate::error::
     Ok(())
 }
 
-pub type LoadedHint = LoadedControl<HintState>;
+pub type LoadedHint = LoadedControl<HintPayload>;
 
 pub(crate) async fn load_namespace_hint<S: ObjectStore + ?Sized>(
     store: &S,
@@ -58,7 +58,7 @@ pub(crate) async fn load_hint<S: ObjectStore + ?Sized>(
         store,
         hint(namespace_id),
         ControlObjectKind::Hint,
-        |state: &HintState| expect_namespace(namespace_id, &state.namespace_id),
+        |state: &HintPayload| expect_namespace(namespace_id, &state.namespace_id),
     )
     .await
 }
@@ -80,7 +80,7 @@ pub(crate) async fn raise_hint<S: ObjectStore + ?Sized>(
         None => load_namespace_hint(store, namespace_id).await?,
     };
     loop {
-        let raised = HintState {
+        let raised = HintPayload {
             namespace_id: namespace_id.clone(),
             manifest_no: current.state.manifest_no.max(manifest_no),
             wal_no: current.state.wal_no.max(wal_no),
@@ -226,8 +226,8 @@ pub(crate) async fn load_discovered_manifest<S: ObjectStore + ?Sized>(
             manifest: ManifestRef {
                 owner_namespace_id: namespace_id.clone(),
                 manifest_no,
-                manifest_head_seq: envelope.payload().head_seq,
-                manifest_payload_checksum: envelope.payload_checksum().to_owned(),
+                head_seq: envelope.payload().head_seq,
+                payload_checksum: envelope.payload_checksum().to_owned(),
             },
             generation: envelope.payload().generation,
             retention_floor_seq: envelope.payload().retention_floor_seq,
@@ -252,8 +252,8 @@ pub async fn load_namespace_read_state<S: ObjectStore + ?Sized>(
 pub async fn load_namespace_checkpoint_record_control<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace_id: &NamespaceId,
-    checkpoint_id: &loonfs_api::CheckpointId,
-) -> Result<Option<loonfs_api::wire::control::CheckpointRecordState>, crate::error::CoreError> {
+    checkpoint_id: &loonfs_api::PinId,
+) -> Result<Option<loonfs_api::wire::control::PinPayload>, crate::error::CoreError> {
     Ok(
         crate::checkpoint::load_checkpoint_record(store, expected_namespace_id, checkpoint_id)
             .await?

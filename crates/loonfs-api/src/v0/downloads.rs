@@ -1,7 +1,7 @@
 //! Download requests and responses for direct object-store reads in the v0 HTTP API.
 
 use super::ObjectTransferAccess;
-use crate::{AbsolutePath, ContentRef, InodeId, NamespaceId, RevisionNo, SnapshotId};
+use crate::{AbsolutePath, ContentRef, InodeId, NamespaceId, PinId, RevisionNo};
 use serde::{Deserialize, Serialize};
 
 /// The path to download and, optionally, the revision to download.
@@ -20,7 +20,7 @@ pub struct CreateDownloadRequest {
     /// Cannot be combined with `revision_no`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
-    pub snapshot_id: Option<SnapshotId>,
+    pub snapshot_id: Option<PinId>,
 }
 
 /// A presigned URL for one content object.
@@ -62,7 +62,7 @@ pub struct CreateDownloadByInodeResponse {
 mod tests {
     use super::{CreateDownloadByInodeResponse, CreateDownloadRequest, CreateDownloadResponse};
     use crate::v0::ObjectTransferAccess;
-    use crate::{AbsolutePath, ContentId, ContentRef, NamespaceId, RevisionNo, SnapshotId};
+    use crate::{AbsolutePath, ContentId, ContentRef, NamespaceId, PinId, RevisionNo};
     use std::collections::BTreeMap;
 
     fn absolute_path() -> AbsolutePath {
@@ -105,7 +105,7 @@ mod tests {
         assert_eq!(pinned.revision_no, Some(RevisionNo(3)));
 
         let snapshot_id =
-            SnapshotId::parse("pin_00000000000000000001-0000000000000002").expect("snapshot id");
+            PinId::parse("pin_00000000000000000001-0000000000000002").expect("snapshot id");
         for revision_no in [None, Some(RevisionNo(3))] {
             let request: CreateDownloadRequest = serde_json::from_value(serde_json::json!({
                 "path": "/docs/report.txt",

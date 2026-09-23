@@ -10,7 +10,7 @@ use crate::namespace::read_anchor::NamespaceReadAnchor;
 use crate::path::read::{load_metadata_view, LoadedMetadataView, ReadLoadContext};
 use crate::protocol::AbandonedUpload;
 use crate::storage::content::delete_unpublished_content_object;
-use loonfs_api::wire::control::{UploadSessionRecordStatus, UploadSessionState};
+use loonfs_api::wire::control::{UploadSessionPayload, UploadSessionRecordStatus};
 use loonfs_api::{ContentStoreId, NamespaceId};
 use loonfs_objectstore::ObjectStore;
 use tokio::sync::OnceCell;
@@ -102,7 +102,7 @@ impl<'a, S: ?Sized> UploadSweepContext<'a, S> {
 
 pub(super) async fn sweep_upload_session<S: ObjectStore + ?Sized>(
     sweep: &UploadSweepContext<'_, S>,
-    state: &UploadSessionState,
+    state: &UploadSessionPayload,
     view: &PublicationView<'_, '_, S>,
 ) -> Result<UploadSessionSweep> {
     if state.owner_generation > sweep.live.owner_generation {
@@ -232,7 +232,7 @@ fn retain_undated() -> UploadSessionSweep {
 /// with completions that arrive shortly after lease expiry.
 async fn abort_expired_session<S: ObjectStore + ?Sized>(
     sweep: &UploadSweepContext<'_, S>,
-    state: &UploadSessionState,
+    state: &UploadSessionPayload,
     content_store_id: &ContentStoreId,
     expires_at_ms: u64,
 ) -> Result<UploadSessionSweep> {
@@ -245,7 +245,7 @@ async fn abort_expired_session<S: ObjectStore + ?Sized>(
         sweep.store,
         &state.namespace_id,
         &state.upload_id,
-        |mut state: UploadSessionState| async move {
+        |mut state: UploadSessionPayload| async move {
             if !matches!(state.status, UploadSessionRecordStatus::Open { .. }) {
                 return Ok(UploadSessionUpdate::Noop(None));
             }

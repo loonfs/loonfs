@@ -64,16 +64,16 @@ pub(crate) fn ensure_manifest_reference_matches(
             reference.manifest_no.to_string(),
             payload.manifest_no.to_string(),
         ))
-    } else if reference.manifest_head_seq != payload.head_seq {
+    } else if reference.head_seq != payload.head_seq {
         Some((
-            "manifest_head_seq",
-            reference.manifest_head_seq.to_string(),
+            "head_seq",
+            reference.head_seq.to_string(),
             payload.head_seq.to_string(),
         ))
-    } else if reference.manifest_payload_checksum != manifest.payload_checksum() {
+    } else if reference.payload_checksum != manifest.payload_checksum() {
         Some((
-            "manifest_payload_checksum",
-            reference.manifest_payload_checksum.clone(),
+            "payload_checksum",
+            reference.payload_checksum.clone(),
             manifest.payload_checksum().to_owned(),
         ))
     } else {
@@ -110,9 +110,9 @@ pub(crate) async fn load_basis_metadata_segments<'a, S: ObjectStore + ?Sized>(
 ) -> crate::error::Result<LoadedMetadataBasis<'a, S>> {
     let manifest = basis.manifest();
     let segments = load_manifest_segments(store, segment_cache, manifest).await?;
-    let manifest_head_seq = segments.manifest().payload().head_seq;
+    let head_seq = segments.manifest().payload().head_seq;
     Ok(LoadedMetadataBasis {
-        identity: MetadataBasisIdentity::from_verified_basis(basis.clone(), manifest_head_seq),
+        identity: MetadataBasisIdentity::from_verified_basis(basis.clone(), head_seq),
         base_state: if segments.manifest().payload().runs.is_empty() {
             bootstrap_metadata_state(
                 segments.manifest().payload().created_at_ms,

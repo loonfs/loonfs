@@ -10,7 +10,7 @@ use loonfs::{
     FsWriter, MetadataMaintenanceOptions, NamespaceId, PutFileOptions, RuntimeError,
     SharedObjectStore,
 };
-use loonfs_api::wire::control::CheckpointOwner;
+use loonfs_api::wire::control::PinOwner;
 use loonfs_api::{
     sha256_digest, AbsolutePath, ChangeSeq, EffectiveLimit, GrepRequest, GrepResponse,
     IndexSegmentId, PageRequest, PaginationPolicy, RunNo, MAX_PUBLIC_INTEGER,
@@ -1087,12 +1087,12 @@ async fn an_expired_backfill_pin_keeps_enumerating_until_deleted() {
     let key = checkpoint_record(&namespace_id, &checkpoint_id);
     let mut record = control::checkpoint_record(&store, &namespace_id, &checkpoint_id)
         .await
-        .expect("backfill checkpoint record");
+        .expect("backfill pin");
     assert!(
         record.owner.expires_at_ms().is_some(),
         "the backfill pin carries a ttl"
     );
-    let CheckpointOwner::User { expires_at_ms, .. } = &mut record.owner else {
+    let PinOwner::User { expires_at_ms, .. } = &mut record.owner else {
         panic!("the backfill pin is user-owned");
     };
     *expires_at_ms = Some(record.created_at_ms);
@@ -1102,7 +1102,7 @@ async fn an_expired_backfill_pin_keeps_enumerating_until_deleted() {
             &key,
             Bytes::from(
                 loonfs_api::wire::control::encode_control_state(
-                    loonfs_api::wire::control::ControlObjectKind::CheckpointRecord,
+                    loonfs_api::wire::control::ControlObjectKind::Pin,
                     &expired,
                 )
                 .expect("encode record"),
@@ -1130,7 +1130,7 @@ async fn an_expired_backfill_pin_keeps_enumerating_until_deleted() {
 async fn assert_fresh_backfill_attempt(
     store: &SharedObjectStore,
     namespace_id: &NamespaceId,
-) -> loonfs_api::CheckpointId {
+) -> loonfs_api::PinId {
     let manifest = load_current_grep_manifest(&**store, namespace_id)
         .await
         .expect("load grep manifest")
@@ -1841,7 +1841,7 @@ async fn planless_scan_covers_wal_revisions_at_or_below_index_watermark() {
     let head = control::head(&store, &namespace_id).await;
     let metadata_manifest = control::metadata_manifest(&store, &namespace_id).await;
     assert!(
-        metadata_manifest.manifest.manifest_head_seq < head.seq,
+        metadata_manifest.manifest.head_seq < head.seq,
         "the WAL-only revision must sit past metadata materialization"
     );
     let grep_manifest = loonfs_grep::manifest::load_current_grep_manifest(&*store, &namespace_id)

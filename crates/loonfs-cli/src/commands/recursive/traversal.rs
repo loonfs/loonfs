@@ -5,7 +5,7 @@
 use super::{parse_remote, relative_remote, CommandContext, FileJob};
 use crate::error::CliError;
 use futures::Stream;
-use loonfs_api::SnapshotId;
+use loonfs_api::PinId;
 use loonfs_api::{ChangeSeq, ListPathEntriesResponse, PathEntry, PathEntryKind};
 use std::fs::ReadDir;
 use std::path::{Path, PathBuf};
@@ -158,7 +158,7 @@ struct RemoteTree<'a> {
     context: &'a CommandContext,
     root: &'a str,
     param: &'a str,
-    snapshot_id: Option<&'a SnapshotId>,
+    snapshot_id: Option<&'a PinId>,
     stack: Vec<RemoteFrame>,
     first_head: Option<ChangeSeq>,
 }
@@ -167,7 +167,7 @@ pub(super) async fn remote_tree<'a>(
     context: &'a CommandContext,
     root: &'a str,
     param: &'a str,
-    snapshot_id: Option<&'a SnapshotId>,
+    snapshot_id: Option<&'a PinId>,
 ) -> Result<impl Stream<Item = TreeEntry> + 'a, CliError> {
     let spec = parse_remote(context, root, param)?;
     let page = context

@@ -321,13 +321,13 @@ async fn classifies_durable_key_families() {
         .put_overwrite(
             &checkpoint_record(
                 &loonfs_api::NamespaceId::parse("ns-1").expect("valid namespace id"),
-                &loonfs_api::CheckpointId::parse("pin_00000000000000000001-0000000000000001")
+                &loonfs_api::PinId::parse("pin_00000000000000000001-0000000000000001")
                     .expect("valid checkpoint id"),
             ),
             bytes(b"checkpoint"),
         )
         .await
-        .expect("put checkpoint record");
+        .expect("put pin");
 
     store
         .put_if_absent(

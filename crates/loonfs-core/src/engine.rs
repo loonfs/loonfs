@@ -33,14 +33,14 @@ use loonfs_api::options::{
 use loonfs_api::v0::{
     Commit, ListChangesResponse, UploadMode, UploadPartChecksumClaim, UploadSession,
 };
-use loonfs_api::wire::control::CheckpointOwner;
+use loonfs_api::wire::control::PinOwner;
 use loonfs_api::EffectiveLimit;
 use loonfs_api::{
-    AdvanceRetentionResponse, ChangeSeq, Checkpoint, CheckpointId, ChecksumAlgorithm, CommitId,
-    ContentRef, DeleteCheckpointResponse, DeleteNamespaceResponse, DeleteSnapshotResponse,
-    DirectoryPageCursor, FileBytes, FileRevision, FileRevisionsPageCursor, FlushWalResponse,
-    InodeId, Namespace, NamespaceAccess, NamespaceId, Page, PageRequest, PathEntry, RevisionNo,
-    Subject, TrashEntry, TrashPageCursor, UploadId, WriterId, ROOT_INODE_ID,
+    AdvanceRetentionResponse, ChangeSeq, Checkpoint, ChecksumAlgorithm, CommitId, ContentRef,
+    DeleteCheckpointResponse, DeleteNamespaceResponse, DeleteSnapshotResponse, DirectoryPageCursor,
+    FileBytes, FileRevision, FileRevisionsPageCursor, FlushWalResponse, InodeId, Namespace,
+    NamespaceAccess, NamespaceId, Page, PageRequest, PathEntry, PinId, RevisionNo, Subject,
+    TrashEntry, TrashPageCursor, UploadId, WriterId, ROOT_INODE_ID,
 };
 use loonfs_objectstore::{ByteStream, ObjectStore};
 use std::num::NonZeroU64;
@@ -420,7 +420,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         &self,
         target: &NamespaceId,
         actor_id: &loonfs_api::ActorId,
-        snapshot_id: Option<&CheckpointId>,
+        snapshot_id: Option<&PinId>,
     ) -> Result<Namespace> {
         fork::fork_namespace(
             &self.store,
@@ -657,7 +657,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// that it has not been deleted.
     pub async fn list_checkpoint_files_page(
         &self,
-        checkpoint_id: &CheckpointId,
+        checkpoint_id: &PinId,
         request: PageRequest<CheckpointFilesPageCursor>,
         context: &RuntimeReadContext,
     ) -> Result<CheckpointFilesPage> {
@@ -734,7 +734,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             let key = crate::cache::WalTailProjectionCacheKey {
                 namespace_id: self.namespace_id.clone(),
                 manifest_no: context.basis.manifest_no(),
-                manifest_head_seq: context.basis.manifest().manifest_head_seq,
+                manifest_head_seq: context.basis.manifest().head_seq,
                 head_seq: context.head.seq,
             };
             if let Some(tail) = context.tail_cache.get(&key) {
@@ -1169,7 +1169,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         crate::checkpoint::create_checkpoint(
             &self.store,
             &self.namespace_id,
-            CheckpointOwner::User {
+            PinOwner::User {
                 name,
                 expires_at_ms,
             },
@@ -1184,7 +1184,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         crate::checkpoint::create_checkpoint(
             &self.store,
             &self.namespace_id,
-            CheckpointOwner::Snapshot {
+            PinOwner::Snapshot {
                 name,
                 expires_at_ms,
             },
@@ -1212,7 +1212,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// Deletion makes its unreferenced manifest and runs collectable.
     pub async fn delete_checkpoint(
         &self,
-        checkpoint_id: &CheckpointId,
+        checkpoint_id: &PinId,
     ) -> Result<DeleteCheckpointResponse> {
         crate::checkpoint::delete_checkpoint(&self.store, &self.namespace_id, checkpoint_id).await
     }
@@ -1220,7 +1220,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// Extends a live snapshot without passing its lifetime ceiling.
     pub async fn extend_snapshot(
         &self,
-        checkpoint_id: &CheckpointId,
+        checkpoint_id: &PinId,
         requested_expires_at_ms: u64,
         max_lifetime_ms: u64,
     ) -> Result<Checkpoint> {
@@ -1236,10 +1236,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     }
 
     /// Deletes a snapshot pin. A missing id returns `snapshot_not_found`.
-    pub async fn delete_snapshot(
-        &self,
-        checkpoint_id: &CheckpointId,
-    ) -> Result<DeleteSnapshotResponse> {
+    pub async fn delete_snapshot(&self, checkpoint_id: &PinId) -> Result<DeleteSnapshotResponse> {
         self.mutation_context()?;
         crate::checkpoint::delete_snapshot(&self.store, &self.namespace_id, checkpoint_id).await
     }
@@ -1249,7 +1246,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     ///
     /// This is the latest-state maintenance operation: it absorbs the visible
     /// WAL tail into a new manifest, creating no
-    /// checkpoint record. Superseded manifests become garbage-collection
+    /// pin. Superseded manifests become garbage-collection
     /// candidates once nothing pins them.
     pub async fn flush_wal(&self) -> Result<FlushWalResponse> {
         self.mutation_context()?;

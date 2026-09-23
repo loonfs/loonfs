@@ -183,7 +183,7 @@
             "description": "Namespace sequence captured by the checkpoint."
           },
           "checkpoint_id": {
-            "$ref": "#/components/schemas/CheckpointId",
+            "$ref": "#/components/schemas/PinId",
             "description": "Durable checkpoint id used to address the checkpoint for deletion."
           },
           "created_at_ms": {
@@ -220,12 +220,6 @@
           "manifest_no"
         ],
         "type": "object"
-      },
-      "CheckpointId": {
-        "description": "Durable checkpoint identifier.\n\nThe manifest number determines which namespace manifest it pins.",
-        "example": "pin_00000000000000000001-0000000000000002",
-        "pattern": "^pin_[0-9]{20}-[0-9a-f]{16}$",
-        "type": "string"
       },
       "CheckpointOwnerFork": {
         "description": "A fork target retaining its source basis for one fork attempt.",
@@ -858,7 +852,7 @@
             "description": "Revision to read, or `None` for the path's current revision.\nCannot be combined with `snapshot_id`."
           },
           "snapshot_id": {
-            "$ref": "#/components/schemas/SnapshotId",
+            "$ref": "#/components/schemas/PinId",
             "description": "Read the file revision captured by this snapshot.\nCannot be combined with `revision_no`."
           }
         },
@@ -1022,7 +1016,7 @@
         "description": "Identifies the checkpoint record that was deleted.",
         "properties": {
           "checkpoint_id": {
-            "$ref": "#/components/schemas/CheckpointId",
+            "$ref": "#/components/schemas/PinId",
             "description": "Deleted checkpoint record."
           },
           "namespace_id": {
@@ -1070,7 +1064,7 @@
             "description": "Namespace the snapshot belonged to."
           },
           "snapshot_id": {
-            "$ref": "#/components/schemas/SnapshotId",
+            "$ref": "#/components/schemas/PinId",
             "description": "Deleted snapshot record."
           }
         },
@@ -2290,7 +2284,7 @@
             "description": "Durable namespace id for the fork target."
           },
           "snapshot_id": {
-            "$ref": "#/components/schemas/SnapshotId",
+            "$ref": "#/components/schemas/PinId",
             "description": "Fork from this live snapshot instead of the current head."
           }
         },
@@ -2410,7 +2404,7 @@
         "description": "An initial scan of a pinned checkpoint that is not yet searchable.",
         "properties": {
           "checkpoint_id": {
-            "$ref": "#/components/schemas/CheckpointId",
+            "$ref": "#/components/schemas/PinId",
             "description": "Checkpoint pinning the state being walked."
           },
           "cursor_inode_id": {
@@ -3496,6 +3490,12 @@
         ],
         "type": "object"
       },
+      "PinId": {
+        "description": "Durable pin identifier. The manifest number determines which namespace manifest it pins.",
+        "example": "pin_00000000000000000001-0000000000000002",
+        "pattern": "^pin_[0-9]{20}-[0-9a-f]{16}$",
+        "type": "string"
+      },
       "PrincipalId": {
         "description": "Stable opaque principal id containing 1 to 256 visible ASCII characters other than the comma.",
         "example": "prn_8f3c",
@@ -4089,7 +4089,7 @@
             "description": "Namespace whose state the snapshot captured."
           },
           "snapshot_id": {
-            "$ref": "#/components/schemas/SnapshotId",
+            "$ref": "#/components/schemas/PinId",
             "description": "Snapshot id."
           }
         },
@@ -4102,12 +4102,6 @@
           "expires_at_ms"
         ],
         "type": "object"
-      },
-      "SnapshotId": {
-        "description": "Id of a snapshot.\n\nA snapshot is backed by a checkpoint record and uses that record's\nid, `pin_{manifest_no:020}-{16 lowercase hex}`.",
-        "example": "pin_00000000000000000001-0000000000000002",
-        "pattern": "^pin_[0-9]{20}-[0-9a-f]{16}$",
-        "type": "string"
       },
       "StoreProbeCheckOutcome": {
         "description": "What one contract check concluded about the store.",
@@ -5913,7 +5907,7 @@
             "name": "snapshot_id",
             "required": false,
             "schema": {
-              "$ref": "#/components/schemas/SnapshotId"
+              "$ref": "#/components/schemas/PinId"
             }
           }
         ],
@@ -6144,7 +6138,7 @@
             "name": "snapshot_id",
             "required": false,
             "schema": {
-              "$ref": "#/components/schemas/SnapshotId"
+              "$ref": "#/components/schemas/PinId"
             }
           }
         ],
@@ -6392,7 +6386,7 @@
             "name": "snapshot_id",
             "required": false,
             "schema": {
-              "$ref": "#/components/schemas/SnapshotId"
+              "$ref": "#/components/schemas/PinId"
             }
           }
         ],
@@ -6507,7 +6501,7 @@
             "name": "snapshot_id",
             "required": false,
             "schema": {
-              "$ref": "#/components/schemas/SnapshotId"
+              "$ref": "#/components/schemas/PinId"
             }
           }
         ],
@@ -7128,7 +7122,7 @@
             "name": "snapshot_id",
             "required": false,
             "schema": {
-              "$ref": "#/components/schemas/SnapshotId"
+              "$ref": "#/components/schemas/PinId"
             }
           }
         ],
@@ -7262,7 +7256,7 @@
             "name": "snapshot_id",
             "required": false,
             "schema": {
-              "$ref": "#/components/schemas/SnapshotId"
+              "$ref": "#/components/schemas/PinId"
             }
           }
         ],
@@ -7948,7 +7942,7 @@
             "name": "snapshot_id",
             "required": true,
             "schema": {
-              "$ref": "#/components/schemas/SnapshotId"
+              "$ref": "#/components/schemas/PinId"
             }
           }
         ],
@@ -8029,7 +8023,7 @@
             "name": "snapshot_id",
             "required": true,
             "schema": {
-              "$ref": "#/components/schemas/SnapshotId"
+              "$ref": "#/components/schemas/PinId"
             }
           }
         ],

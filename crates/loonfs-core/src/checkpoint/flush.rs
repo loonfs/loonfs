@@ -193,7 +193,7 @@ async fn try_flush_wal_projection<S: ObjectStore + ?Sized>(
     };
     Ok(TryFlushWal::Settled(Box::new(FlushedBasis {
         current_manifest_no: current.manifest.manifest_no,
-        current_manifest_head_seq: current.manifest.manifest_head_seq,
+        current_manifest_head_seq: current.manifest.head_seq,
         manifest: current.manifest,
         head_commit_id,
         target_head_seq: head_seq,

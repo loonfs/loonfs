@@ -15,7 +15,7 @@ use loonfs::{
     PutFileOptions, RestoreRevisionOptions, RuntimeError, SharedObjectStore, StatPathOptions,
     UndeleteOptions, UpdateAttributesOptions,
 };
-use loonfs_api::SnapshotId;
+use loonfs_api::PinId;
 use loonfs_api::{
     v0::{
         GrepGcRequest, GrepGcResponse, GrepIndex, GrepIndexLifecycle, ListSnapshotsResponse,
@@ -193,7 +193,7 @@ impl EmbeddedBackend {
         spec: &NamespacePath,
         limit: Option<u32>,
         cursor: Option<&str>,
-        snapshot_id: Option<&SnapshotId>,
+        snapshot_id: Option<&PinId>,
     ) -> Result<ListPathEntriesResponse, CliError> {
         let request = cli_page_request(limit, cursor)?;
         if let Some(snapshot_id) = snapshot_id {
@@ -723,7 +723,7 @@ impl EmbeddedBackend {
     pub(super) async fn extend_snapshot(
         &self,
         namespace_id: &NamespaceId,
-        snapshot_id: &SnapshotId,
+        snapshot_id: &PinId,
         ttl_ms: u64,
     ) -> Result<SnapshotSummary, CliError> {
         let now_ms = validate_embedded_snapshot_ttl(namespace_id, ttl_ms)?;
@@ -813,7 +813,7 @@ impl EmbeddedBackend {
         namespace_id: &NamespaceId,
         after_seq: ChangeSeq,
         limit: Option<u32>,
-        snapshot_id: Option<&SnapshotId>,
+        snapshot_id: Option<&PinId>,
     ) -> Result<ListChangesResponse, CliError> {
         let limit = resolve_cli_page_limit(limit)?;
         let captured_seq = match snapshot_id {

@@ -8,8 +8,8 @@ use crate::resolve::{
     load_cli_config, resolve_actor, resolve_namespace, resolve_subject, ResolvedTarget,
 };
 use loonfs_api::{
-    AbsolutePath, ActorId, ChangeSeq, Commit, ErrorCode, InodeId, InodeKind, NamespaceId,
-    PublicOrdinalRangeError, SnapshotId, Subject,
+    AbsolutePath, ActorId, ChangeSeq, Commit, ErrorCode, InodeId, InodeKind, NamespaceId, PinId,
+    PublicOrdinalRangeError, Subject,
 };
 use loonfs_client::{CreateDirectoryOptions, NamespacePath};
 use std::path::{Path, PathBuf};
@@ -86,9 +86,13 @@ pub(crate) fn parse_public_ordinal_arg<T>(
     })
 }
 
-pub(crate) fn parse_snapshot_id_arg(argument: &str, value: &str) -> Result<SnapshotId, CliError> {
-    SnapshotId::parse(value).map_err(|error| {
-        CliError::invalid_request(format!("invalid {argument}: {error}")).with_param(argument)
+pub(crate) fn parse_snapshot_id_arg(argument: &str, value: &str) -> Result<PinId, CliError> {
+    PinId::parse(value).map_err(|error| {
+        CliError::invalid_request(format!(
+            "invalid {argument}: invalid snapshot_id {value:?}: {}",
+            error.reason()
+        ))
+        .with_param(argument)
     })
 }
 

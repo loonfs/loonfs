@@ -14,14 +14,14 @@ use loonfs::{
 use loonfs_api::ApiError;
 use loonfs_api::ChangeSeq;
 use loonfs_api::{
-    decode_namespace_cursor, AccessRight, CapabilityDocument, Checkpoint, CheckpointId,
-    CreateCheckpointRequest, CreateNamespaceRequest, CreateSnapshotRequest,
-    DeleteCheckpointResponse, DeleteSnapshotResponse, ErrorCode, ExtendSnapshotRequest,
-    ForkNamespaceRequest, ListCheckpointsResponse, ListSnapshotsResponse, NamespaceAccess,
-    PageRequest, PaginationPolicy, RunMaintenanceRequest, RunMaintenanceResponse, SnapshotSummary,
-    API_GROUP_FILESYSTEM_V0, API_GROUP_MAINTENANCE_V0, API_GROUP_QUERY_V0,
-    FEATURE_COMMIT_INLINE_CONTENT, FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_MAINTENANCE_GREP_INDEX,
-    FEATURE_QUERY_GREP, FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT,
+    decode_namespace_cursor, AccessRight, CapabilityDocument, Checkpoint, CreateCheckpointRequest,
+    CreateNamespaceRequest, CreateSnapshotRequest, DeleteCheckpointResponse,
+    DeleteSnapshotResponse, ErrorCode, ExtendSnapshotRequest, ForkNamespaceRequest,
+    ListCheckpointsResponse, ListSnapshotsResponse, NamespaceAccess, PageRequest, PaginationPolicy,
+    PinId, RunMaintenanceRequest, RunMaintenanceResponse, SnapshotSummary, API_GROUP_FILESYSTEM_V0,
+    API_GROUP_MAINTENANCE_V0, API_GROUP_QUERY_V0, FEATURE_COMMIT_INLINE_CONTENT,
+    FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_MAINTENANCE_GREP_INDEX, FEATURE_QUERY_GREP,
+    FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT,
     LIMIT_COMMIT_MAX_INLINE_CONTENT_BYTES_PER_OPERATION, LIMIT_COMMIT_MAX_REQUEST_BODY_BYTES,
     LIMIT_DOWNLOAD_SERVICE_PROXIED_MAX_CONCURRENT_REQUESTS,
     LIMIT_DOWNLOAD_SERVICE_PROXIED_MAX_CONTENT_BYTES, LIMIT_QUERY_GREP_DEFAULT,
@@ -548,7 +548,7 @@ pub(super) async fn list_snapshots(
         description = "Extends a live snapshot without passing its lifetime limit. Repeating the request has the same result.",
         params(
             ("namespace_id" = String, Path, description = "Namespace id"),
-            ("snapshot_id" = loonfs_api::SnapshotId, Path, description = "Snapshot id")
+            ("snapshot_id" = loonfs_api::PinId, Path, description = "Snapshot id")
         ),
         request_body = ExtendSnapshotRequest,
         responses(
@@ -598,7 +598,7 @@ pub(super) async fn extend_snapshot(
         description = "Deletes a snapshot pin. A missing id returns snapshot_not_found.",
         params(
             ("namespace_id" = String, Path, description = "Namespace id"),
-            ("snapshot_id" = loonfs_api::SnapshotId, Path, description = "Snapshot id")
+            ("snapshot_id" = loonfs_api::PinId, Path, description = "Snapshot id")
         ),
         responses(
             (status = 200, description = "Snapshot record deleted", body = DeleteSnapshotResponse),
@@ -786,7 +786,7 @@ pub(super) async fn delete_checkpoint(
     AppPath(CheckpointPathParams { checkpoint_id }): AppPath<CheckpointPathParams>,
     AppQuery(_): AppQuery<NoQuery>,
 ) -> Result<Json<DeleteCheckpointResponse>, ApiResponseError> {
-    let checkpoint_id = parse_path_id::<CheckpointId>("checkpoint_id", &checkpoint_id)?;
+    let checkpoint_id = parse_path_id::<PinId>("checkpoint_id", &checkpoint_id)?;
     let response = state
         .maintenance
         .delete_checkpoint(&namespace_id, &checkpoint_id)

@@ -160,16 +160,12 @@ pub enum CoreError {
     #[error("invalid checkpoint request: {0}")]
     InvalidCheckpointRequest(String),
     #[error("checkpoint `{checkpoint_id}` was not found")]
-    CheckpointNotFound {
-        checkpoint_id: loonfs_api::CheckpointId,
-    },
+    CheckpointNotFound { checkpoint_id: loonfs_api::PinId },
     #[error("snapshot `{snapshot_id}` was not found")]
-    SnapshotNotFound {
-        snapshot_id: loonfs_api::CheckpointId,
-    },
+    SnapshotNotFound { snapshot_id: loonfs_api::PinId },
     #[error("snapshot `{snapshot_id}` is gone: {reason}")]
     SnapshotGone {
-        snapshot_id: loonfs_api::CheckpointId,
+        snapshot_id: loonfs_api::PinId,
         reason: String,
     },
     #[error(

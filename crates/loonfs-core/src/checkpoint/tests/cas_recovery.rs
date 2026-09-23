@@ -1,7 +1,7 @@
 //! Numbered publication, discovery, and retention contracts.
 
 use super::*;
-use loonfs_api::wire::control::{encode_control_state, ControlObjectKind, HintState};
+use loonfs_api::wire::control::{encode_control_state, ControlObjectKind, HintPayload};
 
 #[tokio::test]
 async fn publishers_racing_one_number_load_the_winner_and_retry_when_needed() {
@@ -180,7 +180,7 @@ async fn a_lagging_hint_probes_forward_and_a_missing_hint_reads_as_absent() {
     for manifest_no in [ManifestNo(1), ManifestNo(2)] {
         let bytes = encode_control_state(
             ControlObjectKind::Hint,
-            &HintState {
+            &HintPayload {
                 wal_no: loonfs_api::WalNo(0),
                 namespace_id: namespace_id.clone(),
                 manifest_no,
@@ -490,7 +490,7 @@ async fn read_anchor_reloads_the_head_when_the_manifest_is_ahead() {
         .await
         .expect("read anchor resolves the stale-head race by reloading");
     assert_eq!(projection.head.seq, ChangeSeq(1));
-    assert_eq!(projection.manifest.manifest.manifest_head_seq, ChangeSeq(1));
+    assert_eq!(projection.manifest.manifest.head_seq, ChangeSeq(1));
 }
 
 #[tokio::test]

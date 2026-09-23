@@ -114,7 +114,7 @@ async fn open_direct_upload_outlives_retirement_and_still_gets_provider_cleanup(
             .delete(&late_key)
             .await
             .expect("hold back session record");
-        let late_state = loonfs_api::wire::control::decode_control_object::<UploadSessionState>(
+        let late_state = loonfs_api::wire::control::decode_control_object::<UploadSessionPayload>(
             &late_session,
             ControlObjectKind::UploadSession,
         )
@@ -159,7 +159,7 @@ async fn open_direct_upload_outlives_retirement_and_still_gets_provider_cleanup(
         let tombstone = crate::namespace::control::load_current_manifest(&store, &namespace_id)
             .await
             .expect("tombstone");
-        let pin_id = CheckpointId::retired(&namespace_id, tombstone.envelope.payload().manifest_no);
+        let pin_id = PinId::retired(&namespace_id, tombstone.envelope.payload().manifest_no);
         if recreate {
             bootstrap_namespace(
                 &store,
@@ -275,7 +275,7 @@ async fn a_retired_pin_to_a_collected_manifest_is_deleted_without_protecting_obj
     )
     .await
     .expect("recreate");
-    let pin_id = CheckpointId::retired(&namespace_id, tombstone.envelope.payload().manifest_no);
+    let pin_id = PinId::retired(&namespace_id, tombstone.envelope.payload().manifest_no);
     let pin_key = loonfs_objectstore::keys::checkpoint_record(&namespace_id, &pin_id);
     let pin_bytes = store
         .get(&pin_key, None)

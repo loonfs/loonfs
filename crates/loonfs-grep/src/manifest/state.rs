@@ -3,8 +3,7 @@
 use super::error::GrepManifestStateError;
 use loonfs_api::wire::sst_blocks::BlockHandle;
 use loonfs_api::{
-    ChangeSeq, CheckpointId, IndexSegmentId, InodeId, ManifestNo, NamespaceGeneration, NamespaceId,
-    RunNo,
+    ChangeSeq, IndexSegmentId, InodeId, ManifestNo, NamespaceGeneration, NamespaceId, PinId, RunNo,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -35,7 +34,7 @@ pub enum GrepIndexStatus {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cursor_inode_id: Option<InodeId>,
         /// User-checkpoint pin backing this immutable manifest walk.
-        checkpoint_id: CheckpointId,
+        checkpoint_id: PinId,
     },
     /// Backfill is complete and changes are consumed incrementally.
     Active {

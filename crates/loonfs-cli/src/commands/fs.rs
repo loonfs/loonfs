@@ -30,7 +30,7 @@ use crate::progress::{ProgressOp, ProgressReporter};
 use crate::resolve::ResolvedTarget;
 use crate::uploads::{SourceIdentity, UploadJournal};
 use loonfs_api::v0::UploadSessionStatus;
-use loonfs_api::SnapshotId;
+use loonfs_api::PinId;
 use loonfs_api::{
     AbsolutePath, ActorId, AttributeKey, AttributeValue, AttributesRevisionNo, ChangeSeq, Commit,
     CommitId, DeleteDirectoryBehavior, DestinationBehavior, InodeKind, ListPathEntriesResponse,
@@ -87,7 +87,7 @@ async fn follow_path_entry_pages(
     spec: &NamespacePath,
     pagination: &PaginationArgs,
     cursor: Option<&str>,
-    snapshot_id: Option<&SnapshotId>,
+    snapshot_id: Option<&PinId>,
     mut visit: impl FnMut(Vec<loonfs_api::PathEntry>) -> Result<(), CliError>,
 ) -> Result<FollowedPathEntryPages, CommandFailure> {
     let mut heads = ListingHeadObservation::default();
@@ -612,7 +612,7 @@ pub(super) async fn open_resumable_download(
     context: &CommandContext,
     spec: &NamespacePath,
     revision_no: Option<RevisionNo>,
-    snapshot_id: Option<&SnapshotId>,
+    snapshot_id: Option<&PinId>,
     destination: &Path,
 ) -> Result<(FileDownload, Option<PartialMeta>), CliError> {
     let mut download = context

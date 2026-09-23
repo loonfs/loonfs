@@ -1726,7 +1726,7 @@ func runSnapshots(t *testing.T, h *harness, testCase conformanceCase) {
 	})
 	assertNotFoundError(t, err, expected.SnapshotNotFound)
 
-	unknownSnapshotID := loonfs.SnapshotID(request.UnknownSnapshotID)
+	unknownSnapshotID := loonfs.PinID(request.UnknownSnapshotID)
 	_, err = h.client.Files.Retrieve(ctx, &loonfs.GetPathEntryRequest{
 		NamespaceID: request.NamespaceID,
 		Path:        childPath(request.ReplacedFileName),

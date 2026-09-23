@@ -12,19 +12,15 @@ use crate::checkpoint::{
 use crate::context::MutationContext;
 use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, Result};
-use crate::limits::{CHECKPOINT_VERIFY_BUDGET_MS, FORK_INSTALL_BUDGET_MS};
+use crate::limits::{FORK_INSTALL_BUDGET_MS, PIN_VERIFY_BUDGET_MS};
 use crate::namespace::bootstrap::{
     install_namespace_manifest, write_content_store_descriptor, NamespaceInstall,
 };
 use crate::namespace::control::load_current_manifest;
 use crate::time::{MonotonicTimer, StdMonotonicTimer};
-use loonfs_api::wire::control::{
-    CheckpointOwner, CheckpointRecordState, ForkBasis, NamespaceStatus,
-};
+use loonfs_api::wire::control::{ForkBasis, NamespaceStatus, PinOwner, PinPayload};
 use loonfs_api::wire::manifest::NamespaceManifestPayload;
-use loonfs_api::{
-    CheckpointId, ManifestNo, Namespace, NamespaceGeneration, NamespaceId, WriterEpoch,
-};
+use loonfs_api::{ManifestNo, Namespace, NamespaceGeneration, NamespaceId, PinId, WriterEpoch};
 use loonfs_objectstore::ObjectStore;
 
 pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
@@ -32,12 +28,12 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
     source_namespace_id: &NamespaceId,
     new_namespace_id: &NamespaceId,
     actor_id: &loonfs_api::ActorId,
-    snapshot_id: Option<&CheckpointId>,
+    snapshot_id: Option<&PinId>,
     context: &MutationContext,
 ) -> Result<Namespace> {
     let timer = StdMonotonicTimer::default();
     let started_ms = timer.monotonic_now_ms();
-    let owner = CheckpointOwner::Fork {
+    let owner = PinOwner::Fork {
         target_namespace_id: new_namespace_id.clone(),
     };
     let source_record = if let Some(snapshot_id) = snapshot_id {
@@ -69,10 +65,10 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
     )?;
     let fork_basis = ForkBasis {
         manifest: source_record.manifest(),
-        source_checkpoint_id: source_record.pin_id.clone(),
+        source_pin_id: source_record.pin_id.clone(),
         source_generation: source_manifest.payload().generation,
     };
-    let fork_seq = fork_basis.manifest.manifest_head_seq;
+    let fork_seq = fork_basis.manifest.head_seq;
 
     let manifest = NamespaceManifestPayload {
         namespace_id: new_namespace_id.clone(),
@@ -161,10 +157,10 @@ async fn recreate_fork_namespace<S: ObjectStore + ?Sized>(
 async fn create_snapshot_fork_checkpoint<S: ObjectStore + ?Sized>(
     store: &S,
     source_namespace_id: &NamespaceId,
-    snapshot_id: &CheckpointId,
-    owner: CheckpointOwner,
+    snapshot_id: &PinId,
+    owner: PinOwner,
     context: &MutationContext,
-) -> Result<CheckpointRecordState> {
+) -> Result<PinPayload> {
     let timer = StdMonotonicTimer::default();
     let started_ms = timer.monotonic_now_ms();
     let source_head =
@@ -180,13 +176,13 @@ async fn create_snapshot_fork_checkpoint<S: ObjectStore + ?Sized>(
     let snapshot = classify_live_snapshot(
         load_checkpoint_record(store, source_namespace_id, snapshot_id)
             .await?
-            .filter(|record| matches!(record.state.owner, CheckpointOwner::Snapshot { .. })),
+            .filter(|record| matches!(record.state.owner, PinOwner::Snapshot { .. })),
         snapshot_id,
         context.now_ms,
     )?
     .state;
-    let record = CheckpointRecordState {
-        pin_id: CheckpointId::generate(snapshot.manifest_no),
+    let record = PinPayload {
+        pin_id: PinId::generate(snapshot.manifest_no),
         created_at_ms: context.now_ms,
         owner,
         ..snapshot
@@ -205,7 +201,7 @@ async fn create_snapshot_fork_checkpoint<S: ObjectStore + ?Sized>(
         delete_checkpoint_record(store, source_namespace_id, &record.pin_id).await?;
         return Err(error);
     }
-    if timer.monotonic_now_ms().saturating_sub(started_ms) > CHECKPOINT_VERIFY_BUDGET_MS {
+    if timer.monotonic_now_ms().saturating_sub(started_ms) > PIN_VERIFY_BUDGET_MS {
         delete_checkpoint_record(store, source_namespace_id, &record.pin_id).await?;
         return Err(CoreError::CheckpointUnavailable(
             "snapshot fork verification exceeded its budget".to_owned(),
@@ -217,7 +213,7 @@ async fn create_snapshot_fork_checkpoint<S: ObjectStore + ?Sized>(
 async fn verify_snapshot_fork_basis<S: ObjectStore + ?Sized>(
     store: &S,
     source_namespace_id: &NamespaceId,
-    snapshot_id: &CheckpointId,
+    snapshot_id: &PinId,
     now_ms: u64,
     timer: &dyn MonotonicTimer,
     started_ms: u64,

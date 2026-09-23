@@ -58,7 +58,7 @@ pub(super) struct StatInodeQuery {
             ("namespace_id" = String, Path, description = "Namespace id"),
             ("inode_id" = String, Path, description = "Inode ID", pattern = r"^ino_[1-9][0-9]*$", example = "ino_123"),
             ("include_attributes" = inline(Option<super::query_params::OpenApiDefaultTrueBoolean>), Query, description = "Project the inode's attribute map and revision (`true` or `false`). Defaults to `true`: a stat answers for one path and a map is capped at 64 KiB."),
-            ("snapshot_id" = Option<loonfs_api::SnapshotId>, Query, description = "Use the path state captured by this snapshot")
+            ("snapshot_id" = Option<loonfs_api::PinId>, Query, description = "Use the path state captured by this snapshot")
         ),
         responses(
             (status = 200, description = "Authoritative current inode entry", body = loonfs_api::PathEntry),
@@ -125,7 +125,7 @@ pub(super) struct ListInodeChildrenQuery {
             ("limit" = inline(Option<super::query_params::OpenApiPageLimit>), Query, description = "Maximum page size"),
             ("cursor" = Option<String>, Query, description = "Opaque directory page cursor"),
             ("include_attributes" = inline(Option<super::query_params::OpenApiDefaultFalseBoolean>), Query, description = "Project each entry's attribute map and revision (`true` or `false`). Defaults to `false`: a page holds many entries and each map may be 64 KiB, so a listing does not carry them unless asked."),
-            ("snapshot_id" = Option<loonfs_api::SnapshotId>, Query, description = "Use the directory state captured by this snapshot")
+            ("snapshot_id" = Option<loonfs_api::PinId>, Query, description = "Use the directory state captured by this snapshot")
         ),
         responses(
             (status = 200, description = "One page of directory children", body = loonfs_api::ListInodeChildrenResponse),

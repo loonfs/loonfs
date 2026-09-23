@@ -11,7 +11,7 @@ use crate::namespace::control::{
 use crate::time::{MonotonicTimer, StdMonotonicTimer};
 use bytes::Bytes;
 use loonfs_api::wire::control::{
-    encode_control_state, ContentStoreState, ControlObjectKind, HintState,
+    encode_control_state, ContentStorePayload, ControlObjectKind, HintPayload,
 };
 use loonfs_api::wire::manifest::{
     encode_namespace_manifest_json, NamespaceAccess, NamespaceManifestPayload,
@@ -133,7 +133,7 @@ pub(super) async fn install_namespace_manifest<
     write_content_store_descriptor(store, &manifest.content_store_id, manifest.created_at_ms)
         .await?;
     let hint_key = hint(namespace_id);
-    let hint = HintState {
+    let hint = HintPayload {
         namespace_id: namespace_id.clone(),
         manifest_no: ManifestNo(1),
         wal_no: WalNo(0),
@@ -192,7 +192,7 @@ pub(super) async fn write_content_store_descriptor<S: ObjectStore + ?Sized>(
     created_at_ms: u64,
 ) -> Result<(), CoreError> {
     let object_key = content_store(content_store_id);
-    let descriptor = ContentStoreState {
+    let descriptor = ContentStorePayload {
         content_store_id: content_store_id.clone(),
         created_at_ms,
     };

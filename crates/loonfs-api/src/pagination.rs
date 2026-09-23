@@ -345,7 +345,7 @@ pub struct DirectoryPageCursor {
     pub head_seq: ChangeSeq,
     /// The snapshot that issued this cursor, or `None` for a live read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub snapshot_id: Option<crate::SnapshotId>,
+    pub snapshot_id: Option<crate::PinId>,
     /// Directory inode resolved at `head_seq`.
     pub directory_inode_id: InodeId,
     /// Last canonical name key returned to the client.
@@ -652,7 +652,7 @@ mod tests {
         let cursor = DirectoryPageCursor {
             head_seq: ChangeSeq(11),
             snapshot_id: Some(
-                crate::SnapshotId::parse("pin_00000000000000000001-0000000000000001")
+                crate::PinId::parse("pin_00000000000000000001-0000000000000001")
                     .expect("snapshot id"),
             ),
             directory_inode_id: InodeId(7),

@@ -449,7 +449,7 @@ async fn retention_floor_advancement_preserves_writer_identity() {
 async fn read_checkpoint_files<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    checkpoint_id: &CheckpointId,
+    checkpoint_id: &PinId,
 ) -> crate::error::Result<Vec<InodeId>> {
     let page = crate::checkpoint::list_checkpoint_files_page(
         store,
@@ -542,7 +542,7 @@ async fn each_create_mints_its_own_record_and_carries_its_own_expiry() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let owner = |expires_at_ms| loonfs_api::wire::control::CheckpointOwner::User {
+    let owner = |expires_at_ms| loonfs_api::wire::control::PinOwner::User {
         name: "test-pin".to_owned(),
         expires_at_ms,
     };
@@ -582,7 +582,7 @@ async fn each_create_mints_its_own_record_and_carries_its_own_expiry() {
         assert_eq!(next.expires_at_ms, expiry);
         let record = load_checkpoint_record(&store, &namespace_id, &next.checkpoint_id)
             .await
-            .expect("read checkpoint record")
+            .expect("read pin")
             .expect("record exists")
             .state;
         assert_eq!(record.owner.expires_at_ms(), expiry);
@@ -593,7 +593,7 @@ async fn each_create_mints_its_own_record_and_carries_its_own_expiry() {
     // an expiry, or with one, is held until something deletes it.
     let original = load_checkpoint_record(&store, &namespace_id, &first.checkpoint_id)
         .await
-        .expect("read checkpoint record")
+        .expect("read pin")
         .expect("record exists")
         .state;
     assert_eq!(original.created_at_ms, 1_000, "creation instant is history");
@@ -626,7 +626,7 @@ async fn an_expired_pin_still_enumerates_its_files_until_deleted() {
     let already_expired = super::create::create_checkpoint(
         &store,
         &namespace_id,
-        loonfs_api::wire::control::CheckpointOwner::User {
+        loonfs_api::wire::control::PinOwner::User {
             name: "test-pin".to_owned(),
             expires_at_ms: Some(context.now_ms),
         },
@@ -705,7 +705,7 @@ async fn a_pin_without_a_ttl_is_held_until_it_is_deleted() {
     }
     load_checkpoint_record(&store, &namespace_id, &pin.checkpoint_id)
         .await
-        .expect("read checkpoint record")
+        .expect("read pin")
         .expect("an unexpiring pin survives every pass");
     assert!(
         !read_checkpoint_files(&store, &namespace_id, &pin.checkpoint_id)
@@ -751,7 +751,7 @@ async fn checkpoint_creation_deletes_its_pin_when_the_floor_passed_its_manifest(
     let error = super::create::create_checkpoint_at_basis(
         &store,
         &namespace_id,
-        loonfs_api::wire::control::CheckpointOwner::User {
+        loonfs_api::wire::control::PinOwner::User {
             name: "old".to_owned(),
             expires_at_ms: None,
         },
@@ -848,7 +848,7 @@ async fn checkpoint_basis_verification_store_failure_deletes_the_record() {
     let error = super::create::create_checkpoint_at_basis(
         &store,
         &namespace_id,
-        loonfs_api::wire::control::CheckpointOwner::User {
+        loonfs_api::wire::control::PinOwner::User {
             name: "failed".to_owned(),
             expires_at_ms: None,
         },

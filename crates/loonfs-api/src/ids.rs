@@ -57,10 +57,6 @@ validation_error!(
     "invalid generated id {value:?}: {reason}"
 );
 validation_error!(
-    SnapshotIdValidationError,
-    "invalid snapshot_id {value:?}: {reason}"
-);
-validation_error!(
     NameKeyValidationError,
     "invalid name_key {value:?}: {reason}"
 );
@@ -328,7 +324,7 @@ pub(crate) use validation_error;
 /// Generates a project-standard opaque durable identifier.
 ///
 /// Generated server-side IDs use an underscore prefix plus a 32-character
-/// lowercase hexadecimal body, such as `cs_<32hex>` or `chk_<32hex>`.
+/// lowercase hexadecimal body, such as `cs_<32hex>` or `upl_<32hex>`.
 ///
 /// Ids in the id inventory generate through their newtype `generate()`
 /// constructors; this helper stays public for free-form generated labels
@@ -547,46 +543,17 @@ impl CommitId {
 }
 
 string_id! {
-    /// Durable checkpoint identifier.
-    ///
-    /// The manifest number determines which namespace manifest it pins.
-    CheckpointId,
+    /// Durable pin identifier. The manifest number determines which namespace manifest it pins.
+    PinId,
     error = GeneratedIdValidationError,
-    validate = validate_checkpoint_id,
+    validate = validate_pin_id,
     schema(
         pattern = r"^pin_[0-9]{20}-[0-9a-f]{16}$",
         example = "pin_00000000000000000001-0000000000000002"
     )
 }
 
-string_id! {
-    /// Id of a snapshot.
-    ///
-    /// A snapshot is backed by a checkpoint record and uses that record's
-    /// id, `pin_{manifest_no:020}-{16 lowercase hex}`.
-    SnapshotId,
-    error = SnapshotIdValidationError,
-    validate = |value: &str| validate_checkpoint_id(value)
-        .map_err(|error| SnapshotIdValidationError::new(&error.value, error.reason)),
-    schema(
-        pattern = r"^pin_[0-9]{20}-[0-9a-f]{16}$",
-        example = "pin_00000000000000000001-0000000000000002"
-    )
-}
-
-impl From<SnapshotId> for CheckpointId {
-    fn from(snapshot_id: SnapshotId) -> Self {
-        Self(snapshot_id.0)
-    }
-}
-
-impl From<CheckpointId> for SnapshotId {
-    fn from(checkpoint_id: CheckpointId) -> Self {
-        Self(checkpoint_id.0)
-    }
-}
-
-impl CheckpointId {
+impl PinId {
     /// Generates a new pin for the given manifest number.
     pub fn generate(manifest_no: ManifestNo) -> Self {
         let entropy = generated_id("pin");
@@ -612,7 +579,7 @@ impl CheckpointId {
     }
 }
 
-fn validate_checkpoint_id(value: &str) -> Result<(), GeneratedIdValidationError> {
+fn validate_pin_id(value: &str) -> Result<(), GeneratedIdValidationError> {
     let valid = value
         .strip_prefix("pin_")
         .and_then(|body| body.split_once('-'))
@@ -874,9 +841,9 @@ impl fmt::Display for InodeKind {
 #[cfg(test)]
 mod tests {
     use super::{
-        next_public_ordinal, BindingGeneration, ChangeSeq, CheckpointId, CommitId, ContentId,
-        ContentStoreId, InodeId, ManifestNo, MetadataSegmentId, NameKey, NamespaceId, RevisionNo,
-        RunNo, SnapshotId, UploadId, WalNo, WriterEpoch, WriterId, MAX_PUBLIC_INTEGER,
+        next_public_ordinal, BindingGeneration, ChangeSeq, CommitId, ContentId, ContentStoreId,
+        InodeId, ManifestNo, MetadataSegmentId, NameKey, NamespaceId, PinId, RevisionNo, RunNo,
+        UploadId, WalNo, WriterEpoch, WriterId, MAX_PUBLIC_INTEGER,
     };
     use crate::AttributesRevisionNo;
     use std::collections::BTreeSet;
@@ -1019,8 +986,8 @@ mod tests {
             "cs_00000000000000000000000000000001"
         );
         assert_eq!(
-            CheckpointId::try_from("pin_00000000000000000001-0000000000000001")
-                .expect("valid checkpoint id")
+            PinId::try_from("pin_00000000000000000001-0000000000000001")
+                .expect("valid pin id")
                 .as_str(),
             "pin_00000000000000000001-0000000000000001"
         );
@@ -1034,7 +1001,7 @@ mod tests {
         assert!(NamespaceId::try_from("invalid/name").is_err());
         assert!(CommitId::try_from("invalid/name").is_err());
         assert!(ContentStoreId::try_from("cs_0000000000000000000000000000000g").is_err());
-        assert!(CheckpointId::try_from("chk_0000000000000000000000000000000g").is_err());
+        assert!(PinId::try_from("pin_00000000000000000001-000000000000000g").is_err());
         assert!(NameKey::try_from("a/b").is_err());
     }
 
@@ -1053,13 +1020,9 @@ mod tests {
             content_store_id.as_str(),
             "cs_00000000000000000000000000000001"
         );
-        let checkpoint_id: CheckpointId =
-            serde_json::from_str(r#""pin_00000000000000000001-0000000000000001""#)
-                .expect("valid checkpoint id json");
-        assert_eq!(
-            checkpoint_id.as_str(),
-            "pin_00000000000000000001-0000000000000001"
-        );
+        let pin_id: PinId = serde_json::from_str(r#""pin_00000000000000000001-0000000000000001""#)
+            .expect("valid pin id json");
+        assert_eq!(pin_id.as_str(), "pin_00000000000000000001-0000000000000001");
 
         let namespace_error = serde_json::from_str::<NamespaceId>(r#""invalid/name""#)
             .expect_err("invalid namespace id json");
@@ -1071,10 +1034,10 @@ mod tests {
             serde_json::from_str::<ContentStoreId>(r#""cs_0000000000000000000000000000000g""#)
                 .expect_err("invalid content store id json");
         assert!(content_store_error.to_string().contains("generated id"));
-        let checkpoint_error =
-            serde_json::from_str::<CheckpointId>(r#""chk_0000000000000000000000000000000g""#)
-                .expect_err("invalid checkpoint id json");
-        assert!(checkpoint_error.to_string().contains("generated id"));
+        let pin_error =
+            serde_json::from_str::<PinId>(r#""pin_00000000000000000001-000000000000000g""#)
+                .expect_err("invalid pin id json");
+        assert!(pin_error.to_string().contains("generated id"));
     }
 
     #[test]
@@ -1105,43 +1068,41 @@ mod tests {
     }
 
     #[test]
-    fn generated_upload_wal_metadata_segment_and_checkpoint_ids_reject_hyphenated_ids() {
+    fn generated_upload_wal_metadata_segment_and_pin_ids_reject_hyphenated_ids() {
         assert!(UploadId::parse("upl_00000000000000000000000000000001").is_ok());
         assert!(MetadataSegmentId::parse("seg_00000000000000000000000000000001").is_ok());
-        assert!(CheckpointId::parse("pin_00000000000000000001-0000000000000001").is_ok());
+        assert!(PinId::parse("pin_00000000000000000001-0000000000000001").is_ok());
         assert!(UploadId::parse(["upl", "123"].join("-")).is_err());
         // The two positional families are told apart by their prefix, never
         // by context.
         assert!(MetadataSegmentId::parse(["seg", "123"].join("-")).is_err());
-        assert!(CheckpointId::parse(["chk", "123"].join("-")).is_err());
+        assert!(PinId::parse(["chk", "123"].join("-")).is_err());
     }
 
     #[test]
     fn generated_runtime_ids_use_lower_hex_bodies() {
         let upload_id = UploadId::generate();
         let metadata_segment_id = MetadataSegmentId::generate();
-        let checkpoint_id = CheckpointId::generate(ManifestNo(1));
+        let pin_id = PinId::generate(ManifestNo(1));
 
         assert_generated_id_shape(upload_id.as_str(), "upl");
         assert_generated_id_shape(metadata_segment_id.as_str(), "seg");
-        assert_eq!(checkpoint_id.manifest_no(), ManifestNo(1));
+        assert_eq!(pin_id.manifest_no(), ManifestNo(1));
         assert!(UploadId::parse(upload_id.as_str()).is_ok());
         assert!(MetadataSegmentId::parse(metadata_segment_id.as_str()).is_ok());
-        assert!(CheckpointId::parse(checkpoint_id.as_str()).is_ok());
+        assert!(PinId::parse(pin_id.as_str()).is_ok());
     }
 
     #[test]
-    fn checkpoint_ids_order_and_validate_their_manifest_numbers() {
-        let first = CheckpointId::parse("pin_00000000000000000009-ffffffffffffffff").expect("pin");
-        let second = CheckpointId::parse("pin_00000000000000000010-0000000000000000").expect("pin");
+    fn pin_ids_order_and_validate_their_manifest_numbers() {
+        let first = PinId::parse("pin_00000000000000000009-ffffffffffffffff").expect("pin");
+        let second = PinId::parse("pin_00000000000000000010-0000000000000000").expect("pin");
         assert!(first < second);
         assert_eq!(second.manifest_no(), ManifestNo(10));
-        let snapshot_id = SnapshotId::from(second.clone());
-        let decoded: SnapshotId = serde_json::from_str(
-            &serde_json::to_string(&snapshot_id).expect("serialize snapshot id"),
-        )
-        .expect("decode snapshot id");
-        assert_eq!(CheckpointId::from(decoded), second);
+        let decoded: PinId =
+            serde_json::from_str(&serde_json::to_string(&second).expect("serialize pin id"))
+                .expect("decode pin id");
+        assert_eq!(decoded, second);
         for invalid in [
             "pin_00000000000000000000-0000000000000000".to_owned(),
             format!("pin_{:020}-0000000000000000", MAX_PUBLIC_INTEGER + 1),
@@ -1149,8 +1110,7 @@ mod tests {
             "pin_1-0000000000000000".to_owned(),
             "pin_00000000000000000001-00000000000000000".to_owned(),
         ] {
-            assert!(CheckpointId::parse(&invalid).is_err());
-            assert!(SnapshotId::parse(&invalid).is_err());
+            assert!(PinId::parse(&invalid).is_err());
         }
     }
 

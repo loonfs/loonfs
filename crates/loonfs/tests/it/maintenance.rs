@@ -258,10 +258,10 @@ fn maintenance_step_at_segment_threshold_flushes_the_wal() {
     let records = block_on(
         raw_store.list_prefix(&loonfs_objectstore::keys::checkpoint_prefix(&namespace_id)),
     )
-    .expect("list checkpoint records");
+    .expect("list pins");
     assert!(
         records.is_empty(),
-        "maintenance pass created checkpoint records: {records:?}"
+        "maintenance pass created pins: {records:?}"
     );
 }
 

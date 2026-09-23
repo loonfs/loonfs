@@ -1,11 +1,11 @@
 //! Durable control-object shapes: the discovery hint,
-//! checkpoint records, upload sessions, and their envelopes (format spec,
+//! pins, upload sessions, and their envelopes (format spec,
 //! "Control objects").
 
 use crate::envelope::EnvelopeCodecError;
 use crate::{
-    ChangeSeq, CheckpointId, ChecksumAlgorithm, CommitId, ContentId, ContentRef, ContentStoreId,
-    ManifestNo, NamespaceGeneration, NamespaceId, SubjectId, UploadId,
+    ChangeSeq, ChecksumAlgorithm, CommitId, ContentId, ContentRef, ContentStoreId, ManifestNo,
+    NamespaceGeneration, NamespaceId, PinId, SubjectId, UploadId,
 };
 use crate::{WriterEpoch, WriterId};
 use serde::de::DeserializeOwned;
@@ -21,7 +21,7 @@ pub enum ControlObjectKind {
     /// Starts forward discovery of numbered manifests.
     Hint,
     /// Pins a manifest basis for a user or fork lifecycle.
-    CheckpointRecord,
+    Pin,
     /// Tracks staged content through upload completion or cleanup.
     UploadSession,
     /// Identifies the content domain held by a backend.
@@ -32,7 +32,7 @@ impl ControlObjectKind {
     /// Lists every registered control-object family in stable registry order.
     pub const ALL: [Self; 4] = [
         Self::Hint,
-        Self::CheckpointRecord,
+        Self::Pin,
         Self::UploadSession,
         Self::ContentStore,
     ];
@@ -46,7 +46,7 @@ impl ControlObjectKind {
     pub const fn format_version(self) -> u32 {
         match self {
             Self::Hint => 1,
-            Self::CheckpointRecord => 1,
+            Self::Pin => 1,
             Self::UploadSession => 1,
             Self::ContentStore => 1,
         }
@@ -56,7 +56,7 @@ impl ControlObjectKind {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Hint => "hint",
-            Self::CheckpointRecord => "checkpoint_record",
+            Self::Pin => "pin",
             Self::UploadSession => "upload_session",
             Self::ContentStore => "content_store",
         }
@@ -71,7 +71,7 @@ impl ControlObjectKind {
 /// Identifies a content domain in its physical backend.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ContentStoreState {
+pub struct ContentStorePayload {
     /// Domain whose objects share this descriptor's prefix.
     pub content_store_id: ContentStoreId,
     /// Unix-millisecond stamp from the domain's creation context.
@@ -81,7 +81,7 @@ pub struct ContentStoreState {
 /// Starts manifest discovery without selecting the current version.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct HintState {
+pub struct HintPayload {
     /// Namespace whose manifest collection is probed.
     pub namespace_id: NamespaceId,
     /// Positive manifest number from which discovery begins.
@@ -104,15 +104,15 @@ pub struct ManifestRef {
     /// Monotonic logical position of the referenced manifest.
     pub manifest_no: ManifestNo,
     /// Greatest owner-namespace sequence the referenced manifest materializes.
-    pub manifest_head_seq: ChangeSeq,
+    pub head_seq: ChangeSeq,
     /// Must equal `payload_checksum` in the referenced manifest envelope.
-    pub manifest_payload_checksum: String,
+    pub payload_checksum: String,
 }
 
-/// Durable owner and expiry policy of a checkpoint record.
+/// Durable owner and expiry policy of a pin.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum CheckpointOwner {
+pub enum PinOwner {
     /// An operator-created pin, deleted explicitly by checkpoint id or by
     /// its declared expiry. The name is a label, not a key: several records
     /// may carry the same name over different bases.
@@ -139,7 +139,7 @@ pub enum CheckpointOwner {
     Retired {},
 }
 
-impl CheckpointOwner {
+impl PinOwner {
     /// When garbage collection may release this record without asking its owner.
     pub fn expires_at_ms(&self) -> Option<u64> {
         match self {
@@ -154,33 +154,33 @@ impl CheckpointOwner {
 /// A pin stored under `pins/`; see format specification section 8.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct CheckpointRecordState {
+pub struct PinPayload {
     /// Namespace containing the pinned manifest.
     pub namespace_id: NamespaceId,
     /// Positions this record at its manifest number.
-    pub pin_id: CheckpointId,
+    pub pin_id: PinId,
     /// Must equal the number in `pin_id`.
     pub manifest_no: ManifestNo,
     /// Greatest sequence in the pinned manifest.
-    pub manifest_head_seq: ChangeSeq,
-    /// Verifies the referenced manifest payload.
-    pub manifest_payload_checksum: String,
+    pub head_seq: ChangeSeq,
     /// Commit at the pinned manifest head.
     pub head_commit_id: CommitId,
+    /// Verifies the referenced manifest payload.
+    pub payload_checksum: String,
     /// Creation time used by collection grace.
     pub created_at_ms: u64,
     /// Determines when collection may delete this record.
-    pub owner: CheckpointOwner,
+    pub owner: PinOwner,
 }
 
-impl CheckpointRecordState {
+impl PinPayload {
     /// Builds the reference for reads through this pin.
     pub fn manifest(&self) -> ManifestRef {
         ManifestRef {
             owner_namespace_id: self.namespace_id.clone(),
             manifest_no: self.pin_id.manifest_no(),
-            manifest_head_seq: self.manifest_head_seq,
-            manifest_payload_checksum: self.manifest_payload_checksum.clone(),
+            head_seq: self.head_seq,
+            payload_checksum: self.payload_checksum.clone(),
         }
     }
 }
@@ -241,15 +241,15 @@ impl NamespaceStatus {
     }
 }
 
-/// Immutable fork provenance matched against the source checkpoint by GC.
+/// Immutable fork provenance matched against the source pin by GC.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ForkBasis {
     /// Source manifest used as the target's initial state. Its owner must
     /// differ from the target namespace.
     pub manifest: ManifestRef,
-    /// Source checkpoint record pinning the basis for as long as the target lives.
-    pub source_checkpoint_id: CheckpointId,
+    /// Source pin that holds the basis for as long as the target lives.
+    pub source_pin_id: PinId,
     /// The source generation captured by the pinned manifest.
     pub source_generation: NamespaceGeneration,
 }
@@ -427,7 +427,7 @@ impl std::fmt::Display for UploadSessionRecordStatus {
 ///
 /// See [upload before publish](../../../docs/specs/format.md#5-uploading-content).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct UploadSessionState {
+pub struct UploadSessionPayload {
     /// Namespace authorized to consume the staged content.
     pub namespace_id: NamespaceId,
     /// Generation of the namespace when the session opened; the content key and every reference the session mints carry it.
@@ -455,7 +455,7 @@ pub struct UploadSessionState {
     pub status: UploadSessionRecordStatus,
 }
 
-impl UploadSessionState {
+impl UploadSessionPayload {
     fn validate(&self) -> Result<(), String> {
         if self.owner_generation.0 == 0 {
             return Err(format!(
@@ -521,7 +521,7 @@ impl UploadSessionState {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct StrictUploadSessionState {
+struct StrictUploadSessionPayload {
     namespace_id: NamespaceId,
     owner_generation: NamespaceGeneration,
     content_store_id: ContentStoreId,
@@ -624,7 +624,7 @@ impl From<StrictUploadSessionRecordStatus> for UploadSessionRecordStatus {
     }
 }
 
-impl<'de> Deserialize<'de> for UploadSessionState {
+impl<'de> Deserialize<'de> for UploadSessionPayload {
     /// Reads one session record and refuses one that `validate` finds
     /// disagreeing with itself, like any other corruption and with no shim
     /// or salvage.
@@ -632,7 +632,7 @@ impl<'de> Deserialize<'de> for UploadSessionState {
     where
         D: Deserializer<'de>,
     {
-        let record = StrictUploadSessionState::deserialize(deserializer)?;
+        let record = StrictUploadSessionPayload::deserialize(deserializer)?;
         let session = Self {
             namespace_id: record.namespace_id,
             owner_generation: record.owner_generation,
@@ -711,7 +711,7 @@ mod tests {
         };
         let mut staged = content_ref.clone();
         staged.size_bytes += 1;
-        let session = UploadSessionState {
+        let session = UploadSessionPayload {
             namespace_id: NamespaceId::parse("demo").expect("namespace id"),
             owner_generation: crate::NamespaceGeneration(1),
             content_store_id: crate::ContentStoreId::parse("cs_0123456789abcdef0123456789abcdef")
@@ -779,7 +779,7 @@ mod tests {
                     aborted_at_ms: 2_000,
                 },
             ] {
-                let session = UploadSessionState {
+                let session = UploadSessionPayload {
                     namespace_id: NamespaceId::parse("demo").expect("namespace id"),
                     owner_generation: crate::NamespaceGeneration(1),
                     content_store_id: crate::ContentStoreId::parse(
@@ -795,7 +795,7 @@ mod tests {
                     status,
                 };
                 let encoded = serde_json::to_value(&session).expect("encode session");
-                let decoded = serde_json::from_value::<UploadSessionState>(encoded);
+                let decoded = serde_json::from_value::<UploadSessionPayload>(encoded);
                 if mode.content_ref().is_some() {
                     let error = decoded
                         .expect_err("terminal staging is corrupt")

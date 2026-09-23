@@ -1,7 +1,7 @@
 //! Store request contracts for WAL freshness and periodic hint raises.
 
 use crate::{CreateDirectoryOptions, CreateNamespaceOptions, FsReader, FsWriter, NamespaceId};
-use loonfs_api::wire::control::{decode_control_object, ControlObjectKind, HintState};
+use loonfs_api::wire::control::{decode_control_object, ControlObjectKind, HintPayload};
 use loonfs_api::{MonotonicTimer, WalNo};
 use loonfs_core::limits::HINT_RAISE_SEGMENTS;
 use loonfs_objectstore::{keys, local_fs_store::LocalFsStore, ObjectStore};
@@ -35,13 +35,13 @@ async fn directory(writer: &FsWriter, namespace_id: &NamespaceId, index: u64) {
         .expect("create directory");
 }
 
-async fn hint(store: &dyn ObjectStore, namespace_id: &NamespaceId) -> HintState {
+async fn hint(store: &dyn ObjectStore, namespace_id: &NamespaceId) -> HintPayload {
     let bytes = store
         .get(&keys::hint(namespace_id), None)
         .await
         .expect("get hint")
         .expect("hint");
-    decode_control_object::<HintState>(&bytes, ControlObjectKind::Hint)
+    decode_control_object::<HintPayload>(&bytes, ControlObjectKind::Hint)
         .expect("decode hint")
         .payload()
         .clone()

@@ -60,7 +60,7 @@ const _: () =
 /// whole-operation clock — their parts are individually time- and
 /// retry-bounded — which leaves the floor derivation below untouched:
 /// every object it times (WAL segments inside the publish budget,
-/// checkpoint records, and numbered manifests) is a small control
+/// pins, and numbered manifests) is a small control
 /// object on the single-request path, and publications self-enforce their
 /// budgets by local monotonic elapsed time regardless of provider deadlines.
 pub const PROVIDER_OPERATION_DEADLINE_MS: u64 = PROVIDER_OPERATION_DEADLINE.as_millis() as u64;
@@ -74,11 +74,11 @@ pub const PROVIDER_ATTEMPT_TIMEOUT_MS: u64 = PROVIDER_ATTEMPT_TIMEOUT.as_millis(
 /// Maximum elapsed time from observing a tip to initiating its next numbered put.
 pub const WAL_PUBLISH_BUDGET_MS: u64 = 60_000;
 
-/// Self-enforced budget between writing a checkpoint record and completing
+/// Self-enforced budget between writing a pin and completing
 /// its post-write basis verification. Overrunning it counts as verification
 /// failure: the record may have raced the grace window, so it must not stand
 /// as a root.
-pub const CHECKPOINT_VERIFY_BUDGET_MS: u64 = 60_000;
+pub const PIN_VERIFY_BUDGET_MS: u64 = 60_000;
 
 /// Self-enforced budget for one metadata publication — WAL flush or
 /// reorganization — measured from before the first segment object is written
@@ -104,7 +104,7 @@ const fn max_u64(left: u64, right: u64) -> u64 {
 /// may remove it. The value covers the longest publication budget, provider
 /// operation time, and the combined clock-error and scheduling allowance.
 pub const GC_MIN_GRACE_WINDOW_MS: u64 = max_u64(
-    max_u64(WAL_PUBLISH_BUDGET_MS, CHECKPOINT_VERIFY_BUDGET_MS),
+    max_u64(WAL_PUBLISH_BUDGET_MS, PIN_VERIFY_BUDGET_MS),
     METADATA_PUBLICATION_BUDGET_MS,
 ) + PROVIDER_OPERATION_DEADLINE_MS
     + PROVIDER_ATTEMPT_TIMEOUT_MS
@@ -266,7 +266,7 @@ mod tests {
         assert!(
             GC_MIN_GRACE_WINDOW_MS
                 > max_u64(
-                    max_u64(WAL_PUBLISH_BUDGET_MS, CHECKPOINT_VERIFY_BUDGET_MS),
+                    max_u64(WAL_PUBLISH_BUDGET_MS, PIN_VERIFY_BUDGET_MS),
                     METADATA_PUBLICATION_BUDGET_MS,
                 ) + PROVIDER_OPERATION_DEADLINE_MS,
             "the floor keeps a margin above budget plus provider deadline"

@@ -298,11 +298,11 @@ async fn manifest_round_trip_supports_empty_namespace() {
     assert_eq!(materialization.manifest.manifest.manifest_no, ManifestNo(1));
     let record = load_checkpoint_record(&store, &namespace_id, &checkpoint.checkpoint_id)
         .await
-        .expect("read checkpoint record")
+        .expect("read pin")
         .expect("record exists")
         .state;
-    assert!(CheckpointId::parse(record.pin_id.as_str()).is_ok());
-    assert_eq!(record.manifest_head_seq, ChangeSeq(0));
+    assert!(PinId::parse(record.pin_id.as_str()).is_ok());
+    assert_eq!(record.head_seq, ChangeSeq(0));
     assert_eq!(record.manifest_no, ManifestNo(1));
     let published =
         load_manifest_materialization_for_inspection(&store, &namespace_id, ManifestNo(1))
@@ -495,11 +495,11 @@ async fn checkpoint_records_are_standalone_files_one_per_pin() {
 
     let record = load_checkpoint_record(&store, &namespace_id, &first.checkpoint_id)
         .await
-        .expect("read checkpoint record")
+        .expect("read pin")
         .expect("record exists")
         .state;
     assert_eq!(record.manifest_no, first.manifest_no);
-    assert_eq!(record.manifest_head_seq, first.captured_seq);
+    assert_eq!(record.head_seq, first.captured_seq);
 
     // A new basis mints a new record; both files exist side by side.
     write_file_bytes(
@@ -654,7 +654,7 @@ async fn manifest_delta_run_materialization_matches_checkpoint_projection() {
     for response in [&first, &second] {
         let record = load_checkpoint_record(&store, &namespace_id, &response.checkpoint_id)
             .await
-            .expect("read checkpoint record")
+            .expect("read pin")
             .expect("record exists")
             .state;
         assert_eq!(record.manifest_no, response.manifest_no);
@@ -989,11 +989,11 @@ async fn create_checkpoint_pins_a_current_basis_without_building_a_new_manifest(
     assert_eq!(checkpoint.manifest_no, covering_manifest_no);
     let record = load_checkpoint_record(&store, &namespace_id, &checkpoint.checkpoint_id)
         .await
-        .expect("read checkpoint record")
+        .expect("read pin")
         .expect("record exists")
         .state;
     assert_eq!(record.manifest_no, covering_manifest_no);
-    assert_eq!(record.manifest_payload_checksum, manifest_checksum);
+    assert_eq!(record.payload_checksum, manifest_checksum);
 }
 
 #[tokio::test]

@@ -6,8 +6,8 @@ use crate::common::http_split_support::*;
 use crate::common::{collect_checkpoints, start_server};
 use bytes::Bytes;
 use loonfs_api::{
-    ApiError, ChangeSeq, Checkpoint, CheckpointId, CheckpointOwnerSummary,
-    DeleteCheckpointResponse, ManifestNo,
+    ApiError, ChangeSeq, Checkpoint, CheckpointOwnerSummary, DeleteCheckpointResponse, ManifestNo,
+    PinId,
 };
 use loonfs_client::{ClientError, NamespacePath};
 use loonfs_objectstore::keys::metadata_manifest_object;
@@ -208,7 +208,7 @@ async fn http_maintenance_checkpoint_and_retention_are_idempotent_and_soft() {
         .expect("write file");
 
     let first = post_checkpoint(&server_url, namespace.as_str()).expect("first checkpoint");
-    assert!(CheckpointId::parse(first.checkpoint_id.as_str()).is_ok());
+    assert!(PinId::parse(first.checkpoint_id.as_str()).is_ok());
     assert_eq!(
         first.owner,
         CheckpointOwnerSummary::User {

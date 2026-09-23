@@ -240,7 +240,7 @@ async fn historical_and_snapshot_reads_stream_the_selected_revision() {
         .await
         .expect("historical stream");
     let pinned = reader
-        .pin_namespace_at_snapshot(&namespace_id, &snapshot.checkpoint_id.clone().into())
+        .pin_namespace_at_snapshot(&namespace_id, &snapshot.checkpoint_id)
         .await
         .expect("pin snapshot");
     let snapshot_stream = pinned

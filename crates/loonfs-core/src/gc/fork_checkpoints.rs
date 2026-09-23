@@ -7,8 +7,8 @@ use crate::control_object::ControlObjectLoadError;
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::namespace::control::load_current_manifest;
 use futures::StreamExt;
-use loonfs_api::wire::control::{CheckpointRecordState, ForkBasis};
-use loonfs_api::{CheckpointId, ContentStoreId, NamespaceGeneration, NamespaceId};
+use loonfs_api::wire::control::{ForkBasis, PinPayload};
+use loonfs_api::{ContentStoreId, NamespaceGeneration, NamespaceId, PinId};
 use loonfs_objectstore::ObjectStore;
 
 pub(super) enum ForkCheckpointReachability {
@@ -22,7 +22,7 @@ pub(super) async fn delete_source_checkpoint<S: ObjectStore + ?Sized>(
 ) -> Result<bool> {
     let key = loonfs_objectstore::keys::checkpoint_record(
         &basis.manifest.owner_namespace_id,
-        &basis.source_checkpoint_id,
+        &basis.source_pin_id,
     );
     let present = store
         .head(&key)
@@ -32,7 +32,7 @@ pub(super) async fn delete_source_checkpoint<S: ObjectStore + ?Sized>(
     crate::checkpoint::record::delete_checkpoint_record(
         store,
         &basis.manifest.owner_namespace_id,
-        &basis.source_checkpoint_id,
+        &basis.source_pin_id,
     )
     .await?;
     Ok(present)
@@ -40,7 +40,7 @@ pub(super) async fn delete_source_checkpoint<S: ObjectStore + ?Sized>(
 
 pub(super) async fn classify_fork_checkpoint<S: ObjectStore + ?Sized>(
     store: &S,
-    record: &CheckpointRecordState,
+    record: &PinPayload,
     target_namespace_id: &NamespaceId,
     grace_window_ms: u64,
     context: &MutationContext,
@@ -79,7 +79,7 @@ pub(super) async fn classify_fork_checkpoint<S: ObjectStore + ?Sized>(
         .payload()
         .fork_basis
         .as_ref()
-        .filter(|basis| basis.source_checkpoint_id == record.pin_id)
+        .filter(|basis| basis.source_pin_id == record.pin_id)
     else {
         if target.envelope.payload().generation > NamespaceGeneration(1) {
             return classify_prior_generations(store, target_namespace_id, &record.pin_id).await;
@@ -100,7 +100,7 @@ pub(super) async fn classify_fork_checkpoint<S: ObjectStore + ?Sized>(
 async fn classify_prior_generations<S: ObjectStore + ?Sized>(
     store: &S,
     target_namespace_id: &NamespaceId,
-    pin_id: &CheckpointId,
+    pin_id: &PinId,
 ) -> Result<ForkCheckpointReachability> {
     let prefix = loonfs_objectstore::keys::checkpoint_prefix(target_namespace_id);
     let mut listing = store.list_prefix_stream(&prefix);
@@ -139,7 +139,7 @@ async fn classify_prior_generations<S: ObjectStore + ?Sized>(
             .payload()
             .fork_basis
             .as_ref()
-            .is_some_and(|basis| &basis.source_checkpoint_id == pin_id)
+            .is_some_and(|basis| &basis.source_pin_id == pin_id)
         {
             return Ok(ForkCheckpointReachability::Retained {
                 reason: "referenced_by_prior_generation",
@@ -149,8 +149,8 @@ async fn classify_prior_generations<S: ObjectStore + ?Sized>(
     Ok(ForkCheckpointReachability::Reclaimable)
 }
 
-pub(super) fn is_retired_pin(namespace_id: &NamespaceId, pin_id: &CheckpointId) -> bool {
-    *pin_id == CheckpointId::retired(namespace_id, pin_id.manifest_no())
+pub(super) fn is_retired_pin(namespace_id: &NamespaceId, pin_id: &PinId) -> bool {
+    *pin_id == PinId::retired(namespace_id, pin_id.manifest_no())
 }
 
 /// Finds the content domain of an unreclaimed generation through its retired pin.

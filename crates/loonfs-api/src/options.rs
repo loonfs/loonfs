@@ -5,7 +5,7 @@ use crate::{
     CommitId, CommitPrecondition, DeleteDirectoryBehavior, DestinationBehavior, InodeId,
     RevisionNo,
 };
-use crate::{SnapshotId, Subject};
+use crate::{PinId, Subject};
 use std::collections::BTreeMap;
 
 /// Whether a path or inode read includes the attribute projection.
@@ -64,7 +64,7 @@ pub struct StatPathOptions {
     /// Whether to include the inode's attribute map and revision, enabled by default.
     pub include_attributes: AttributeInclusion,
     /// Read the entry from this snapshot.
-    pub snapshot_id: Option<SnapshotId>,
+    pub snapshot_id: Option<PinId>,
 }
 
 impl Default for StatPathOptions {
@@ -82,7 +82,7 @@ pub struct ListPathEntriesOptions {
     /// Whether to include each entry's attribute map and revision, disabled by default.
     pub include_attributes: AttributeInclusion,
     /// Read the directory from this snapshot.
-    pub snapshot_id: Option<SnapshotId>,
+    pub snapshot_id: Option<PinId>,
 }
 
 /// Options for listing a directory's children by parent inode.
@@ -91,7 +91,7 @@ pub struct ListInodeChildrenOptions {
     /// Whether to include each entry's attribute map and revision, disabled by default.
     pub include_attributes: AttributeInclusion,
     /// Read the directory from this snapshot.
-    pub snapshot_id: Option<SnapshotId>,
+    pub snapshot_id: Option<PinId>,
 }
 
 /// Options for writing and removing an inode's attributes.
@@ -317,7 +317,7 @@ pub struct ForkNamespaceOptions {
     /// Application-supplied actor creating the namespace.
     pub actor_id: ActorId,
     /// Fork from this live snapshot instead of the current head.
-    pub snapshot_id: Option<crate::SnapshotId>,
+    pub snapshot_id: Option<crate::PinId>,
 }
 
 impl ForkNamespaceOptions {
