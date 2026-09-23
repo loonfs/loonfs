@@ -13,8 +13,8 @@ use crate::error::{CoreError, Result};
 use crate::metadata::ResolvedVisiblePath;
 use crate::path::mutation_path::{ensure_mutation_path, final_component};
 use loonfs_api::{
-    AbsolutePath, AccessRight, AccessRights, AttributeRevisionNo, DestinationBehavior, DisplayName,
-    ExpectedFileState, InodeId, InodeKind,
+    AbsolutePath, AccessRight, AccessRights, AttributesRevisionNo, DestinationBehavior,
+    DisplayName, ExpectedFileState, InodeId, InodeKind,
 };
 use loonfs_objectstore::ObjectStore;
 
@@ -263,7 +263,7 @@ pub(super) async fn plan_copy_file_path<S: ObjectStore + ?Sized>(
                 // validation cannot allocate a different inode for either.
                 ops.push(CommitOp::UpdateAttributes {
                     inode_id: child_inode_id,
-                    base_attributes_revision_no: AttributeRevisionNo(0),
+                    base_attributes_revision_no: AttributesRevisionNo(0),
                     attributes: source_attributes,
                 });
             }

@@ -2,7 +2,7 @@
 
 use super::DirectoryBinding;
 use crate::{
-    AbsolutePath, ActorId, AttributeRevisionNo, Attributes, BindingGeneration, ChangeSeq,
+    AbsolutePath, ActorId, Attributes, AttributesRevisionNo, BindingGeneration, ChangeSeq,
     ContentRef, DisplayName, InodeId, InodeKind, NamespaceId, RevisionNo,
 };
 use serde::{Deserialize, Serialize};
@@ -146,7 +146,7 @@ impl PathEntryKind {
 pub struct AttributesProjection {
     /// The attribute revision this projection represents.
     #[cfg_attr(feature = "openapi", schema(required = false))]
-    pub attributes_revision_no: AttributeRevisionNo,
+    pub attributes_revision_no: AttributesRevisionNo,
     /// The actor responsible for the latest attribute update, or `None` for the
     /// initial empty state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -415,7 +415,7 @@ mod tests {
     fn requested_attributes_serialize_as_flat_prefixed_siblings() {
         let mut projected = entry("/docs", Some(InodeId(1)), Some("docs"));
         projected.attributes = Some(AttributesProjection {
-            attributes_revision_no: crate::AttributeRevisionNo(7),
+            attributes_revision_no: crate::AttributesRevisionNo(7),
             attributes_updated_by: Some(ActorId::loonfs()),
             attributes_updated_at_ms: Some(1_752_624_000_000),
             attributes: crate::Attributes::new(std::collections::BTreeMap::from([(
@@ -445,7 +445,7 @@ mod tests {
         let projection = decoded.attributes.expect("projected attributes");
         assert_eq!(
             projection.attributes_revision_no,
-            crate::AttributeRevisionNo(7)
+            crate::AttributesRevisionNo(7)
         );
     }
 
@@ -466,7 +466,7 @@ mod tests {
     fn never_written_attributes_serialize_as_revision_zero_and_empty_map() {
         let mut projected = entry("/docs", Some(InodeId(1)), Some("docs"));
         projected.attributes = Some(AttributesProjection {
-            attributes_revision_no: crate::AttributeRevisionNo(0),
+            attributes_revision_no: crate::AttributesRevisionNo(0),
             attributes_updated_by: None,
             attributes_updated_at_ms: None,
             attributes: crate::Attributes::default(),

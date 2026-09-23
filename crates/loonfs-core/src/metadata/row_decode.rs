@@ -129,10 +129,10 @@ mod tests {
         MetadataRow::Inode(InodeRecord {
             inode_id: InodeId(7),
             inode_kind: loonfs_api::InodeKind::File,
-            created_seq: ChangeSeq(3),
+            committed_seq: ChangeSeq(3),
             commit_id: CommitId::parse("c_foreign_inode").expect("commit id"),
-            created_by: loonfs_api::ActorId::loonfs(),
-            created_at_ms: 4_000,
+            committed_by: loonfs_api::ActorId::loonfs(),
+            committed_at_ms: 4_000,
         })
     }
 
@@ -161,15 +161,15 @@ mod tests {
             },
             commit_id: CommitId::parse("c_foreign_tombstone").expect("commit id"),
             action: TombstoneRowAction::Set {
-                deleted_direntry: loonfs_api::wire::manifest::DeletedDirentry {
+                deleted_binding: loonfs_api::wire::manifest::DeletedBinding {
                     parent_inode_id: InodeId(1),
                     name_key: loonfs_api::NameKey::parse("foreign").expect("valid name key"),
                     display_name: loonfs_api::DisplayName::parse("foreign")
                         .expect("valid display name"),
                 },
             },
-            deleted_at_ms: 4_000,
-            deleted_by: loonfs_api::ActorId::loonfs(),
+            committed_at_ms: 4_000,
+            committed_by: loonfs_api::ActorId::loonfs(),
         });
         assert!(inode_from_manifest_row(tombstone).is_err());
     }

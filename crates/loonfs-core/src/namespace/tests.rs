@@ -61,8 +61,8 @@ fn an_acl_namespace_begins_with_the_root_grants_as_its_root_access_row() {
             committed_seq: ChangeSeq(0),
             commit_id: loonfs_api::wire::control::genesis_commit_id(),
             delta_index: 0,
-            updated_by: ActorId::loonfs(),
-            updated_at_ms: 1_000,
+            committed_by: ActorId::loonfs(),
+            committed_at_ms: 1_000,
             boundary: false,
             grants: root_grants,
         }]

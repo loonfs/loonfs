@@ -11,7 +11,7 @@ use crate::storage::inline_content::InlineContent;
 use crate::wal::prepare_wal_segment;
 use loonfs_api::wire::wal::{WalDelta, MAX_WAL_SEGMENT_BYTES, WAL_SEGMENT_OVERHEAD_BYTES};
 use loonfs_api::{
-    ActorId, AttributeKey, AttributeRevisionNo, Attributes, ChangeSeq, Checksum, CommitId,
+    ActorId, AttributeKey, Attributes, AttributesRevisionNo, ChangeSeq, Checksum, CommitId,
     ContentId, ContentRef, ContentRefKind, ContentStoreId, DestinationBehavior,
     DestinationPrecondition, DisplayName, InodeId, InodeKind, NameKey, NamespaceId, RevisionNo,
     WalNo, WriterEpoch, MAX_ATTRIBUTE_KEY_BYTES, MAX_ATTRIBUTE_VALUE_BYTES, MAX_PUBLIC_INTEGER,
@@ -92,7 +92,7 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
             WalDelta::AppendAttributesRevision {
                 delta_index: 4,
                 inode_id: InodeId(2),
-                attributes_revision_no: AttributeRevisionNo(
+                attributes_revision_no: AttributesRevisionNo(
                     MAX_PUBLIC_INTEGER - MAX_COMMIT_OPERATIONS as u64,
                 ),
                 attributes: full_attributes(),

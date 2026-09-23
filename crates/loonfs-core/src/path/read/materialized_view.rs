@@ -586,7 +586,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                     scanned += 1;
                     last_scanned = Some((deletion.deletion_seq, deletion.root_inode_id));
                     if access
-                        .can_read(&mut session, deletion.deleted_direntry.parent_inode_id)
+                        .can_read(&mut session, deletion.deleted_binding.parent_inode_id)
                         .await?
                     {
                         kept.push(deletion);
@@ -611,9 +611,9 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 deleted_at_ms: deletion.deleted_at_ms,
                 deleted_by: deletion.deleted_by,
                 deleted_binding: DirectoryBinding {
-                    parent_inode_id: deletion.deleted_direntry.parent_inode_id,
-                    name_key: deletion.deleted_direntry.name_key,
-                    display_name: deletion.deleted_direntry.display_name,
+                    parent_inode_id: deletion.deleted_binding.parent_inode_id,
+                    name_key: deletion.deleted_binding.name_key,
+                    display_name: deletion.deleted_binding.display_name,
                 },
             })
             .collect();
@@ -1079,8 +1079,8 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 absolute_path: child_path.as_str().to_owned(),
                 inode_id: child.binding.child_inode_id,
                 inode_kind: child.inode.inode_kind,
-                created_by: child.inode.created_by,
-                created_at_ms: child.inode.created_at_ms,
+                created_by: child.inode.committed_by,
+                created_at_ms: child.inode.committed_at_ms,
                 parent_inode_id: Some(child.binding.parent_inode_id),
                 display_name: child.binding.display_name.to_string(),
                 binding_generation: Some(binding_generation(&child.binding)),
@@ -1150,7 +1150,7 @@ mod tests {
     use crate::namespace::control::load_namespace_read_state;
     use crate::path::write::{CommitRequest, FilesystemOperation};
     use bytes::Bytes;
-    use loonfs_api::{AttributeRevisionNo, AttributeValue, CommitId, ErrorCode};
+    use loonfs_api::{AttributeValue, AttributesRevisionNo, CommitId, ErrorCode};
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_test_support::ids::attribute_key;
     use std::collections::BTreeMap;
@@ -1308,7 +1308,7 @@ mod tests {
                 .attributes
                 .as_ref()
                 .map(|projection| projection.attributes_revision_no),
-            Some(AttributeRevisionNo(1))
+            Some(AttributesRevisionNo(1))
         );
         assert_eq!(
             annotated
@@ -1334,7 +1334,7 @@ mod tests {
                     projection.attributes.len(),
                 )
             }),
-            Some((AttributeRevisionNo(0), 0))
+            Some((AttributesRevisionNo(0), 0))
         );
 
         let omitted = view

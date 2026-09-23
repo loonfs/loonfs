@@ -80,8 +80,8 @@ pub use access::{
 };
 pub use actor::{ActorId, ActorIdValidationError};
 pub use attributes::{
-    AttributeKey, AttributeKeyValidationError, AttributeRevisionNo, AttributeValue,
-    AttributeValueValidationError, Attributes, AttributesError, MAX_ATTRIBUTES_TOTAL_BYTES,
+    AttributeKey, AttributeKeyValidationError, AttributeValue, AttributeValueValidationError,
+    Attributes, AttributesError, AttributesRevisionNo, MAX_ATTRIBUTES_TOTAL_BYTES,
     MAX_ATTRIBUTE_ENTRIES, MAX_ATTRIBUTE_KEY_BYTES, MAX_ATTRIBUTE_VALUE_BYTES,
     RESERVED_ATTRIBUTE_KEY_PREFIX,
 };

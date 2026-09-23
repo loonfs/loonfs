@@ -16,9 +16,9 @@ use crate::error::{CoreError, ErrorCode};
 use crate::metadata::{InMemoryMetadataView, MetadataState};
 use crate::namespace::state::NamespaceReadState;
 use loonfs_api::wire::control::{NamespaceStatus, WriterBlock};
-use loonfs_api::wire::{manifest::DeletedDirentry, wal::WalDelta};
+use loonfs_api::wire::{manifest::DeletedBinding, wal::WalDelta};
 use loonfs_api::{
-    next_public_ordinal, AttributeKey, AttributeRevisionNo, AttributeValue, Attributes, ChangeSeq,
+    next_public_ordinal, AttributeKey, AttributeValue, Attributes, AttributesRevisionNo, ChangeSeq,
     CommitId, ContentRef, DisplayName, InodeId, InodeKind, NameKey, NamespaceId, RevisionNo,
     WriterEpoch, MAX_PUBLIC_INTEGER,
 };
@@ -59,7 +59,7 @@ fn wal_append_attributes(
     vec![WalDelta::AppendAttributesRevision {
         delta_index,
         inode_id,
-        attributes_revision_no: AttributeRevisionNo(revision),
+        attributes_revision_no: AttributesRevisionNo(revision),
         attributes: test_attributes(entries),
     }]
 }
@@ -143,7 +143,7 @@ fn wal_tombstone(delta_index: u32, root_inode_id: InodeId) -> Vec<WalDelta> {
     vec![WalDelta::TombstoneSubtree {
         delta_index,
         root_inode_id,
-        deleted_direntry: DeletedDirentry {
+        deleted_binding: DeletedBinding {
             parent_inode_id: InodeId(1),
             name_key: NameKey::parse("docs").expect("valid name key"),
             display_name: test_display_name("docs"),
@@ -289,7 +289,7 @@ async fn a_stale_attribute_base_revision_is_rejected_by_the_updates_own_precondi
     let context = validation_context(&metadata_state, ChangeSeq(3), InodeId(3));
     let request = planned(vec![CommitOp::UpdateAttributes {
         inode_id: InodeId(2),
-        base_attributes_revision_no: AttributeRevisionNo(1),
+        base_attributes_revision_no: AttributesRevisionNo(1),
         attributes: test_attributes(&[("owner", "hopper")]),
     }]);
 
@@ -301,8 +301,8 @@ async fn a_stale_attribute_base_revision_is_rejected_by_the_updates_own_precondi
             error,
             CommitValidationError::UpdateAttributesBaseRevisionMismatch {
                 inode_id: InodeId(2),
-                expected: AttributeRevisionNo(1),
-                actual: Some(AttributeRevisionNo(2)),
+                expected: AttributesRevisionNo(1),
+                actual: Some(AttributesRevisionNo(2)),
                 precondition_index: None,
             }
         ),
@@ -327,7 +327,7 @@ async fn a_first_attribute_write_states_revision_zero() {
     let request = |base: u64| {
         planned(vec![CommitOp::UpdateAttributes {
             inode_id: InodeId(2),
-            base_attributes_revision_no: AttributeRevisionNo(base),
+            base_attributes_revision_no: AttributesRevisionNo(base),
             attributes: test_attributes(&[("owner", "ada")]),
         }])
     };
@@ -342,8 +342,8 @@ async fn a_first_attribute_write_states_revision_zero() {
         matches!(
             error,
             CommitValidationError::UpdateAttributesBaseRevisionMismatch {
-                expected: AttributeRevisionNo(1),
-                actual: Some(AttributeRevisionNo(0)),
+                expected: AttributesRevisionNo(1),
+                actual: Some(AttributesRevisionNo(0)),
                 ..
             }
         ),
@@ -357,7 +357,7 @@ async fn an_attribute_update_of_a_missing_inode_is_rejected() {
     let context = validation_context(&metadata_state, ChangeSeq(0), InodeId(2));
     let request = planned(vec![CommitOp::UpdateAttributes {
         inode_id: InodeId(9),
-        base_attributes_revision_no: AttributeRevisionNo(0),
+        base_attributes_revision_no: AttributesRevisionNo(0),
         attributes: test_attributes(&[("owner", "ada")]),
     }]);
 

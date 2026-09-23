@@ -3,12 +3,12 @@
 
 use super::*;
 use crate::error::CoreError;
-use loonfs_api::wire::manifest::DeletedDirentry;
+use loonfs_api::wire::manifest::DeletedBinding;
 use loonfs_api::wire::wal::{WalCommitDelta, WalCommitPayload, WalDelta, WalInlineContent};
 use loonfs_api::ContentId;
 use loonfs_api::{
-    AbsolutePath, AccessGrants, AccessRevisionNo, ActorId, AttributeKey, AttributeRevisionNo,
-    AttributeValue, Attributes, ChangeSeq, CommitId, ContentRef, InodeId, InodeKind, NameKey,
+    AbsolutePath, AccessGrants, AccessRevisionNo, ActorId, AttributeKey, AttributeValue,
+    Attributes, AttributesRevisionNo, ChangeSeq, CommitId, ContentRef, InodeId, InodeKind, NameKey,
     RevisionNo,
 };
 
@@ -28,8 +28,8 @@ fn fingerprint(value: &str) -> loonfs_api::CommitFingerprint {
     serde_json::from_value(value.into()).expect("fingerprint")
 }
 
-fn deleted_direntry(parent_inode_id: InodeId, display_name: &str) -> DeletedDirentry {
-    DeletedDirentry {
+fn deleted_binding(parent_inode_id: InodeId, display_name: &str) -> DeletedBinding {
+    DeletedBinding {
         parent_inode_id,
         name_key: name_key(display_name),
         display_name: loonfs_api::DisplayName::parse(display_name).expect("valid display name"),
@@ -92,12 +92,12 @@ fn every_provenance_row_copies_the_wal_payload_commit_id() {
         WalDelta::TombstoneSubtree {
             delta_index: 2,
             root_inode_id: InodeId(7),
-            deleted_direntry: deleted_direntry(InodeId(1), "deleted"),
+            deleted_binding: deleted_binding(InodeId(1), "deleted"),
         },
         WalDelta::AppendAttributesRevision {
             delta_index: 3,
             inode_id: InodeId(7),
-            attributes_revision_no: AttributeRevisionNo(1),
+            attributes_revision_no: AttributesRevisionNo(1),
             attributes: Attributes::default(),
         },
         WalDelta::AppendAccessRevision {
@@ -174,18 +174,18 @@ fn child_lookup_uses_persisted_name_key_without_recanonicalizing() {
             InodeRecord {
                 inode_id: InodeId(1),
                 inode_kind: InodeKind::Directory,
-                created_seq: ChangeSeq(1),
+                committed_seq: ChangeSeq(1),
                 commit_id: commit_id(1),
-                created_by: actor(),
-                created_at_ms: 4_200,
+                committed_by: actor(),
+                committed_at_ms: 4_200,
             },
             InodeRecord {
                 inode_id: InodeId(2),
                 inode_kind: InodeKind::File,
-                created_seq: ChangeSeq(1),
+                committed_seq: ChangeSeq(1),
                 commit_id: commit_id(1),
-                created_by: actor(),
-                created_at_ms: 4_200,
+                committed_by: actor(),
+                committed_at_ms: 4_200,
             },
         ],
         vec![DirentryBindRecord {
@@ -221,26 +221,26 @@ fn maintained_indexes_track_bind_unbind_rename_and_tombstone() {
             InodeRecord {
                 inode_id: InodeId(1),
                 inode_kind: InodeKind::Directory,
-                created_seq: ChangeSeq(0),
+                committed_seq: ChangeSeq(0),
                 commit_id: commit_id(0),
-                created_by: actor(),
-                created_at_ms: 4_200,
+                committed_by: actor(),
+                committed_at_ms: 4_200,
             },
             InodeRecord {
                 inode_id: InodeId(2),
                 inode_kind: InodeKind::Directory,
-                created_seq: ChangeSeq(1),
+                committed_seq: ChangeSeq(1),
                 commit_id: commit_id(1),
-                created_by: actor(),
-                created_at_ms: 4_200,
+                committed_by: actor(),
+                committed_at_ms: 4_200,
             },
             InodeRecord {
                 inode_id: InodeId(3),
                 inode_kind: InodeKind::File,
-                created_seq: ChangeSeq(2),
+                committed_seq: ChangeSeq(2),
                 commit_id: commit_id(2),
-                created_by: actor(),
-                created_at_ms: 4_200,
+                committed_by: actor(),
+                committed_at_ms: 4_200,
             },
         ],
         vec![
@@ -349,7 +349,7 @@ fn maintained_indexes_track_bind_unbind_rename_and_tombstone() {
         &[WalDelta::TombstoneSubtree {
             delta_index: 0,
             root_inode_id: InodeId(2),
-            deleted_direntry: deleted_direntry(InodeId(1), "renamed"),
+            deleted_binding: deleted_binding(InodeId(1), "renamed"),
         }],
     );
     assert!(metadata_state
@@ -375,26 +375,26 @@ fn stale_binding_is_not_active_after_newer_bind_claims_same_name() {
             InodeRecord {
                 inode_id: InodeId(1),
                 inode_kind: InodeKind::Directory,
-                created_seq: ChangeSeq(0),
+                committed_seq: ChangeSeq(0),
                 commit_id: commit_id(0),
-                created_by: actor(),
-                created_at_ms: 4_200,
+                committed_by: actor(),
+                committed_at_ms: 4_200,
             },
             InodeRecord {
                 inode_id: InodeId(2),
                 inode_kind: InodeKind::File,
-                created_seq: ChangeSeq(1),
+                committed_seq: ChangeSeq(1),
                 commit_id: commit_id(1),
-                created_by: actor(),
-                created_at_ms: 4_200,
+                committed_by: actor(),
+                committed_at_ms: 4_200,
             },
             InodeRecord {
                 inode_id: InodeId(3),
                 inode_kind: InodeKind::File,
-                created_seq: ChangeSeq(2),
+                committed_seq: ChangeSeq(2),
                 commit_id: commit_id(2),
-                created_by: actor(),
-                created_at_ms: 4_200,
+                committed_by: actor(),
+                committed_at_ms: 4_200,
             },
         ],
         vec![
@@ -448,18 +448,18 @@ fn resolve_visible_path_folds_names_and_uses_stored_display_name() {
             InodeRecord {
                 inode_id: InodeId(1),
                 inode_kind: InodeKind::Directory,
-                created_seq: ChangeSeq(1),
+                committed_seq: ChangeSeq(1),
                 commit_id: commit_id(1),
-                created_by: actor(),
-                created_at_ms: 4_200,
+                committed_by: actor(),
+                committed_at_ms: 4_200,
             },
             InodeRecord {
                 inode_id: InodeId(2),
                 inode_kind: InodeKind::File,
-                created_seq: ChangeSeq(1),
+                committed_seq: ChangeSeq(1),
                 commit_id: commit_id(1),
-                created_by: actor(),
-                created_at_ms: 4_200,
+                committed_by: actor(),
+                committed_at_ms: 4_200,
             },
         ],
         vec![DirentryBindRecord {
@@ -550,10 +550,10 @@ fn metadata_builder_tracks_the_highest_row_sequence() {
     builder.push_inode(InodeRecord {
         inode_id: InodeId(7),
         inode_kind: InodeKind::File,
-        created_seq: ChangeSeq(1),
+        committed_seq: ChangeSeq(1),
         commit_id: commit_id(1),
-        created_by: actor(),
-        created_at_ms: 4_200,
+        committed_by: actor(),
+        committed_at_ms: 4_200,
     });
     builder.push_revision(RevisionRecord {
         inode_id: InodeId(7),
@@ -610,7 +610,7 @@ fn append_attributes(
     WalDelta::AppendAttributesRevision {
         delta_index,
         inode_id,
-        attributes_revision_no: AttributeRevisionNo(revision),
+        attributes_revision_no: AttributesRevisionNo(revision),
         attributes,
     }
 }
@@ -688,7 +688,7 @@ async fn attribute_reads_answer_at_the_sequence_they_ask_for() {
             .expect("read attributes");
         assert_eq!(
             revision,
-            AttributeRevisionNo(expected_revision),
+            AttributesRevisionNo(expected_revision),
             "at seq {visible_seq}"
         );
         assert_eq!(
@@ -706,7 +706,7 @@ async fn attribute_reads_answer_at_the_sequence_they_ask_for() {
         view.attributes_at_visible_seq(InodeId(8))
             .await
             .expect("read attributes"),
-        (AttributeRevisionNo(0), Attributes::default())
+        (AttributesRevisionNo(0), Attributes::default())
     );
 }
 
@@ -964,18 +964,18 @@ fn has_visible_children_sees_through_unbinds() {
             InodeRecord {
                 inode_id: dir,
                 inode_kind: InodeKind::Directory,
-                created_seq: ChangeSeq(1),
+                committed_seq: ChangeSeq(1),
                 commit_id: commit_id(1),
-                created_by: actor(),
-                created_at_ms: 4_200,
+                committed_by: actor(),
+                committed_at_ms: 4_200,
             },
             InodeRecord {
                 inode_id: InodeId(2),
                 inode_kind: InodeKind::File,
-                created_seq: ChangeSeq(2),
+                committed_seq: ChangeSeq(2),
                 commit_id: commit_id(2),
-                created_by: actor(),
-                created_at_ms: 4_200,
+                committed_by: actor(),
+                committed_at_ms: 4_200,
             },
         ],
         vec![DirentryBindRecord {

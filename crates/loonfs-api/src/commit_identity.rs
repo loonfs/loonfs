@@ -11,7 +11,7 @@
 //! receipt.
 
 use crate::{
-    AbsolutePath, AccessRevisionNo, AccessRight, ActorId, AttributeRevisionNo, ChangeSeq,
+    AbsolutePath, AccessRevisionNo, AccessRight, ActorId, AttributesRevisionNo, ChangeSeq,
     ChecksumAlgorithm, CommitPrecondition, ContentId, ContentRef, ContentRefKind,
     DeleteDirectoryBehavior, DestinationBehavior, FilesystemOperation, InodeId, NamespaceId,
     RevisionNo, SubjectId,
@@ -165,7 +165,7 @@ enum OperationFingerprintInput<'a> {
         set: BTreeMap<&'a str, &'a str>,
         remove: Vec<&'a str>,
         expected_inode_id: Option<InodeId>,
-        expected_attributes_revision_no: Option<AttributeRevisionNo>,
+        expected_attributes_revision_no: Option<AttributesRevisionNo>,
     },
     UpdateAccess {
         path: &'a str,
@@ -196,7 +196,7 @@ enum PreconditionFingerprintInput<'a> {
     },
     AttributesRevision {
         inode_id: InodeId,
-        expected_attributes_revision_no: AttributeRevisionNo,
+        expected_attributes_revision_no: AttributesRevisionNo,
     },
     AccessRevision {
         inode_id: InodeId,
@@ -720,7 +720,7 @@ mod tests {
         set: impl IntoIterator<Item = (&'static str, AttributeValue)>,
         remove: impl IntoIterator<Item = &'static str>,
         expected_inode_id: Option<InodeId>,
-        expected_attributes_revision_no: Option<AttributeRevisionNo>,
+        expected_attributes_revision_no: Option<AttributesRevisionNo>,
     ) -> FilesystemOperation {
         FilesystemOperation::UpdateAttributes {
             path: AbsolutePath::parse("/docs/report.txt").expect("path"),
@@ -841,7 +841,7 @@ mod tests {
                     [("owner", text("ada"))],
                     ["draft"],
                     None,
-                    Some(AttributeRevisionNo(0)),
+                    Some(AttributesRevisionNo(0)),
                 ),
             ),
         ] {

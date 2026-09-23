@@ -1,7 +1,7 @@
 //! Commit responses and change-feed shapes for the v0 HTTP API.
 
 use crate::{
-    AccessGrants, AccessRevisionNo, AttributeRevisionNo, Attributes, BindingGeneration, ChangeSeq,
+    AccessGrants, AccessRevisionNo, Attributes, AttributesRevisionNo, BindingGeneration, ChangeSeq,
     CommitId, ContentRef, DisplayName, InodeId, NameKey, NamespaceId, RevisionNo,
 };
 use serde::{Deserialize, Serialize};
@@ -146,7 +146,7 @@ pub enum FilesystemChange {
         #[serde(with = "crate::public_inode_id")]
         inode_id: InodeId,
         /// New attribute revision for that inode.
-        attributes_revision_no: AttributeRevisionNo,
+        attributes_revision_no: AttributesRevisionNo,
         /// The inode's complete attribute map after the update, including an empty map
         /// when all attributes were cleared.
         attributes: Attributes,
@@ -414,7 +414,7 @@ mod tests {
 
         let attributes_changed = FilesystemChange::AttributesChanged {
             inode_id: InodeId(2),
-            attributes_revision_no: crate::AttributeRevisionNo(4),
+            attributes_revision_no: crate::AttributesRevisionNo(4),
             attributes: crate::Attributes::new(std::collections::BTreeMap::from([(
                 crate::AttributeKey::parse("owner").expect("valid attribute key"),
                 crate::AttributeValue::parse("ada").expect("valid attribute value"),
@@ -429,7 +429,7 @@ mod tests {
         // A clear is a real event carrying the empty map, not an absence.
         let cleared = FilesystemChange::AttributesChanged {
             inode_id: InodeId(2),
-            attributes_revision_no: crate::AttributeRevisionNo(5),
+            attributes_revision_no: crate::AttributesRevisionNo(5),
             attributes: crate::Attributes::default(),
         };
         assert_eq!(

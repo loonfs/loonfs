@@ -1,11 +1,11 @@
 //! Differential checks between core metadata and the `loonfs-model` oracle.
 
-use loonfs_api::wire::manifest::{DeletedDirentry, TombstoneGeneration};
+use loonfs_api::wire::manifest::{DeletedBinding, TombstoneGeneration};
 use loonfs_api::wire::wal::WalDelta;
 use loonfs_api::{
-    AccessGrants, AccessRevisionNo, ActorId, AttributeKey, AttributeRevisionNo, AttributeValue,
-    Attributes, ChangeSeq, CommitId, ContentId, ContentRef, DisplayName, InodeId, InodeKind,
-    NameKey, RevisionNo,
+    AccessGrants, AccessRevisionNo, ActorId, AttributeKey, AttributeValue, Attributes,
+    AttributesRevisionNo, ChangeSeq, CommitId, ContentId, ContentRef, DisplayName, InodeId,
+    InodeKind, NameKey, RevisionNo,
 };
 use loonfs_core::metadata::{
     MetadataState as CoreMetadataState, TombstoneRowAction as CoreTombstoneAction,
@@ -39,8 +39,8 @@ struct NormalizedAttributeRevision {
     committed_seq: u64,
     commit_id: CommitId,
     delta_index: u32,
-    updated_by: ActorId,
-    updated_at_ms: u64,
+    committed_by: ActorId,
+    committed_at_ms: u64,
     entries: Vec<(String, String)>,
 }
 
@@ -51,8 +51,8 @@ struct NormalizedAccessRevision {
     committed_seq: u64,
     commit_id: CommitId,
     delta_index: u32,
-    updated_by: ActorId,
-    updated_at_ms: u64,
+    committed_by: ActorId,
+    committed_at_ms: u64,
     boundary: bool,
     grants: Vec<(String, Vec<String>)>,
 }
@@ -68,8 +68,8 @@ struct NormalizedTombstone {
     tombstone_seq: u64,
     tombstone_delta_index: u32,
     commit_id: CommitId,
-    deleted_at_ms: u64,
-    deleted_by: ActorId,
+    committed_at_ms: u64,
+    committed_by: ActorId,
     action: NormalizedTombstoneAction,
 }
 
@@ -188,7 +188,7 @@ fn tombstone(
     vec![WalDelta::TombstoneSubtree {
         delta_index,
         root_inode_id,
-        deleted_direntry: DeletedDirentry {
+        deleted_binding: DeletedBinding {
             parent_inode_id,
             name_key: NameKey::parse(loonfs_api::name_key_for_display_name(display_name))
                 .expect("derived name key"),
@@ -220,7 +220,7 @@ fn update_attributes(
     vec![WalDelta::AppendAttributesRevision {
         delta_index,
         inode_id,
-        attributes_revision_no: AttributeRevisionNo(revision),
+        attributes_revision_no: AttributesRevisionNo(revision),
         attributes,
     }]
 }
@@ -568,10 +568,10 @@ fn normalize_core(state: &CoreMetadataState) -> NormalizedMetadata {
                 normalize_inode(
                     inode.inode_id.0,
                     inode.inode_kind,
-                    inode.created_seq.0,
+                    inode.committed_seq.0,
                     inode.commit_id.clone(),
-                    inode.created_by.clone(),
-                    inode.created_at_ms,
+                    inode.committed_by.clone(),
+                    inode.committed_at_ms,
                 )
             })
             .collect(),
@@ -612,15 +612,15 @@ fn normalize_core(state: &CoreMetadataState) -> NormalizedMetadata {
                 tombstone_seq: tombstone.generation.seq.0,
                 tombstone_delta_index: tombstone.generation.delta_index,
                 commit_id: tombstone.commit_id.clone(),
-                deleted_at_ms: tombstone.deleted_at_ms,
-                deleted_by: tombstone.deleted_by.clone(),
+                committed_at_ms: tombstone.committed_at_ms,
+                committed_by: tombstone.committed_by.clone(),
                 action: match &tombstone.action {
-                    CoreTombstoneAction::Set { deleted_direntry } => {
+                    CoreTombstoneAction::Set { deleted_binding } => {
                         NormalizedTombstoneAction::Set {
                             deleted_binding: NormalizedBinding {
-                                parent_inode_id: deleted_direntry.parent_inode_id.0,
-                                name_key: deleted_direntry.name_key.as_str().to_owned(),
-                                display_name: deleted_direntry.display_name.as_str().to_owned(),
+                                parent_inode_id: deleted_binding.parent_inode_id.0,
+                                name_key: deleted_binding.name_key.as_str().to_owned(),
+                                display_name: deleted_binding.display_name.as_str().to_owned(),
                             },
                         }
                     }
@@ -640,8 +640,8 @@ fn normalize_core(state: &CoreMetadataState) -> NormalizedMetadata {
                 committed_seq: record.committed_seq.0,
                 commit_id: record.commit_id.clone(),
                 delta_index: record.delta_index,
-                updated_by: record.updated_by.clone(),
-                updated_at_ms: record.updated_at_ms,
+                committed_by: record.committed_by.clone(),
+                committed_at_ms: record.committed_at_ms,
                 entries: record
                     .attributes
                     .iter()
@@ -658,8 +658,8 @@ fn normalize_core(state: &CoreMetadataState) -> NormalizedMetadata {
                 committed_seq: record.committed_seq.0,
                 commit_id: record.commit_id.clone(),
                 delta_index: record.delta_index,
-                updated_by: record.updated_by.clone(),
-                updated_at_ms: record.updated_at_ms,
+                committed_by: record.committed_by.clone(),
+                committed_at_ms: record.committed_at_ms,
                 boundary: record.boundary,
                 grants: record
                     .grants
@@ -695,10 +695,10 @@ fn normalize_model(state: &ModelMetadataState) -> NormalizedMetadata {
                 normalize_inode(
                     inode.inode_id.0,
                     inode.inode_kind,
-                    inode.created_seq.0,
+                    inode.committed_seq.0,
                     inode.commit_id.clone(),
-                    inode.created_by.clone(),
-                    inode.created_at_ms,
+                    inode.committed_by.clone(),
+                    inode.committed_at_ms,
                 )
             })
             .collect(),
@@ -736,8 +736,8 @@ fn normalize_model(state: &ModelMetadataState) -> NormalizedMetadata {
                 tombstone_seq: tombstone.tombstone_seq.0,
                 tombstone_delta_index: tombstone.tombstone_delta_index,
                 commit_id: tombstone.commit_id.clone(),
-                deleted_at_ms: tombstone.deleted_at_ms,
-                deleted_by: tombstone.deleted_by.clone(),
+                committed_at_ms: tombstone.committed_at_ms,
+                committed_by: tombstone.committed_by.clone(),
                 action: match &tombstone.action {
                     ModelTombstoneAction::Set { deleted_binding } => {
                         NormalizedTombstoneAction::Set {
@@ -763,8 +763,8 @@ fn normalize_model(state: &ModelMetadataState) -> NormalizedMetadata {
                 committed_seq: record.committed_seq.0,
                 commit_id: record.commit_id.clone(),
                 delta_index: record.delta_index,
-                updated_by: record.updated_by.clone(),
-                updated_at_ms: record.updated_at_ms,
+                committed_by: record.committed_by.clone(),
+                committed_at_ms: record.committed_at_ms,
                 entries: record
                     .entries
                     .iter()
@@ -781,8 +781,8 @@ fn normalize_model(state: &ModelMetadataState) -> NormalizedMetadata {
                 committed_seq: record.committed_seq.0,
                 commit_id: record.commit_id.clone(),
                 delta_index: record.delta_index,
-                updated_by: record.updated_by.clone(),
-                updated_at_ms: record.updated_at_ms,
+                committed_by: record.committed_by.clone(),
+                committed_at_ms: record.committed_at_ms,
                 boundary: record.boundary,
                 grants: record
                     .grants
@@ -797,10 +797,10 @@ fn normalize_model(state: &ModelMetadataState) -> NormalizedMetadata {
 fn normalize_inode(
     inode_id: u64,
     inode_kind: InodeKind,
-    created_seq: u64,
+    committed_seq: u64,
     commit_id: CommitId,
-    created_by: ActorId,
-    created_at_ms: u64,
+    committed_by: ActorId,
+    committed_at_ms: u64,
 ) -> (u64, &'static str, u64, CommitId, ActorId, u64) {
     (
         inode_id,
@@ -808,10 +808,10 @@ fn normalize_inode(
             InodeKind::Directory => "dir",
             InodeKind::File => "file",
         },
-        created_seq,
+        committed_seq,
         commit_id,
-        created_by,
-        created_at_ms,
+        committed_by,
+        committed_at_ms,
     )
 }
 

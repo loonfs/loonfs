@@ -24,7 +24,7 @@ use loonfs::{
     TraceStoreKind,
 };
 use loonfs_api::{
-    AttributeRevisionNo, ErrorCode, ErrorDetails, InodeId, WriterEpoch, ALL_LIMIT_KEYS,
+    AttributesRevisionNo, ErrorCode, ErrorDetails, InodeId, WriterEpoch, ALL_LIMIT_KEYS,
 };
 use loonfs_api::{
     CapabilityDocument, ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior,
@@ -393,8 +393,8 @@ fn error_detail_fields_match_the_api_spec_table() {
         ),
         expected_revision_no: Some(RevisionNo::from(1)),
         actual_revision_no: Some(RevisionNo::from(2)),
-        expected_attributes_revision_no: Some(AttributeRevisionNo::from(1)),
-        actual_attributes_revision_no: Some(AttributeRevisionNo::from(2)),
+        expected_attributes_revision_no: Some(AttributesRevisionNo::from(1)),
+        actual_attributes_revision_no: Some(AttributesRevisionNo::from(2)),
         expected_access_revision_no: Some(loonfs_api::AccessRevisionNo(1)),
         actual_access_revision_no: Some(loonfs_api::AccessRevisionNo(2)),
         after_seq: Some(ChangeSeq::from(2)),

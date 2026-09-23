@@ -7,7 +7,7 @@ use crate::envelope::EnvelopeCodecError;
 use crate::sst_blocks::BlockHandle;
 use crate::wal::WalCommitPayload;
 use crate::{
-    AccessGrants, AccessRevisionNo, ActorId, AttributeRevisionNo, Attributes, ChangeSeq, CommitId,
+    AccessGrants, AccessRevisionNo, ActorId, Attributes, AttributesRevisionNo, ChangeSeq, CommitId,
     ContentId, ContentRef, DisplayName, InodeId, InodeKind, ManifestNo, MetadataSegmentId, NameKey,
     NamespaceGeneration, NamespaceId, RevisionNo, RunNo,
 };
@@ -270,14 +270,14 @@ pub struct InodeRecord {
     pub inode_id: InodeId,
     /// Classification fixed when the inode was created.
     pub inode_kind: InodeKind,
-    /// Commit sequence from which the inode can become visible.
-    pub created_seq: ChangeSeq,
+    /// Commit sequence that created the inode.
+    pub committed_seq: ChangeSeq,
     /// Commit ID associated with this row.
     pub commit_id: CommitId,
-    /// Actor that created the inode, as supplied by the application.
-    pub created_by: crate::ActorId,
-    /// Time the inode was created, in Unix milliseconds.
-    pub created_at_ms: u64,
+    /// Actor of the creating commit, as supplied by the application.
+    pub committed_by: crate::ActorId,
+    /// Wall-clock stamp of the creating commit, in Unix milliseconds.
+    pub committed_at_ms: u64,
 }
 
 /// One generation of a directory name binding.
@@ -332,10 +332,10 @@ pub struct RevisionRecord {
     pub committed_seq: ChangeSeq,
     /// Commit ID associated with this row.
     pub commit_id: CommitId,
-    /// The owning commit's observational wall-clock stamp.
-    pub committed_at_ms: u64,
     /// Actor that committed this revision, as supplied by the application.
     pub committed_by: crate::ActorId,
+    /// The owning commit's observational wall-clock stamp.
+    pub committed_at_ms: u64,
     /// Delta position that disambiguates the revision within `committed_seq`.
     pub delta_index: u32,
     /// Immutable bytes published by the revision.
@@ -354,10 +354,10 @@ pub struct SubtreeTombstoneRecord {
     pub commit_id: CommitId,
     /// What this event did.
     pub action: TombstoneRowAction,
-    /// Wall-clock stamp of the recording commit.
-    pub deleted_at_ms: u64,
-    /// Actor that recorded this tombstone event.
-    pub deleted_by: crate::ActorId,
+    /// Actor of the commit that recorded this event.
+    pub committed_by: crate::ActorId,
+    /// Wall-clock stamp of the commit that recorded this event.
+    pub committed_at_ms: u64,
 }
 
 /// One current-state row for a recoverable deletion.
@@ -414,7 +414,7 @@ pub struct AttributesRevisionRecord {
     /// Inode whose attributes this revision states.
     pub inode_id: InodeId,
     /// Monotonic per-inode attribute revision.
-    pub attributes_revision_no: AttributeRevisionNo,
+    pub attributes_revision_no: AttributesRevisionNo,
     /// Namespace sequence that published the revision.
     pub committed_seq: ChangeSeq,
     /// Commit ID associated with this row.
@@ -422,9 +422,9 @@ pub struct AttributesRevisionRecord {
     /// Delta position that disambiguates the revision within `committed_seq`.
     pub delta_index: u32,
     /// Actor that updated the attributes.
-    pub updated_by: crate::ActorId,
+    pub committed_by: crate::ActorId,
     /// Time of the attribute update, in Unix milliseconds.
-    pub updated_at_ms: u64,
+    pub committed_at_ms: u64,
     /// The inode's complete attribute map at this revision.
     pub attributes: Attributes,
 }
@@ -444,9 +444,9 @@ pub struct AccessRevisionRecord {
     /// Delta position that disambiguates the revision within `committed_seq`.
     pub delta_index: u32,
     /// Actor that updated the access state.
-    pub updated_by: crate::ActorId,
+    pub committed_by: crate::ActorId,
     /// Time of the update, in Unix milliseconds.
-    pub updated_at_ms: u64,
+    pub committed_at_ms: u64,
     /// Whether this directory stops inheritance from its ancestors.
     pub boundary: bool,
     /// The inode's complete direct grants at this revision.
@@ -475,7 +475,7 @@ pub struct TombstoneGeneration {
 /// collected. Undelete uses it to restore the original parent and name.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct DeletedDirentry {
+pub struct DeletedBinding {
     /// Directory that held the binding.
     pub parent_inode_id: InodeId,
     /// Canonical key the binding was reachable under.
@@ -491,7 +491,7 @@ pub enum TombstoneRowAction {
     /// The subtree rooted at the row's inode is deleted.
     Set {
         /// The binding the delete removed.
-        deleted_direntry: DeletedDirentry,
+        deleted_binding: DeletedBinding,
     },
     /// The deletion recorded at `target` is revoked. Only a `set` carries a
     /// binding, so the revoke has no place to put one.
@@ -522,7 +522,7 @@ pub enum ActiveDeletionRowAction {
         deleted_by: crate::ActorId,
         /// The binding the deletion removed, copied from the tombstone event
         /// this row derives from.
-        deleted_direntry: DeletedDirentry,
+        deleted_binding: DeletedBinding,
     },
     /// The deletion was cancelled by an undelete at `revocation_seq`.
     Removed {
@@ -737,7 +737,9 @@ pub fn hex_encode_row_key_component(value: &str) -> String {
 /// See [metadata rows and row keys](../../../docs/specs/format.md#a6-metadata-rows-and-row-keys).
 pub mod lookup_keys {
     use super::{hex_encode_row_key_component, TombstoneGeneration};
-    use crate::{AccessRevisionNo, AttributeRevisionNo, ChangeSeq, ContentId, InodeId, RevisionNo};
+    use crate::{
+        AccessRevisionNo, AttributesRevisionNo, ChangeSeq, ContentId, InodeId, RevisionNo,
+    };
 
     /// Prefix for inode row keys.
     pub const INODE_ROW_PREFIX: &str = "inode-";
@@ -1037,7 +1039,7 @@ pub mod lookup_keys {
     /// Builds a row key for an attribute revision.
     pub(super) fn attributes_row_key(
         inode_id: InodeId,
-        attributes_revision_no: AttributeRevisionNo,
+        attributes_revision_no: AttributesRevisionNo,
         committed_seq: ChangeSeq,
         delta_index: u32,
     ) -> String {
@@ -1425,8 +1427,8 @@ mod tests {
         CommitId::parse("c_metadata_row").expect("commit id")
     }
 
-    fn deleted_direntry() -> super::DeletedDirentry {
-        super::DeletedDirentry {
+    fn deleted_binding() -> super::DeletedBinding {
+        super::DeletedBinding {
             parent_inode_id: InodeId(9),
             name_key: NameKey::parse("report.txt").expect("valid name key"),
             display_name: crate::DisplayName::parse("report.txt").expect("valid display name"),
@@ -1858,12 +1860,12 @@ mod tests {
         let row_of = |revision: u64, seq: u64, delta_index: u32| {
             super::MetadataRow::AttributesRevision(super::AttributesRevisionRecord {
                 inode_id: InodeId(42),
-                attributes_revision_no: crate::AttributeRevisionNo(revision),
+                attributes_revision_no: crate::AttributesRevisionNo(revision),
                 committed_seq: ChangeSeq(seq),
                 commit_id: row_commit_id(),
                 delta_index,
-                updated_by: crate::ActorId::loonfs(),
-                updated_at_ms: 12_000 + seq,
+                committed_by: crate::ActorId::loonfs(),
+                committed_at_ms: 12_000 + seq,
                 attributes: crate::Attributes::default(),
             })
         };
@@ -1903,8 +1905,8 @@ mod tests {
                 committed_seq: ChangeSeq(seq),
                 commit_id: crate::CommitId::parse("c_access").expect("commit"),
                 delta_index,
-                updated_by: crate::ActorId::loonfs(),
-                updated_at_ms: 1_000,
+                committed_by: crate::ActorId::loonfs(),
+                committed_at_ms: 1_000,
                 boundary: false,
                 grants: crate::AccessGrants::default(),
             })
@@ -1956,10 +1958,10 @@ mod tests {
                 super::MetadataRow::Inode(super::InodeRecord {
                     inode_id: InodeId(42),
                     inode_kind: crate::InodeKind::File,
-                    created_seq: ChangeSeq(3),
+                    committed_seq: ChangeSeq(3),
                     commit_id: row_commit_id(),
-                    created_by: crate::ActorId::loonfs(),
-                    created_at_ms: 3_000,
+                    committed_by: crate::ActorId::loonfs(),
+                    committed_at_ms: 3_000,
                 }),
             ),
             (MetadataRowFamily::DirentryBinds, bind.clone()),
@@ -1997,10 +1999,10 @@ mod tests {
                     },
                     commit_id: row_commit_id(),
                     action: super::TombstoneRowAction::Set {
-                        deleted_direntry: deleted_direntry(),
+                        deleted_binding: deleted_binding(),
                     },
-                    deleted_at_ms: 12_000,
-                    deleted_by: crate::ActorId::loonfs(),
+                    committed_at_ms: 12_000,
+                    committed_by: crate::ActorId::loonfs(),
                 }),
             ),
             (
@@ -2027,12 +2029,12 @@ mod tests {
                 MetadataRowFamily::Attributes,
                 super::MetadataRow::AttributesRevision(super::AttributesRevisionRecord {
                     inode_id: InodeId(42),
-                    attributes_revision_no: crate::AttributeRevisionNo(3),
+                    attributes_revision_no: crate::AttributesRevisionNo(3),
                     committed_seq: ChangeSeq(12),
                     commit_id: row_commit_id(),
                     delta_index: 0,
-                    updated_by: crate::ActorId::loonfs(),
-                    updated_at_ms: 12_000,
+                    committed_by: crate::ActorId::loonfs(),
+                    committed_at_ms: 12_000,
                     attributes: crate::Attributes::default(),
                 }),
             ),
@@ -2061,10 +2063,10 @@ mod tests {
                     super::MetadataRow::Inode(super::InodeRecord {
                         inode_id: InodeId(42),
                         inode_kind: crate::InodeKind::File,
-                        created_seq: ChangeSeq(3),
+                        committed_seq: ChangeSeq(3),
                         commit_id: row_commit_id(),
-                        created_by: actor.clone(),
-                        created_at_ms: 3_000,
+                        committed_by: actor.clone(),
+                        committed_at_ms: 3_000,
                     }),
                 ),
                 (
@@ -2096,10 +2098,10 @@ mod tests {
                         },
                         commit_id: row_commit_id(),
                         action: super::TombstoneRowAction::Set {
-                            deleted_direntry: deleted_direntry(),
+                            deleted_binding: deleted_binding(),
                         },
-                        deleted_at_ms: 12_000,
-                        deleted_by: actor.clone(),
+                        committed_at_ms: 12_000,
+                        committed_by: actor.clone(),
                     }),
                 ),
                 (
@@ -2111,7 +2113,7 @@ mod tests {
                             inode_kind: crate::InodeKind::File,
                             deleted_at_ms: 12_000,
                             deleted_by: actor.clone(),
-                            deleted_direntry: deleted_direntry(),
+                            deleted_binding: deleted_binding(),
                         },
                     }),
                 ),
@@ -2119,12 +2121,12 @@ mod tests {
                     MetadataRowFamily::Attributes,
                     super::MetadataRow::AttributesRevision(super::AttributesRevisionRecord {
                         inode_id: InodeId(42),
-                        attributes_revision_no: crate::AttributeRevisionNo(2),
+                        attributes_revision_no: crate::AttributesRevisionNo(2),
                         committed_seq: ChangeSeq(12),
                         commit_id: row_commit_id(),
                         delta_index: 3,
-                        updated_by: actor,
-                        updated_at_ms: 12_000,
+                        committed_by: actor,
+                        committed_at_ms: 12_000,
                         attributes: crate::Attributes::default(),
                     }),
                 ),

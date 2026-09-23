@@ -5,7 +5,7 @@ use super::indexes::MetadataIndexes;
 use crate::checkpoint::DecodedRowWeight;
 use loonfs_api::wire::manifest::{
     AccessRevisionRecord, ActiveDeletionRecord, ActiveDeletionRowAction, AttributesRevisionRecord,
-    CommitReceiptRecord, ContentPublicationRecord, DeletedDirentry, DirentryBindRecord,
+    CommitReceiptRecord, ContentPublicationRecord, DeletedBinding, DirentryBindRecord,
     DirentryUnbindRecord, InodeRecord, RevisionRecord, SubtreeTombstoneRecord, TombstoneRowAction,
 };
 use loonfs_api::wire::wal::WalCommitPayload;
@@ -82,14 +82,14 @@ pub(crate) fn active_deletion_from_tombstone(
     inode_kind: InodeKind,
 ) -> ActiveDeletionRecord {
     match &tombstone.action {
-        TombstoneRowAction::Set { deleted_direntry } => ActiveDeletionRecord {
+        TombstoneRowAction::Set { deleted_binding } => ActiveDeletionRecord {
             root_inode_id: tombstone.root_inode_id,
             deletion_seq: tombstone.generation.seq,
             action: ActiveDeletionRowAction::Listed {
                 inode_kind,
-                deleted_at_ms: tombstone.deleted_at_ms,
-                deleted_by: tombstone.deleted_by.clone(),
-                deleted_direntry: deleted_direntry.clone(),
+                deleted_at_ms: tombstone.committed_at_ms,
+                deleted_by: tombstone.committed_by.clone(),
+                deleted_binding: deleted_binding.clone(),
             },
         },
         TombstoneRowAction::Revoke { target } => ActiveDeletionRecord {
@@ -110,14 +110,14 @@ pub(crate) fn recoverable_deletion_from_active_record(
             inode_kind,
             deleted_at_ms,
             deleted_by,
-            deleted_direntry,
+            deleted_binding,
         } => Some(RecoverableDeletion {
             root_inode_id: record.root_inode_id,
             inode_kind,
             deletion_seq: record.deletion_seq,
             deleted_at_ms,
             deleted_by,
-            deleted_direntry,
+            deleted_binding,
         }),
         ActiveDeletionRowAction::Removed { .. } => None,
     }
@@ -132,7 +132,7 @@ pub(crate) struct RecoverableDeletion {
     pub(crate) deleted_at_ms: u64,
     pub(crate) deleted_by: ActorId,
     /// The binding the delete removed and an in-place undelete restores.
-    pub(crate) deleted_direntry: DeletedDirentry,
+    pub(crate) deleted_binding: DeletedBinding,
 }
 
 impl MetadataState {

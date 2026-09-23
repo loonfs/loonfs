@@ -98,13 +98,6 @@
         "example": "owner",
         "type": "string"
       },
-      "AttributeRevisionNo": {
-        "description": "Revision number for an inode's attributes. It starts at 0 and increases whenever the attribute map changes.",
-        "format": "int64",
-        "maximum": 9007199254740991,
-        "minimum": 0,
-        "type": "integer"
-      },
       "AttributeValue": {
         "description": "A validated inode attribute value of at most [`MAX_ATTRIBUTE_VALUE_BYTES`] UTF-8 bytes.\n\nEmpty strings and control characters are valid, and only an explicit remove\noperation deletes an attribute.",
         "example": "platform",
@@ -119,6 +112,13 @@
           "type": "string"
         },
         "type": "object"
+      },
+      "AttributesRevisionNo": {
+        "description": "Revision number for an inode's attributes. It starts at 0 and increases whenever the attribute map changes.",
+        "format": "int64",
+        "maximum": 9007199254740991,
+        "minimum": 0,
+        "type": "integer"
       },
       "BindingGeneration": {
         "description": "Opaque token identifying one parent and name binding generation.",
@@ -453,7 +453,7 @@
         "description": "Requires a visible inode with the attribute revision the caller read.",
         "properties": {
           "expected_attributes_revision_no": {
-            "$ref": "#/components/schemas/AttributeRevisionNo",
+            "$ref": "#/components/schemas/AttributesRevisionNo",
             "description": "Attribute revision observed by the caller."
           },
           "inode_id": {
@@ -1224,7 +1224,7 @@
             "description": "Access revision that is actually current for the inode."
           },
           "actual_attributes_revision_no": {
-            "$ref": "#/components/schemas/AttributeRevisionNo",
+            "$ref": "#/components/schemas/AttributesRevisionNo",
             "description": "Attribute revision that is actually current for the inode."
           },
           "actual_binding_generation": {
@@ -1268,7 +1268,7 @@
             "description": "Access revision the request expected to be current."
           },
           "expected_attributes_revision_no": {
-            "$ref": "#/components/schemas/AttributeRevisionNo",
+            "$ref": "#/components/schemas/AttributesRevisionNo",
             "description": "Attribute revision the request expected to be current."
           },
           "expected_binding_generation": {
@@ -1503,7 +1503,7 @@
             "description": "The inode's complete attribute map after the update, including an empty map\nwhen all attributes were cleared."
           },
           "attributes_revision_no": {
-            "$ref": "#/components/schemas/AttributeRevisionNo",
+            "$ref": "#/components/schemas/AttributesRevisionNo",
             "description": "New attribute revision for that inode."
           },
           "inode_id": {
@@ -2238,7 +2238,7 @@
         "description": "Write and remove attributes on the inode one path resolves to.",
         "properties": {
           "expected_attributes_revision_no": {
-            "$ref": "#/components/schemas/AttributeRevisionNo",
+            "$ref": "#/components/schemas/AttributesRevisionNo",
             "description": "With an inode precondition, the attribute revision that must still be current."
           },
           "expected_inode_id": {
@@ -3319,7 +3319,7 @@
             "description": "The complete attribute map at `attributes_revision_no`, including an empty map\nfor the initial state."
           },
           "attributes_revision_no": {
-            "$ref": "#/components/schemas/AttributeRevisionNo",
+            "$ref": "#/components/schemas/AttributesRevisionNo",
             "description": "The attribute revision this projection represents."
           },
           "attributes_updated_at_ms": {
@@ -3397,7 +3397,7 @@
             "description": "The complete attribute map at `attributes_revision_no`, including an empty map\nfor the initial state."
           },
           "attributes_revision_no": {
-            "$ref": "#/components/schemas/AttributeRevisionNo",
+            "$ref": "#/components/schemas/AttributesRevisionNo",
             "description": "The attribute revision this projection represents."
           },
           "attributes_updated_at_ms": {

@@ -7,7 +7,7 @@
 //! outside this crate constructs them.
 
 use loonfs_api::{
-    AccessGrants, AccessRevisionNo, AttributeRevisionNo, Attributes, ChangeSeq, ContentRef,
+    AccessGrants, AccessRevisionNo, Attributes, AttributesRevisionNo, ChangeSeq, ContentRef,
     DisplayName, InodeId, RevisionNo,
 };
 
@@ -118,7 +118,7 @@ pub(crate) enum CommitOp {
         inode_id: InodeId,
         /// Attribute revision the planner resolved against; the operation
         /// conflicts if it is no longer current.
-        base_attributes_revision_no: AttributeRevisionNo,
+        base_attributes_revision_no: AttributesRevisionNo,
         /// The inode's complete attribute map after the update.
         attributes: Attributes,
     },

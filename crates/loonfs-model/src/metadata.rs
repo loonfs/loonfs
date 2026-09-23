@@ -30,10 +30,10 @@ pub struct MetadataState {
 pub struct InodeRecord {
     pub inode_id: InodeId,
     pub inode_kind: InodeKind,
-    pub created_seq: ChangeSeq,
+    pub committed_seq: ChangeSeq,
     pub commit_id: CommitId,
-    pub created_by: ActorId,
-    pub created_at_ms: u64,
+    pub committed_by: ActorId,
+    pub committed_at_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -85,8 +85,8 @@ pub struct SubtreeTombstoneRecord {
     pub tombstone_seq: ChangeSeq,
     pub tombstone_delta_index: u32,
     pub commit_id: CommitId,
-    pub deleted_at_ms: u64,
-    pub deleted_by: ActorId,
+    pub committed_at_ms: u64,
+    pub committed_by: ActorId,
     /// Action recorded by this event. The newest event for each root determines
     /// state; a newest `Revoke` means no tombstone is active.
     pub action: SubtreeTombstoneAction,
@@ -101,8 +101,8 @@ pub struct AttributeRevisionRecord {
     pub committed_seq: ChangeSeq,
     pub commit_id: CommitId,
     pub delta_index: u32,
-    pub updated_by: ActorId,
-    pub updated_at_ms: u64,
+    pub committed_by: ActorId,
+    pub committed_at_ms: u64,
     /// The map after the update, in key order. An empty list is the cleared
     /// state, not a missing record.
     pub entries: Vec<AttributeEntry>,
@@ -124,8 +124,8 @@ pub struct AccessRevisionRecord {
     pub committed_seq: ChangeSeq,
     pub commit_id: CommitId,
     pub delta_index: u32,
-    pub updated_by: ActorId,
-    pub updated_at_ms: u64,
+    pub committed_by: ActorId,
+    pub committed_at_ms: u64,
     pub boundary: bool,
     /// The grants after the update, in principal order. An empty list with
     /// `boundary` false is the cleared state, not a missing record.
@@ -186,10 +186,10 @@ impl MetadataState {
                     metadata_state.inodes.push(InodeRecord {
                         inode_id: *inode_id,
                         inode_kind: *inode_kind,
-                        created_seq: committed_seq,
+                        committed_seq,
                         commit_id: commit_id.clone(),
-                        created_by: actor.clone(),
-                        created_at_ms: committed_at_ms,
+                        committed_by: actor.clone(),
+                        committed_at_ms,
                     });
                 }
                 WalDelta::BindDirentry {
@@ -260,7 +260,7 @@ impl MetadataState {
                 WalDelta::TombstoneSubtree {
                     delta_index,
                     root_inode_id,
-                    deleted_direntry,
+                    deleted_binding,
                 } => {
                     metadata_state
                         .subtree_tombstones
@@ -269,13 +269,13 @@ impl MetadataState {
                             tombstone_seq: committed_seq,
                             tombstone_delta_index: *delta_index,
                             commit_id: commit_id.clone(),
-                            deleted_at_ms: committed_at_ms,
-                            deleted_by: actor.clone(),
+                            committed_at_ms,
+                            committed_by: actor.clone(),
                             action: SubtreeTombstoneAction::Set {
                                 deleted_binding: DeletedBinding {
-                                    parent_inode_id: deleted_direntry.parent_inode_id,
-                                    name_key: deleted_direntry.name_key.as_str().to_owned(),
-                                    display_name: deleted_direntry.display_name.as_str().to_owned(),
+                                    parent_inode_id: deleted_binding.parent_inode_id,
+                                    name_key: deleted_binding.name_key.as_str().to_owned(),
+                                    display_name: deleted_binding.display_name.as_str().to_owned(),
                                 },
                             },
                         });
@@ -292,8 +292,8 @@ impl MetadataState {
                             tombstone_seq: committed_seq,
                             tombstone_delta_index: *delta_index,
                             commit_id: commit_id.clone(),
-                            deleted_at_ms: committed_at_ms,
-                            deleted_by: actor.clone(),
+                            committed_at_ms,
+                            committed_by: actor.clone(),
                             action: SubtreeTombstoneAction::Revoke {
                                 target: DeletionGeneration {
                                     seq: target.seq,
@@ -316,8 +316,8 @@ impl MetadataState {
                             committed_seq,
                             commit_id: commit_id.clone(),
                             delta_index: *delta_index,
-                            updated_by: actor.clone(),
-                            updated_at_ms: committed_at_ms,
+                            committed_by: actor.clone(),
+                            committed_at_ms,
                             entries: attributes
                                 .iter()
                                 .map(|(key, value)| AttributeEntry {
@@ -340,8 +340,8 @@ impl MetadataState {
                         committed_seq,
                         commit_id: commit_id.clone(),
                         delta_index: *delta_index,
-                        updated_by: actor.clone(),
-                        updated_at_ms: committed_at_ms,
+                        committed_by: actor.clone(),
+                        committed_at_ms,
                         boundary: *boundary,
                         grants: grants
                             .iter()
@@ -365,7 +365,7 @@ impl MetadataState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use loonfs_api::wire::manifest::{DeletedDirentry, TombstoneGeneration};
+    use loonfs_api::wire::manifest::TombstoneGeneration;
     use loonfs_api::NameKey;
 
     fn commit_id() -> CommitId {
@@ -404,7 +404,7 @@ mod tests {
                 WalDelta::TombstoneSubtree {
                     delta_index: 1,
                     root_inode_id: InodeId(2),
-                    deleted_direntry: DeletedDirentry {
+                    deleted_binding: loonfs_api::wire::manifest::DeletedBinding {
                         parent_inode_id: InodeId(1),
                         name_key: NameKey::parse("report.txt").expect("valid name key"),
                         display_name: loonfs_api::DisplayName::parse("Report.TXT")

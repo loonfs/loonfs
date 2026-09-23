@@ -1686,7 +1686,7 @@ async fn binding_preconditions_track_identity_absence_and_moves() {
 
 #[tokio::test]
 async fn attributes_preconditions_ignore_content_rewrites_and_reject_attribute_updates() {
-    use loonfs_api::{AttributeKey, AttributeRevisionNo, AttributeValue, CommitPrecondition};
+    use loonfs_api::{AttributeKey, AttributeValue, AttributesRevisionNo, CommitPrecondition};
     use std::collections::BTreeMap;
 
     let temp_dir = tempdir().expect("tempdir");
@@ -1716,7 +1716,7 @@ async fn attributes_preconditions_ignore_content_rewrites_and_reject_attribute_u
         .expect("content");
     let precondition = CommitPrecondition::AttributesRevision {
         inode_id,
-        expected_attributes_revision_no: AttributeRevisionNo(0),
+        expected_attributes_revision_no: AttributesRevisionNo(0),
     };
     let results = submit_commits_batch(
         &store,
@@ -1757,11 +1757,11 @@ async fn attributes_preconditions_ignore_content_rewrites_and_reject_attribute_u
     assert_eq!(stale.inode_id, Some(inode_id));
     assert_eq!(
         stale.expected_attributes_revision_no,
-        Some(AttributeRevisionNo(0))
+        Some(AttributesRevisionNo(0))
     );
     assert_eq!(
         stale.actual_attributes_revision_no,
-        Some(AttributeRevisionNo(1))
+        Some(AttributesRevisionNo(1))
     );
 }
 

@@ -372,10 +372,10 @@ mod tests {
                 vec![InodeRecord {
                     inode_id: InodeId(42),
                     inode_kind: InodeKind::File,
-                    created_seq: ChangeSeq(3),
+                    committed_seq: ChangeSeq(3),
                     commit_id: loonfs_api::CommitId::parse("c_cache_row").expect("commit id"),
-                    created_by: actor.clone(),
-                    created_at_ms: 3_000 + offset as u64,
+                    committed_by: actor.clone(),
+                    committed_at_ms: 3_000 + offset as u64,
                 }],
                 Vec::new(),
                 Vec::new(),
@@ -394,7 +394,7 @@ mod tests {
                     .expect("same projection cache key should hit")
                     .rows
                     .inodes()[0]
-                    .created_by,
+                    .committed_by,
                 actor
             );
         }

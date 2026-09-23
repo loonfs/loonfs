@@ -878,7 +878,7 @@ mod tests {
         ContentStoreId, InodeId, ManifestNo, MetadataSegmentId, NameKey, NamespaceId, RevisionNo,
         RunNo, SnapshotId, UploadId, WalNo, WriterEpoch, WriterId, MAX_PUBLIC_INTEGER,
     };
-    use crate::AttributeRevisionNo;
+    use crate::AttributesRevisionNo;
     use std::collections::BTreeSet;
 
     #[test]
@@ -922,7 +922,7 @@ mod tests {
 
         assert_range!(RevisionNo);
         assert_range!(ChangeSeq);
-        assert_range!(AttributeRevisionNo);
+        assert_range!(AttributesRevisionNo);
         assert_range!(ManifestNo);
         assert_range!(WalNo);
         assert_range!(RunNo);

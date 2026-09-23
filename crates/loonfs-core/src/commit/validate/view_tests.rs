@@ -281,7 +281,7 @@ fn update_attributes_overlay_rows_match_replayed_wal_deltas() {
         &[ValidatedOp::UpdateAttributes {
             op_index: 0,
             inode_id: InodeId(4),
-            attributes_revision_no: loonfs_api::AttributeRevisionNo(1),
+            attributes_revision_no: loonfs_api::AttributesRevisionNo(1),
             attributes: attributes([("owner", "ada")]),
             attributes_delta_index: 0,
         }],
@@ -296,14 +296,14 @@ fn cleared_attributes_overlay_rows_match_replayed_wal_deltas() {
             ValidatedOp::UpdateAttributes {
                 op_index: 0,
                 inode_id: InodeId(4),
-                attributes_revision_no: loonfs_api::AttributeRevisionNo(1),
+                attributes_revision_no: loonfs_api::AttributesRevisionNo(1),
                 attributes: attributes([("owner", "ada")]),
                 attributes_delta_index: 0,
             },
             ValidatedOp::UpdateAttributes {
                 op_index: 1,
                 inode_id: InodeId(4),
-                attributes_revision_no: loonfs_api::AttributeRevisionNo(2),
+                attributes_revision_no: loonfs_api::AttributesRevisionNo(2),
                 attributes: loonfs_api::Attributes::default(),
                 attributes_delta_index: 1,
             },
