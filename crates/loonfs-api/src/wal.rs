@@ -35,22 +35,21 @@ pub const MAX_WAL_SEGMENT_INLINE_CONTENT_BYTES: usize = 4 * 1024 * 1024;
 
 /// Upper bound for the document and payload fields outside commit records.
 pub const WAL_SEGMENT_OVERHEAD_BYTES: usize = cbor_map_bytes(&[
-    ("kind", cbor_string_bytes("namespace_wal_segment".len())),
+    ("kind", cbor_string_bytes("wal_segment".len())),
     ("format_version", 5),
     ("payload_checksum", cbor_string_bytes(64)),
     ("payload", 9),
 ]) + cbor_map_bytes(&[
     ("namespace_id", cbor_string_bytes(crate::ids::MAX_ID_BYTES)),
     ("wal_no", 9),
-    ("next_inode_id", 9),
+    ("writer_epoch", 9),
+    ("prior_head_seq", 9),
+    ("head_seq", 9),
     (
         "head_commit_id",
         cbor_string_bytes(crate::ids::MAX_ID_BYTES),
     ),
-    ("writer_epoch", 9),
-    ("base_head_seq", 9),
-    ("start_seq", 9),
-    ("end_seq", 9),
+    ("next_inode_id", 9),
     ("records", 9),
 ]);
 
@@ -76,14 +75,14 @@ const fn cbor_map_bytes(fields: &[(&str, usize)]) -> usize {
 #[serde(rename_all = "snake_case")]
 pub enum WalEnvelopeKind {
     /// Marks an immutable segment in one namespace's numbered WAL.
-    NamespaceWalSegment,
+    WalSegment,
 }
 
 impl WalEnvelopeKind {
     /// Returns the frozen envelope discriminator written to durable storage.
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::NamespaceWalSegment => "namespace_wal_segment",
+            Self::WalSegment => "wal_segment",
         }
     }
 }
@@ -212,7 +211,7 @@ pub enum WalDelta {
 pub struct WalCommitDelta {
     /// Internal operation position within this commit. Convenience requests can
     /// expand into several operations; each operation's deltas are contiguous.
-    pub semantic_op_index: u32,
+    pub semantic_operation_index: u32,
     /// Replay mutation produced for that semantic operation.
     pub delta: WalDelta,
 }
@@ -222,7 +221,7 @@ pub struct WalCommitDelta {
 pub fn semantic_operation_groups(
     deltas: &[WalCommitDelta],
 ) -> impl Iterator<Item = &[WalCommitDelta]> {
-    deltas.chunk_by(|left, right| left.semantic_op_index == right.semantic_op_index)
+    deltas.chunk_by(|left, right| left.semantic_operation_index == right.semantic_operation_index)
 }
 
 /// Counts activity represented by one committed delta vector.
@@ -292,18 +291,16 @@ pub struct WalSegmentPayload {
     pub namespace_id: NamespaceId,
     /// Contiguous object number checked against the key.
     pub wal_no: WalNo,
-    /// Allocation high-water mark after this segment.
-    pub next_inode_id: InodeId,
-    /// Head commit ID after this segment; a fence repeats the one it received.
-    pub head_commit_id: CommitId,
     /// Fencing epoch of the writer that proposed this segment.
     pub writer_epoch: WriterEpoch,
-    /// Head sequence the writer materialized against before adding these records.
-    pub base_head_seq: ChangeSeq,
-    /// Sequence of the first record, or the unchanged head sequence for a fence.
-    pub start_seq: ChangeSeq,
-    /// Visible sequence after this segment, unchanged for a fence.
-    pub end_seq: ChangeSeq,
+    /// Head sequence this segment was built on. A fence's equals its own `head_seq`.
+    pub prior_head_seq: ChangeSeq,
+    /// Visible sequence after this segment.
+    pub head_seq: ChangeSeq,
+    /// Head commit ID after this segment; a fence repeats the one it received.
+    pub head_commit_id: CommitId,
+    /// Allocation high-water mark after this segment.
+    pub next_inode_id: InodeId,
     /// Logical commits in contiguous ascending sequence order.
     pub records: Vec<WalCommitPayload>,
 }
@@ -343,7 +340,7 @@ pub fn encode_wal_segment_envelope_zstd(
     let payload_bytes = encode_wal_payload_cbor(&payload)?;
     let payload_checksum = sha256_digest(&payload_bytes);
     let document = WalSegmentDocument {
-        kind: WalEnvelopeKind::NamespaceWalSegment.as_str().to_owned(),
+        kind: WalEnvelopeKind::WalSegment.as_str().to_owned(),
         format_version: WAL_FORMAT_VERSION,
         payload_checksum: payload_checksum.clone(),
         payload: payload_bytes,
@@ -390,7 +387,7 @@ fn decode_wal_segment_envelope_zstd_with_limit(
     }
     let probe: EnvelopeProbe = from_reader(decompressed.as_slice())
         .map_err(|err| EnvelopeCodecError::EnvelopeDecode(err.to_string()))?;
-    let expected_kind = WalEnvelopeKind::NamespaceWalSegment;
+    let expected_kind = WalEnvelopeKind::WalSegment;
     envelope::verify_kind(expected_kind.as_str(), &probe.kind)?;
     envelope::verify_version(&probe.kind, probe.format_version, WAL_FORMAT_VERSION)?;
 
@@ -468,9 +465,9 @@ mod tests {
             .flat_map(|record| record.deltas)
             .collect();
         // Several deltas in one group count once, and indices can have gaps.
-        deltas[0].semantic_op_index = 2;
-        deltas[1].semantic_op_index = 2;
-        deltas[2].semantic_op_index = 9;
+        deltas[0].semantic_operation_index = 2;
+        deltas[1].semantic_operation_index = 2;
+        deltas[2].semantic_operation_index = 9;
         assert_eq!(
             committed_activity(&deltas),
             Some(crate::manifest::ManifestActivity {
@@ -504,7 +501,7 @@ mod tests {
                     committed_at_ms: 0,
                     message: None,
                     deltas: vec![WalCommitDelta {
-                        semantic_op_index: 0,
+                        semantic_operation_index: 0,
                         delta: WalDelta::AppendFileRevision {
                             delta_index: 0,
                             inode_id: InodeId(2),
@@ -529,12 +526,11 @@ mod tests {
         WalSegmentPayload {
             namespace_id,
             wal_no: WalNo(1),
-            next_inode_id: InodeId(3),
-            head_commit_id,
             writer_epoch: WriterEpoch(1),
-            base_head_seq: ChangeSeq(0),
-            start_seq: ChangeSeq(1),
-            end_seq: ChangeSeq(lengths.len() as u64),
+            prior_head_seq: ChangeSeq(0),
+            head_seq: ChangeSeq(lengths.len() as u64),
+            head_commit_id,
+            next_inode_id: InodeId(3),
             records,
         }
     }
@@ -543,7 +539,7 @@ mod tests {
         let mut payload_bytes = Vec::new();
         into_writer(payload, &mut payload_bytes).expect("encode payload directly");
         let document = WalSegmentDocument {
-            kind: WalEnvelopeKind::NamespaceWalSegment.as_str().to_owned(),
+            kind: WalEnvelopeKind::WalSegment.as_str().to_owned(),
             format_version: WAL_FORMAT_VERSION,
             payload_checksum: sha256_digest(&payload_bytes),
             payload: payload_bytes,
@@ -619,7 +615,7 @@ mod tests {
 
         let mut payload = inline_segment(&[3]);
         let mut other_reference = payload.records[0].deltas[0].clone();
-        other_reference.semantic_op_index = 1;
+        other_reference.semantic_operation_index = 1;
         match &mut other_reference.delta {
             WalDelta::AppendFileRevision {
                 delta_index,
@@ -684,12 +680,11 @@ mod tests {
         let encoded = encode_wal_segment_envelope_zstd(WalSegmentPayload {
             namespace_id: NamespaceId::parse("bounded").expect("namespace"),
             wal_no: WalNo(1),
-            next_inode_id: InodeId(2),
-            head_commit_id: crate::control::genesis_commit_id(),
             writer_epoch: WriterEpoch(1),
-            base_head_seq: ChangeSeq(0),
-            start_seq: ChangeSeq(0),
-            end_seq: ChangeSeq(0),
+            prior_head_seq: ChangeSeq(0),
+            head_seq: ChangeSeq(0),
+            head_commit_id: crate::control::genesis_commit_id(),
+            next_inode_id: InodeId(2),
             records: Vec::new(),
         })
         .expect("encode");

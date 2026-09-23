@@ -110,8 +110,8 @@ fn every_provenance_row_copies_the_wal_payload_commit_id() {
     ]
     .into_iter()
     .enumerate()
-    .map(|(semantic_op_index, delta)| WalCommitDelta {
-        semantic_op_index: u32::try_from(semantic_op_index).expect("operation index"),
+    .map(|(semantic_operation_index, delta)| WalCommitDelta {
+        semantic_operation_index: u32::try_from(semantic_operation_index).expect("operation index"),
         delta,
     })
     .collect();

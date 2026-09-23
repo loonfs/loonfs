@@ -335,7 +335,7 @@ This example assumes 12 is the discovered WAL tip. Manifest and WAL discovery mu
 
 After selecting a manifest, discover the WAL tip by probing consecutive numbers. If the hint names a WAL number above `last_folded_wal_no`, load that object and probe forward from it; otherwise probe from the folded boundary. The first absent successor ends discovery. Replay still requires every WAL number between the folded boundary and the discovered tip, including numbers below the hint.
 
-Each data segment must contain contiguous commits following its `base_head_seq`. Namespace identity, WAL number, sequence range, head commit ID, allocation state, and writer epoch must validate. Empty fence segments contain no metadata changes. Epochs cannot decrease along the log or exceed the current manifest's epoch. If a WAL object exposes a newer epoch, reload the manifest before deciding that the object is invalid.
+Each data segment must contain contiguous commits following its `prior_head_seq`. Namespace identity, WAL number, sequence range, head commit ID, allocation state, and writer epoch must validate. Empty fence segments contain no metadata changes. Epochs cannot decrease along the log or exceed the current manifest's epoch. If a WAL object exposes a newer epoch, reload the manifest before deciding that the object is invalid.
 
 After WAL discovery, check for a successor to the selected manifest and reload if one appeared. This prevents a concurrent fold or retention advance from making a reclaimed WAL number look unused. Required missing or malformed objects fail the read.
 
@@ -468,7 +468,7 @@ A writer session acquires authority lazily, before its first semantic publicatio
 
 Another session can acquire a higher epoch. Its numbered fence prevents an older writer from extending the log using a previously observed tip: the stale writer's put collides, discovery observes the higher epoch, and the session returns `writer_fenced`. A fenced session does not automatically reacquire authority.
 
-A fence has equal `base_head_seq`, `start_seq`, and `end_seq`, preserves `next_inode_id` and `head_commit_id`, and contains no commit records. It advances WAL position without advancing logical history. Concurrent attempts are serialized by conditional creation of the next number.
+A fence has `head_seq` equal to `prior_head_seq`, preserves `next_inode_id` and `head_commit_id`, and contains no commit records. It advances WAL position without advancing logical history. Concurrent attempts are serialized by conditional creation of the next number.
 
 There is no writer lease or writer-expiry timestamp. The `writer_id` and `acquired_at_ms` fields describe the acquisition; the epoch determines authority. An acquisition retried after an uncertain outcome can advance the epoch again. Commit retry identity is separate and uses durable receipts.
 
@@ -561,7 +561,7 @@ A replacing move deletes the destination file and rebinds the source within the 
 
 The WAL stores the resulting metadata changes, not the original request bodies or validation inputs. The delta kinds are `create_inode`, `bind_direntry`, `unbind_direntry`, `append_file_revision`, `tombstone_subtree`, `revoke_subtree_tombstone`, `append_attributes_revision`, and `append_access_revision`.
 
-Each delta has a `delta_index`, and its wrapper has a `semantic_op_index` identifying the internal operation that produced it. A convenience request can expand into several internal operations, such as creating missing parent directories. Each operation's deltas are contiguous within its commit. Actor and timestamp are recorded once per commit and copied into the appropriate rows during materialization. The complete stored fields appear in Appendix A.
+Each delta has a `delta_index`, and its wrapper has a `semantic_operation_index` identifying the internal operation that produced it. A convenience request can expand into several internal operations, such as creating missing parent directories. Each operation's deltas are contiguous within its commit. Actor and timestamp are recorded once per commit and copied into the appropriate rows during materialization. The complete stored fields appear in Appendix A.
 
 ### 6.7 Change feed
 
@@ -623,7 +623,7 @@ Each manifest stores three cumulative activity counters in a required `activity`
 | --- | --- |
 | `content_bytes` | Full content length of every committed file revision, including overwrites and revisions that reuse stored content. |
 | `file_revisions` | Every committed file-revision append, including an empty revision. |
-| `mutations` | Each semantic operation group in a committed WAL record, identified by `semantic_op_index`. |
+| `mutations` | Each semantic operation group in a committed WAL record, identified by `semantic_operation_index`. |
 
 For example, writing a 10-byte file and then replacing it with a 6-byte revision adds 16 bytes, two revisions, and two mutations. Creating a directory adds one mutation. Recursively deleting that directory adds one mutation, regardless of how many descendants it hides. Convenience requests can contain several internal operations, so mutation totals can exceed request counts.
 
@@ -1075,7 +1075,7 @@ This appendix is the field and encoding reference for the protocols above. Field
 
 | Object | Envelope kind | Encoding | Version |
 | --- | --- | --- | --- |
-| WAL segment | `namespace_wal_segment` | zstd-compressed CBOR envelope with CBOR payload bytes | 1 |
+| WAL segment | `wal_segment` | zstd-compressed CBOR envelope with CBOR payload bytes | 1 |
 | Namespace manifest | `namespace_manifest` | Uncompressed JSON | 1 |
 | Namespace hint | `hint` | Uncompressed JSON | 1 |
 | Metadata segment | No envelope | Block sections described in A.7 | Governed by namespace manifest version 1 |
@@ -1210,11 +1210,11 @@ The owner and segment ID determine the object key. The descriptor stores no sepa
 
 `MAX_WAL_SEGMENT_BYTES` is 512 MiB (536,870,912 bytes) for the complete decompressed WAL document, including its envelope. Writers keep every segment within this limit through request and batch admission; readers refuse larger documents. A writer composes each batch so the sum of its requests' bounds plus the document overhead stays within the limit. This is a format constraint because every successful publication must remain readable with bounded decompression.
 
-A WAL segment's payload contains `namespace_id`, `wal_no`, `next_inode_id`, `head_commit_id`, `writer_epoch`, `base_head_seq`, `start_seq`, `end_seq`, and `records`.
+A WAL segment's payload contains `namespace_id`, `wal_no`, `writer_epoch`, `prior_head_seq`, `head_seq`, `head_commit_id`, `next_inode_id`, and `records`.
 
-For a data segment, `records` covers the sequence interval contiguously; the first commit follows `base_head_seq`. The WAL number must match the key, and the allocation high-water mark and head commit ID must agree with replay. A fence has an empty record list, equal base/start/end sequences, and an unchanged allocator and head commit ID. Fences participate in WAL numbering and epoch validation but produce no logical changes.
+For a data segment, `records` covers the sequences after `prior_head_seq` through `head_seq` contiguously. The WAL number must match the key, and the allocation high-water mark and head commit ID must agree with replay. A fence has an empty record list, `head_seq` equal to `prior_head_seq`, and an unchanged allocator and head commit ID. Fences participate in WAL numbering and epoch validation but produce no logical changes.
 
-Each commit contains `seq`, `commit_id`, `committed_by`, `semantic_commit_fingerprint`, `committed_at_ms`, optional `message`, `deltas`, and optional `inline_content`. A delta wrapper contains `semantic_op_index` and `delta`. The latter is a kind-tagged object with these fields:
+Each commit contains `seq`, `commit_id`, `committed_by`, `semantic_commit_fingerprint`, `committed_at_ms`, optional `message`, `deltas`, and optional `inline_content`. A delta wrapper contains `semantic_operation_index` and `delta`. The latter is a kind-tagged object with these fields:
 
 | Delta kind | Fields after `kind` |
 | --- | --- |

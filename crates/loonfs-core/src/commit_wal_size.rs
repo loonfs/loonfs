@@ -137,7 +137,7 @@ const fn map_bytes(fields: &[(&str, usize)]) -> usize {
 
 const fn delta_bytes(kind: &str, fields: &[(&str, usize)]) -> usize {
     map_bytes(&[
-        ("semantic_op_index", INDEX_BYTES),
+        ("semantic_operation_index", INDEX_BYTES),
         (
             "delta",
             map_bytes(&[

@@ -59,8 +59,7 @@ async fn readers_reject_invalid_numbers_epochs_sequences_and_allocation_summarie
     .expect("decode");
 
     let mut data_payload = original.payload().clone();
-    data_payload.start_seq = ChangeSeq(1);
-    data_payload.end_seq = ChangeSeq(1);
+    data_payload.head_seq = ChangeSeq(1);
     data_payload.head_commit_id = CommitId::parse("wrong-data-head").expect("commit");
     data_payload.records = vec![WalCommitPayload {
         seq: ChangeSeq(1),
@@ -110,7 +109,7 @@ async fn readers_reject_invalid_numbers_epochs_sequences_and_allocation_summarie
             0 => payload.wal_no = WalNo(1),
             1 => payload.writer_epoch = WriterEpoch(0),
             2 => payload.writer_epoch = WriterEpoch(3),
-            3 => payload.end_seq = ChangeSeq(1),
+            3 => payload.head_seq = ChangeSeq(1),
             _ => payload.next_inode_id = InodeId(3),
         }
         let bytes = encode_wal_segment_envelope_zstd(payload)

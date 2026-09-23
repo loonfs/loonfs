@@ -133,7 +133,7 @@ impl<'a> WalWalk<'a> {
             },
         )?;
         self.wal_no = wal_no;
-        self.seq = envelope.payload().end_seq;
+        self.seq = envelope.payload().head_seq;
         Ok(Some(ValidatedWalSegment::new(object_key, envelope)))
     }
 }

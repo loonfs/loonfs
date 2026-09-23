@@ -43,15 +43,15 @@ pub(crate) fn prepare_wal_segment(
         payload_records.push(payload_record);
     }
 
-    let start_seq = payload_records
+    let first_seq = payload_records
         .first()
         .map(|record| record.seq)
         .ok_or(WalSegmentError::EmptySegment)?;
-    let end_seq = payload_records
+    let head_seq = payload_records
         .last()
         .map(|record| record.seq)
         .ok_or(WalSegmentError::EmptySegment)?;
-    let base_head_seq = start_seq
+    let prior_head_seq = first_seq
         .0
         .checked_sub(1)
         .map(ChangeSeq)
@@ -64,16 +64,15 @@ pub(crate) fn prepare_wal_segment(
     let payload = WalSegmentPayload {
         namespace_id,
         wal_no,
+        writer_epoch,
+        prior_head_seq,
+        head_seq,
+        head_commit_id,
         next_inode_id: records
             .last()
             .expect("records should be nonempty")
             .commit
             .resulting_next_inode_id,
-        head_commit_id,
-        writer_epoch,
-        base_head_seq,
-        start_seq,
-        end_seq,
         records: payload_records,
     };
     encode_segment(payload)
@@ -88,11 +87,10 @@ pub(crate) fn prepare_fence_segment(
         namespace_id,
         wal_no: next_wal_no(head)?,
         writer_epoch,
-        next_inode_id: head.next_inode_id,
+        prior_head_seq: head.seq,
+        head_seq: head.seq,
         head_commit_id: head.head_commit_id.clone(),
-        base_head_seq: head.seq,
-        start_seq: head.seq,
-        end_seq: head.seq,
+        next_inode_id: head.next_inode_id,
         records: Vec::new(),
     })
 }
@@ -103,7 +101,7 @@ pub(crate) fn resulting_head_after(
 ) -> NamespaceReadState {
     let payload = segment.envelope().payload();
     NamespaceReadState {
-        seq: payload.end_seq,
+        seq: payload.head_seq,
         head_commit_id: payload.head_commit_id.clone(),
         next_inode_id: payload.next_inode_id,
         wal_no: payload.wal_no,

@@ -29,7 +29,7 @@ pub(crate) async fn discover_tip<S: ObjectStore + ?Sized>(
         // first position the walk can be contiguous from.
         let (object_key, segment) = load_required_segment(store, namespace_id, start).await?;
         let payload = segment.payload();
-        validate_wal_segment_for_replay(namespace_id, payload.base_head_seq, &segment)
+        validate_wal_segment_for_replay(namespace_id, payload.prior_head_seq, &segment)
             .map_err(|error| corrupt(&object_key, error))?;
         apply_segment(&mut state, &segment, &object_key)?;
         previous_epoch = payload.writer_epoch;
@@ -69,7 +69,7 @@ pub(super) fn apply_segment(
         return Err(corrupt(object_key, "WAL writer epoch exceeds the manifest"));
     }
     state.wal_no = payload.wal_no;
-    state.seq = payload.end_seq;
+    state.seq = payload.head_seq;
     state.next_inode_id = payload.next_inode_id;
     state.head_commit_id = payload.head_commit_id.clone();
     Ok(())

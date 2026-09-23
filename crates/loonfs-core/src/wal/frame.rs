@@ -31,8 +31,8 @@ pub enum WalSegmentError {
     ActivityOverflow,
     #[error("WAL number cannot exceed 9007199254740991")]
     NumberOverflow,
-    #[error("WAL segment base head seq mismatch: expected `{expected}`, actual `{actual}`")]
-    BaseHeadSeqMismatch {
+    #[error("WAL segment prior head seq mismatch: expected `{expected}`, actual `{actual}`")]
+    PriorHeadSeqMismatch {
         expected: ChangeSeq,
         actual: ChangeSeq,
     },
