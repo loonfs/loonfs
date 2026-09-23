@@ -853,7 +853,7 @@ impl FsReader {
             .list_checkpoint_files_page(checkpoint_id, request, &read_context)
             .await
             .map_err(crate::RuntimeError::from);
-        if super::should_invalidate_after_result(&result) {
+        if super::is_stale_head(&result) {
             self.core.invalidate_namespace_read_cache(namespace_id);
         }
         result

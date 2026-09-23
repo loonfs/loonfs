@@ -6,8 +6,8 @@
 
 use loonfs::metrics::{DefaultMetricsRecorder, MetricValue};
 use loonfs::{
-    CreateNamespaceOptions, DeleteNamespaceOptions, FsWriter, NamespaceId, PutFileOptions,
-    RuntimeCacheConfig, RuntimeError, SharedObjectStore, WriterFence,
+    CreateNamespaceOptions, CreateSnapshotOptions, DeleteNamespaceOptions, FsWriter, NamespaceId,
+    PutFileOptions, RuntimeCacheConfig, RuntimeError, SharedObjectStore, WriterFence,
 };
 use loonfs_api::wire::control::NamespaceStatus;
 use loonfs_core::control::NamespaceReadState;
@@ -518,6 +518,16 @@ async fn read_after_write_only_probes_the_next_wal_number_without_replay() {
             .await
             .expect("warmup put");
     }
+    let snapshot = writer
+        .create_snapshot(
+            &namespace_id,
+            CreateSnapshotOptions {
+                name: "pinned".to_owned(),
+                expires_at_ms: u64::MAX,
+            },
+        )
+        .await
+        .expect("create snapshot");
     reader
         .get_path_entry(&namespace_id, "/docs/warm-0.txt", Default::default())
         .await
@@ -538,6 +548,10 @@ async fn read_after_write_only_probes_the_next_wal_number_without_replay() {
         .drain()
         .await
         .expect("finish background hints");
+    let _pinned = reader
+        .pin_namespace_at_snapshot(&namespace_id, &snapshot.checkpoint_id)
+        .await
+        .expect("a pinned read keeps the live read cache");
     let next_wal_no = head_state(&store, &namespace_id)
         .await
         .wal_no
