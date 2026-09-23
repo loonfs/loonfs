@@ -332,7 +332,7 @@ async fn deleted_owner_import_uses_updated_access_state_in_the_surviving_head() 
 
 #[tokio::test]
 async fn prior_generation_import_uses_its_own_key_and_current_authority() {
-    use loonfs_api::{NamespaceGeneration, PinId};
+    use loonfs_api::NamespaceGeneration;
     use loonfs_core::content::DurableContentValidationError;
     use loonfs_core::control::load_namespace_current_manifest;
 
@@ -358,7 +358,6 @@ async fn prior_generation_import_uses_its_own_key_and_current_authority() {
     let tombstone = load_namespace_current_manifest(recording.as_ref(), &source)
         .await
         .expect("tombstone");
-    let retired_id = PinId::retired(&source, tombstone.envelope.payload().manifest_no);
     create_namespace(&writer, &source, acl("replacement")).await;
     let current = load_namespace_current_manifest(recording.as_ref(), &source)
         .await
@@ -377,19 +376,19 @@ async fn prior_generation_import_uses_its_own_key_and_current_authority() {
     assert_forbidden_without_writes(recording.as_ref(), error);
 
     recording
-        .delete(&loonfs_objectstore::keys::checkpoint_record(
+        .delete(&loonfs_objectstore::keys::retired_generation_record(
             &source,
-            &retired_id,
+            tombstone.state.generation,
         ))
         .await
-        .expect("delete retired pin");
+        .expect("delete retired record");
     recording.reset();
     let source_key = format!("namespaces/source/content/{}", content_ref.content_id);
     let importer = writer.as_subject(subject("replacement"));
     let prepared = importer
         .prepare_content_ref(&destination, content_ref.clone())
         .await
-        .expect("import prior generation without a retired pin");
+        .expect("import prior generation without a retired record");
     assert!(recording.take_get_keys().contains(&source_key));
     assert_eq!(recording.count(OperationClass::List), 0);
     assert_eq!(prepared.content_ref().owner_namespace_id, destination);

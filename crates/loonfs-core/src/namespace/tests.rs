@@ -1,20 +1,19 @@
 //! Namespace installation, numbered publication, and fork ownership contracts.
 
+use super::retired::load_retired_generation;
 use super::{
     bootstrap::bootstrap_namespace,
     control::{load_current_manifest, load_namespace_hint},
     fork::fork_namespace,
     read_anchor::load_read_anchor,
 };
-use crate::checkpoint::record::load_checkpoint_record;
 use crate::commit_engine::NamespaceCommitEngine;
 use crate::context::MutationContext;
 use crate::path::read::load_current_metadata_view;
 use crate::wal::tests::publish;
-use loonfs_api::wire::control::PinOwner;
 use loonfs_api::{
-    AttributeInclusion, ChangeSeq, ErrorCode, ManifestNo, NamespaceGeneration, NamespaceId, PinId,
-    WalNo, WriterId,
+    AttributeInclusion, ChangeSeq, ErrorCode, ManifestNo, NamespaceGeneration, NamespaceId, WalNo,
+    WriterId,
 };
 use loonfs_objectstore::{
     keys::{hint, metadata_manifest_object, wal_segment_prefix},
@@ -580,13 +579,11 @@ async fn recreating_a_deleted_namespace_publishes_an_empty_next_generation() {
     assert!(payload.runs.is_empty());
     assert_eq!(payload.folded_wal_no, wal_tip);
 
-    let retired_id = PinId::retired(&namespace_id, tombstone.manifest_no);
-    let retired = load_checkpoint_record(&store, &namespace_id, &retired_id)
+    let retired = load_retired_generation(&store, &namespace_id, tombstone.generation)
         .await
-        .expect("load retired pin")
-        .expect("retired pin");
-    assert_eq!(retired.state.owner, PinOwner::Retired {});
-    assert_eq!(retired.state.manifest(), tombstone_ref);
+        .expect("load retired record")
+        .expect("retired record");
+    assert_eq!(retired.tombstone, tombstone_ref);
     let raised = load_namespace_hint(&store, &namespace_id)
         .await
         .expect("raised hint");
@@ -754,16 +751,11 @@ async fn assert_fork_recreation(source_commits: u64, target_commits: u64) {
     assert_eq!(basis.manifest.head_seq, source.head_seq);
     let reported_basis = fork.fork_basis.expect("reported fork basis");
     assert_eq!(reported_basis.source_namespace_id, source_id);
-    let retired = load_checkpoint_record(
-        &store,
-        &target_id,
-        &PinId::retired(&target_id, tombstone.manifest_no),
-    )
-    .await
-    .expect("load retired pin")
-    .expect("retired pin");
-    assert_eq!(retired.state.owner, PinOwner::Retired {});
-    assert_eq!(retired.state.manifest(), deleted.state.manifest);
+    let retired = load_retired_generation(&store, &target_id, tombstone.generation)
+        .await
+        .expect("load retired record")
+        .expect("retired record");
+    assert_eq!(retired.tombstone, deleted.state.manifest);
     let raised = load_namespace_hint(&store, &target_id)
         .await
         .expect("raised hint");
@@ -827,4 +819,160 @@ async fn assert_fork_recreation(source_commits: u64, target_commits: u64) {
         commit.committed_seq,
         head_seq.successor().expect("next sequence")
     );
+}
+
+#[tokio::test]
+async fn recreation_writes_the_retired_record_before_the_manifest_and_accepts_a_collision() {
+    use loonfs_objectstore::keys::retired_generation_record;
+    use loonfs_test_support::stores::RecordedOperation;
+    let directory = tempdir().expect("directory");
+    let namespace_id = NamespaceId::parse("record-order").expect("namespace");
+    let store = RecordingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::any(),
+    );
+    let context = context();
+    let actor = loonfs_test_support::test_actor();
+    let access = loonfs_api::NamespaceAccess::Unrestricted {};
+    bootstrap_namespace(&store, &namespace_id, &context, &actor, &access, false)
+        .await
+        .expect("create");
+    NamespaceCommitEngine::new(namespace_id.clone())
+        .delete_namespace(&store, Default::default(), &context)
+        .await
+        .expect("delete");
+    let tombstone = load_current_manifest(&store, &namespace_id)
+        .await
+        .expect("tombstone");
+    let record_key = retired_generation_record(&namespace_id, tombstone.state.generation);
+    let next_key = metadata_manifest_object(
+        &namespace_id,
+        &tombstone
+            .state
+            .manifest
+            .manifest_no
+            .successor()
+            .expect("successor"),
+    );
+    store.reset();
+    let store = BlockingStore::new(
+        store,
+        KeyPredicate::exact(&record_key),
+        OperationClass::PutCreateIfAbsent,
+    );
+    store.block_next();
+    let (result, ()) = futures::join!(
+        bootstrap_namespace(&store, &namespace_id, &context, &actor, &access, false),
+        async {
+            store.wait_until_blocked().await;
+            let record = loonfs_api::wire::control::RetiredGenerationPayload {
+                namespace_id: namespace_id.clone(),
+                generation: tombstone.state.generation,
+                tombstone: tombstone.state.manifest.clone(),
+                created_at_ms: context.now_ms,
+            };
+            let bytes = loonfs_api::wire::control::encode_control_state(
+                loonfs_api::wire::control::ControlObjectKind::RetiredGeneration,
+                &record,
+            )
+            .expect("record bytes");
+            store
+                .inner()
+                .put_if_absent(&record_key, bytes.into())
+                .await
+                .expect("concurrent record");
+            assert!(store
+                .inner()
+                .head(&next_key)
+                .await
+                .expect("successor")
+                .is_none());
+            store.release();
+        }
+    );
+    assert_eq!(
+        result.expect("recreated").generation,
+        NamespaceGeneration(2)
+    );
+    let puts: Vec<_> = store
+        .inner()
+        .snapshot()
+        .into_iter()
+        .filter_map(|operation| match operation {
+            RecordedOperation::Put {
+                key,
+                mode: loonfs_objectstore::PutMode::CreateIfAbsent,
+                ..
+            } => Some(key),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(puts, vec![record_key.clone(), record_key, next_key]);
+}
+
+#[tokio::test]
+async fn a_fork_refuses_a_later_target_generation_and_its_abandoned_pin_ages_out() {
+    use loonfs_objectstore::keys::checkpoint_prefix;
+    for block_manifest in [false, true] {
+        let directory = tempdir().expect("directory");
+        let source = NamespaceId::parse("race-source").expect("source");
+        let target = NamespaceId::parse("race-target").expect("target");
+        let keys = if block_manifest {
+            KeyPredicate::exact(metadata_manifest_object(&target, &ManifestNo(1)))
+        } else {
+            KeyPredicate::prefix(checkpoint_prefix(&source))
+        };
+        let store = BlockingStore::new(
+            LocalFsStore::new(directory.path()).expect("store"),
+            keys,
+            OperationClass::PutCreateIfAbsent,
+        );
+        let context = context();
+        let actor = loonfs_test_support::test_actor();
+        let access = loonfs_api::NamespaceAccess::Unrestricted {};
+        bootstrap_namespace(&store, &source, &context, &actor, &access, false)
+            .await
+            .expect("source");
+        store.block_next();
+        let (result, ()) = futures::join!(
+            fork_namespace(&store, &source, &target, &actor, None, &context),
+            async {
+                store.wait_until_blocked().await;
+                bootstrap_namespace(store.inner(), &target, &context, &actor, &access, false)
+                    .await
+                    .expect("target");
+                NamespaceCommitEngine::new(target.clone())
+                    .delete_namespace(store.inner(), Default::default(), &context)
+                    .await
+                    .expect("delete target");
+                bootstrap_namespace(store.inner(), &target, &context, &actor, &access, false)
+                    .await
+                    .expect("recreate target");
+                store.release();
+            }
+        );
+        assert_eq!(
+            result.expect_err("target moved").code(),
+            ErrorCode::StaleHead
+        );
+        let pins = store
+            .list_prefix(&checkpoint_prefix(&source))
+            .await
+            .expect("source pins");
+        assert_eq!(pins.len(), 1);
+        let config = crate::gc::GcConfig::default();
+        let young = crate::gc::gc_namespace(&store, &source, &config, &context)
+            .await
+            .expect("young pin");
+        assert_eq!(young.deleted_checkpoints_by_owner.fork, 0);
+        let aged = MutationContext {
+            now_ms: context.now_ms + config.grace_window_ms,
+            ..context
+        };
+        let report = crate::gc::gc_namespace(&store, &source, &config, &aged)
+            .await
+            .expect("collect abandoned pin");
+        assert_eq!(report.deleted_checkpoints_by_owner.fork, 1);
+        assert!(store.head(&pins[0]).await.expect("pin").is_none());
+    }
 }

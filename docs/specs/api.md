@@ -1013,7 +1013,7 @@ floor has advanced.
 
 A checkpoint name is a label, not a key. Every create call generates a new record, so the same name may identify multiple checkpoints. Create and list use one checkpoint object with `namespace_id`, `checkpoint_id`, `owner`, `created_at_ms`, optional `expires_at_ms`, `captured_seq`, and `manifest_no`. Create returns this object directly. For API-created checkpoints, `owner` is `user` with the requested `name`, and `created_at_ms` is the durable record timestamp.
 
-Checkpoint and snapshot records from a prior namespace generation are not listed. Reading, deleting, extending, listing files through, or forking from one answers exactly as if that record had been deleted. Internal retired pins are never exposed by checkpoint or snapshot operations.
+Checkpoint and snapshot records from a prior namespace generation are not listed. Reading, deleting, extending, listing files through, or forking from one answers exactly as if that record had been deleted. Internal retired generation records are never exposed by checkpoint or snapshot operations.
 
 The id is `pin_{manifest_no:020}-{16 lowercase hex}`. It identifies the
 manifest used by checkpoint and snapshot reads. Every pin has a fresh id.
@@ -1123,14 +1123,13 @@ Routes under `/v0/maintenance/` belong to the `maintenance/v0` API group. `GET /
 
 A GC response includes `next_reclamation_at_ms` when a deleted generation is inside its retirement grace, a retained user or snapshot pin has a future deletion time, or an upload session has a future cleanup time. It is the earliest of those future times examined by the pass. A generation that a user or snapshot pin holds after its grace is reported at that pin's deletion time. A fork pin carries no time. Upload cleanup times include lease plus grace, abort grace, and completed-content grace. Candidates that age out by provider timestamps carry no time here. Absence does not mean that nothing remains to collect.
 
-`reclaim_after_ms` is present when the current manifest is deleted. It equals `deleted_at_ms + max(configured_grace, NAMESPACE_RETIREMENT_GRACE_MS)`, including when pins still block reclamation. It is absent for an active namespace. Retired pins provide the same derived deadline for prior generations. No retirement deadline is stored and collection publishes no manifest.
+`reclaim_after_ms` is present when the current manifest is deleted. It equals `deleted_at_ms + max(configured_grace, NAMESPACE_RETIREMENT_GRACE_MS)`, including when pins still block reclamation. It is absent for an active namespace. Retired generation records provide the same derived deadline for prior generations. No retirement deadline is stored and collection publishes no manifest.
 
-Every call reads the current manifest and uses one fixed clock. It keeps its live set in memory and writes no collection progress. Every family lists from the beginning and sweeps to the end. The collector uses a separate complete pin listing to find retained manifests and check generation eligibility. Pins in a tombstone's manifest range block reclamation except for its own retired pin. Pins deleted later in the pass still count. An unrecognized pin key blocks every generation. Manifest read failures fail the call before sweeping.
+Every call reads the current manifest and uses one fixed clock. It keeps its live set in memory and writes no collection progress. Every family lists from the beginning and sweeps to the end. The collector uses a separate complete pin listing to find retained manifests and check generation eligibility. It discovers prior tombstones by listing retired generation records. Pins in a tombstone's manifest range block reclamation. Pins deleted later in the pass still count. An unrecognized pin key blocks every generation. Manifest read failures fail the call before sweeping.
 
 A GC response groups related counts. `deleted` contains `wal_segments`,
-`metadata_segments`, `manifests`, `upload_sessions`, `content_objects`, and
-`retired_content_objects`. `deleted_checkpoints_by_owner` contains `fork`,
-`expired`, `snapshot`, and `retired` counts for pins deleted in the pass. A retired pin is counted when reclamation deletes it after its generation has no retained upload sessions, or when the pin sweep deletes a pin whose manifest is absent.
+`metadata_segments`, `manifests`, `upload_sessions`, `content_objects`,
+`retired_content_objects`, and `retired_generation_records`. A retired generation record is counted when reclamation deletes it after its generation has no retained upload sessions, or when the same pass deletes a record whose tombstone is absent. `deleted_checkpoints_by_owner` contains `fork`, `expired`, and `snapshot` counts for pins deleted in the pass.
 Their sum is the total number of pins deleted. Each deletion
 is counted once. A target's deletion of its source pin contributes to `fork`
 when the pin was present before deletion. Repeating that deletion on an
@@ -1160,7 +1159,7 @@ that reason, and the fields sum to the total:
 Retention is counted per candidate examined, not per object in the
 namespace, so one object two passes both examine is counted by each.
 
-Active current and pinned manifests protect their metadata segments. A tombstone protects only itself. An unreferenced object becomes eligible for collection after its
+Current and pinned manifests protect their metadata segments. A retired generation record protects its tombstone and its metadata segments until reclamation completes. An unreferenced object becomes eligible for collection after its
 own provider timestamp is at least `grace_window_ms` old. Metadata segments
 use the separate `UNREFERENCED_SEGMENT_MIN_AGE_MS` age gate and must be
 strictly older than that bound. A live namespace
@@ -1173,7 +1172,7 @@ Namespace deletion ends access immediately. Ordinary namespace GC then
 conditionally reclaims the namespace's own content. This is asynchronous
 reclamation, with no fixed completion time or guarantee of physical erasure.
 
-Dependent forks and retained checkpoints delay reclamation. GC derives each generation's deadline from its deletion stamp. At or after that deadline, a complete pin listing must contain no pin in the generation's manifest range except its own retired pin. A qualifying pass cleans upload sessions, deletes the exact content keys that generation's publication rows name, releases its source pin, and deletes its retired pin when no session remains. The current tombstone survives until recreation supersedes it. Every other owner's prefix remains.
+Dependent forks and retained checkpoints delay reclamation. GC derives each generation's deadline from its deletion stamp. At or after that deadline, a complete pin listing must contain no pin in the generation's manifest range. A qualifying pass cleans upload sessions, deletes the exact content keys that generation's publication rows name, releases its source pin, and deletes its retired generation record when no session remains. The current tombstone survives until recreation supersedes it. Every other owner's prefix remains.
 
 Retention is coarse: a deleted ancestor keeps every object its generation
 published while a live descendant still depends on it. GC does not select
@@ -1521,7 +1520,7 @@ Create and fork install hint and manifest 1 in order. The
 conditional put of manifest 1 decides first-generation existence ([format: namespace lifecycle](format.md#9-namespace-lifecycle-and-forks)). A create or fork that loses that write to
 another active namespace answers `namespace_exists` (409). A create or a fork into an id
 whose current manifest is deleted publishes its next generation. There is no partially created
-namespace, so there is no third answer and nothing to repair.
+namespace. A fork whose selected lifetime has passed returns `stale_head`.
 
 A new request after a lost creation acknowledgement returns
 `namespace_exists`, unless it explicitly allows an existing namespace.
@@ -1659,7 +1658,7 @@ reclamation. Deletion itself reclaims nothing. Dependent forks, retained
 checkpoints, grace windows, and maintenance not running can all delay
 reclamation. Continued writes through already-issued capabilities can also
 leave objects for later passes. A maintenance run with `kind` set to `gc` ages out unneeded WAL,
-metadata, and pins. GC derives `reclaim_after_ms` from the current tombstone's deletion stamp and the retirement grace. After recreation, retired pins preserve prior tombstones for the same checks. Once a generation's deadline passes and the complete pin listing contains no other pin in its manifest range, the pass reclaims its owned content and source pin. It deletes the retired pin last, only when no upload session of that generation remains. It publishes no retirement manifest. A pass can reclaim multiple generations independently. The current manifest survives, and other owners' objects and generations that are not eligible remain.
+metadata, and pins. GC derives `reclaim_after_ms` from the current tombstone's deletion stamp and the retirement grace. After recreation, retired generation records preserve prior tombstones for the same checks. Once a generation's deadline passes and the complete pin listing contains no pin in its manifest range, the pass reclaims its owned content and source pin. It deletes the retired generation record last, only when no upload session of that generation remains. It publishes no retirement manifest. A pass can reclaim multiple generations independently. The current manifest survives, and other owners' objects and generations that are not eligible remain.
 
 Run GC repeatedly to catch late writes and keep the provider's incomplete
 multipart-upload lifecycle rule. Deleting an object key does not erase
@@ -2938,18 +2937,17 @@ Namespace creation and forking produce no change-feed event.
 The new namespace reads inherited content at each reference's owner key and starts with
 independent future namespace metadata. The fork creates a fork-owned source checkpoint so the
 source-owned immutable metadata segments stay available for as long as the
-target may still read them. It renews the checkpoint with compare-and-swap,
-then installs the target namespace's head in one conditional write. That head
-records the source checkpoint for the target's lifetime.
+target may still read them. It verifies the checkpoint, then installs the target namespace with a conditional manifest write. The manifest records the source checkpoint for the target's lifetime.
 
 The response contains the new namespace's initial state. Its head sequence and
 retention floor equal the captured basis sequence, for a fresh id and for a
 deleted id alike. The target's first data commit is one sequence above that head.
 
-If the target ID is active, the server returns `namespace_exists`. If it is
+If the target ID is active, the server returns `namespace_exists` before writing a source pin. If it is
 deleted, the fork recreates the id as its next generation with the source
 runs.
-If the source checkpoint cannot be renewed, the server returns
+If the target advances beyond the selected lifetime during installation, the server returns `stale_head`.
+If the source checkpoint cannot be verified, the server returns
 `checkpoint_unavailable` and no target namespace is installed.
 
 ### 6.13 `GET /grep`

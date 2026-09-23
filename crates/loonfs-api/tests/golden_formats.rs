@@ -20,8 +20,8 @@
 
 use loonfs_api::wire::control::{
     decode_control_object, ControlObjectEnvelope, ControlObjectKind, ForkBasis, HintPayload,
-    ManifestRef, NamespaceStatus, PinOwner, PinPayload, ProxiedStaging, UploadSessionMode,
-    UploadSessionPayload, UploadSessionRecordStatus, WriterBlock,
+    ManifestRef, NamespaceStatus, PinOwner, PinPayload, ProxiedStaging, RetiredGenerationPayload,
+    UploadSessionMode, UploadSessionPayload, UploadSessionRecordStatus, WriterBlock,
 };
 use loonfs_api::wire::envelope::EnvelopeCodecError;
 use loonfs_api::wire::manifest::{
@@ -714,20 +714,18 @@ fn control_objects_match_golden_bytes() {
             created_at_ms: 3_000,
             owner: PinOwner::Fork {
                 target_namespace_id: NamespaceId::parse("clone").expect("valid namespace id"),
+                target_generation: loonfs_api::NamespaceGeneration(1),
             },
         },
     );
-    let retired_manifest_no = ManifestNo(5);
     check_control_golden(
-        "control_pin_retired.v1.json",
-        ControlObjectKind::Pin,
-        PinPayload {
-            pin_id: PinId::retired(&namespace_id(), retired_manifest_no),
+        "control_retired_generation.v1.json",
+        ControlObjectKind::RetiredGeneration,
+        RetiredGenerationPayload {
             namespace_id: namespace_id(),
-            head_seq: ChangeSeq(5),
-            payload_checksum: sample_manifest_ref(5).payload_checksum,
+            generation: loonfs_api::NamespaceGeneration(1),
+            tombstone: sample_manifest_ref(5),
             created_at_ms: 3_000,
-            owner: PinOwner::Retired {},
         },
     );
     check_control_golden(

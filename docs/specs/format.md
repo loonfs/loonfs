@@ -182,6 +182,7 @@ namespaces/{namespace_id}/
 ├── wal/{wal_no:020}.wal.zst
 ├── segments/{segment_id}.sst.zst
 ├── pins/{pin_id}.json
+├── retired/{generation:020}.json
 ├── uploads/{upload_id}.json
 ├── content/{content_id}
 └── extensions/{extension_name}/...
@@ -200,6 +201,7 @@ The key layout is part of the format. Other objects must not collide with these 
 | Hint | Starting point for manifest and WAL discovery | Compare-and-swap; neither number decreases. |
 | Metadata segment | Sorted metadata rows referenced by a manifest | Write a new immutable object. |
 | Pin record | Retain one manifest for a user, snapshot, or fork | Create and delete; snapshot expiry can be extended by CAS. |
+| Retired generation record | Name one generation's tombstone | Put-if-absent before recreation; delete after reclamation. |
 | Upload session | Own a transfer and its completed content until publication or cleanup | Conditional lifecycle transitions. |
 | Content object | Complete bytes of one file revision | Write once. |
 
@@ -211,7 +213,7 @@ Manifest and WAL numbers are independent, positive counters scoped to a namespac
 
 Each number names one immutable object. A publisher creates the next number with put-if-absent. Competing publishers cannot install different objects at the same number; a loser loads the winner before planning another attempt. The payload's namespace and number must agree with its key.
 
-A pin ID has the form `pin_{manifest_no:020}-{16 lowercase hex}`. The number identifies its manifest; a random suffix distinguishes separate user, snapshot, and fork pins over that manifest. A retired pin uses the first sixteen lowercase hex characters of the SHA-256 of the UTF-8 bytes of `retired\n{namespace_id}\n{manifest_no:020}`. Its id is `pin_{manifest_no:020}-{derived suffix}`, so repeated recreation attempts over one tombstone address the same record. The API calls a pin id a `checkpoint_id`; the durable record calls it `pin_id`.
+A pin ID has the form `pin_{manifest_no:020}-{16 lowercase hex}`. The number identifies its manifest; a random suffix distinguishes separate user, snapshot, and fork pins over that manifest. The API calls a pin id a `checkpoint_id`; the durable record calls it `pin_id`.
 
 Content IDs are `con_` followed by 32 random lowercase hexadecimal characters. Metadata segment IDs are also generated identities, rather than positions in publication history. A collision at a newly generated immutable key must not overwrite existing bytes.
 
@@ -648,8 +650,7 @@ Each pin is stored under `pins/{pin_id}.json`. Its positioned ID identifies the 
 | --- | --- | --- |
 | `user` | `name`, optional `expires_at_ms` | Explicit deletion, or GC after expiry and grace. |
 | `snapshot` | `name`, required `expires_at_ms` | Reads require an unexpired snapshot; GC adds grace before deletion. |
-| `fork` | `target_namespace_id` | Retained while the target depends on the source. |
-| `retired` | None | Until its generation is reclaimed. |
+| `fork` | `target_namespace_id`, `target_generation` | Retained while that target generation depends on the source. |
 
 The record also stores namespace, head sequence, payload checksum, and creation time. The manifest number comes from the pin ID. It has no lifecycle status. Creating the record establishes the candidate pin; deleting it ends the pin. Fork pins have no expiry or renewal protocol.
 
@@ -704,27 +705,27 @@ Write the hint naming manifest 1 and WAL 0, then manifest 1, both with put-if-ab
 
 After an unknown transport outcome, identical read-back bytes do not prove who published a generation's first manifest without a fork basis, so a plain create or recreate answers `namespace_exists`, or the existing summary with `allow_existing`.
 
-A plain create or a fork into an id whose current manifest is a tombstone recreates it. A fork first creates and verifies its source pin under section 9.2:
+A plain create or a fork into an id whose current manifest is a tombstone recreates it. A fork first selects its target generation, then creates and verifies its source pin under section 9.2:
 
 1. Load the current manifest. If it is active, return `namespace_exists`, or its current summary with `allow_existing`. Otherwise it is the tombstone, and its folded WAL number is the WAL tip of the deleted generation.
-2. Check the metadata publication budget, measured from the start of recreation, before writing a retired pin over the tombstone with put-if-absent. An existing record at its derived id is success.
+2. Check the metadata publication budget, measured from the start of recreation, before writing a retired generation record over the tombstone with put-if-absent. An existing record at the generation-derived key is success.
 3. Build the next manifest number with the next generation and its own number as `generation_first_manifest_no`. Copy the tombstone's folded WAL number and increment both epochs. For a plain create, head, base, and retention floor start at zero, the inode and run allocators start over, and the manifest is active, has no fork basis or writer, has no runs, carries the genesis commit id, and starts every activity counter at zero. For a fork, copy the pinned source manifest's runs, head, base, head commit ID, and allocators as section 9.2 describes, with the retention floor at the head and activity at zero.
 4. Publish the manifest after the tombstone within the metadata publication budget, measured from the start of the create or, for a fork, from before its source pin write. Reload when another manifest wins. An active winner answers `namespace_exists`, or its current summary with `allow_existing`.
 5. Publication raises the hint to the new manifest and its folded WAL number. A failed hint raise does not fail creation.
 
 Recreation reads no WAL object. The deleted generation's WAL objects are unprotected and may already be collected.
 
-The retired pin records the tombstone's manifest reference. Its creation time comes from the recreation call.
+The retired generation record stores the namespace id, retired generation, tombstone `ManifestRef`, and creation time from the recreation call. Its key is `retired/{generation:020}.json`, with the same width as manifest numbers. A known generation resolves with one GET. Every load of its tombstone verifies the full reference with `ensure_manifest_reference_matches` and requires deleted status and the same generation.
 
 ### 9.2 Forking a namespace
 
 A fork starts independent history from the source's retained metadata:
 
-1. Create a verified source pin whose owner names the target namespace, either from the source head or a live snapshot under section 8.2.
+1. Load the target's current manifest before writing a source pin. Absence selects generation 1. A tombstone selects its generation plus one. An active target returns `namespace_exists` without writing a pin. Create a verified source pin whose owner names the target namespace and selected generation, either from the source head or a live snapshot under section 8.2.
 2. Load and verify the pinned manifest.
 3. Copy its run references, base sequence, head commit ID, inode allocator, and next run number into the target manifest. The initial head is the captured source sequence, for a fresh id and for a deleted id alike. Preserve every segment's owner.
 4. Set target identity, creation time, and `created_by` from the fork request, immutable `fork_basis`, active status, and no writer block. Activity counters start at zero and the retention floor equals the head. For a fresh id, both epochs and the local folded WAL number start at zero. For a deleted id, apply the generation, manifest, WAL, and epoch rules from section 9.1; copy the source's allocators.
-5. Install the target exactly as section 9.1 installs a create: for a fresh id, the target hint naming manifest 1 and WAL 0, and target manifest 1, in that order; for a deleted id, the retired pin and the successor to the tombstone.
+5. Install the target exactly as section 9.1 installs a create: for a fresh id, the target hint naming manifest 1 and WAL 0, and target manifest 1, in that order; for a deleted id, the retired generation record and the successor to the tombstone.
 
 The target copies no file bytes or metadata segments. Its head is at least the captured source sequence and every copied run sequence. Its WAL starts at number 1 for a fresh id, or after the tombstone's folded WAL number for a recreated id. Its first data commit is one sequence above its initial head. It can itself be forked immediately because its manifest already lists its inherited runs.
 
@@ -732,7 +733,7 @@ The fixed creation grace on the source pin protects installation. Before initiat
 
 ### 9.3 Conflicting and unknown installations
 
-A losing manifest-1 put reads the winner and verifies its namespace identity. Current active status means `namespace_exists`; current deleted status enters the recreation procedure for either a create or a fork. A recreation manifest put that loses reloads the current manifest. An active winner means another recreation succeeded. A newer tombstone means another generation was created and deleted, so recreation retries over that tombstone. Invalid bytes or key/payload disagreement are corruption. No loser overwrites the winner.
+A losing manifest-1 put reads the winner and verifies its namespace identity. Current active status in the selected generation means `namespace_exists`. A plain create can enter recreation after current deleted status. A fork keeps its selected target generation. A recreation manifest put that loses reloads the current manifest. An active winner means another recreation succeeded. A newer tombstone means another generation was created and deleted. A plain create retries over that tombstone. A fork checks its selected generation on every publication-loop iteration. If the target has passed that generation, or deleted it, the fork returns `stale_head` without rebinding its source pin or retrying over the later tombstone. Invalid bytes or key/payload disagreement are corruption. No loser overwrites the winner.
 
 A confirmed precondition failure is a conflict. A put with an unknown transport outcome can confirm its own success only by reading back the exact proposed manifest, except for a plain create or recreate under section 9.1. A fork's unique source pin makes its exact read-back proof of publication. An explicit `allow_existing` retry can instead return an existing active namespace.
 
@@ -744,7 +745,7 @@ Deletion uses the acquired writer epoch. After admitted commits finish, it folds
 
 An ordinary operation that observes deletion returns `namespace_deleted`. A create or a fork into the id recreates it. A cached reader can still use its active view until the next manifest revalidation is due. Deletion does not immediately remove content.
 
-The current deleted manifest is the generation's tombstone. It protects its runs until recreation supersedes it; the retired pin then keeps those runs protected until reclamation finishes. It protects no current WAL.
+The current deleted manifest is the generation's tombstone. It protects its runs until recreation supersedes it; the retired generation record then keeps those runs protected until reclamation finishes. It protects no current WAL.
 
 ### 9.5 Retirement
 
@@ -755,17 +756,17 @@ deadline(T) = T.deleted_at_ms
               + max(configured_grace, NAMESPACE_RETIREMENT_GRACE_MS)
 ```
 
-A generation is eligible when the pass clock reaches its deadline and the complete pin listing contains no pin in `[T.generation_first_manifest_no, T.manifest_no]` except its own retired pin. A pin's manifest number comes from its key. Pins deleted later in the same pass still count. An unrecognized key under the pin prefix makes every generation ineligible.
+A generation is eligible when the pass clock reaches its deadline and the complete pin listing contains no pin in `[T.generation_first_manifest_no, T.manifest_no]`. A pin's manifest number comes from its key. Pins deleted later in the same pass still count. An unrecognized key under the pin prefix makes every generation ineligible.
 
-The current deleted manifest and each retired pin's tombstone provide independent reclamation evidence. No manifest is published to retire a generation. Eligible generations release their own content and source pins under section 11.8. Other generations and other owners remain outside that sweep.
+The current deleted manifest and each retired generation record's tombstone provide independent reclamation evidence. No manifest is published to retire a generation. Eligible generations release their own content and source pins under section 11.8. Other generations and other owners remain outside that sweep.
 
 ### 9.6 Fork dependencies after deletion
 
-A source pin remains required while a target's current manifest or a retired pin's tombstone refers to it. Rewriting a target's metadata does not transfer ownership of inherited file bytes.
+A source pin remains required while a target's current manifest or a retired generation record's tombstone refers to it. Rewriting a target's metadata does not transfer ownership of inherited file bytes.
 
 For `A → B → C`, C's fork pin on B prevents B's generation from being reclaimed. B's pin on A remains until B's generation is reclaimed. Reclaiming C deletes C's pin on B. B can then be reclaimed once its deadline and pin checks pass, releasing its pin on A.
 
-Pin deletion proceeds from descendants to ancestors. A failed source-pin deletion leaves the target tombstone available for another pass, through the current manifest or its retired pin.
+Pin deletion proceeds from descendants to ancestors. A failed source-pin deletion leaves the target tombstone available for another pass, through the current manifest or its retired generation record.
 
 ### 9.7 Cross-namespace copies and moves
 
@@ -773,7 +774,7 @@ An inode-preserving rename is namespace-local. Across namespaces, a move is a de
 
 A fork can retain references through its source pin; other imports write verified bytes under a fresh destination-owned identity. Reusing another owner's identity would require an additional durable source-side retention protocol.
 
-An import checks the owner's current view for authorization, including imports within that namespace. Resident inline bytes are used only when the reference's owner and generation match the reading namespace and generation. Otherwise the import reads the object key derived from the reference, including references from earlier generations. A reclaimed generation's object is missing and returns the same error as any missing content object. No retired-pin or tombstone lookup is needed. The import verifies the bytes and stages them under a fresh identity owned by the destination's current generation. Forks pin manifests, so inherited content is always materialized. Inherited references retain their owner and owner generation.
+An import checks the owner's current view for authorization, including imports within that namespace. Resident inline bytes are used only when the reference's owner and generation match the reading namespace and generation. Otherwise the import reads the object key derived from the reference, including references from earlier generations. A reclaimed generation's object is missing and returns the same error as any missing content object. No retired-record or tombstone lookup is needed. The import verifies the bytes and stages them under a fresh identity owned by the destination's current generation. Forks pin manifests, so inherited content is always materialized. Inherited references retain their owner and owner generation.
 
 A subject importing a bare reference must be an administrator of its owner namespace. An unrestricted owner and a request with no subject need no administrator grant. Authorization always uses the owner's current head, including after recreation. A deleted owner uses the access state in its surviving head.
 
@@ -851,7 +852,7 @@ Collection removes objects that no retained view needs, after the applicable age
 
 ### 11.1 One complete pass
 
-A call discovers the namespace's current manifest, lists all pin keys, and builds an in-memory set of protected manifests and segments. Invalid or unreadable root manifests stop the call before sweeping. An absent namespace has nothing for core GC to collect.
+A call discovers the namespace's current manifest, lists all pin keys and the `retired/` prefix, and builds an in-memory set of protected manifests and segments. Invalid or unreadable root manifests stop the call before sweeping. An absent namespace has nothing for core GC to collect.
 
 The call then lists each candidate family from the beginning to completion. It stores no durable run, phase, reference table, or cursor. The complete pin listing used to establish roots is separate from the later pin sweep that decides which records can be deleted.
 
@@ -862,14 +863,14 @@ Every age decision uses the call's fixed `now_ms`. A later call reads fresh root
 | Evidence captured for the pass | Objects protected |
 | --- | --- |
 | Current active namespace manifest | The manifest and every segment in its runs. |
-| Current deleted manifest or a retired pin's tombstone | The tombstone and every segment in its runs. A retired pin protects them for the whole pass that deletes it. |
+| Current deleted manifest or a retired generation record's tombstone | The tombstone and every segment in its runs. A retired generation record protects them for the whole pass that deletes it. |
 | Every recognized pin key in the complete listing | The numbered manifest in its ID and every segment in that manifest. |
 | Hint's observed manifest number | All manifest numbers at or above it, so discovery can probe forward. Intermediate numbers do not protect additional runs. |
 | Current active manifest's folded boundary | Every WAL number above `folded_wal_no`. |
 
-Pin bodies are not needed to identify these roots: the manifest number is part of the pin key. Bodies are read later for owner and expiry decisions. A pin naming a missing manifest is corruption, except for a retired pin. A retired pin whose manifest is absent protects nothing and is deleted in the pin sweep with the retired count. Each listed pin protects its files for the whole pass, even if that pass deletes the pin.
+Pin bodies are not needed to identify these roots: the manifest number is part of the pin key. Bodies are read later for owner and expiry decisions. A pin naming a missing manifest is corruption. A retired generation record whose tombstone is absent protects nothing. A stalled recreation can write such a record after the tombstone was collected. Delete the record in the same pass and count it in `deleted.retired_generation_records`. Each listed pin protects its files for the whole pass, even if that pass deletes the pin.
 
-Tombstone segments remain roots because retirement reads their publication rows to find exact content keys; after the retired pin is deleted and the tombstone is no longer current, the ordinary segment-age sweep can remove them.
+Tombstone segments remain roots because retirement reads their publication rows to find exact content keys; after the retired generation record is deleted and the tombstone is no longer current, the ordinary segment-age sweep can remove them.
 
 A retention floor may pass a pinned manifest's head sequence. That does not remove its protection. Reads through the pin use the pinned file set directly.
 
@@ -932,7 +933,7 @@ Uploads are collected through their session records. Content prefixes are never 
 
 Before completion, a session owns its random content identity exclusively and cannot issue admission evidence. In current or eligible generations, cleanup first wins the terminal transition, then removes content and any provider transfer. A failed cleanup leaves the record for another attempt. Open and aborted sessions still require provider cleanup after namespace retirement because provider upload state can exist outside object listings.
 
-Cleanup derives every content key and provider cleanup target from the namespace and content ID recorded when the session opened. A pass records each generation with a retained session and keeps that generation's retired pin until a pass leaves no session behind. A generation below the head with no retired pin is reclaimed: recreation writes the pin before publishing the new head.
+Cleanup derives every content key and provider cleanup target from the namespace and content ID recorded when the session opened. A pass records each generation with a retained session and keeps that generation's retired generation record until a pass leaves no session behind. A generation below the head with no retired generation record is reclaimed: recreation writes the record before publishing the new head.
 
 For eligible completed uploads on an active namespace, the collector loads a metadata view lazily and looks up `content_id` in the WAL projection and `content_publications` family. It does not scan every revision. These publication rows are retained permanently, independently of commit receipts and the retention floor. If publication is found, only the session record is removed. If no publication exists, content is deleted before the session. An error permits neither a speculative content deletion nor removal of retry evidence.
 
@@ -961,38 +962,37 @@ Every token mint checks the original completion time. A retained receipt cannot 
 
 User and snapshot pins become collectable after expiry plus `T`, or creation plus `T` on a deleted namespace. A pin whose manifest number is below the head's `generation_first_manifest_no` also uses creation plus `T`. A user pin with no expiry remains until explicit deletion only within the active current generation. A retained user or snapshot pin reports the earlier of those times in `next_reclamation_at_ms`, so a generation it holds is collected once it goes. Pin deletion is direct; IDs are never reused.
 
-A retired pin with a present manifest is retained before any age check. Reclaiming its generation removes it. A retired pin whose manifest is absent is deleted in the pin sweep.
-
-Fork pins use this decision table:
+For a fork pin naming target `T` and generation `g`:
 
 | Source pin and target state | Action |
 | --- | --- |
-| Pin younger than `T` | Retain without reading the target. |
+| Pin younger than the creation grace | Retain without reading the target. |
 | Aged pin, target absent | Delete the abandoned installation's pin. |
-| Target names the exact source, pin ID, and manifest reference | Retain, including if the target is deleted. |
-| Target does not name this pin, generation above 1, and a retired pin's tombstone names it | Retain as `referenced_by_prior_generation`. |
-| Target does not name this pin and no retired tombstone names it | Delete the pin from the abandoned attempt. |
-| A retired tombstone cannot be loaded | Retain the source pin. |
-| Target names this pin but disagrees on source or manifest | Report corruption. |
-| Target cannot be read | Retain the pin. |
-| Target data is invalid | Report corruption. |
+| Target generation equals `g`, and its fork basis names this pin with the same manifest reference | Retain, including when the target is deleted. |
+| Target generation equals `g`, and its fork basis does not name this pin | Delete the abandoned installation's pin. |
+| Target generation is below `g` | Delete the attempt's pin; installation cannot finish after its grace. |
+| Target generation is above `g`, retired record for `g` absent | Delete the abandoned installation's pin. |
+| Target generation is above `g`, retired record for `g` present | Load and verify its tombstone, then apply the same fork-basis rule. An absent tombstone makes the pin reclaimable. |
+| A matching pin ID has a different manifest reference | Report corruption. |
+| A target, retired record, or tombstone store read fails | Retain the pin. |
+| Target or retired data is invalid | Report corruption. |
 
-The source discovers the target's current manifest through its hint; it does not read the target WAL. An absent target does not need a tombstone. When the current target does not name the pin and its generation is above 1, list its pin prefix. Select keys whose ID equals `PinId::retired(target, manifest_no)` for their own manifest number and load those tombstones without reading pin bodies. Generation 1 needs no extra reads. A matching target's collector deletes the source pin when it reclaims the generation.
+The source discovers the target's current manifest through its hint. It reads no target WAL and performs no listing. For a later target generation, it GETs `namespaces/{target_namespace_id}/retired/{g:020}.json`. A present record adds one tombstone GET, verified against the record's reference. Reclamation deletes every source pin named by the tombstone before deleting the retired record. An absent record therefore means that a remaining pin was never named by that generation.
 
-An unrecognized key prevents reclamation of every generation. Any other listed pin prevents reclamation of the generation whose manifest range contains it, even if the pass later deletes that pin. A candidate pin written too late to verify must be deleted by its creator; if that creator crashes first, its installation grace and owner rules still apply.
+An unrecognized key prevents reclamation of every generation. Any listed pin prevents reclamation of the generation whose manifest range contains it, even if the pass later deletes that pin. A candidate pin written too late to verify must be deleted by its creator; if that creator crashes first, its installation grace and owner rules still apply.
 
 ### 11.8 Sweeping a retired owner's content
 
-After session cleanup, reclaim each eligible generation: the current tombstone first, then retired pins in key order. Use the deadline and complete pin listing captured for the pass, as specified in section 9.5.
+After session cleanup, reclaim each eligible generation once: the current tombstone first, then retired generation records in key order. Use the deadline and complete pin listing captured for the pass, as specified in section 9.5.
 
 For each eligible tombstone `T`:
 
-1. Confirm the evidence. For a retired pin, `head` its key and require it to be present. For the current tombstone, reload the current manifest and require the same manifest number. A mismatch skips this generation without error. A failed read stops the call.
-2. Open the metadata segments named by `T` and page through the whole `content_publications` family. For each row whose `owner_namespace_id` equals `T.namespace_id` and `owner_generation` equals `T.generation`, delete `namespaces/{owner_namespace_id}/content/{content_id}`. Skip every other row. Its object belongs to another owner, whose lifecycle and the fork pin protect it. Count successful deletions, including `NotFound`, in `deleted.retired_content_objects`. Do not list content or apply an additional age check. A segment read failure or deletion failure ends the call before either pin is released.
+1. Confirm the evidence. For a retired generation record, `head` its key and require it to be present. For the current tombstone, reload the current manifest and require the same manifest number. A mismatch skips this generation without error. A failed read stops the call.
+2. Open only segments in `T`'s runs whose `owner_namespace_id` equals `T.namespace_id`; inherited segments cannot hold its publication rows because folds and compaction write owned segments and cross-namespace imports mint destination-owned identities. Page through the whole `content_publications` family in those segments. For each row whose `owner_namespace_id` equals `T.namespace_id` and `owner_generation` equals `T.generation`, delete `namespaces/{owner_namespace_id}/content/{content_id}`. Skip every other row. Its object belongs to another owner, whose lifecycle and the fork pin protect it. Count successful deletions, including `NotFound`, in `deleted.retired_content_objects`. Do not list content or apply an additional age check. A segment read failure or deletion failure ends the call before either pin is released.
 3. If `T.fork_basis` is present, delete its source pin. Count the deletion when the pin was present.
-4. For a retired pin, delete it only if this pass left no upload session of its generation behind. Count it under `deleted_checkpoints_by_owner.retired`. A retained session leaves the pin for the next pass.
+4. For a retired generation record, delete it only if this pass left no upload session of its generation behind. Count it under `deleted.retired_generation_records`. A retained session leaves the record for the next pass.
 
-Content and source-pin cleanup are idempotent. Deleting the retired pin last preserves the tombstone until cleanup finishes. The current tombstone remains when the namespace is never recreated. Later passes read the same publication rows and repeat the same exact deletes. No progress record or journal is stored.
+Content and source-pin cleanup are idempotent. Deleting the retired generation record last preserves the tombstone until cleanup finishes. The current tombstone remains when the namespace is never recreated. Later passes read the same publication rows and repeat the same exact deletes. No progress record or journal is stored.
 
 ## 12. Encodings, versions, and extensions
 
@@ -1060,7 +1060,7 @@ This appendix is the field and encoding reference for the protocols above. Field
 
 ### A.1 Family versions
 
-The three control-object kinds are `hint`, `pin`, and `upload_session`.
+The four control-object kinds are `hint`, `pin`, `upload_session`, and `retired_generation`.
 
 | Object | Envelope kind | Encoding | Version |
 | --- | --- | --- | --- |
@@ -1069,6 +1069,7 @@ The three control-object kinds are `hint`, `pin`, and `upload_session`.
 | Namespace hint | `hint` | Uncompressed JSON | 1 |
 | Metadata segment | No envelope | Block sections described in A.7 | Governed by namespace manifest version 1 |
 | Pin record | `pin` | Uncompressed JSON | 1 |
+| Retired generation record | `retired_generation` | Uncompressed JSON | 1 |
 | Upload session | `upload_session` | Uncompressed JSON | 1 |
 | Content object | No envelope | Complete file bytes | Referenced as `blob_v1` |
 | Grep hint | `grep_hint` | Uncompressed JSON | 1 |
@@ -1144,11 +1145,12 @@ The following tables list the durable payload fields. Their transition rules are
 | Fork basis | `manifest`, `source_pin_id` |
 | Manifest reference | `owner_namespace_id`, `manifest_no`, `head_seq`, `payload_checksum` |
 | Pin record | `namespace_id`, `pin_id`, `head_seq`, `payload_checksum`, `created_at_ms`, `owner` |
+| Retired generation record | `namespace_id`, `generation`, `tombstone`, `created_at_ms` |
 | Upload session | `namespace_id`, `owner_generation`, `upload_id`, `content_id`, `created_at_ms`, optional `subject_id`, `mode`, `status` |
 
 Namespace status is `{"kind":"active"}` or `{"kind":"deleted"}` with required `deleted_at_ms` only on the deleted variant. Missing status is invalid. The genesis commit ID is `c_00000000000000000000000000000000`.
 
-Pin owners have the fields in section 8.1. The `retired` owner has no fields. There is no status field on a pin. Upload status is `open` with `expires_at_ms`, `completed` with `completed_at_ms` and `content_ref`, or `aborted` with `aborted_at_ms`. The mode remains present in every status. A service-proxied mode contains `staging`; direct PUT contains `checksum_algorithm`; direct multipart contains `provider_upload_id`, `part_size_bytes`, and `checksum_algorithm`. Staging is `idle`, `claimed`, or `staged` with `content_ref`. All these variants use `kind` tags.
+Pin owners have the fields in section 8.1. There is no status field on a pin. Upload status is `open` with `expires_at_ms`, `completed` with `completed_at_ms` and `content_ref`, or `aborted` with `aborted_at_ms`. The mode remains present in every status. A service-proxied mode contains `staging`; direct PUT contains `checksum_algorithm`; direct multipart contains `provider_upload_id`, `part_size_bytes`, and `checksum_algorithm`. Staging is `idle`, `claimed`, or `staged` with `content_ref`. All these variants use `kind` tags.
 
 A namespace manifest contains:
 
@@ -1396,6 +1398,7 @@ These patterns define the core object families. Segment owners can differ from t
 | **WAL segments** | `namespaces/{namespace_id}/wal/{wal_no:020}.wal.zst` |
 | **Namespace manifests** | `namespaces/{namespace_id}/manifests/{manifest_no:020}.json` |
 | **Pin records** | `namespaces/{namespace_id}/pins/{pin_id}.json` |
+| **Retired generation records** | `namespaces/{namespace_id}/retired/{generation:020}.json` |
 | **Metadata segments** | `namespaces/{owner_namespace_id}/segments/{segment_id}.sst.zst` |
 | **Upload sessions** | `namespaces/{namespace_id}/uploads/{upload_id}.json` |
 | **Hint** | `namespaces/{namespace_id}/hint.json` |

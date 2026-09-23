@@ -75,8 +75,8 @@ pub(crate) use self::flush::flush_wal;
 pub(crate) use self::list::list_checkpoints_page;
 pub(crate) use self::load::{
     ensure_manifest_reference_matches, load_basis_metadata_segments,
-    load_manifest_segments_for_inspection, load_namespace_manifest_envelope,
-    load_namespace_manifest_envelope_if_present, LoadedMetadataBasis,
+    load_namespace_manifest_envelope, load_namespace_manifest_envelope_if_present,
+    load_owned_manifest_segments_for_inspection, LoadedMetadataBasis,
 };
 pub(crate) use self::record::load_checkpoint_record;
 pub use self::reorganize::metadata_maintenance_due;
@@ -86,9 +86,7 @@ pub(crate) use self::scan::{Readahead, VerifiedMetadataSegments};
 pub(crate) use self::snapshot::{classify_live_snapshot, delete_snapshot, extend_snapshot_expiry};
 pub(crate) use self::streaming_compaction::run_metadata_compaction_job;
 
-fn checkpoint_summary(
-    record: loonfs_api::wire::control::PinPayload,
-) -> Option<loonfs_api::Checkpoint> {
+fn checkpoint_summary(record: loonfs_api::wire::control::PinPayload) -> loonfs_api::Checkpoint {
     let expires_at_ms = record.owner.expires_at_ms();
     let owner = match record.owner {
         loonfs_api::wire::control::PinOwner::User { name, .. } => {
@@ -103,9 +101,8 @@ fn checkpoint_summary(
         loonfs_api::wire::control::PinOwner::Snapshot { name, .. } => {
             loonfs_api::CheckpointOwnerSummary::Snapshot { name }
         }
-        loonfs_api::wire::control::PinOwner::Retired {} => return None,
     };
-    Some(loonfs_api::Checkpoint {
+    loonfs_api::Checkpoint {
         namespace_id: record.namespace_id,
         manifest_no: record.pin_id.manifest_no(),
         checkpoint_id: record.pin_id,
@@ -113,5 +110,5 @@ fn checkpoint_summary(
         created_at_ms: record.created_at_ms,
         expires_at_ms,
         captured_seq: record.head_seq,
-    })
+    }
 }

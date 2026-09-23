@@ -153,8 +153,8 @@ const GC_CATEGORIES: [GcCategory; 9] = [
     ("deleted_snapshot_checkpoints", |gc| {
         gc.deleted_checkpoints_by_owner.snapshot
     }),
-    ("deleted_retired_checkpoints", |gc| {
-        gc.deleted_checkpoints_by_owner.retired
+    ("deleted_retired_generation_records", |gc| {
+        gc.deleted.retired_generation_records
     }),
 ];
 
@@ -1619,13 +1619,13 @@ mod tests {
             deleted: loonfs_api::DeletedObjectCounts {
                 wal_segments: 3,
                 content_objects: 5,
+                retired_generation_records: 1,
                 ..loonfs_api::DeletedObjectCounts::default()
             },
             deleted_checkpoints_by_owner: loonfs_api::DeletedCheckpointsByOwner {
                 fork: 2,
                 expired: 3,
                 snapshot: 7,
-                retired: 1,
             },
             retained: loonfs_api::RetainedCandidates {
                 referenced: 2,
@@ -1664,7 +1664,7 @@ mod tests {
             ("deleted_fork_checkpoints", 4),
             ("deleted_expired_checkpoints", 6),
             ("deleted_snapshot_checkpoints", 14),
-            ("deleted_retired_checkpoints", 2),
+            ("deleted_retired_generation_records", 2),
         ] {
             assert_eq!(
                 counter(&snapshot, "loonfs.gc.reclaimed", &[("category", category)]),
