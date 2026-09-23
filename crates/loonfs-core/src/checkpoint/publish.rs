@@ -60,6 +60,15 @@ pub(crate) async fn publish_manifest<S: ObjectStore + ?Sized>(
         .await
         .map_err(CoreError::ControlObjectLoad)?;
     if let Some(current) = &current {
+        // A tombstone ends its generation; work that raced the deletion stops here.
+        if current.envelope.payload().status.is_deleted()
+            && current.state.generation == candidate.generation
+            && current.state.manifest != candidate.manifest
+        {
+            return Err(CoreError::NamespaceDeleted {
+                namespace_id: namespace_id.clone(),
+            });
+        }
         if manifest.envelope().payload().writer_epoch < current.envelope.payload().writer_epoch {
             return Ok(ManifestPublicationOutcome::PredecessorChanged(
                 current.state.clone(),
@@ -70,40 +79,26 @@ pub(crate) async fn publish_manifest<S: ObjectStore + ?Sized>(
             outcome => return Ok(outcome),
         }
     }
-    let predecessor_no = current
-        .as_ref()
-        .map_or(ManifestNo(0), |loaded| loaded.state.manifest.manifest_no);
-    if predecessor_no.successor().ok() != Some(candidate.manifest.manifest_no)
-        || manifest.envelope().payload().namespace_id != *namespace_id
-        || current.as_ref().is_some_and(|loaded| {
-            loaded.state.generation == candidate.generation
-                && (candidate.manifest.head_seq < loaded.state.manifest.head_seq
-                    || candidate.retention_floor_seq < loaded.state.retention_floor_seq)
-        })
-    {
-        return Err(CoreError::Internal(format!("manifest `{}` is not a legal successor of `{predecessor_no}` in namespace `{namespace_id}`", candidate.manifest.manifest_no)));
-    }
-    if let Some(current) = &current {
-        current
+    let payload = manifest.envelope().payload();
+    let legal = match &current {
+        _ if payload.namespace_id != *namespace_id => {
+            Err("belongs to another namespace".to_owned())
+        }
+        Some(current) => current
             .envelope
             .payload()
-            .ensure_successor_identity(manifest.envelope().payload())
-            .map_err(|error| CoreError::NamespaceCorrupt(error.to_string()))?;
-        if !current
-            .envelope
-            .payload()
-            .preserves_activity(manifest.envelope().payload())
-        {
-            return Err(CoreError::NamespaceCorrupt(
-                "manifest changes activity without folding new activity or lowers a counter"
-                    .to_owned(),
-            ));
-        }
-        if manifest.envelope().payload().folded_wal_no < current.envelope.payload().folded_wal_no {
-            return Err(CoreError::NamespaceCorrupt(
-                "manifest lowers a WAL counter".to_owned(),
-            ));
-        }
+            .ensure_successor(payload)
+            .map_err(|error| error.to_string()),
+        None if payload.manifest_no == ManifestNo(1) => payload
+            .ensure_generation_start()
+            .map_err(|error| error.to_string()),
+        None => Err("has no predecessor".to_owned()),
+    };
+    if let Err(reason) = legal {
+        return Err(CoreError::Internal(format!(
+            "manifest `{}` of namespace `{namespace_id}` {reason}",
+            payload.manifest_no
+        )));
     }
     let object_key = metadata_manifest_object(namespace_id, &candidate.manifest.manifest_no);
     super::flush::ensure_metadata_publication_budget(timer, started_ms, namespace_id)?;
@@ -179,18 +174,8 @@ fn classify_current(
         ManifestPublicationOutcome::Published(current.clone())
     } else if current.compactor_epoch > candidate.compactor_epoch {
         ManifestPublicationOutcome::PredecessorChanged(current.clone())
-    } else if candidate.generation > current.generation {
-        // A new generation starts its own sequence space, so its head says
-        // nothing about coverage; only the predecessor number decides.
-        if Some(current.manifest.manifest_no) == expected_predecessor {
-            ManifestPublicationOutcome::Installable
-        } else {
-            ManifestPublicationOutcome::PredecessorChanged(current.clone())
-        }
     } else if current.folded_wal_no >= candidate.folded_wal_no
-        && (current.manifest.head_seq > candidate.manifest.head_seq
-            || (current.manifest.head_seq == candidate.manifest.head_seq
-                && current.manifest.manifest_no >= candidate.manifest.manifest_no))
+        && current.position() >= candidate.position()
     {
         ManifestPublicationOutcome::CoveredByCurrent(current.clone())
     } else if Some(current.manifest.manifest_no) == expected_predecessor {

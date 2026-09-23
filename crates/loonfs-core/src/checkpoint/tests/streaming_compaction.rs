@@ -3181,7 +3181,7 @@ async fn direct_output_is_published_by_number_and_failed_output_ages_out() {
 }
 
 #[tokio::test]
-async fn a_new_compactor_epoch_and_an_expired_job_each_prevent_publication() {
+async fn a_new_compactor_epoch_an_expired_job_and_a_deletion_each_prevent_publication() {
     use crate::limits::METADATA_COMPACTION_BUDGET_MS;
     use loonfs_test_support::stores::RecordingStore;
 
@@ -3249,7 +3249,7 @@ async fn a_new_compactor_epoch_and_an_expired_job_each_prevent_publication() {
         &namespace,
         &spec,
         &input,
-        result,
+        result.clone(),
         &cancellation,
         &publication,
     )
@@ -3257,6 +3257,49 @@ async fn a_new_compactor_epoch_and_an_expired_job_each_prevent_publication() {
     .expect("elapsed bound");
     assert_eq!(outcome, MetadataCompactionJobOutcome::Abandoned);
     assert_eq!(store.counts().puts, 0);
+
+    timer.0.store(0, Ordering::SeqCst);
+    crate::commit_engine::NamespaceCommitEngine::new(namespace.clone())
+        .delete_namespace(
+            store.inner(),
+            Default::default(),
+            &crate::MutationContext {
+                writer_id: loonfs_api::WriterId::parse("deleter").expect("writer"),
+                now_ms: 5_000,
+            },
+        )
+        .await
+        .expect("delete while the job runs");
+    store.reset();
+    let outcome = finalize_metadata_compaction(
+        &store,
+        &namespace,
+        &spec,
+        &input,
+        result,
+        &cancellation,
+        &publication,
+    )
+    .await
+    .expect("a deletion abandons the job");
+    assert_eq!(outcome, MetadataCompactionJobOutcome::Abandoned);
+    assert_eq!(store.counts().puts, 0);
+    let tombstone = crate::namespace::control::load_current_manifest(&store, &namespace)
+        .await
+        .expect("tombstone");
+    let mut successor = tombstone.envelope.payload().clone();
+    successor.manifest_no = successor.manifest_no.successor().expect("next number");
+    let error = super::super::publish::publish_manifest(
+        &store,
+        &namespace,
+        super::super::publish::encode_manifest(successor).expect("encode"),
+        Some(tombstone.state.manifest.manifest_no),
+        &timer,
+        0,
+    )
+    .await
+    .expect_err("a tombstone ends its generation");
+    assert_eq!(error.code(), loonfs_api::ErrorCode::NamespaceDeleted);
 }
 
 #[tokio::test]
