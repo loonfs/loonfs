@@ -6,6 +6,124 @@ use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::stores::FakeMultipartStore;
 
 #[tokio::test]
+async fn retired_fork_reclaims_without_reading_inherited_segments() {
+    let directory = tempdir().expect("directory");
+    let inner = LocalFsStore::new(directory.path()).expect("store");
+    let source = NamespaceId::parse("source").expect("namespace");
+    let target = NamespaceId::parse("target").expect("namespace");
+    let setup = context(1_000);
+    bootstrap_namespace(
+        &inner,
+        &source,
+        &setup,
+        &loonfs_test_support::test_actor(),
+        &loonfs_api::NamespaceAccess::unrestricted(),
+        false,
+    )
+    .await
+    .expect("bootstrap source");
+    publish_owned_content(&inner, &source, 1).await;
+    fork_namespace(
+        &inner,
+        &source,
+        &target,
+        &loonfs_test_support::test_actor(),
+        None,
+        &setup,
+    )
+    .await
+    .expect("fork target");
+    write_test_file(&inner, &target, "/owned.txt", "target-write", &setup).await;
+    let upload = crate::protocol::begin_service_proxied_upload(&inner, &target, None, &setup)
+        .await
+        .expect("open upload");
+    delete_namespace(&inner, &target, Default::default(), &setup)
+        .await
+        .expect("delete target");
+    let tombstone = crate::namespace::control::load_current_manifest(&inner, &target)
+        .await
+        .expect("target tombstone");
+    let payload = tombstone.envelope.payload();
+    let retired_pin = PinId::retired(&target, payload.manifest_no);
+    let source_pin = &payload
+        .fork_basis
+        .as_ref()
+        .expect("fork basis")
+        .source_pin_id;
+    let source_segments = payload
+        .runs
+        .iter()
+        .flat_map(|run| &run.segments)
+        .filter(|segment| segment.owner_namespace_id == source)
+        .map(loonfs_objectstore::keys::metadata_segment_object_key)
+        .collect::<Vec<_>>();
+    assert!(!source_segments.is_empty());
+    bootstrap_namespace(
+        &inner,
+        &target,
+        &setup,
+        &loonfs_test_support::test_actor(),
+        &loonfs_api::NamespaceAccess::unrestricted(),
+        false,
+    )
+    .await
+    .expect("recreate target");
+    let store = RecordingStore::new(
+        inner,
+        KeyPredicate::prefix(metadata_segment_prefix(&source)),
+    );
+    let first = gc_namespace(
+        &store,
+        &target,
+        &config(),
+        &context(setup.now_ms + GRACE_MS),
+    )
+    .await
+    .expect("release source pin with retained session");
+    assert_eq!(first.deleted.retired_content_objects, 1);
+    assert_eq!(first.deleted_checkpoints_by_owner.fork, 1);
+    assert_eq!(first.deleted_checkpoints_by_owner.retired, 0);
+    assert!(!checkpoint_exists(&store, &source, source_pin).await);
+    assert!(checkpoint_exists(&store, &target, &retired_pin).await);
+    assert!(read_upload_session(&store, &target, &upload.upload_id)
+        .await
+        .is_some());
+    assert!(store.snapshot().is_empty());
+
+    for key in source_segments {
+        store
+            .inner()
+            .delete(&key)
+            .await
+            .expect("collect source segment");
+    }
+    let expired_at_ms = setup.now_ms + UPLOAD_SESSION_LEASE_MS + GRACE_MS;
+    let repeated = gc_namespace(&store, &target, &config(), &context(expired_at_ms))
+        .await
+        .expect("repeat retirement after source collection");
+    assert_eq!(repeated.deleted.retired_content_objects, 1);
+    assert_eq!(repeated.deleted_checkpoints_by_owner.fork, 0);
+    assert_eq!(repeated.deleted_checkpoints_by_owner.retired, 0);
+    assert!(checkpoint_exists(&store, &target, &retired_pin).await);
+    let finished = gc_namespace(
+        &store,
+        &target,
+        &config(),
+        &context(expired_at_ms + GRACE_MS),
+    )
+    .await
+    .expect("finish retirement after session cleanup");
+    assert_eq!(finished.deleted.retired_content_objects, 1);
+    assert_eq!(finished.deleted.upload_sessions, 1);
+    assert_eq!(finished.deleted_checkpoints_by_owner.retired, 1);
+    assert!(!checkpoint_exists(&store, &target, &retired_pin).await);
+    assert!(read_upload_session(&store, &target, &upload.upload_id)
+        .await
+        .is_none());
+    assert!(store.snapshot().is_empty());
+}
+
+#[tokio::test]
 async fn deleted_generation_uses_its_deletion_clock_without_publishing_a_manifest() {
     let directory = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("retirement-clock").expect("namespace");

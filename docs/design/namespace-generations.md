@@ -84,7 +84,7 @@ Reclaiming a tombstone `T`:
 
 1. Load `T` through the retired pin's manifest reference and verify its checksum, or use the current manifest when it is itself deleted.
 2. Confirm the deadline and the pin range. Otherwise report the derived deadline and stop.
-3. Confirm that the retired pin still exists, or that the current manifest is still `T`. Then scan `T`'s publication rows and delete the exact keys for its owner and generation under the rules of format section 11.8.
+3. Confirm that the retired pin still exists, or that the current manifest is still `T`. Then scan publication rows only in segments owned by `T.namespace_id` and delete the exact keys for its owner and generation under the rules of format section 11.8. Inherited segments cannot hold its publication rows, so later passes do not need them after the source pin is released.
 4. If `T` has a fork basis, delete the source pin it names.
 5. Delete the retired pin, if there is one and no upload session of this generation remains.
 

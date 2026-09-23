@@ -2,7 +2,7 @@
 
 use super::fork_checkpoints::delete_source_checkpoint;
 use super::live_set::{GenerationState, LiveSet, RetiredPin};
-use crate::checkpoint::load_manifest_segments_for_inspection;
+use crate::checkpoint::load_owned_manifest_segments_for_inspection;
 use crate::checkpoint::record::delete_checkpoint_record;
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::namespace::control::load_current_manifest;
@@ -75,9 +75,8 @@ async fn sweep_content<S: ObjectStore + ?Sized>(
     tombstone: &NamespaceManifestPayload,
     report: &mut GcResponse,
 ) -> Result<()> {
-    let segments = load_manifest_segments_for_inspection(
+    let segments = load_owned_manifest_segments_for_inspection(
         store,
-        None,
         &tombstone.namespace_id,
         &tombstone.manifest_no,
     )

@@ -230,6 +230,23 @@ pub(crate) async fn load_manifest_segments_for_inspection<'a, S: ObjectStore + ?
     Ok(segments)
 }
 
+pub(crate) async fn load_owned_manifest_segments_for_inspection<'a, S: ObjectStore + ?Sized>(
+    store: &'a S,
+    namespace_id: &NamespaceId,
+    manifest_no: &ManifestNo,
+) -> Result<VerifiedMetadataSegments<'a, S>, ManifestLoadError> {
+    let mut segments =
+        load_manifest_segments_for_inspection(store, None, namespace_id, manifest_no).await?;
+    for run in Arc::make_mut(&mut segments.scan_runs) {
+        for family in &mut run.segments {
+            family
+                .segments
+                .retain(|segment| &segment.owner_namespace_id == namespace_id);
+        }
+    }
+    Ok(segments)
+}
+
 pub(crate) fn head_from_manifest(
     current_head: &NamespaceReadState,
     manifest: &NamespaceManifestEnvelope,
