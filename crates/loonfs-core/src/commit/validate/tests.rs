@@ -207,7 +207,7 @@ fn validation_context(
         }),
         next_inode_id,
         wal_no: loonfs_api::WalNo(0),
-        last_folded_wal_no: loonfs_api::WalNo(0),
+        folded_wal_no: loonfs_api::WalNo(0),
         status: NamespaceStatus::Active {},
     };
     TestValidationContext {

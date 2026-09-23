@@ -142,12 +142,12 @@ The embedded `DirectDownloadTarget` follows the same rule: a handle with write a
 
 ## Folding
 
-A fold turns the WAL after `last_folded_wal_no` into segments and publishes the next manifest. That manifest is what allows garbage collection to delete the folded WAL objects, so it is where inline bytes must leave the log:
+A fold turns the WAL after `folded_wal_no` into segments and publishes the next manifest. That manifest is what allows garbage collection to delete the folded WAL objects, so it is where inline bytes must leave the log:
 
 1. For each inline value in the range being folded, write the content object at the key its reference names, with a verified immutable write. Run these with bounded concurrency.
 2. Only after every write succeeds, build segments and publish the manifest as today.
 
-The invariant is: **a manifest whose `last_folded_wal_no` is `n` implies a content object exists for every inline value in WAL objects up to `n`.** WAL collection already requires a WAL number to be at or below `last_folded_wal_no`, so that rule stays safe without modification.
+The invariant is: **a manifest whose `folded_wal_no` is `n` implies a content object exists for every inline value in WAL objects up to `n`.** WAL collection already requires a WAL number to be at or below `folded_wal_no`, so that rule stays safe without modification.
 
 An object already present at the key must hold the same bytes, and the verified write checks this. A mismatch, or a value that fails its own checksum, stops the fold without publishing. The bytes are inside a validated WAL payload, so this indicates the same class of fault as a corrupt WAL record, which already stops replay.
 
@@ -161,7 +161,7 @@ A fold becomes due when the unfolded tail reaches 32 segments, as today, or when
 
 No candidate family is added. The existing deletion rules remain, provided the invariants in this document hold: publication records the content ID, the fold materializes before it publishes, one content ID has one lifecycle, and materialization stops at deletion.
 
-- **WAL objects** are collected at or below `last_folded_wal_no` once old enough. The fold invariant makes this safe for inline bytes.
+- **WAL objects** are collected at or below `folded_wal_no` once old enough. The fold invariant makes this safe for inline bytes.
 - **Content objects** written by a fold are published content. They produce the same permanent `content_publications` rows. A live namespace's content prefix is still never enumerated.
 - **Upload sessions** are not involved in an inline write. Unpublished inline content cannot exist, so the ownership question that sessions answer does not arise. A write that falls back uses a session as today.
 - **Deleted namespaces** sweep WAL objects and the owner's content prefix as today. Inline bytes that were never folded are removed with their WAL object. No object was written for them, and nothing needs one.

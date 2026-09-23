@@ -43,7 +43,7 @@ async fn load_index_section_bytes<S: ObjectStore + ?Sized>(
 ) -> Result<Vec<u8>> {
     let end_exclusive = handle
         .offset
-        .checked_add(u64::from(handle.stored_len))
+        .checked_add(u64::from(handle.stored_bytes))
         .ok_or_else(|| GrepError::CorruptIndex {
             message: format!(
                 "index segment `{object_key}` descriptor names bytes past the address space"
@@ -66,13 +66,13 @@ async fn load_index_section_bytes<S: ObjectStore + ?Sized>(
         .ok_or_else(|| GrepError::CorruptIndex {
             message: format!("manifest references missing index segment `{object_key}`"),
         })?;
-    if bytes.len() != handle.stored_len as usize {
+    if bytes.len() != handle.stored_bytes as usize {
         return Err(GrepError::StoreUnavailable {
             object_key: object_key.to_owned(),
             message: format!(
                 "ranged read returned {} bytes, expected {}",
                 bytes.len(),
-                handle.stored_len
+                handle.stored_bytes
             ),
             class: StoreFailureClass::Other,
         });
@@ -89,7 +89,7 @@ pub(crate) fn segment_object_len(object_key: &str, descriptor: &GrepSegmentRef) 
     descriptor
         .index_block
         .offset
-        .checked_add(u64::from(descriptor.index_block.stored_len))
+        .checked_add(u64::from(descriptor.index_block.stored_bytes))
         .ok_or_else(|| GrepError::CorruptIndex {
             message: format!(
                 "index segment `{object_key}` descriptor names bytes past the address space"
@@ -106,14 +106,14 @@ async fn load_and_publish_segment_sections<S: ObjectStore + ?Sized>(
 ) -> Result<WholeSegment> {
     let whole_handle = BlockHandle {
         offset: 0,
-        stored_len: object_len as u32,
-        decoded_len: 0,
+        stored_bytes: object_len as u32,
+        decoded_bytes: 0,
         crc32c: 0,
     };
     let bytes = load_index_section_bytes(store, object_key, &whole_handle).await?;
     let section = |handle: &BlockHandle| -> Option<&[u8]> {
         let start = usize::try_from(handle.offset).ok()?;
-        let end = start.checked_add(handle.stored_len as usize)?;
+        let end = start.checked_add(handle.stored_bytes as usize)?;
         bytes.get(start..end)
     };
     let index_bytes = section(&descriptor.index_block).ok_or_else(|| GrepError::CorruptIndex {
@@ -147,7 +147,7 @@ async fn load_and_publish_segment_sections<S: ObjectStore + ?Sized>(
             ),
             DecodedGrepBlock::Data {
                 block,
-                decoded_bytes: entry.block.decoded_len as usize,
+                decoded_bytes: entry.block.decoded_bytes as usize,
             },
         );
     }
@@ -178,12 +178,12 @@ pub(crate) async fn load_filter_block<S: ObjectStore + ?Sized>(
                     ),
                     DecodedGrepBlock::Index {
                         entries: whole.entries,
-                        decoded_bytes: descriptor.index_block.decoded_len as usize,
+                        decoded_bytes: descriptor.index_block.decoded_bytes as usize,
                     },
                 );
                 return Ok(DecodedGrepBlock::Filter {
                     filter: whole.filter,
-                    decoded_bytes: handle.decoded_len as usize,
+                    decoded_bytes: handle.decoded_bytes as usize,
                 });
             }
             let bytes = load_index_section_bytes(store, object_key, handle).await?;
@@ -193,7 +193,7 @@ pub(crate) async fn load_filter_block<S: ObjectStore + ?Sized>(
             );
             Ok::<_, GrepError>(DecodedGrepBlock::Filter {
                 filter,
-                decoded_bytes: handle.decoded_len as usize,
+                decoded_bytes: handle.decoded_bytes as usize,
             })
         })
         .await?;
@@ -226,12 +226,12 @@ pub(crate) async fn load_index_block<S: ObjectStore + ?Sized>(
                     ),
                     DecodedGrepBlock::Filter {
                         filter: whole.filter,
-                        decoded_bytes: descriptor.filter_block.decoded_len as usize,
+                        decoded_bytes: descriptor.filter_block.decoded_bytes as usize,
                     },
                 );
                 return Ok(DecodedGrepBlock::Index {
                     entries: whole.entries,
-                    decoded_bytes: handle.decoded_len as usize,
+                    decoded_bytes: handle.decoded_bytes as usize,
                 });
             }
             let bytes = load_index_section_bytes(store, object_key, handle).await?;
@@ -241,7 +241,7 @@ pub(crate) async fn load_index_block<S: ObjectStore + ?Sized>(
             );
             Ok::<_, GrepError>(DecodedGrepBlock::Index {
                 entries,
-                decoded_bytes: handle.decoded_len as usize,
+                decoded_bytes: handle.decoded_bytes as usize,
             })
         })
         .await?;
@@ -267,7 +267,7 @@ pub(crate) async fn load_data_block<S: ObjectStore + ?Sized>(
             );
             Ok::<_, GrepError>(DecodedGrepBlock::Data {
                 block,
-                decoded_bytes: handle.decoded_len as usize,
+                decoded_bytes: handle.decoded_bytes as usize,
             })
         })
         .await?;
@@ -315,8 +315,8 @@ mod tests {
         };
         let handle = BlockHandle {
             offset: 0,
-            stored_len: 64,
-            decoded_len: 64,
+            stored_bytes: 64,
+            decoded_bytes: 64,
             crc32c: 0,
         };
         let error = load_index_section_bytes(&store, "segments/one", &handle)

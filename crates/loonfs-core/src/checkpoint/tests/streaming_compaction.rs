@@ -1754,7 +1754,7 @@ async fn install_synthetic_bindings_base(
         .expect("load a synthetic segment index");
         unbind_decoded_bytes += index
             .iter()
-            .map(|entry| u64::from(entry.block.decoded_len))
+            .map(|entry| u64::from(entry.block.decoded_bytes))
             .sum::<u64>();
     }
     super::index_parity::overwrite_manifest(

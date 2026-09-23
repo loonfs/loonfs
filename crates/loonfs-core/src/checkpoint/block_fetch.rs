@@ -85,13 +85,13 @@ pub(super) async fn stored_block_section<T>(
     let bytes = cache.get(&key).await?;
     // The decoder checks the stored length too; checking it first keeps a
     // truncated entry from reaching the decompressor at all.
-    let decoded = if bytes.len() == handle.stored_len as usize {
+    let decoded = if bytes.len() == handle.stored_bytes as usize {
         decode(&bytes, handle).map_err(|error| error.to_string())
     } else {
         Err(format!(
             "entry holds {} bytes, expected {}",
             bytes.len(),
-            handle.stored_len
+            handle.stored_bytes
         ))
     };
     match decoded {
@@ -196,7 +196,7 @@ const WHOLE_SEGMENT_LOAD_MAX_BYTES: u64 = 256 * 1024;
 /// A segment object's total stored length: the index block is the last
 /// section, so it ends the object.
 pub(super) fn segment_object_len(descriptor: &MetadataSegmentRef) -> u64 {
-    descriptor.index_block.offset + u64::from(descriptor.index_block.stored_len)
+    descriptor.index_block.offset + u64::from(descriptor.index_block.stored_bytes)
 }
 
 /// Fetches the byte span that answers one filter or index load with a single
@@ -237,7 +237,7 @@ async fn load_and_publish_segment_sections<S: ObjectStore + ?Sized>(
         load_section_bytes(store, &object_key, fetch_offset, object_len - fetch_offset).await?;
     let section = |handle: &BlockHandle| -> Option<&[u8]> {
         let start = usize::try_from(handle.offset.checked_sub(fetch_offset)?).ok()?;
-        let end = start.checked_add(handle.stored_len as usize)?;
+        let end = start.checked_add(handle.stored_bytes as usize)?;
         bytes.get(start..end)
     };
 
@@ -255,7 +255,7 @@ async fn load_and_publish_segment_sections<S: ObjectStore + ?Sized>(
                     .map_err(|err| segment_codec_error(&object_key, err))?,
             );
             let block = DecodedMetadataSegmentBlock::Index {
-                decoded_bytes: index_handle.decoded_len as usize,
+                decoded_bytes: index_handle.decoded_bytes as usize,
                 entries: Arc::clone(&entries),
             };
             publish_segment_block(
@@ -284,7 +284,7 @@ async fn load_and_publish_segment_sections<S: ObjectStore + ?Sized>(
             let filter = decode_filter_block(stored, &filter_handle)
                 .map_err(|err| segment_codec_error(&object_key, err))?;
             let block = DecodedMetadataSegmentBlock::Filter {
-                decoded_bytes: filter_handle.decoded_len as usize,
+                decoded_bytes: filter_handle.decoded_bytes as usize,
                 filter: Arc::new(filter),
             };
             publish_segment_block(
@@ -411,7 +411,7 @@ async fn load_segment_index_inner<S: ObjectStore + ?Sized>(
         .await
         {
             return Ok(DecodedMetadataSegmentBlock::Index {
-                decoded_bytes: handle.decoded_len as usize,
+                decoded_bytes: handle.decoded_bytes as usize,
                 entries: Arc::new(entries),
             });
         }
@@ -430,13 +430,13 @@ async fn load_segment_index_inner<S: ObjectStore + ?Sized>(
                 store,
                 &object_key,
                 handle.offset,
-                u64::from(handle.stored_len),
+                u64::from(handle.stored_bytes),
             )
             .await?;
             let entries = decode_index_block(&stored, &handle)
                 .map_err(|err| segment_codec_error(&object_key, err))?;
             Ok(DecodedMetadataSegmentBlock::Index {
-                decoded_bytes: handle.decoded_len as usize,
+                decoded_bytes: handle.decoded_bytes as usize,
                 entries: Arc::new(entries),
             })
         }
@@ -481,7 +481,7 @@ pub(super) async fn load_segment_filter<S: ObjectStore + ?Sized>(
                 .map_err(|err| segment_codec_error(&object_key, err))?,
         );
         let block = DecodedMetadataSegmentBlock::Filter {
-            decoded_bytes: handle.decoded_len as usize,
+            decoded_bytes: handle.decoded_bytes as usize,
             filter: Arc::clone(&filter),
         };
         publish_segment_block(segment_cache, Some(memo), cache_key, &block);
@@ -500,7 +500,7 @@ pub(super) async fn load_segment_filter<S: ObjectStore + ?Sized>(
         .await
         {
             return Ok(DecodedMetadataSegmentBlock::Filter {
-                decoded_bytes: handle.decoded_len as usize,
+                decoded_bytes: handle.decoded_bytes as usize,
                 filter: Arc::new(filter),
             });
         }

@@ -128,7 +128,7 @@ async fn try_flush_wal_projection<S: ObjectStore + ?Sized>(
         .manifest_segments
         .manifest()
         .payload()
-        .last_folded_wal_no
+        .folded_wal_no
         == projection.head.wal_no
     {
         return Ok(TryFlushWal::Settled(Box::new(FlushedBasis {
@@ -476,7 +476,7 @@ async fn build_namespace_manifest_for_projection<S: ObjectStore + ?Sized>(
         next_inode_id: projection.head.next_inode_id,
         next_run_no,
         retention_floor_seq: projection.floor_seq,
-        last_folded_wal_no: projection.head.wal_no,
+        folded_wal_no: projection.head.wal_no,
         runs,
         ..projection.manifest_segments.manifest().payload().clone()
     })

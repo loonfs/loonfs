@@ -103,7 +103,7 @@ async fn fill_wal_tail_to_write_stop<S: ObjectStore + ?Sized>(
         store,
         namespace_id,
         loonfs_core::limits::MAX_UNFLUSHED_WAL_SEGMENTS
-            - (current.wal_no.0 - current.last_folded_wal_no.0)
+            - (current.wal_no.0 - current.folded_wal_no.0)
             - 1,
         &MutationContext {
             writer_id: loonfs_api::WriterId::parse("wal-tail-test-writer").expect("writer id"),

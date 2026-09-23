@@ -391,7 +391,7 @@ fn sample_manifest_payload() -> NamespaceManifestPayload {
             writer_id: loonfs_api::WriterId::parse("writer-a").expect("writer"),
             acquired_at_ms: 2_000,
         }),
-        last_folded_wal_no: WalNo(2),
+        folded_wal_no: WalNo(2),
         compactor_epoch: 0,
         namespace_id: namespace_id(),
         manifest_no: ManifestNo(2),
@@ -419,14 +419,14 @@ fn sample_manifest_payload() -> NamespaceManifestPayload {
                 max_row_key: "tombstone".to_owned(),
                 index_block: loonfs_api::wire::sst_blocks::BlockHandle {
                     offset: 4_000,
-                    stored_len: 200,
-                    decoded_len: 400,
+                    stored_bytes: 200,
+                    decoded_bytes: 400,
                     crc32c: 0x1234_5678,
                 },
                 filter_block: loonfs_api::wire::sst_blocks::BlockHandle {
                     offset: 3_900,
-                    stored_len: 100,
-                    decoded_len: 100,
+                    stored_bytes: 100,
+                    decoded_bytes: 100,
                     crc32c: 0x9abc_def0,
                 },
                 // Only small filters are inlined; this descriptor's filter
@@ -548,7 +548,7 @@ fn namespace_manifest_matches_golden_bytes() {
     let encoded = encode_namespace_manifest_json(sample_manifest_payload())
         .expect("encode")
         .into_bytes();
-    assert_matches_golden("namespace_manifest.v1.json", &encoded);
+    assert_matches_golden("manifest.v1.json", &encoded);
     let document: serde_json::Value = serde_json::from_slice(&encoded).expect("manifest json");
     let payload = document["payload"].as_object().expect("manifest payload");
     assert!(!payload.contains_key("index_files"));
@@ -557,7 +557,7 @@ fn namespace_manifest_matches_golden_bytes() {
 
 #[test]
 fn namespace_manifest_golden_decodes_to_sample() {
-    let decoded = decode_namespace_manifest_json(&read_golden("namespace_manifest.v1.json"))
+    let decoded = decode_namespace_manifest_json(&read_golden("manifest.v1.json"))
         .expect("decode golden manifest");
     assert_eq!(decoded.into_payload(), sample_manifest_payload());
 }
@@ -917,9 +917,9 @@ fn control_objects_match_golden_bytes() {
 #[test]
 fn every_durable_status_is_a_kind_tagged_object() {
     let fixtures = [
-        "namespace_manifest.v1.json",
-        "namespace_manifest.deleted.v1.json",
-        "namespace_manifest.retired.v1.json",
+        "manifest.v1.json",
+        "manifest.deleted.v1.json",
+        "manifest.retired.v1.json",
         "control_upload_session.v1.json",
     ];
     for fixture in fixtures {
@@ -1664,7 +1664,7 @@ fn control_object_decode_rejects_tampered_payload_as_checksum_mismatch() {
 #[test]
 fn namespace_manifest_requires_every_activity_counter() {
     for field in ["activity", "content_bytes", "file_revisions", "mutations"] {
-        let encoded = control_document_with_payload_edit("namespace_manifest.v1.json", |payload| {
+        let encoded = control_document_with_payload_edit("manifest.v1.json", |payload| {
             if field == "activity" {
                 payload.as_object_mut().expect("object").remove(field);
             } else {
@@ -2169,7 +2169,7 @@ fn segment_section<'a>(
     bytes: &'a [u8],
     handle: &loonfs_api::wire::sst_blocks::BlockHandle,
 ) -> &'a [u8] {
-    &bytes[handle.offset as usize..handle.offset as usize + handle.stored_len as usize]
+    &bytes[handle.offset as usize..handle.offset as usize + handle.stored_bytes as usize]
 }
 
 fn sample_segment_index(
@@ -2224,8 +2224,8 @@ fn decode_golden_data_block(name: &str) -> loonfs_api::wire::sst_blocks::Decoded
     let stored = rezstd(&payload);
     let handle = BlockHandle {
         offset: 0,
-        stored_len: stored.len() as u32,
-        decoded_len: payload.len() as u32,
+        stored_bytes: stored.len() as u32,
+        decoded_bytes: payload.len() as u32,
         crc32c: crc32c::crc32c(&stored),
     };
     decode_data_block(&stored, &handle).expect("decode golden data block")
@@ -2728,8 +2728,8 @@ fn sst_block_index_entry_schema_matches_golden_bytes() {
         last_row_key: "inode-00000000000000000042".to_owned(),
         block: BlockHandle {
             offset: 7,
-            stored_len: 512,
-            decoded_len: 4096,
+            stored_bytes: 512,
+            decoded_bytes: 4096,
             crc32c: 0xdead_beef,
         },
     }];
@@ -2998,13 +2998,10 @@ fn namespace_manifest_lifecycle_variants_match_golden_bytes() {
         deleted_at_ms: 1_500_000,
     };
     for (name, payload) in [
-        (
-            "namespace_manifest.deleted.v1.json",
-            sample_deleted_manifest(),
-        ),
-        ("namespace_manifest.retired.v1.json", retired),
-        ("namespace_manifest.fork.v1.json", sample_fork_manifest()),
-        ("namespace_manifest.acl.v1.json", sample_acl_manifest()),
+        ("manifest.deleted.v1.json", sample_deleted_manifest()),
+        ("manifest.retired.v1.json", retired),
+        ("manifest.fork.v1.json", sample_fork_manifest()),
+        ("manifest.acl.v1.json", sample_acl_manifest()),
     ] {
         let encoded = encode_namespace_manifest_json(payload.clone())
             .expect("manifest")

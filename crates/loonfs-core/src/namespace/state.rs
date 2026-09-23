@@ -25,13 +25,13 @@ pub struct NamespaceReadState {
     pub head_commit_id: CommitId,
     pub next_inode_id: InodeId,
     pub wal_no: WalNo,
-    pub last_folded_wal_no: WalNo,
+    pub folded_wal_no: WalNo,
 }
 
 impl NamespaceReadState {
     /// Counts the WAL segments after the last folded position, including fences.
     pub fn unfolded_wal_segments(&self) -> u64 {
-        self.wal_no.0 - self.last_folded_wal_no.0
+        self.wal_no.0 - self.folded_wal_no.0
     }
 }
 
@@ -52,8 +52,8 @@ impl From<&NamespaceManifestPayload> for NamespaceReadState {
             seq: manifest.head_seq,
             head_commit_id: manifest.head_commit_id.clone(),
             next_inode_id: manifest.next_inode_id,
-            wal_no: manifest.last_folded_wal_no,
-            last_folded_wal_no: manifest.last_folded_wal_no,
+            wal_no: manifest.folded_wal_no,
+            folded_wal_no: manifest.folded_wal_no,
         }
     }
 }

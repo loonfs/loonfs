@@ -92,7 +92,7 @@ pub enum MetadataReorganizeOutcome {
     name = "loonfs.phase",
     err(level = "warn"),
     skip_all,
-    fields(phase = "reorganize_metadata", key_class = "namespace_manifest")
+    fields(phase = "reorganize_metadata", key_class = "manifest")
 )]
 pub(crate) async fn reorganize_metadata_step<S: ObjectStore + ?Sized>(
     store: &S,
@@ -698,7 +698,7 @@ async fn decoded_group_run_bytes<S: ObjectStore + ?Sized>(
         )
         .await?;
         for entry in index.iter() {
-            decoded_bytes = decoded_bytes.saturating_add(u64::from(entry.block.decoded_len));
+            decoded_bytes = decoded_bytes.saturating_add(u64::from(entry.block.decoded_bytes));
         }
     }
     Ok(decoded_bytes)
@@ -810,7 +810,7 @@ mod planning_tests {
     // stored lengths to exercise GiB-scale layouts without allocating their data.
     fn runs(sizes: &[u64]) -> Vec<MetadataRunManifest> {
         let manifest = decode_namespace_manifest_json(include_bytes!(
-            "../../../loonfs-api/tests/golden/namespace_manifest.v1.json"
+            "../../../loonfs-api/tests/golden/manifest.v1.json"
         ))
         .expect("manifest fixture");
         let mut template = runs_in_reorganization_order(manifest.payload()).remove(0);
@@ -831,7 +831,7 @@ mod planning_tests {
                 };
                 let MetadataFamilySegments { segments, .. } = &mut run.segments[0];
                 segments[0].index_block.offset =
-                    *size - u64::from(segments[0].index_block.stored_len);
+                    *size - u64::from(segments[0].index_block.stored_bytes);
                 run
             })
             .collect()

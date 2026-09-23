@@ -45,8 +45,7 @@ fn is_fold(operation: &OperationContext<'_>) -> bool {
             mode: PutMode::CreateIfAbsent,
         } => loonfs_api::wire::manifest::decode_namespace_manifest_json(bytes).is_ok_and(
             |manifest| {
-                manifest.payload().last_folded_wal_no.0 > 0
-                    && !manifest.payload().status.is_deleted()
+                manifest.payload().folded_wal_no.0 > 0 && !manifest.payload().status.is_deleted()
             },
         ),
         _ => false,

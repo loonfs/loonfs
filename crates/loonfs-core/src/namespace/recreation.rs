@@ -13,7 +13,7 @@ pub(super) struct GenerationSuccessor {
     generation: NamespaceGeneration,
     writer_epoch: WriterEpoch,
     compactor_epoch: u64,
-    last_folded_wal_no: WalNo,
+    folded_wal_no: WalNo,
 }
 
 impl GenerationSuccessor {
@@ -35,7 +35,7 @@ impl GenerationSuccessor {
                 .compactor_epoch
                 .checked_add(1)
                 .ok_or_else(|| CoreError::Internal("compactor epoch overflow".to_owned()))?,
-            last_folded_wal_no: tombstone.last_folded_wal_no,
+            folded_wal_no: tombstone.folded_wal_no,
         })
     }
 
@@ -45,7 +45,7 @@ impl GenerationSuccessor {
         payload.generation_first_manifest_no = self.manifest_no;
         payload.writer_epoch = self.writer_epoch;
         payload.compactor_epoch = self.compactor_epoch;
-        payload.last_folded_wal_no = self.last_folded_wal_no;
+        payload.folded_wal_no = self.folded_wal_no;
     }
 }
 

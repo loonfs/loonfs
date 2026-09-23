@@ -64,7 +64,7 @@ pub(crate) fn folded_manifest_put(
         } if operation.key().contains("/manifests/") => {
             loonfs_api::wire::manifest::decode_namespace_manifest_json(bytes).is_ok_and(
                 |envelope| {
-                    envelope.payload().last_folded_wal_no > loonfs_api::WalNo(0)
+                    envelope.payload().folded_wal_no > loonfs_api::WalNo(0)
                         && !envelope.payload().status.is_deleted()
                 },
             )

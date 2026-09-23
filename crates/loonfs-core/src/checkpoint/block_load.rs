@@ -250,7 +250,7 @@ mod tests {
             .expect("filter fixture row should encode");
         let built = builder.finish().expect("filter fixture should finish");
         let start = built.filter.offset as usize;
-        let end = start + built.filter.stored_len as usize;
+        let end = start + built.filter.stored_bytes as usize;
         let filter = decode_filter_block(&built.bytes[start..end], &built.filter)
             .expect("filter fixture should decode");
         DecodedMetadataSegmentBlock::Filter {
@@ -261,7 +261,7 @@ mod tests {
 
     fn manifest_block() -> DecodedMetadataSegmentBlock {
         let manifest = loonfs_api::wire::manifest::decode_namespace_manifest_json(include_bytes!(
-            "../../../loonfs-api/tests/golden/namespace_manifest.v1.json"
+            "../../../loonfs-api/tests/golden/manifest.v1.json"
         ))
         .expect("valid manifest fixture");
         DecodedMetadataSegmentBlock::Manifest {

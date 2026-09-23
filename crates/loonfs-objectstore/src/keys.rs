@@ -270,14 +270,14 @@ mod tests {
             max_row_key: String::new(),
             index_block: BlockHandle {
                 offset: 0,
-                stored_len: 0,
-                decoded_len: 0,
+                stored_bytes: 0,
+                decoded_bytes: 0,
                 crc32c: 0,
             },
             filter_block: BlockHandle {
                 offset: 0,
-                stored_len: 0,
-                decoded_len: 0,
+                stored_bytes: 0,
+                decoded_bytes: 0,
                 crc32c: 0,
             },
             filter_inline: None,
