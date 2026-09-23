@@ -5,7 +5,7 @@
 use crate::envelope::EnvelopeCodecError;
 use crate::{
     ChangeSeq, CheckpointId, ChecksumAlgorithm, CommitId, ContentId, ContentRef, ContentStoreId,
-    ManifestNo, NamespaceId, SubjectId, UploadId,
+    ManifestNo, NamespaceGeneration, NamespaceId, SubjectId, UploadId,
 };
 use crate::{WriterEpoch, WriterId};
 use serde::de::DeserializeOwned;
@@ -441,6 +441,8 @@ impl std::fmt::Display for UploadSessionRecordStatus {
 pub struct UploadSessionState {
     /// Namespace authorized to consume the staged content.
     pub namespace_id: NamespaceId,
+    /// Generation of the namespace when the session opened; the content key and every reference the session mints carry it.
+    pub owner_generation: NamespaceGeneration,
     /// Durable session identity used by staging and completion requests.
     pub upload_id: UploadId,
     /// Content object this session writes, allocated when the session began.
@@ -464,6 +466,12 @@ pub struct UploadSessionState {
 
 impl UploadSessionState {
     fn validate(&self) -> Result<(), String> {
+        if self.owner_generation.0 == 0 {
+            return Err(format!(
+                "upload session `{}` has a zero owner generation",
+                self.upload_id
+            ));
+        }
         if !matches!(self.status, UploadSessionRecordStatus::Open { .. })
             && self.mode.content_ref().is_some()
         {
@@ -490,6 +498,18 @@ impl UploadSessionState {
                     self.upload_id, self.content_id, content_ref.content_id
                 ));
             }
+            if content_ref.owner_namespace_id != self.namespace_id
+                || content_ref.owner_generation != self.owner_generation
+            {
+                return Err(format!(
+                    "upload session `{}` belongs to namespace `{}` generation `{}` but holds a reference owned by namespace `{}` generation `{}`",
+                    self.upload_id,
+                    self.namespace_id,
+                    self.owner_generation,
+                    content_ref.owner_namespace_id,
+                    content_ref.owner_generation
+                ));
+            }
         }
         if let (
             Some(checksum_algorithm),
@@ -512,6 +532,7 @@ impl UploadSessionState {
 #[serde(deny_unknown_fields)]
 struct StrictUploadSessionState {
     namespace_id: NamespaceId,
+    owner_generation: NamespaceGeneration,
     upload_id: UploadId,
     content_id: ContentId,
     created_at_ms: u64,
@@ -622,6 +643,7 @@ impl<'de> Deserialize<'de> for UploadSessionState {
         let record = StrictUploadSessionState::deserialize(deserializer)?;
         let session = Self {
             namespace_id: record.namespace_id,
+            owner_generation: record.owner_generation,
             upload_id: record.upload_id,
             content_id: record.content_id,
             created_at_ms: record.created_at_ms,
@@ -688,6 +710,7 @@ mod tests {
         let content_ref = ContentRef {
             kind: ContentRefKind::BlobV1,
             owner_namespace_id: crate::NamespaceId::parse("demo").expect("namespace id"),
+            owner_generation: crate::NamespaceGeneration(1),
             content_id: ContentId::parse("con_0123456789abcdef0123456789abcdef")
                 .expect("content id"),
             size_bytes: 5,
@@ -697,6 +720,7 @@ mod tests {
         staged.size_bytes += 1;
         let session = UploadSessionState {
             namespace_id: NamespaceId::parse("demo").expect("namespace id"),
+            owner_generation: crate::NamespaceGeneration(1),
             upload_id: UploadId::parse("upl_0123456789abcdef0123456789abcdef").expect("upload id"),
             content_id: content_ref.content_id.clone(),
             created_at_ms: 1_000,
@@ -725,6 +749,7 @@ mod tests {
         let content_ref = ContentRef {
             kind: ContentRefKind::BlobV1,
             owner_namespace_id: crate::NamespaceId::parse("demo").expect("namespace id"),
+            owner_generation: crate::NamespaceGeneration(1),
             content_id: ContentId::parse("con_0123456789abcdef0123456789abcdef")
                 .expect("content id"),
             size_bytes: 5,
@@ -761,6 +786,7 @@ mod tests {
             ] {
                 let session = UploadSessionState {
                     namespace_id: NamespaceId::parse("demo").expect("namespace id"),
+                    owner_generation: crate::NamespaceGeneration(1),
                     upload_id: UploadId::parse("upl_0123456789abcdef0123456789abcdef")
                         .expect("upload id"),
                     content_id: content_ref.content_id.clone(),

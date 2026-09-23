@@ -170,6 +170,7 @@ impl FsWriter {
         {
             return Ok(PreparedContent::inline(
                 namespace_id.clone(),
+                self.namespace_generation(namespace_id).await?,
                 bytes::Bytes::copy_from_slice(bytes),
             ));
         }
@@ -218,6 +219,7 @@ impl FsWriter {
                 let Some(chunk) = body.next().await else {
                     return Ok(PreparedContent::inline(
                         namespace_id.clone(),
+                        self.namespace_generation(namespace_id).await?,
                         buffered.freeze(),
                     ));
                 };
@@ -461,6 +463,22 @@ impl FsWriter {
         namespace_id: &NamespaceId,
     ) -> Result<loonfs_core::control::VerifiedNamespaceCatalogEntry> {
         self.core.load_namespace_catalog_cached(namespace_id).await
+    }
+
+    /// The publisher's last published head answers without a store request;
+    /// a cold namespace reads its cached catalog. A stale answer is caught by
+    /// commit validation, which fences the session a recreation left behind.
+    pub async fn namespace_generation(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> Result<crate::NamespaceGeneration> {
+        if let Some(generation) = self.publisher.cached_generation(namespace_id) {
+            return Ok(generation);
+        }
+        Ok(self
+            .load_namespace_catalog_for_content_preparation(namespace_id)
+            .await?
+            .generation())
     }
 
     /// Creates a directory at an absolute path.

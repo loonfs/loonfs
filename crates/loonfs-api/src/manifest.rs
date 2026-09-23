@@ -1870,6 +1870,7 @@ mod tests {
             delta_index: 3,
             content_ref: crate::ContentRef::blob_v1(
                 crate::NamespaceId::parse("demo").expect("namespace id"),
+                crate::NamespaceGeneration(1),
                 crate::ContentId::parse("con_0123456789abcdef0123456789abcdef")
                     .expect("valid content id"),
                 b"row key sample",
@@ -1973,6 +1974,7 @@ mod tests {
             delta_index: 3,
             content_ref: crate::ContentRef::blob_v1(
                 crate::NamespaceId::parse("demo").expect("namespace id"),
+                crate::NamespaceGeneration(1),
                 crate::ContentId::parse("con_0123456789abcdef0123456789abcdef")
                     .expect("valid content id"),
                 b"row key prefix sample",
@@ -2110,6 +2112,7 @@ mod tests {
                         delta_index: 3,
                         content_ref: crate::ContentRef::blob_v1(
                             crate::NamespaceId::parse("demo").expect("namespace id"),
+                            crate::NamespaceGeneration(1),
                             crate::ContentId::parse("con_0123456789abcdef0123456789abcdef")
                                 .expect("content id"),
                             b"attribution key test",

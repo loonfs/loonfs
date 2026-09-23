@@ -742,6 +742,7 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
         vec![content_blob(
             &content_store_id,
             &source_namespace_id,
+            inherited_ref.owner_generation,
             &inherited_ref.content_id
         )]
     );
@@ -796,6 +797,7 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
         .list_prefix(&content_owner_prefix(
             &content_store_id,
             &clone_namespace_id,
+            uploaded_ref.owner_generation,
         ))
         .await
         .expect("owner content");
@@ -804,6 +806,7 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
         vec![content_blob(
             &content_store_id,
             &clone_namespace_id,
+            uploaded_ref.owner_generation,
             &uploaded_ref.content_id
         )]
     );
@@ -1664,8 +1667,16 @@ async fn retired_leaf_content_is_reclaimed_while_live_workspaces_keep_their_cont
     .await
     .expect("write sibling");
     let content_store_id = head_state(&store, &source).await.content_store_id;
-    let source_prefix = content_owner_prefix(&content_store_id, &source);
-    let sibling_prefix = content_owner_prefix(&content_store_id, &sibling);
+    let source_prefix = content_owner_prefix(
+        &content_store_id,
+        &source,
+        loonfs_api::NamespaceGeneration(1),
+    );
+    let sibling_prefix = content_owner_prefix(
+        &content_store_id,
+        &sibling,
+        loonfs_api::NamespaceGeneration(1),
+    );
     let source_keys = store
         .list_prefix(&source_prefix)
         .await
@@ -1694,7 +1705,8 @@ async fn retired_leaf_content_is_reclaimed_while_live_workspaces_keep_their_cont
         )
         .await
         .expect("write leaf");
-        let prefix = content_owner_prefix(&content_store_id, &leaf);
+        let prefix =
+            content_owner_prefix(&content_store_id, &leaf, loonfs_api::NamespaceGeneration(1));
         assert!(!store
             .list_prefix(&prefix)
             .await

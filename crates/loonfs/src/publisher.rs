@@ -428,6 +428,16 @@ impl PublisherRegistry {
     /// If an operation currently holds the engine, invalidation is skipped. That
     /// operation validates the live head and reports its retained projection when
     /// it completes.
+    /// The generation of the namespace head its publisher last published
+    /// against, when a publisher exists and nothing holds its engine.
+    pub(crate) fn cached_generation(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> Option<loonfs_api::NamespaceGeneration> {
+        let state = self.shared.lock_state();
+        state.publishers.get(namespace_id)?.cached_generation()
+    }
+
     pub(crate) fn invalidate_projection(&self, namespace_id: &NamespaceId) {
         let totals = {
             let mut state = self.shared.lock_state();
@@ -1099,6 +1109,11 @@ impl NamespacePublisher {
     /// Drops the engine's tail projection, reporting whether it took the
     /// engine to do so. A `false` return means a publication or delete holds
     /// the engine, and that unit's own settlement reports what it retains.
+    fn cached_generation(&self) -> Option<loonfs_api::NamespaceGeneration> {
+        let slot = self.engine.try_lock().ok()?;
+        slot.engine.as_ref()?.cached_generation()
+    }
+
     fn invalidate_projection(&self) -> bool {
         let Ok(mut slot) = self.engine.try_lock() else {
             return false;

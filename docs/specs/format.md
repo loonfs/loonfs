@@ -105,18 +105,18 @@ A change to any name-key mapping changes the format semantics, even if the seria
 
 Each file revision contains one `ContentRef`. The current kind, `blob_v1`, represents a complete file stored as one immutable object. Its bytes are the file bytes; LoonFS does not add an envelope around the content object.
 
-A reference contains the original owner namespace, a random content ID, the complete size, and a full-object checksum. It does not contain a bucket address, object-store path, or content-store ID.
+A reference contains the original owner namespace, that owner's generation, a random content ID, the complete size, and a full-object checksum. It does not contain a bucket address, object-store path, or content-store ID.
 
 To locate the bytes, read the content-store ID from the namespace manifest and the owner and content ID from the reference:
 
 ```text
 reading namespace -> manifest.content_store_id
-content reference -> owner_namespace_id + content_id
+content reference -> owner_namespace_id + owner_generation + content_id
 ```
 
 The original owner's manifest is not required to read inherited content. This matters for forks: a descendant can continue reading the exact objects in its pinned basis after the source namespace is deleted.
 
-New uploads are owned by the namespace that creates them. Inherited references retain their original owners. Forking, restoring a revision, replaying the WAL, or compacting metadata must not replace the owner with the current namespace.
+New uploads are owned by the namespace generation that creates them. Inherited references retain their original owners and owner generations. Forking, restoring a revision, replaying the WAL, or compacting metadata must not replace either value with the current namespace or generation.
 
 Two separate uploads of identical bytes create two objects. There is no cross-upload content deduplication. A retry within the same upload session reuses that session's identity; retry behavior does not depend on discovering another upload with identical contents.
 
@@ -175,7 +175,7 @@ Each namespace records an access mode in its manifest, fixed at creation: `unres
 
 ### 2.1 Storage layout
 
-Namespace metadata is stored below `namespaces/{namespace_id}/`. Content is stored below `content-stores/{content_store_id}/`, with a separate owner prefix for each namespace's new objects.
+Namespace metadata is stored below `namespaces/{namespace_id}/`. Content is stored below `content-stores/{content_store_id}/`, with a separate owner-and-generation prefix for each namespace generation's new objects.
 
 ```text
 namespaces/{namespace_id}/
@@ -189,7 +189,7 @@ namespaces/{namespace_id}/
 
 content-stores/{content_store_id}/
 ├── store.json
-└── objects/{owner_namespace_id}/{shard_1}/{shard_2}/{content_id}
+└── objects/{owner_namespace_id}/{owner_generation}/{shard_1}/{shard_2}/{content_id}
 ```
 
 The content shards are `content_id[4..6]` and `content_id[6..8]`: the first four hexadecimal characters after `con_`, split into two groups. For `con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41`, the shard directories are `9f/2a`.
@@ -394,9 +394,9 @@ Reading speculative bytes does not by itself establish freshness or change reten
 
 ### 5.1 Upload sessions
 
-Every new content object is associated with an upload session before it becomes eligible for metadata publication. The content ID is allocated when the session is created, before the file bytes are read. New content belongs to the session's namespace and is stored under that namespace's owner prefix.
+Every new content object is associated with an upload session before it becomes eligible for metadata publication. The content ID is allocated when the session is created, before the file bytes are read. New content belongs to the session's namespace generation and is stored under that owner-and-generation prefix. A session belongs to the generation in which it opened.
 
-An upload session contains `namespace_id`, `upload_id`, `content_id`, `created_at_ms`, optional `subject_id`, a tagged `mode`, and a tagged `status`.
+An upload session contains `namespace_id`, `owner_generation`, `upload_id`, `content_id`, `created_at_ms`, optional `subject_id`, a tagged `mode`, and a tagged `status`.
 
 | Status | Stored fields | Meaning |
 | --- | --- | --- |
@@ -420,7 +420,7 @@ The mode is fixed for the session's lifetime.
 
 Multipart part progress remains client-side. The part geometry and algorithm remain on the session so resumed work uses the same settings. Provider upload identifiers are retained where required for completion recovery and cleanup.
 
-Every staged or completed reference must match the session's content identity and namespace ownership. Completed direct-upload references must use the algorithm recorded in the mode. Missing required fields, inconsistent references, or invalid mode/status combinations are corrupt.
+Every staged or completed reference must match the session's content identity, namespace ownership, and owner generation. Completed direct-upload references must use the algorithm recorded in the mode. Missing required fields, inconsistent references, or invalid mode/status combinations are corrupt.
 
 ### 5.3 Service-proxied staging
 
@@ -445,6 +445,8 @@ Provider-specific checksum headers, completion APIs, and response encodings belo
 ### 5.5 Admission proofs
 
 Content is admitted only with evidence that the named bytes were verified in a completed upload. The evidence is bound to the namespace, the content store, and the complete content reference, even when several namespaces share a content store. A match on the content ID alone is not enough.
+
+An inline reference owned by the committing namespace must name its current generation. Otherwise the commit is invalid because the inline content is not owned by that namespace generation. A staged reference owned by the committing namespace must also name its current generation; otherwise it is `content_not_prepared`. A reference owned by another namespace is not checked against the committing namespace's generation. These checks still apply when a token or receipt otherwise admits the reference.
 
 The evidence expires. A completed session can produce evidence only during `COMPLETED_UPLOAD_RECEIPT_WINDOW_MS` after its original completion time. A status read or cached response does not restart that window, and nothing is issued at or after its end. A signed token lasts `CONTENT_RECEIPT_TTL_MS` from issuance. Evidence prepared in process without a token expires no later than the last token its session could have issued.
 
@@ -776,7 +778,7 @@ reclaim_after_ms = call.now_ms
 
 The deadline uses the call's fixed clock. A collector establishes retirement only while its elapsed monotonic time since capturing that clock is within `RETIREMENT_PUBLICATION_BUDGET_MS`. This bounds how far the call clock can lag publication, as the retirement grace calculation requires. A concurrent collector's established deadline wins; it must never be cleared or moved. An uncertain publication requires readback. Every successor remains deleted.
 
-Retirement itself deletes no content. After the deadline, collection can sweep the namespace's owner prefix and delete its source pin. The shared descriptor and other owners' content remain outside that sweep.
+Retirement itself deletes no content. After the deadline, collection can sweep the namespace generation's owner prefix and delete its source pin. The shared descriptor, other generations, and other owners' content remain outside that sweep.
 
 ### 9.6 Fork dependencies after deletion
 
@@ -800,7 +802,7 @@ An inode-preserving rename is namespace-local. Across namespaces, a move is a de
 
 Sharing a content store does not authorize arbitrary reference reuse. A fork can retain references through its source pin; other imports write verified bytes under a fresh destination-owned identity. Reusing another owner's identity would require an additional durable source-side retention protocol.
 
-An import resolves the source reference through its owner's current view, including imports within that namespace. It verifies resident inline bytes or streams the content object, then stages the bytes under a fresh destination-owned identity. If the owner is deleted, the import reads the object using the content-store binding in the surviving head. Forks pin manifests, so inherited content is always materialized.
+An import resolves the source reference through its owner's current view, including imports within that namespace. It verifies resident inline bytes or streams the content object, then stages the bytes under a fresh identity owned by the destination's current generation. If the owner is deleted, the import reads the object using the content-store binding in the surviving head. Forks pin manifests, so inherited content is always materialized. Inherited references retain their owner and owner generation.
 
 A subject importing a bare reference must be an administrator of its owner namespace. An unrestricted owner and a request with no subject need no administrator grant. A deleted owner uses the access state in its surviving head.
 
@@ -954,6 +956,8 @@ Uploads are collected through their session records. A live namespace's publishe
 
 Before completion, a session owns its random content identity exclusively and cannot issue admission evidence. Cleanup first wins the terminal transition, then removes its content and any provider-side transfer. A failed cleanup leaves the record for another attempt. Open and aborted sessions still require provider cleanup after namespace retirement because provider upload state can exist outside object listings.
 
+Cleanup derives every content key from the generation recorded on the session. It processes sessions from every generation because an earlier-generation session can still hold an object.
+
 For eligible completed uploads on an active namespace, the collector loads a metadata view lazily and looks up `content_id` in the WAL projection and `content_publications` family. It does not scan every revision. These publication rows are retained permanently, independently of commit receipts and the retention floor. If publication is found, only the session record is removed. If no publication exists, content is deleted before the session. An error permits neither a speculative content deletion nor removal of retry evidence.
 
 The completed-content grace covers all possible admission evidence:
@@ -1002,14 +1006,14 @@ An unrecognized key, retained pin, or uncertain pin read prevents namespace reti
 
 ### 11.8 Sweeping a retired owner's content
 
-After session cleanup, a pass can enumerate the captured namespace's owner prefix only when it observed a deleted manifest with `reclaim_after_ms <= now_ms`. Before that deadline it reports the future reclamation time and skips the prefix.
+After session cleanup, a pass can enumerate the captured namespace generation's owner prefix only when it observed a deleted manifest with `reclaim_after_ms <= now_ms`. Before that deadline it reports the future reclamation time and skips the prefix.
 
-Before listing, reload the manifest once and require deleted status, the same content-store ID, and a retirement deadline no later than the fixed call clock. A mismatch is corruption and a failed read stops the sweep. Retirement cannot regress, so this check covers the family for the call.
+Before listing, reload the manifest once and require deleted status, the same generation, the same content-store ID, and a retirement deadline no later than the fixed call clock. A mismatch is corruption and a failed read stops the sweep. Retirement cannot regress, so this check covers the family for the call.
 
 Every deleted key must parse as a content blob, belong to the exact namespace owner, and lie under:
 
 ```text
-content-stores/{content_store_id}/objects/{namespace_id}/
+content-stores/{content_store_id}/objects/{namespace_id}/{generation}/
 ```
 
 Other owners, descriptors, and unrecognized keys are retained. Recognized blobs can be deleted without a further age check because the retirement deadline covers this sweep. A deletion failure ends the call; the next call starts at the beginning.
@@ -1121,6 +1125,7 @@ A `blob_v1` reference contains all of the following fields:
 | --- | --- |
 | `kind` | `blob_v1`. |
 | `owner_namespace_id` | Namespace that originally wrote the object. |
+| `owner_generation` | Generation of the owner namespace that wrote the object. |
 | `content_id` | `con_` followed by 32 random lowercase hexadecimal characters. |
 | `size_bytes` | Length of the complete file. |
 | `checksum` | Algorithm and digest of the complete file. |
@@ -1131,6 +1136,7 @@ For example, the 15 UTF-8 bytes represented by `Hello, LoonFS!\n`, with a single
 {
   "kind": "blob_v1",
   "owner_namespace_id": "demo",
+  "owner_generation": 1,
   "content_id": "con_0123456789abcdef0123456789abcdef",
   "size_bytes": 15,
   "checksum": {
@@ -1140,7 +1146,7 @@ For example, the 15 UTF-8 bytes represented by `Hello, LoonFS!\n`, with a single
 }
 ```
 
-Within the reading namespace's content store, that ID is located under the owner prefix followed by shards `01/23/` and the complete content ID. The shard characters come from positions `[4..6]` and `[6..8]` of the ASCII ID, after `con_`.
+Within the reading namespace's content store, that ID is located under the owner and generation segments followed by shards `01/23/` and the complete content ID. The generation is an unpadded positive decimal number. The shard characters come from positions `[4..6]` and `[6..8]` of the ASCII ID, after `con_`.
 
 A checksum is `{ "algorithm": <name>, "value": <lowercase hex> }`:
 
@@ -1164,7 +1170,7 @@ The following tables list the durable payload fields. Their transition rules are
 | Manifest reference | `owner_namespace_id`, `manifest_no`, `manifest_head_seq`, `manifest_payload_checksum` |
 | Content-store descriptor | `content_store_id`, `created_at_ms` |
 | Pin record | `namespace_id`, `pin_id`, `manifest_no`, `manifest_head_seq`, `manifest_payload_checksum`, `head_commit_id`, `created_at_ms`, `owner` |
-| Upload session | `namespace_id`, `upload_id`, `content_id`, `created_at_ms`, optional `subject_id`, `mode`, `status` |
+| Upload session | `namespace_id`, `owner_generation`, `upload_id`, `content_id`, `created_at_ms`, optional `subject_id`, `mode`, `status` |
 
 Namespace status is `{"kind":"active"}` or `{"kind":"deleted"}` with required `deleted_at_ms` and optional `reclaim_after_ms` only on the deleted variant. Missing status is invalid. The genesis commit ID is `c_00000000000000000000000000000000`.
 
@@ -1421,7 +1427,7 @@ These patterns define the core object families. Segment owners can differ from t
 | **Upload sessions** | `namespaces/{namespace_id}/uploads/{upload_id}.json` |
 | **Hint** | `namespaces/{namespace_id}/hint.json` |
 | **Content store descriptors** | `content-stores/{content_store_id}/store.json` |
-| **Content objects** | `content-stores/{content_store_id}/objects/{owner_namespace_id}/{content_id[4..6]}/{content_id[6..8]}/{content_id}` |
+| **Content objects** | `content-stores/{content_store_id}/objects/{owner_namespace_id}/{owner_generation}/{content_id[4..6]}/{content_id[6..8]}/{content_id}` |
 
 ## Appendix B. Semantic commit fingerprints
 
@@ -1478,7 +1484,7 @@ A content reference is represented by exactly these fields, in this order:
 {"kind":"blob_v1","content_id":"con_0123456789abcdef0123456789abcdef","size_bytes":15}
 ```
 
-The owner namespace and checksum are excluded from the preimage. Every reference a commit can admit is owned by the committing namespace: an upload records its session's namespace as the owner, and admission requires the reference to match the prepared content exactly, so the owner repeats the `namespace_id` the preimage already names. The checksum is verification evidence rather than a second identity. Both fields are still present and validated on the actual reference; their exclusion from the fingerprint does not make them optional on a commit.
+The owner namespace, owner generation, and checksum are excluded from the preimage. Every reference a commit can admit is owned by the committing namespace and carries its current generation. The owner repeats the `namespace_id` the preimage already names, and the generation is fixed by that namespace's current head. The checksum is verification evidence rather than a second identity. All three fields are still present and validated on the actual reference; their exclusion from the fingerprint does not make them optional on a commit.
 
 Two uploads of identical bytes have different IDs and different fingerprints. A retry reuses the original reference rather than repeating the upload and substituting a new one.
 

@@ -1151,7 +1151,7 @@ absent pin adds no count. Every count field is present, including zero values.
 
 `content_objects` counts reclamation through completed upload sessions.
 `retired_content_objects` counts successful deletion attempts under a retired
-namespace's owner prefix, including a delete that finds the key already absent.
+namespace generation's owner prefix, including a delete that finds the key already absent.
 A retry can repeat a count; these are attempt counts, not a count of distinct
 objects.
 
@@ -1190,13 +1190,13 @@ reclamation, with no fixed completion time or guarantee of physical erasure.
 Dependent forks and retained checkpoints delay retirement. A complete
 post-deletion checkpoint sweep must retain no record before GC records
 `reclaim_after_ms` on the deleted manifest. A later call whose clock is at or after
-that deadline lists and deletes recognized content objects under that
-namespace's owner prefix. It keeps the current manifest, content-store descriptor, and
-every other owner's prefix.
+that deadline lists and deletes recognized content objects under that namespace
+generation's owner prefix. It keeps the current manifest, content-store descriptor,
+every other generation, and every other owner's prefix.
 
-Retention is coarse: a deleted ancestor keeps its entire owner prefix while
-a live descendant still depends on it. GC does not select individual published
-content objects within that prefix. Deleting a file or tree in an active
+Retention is coarse: a deleted ancestor keeps its entire owner-and-generation
+prefix while a live descendant still depends on it. GC does not select individual
+published content objects within that prefix. Deleting a file or tree in an active
 namespace also does not reclaim its published content, because LoonFS retains
 every file revision.
 
@@ -1208,7 +1208,7 @@ Completed upload sessions in active namespaces use the derived content
 reclamation grace, slightly longer than seven days, before GC can reclaim
 staged content that no retained revision references.
 
-Run GC repeatedly, including after a pass finds an empty owner prefix. An
+Run GC repeatedly, including after a pass finds an empty owner-and-generation prefix. An
 already-issued upload capability can write an object after deletion, and a
 late write before a saved cursor is found by the next run. Continued late
 writes, grace windows, dependent forks, retained checkpoints, and maintenance
@@ -1223,8 +1223,8 @@ Retirement also prompts the runner to schedule GC for a fork's source. A
 missed prompt delays reclamation and never permits deletion.
 
 Keep the provider's lifecycle rule for incomplete multipart uploads. Provider
-upload state can exist outside object listings, so owner-prefix deletion does
-not replace session abort and provider cleanup. Deleting a key does not erase
+upload state can exist outside object listings, so deleting an owner-and-generation
+prefix does not replace session abort and provider cleanup. Deleting a key does not erase
 physical versions retained by bucket versioning or retention locks.
 
 Use `retained` to understand what a pass kept. Inspect checkpoint blockers
@@ -1450,11 +1450,12 @@ upload along with the object it was writing. Aborting an upload that already
 assembled its object is safe on every supported provider: it succeeds and
 leaves the object alone.
 
-A content reference contains `kind`, `owner_namespace_id`, `content_id`,
-`size_bytes`, and `checksum`. The owner is the namespace that originally wrote
-the bytes. Clients echo the server's reference unchanged; the owner is required
-in requests and visible in responses. Ownership does not change on a fork or
-restore. Recording the owner reclaims nothing by itself.
+A content reference contains `kind`, `owner_namespace_id`, `owner_generation`,
+`content_id`, `size_bytes`, and `checksum`. The owner and owner generation name
+the namespace generation that originally wrote the bytes. Clients echo the
+server's reference unchanged; both fields are required in requests and visible
+in responses. Neither changes on a fork or restore. Recording them reclaims
+nothing by itself.
 
 A server may return a short-lived `content_token` for completed content.
 Clients treat the token as opaque and can copy it directly into a commit
@@ -1465,7 +1466,7 @@ window remains open. The separate `content_ref` remains available afterward.
 {
   "namespace_id": "demo",
   "upload_id": "upl_...",
-  "content_ref": { "kind": "blob_v1", "owner_namespace_id": "demo", "content_id": "con_9f2a...", "size_bytes": 1234, "checksum": { "algorithm": "sha256", "value": "..." } }
+  "content_ref": { "kind": "blob_v1", "owner_namespace_id": "demo", "owner_generation": 1, "content_id": "con_9f2a...", "size_bytes": 1234, "checksum": { "algorithm": "sha256", "value": "..." } }
 }
 ```
 
@@ -1484,7 +1485,7 @@ tokens naming other refs are ignored.
   "commit_id": "commit-a",
   "content_tokens": [
     {
-      "content_ref": { "kind": "blob_v1", "owner_namespace_id": "demo", "content_id": "con_9f2a...", "size_bytes": 1234, "checksum": { "algorithm": "sha256", "value": "..." } },
+      "content_ref": { "kind": "blob_v1", "owner_namespace_id": "demo", "owner_generation": 1, "content_id": "con_9f2a...", "size_bytes": 1234, "checksum": { "algorithm": "sha256", "value": "..." } },
       "token": "opaque-server-token"
     }
   ],
@@ -1492,7 +1493,7 @@ tokens naming other refs are ignored.
     {
       "kind": "put_file",
       "path": "/docs/report.pdf",
-      "content_ref": { "kind": "blob_v1", "owner_namespace_id": "demo", "content_id": "con_9f2a...", "size_bytes": 1234, "checksum": { "algorithm": "sha256", "value": "..." } },
+      "content_ref": { "kind": "blob_v1", "owner_namespace_id": "demo", "owner_generation": 1, "content_id": "con_9f2a...", "size_bytes": 1234, "checksum": { "algorithm": "sha256", "value": "..." } },
       "behavior": "no_replace"
     }
   ]
@@ -1666,10 +1667,10 @@ metadata, and checkpoint records. Once a complete post-deletion checkpoint
 sweep retains no record, it records retirement on the deleted manifest as a fixed
 `reclaim_after_ms`. The current manifest survives permanently. Retirement itself deletes
 no content. A later GC call whose clock is at or after the deadline sweeps the
-namespace's owner prefix, including previously published content whose upload
-record is gone. A deleted ancestor retains its entire owner prefix while a
-live descendant depends on it. The shared content-store descriptor and other
-owners' objects remain.
+namespace generation's owner prefix, including previously published content
+whose upload record is gone. A deleted ancestor retains that owner-and-generation
+prefix while a live descendant depends on it. The shared content-store descriptor,
+other generations, and other owners' objects remain.
 
 Run GC repeatedly to catch late writes and keep the provider's incomplete
 multipart-upload lifecycle rule. Deleting an object key does not erase
@@ -1717,6 +1718,7 @@ the durable naming rules ([format: field conventions](format.md#121-field-conven
   "content_ref": {
     "kind": "blob_v1",
     "owner_namespace_id": "demo",
+    "owner_generation": 1,
     "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
     "size_bytes": 19482,
     "checksum": { "algorithm": "sha256", "value": "42d..." }
@@ -1827,6 +1829,7 @@ An unrecognized cursor version is also rejected as `invalid_request`.
       "content_ref": {
         "kind": "blob_v1",
         "owner_namespace_id": "demo",
+        "owner_generation": 1,
         "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
         "size_bytes": 19482,
         "checksum": { "algorithm": "sha256", "value": "42d..." }
@@ -1923,6 +1926,7 @@ retained. A directory returns `path_conflict`, an unknown inode returns
       "content_ref": {
         "kind": "blob_v1",
         "owner_namespace_id": "demo",
+        "owner_generation": 1,
         "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
         "size_bytes": 19482,
         "checksum": { "algorithm": "sha256", "value": "42d..." }
@@ -1989,7 +1993,7 @@ create a directory and write into it:
   "message": "import the January report",
   "content_tokens": [
     {
-      "content_ref": { "kind": "blob_v1", "owner_namespace_id": "demo", "content_id": "con_9f2a...", "size_bytes": 1234, "checksum": { "algorithm": "sha256", "value": "..." } },
+      "content_ref": { "kind": "blob_v1", "owner_namespace_id": "demo", "owner_generation": 1, "content_id": "con_9f2a...", "size_bytes": 1234, "checksum": { "algorithm": "sha256", "value": "..." } },
       "token": "opaque-server-token"
     }
   ],
@@ -1998,7 +2002,7 @@ create a directory and write into it:
     {
       "kind": "put_file",
       "path": "/reports/2026/january.pdf",
-      "content_ref": { "kind": "blob_v1", "owner_namespace_id": "demo", "content_id": "con_9f2a...", "size_bytes": 1234, "checksum": { "algorithm": "sha256", "value": "..." } },
+      "content_ref": { "kind": "blob_v1", "owner_namespace_id": "demo", "owner_generation": 1, "content_id": "con_9f2a...", "size_bytes": 1234, "checksum": { "algorithm": "sha256", "value": "..." } },
       "behavior": "no_replace"
     },
     {
@@ -2156,7 +2160,7 @@ Representative response:
       "parent_inode_id": "ino_12",
       "display_name": "january.pdf",
       "revision_no": 1,
-      "content_ref": { "kind": "blob_v1", "owner_namespace_id": "demo", "content_id": "con_9f2a...", "size_bytes": 1234, "checksum": { "algorithm": "sha256", "value": "..." } }
+      "content_ref": { "kind": "blob_v1", "owner_namespace_id": "demo", "owner_generation": 1, "content_id": "con_9f2a...", "size_bytes": 1234, "checksum": { "algorithm": "sha256", "value": "..." } }
     }
   ]
 }
@@ -2484,6 +2488,11 @@ session and nothing else. Completing a service-proxied upload fails if no
 content was staged. Publication never downloads an arbitrary external ref to
 rescue a missing proof.
 
+A session belongs to the namespace generation in which it opened. Every later
+operation checks that generation against the current namespace head. A session
+from another generation answers `upload_not_found`, just like a session that
+does not exist.
+
 A session is `open`, then `completed` or `aborted`, and both of those are
 final ([format: upload sessions](format.md#51-upload-sessions)). What that means at the API:
 
@@ -2495,7 +2504,7 @@ final ([format: upload sessions](format.md#51-upload-sessions)). What that means
 
   ```json
   { "namespace_id": "demo", "upload_id": "upl_...", "mode": "direct_multipart", "status": "open", "expires_at_ms": 1730000000000, "checksum_algorithm": "crc64nvme", "part_size_bytes": 8388608 }
-  { "namespace_id": "demo", "upload_id": "upl_...", "mode": "direct_put", "status": "completed", "completed_at_ms": 1730000001000, "content_ref": { "kind": "blob_v1", "owner_namespace_id": "demo", "content_id": "con_...", "size_bytes": 1234, "checksum": { "algorithm": "sha256", "value": "<64 hex>" } }, "content_token": { "content_ref": { "kind": "blob_v1", "owner_namespace_id": "demo", "content_id": "con_...", "size_bytes": 1234, "checksum": { "algorithm": "sha256", "value": "<64 hex>" } }, "token": "<opaque>" } }
+  { "namespace_id": "demo", "upload_id": "upl_...", "mode": "direct_put", "status": "completed", "completed_at_ms": 1730000001000, "content_ref": { "kind": "blob_v1", "owner_namespace_id": "demo", "owner_generation": 1, "content_id": "con_...", "size_bytes": 1234, "checksum": { "algorithm": "sha256", "value": "<64 hex>" } }, "content_token": { "content_ref": { "kind": "blob_v1", "owner_namespace_id": "demo", "owner_generation": 1, "content_id": "con_...", "size_bytes": 1234, "checksum": { "algorithm": "sha256", "value": "<64 hex>" } }, "token": "<opaque>" } }
   { "namespace_id": "demo", "upload_id": "upl_...", "mode": "service_proxied", "status": "aborted", "aborted_at_ms": 1730000002000 }
   ```
 
@@ -2615,6 +2624,7 @@ Representative content-upload response:
   "content_ref": {
     "kind": "blob_v1",
     "owner_namespace_id": "demo",
+    "owner_generation": 1,
     "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
     "size_bytes": 20591,
     "checksum": { "algorithm": "sha256", "value": "7ab..." }
@@ -2640,6 +2650,7 @@ Representative complete-upload response:
   "content_ref": {
     "kind": "blob_v1",
     "owner_namespace_id": "demo",
+    "owner_generation": 1,
     "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
     "size_bytes": 20591,
     "checksum": { "algorithm": "sha256", "value": "7ab..." }
@@ -2648,6 +2659,7 @@ Representative complete-upload response:
     "content_ref": {
       "kind": "blob_v1",
       "owner_namespace_id": "demo",
+      "owner_generation": 1,
       "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
       "size_bytes": 20591,
       "checksum": { "algorithm": "sha256", "value": "7ab..." }
@@ -2694,6 +2706,7 @@ checks the arriving bytes against:
   "content_ref": {
     "kind": "blob_v1",
     "owner_namespace_id": "demo",
+    "owner_generation": 1,
     "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
     "size_bytes": 314572800,
     "checksum": { "algorithm": "sha256", "value": "42d..." }
@@ -2719,6 +2732,7 @@ The request has no body and its response does not include a path:
   "content_ref": {
     "kind": "blob_v1",
     "owner_namespace_id": "demo",
+    "owner_generation": 1,
     "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
     "size_bytes": 314572800,
     "checksum": { "algorithm": "sha256", "value": "42d..." }
@@ -2798,6 +2812,7 @@ more than three events. The events stay in request order.
           "content_ref": {
             "kind": "blob_v1",
             "owner_namespace_id": "demo",
+            "owner_generation": 1,
             "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
             "size_bytes": 20591,
             "checksum": { "algorithm": "sha256", "value": "7ab..." }
@@ -2844,6 +2859,7 @@ includes its first revision and content reference:
   "content_ref": {
     "kind": "blob_v1",
     "owner_namespace_id": "demo",
+    "owner_generation": 1,
     "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
     "size_bytes": 20591,
     "checksum": { "algorithm": "sha256", "value": "7ab..." }

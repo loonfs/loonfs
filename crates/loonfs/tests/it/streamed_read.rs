@@ -170,6 +170,7 @@ async fn a_streamed_read_rejects_content_that_stopped_matching_its_reference() {
     let key = content_blob(
         catalog.content_store_id(),
         &content_ref.owner_namespace_id,
+        content_ref.owner_generation,
         &content_ref.content_id,
     );
     let mut corrupted = payload.clone();

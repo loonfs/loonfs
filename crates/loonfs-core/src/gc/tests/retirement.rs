@@ -126,8 +126,11 @@ async fn open_direct_upload_outlives_retirement_and_still_gets_provider_cleanup(
         crate::namespace::catalog::load_namespace_content_store_id(&inner, &namespace_id)
             .await
             .expect("content store");
-    let owner_prefix =
-        loonfs_objectstore::keys::content_owner_prefix(&content_store_id, &namespace_id);
+    let owner_prefix = loonfs_objectstore::keys::content_owner_prefix(
+        &content_store_id,
+        &namespace_id,
+        loonfs_api::NamespaceGeneration(1),
+    );
     let store = RecordingStore::new(inner, KeyPredicate::prefix(owner_prefix));
     clock.advance_ms(1);
     delete_namespace(

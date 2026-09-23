@@ -1,7 +1,7 @@
 //! Immutable content references and their checksums.
 
 use crate::hex::{hex_encode_bytes, is_lower_hex_byte};
-use crate::ids::{ContentId, NamespaceId};
+use crate::ids::{ContentId, NamespaceGeneration, NamespaceId};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256 as Sha2Sha256};
 use std::fmt;
@@ -312,6 +312,9 @@ pub enum ContentRefValidationError {
     /// The checksum is not in the algorithm's canonical form.
     #[error("invalid content ref checksum: {0}")]
     InvalidChecksum(ChecksumValidationError),
+    /// The owner generation is zero; generations start at one.
+    #[error("content ref owner generation must be positive")]
+    ZeroOwnerGeneration,
 }
 
 /// A reference to one immutable content object.
@@ -327,6 +330,8 @@ pub struct ContentRef {
     pub kind: ContentRefKind,
     /// Namespace that originally wrote the bytes.
     pub owner_namespace_id: NamespaceId,
+    /// Generation of the owner namespace that wrote the bytes.
+    pub owner_generation: NamespaceGeneration,
     /// Immutable identity of the referenced object.
     pub content_id: ContentId,
     /// Complete byte length of the referenced content.
@@ -340,10 +345,16 @@ impl ContentRef {
     ///
     /// Every caller of this constructor moves the bytes through the LoonFS
     /// write path, so the checksum is trusted by construction.
-    pub fn blob_v1(owner_namespace_id: NamespaceId, content_id: ContentId, bytes: &[u8]) -> Self {
+    pub fn blob_v1(
+        owner_namespace_id: NamespaceId,
+        owner_generation: NamespaceGeneration,
+        content_id: ContentId,
+        bytes: &[u8],
+    ) -> Self {
         Self {
             kind: ContentRefKind::BlobV1,
             owner_namespace_id,
+            owner_generation,
             content_id,
             size_bytes: bytes.len() as u64,
             checksum: Checksum::sha256(bytes),
@@ -357,6 +368,7 @@ impl ContentRef {
     /// ensures that the checksum came from the LoonFS write path.
     pub fn blob_v1_streamed(
         owner_namespace_id: NamespaceId,
+        owner_generation: NamespaceGeneration,
         content_id: ContentId,
         size_bytes: u64,
         digest: Sha256,
@@ -364,6 +376,7 @@ impl ContentRef {
         Self {
             kind: ContentRefKind::BlobV1,
             owner_namespace_id,
+            owner_generation,
             content_id,
             size_bytes,
             checksum: digest.finish(),
@@ -378,6 +391,9 @@ impl ContentRef {
         self.checksum
             .validate()
             .map_err(ContentRefValidationError::InvalidChecksum)?;
+        if self.owner_generation.0 == 0 {
+            return Err(ContentRefValidationError::ZeroOwnerGeneration);
+        }
         Ok(())
     }
 }
@@ -439,6 +455,7 @@ mod tests {
         let json = r#"{
             "kind": "blob_v1",
             "owner_namespace_id": "demo",
+            "owner_generation": 1,
             "content_id": "con_0123456789abcdef0123456789abcdef",
             "size_bytes": 5,
             "checksum": {"algorithm": "md5", "value": "00000000000000000000000000000000"}
@@ -447,9 +464,10 @@ mod tests {
     }
 
     #[test]
-    fn a_content_ref_requires_an_owner_and_one_checksum() {
+    fn a_content_ref_requires_an_owner_generation_and_one_checksum() {
         let content_ref = ContentRef::blob_v1(
             crate::NamespaceId::parse("demo").expect("namespace id"),
+            crate::NamespaceGeneration(1),
             content_id(),
             b"hello",
         );
@@ -461,14 +479,21 @@ mod tests {
 
         let document = serde_json::to_value(&content_ref).expect("encode content ref");
         let object = document.as_object().expect("content ref object");
-        assert_eq!(object.len(), 5);
+        assert_eq!(object.len(), 6);
         assert_eq!(object["owner_namespace_id"], "demo");
+        assert_eq!(object["owner_generation"], 1);
         let mut missing_owner = document.clone();
         missing_owner
             .as_object_mut()
             .expect("reference")
             .remove("owner_namespace_id");
         assert!(serde_json::from_value::<ContentRef>(missing_owner).is_err());
+        let mut missing_generation = document.clone();
+        missing_generation
+            .as_object_mut()
+            .expect("reference")
+            .remove("owner_generation");
+        assert!(serde_json::from_value::<ContentRef>(missing_generation).is_err());
         assert!(object.contains_key("checksum"));
         assert!(!object.contains_key("storage_checksum"));
         assert!(!object.contains_key("whole_file_sha256"));
@@ -478,6 +503,7 @@ mod tests {
     fn validation_rejects_a_malformed_checksum() {
         let mut content_ref = ContentRef::blob_v1(
             crate::NamespaceId::parse("demo").expect("namespace id"),
+            crate::NamespaceGeneration(1),
             content_id(),
             b"hello",
         );

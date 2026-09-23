@@ -3,12 +3,13 @@
 use crate::control_object::ControlObjectLoadError;
 use crate::namespace::control::load_current_manifest;
 use crate::namespace::state::NamespaceReadState;
-use loonfs_api::{ContentStoreId, NamespaceAccess, NamespaceId};
+use loonfs_api::{ContentStoreId, NamespaceAccess, NamespaceGeneration, NamespaceId};
 use loonfs_objectstore::ObjectStore;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedNamespaceCatalogEntry {
     namespace_id: NamespaceId,
+    generation: NamespaceGeneration,
     content_store_id: ContentStoreId,
     access: NamespaceAccess,
 }
@@ -21,6 +22,7 @@ impl VerifiedNamespaceCatalogEntry {
     pub fn from_head(head: &NamespaceReadState) -> Self {
         Self {
             namespace_id: head.namespace_id.clone(),
+            generation: head.generation,
             content_store_id: head.content_store_id.clone(),
             access: head.access.clone(),
         }
@@ -28,6 +30,10 @@ impl VerifiedNamespaceCatalogEntry {
 
     pub fn namespace_id(&self) -> &NamespaceId {
         &self.namespace_id
+    }
+
+    pub fn generation(&self) -> NamespaceGeneration {
+        self.generation
     }
 
     pub fn content_store_id(&self) -> &ContentStoreId {

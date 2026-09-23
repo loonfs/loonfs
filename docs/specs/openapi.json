@@ -741,6 +741,10 @@
             "$ref": "#/components/schemas/ContentRefKind",
             "description": "Content strategy used by the referenced object."
           },
+          "owner_generation": {
+            "$ref": "#/components/schemas/NamespaceGeneration",
+            "description": "Generation of the owner namespace that wrote the bytes."
+          },
           "owner_namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
             "description": "Namespace that originally wrote the bytes."
@@ -755,6 +759,7 @@
         "required": [
           "kind",
           "owner_namespace_id",
+          "owner_generation",
           "content_id",
           "size_bytes",
           "checksum"

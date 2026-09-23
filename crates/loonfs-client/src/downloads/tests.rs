@@ -102,6 +102,7 @@ async fn a_streamed_read_is_refused_when_the_bytes_are_not_what_the_grant_named(
     let served = b"something else entirely, and a different length".to_vec();
     let content_ref = ContentRef::blob_v1(
         loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
+        loonfs_api::NamespaceGeneration(1),
         ContentId::generate(),
         &payload,
     );
@@ -128,6 +129,7 @@ fn crc32c_content_ref(bytes: &[u8]) -> ContentRef {
     ContentRef {
         kind: loonfs_api::ContentRefKind::BlobV1,
         owner_namespace_id: loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
+        owner_generation: loonfs_api::NamespaceGeneration(1),
         content_id: ContentId::generate(),
         size_bytes: bytes.len() as u64,
         checksum: loonfs_api::Checksum::crc32c(bytes),
@@ -220,6 +222,7 @@ async fn a_streamed_read_writes_the_granted_object_and_reports_its_length() {
     let payload = b"exactly the bytes the grant described".to_vec();
     let content_ref = ContentRef::blob_v1(
         loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
+        loonfs_api::NamespaceGeneration(1),
         ContentId::generate(),
         &payload,
     );
@@ -245,6 +248,7 @@ async fn a_resumed_download_asks_for_the_rest_and_verifies_the_whole_file() {
     let held = 10;
     let content_ref = ContentRef::blob_v1(
         loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
+        loonfs_api::NamespaceGeneration(1),
         ContentId::generate(),
         &payload,
     );
@@ -284,6 +288,7 @@ async fn a_resumed_inode_download_asks_for_the_rest_and_verifies_the_whole_file(
     let held = 10;
     let content_ref = ContentRef::blob_v1(
         loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
+        loonfs_api::NamespaceGeneration(1),
         ContentId::generate(),
         &payload,
     );
@@ -327,6 +332,7 @@ async fn a_resume_is_refused_until_it_accounts_for_what_it_holds() {
     let payload = b"a whole object".to_vec();
     let content_ref = ContentRef::blob_v1(
         loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
+        loonfs_api::NamespaceGeneration(1),
         ContentId::generate(),
         &payload,
     );
@@ -365,6 +371,7 @@ async fn a_grant_that_does_not_authorize_a_read_is_refused_before_any_request() 
     let payload = b"unused".to_vec();
     let content_ref = ContentRef::blob_v1(
         loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
+        loonfs_api::NamespaceGeneration(1),
         ContentId::generate(),
         &payload,
     );

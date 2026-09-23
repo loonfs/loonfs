@@ -49,7 +49,9 @@ impl CandidateFamily {
             Self::MetadataSegments => metadata_segment_prefix(namespace_id),
             Self::Checkpoints => checkpoint_prefix(namespace_id),
             Self::UploadSessions => upload_session_prefix(namespace_id),
-            Self::OwnedContent => content_owner_prefix(&live.content_store_id, namespace_id),
+            Self::OwnedContent => {
+                content_owner_prefix(&live.content_store_id, namespace_id, live.owner_generation)
+            }
         }
     }
 }

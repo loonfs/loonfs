@@ -326,6 +326,7 @@ mod tests {
     fn a_file_entry_serializes_its_required_payload_with_the_kind() {
         let content_ref = ContentRef::blob_v1(
             crate::NamespaceId::parse("demo").expect("namespace id"),
+            crate::NamespaceGeneration(1),
             crate::ContentId::generate(),
             b"hello",
         );
@@ -393,6 +394,7 @@ mod tests {
 
         let content_ref = ContentRef::blob_v1(
             crate::NamespaceId::parse("demo").expect("namespace id"),
+            crate::NamespaceGeneration(1),
             crate::ContentId::generate(),
             b"hello",
         );

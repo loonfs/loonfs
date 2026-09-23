@@ -149,10 +149,18 @@ impl CommitCandidate {
 
     /// Lists inline values in the order their operations first name them.
     pub fn ordered_inline_content(&self, namespace_id: &NamespaceId) -> Result<Vec<InlineContent>> {
+        let Some(namespace_generation) = self
+            .inline_content
+            .first()
+            .map(|value| value.content_ref().owner_generation)
+        else {
+            return Ok(Vec::new());
+        };
         crate::protocol::validate_inline_content_references(
             &self.request,
             &self.inline_content,
             namespace_id,
+            namespace_generation,
         )?;
         let mut values: std::collections::HashMap<_, _> = self
             .inline_content
@@ -569,6 +577,14 @@ impl NamespaceCommitEngine {
         self.projection_loaded_ms = None;
     }
 
+    /// The generation of the head this engine last published against, without
+    /// touching the store.
+    pub fn cached_generation(&self) -> Option<loonfs_api::NamespaceGeneration> {
+        self.publish_tail_projection
+            .as_ref()
+            .map(|projection| projection.head.generation)
+    }
+
     /// Returns the retained tail projection's memory weight, or `None` when no
     /// projection is cached. Runtimes can sum this value across namespace engines
     /// to enforce a global cache limit.
@@ -950,6 +966,7 @@ mod tests {
             ContentStoreId::parse("cs_00000000000000000000000000000001").expect("store"),
             ContentRef::blob_v1(
                 loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
+                loonfs_api::NamespaceGeneration(1),
                 ContentId::generate(),
                 b"proof",
             ),
@@ -1032,6 +1049,7 @@ mod tests {
 
         let content_ref = ContentRef::blob_v1(
             loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
+            loonfs_api::NamespaceGeneration(1),
             ContentId::generate(),
             b"proof",
         );

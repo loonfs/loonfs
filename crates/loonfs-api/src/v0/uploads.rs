@@ -434,6 +434,7 @@ mod tests {
     fn open_sessions_carry_only_their_modes_fields() {
         let content_ref = ContentRef::blob_v1(
             NamespaceId::parse("demo").expect("namespace id"),
+            crate::NamespaceGeneration(1),
             ContentId::generate(),
             b"hello",
         );
@@ -564,6 +565,7 @@ mod tests {
                 completed_at_ms: 3_000,
                 content_ref: ContentRef::blob_v1(
                     crate::NamespaceId::parse("demo").expect("namespace id"),
+                    crate::NamespaceGeneration(1),
                     ContentId::generate(),
                     b"hello",
                 ),
@@ -587,6 +589,7 @@ mod tests {
         let upload_id = UploadId::parse("upl_00000000000000000000000000000001").expect("upload id");
         let content_ref = ContentRef::blob_v1(
             crate::NamespaceId::parse("demo").expect("namespace id"),
+            crate::NamespaceGeneration(1),
             ContentId::parse("con_0123456789abcdef0123456789abcdef").expect("content id"),
             b"hello",
         );
@@ -621,6 +624,7 @@ mod tests {
                 "content_ref": {
                     "kind": "blob_v1",
                     "owner_namespace_id": "demo",
+                    "owner_generation": 1,
                     "content_id": "con_0123456789abcdef0123456789abcdef",
                     "size_bytes": 5,
                     "checksum": {
@@ -654,6 +658,7 @@ mod tests {
             "content_ref": {
                 "kind": "blob_v1",
                 "owner_namespace_id": "demo",
+                "owner_generation": 1,
                 "content_id": "con_0123456789abcdef0123456789abcdef",
                 "size_bytes": 5,
                 "checksum": {
