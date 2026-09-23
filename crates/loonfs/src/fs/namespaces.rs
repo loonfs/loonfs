@@ -90,7 +90,7 @@ impl FsWriter {
             .fork_namespace(
                 new_namespace_id,
                 &options.actor_id,
-                options.snapshot_id.map(Into::into).as_ref(),
+                options.snapshot_id.as_ref(),
             )
             .await
             .map_err(RuntimeError::from);

@@ -60,7 +60,7 @@ impl Client {
         })
     }
 
-    /// Lists one bounded page of active checkpoint records (maintenance API group).
+    /// Lists one bounded page of active pins (maintenance API group).
     pub async fn list_checkpoints_page(
         &self,
         namespace_id: &NamespaceId,
@@ -82,7 +82,7 @@ impl Client {
     pub async fn delete_checkpoint(
         &self,
         namespace_id: &NamespaceId,
-        checkpoint_id: &CheckpointId,
+        checkpoint_id: &PinId,
     ) -> Result<DeleteCheckpointResponse> {
         let url = format!(
             "{}/v0/maintenance/namespaces/{namespace_id}/checkpoints/{checkpoint_id}",

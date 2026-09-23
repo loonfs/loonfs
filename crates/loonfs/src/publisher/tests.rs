@@ -1438,7 +1438,7 @@ async fn delete_barrier_publishes_admitted_work_and_rejects_later_work() {
         .await
         .expect("final statistics");
     assert_eq!(statistics.activity.mutations.get(), 2);
-    assert_eq!(statistics.manifest.manifest_head_seq, response.head_seq);
+    assert_eq!(statistics.manifest.head_seq, response.head_seq);
     assert_eq!(statistics.inode_record_count, 3);
 
     // Admitted-after work is rejected, and the tombstone fails new

@@ -116,13 +116,12 @@ pub use digest::sha256_digest;
 pub use error::{ErrorCode, ErrorKind};
 pub use ids::{
     generated_id, next_public_ordinal, BindingGeneration, BindingGenerationValidationError,
-    ChangeSeq, CheckpointId, CommitId, CommitIdValidationError, ContentId, ContentStoreId,
+    ChangeSeq, CommitId, CommitIdValidationError, ContentId, ContentStoreId,
     GeneratedIdValidationError, IndexSegmentId, InodeId, InodeKind, ManifestNo,
     MetadataCompactionId, MetadataSegmentId, NameKey, NameKeyValidationError, NamespaceGeneration,
-    NamespaceId, NamespaceIdValidationError, PublicOrdinalRangeError, RevisionNo, RunNo,
-    SnapshotId, SnapshotIdValidationError, UploadId, WalNo, WriterEpoch, WriterId,
-    WriterIdValidationError, FIRST_ALLOCATABLE_INODE_ID, MAX_ID_BYTES, MAX_NAME_KEY_BYTES,
-    MAX_PUBLIC_INTEGER, ROOT_INODE_ID,
+    NamespaceId, NamespaceIdValidationError, PinId, PublicOrdinalRangeError, RevisionNo, RunNo,
+    UploadId, WalNo, WriterEpoch, WriterId, WriterIdValidationError, FIRST_ALLOCATABLE_INODE_ID,
+    MAX_ID_BYTES, MAX_NAME_KEY_BYTES, MAX_PUBLIC_INTEGER, ROOT_INODE_ID,
 };
 pub use manifest::{MetadataFamilyGroup, NamespaceAccess};
 pub use name_policy::name_key_for_display_name;

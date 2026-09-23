@@ -23,7 +23,7 @@ This specification defines the storage layout, encodings, read and write protoco
 | [5. Uploading content](#5-uploading-content) | Upload sessions, direct transfers, and admission proofs |
 | [6. Publishing a commit](#6-publishing-a-commit) | Writer fencing, validation, group commit, and retries |
 | [7. Materializing metadata](#7-materializing-metadata) | Manifests, runs, segments, and publication |
-| [8. Checkpoints and snapshots](#8-checkpoints-and-snapshots) | Stable views, verification, deletion, and expiry |
+| [8. Pins](#8-pins) | Stable views, verification, deletion, and expiry |
 | [9. Namespace lifecycle and forks](#9-namespace-lifecycle-and-forks) | Creation, copy-on-write forks, deletion, and retirement |
 | [10. Retention and compaction](#10-retention-and-compaction) | History boundaries and metadata rewrites |
 | [11. Garbage collection](#11-garbage-collection) | Reference roots, collection safety, and complete passes |
@@ -249,8 +249,8 @@ A durable reference to a manifest contains:
 | --- | --- |
 | `owner_namespace_id` | Namespace storing the manifest. |
 | `manifest_no` | Number determining its object key. |
-| `manifest_head_seq` | Head sequence recorded by that manifest. |
-| `manifest_payload_checksum` | Digest that must match its stored payload. |
+| `head_seq` | Head sequence recorded by that manifest. |
+| `payload_checksum` | Digest that must match its stored payload. |
 
 A pin refers to a manifest under its own namespace and stores these manifest fields directly, using its `namespace_id` as owner. A fork basis embeds a reference to a source namespace and records the source pin ID. Segment references inside that manifest retain their own owners; not every segment must belong to the manifest's owner.
 
@@ -274,7 +274,7 @@ A mutable-object read must return the bytes and the compare token for those same
 
 Successful writes and deletes require strong consistency. Prefix enumeration returns keys in ascending lexicographic order. The collection protocols depend on this behavior; “S3 compatible” is not, by itself, evidence of conformance.
 
-Readers determine committed state from verified manifests and numbered WAL objects. Collectors also use listings to find candidates and dependencies. In particular, namespace retirement requires a complete checkpoint scan after deletion. The format does not assume a multi-object transaction or a snapshot across separately read control objects.
+Readers determine committed state from verified manifests and numbered WAL objects. Collectors also use listings to find candidates and dependencies. In particular, namespace retirement requires a complete pin scan after deletion. The format does not assume a multi-object transaction or a snapshot across separately read control objects.
 
 ### 3.2 Immutable writes and retries
 
@@ -649,9 +649,9 @@ The counters are public integers within the bound in the API specification; exce
 
 Grep reports its own referenced segment bytes under Appendix D. Its manifest and indexing position are independent of the core observation. A new fork starts without an index; a failed index read must not be reported as zero bytes.
 
-## 8. Checkpoints and snapshots
+## 8. Pins
 
-A checkpoint is a durable pin to one manifest. It preserves that manifest and its segments after newer manifests are published. Ordinary flushing creates no pin; applications, operators, and forks create pins when they need a stable retained basis.
+A pin is a durable record that holds one manifest. It preserves that manifest and its segments after newer manifests are published. Ordinary flushing creates no pin; applications, operators, and forks create pins when they need a stable retained basis.
 
 ### 8.1 Records and owners
 
@@ -666,13 +666,13 @@ Each pin is stored under `pins/{pin_id}.json`. Its positioned ID identifies the 
 
 The record also stores namespace, manifest number, head sequence, payload checksum, head commit ID, and creation time. It has no lifecycle status. Creating the record establishes the candidate pin; deleting it ends the pin. Fork pins have no expiry or renewal protocol.
 
-### 8.2 Creating and verifying a checkpoint
+### 8.2 Creating and verifying a pin
 
 For a pin created from the current head:
 
 1. Flush the observed WAL tail and select a verified current manifest.
 2. Write a fresh pin with put-if-absent.
-3. Load the current manifest again within `CHECKPOINT_VERIFY_BUDGET_MS`.
+3. Load the current manifest again within `PIN_VERIFY_BUDGET_MS`.
 4. Require the same manifest number and payload checksum, an active namespace, and a retention floor no later than the pinned head sequence.
 
 If another manifest became current, delete the candidate pin and retry from a fresh basis. A deletion, an exceeded verification budget, or exhausted contention retries prevents acknowledgement. Store and cleanup failures also prevent acknowledgement. The number and checksum checks apply even when the new manifest has the same logical sequence.
@@ -683,7 +683,7 @@ A fork of a snapshot uses a different protecting root. It first writes a fork pi
 
 ### 8.3 Reads, deletion, and expiry
 
-A checkpoint read derives the manifest number from the ID, confirms the pin's existence and owner, and verifies its manifest reference. Reads use that manifest directly, without replaying later namespace history.
+A read through a pin derives the manifest number from the ID, confirms the pin's existence and owner, and verifies its manifest reference. Reads use that manifest directly, without replaying later namespace history.
 
 User pins remain readable while their records exist, even after an optional expiry. Snapshot reads and extensions require an unexpired snapshot owner. Expiry and physical deletion are therefore different events: an expired snapshot remains a collection root until its record is deleted after grace.
 
@@ -787,7 +787,7 @@ Sharing a content store does not authorize arbitrary reference reuse. A fork can
 
 An import of the owner's current generation resolves the source reference through the owner's current view, including imports within that namespace. Resident inline bytes are used only when the reference's owner and generation match the reading namespace and generation. Otherwise the import streams the content object. If the owner is deleted, the import uses the content-store binding in the surviving head.
 
-For a reference from an earlier owner generation, the import lists the owner's pin prefix and keeps only ids equal to `CheckpointId::retired(owner, manifest_no)` for their own manifest number. It loads those tombstones and uses the content-store binding of the one whose `generation` equals `owner_generation`. Without a retired pin for that generation, the content is missing. The import verifies the bytes and stages them under a fresh identity owned by the destination's current generation. Forks pin manifests, so inherited content is always materialized. Inherited references retain their owner and owner generation.
+For a reference from an earlier owner generation, the import lists the owner's pin prefix and keeps only ids equal to `PinId::retired(owner, manifest_no)` for their own manifest number. It loads those tombstones and uses the content-store binding of the one whose `generation` equals `owner_generation`. Without a retired pin for that generation, the content is missing. The import verifies the bytes and stages them under a fresh identity owned by the destination's current generation. Forks pin manifests, so inherited content is always materialized. Inherited references retain their owner and owner generation.
 
 A subject importing a bare reference must be an administrator of its owner namespace. An unrestricted owner and a request with no subject need no administrator grant. Authorization always uses the owner's current head, including after recreation. A deleted owner uses the access state in its surviving head.
 
@@ -839,7 +839,7 @@ A rewrite must refuse an ambiguous attribute or access history in which two rows
 
 The active-deletion family is a current-state index, not an independent historical trash log. Its removal marker sorts before the corresponding listed entry. Bottom-anchored compaction can remove the pair without leaving an older entry that would reappear in a subsequent read.
 
-Compaction must preserve visible metadata at every retained sequence. It publishes a complete replacement through the numbered manifest protocol. Input objects remain available until no protected manifest or checkpoint references them; successful publication is not permission to delete them immediately.
+Compaction must preserve visible metadata at every retained sequence. It publishes a complete replacement through the numbered manifest protocol. Input objects remain available until no protected manifest or pin references them; successful publication is not permission to delete them immediately.
 
 ### 10.4 Streaming compaction
 
@@ -989,7 +989,7 @@ Fork pins use this decision table:
 | Target cannot be read | Retain the pin. |
 | Target data is invalid | Report corruption. |
 
-The source discovers the target's current manifest through its hint; it does not read the target WAL. An absent target does not need a tombstone. When the current target does not name the pin and its generation is above 1, list its pin prefix. Select keys whose ID equals `CheckpointId::retired(target, manifest_no)` for their own manifest number and load those tombstones without reading pin bodies. Generation 1 needs no extra reads. A matching target's collector deletes the source pin when it reclaims the generation.
+The source discovers the target's current manifest through its hint; it does not read the target WAL. An absent target does not need a tombstone. When the current target does not name the pin and its generation is above 1, list its pin prefix. Select keys whose ID equals `PinId::retired(target, manifest_no)` for their own manifest number and load those tombstones without reading pin bodies. Generation 1 needs no extra reads. A matching target's collector deletes the source pin when it reclaims the generation.
 
 An unrecognized key prevents reclamation of every generation. Any other listed pin prevents reclamation of the generation whose manifest range contains it, even if the pass later deletes that pin. A candidate pin written too late to verify must be deleted by its creator; if that creator crashes first, its installation grace and owner rules still apply.
 
@@ -1078,7 +1078,7 @@ This appendix is the field and encoding reference for the protocols above. Field
 | Namespace manifest | `manifest` | Uncompressed JSON | 1 |
 | Namespace hint | `hint` | Uncompressed JSON | 1 |
 | Metadata segment | No envelope | Block sections described in A.7 | Governed by namespace manifest version 1 |
-| Pin record | `checkpoint_record` | Uncompressed JSON | 1 |
+| Pin record | `pin` | Uncompressed JSON | 1 |
 | Upload session | `upload_session` | Uncompressed JSON | 1 |
 | Content-store descriptor | `content_store` | Uncompressed JSON | 1 |
 | Content object | No envelope | Complete file bytes | Referenced as `blob_v1` |
@@ -1152,10 +1152,10 @@ The following tables list the durable payload fields. Their transition rules are
 | --- | --- |
 | Namespace hint | `namespace_id`, `manifest_no`, `wal_no` |
 | Writer block | `writer_id`, `acquired_at_ms` |
-| Fork basis | `manifest`, `source_checkpoint_id`, `source_generation` |
-| Manifest reference | `owner_namespace_id`, `manifest_no`, `manifest_head_seq`, `manifest_payload_checksum` |
+| Fork basis | `manifest`, `source_pin_id`, `source_generation` |
+| Manifest reference | `owner_namespace_id`, `manifest_no`, `head_seq`, `payload_checksum` |
 | Content-store descriptor | `content_store_id`, `created_at_ms` |
-| Pin record | `namespace_id`, `pin_id`, `manifest_no`, `manifest_head_seq`, `manifest_payload_checksum`, `head_commit_id`, `created_at_ms`, `owner` |
+| Pin record | `namespace_id`, `pin_id`, `manifest_no`, `head_seq`, `head_commit_id`, `payload_checksum`, `created_at_ms`, `owner` |
 | Upload session | `namespace_id`, `owner_generation`, `content_store_id`, `upload_id`, `content_id`, `created_at_ms`, optional `subject_id`, `mode`, `status` |
 
 Namespace status is `{"kind":"active"}` or `{"kind":"deleted"}` with required `deleted_at_ms` only on the deleted variant. Missing status is invalid. The genesis commit ID is `c_00000000000000000000000000000000`.
@@ -1528,7 +1528,7 @@ Publication and collection use the timing relationships below. Configurable sizi
 | Constant | Milliseconds | Interpretation |
 | --- | ---: | --- |
 | `WAL_PUBLISH_BUDGET_MS` | 60,000 | Observing the planning tip through initiation of its next numbered put. |
-| `CHECKPOINT_VERIFY_BUDGET_MS` | 60,000 | Pin write through completion of post-write verification. |
+| `PIN_VERIFY_BUDGET_MS` | 60,000 | Pin write through completion of post-write verification. |
 | `METADATA_PUBLICATION_BUDGET_MS` | 900,000 | First output through initiation of a bounded manifest publication. |
 | `PROVIDER_OPERATION_DEADLINE_MS` | 120,000 | Shared client-operation retry budget. |
 | `PROVIDER_ATTEMPT_TIMEOUT_MS` | 30,000 | One control-operation attempt. |
@@ -1545,7 +1545,7 @@ A provider attempt can begin before its operation deadline and finish within its
 
 ```text
 GC_MIN_GRACE_WINDOW_MS
-    = max(WAL_PUBLISH_BUDGET_MS, CHECKPOINT_VERIFY_BUDGET_MS,
+    = max(WAL_PUBLISH_BUDGET_MS, PIN_VERIFY_BUDGET_MS,
           METADATA_PUBLICATION_BUDGET_MS)
       + PROVIDER_OPERATION_DEADLINE_MS
       + PROVIDER_ATTEMPT_TIMEOUT_MS

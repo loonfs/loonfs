@@ -79,7 +79,7 @@ fn a_created_snapshot_is_listed_with_its_snapshot_owner() {
     let listed_snapshot = listed
         .snapshots
         .iter()
-        .find(|listed| listed.snapshot_id == snapshot.checkpoint_id.clone().into())
+        .find(|listed| listed.snapshot_id == snapshot.checkpoint_id.clone())
         .expect("the snapshot is in the snapshot listing");
     assert_eq!(listed_snapshot.name, "report-run");
     assert_eq!(listed_snapshot.expires_at_ms, expires_at_ms);
@@ -128,7 +128,7 @@ async fn snapshot_create_recovers_an_ambiguously_landed_record_write() {
     assert_eq!(listed.snapshots.len(), 1);
     assert_eq!(
         listed.snapshots[0].snapshot_id,
-        snapshot.checkpoint_id.clone().into()
+        snapshot.checkpoint_id.clone()
     );
 }
 
@@ -169,12 +169,7 @@ async fn snapshot_extension_recovers_an_ambiguously_landed_record_write() {
 
     let extended = fs
         .writer
-        .extend_snapshot(
-            &namespace_id,
-            &snapshot.checkpoint_id.clone().into(),
-            u64::MAX,
-            u64::MAX,
-        )
+        .extend_snapshot(&namespace_id, &snapshot.checkpoint_id, u64::MAX, u64::MAX)
         .await
         .expect("reconcile the durable snapshot extension");
 
@@ -218,13 +213,13 @@ async fn snapshot_delete_reports_an_uncertain_delete_without_recreating_the_pin(
 
     assert_core_error_kind(
         fs.writer
-            .delete_snapshot(&namespace_id, &snapshot.checkpoint_id.clone().into())
+            .delete_snapshot(&namespace_id, &snapshot.checkpoint_id)
             .await,
         ErrorCode::ServerError,
     );
     assert_core_error_kind(
         fs.writer
-            .delete_snapshot(&namespace_id, &snapshot.checkpoint_id.clone().into())
+            .delete_snapshot(&namespace_id, &snapshot.checkpoint_id)
             .await,
         ErrorCode::SnapshotNotFound,
     );

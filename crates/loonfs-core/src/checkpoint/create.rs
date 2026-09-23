@@ -11,11 +11,11 @@ use crate::control_update::{retry_while_contended, CasAttempt};
 use crate::error::CoreError;
 use crate::error::Result;
 use crate::time::{MonotonicTimer, StdMonotonicTimer};
-use loonfs_api::wire::control::{CheckpointOwner, CheckpointRecordState};
-use loonfs_api::{Checkpoint, CheckpointId, NamespaceId};
+use loonfs_api::wire::control::{PinOwner, PinPayload};
+use loonfs_api::{Checkpoint, NamespaceId, PinId};
 use loonfs_objectstore::ObjectStore;
 
-pub(crate) use crate::limits::CHECKPOINT_VERIFY_BUDGET_MS;
+pub(crate) use crate::limits::PIN_VERIFY_BUDGET_MS;
 
 /// Longest accepted user checkpoint name. A label bound, not a durable
 /// format limit.
@@ -24,7 +24,7 @@ const CHECKPOINT_NAME_MAX_CHARS: usize = 128;
 pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    owner: CheckpointOwner,
+    owner: PinOwner,
     context: &MutationContext,
 ) -> Result<Checkpoint> {
     validate_checkpoint_owner(&owner)?;
@@ -67,20 +67,20 @@ pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
 pub(crate) async fn create_checkpoint_at_basis<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    owner: CheckpointOwner,
+    owner: PinOwner,
     manifest: loonfs_api::wire::control::ManifestRef,
     head_commit_id: loonfs_api::CommitId,
     context: &MutationContext,
 ) -> Result<Checkpoint> {
     validate_checkpoint_owner(&owner)?;
     let timer = StdMonotonicTimer::default();
-    let checkpoint_id = CheckpointId::generate(manifest.manifest_no);
-    let record = CheckpointRecordState {
+    let checkpoint_id = PinId::generate(manifest.manifest_no);
+    let record = PinPayload {
         pin_id: checkpoint_id.clone(),
         namespace_id: namespace_id.clone(),
         manifest_no: manifest.manifest_no,
-        manifest_head_seq: manifest.manifest_head_seq,
-        manifest_payload_checksum: manifest.manifest_payload_checksum,
+        head_seq: manifest.head_seq,
+        payload_checksum: manifest.payload_checksum,
         head_commit_id,
         created_at_ms: context.now_ms,
         owner,
@@ -101,14 +101,14 @@ pub(crate) async fn create_checkpoint_at_basis<S: ObjectStore + ?Sized>(
                     checkpoint_id = %checkpoint_id,
                     original_error = %error,
                     cleanup_error = %cleanup_error,
-                    "failed to delete a checkpoint record after basis verification failed"
+                    "failed to delete a pin after basis verification failed"
                 );
             }
             return Err(error);
         }
     };
     let within_budget =
-        timer.monotonic_now_ms().saturating_sub(verify_started_ms) <= CHECKPOINT_VERIFY_BUDGET_MS;
+        timer.monotonic_now_ms().saturating_sub(verify_started_ms) <= PIN_VERIFY_BUDGET_MS;
     if verification == CheckpointBasisVerification::Verified && within_budget {
         return Ok(super::checkpoint_summary(record)
             .expect("a caller-created checkpoint should have a public owner"));
@@ -122,10 +122,10 @@ pub(crate) async fn create_checkpoint_at_basis<S: ObjectStore + ?Sized>(
     ))
 }
 
-fn validate_checkpoint_owner(owner: &CheckpointOwner) -> Result<()> {
+fn validate_checkpoint_owner(owner: &PinOwner) -> Result<()> {
     match owner {
-        CheckpointOwner::User { name, .. } => validate_checkpoint_name(name),
-        CheckpointOwner::Snapshot {
+        PinOwner::User { name, .. } => validate_checkpoint_name(name),
+        PinOwner::Snapshot {
             name,
             expires_at_ms,
         } => {
@@ -137,8 +137,8 @@ fn validate_checkpoint_owner(owner: &CheckpointOwner) -> Result<()> {
             }
             Ok(())
         }
-        CheckpointOwner::Fork { .. } => Ok(()),
-        CheckpointOwner::Retired {} => Ok(()),
+        PinOwner::Fork { .. } => Ok(()),
+        PinOwner::Retired {} => Ok(()),
     }
 }
 

@@ -1,4 +1,4 @@
-//! Listing the active checkpoint records a namespace still carries.
+//! Listing the active pins a namespace still carries.
 //!
 //! The listing exists so a pin can be found again once its creation response
 //! is gone, so what it must never do is hide a record that still roots a
@@ -7,7 +7,7 @@
 
 use super::*;
 use crate::checkpoint::list::list_checkpoints_page;
-use loonfs_api::wire::control::CheckpointOwner;
+use loonfs_api::wire::control::PinOwner;
 use loonfs_api::{
     CheckpointOwnerSummary, ErrorCode, ListCheckpointsResponse, NamespaceCursor, PageRequest,
 };
@@ -42,11 +42,11 @@ async fn pin_named<S: ObjectStore + ?Sized>(
     name: &str,
     expires_at_ms: Option<u64>,
     context: &MutationContext,
-) -> CheckpointId {
+) -> PinId {
     create::create_checkpoint(
         store,
         namespace_id,
-        CheckpointOwner::User {
+        PinOwner::User {
             name: name.to_owned(),
             expires_at_ms,
         },
@@ -157,7 +157,7 @@ async fn prior_generation_checkpoints_and_snapshots_are_hidden_after_recreation(
     let snapshot_id = create::create_checkpoint(
         &store,
         &namespace_id,
-        CheckpointOwner::Snapshot {
+        PinOwner::Snapshot {
             name: "snapshot".to_owned(),
             expires_at_ms: context.now_ms + 10_000,
         },
@@ -541,7 +541,7 @@ async fn a_snapshot_lists_with_its_owner_and_its_required_expiry() {
     let snapshot = create::create_checkpoint(
         &store,
         &namespace_id,
-        CheckpointOwner::Snapshot {
+        PinOwner::Snapshot {
             name: "report-run".to_owned(),
             expires_at_ms,
         },
@@ -575,15 +575,15 @@ async fn a_refused_owner_writes_no_record_to_find() {
         .expect("bootstrap namespace");
 
     let refused = [
-        CheckpointOwner::User {
+        PinOwner::User {
             name: String::new(),
             expires_at_ms: None,
         },
-        CheckpointOwner::Snapshot {
+        PinOwner::Snapshot {
             name: String::new(),
             expires_at_ms: context.now_ms + 60_000,
         },
-        CheckpointOwner::Snapshot {
+        PinOwner::Snapshot {
             name: "report-run".to_owned(),
             expires_at_ms: 0,
         },

@@ -254,6 +254,7 @@ fn no_schema_a_response_reaches_admits_null() {
         "ErrorDetails",
         "RunMaintenanceResponseGc",
         "GrepMatch",
+        "PinId",
     ] {
         assert!(
             visited.contains(&format!("#/components/schemas/{schema_name}")),

@@ -81,7 +81,7 @@ async fn listed_files(
 async fn checkpoint_files(
     reader: &FsReader,
     namespace_id: &NamespaceId,
-    checkpoint_id: &loonfs::CheckpointId,
+    checkpoint_id: &loonfs::PinId,
     limit: usize,
 ) -> Vec<CheckpointFile> {
     let mut files = Vec::new();
@@ -578,7 +578,7 @@ async fn a_deleted_checkpoint_refuses_enumeration_instead_of_answering_current_s
         .expect_err("a deleted checkpoint pins nothing to enumerate");
     assert_eq!(error.code(), ErrorCode::CheckpointUnavailable);
 
-    let missing = loonfs::CheckpointId::parse("pin_00000000000000000001-0123456789abcdef")
+    let missing = loonfs::PinId::parse("pin_00000000000000000001-0123456789abcdef")
         .expect("valid checkpoint id");
     let error = fs
         .reader

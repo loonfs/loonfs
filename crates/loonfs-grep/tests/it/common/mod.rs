@@ -196,10 +196,8 @@ impl GrepHost {
 pub(crate) mod control {
     use loonfs::control::NamespaceReadState;
     use loonfs::SharedObjectStore;
-    use loonfs_api::wire::control::{
-        decode_control_object, CheckpointRecordState, ControlObjectKind,
-    };
-    use loonfs_api::{CheckpointId, NamespaceId};
+    use loonfs_api::wire::control::{decode_control_object, ControlObjectKind, PinPayload};
+    use loonfs_api::{NamespaceId, PinId};
     use loonfs_objectstore::keys;
 
     async fn control_bytes(store: &SharedObjectStore, object_key: &str) -> Option<Vec<u8>> {
@@ -232,17 +230,14 @@ pub(crate) mod control {
     pub(crate) async fn checkpoint_record(
         store: &SharedObjectStore,
         namespace_id: &NamespaceId,
-        checkpoint_id: &CheckpointId,
-    ) -> Option<CheckpointRecordState> {
+        checkpoint_id: &PinId,
+    ) -> Option<PinPayload> {
         let bytes =
             control_bytes(store, &keys::checkpoint_record(namespace_id, checkpoint_id)).await?;
         Some(
-            decode_control_object::<CheckpointRecordState>(
-                &bytes,
-                ControlObjectKind::CheckpointRecord,
-            )
-            .expect("decode checkpoint record")
-            .into_payload(),
+            decode_control_object::<PinPayload>(&bytes, ControlObjectKind::Pin)
+                .expect("decode pin")
+                .into_payload(),
         )
     }
 }

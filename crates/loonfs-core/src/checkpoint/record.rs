@@ -9,17 +9,15 @@ use crate::error::{CoreError, Result};
 use crate::namespace::control::load_current_manifest;
 use crate::namespace::state::NamespaceReadState;
 use bytes::Bytes;
-use loonfs_api::wire::control::{encode_control_state, CheckpointRecordState, ControlObjectKind};
-use loonfs_api::{CheckpointId, NamespaceId};
+use loonfs_api::wire::control::{encode_control_state, ControlObjectKind, PinPayload};
+use loonfs_api::{NamespaceId, PinId};
 use loonfs_objectstore::keys::checkpoint_record;
 use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 
-pub(crate) fn encode_checkpoint_record(
-    record: &CheckpointRecordState,
-) -> crate::error::Result<Bytes> {
+pub(crate) fn encode_checkpoint_record(record: &PinPayload) -> crate::error::Result<Bytes> {
     let object_key = checkpoint_record(&record.namespace_id, &record.pin_id);
-    encode_control_state(ControlObjectKind::CheckpointRecord, record)
+    encode_control_state(ControlObjectKind::Pin, record)
         .map(Bytes::from)
         .map_err(|error| CoreError::Codec {
             object_key,
@@ -27,10 +25,10 @@ pub(crate) fn encode_checkpoint_record(
         })
 }
 
-/// Writes a record under its freshly generated [`CheckpointId`].
+/// Writes a record under its freshly generated [`PinId`].
 pub(crate) async fn write_checkpoint_record<S: ObjectStore + ?Sized>(
     store: &S,
-    record: &CheckpointRecordState,
+    record: &PinPayload,
 ) -> Result<()> {
     let encoded = encode_checkpoint_record(record)?;
     let object_key = checkpoint_record(&record.namespace_id, &record.pin_id);
@@ -40,7 +38,7 @@ pub(crate) async fn write_checkpoint_record<S: ObjectStore + ?Sized>(
 
 pub(crate) async fn write_checkpoint_record_if_absent<S: ObjectStore + ?Sized>(
     store: &S,
-    record: &CheckpointRecordState,
+    record: &PinPayload,
 ) -> Result<()> {
     let encoded = encode_checkpoint_record(record)?;
     let object_key = checkpoint_record(&record.namespace_id, &record.pin_id);
@@ -50,14 +48,11 @@ pub(crate) async fn write_checkpoint_record_if_absent<S: ObjectStore + ?Sized>(
     }
 }
 
-pub(crate) fn checkpoint_is_visible(
-    head: &NamespaceReadState,
-    checkpoint_id: &CheckpointId,
-) -> bool {
+pub(crate) fn checkpoint_is_visible(head: &NamespaceReadState, checkpoint_id: &PinId) -> bool {
     checkpoint_id.manifest_no() >= head.generation_first_manifest_no
 }
 
-pub(crate) type LoadedCheckpointRecord = LoadedControl<CheckpointRecordState>;
+pub(crate) type LoadedCheckpointRecord = LoadedControl<PinPayload>;
 
 /// Loads the exact checkpoint key returned by a prefix listing.
 ///
@@ -73,8 +68,8 @@ pub(crate) async fn load_checkpoint_record_at_key<S: ObjectStore + ?Sized>(
     load_control_object(
         store,
         object_key.to_owned(),
-        ControlObjectKind::CheckpointRecord,
-        |state: &CheckpointRecordState| {
+        ControlObjectKind::Pin,
+        |state: &PinPayload| {
             expect_namespace(&namespace_id, &state.namespace_id)?;
             expect_identity_field(
                 "checkpoint id",
@@ -93,8 +88,8 @@ pub(crate) async fn load_checkpoint_record_at_key<S: ObjectStore + ?Sized>(
 
 pub(crate) fn checkpoint_key_ids(
     object_key: &str,
-) -> std::result::Result<(NamespaceId, CheckpointId), ControlObjectLoadError> {
-    let expected_family = "checkpoint record";
+) -> std::result::Result<(NamespaceId, PinId), ControlObjectLoadError> {
+    let expected_family = "pin";
     let parsed = parse_object_key(object_key).ok_or_else(|| ControlObjectLoadError::KeyLayout {
         object_key: object_key.to_owned(),
         expected_family: expected_family.to_owned(),
@@ -109,10 +104,10 @@ pub(crate) fn checkpoint_key_ids(
     }
     let namespace = parsed
         .owner_namespace_id()
-        .expect("checkpoint record keys carry a namespace identifier");
+        .expect("pin keys carry a namespace identifier");
     let checkpoint = parsed
         .identifier()
-        .expect("checkpoint record keys carry a checkpoint identifier");
+        .expect("pin keys carry a checkpoint identifier");
     let namespace_id =
         NamespaceId::parse(namespace).map_err(|error| ControlObjectLoadError::KeyLayout {
             object_key: object_key.to_owned(),
@@ -120,7 +115,7 @@ pub(crate) fn checkpoint_key_ids(
             reason: format!("the namespace path component is invalid: {error}"),
         })?;
     let checkpoint_id =
-        CheckpointId::parse(checkpoint).map_err(|error| ControlObjectLoadError::KeyLayout {
+        PinId::parse(checkpoint).map_err(|error| ControlObjectLoadError::KeyLayout {
             object_key: object_key.to_owned(),
             expected_family: expected_family.to_owned(),
             reason: format!("the checkpoint filename id is invalid: {error}"),
@@ -131,7 +126,7 @@ pub(crate) fn checkpoint_key_ids(
 pub(crate) async fn load_checkpoint_record<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    checkpoint_id: &CheckpointId,
+    checkpoint_id: &PinId,
 ) -> Result<Option<LoadedCheckpointRecord>> {
     let object_key = checkpoint_record(namespace_id, checkpoint_id);
     let loaded = load_checkpoint_record_at_key(store, &object_key).await;
@@ -145,7 +140,7 @@ pub(crate) async fn load_checkpoint_record<S: ObjectStore + ?Sized>(
 pub(crate) async fn delete_checkpoint_record<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    checkpoint_id: &CheckpointId,
+    checkpoint_id: &PinId,
 ) -> Result<()> {
     let object_key = checkpoint_record(namespace_id, checkpoint_id);
     match store.delete(&object_key).await {
@@ -162,15 +157,15 @@ pub(crate) enum CheckpointBasisVerification {
 
 pub(crate) async fn verify_checkpoint_basis<S: ObjectStore + ?Sized>(
     store: &S,
-    record: &CheckpointRecordState,
+    record: &PinPayload,
 ) -> Result<CheckpointBasisVerification> {
     let manifest = load_current_manifest(store, &record.namespace_id).await?;
     let pinned = record.manifest();
     Ok(
         if manifest.envelope.payload().status.is_deleted()
-            || manifest.state.retention_floor_seq > record.manifest_head_seq
+            || manifest.state.retention_floor_seq > record.head_seq
             || manifest.state.manifest.manifest_no != pinned.manifest_no
-            || manifest.state.manifest.manifest_payload_checksum != pinned.manifest_payload_checksum
+            || manifest.state.manifest.payload_checksum != pinned.payload_checksum
         {
             CheckpointBasisVerification::Invalid
         } else {
@@ -182,7 +177,7 @@ pub(crate) async fn verify_checkpoint_basis<S: ObjectStore + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use loonfs_api::wire::control::CheckpointOwner;
+    use loonfs_api::wire::control::PinOwner;
     use loonfs_api::{ChangeSeq, CommitId, ManifestNo};
     use loonfs_objectstore::keys::hint;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -198,22 +193,22 @@ mod tests {
         NamespaceId::parse(value).expect("valid namespace id")
     }
 
-    fn checkpoint(value: &str) -> CheckpointId {
-        CheckpointId::parse(value).expect("valid checkpoint id")
+    fn checkpoint(value: &str) -> PinId {
+        PinId::parse(value).expect("valid checkpoint id")
     }
 
-    fn record(namespace_id: NamespaceId, checkpoint_id: CheckpointId) -> CheckpointRecordState {
-        CheckpointRecordState {
-            pin_id: checkpoint_id,
+    fn record(namespace_id: NamespaceId, pin_id: PinId) -> PinPayload {
+        PinPayload {
+            pin_id,
             namespace_id: namespace_id.clone(),
             manifest_no: ManifestNo(1),
 
-            manifest_head_seq: ChangeSeq(1),
-            manifest_payload_checksum: "sha256:test".to_owned(),
+            head_seq: ChangeSeq(1),
+            payload_checksum: "sha256:test".to_owned(),
             head_commit_id: CommitId::parse("c_00000000000000000000000000000001")
                 .expect("commit id"),
             created_at_ms: 1,
-            owner: CheckpointOwner::User {
+            owner: PinOwner::User {
                 name: "test".to_owned(),
                 expires_at_ms: None,
             },
@@ -235,9 +230,9 @@ mod tests {
     #[tokio::test]
     async fn listed_loader_rejects_invalid_key_ids() {
         let (_directory, store) = local_store();
-        let checkpoint_id = "pin_00000000000000000001-0000000000000001";
+        let pin_id = "pin_00000000000000000001-0000000000000001";
         let invalid_keys = [
-            format!("namespaces/not valid/pins/{checkpoint_id}.json"),
+            format!("namespaces/not valid/pins/{pin_id}.json"),
             "namespaces/demo/pins/not-a-checkpoint.json".to_owned(),
         ];
 
@@ -253,9 +248,9 @@ mod tests {
     async fn loader_rejects_a_pin_number_that_disagrees_with_its_key() {
         let (_directory, store) = local_store();
         let namespace_id = namespace("demo");
-        let checkpoint_id = checkpoint("pin_00000000000000000001-0000000000000001");
-        let object_key = checkpoint_record(&namespace_id, &checkpoint_id);
-        let mut foreign = record(namespace_id, checkpoint_id);
+        let pin_id = checkpoint("pin_00000000000000000001-0000000000000001");
+        let object_key = checkpoint_record(&namespace_id, &pin_id);
+        let mut foreign = record(namespace_id, pin_id);
         foreign.manifest_no = ManifestNo(2);
         let bytes = encode_checkpoint_record(&foreign).expect("record bytes");
         store
@@ -278,18 +273,18 @@ mod tests {
     async fn listed_loader_validates_the_record_against_its_key() {
         enum Mismatch {
             Namespace,
-            CheckpointId,
+            PinId,
         }
 
         let (_directory, store) = local_store();
         let key_namespace_id = namespace("demo");
-        let key_checkpoint_id = checkpoint("pin_00000000000000000001-0000000000000001");
-        let object_key = checkpoint_record(&key_namespace_id, &key_checkpoint_id);
+        let key_pin_id = checkpoint("pin_00000000000000000001-0000000000000001");
+        let object_key = checkpoint_record(&key_namespace_id, &key_pin_id);
 
         let cases = [
             (
                 "embedded namespace",
-                record(namespace("other"), key_checkpoint_id.clone()),
+                record(namespace("other"), key_pin_id.clone()),
                 Mismatch::Namespace,
             ),
             (
@@ -298,7 +293,7 @@ mod tests {
                     key_namespace_id.clone(),
                     checkpoint("pin_00000000000000000001-0000000000000002"),
                 ),
-                Mismatch::CheckpointId,
+                Mismatch::PinId,
             ),
         ];
 
@@ -317,7 +312,7 @@ mod tests {
                     matches!(error, ControlObjectLoadError::NamespaceMismatch { .. }),
                     "for `{label}`: {error:?}"
                 ),
-                Mismatch::CheckpointId => assert!(
+                Mismatch::PinId => assert!(
                     matches!(
                         error,
                         ControlObjectLoadError::IdentityMismatch { ref field, .. }

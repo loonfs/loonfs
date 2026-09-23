@@ -210,8 +210,8 @@ mod tests {
         wal_segment, wal_segment_prefix,
     };
     use loonfs_api::{
-        CheckpointId, ContentId, ContentStoreId, ManifestNo, MetadataSegmentId,
-        NamespaceGeneration, NamespaceId, UploadId, WalNo,
+        ContentId, ContentStoreId, ManifestNo, MetadataSegmentId, NamespaceGeneration, NamespaceId,
+        PinId, UploadId, WalNo,
     };
 
     #[test]
@@ -221,8 +221,7 @@ mod tests {
         let manifest_object_id = ManifestNo(400);
         let metadata_segment_id = MetadataSegmentId::parse("seg_00000000000000000000000000000001")
             .expect("metadata segment id");
-        let checkpoint_id = CheckpointId::parse("pin_00000000000000000001-0000000000000001")
-            .expect("checkpoint id");
+        let pin_id = PinId::parse("pin_00000000000000000001-0000000000000001").expect("pin id");
         let upload_id = UploadId::parse("upl_00000000000000000000000000000001").expect("upload id");
         let content_store_id =
             ContentStoreId::parse("cs_00000000000000000000000000000001").expect("content store id");
@@ -251,9 +250,9 @@ mod tests {
                 Some(metadata_segment_id.as_str()),
             ),
             (
-                checkpoint_record(&namespace_id, &checkpoint_id),
+                checkpoint_record(&namespace_id, &pin_id),
                 DurableObjectFamily::CheckpointRecord,
-                Some(checkpoint_id.as_str()),
+                Some(pin_id.as_str()),
             ),
             (
                 upload_session(&namespace_id, &upload_id),

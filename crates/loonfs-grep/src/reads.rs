@@ -10,9 +10,9 @@ use loonfs::{
 };
 use loonfs_api::v0::{FilesystemChange, ListChangesResponse};
 use loonfs_api::{
-    decode_cursor, AbsolutePath, ChangeSeq, CheckpointId, ContentRef, DirectoryPageCursor,
-    EffectiveLimit, InodeId, LimitError, Namespace, NamespaceGeneration, NamespaceId, Page,
-    PageRequest, PaginationPolicy, PathEntry, RevisionNo, Subject,
+    decode_cursor, AbsolutePath, ChangeSeq, ContentRef, DirectoryPageCursor, EffectiveLimit,
+    InodeId, LimitError, Namespace, NamespaceGeneration, NamespaceId, Page, PageRequest,
+    PaginationPolicy, PathEntry, PinId, RevisionNo, Subject,
 };
 
 /// Filesystem reads for one namespace.
@@ -71,7 +71,7 @@ impl<'a> NamespaceReads<'a> {
     /// new checkpoint.
     pub async fn list_checkpoint_files_page(
         &self,
-        checkpoint_id: &CheckpointId,
+        checkpoint_id: &PinId,
         cursor: Option<CheckpointFilesPageCursor>,
         limit: usize,
     ) -> Result<CheckpointFilesPage> {

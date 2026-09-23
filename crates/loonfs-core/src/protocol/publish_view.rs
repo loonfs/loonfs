@@ -257,8 +257,8 @@ mod tests {
             owner_namespace_id: namespace_id(owner),
             manifest_no: loonfs_api::ManifestNo(manifest_no),
 
-            manifest_head_seq: ChangeSeq(manifest_no),
-            manifest_payload_checksum: checksum.to_owned(),
+            head_seq: ChangeSeq(manifest_no),
+            payload_checksum: checksum.to_owned(),
         })
     }
 

@@ -46,7 +46,7 @@ fn cache_key(context: &RuntimeReadContext) -> WalTailProjectionCacheKey {
     WalTailProjectionCacheKey {
         namespace_id: context.head.namespace_id.clone(),
         manifest_no: context.basis.manifest_no(),
-        manifest_head_seq: context.basis.manifest().manifest_head_seq,
+        manifest_head_seq: context.basis.manifest().head_seq,
         head_seq: context.head.seq,
     }
 }

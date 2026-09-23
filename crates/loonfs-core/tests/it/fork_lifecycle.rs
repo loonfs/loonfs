@@ -10,7 +10,7 @@ use crate::common::commit_split_support::*;
 use crate::common::namespace_engine;
 use bytes::Bytes;
 use loonfs_api::{
-    wire::control::{decode_control_object, CheckpointOwner, ContentStoreState, ControlObjectKind},
+    wire::control::{decode_control_object, ContentStorePayload, ControlObjectKind, PinOwner},
     wire::manifest::{
         decode_namespace_manifest_json, encode_namespace_manifest_json, MetadataRowFamily,
     },
@@ -685,27 +685,27 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
     assert_eq!(clone_head.seq, ChangeSeq(1));
     let fork_basis = clone_head.fork_basis.clone().expect("fork basis");
     assert_eq!(fork_basis.manifest.owner_namespace_id, source_namespace_id);
-    assert_eq!(fork_basis.manifest.manifest_head_seq, ChangeSeq(1));
+    assert_eq!(fork_basis.manifest.head_seq, ChangeSeq(1));
     assert_eq!(
-        fork_basis.source_checkpoint_id.manifest_no(),
+        fork_basis.source_pin_id.manifest_no(),
         fork_basis.manifest.manifest_no
     );
 
     let source_record = loonfs_core::control::load_namespace_checkpoint_record_control(
         &store,
         &source_namespace_id,
-        &fork_basis.source_checkpoint_id,
+        &fork_basis.source_pin_id,
     )
     .await
-    .expect("read source checkpoint record")
-    .expect("source checkpoint record exists");
-    assert_eq!(source_record.manifest_head_seq, ChangeSeq(1));
-    // The fork basis and checkpoint record must use the same manifest.
+    .expect("read source pin")
+    .expect("source pin exists");
+    assert_eq!(source_record.head_seq, ChangeSeq(1));
+    // The fork basis and pin must use the same manifest.
     assert_eq!(source_record.manifest(), fork_basis.manifest);
     assert!(
         matches!(
             &source_record.owner,
-            CheckpointOwner::Fork {
+            PinOwner::Fork {
                 target_namespace_id,
                 ..
             }
@@ -1098,8 +1098,8 @@ async fn fork_namespace_rejects_corrupt_source_manifest_descriptors() {
         &checkpoint.checkpoint_id,
     )
     .await
-    .expect("read source checkpoint record")
-    .expect("source checkpoint record exists");
+    .expect("read source pin")
+    .expect("source pin exists");
     let manifest_key = metadata_manifest_object(&source_namespace_id, &source_record.manifest_no);
     let manifest_bytes = store
         .get(&manifest_key, None)
@@ -1424,12 +1424,12 @@ async fn creation_and_fork_install_descriptor_hint_and_manifest_in_order() {
         .expect("get descriptor")
         .expect("descriptor");
     let descriptor =
-        decode_control_object::<ContentStoreState>(&bytes, ControlObjectKind::ContentStore)
+        decode_control_object::<ContentStorePayload>(&bytes, ControlObjectKind::ContentStore)
             .expect("decode descriptor")
             .into_payload();
     assert_eq!(
         descriptor,
-        ContentStoreState {
+        ContentStorePayload {
             content_store_id: head.content_store_id.clone(),
             created_at_ms: head.created_at_ms,
         }

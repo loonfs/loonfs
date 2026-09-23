@@ -91,7 +91,7 @@ pub(crate) fn gc_config_from_request(request: GcRequest) -> GcConfig {
 /// a checkpoint always names its owner.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateCheckpointOptions {
-    /// Label recorded on the checkpoint record.
+    /// Label recorded on the pin.
     pub name: String,
     /// Optional lifetime; the record's expiry is computed from the runtime's
     /// clock. Absent means the pin holds until deleted.

@@ -41,7 +41,7 @@ use loonfs_api::v0::{
 };
 use loonfs_api::wire::control::{
     encode_control_state, ControlObjectKind, ProxiedStaging, UploadSessionMode,
-    UploadSessionRecordStatus, UploadSessionState,
+    UploadSessionPayload, UploadSessionRecordStatus,
 };
 use loonfs_api::{
     Checksum, ChecksumAlgorithm, ContentId, ContentRef, ContentRefKind, ContentStoreId,
@@ -313,7 +313,7 @@ pub(crate) async fn direct_multipart_part_targets<S: ObjectStore + ?Sized>(
 /// Returns the provider upload ID for a direct multipart session.
 ///
 /// Other upload modes return an invalid-upload error.
-fn multipart_session_upload(session: &UploadSessionState) -> Result<(&str, ChecksumAlgorithm)> {
+fn multipart_session_upload(session: &UploadSessionPayload) -> Result<(&str, ChecksumAlgorithm)> {
     match &session.mode {
         UploadSessionMode::DirectMultipart {
             provider_upload_id,
@@ -464,9 +464,9 @@ async fn create_upload_session_with_state<S: ObjectStore + ?Sized>(
     subject_id: Option<SubjectId>,
     session: NewUploadSession,
     context: &MutationContext,
-) -> Result<(UploadSessionState, ObjectMetadata)> {
+) -> Result<(UploadSessionPayload, ObjectMetadata)> {
     let upload_id = UploadId::generate();
-    let state = UploadSessionState {
+    let state = UploadSessionPayload {
         namespace_id: catalog.namespace_id().clone(),
         owner_generation: catalog.generation(),
         content_store_id: catalog.content_store_id().clone(),
@@ -512,7 +512,7 @@ fn authorize_upload_subject(
     Authorizer::for_request(namespace_id, access, CommitAuthority::Subject(subject)).map(|_| ())
 }
 
-fn ensure_session_subject(session: &UploadSessionState, subject: Option<&Subject>) -> Result<()> {
+fn ensure_session_subject(session: &UploadSessionPayload, subject: Option<&Subject>) -> Result<()> {
     match (
         &session.subject_id,
         subject.map(|subject| &subject.subject_id),
@@ -539,7 +539,7 @@ async fn ensure_upload_namespace_available<S: ObjectStore + ?Sized>(
 }
 
 fn ensure_session_generation(
-    session: &UploadSessionState,
+    session: &UploadSessionPayload,
     current_generation: NamespaceGeneration,
     upload_id: &UploadId,
 ) -> Result<()> {
@@ -670,7 +670,7 @@ async fn read_open_proxied_session<S: ObjectStore + ?Sized>(
     catalog: &VerifiedNamespaceCatalogEntry,
     upload_id: &UploadId,
     subject: Option<&Subject>,
-) -> Result<(ContentStoreId, UploadSessionState)> {
+) -> Result<(ContentStoreId, UploadSessionPayload)> {
     let session = load_upload_session_state(store, catalog.namespace_id(), upload_id).await?;
     ensure_session_generation(&session, catalog.generation(), upload_id)?;
     ensure_session_subject(&session, subject)?;
@@ -990,7 +990,7 @@ async fn freeze_completed_session_from_initial<S: ObjectStore + ?Sized>(
     upload_id: &UploadId,
     verified: &ContentRef,
     now_ms: u64,
-    initial: Option<LoadedControl<UploadSessionState>>,
+    initial: Option<LoadedControl<UploadSessionPayload>>,
 ) -> Result<CompletedUpload> {
     update_upload_session_from_initial(
         store,
@@ -1045,7 +1045,7 @@ async fn freeze_completed_session_from_initial<S: ObjectStore + ?Sized>(
 struct OwnedStagingSession {
     upload_id: UploadId,
     content_id: ContentId,
-    initial: Option<LoadedControl<UploadSessionState>>,
+    initial: Option<LoadedControl<UploadSessionPayload>>,
 }
 
 /// Stores in-process bytes through an upload session and returns prepared
@@ -1177,7 +1177,7 @@ async fn complete_owned_staging<S: ObjectStore + ?Sized>(
     upload_id: &UploadId,
     content_ref: ContentRef,
     context: &MutationContext,
-    initial: Option<LoadedControl<UploadSessionState>>,
+    initial: Option<LoadedControl<UploadSessionPayload>>,
 ) -> Result<PreparedContent> {
     Ok(freeze_completed_session_from_initial(
         store,
@@ -1269,7 +1269,7 @@ pub(crate) struct AbandonedUpload {
 }
 
 impl AbandonedUpload {
-    pub(crate) fn of(state: &UploadSessionState) -> Self {
+    pub(crate) fn of(state: &UploadSessionPayload) -> Self {
         let provider_multipart_upload_id = match &state.mode {
             UploadSessionMode::DirectMultipart {
                 provider_upload_id, ..
@@ -1387,7 +1387,7 @@ pub(crate) async fn get_upload_status<S: ObjectStore + ?Sized>(
     })
 }
 
-fn session_response(state: &UploadSessionState) -> UploadSession {
+fn session_response(state: &UploadSessionPayload) -> UploadSession {
     let status = match &state.status {
         UploadSessionRecordStatus::Open { expires_at_ms } => UploadSessionStatus::Open {
             expires_at_ms: *expires_at_ms,
@@ -1587,7 +1587,7 @@ fn upload_mode(mode: &UploadSessionMode) -> UploadMode {
 
 /// Validates a completion request against the session mode.
 fn completion_plan<'a>(
-    session: &'a UploadSessionState,
+    session: &'a UploadSessionPayload,
     completion: &'a ResolvedUploadCompletion,
 ) -> Result<CompletionPlan<'a>> {
     let session_mode = upload_mode(&session.mode);
@@ -1923,7 +1923,7 @@ mod tests {
                 .await
                 .expect("read session")
                 .expect("session");
-            let state = decode_control_object::<UploadSessionState>(
+            let state = decode_control_object::<UploadSessionPayload>(
                 &stored.bytes,
                 ControlObjectKind::UploadSession,
             )
@@ -1978,7 +1978,7 @@ mod tests {
 
     #[test]
     fn multipart_validation_uses_the_algorithm_frozen_in_the_session() {
-        let session = UploadSessionState {
+        let session = UploadSessionPayload {
             namespace_id: NamespaceId::parse("demo").expect("namespace id"),
             owner_generation: NamespaceGeneration(1),
             content_store_id: ContentStoreId::generate(),

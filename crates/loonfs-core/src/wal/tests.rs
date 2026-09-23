@@ -436,7 +436,7 @@ async fn cold_open_probes_past_a_lagging_hint_and_reads_a_missing_hint_as_absent
     publish(&mut engine, &store, "two").await.expect("two");
     let hint_bytes = loonfs_api::wire::control::encode_control_state(
         loonfs_api::wire::control::ControlObjectKind::Hint,
-        &loonfs_api::wire::control::HintState {
+        &loonfs_api::wire::control::HintPayload {
             namespace_id: namespace_id.clone(),
             manifest_no: ManifestNo(1),
             wal_no: WalNo(0),
@@ -499,7 +499,7 @@ async fn a_bounded_tail_load_names_the_missing_segment() {
     }
     let hint_bytes = loonfs_api::wire::control::encode_control_state(
         loonfs_api::wire::control::ControlObjectKind::Hint,
-        &loonfs_api::wire::control::HintState {
+        &loonfs_api::wire::control::HintPayload {
             namespace_id: namespace_id.clone(),
             manifest_no: ManifestNo(1),
             wal_no: WalNo(4),

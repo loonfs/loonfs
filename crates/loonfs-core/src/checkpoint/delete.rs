@@ -6,8 +6,8 @@
 use super::record::{checkpoint_is_visible, delete_checkpoint_record, load_checkpoint_record};
 use crate::error::{CoreError, Result};
 use crate::namespace::control::load_namespace_read_state;
-use loonfs_api::wire::control::CheckpointOwner;
-use loonfs_api::{CheckpointId, DeleteCheckpointResponse, NamespaceId};
+use loonfs_api::wire::control::PinOwner;
+use loonfs_api::{DeleteCheckpointResponse, NamespaceId, PinId};
 use loonfs_objectstore::ObjectStore;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -19,12 +19,12 @@ pub(super) enum CheckpointOwnerKind {
 }
 
 impl CheckpointOwnerKind {
-    fn of(owner: &CheckpointOwner) -> Self {
+    fn of(owner: &PinOwner) -> Self {
         match owner {
-            CheckpointOwner::User { .. } => Self::User,
-            CheckpointOwner::Fork { .. } => Self::Fork,
-            CheckpointOwner::Snapshot { .. } => Self::Snapshot,
-            CheckpointOwner::Retired {} => Self::Retired,
+            PinOwner::User { .. } => Self::User,
+            PinOwner::Fork { .. } => Self::Fork,
+            PinOwner::Snapshot { .. } => Self::Snapshot,
+            PinOwner::Retired {} => Self::Retired,
         }
     }
 
@@ -41,8 +41,8 @@ impl CheckpointOwnerKind {
 }
 
 pub(super) fn ensure_owner_is(
-    checkpoint_id: &CheckpointId,
-    owner: &CheckpointOwner,
+    checkpoint_id: &PinId,
+    owner: &PinOwner,
     expected: CheckpointOwnerKind,
 ) -> Result<()> {
     let actual = CheckpointOwnerKind::of(owner);
@@ -56,22 +56,22 @@ pub(super) fn ensure_owner_is(
     )))
 }
 
-fn owner_description(owner: &CheckpointOwner) -> String {
+fn owner_description(owner: &PinOwner) -> String {
     match owner {
-        CheckpointOwner::User { .. } => "a user checkpoint".to_owned(),
-        CheckpointOwner::Fork {
+        PinOwner::User { .. } => "a user checkpoint".to_owned(),
+        PinOwner::Fork {
             target_namespace_id,
             ..
         } => format!("owned by fork target `{target_namespace_id}`"),
-        CheckpointOwner::Snapshot { .. } => "a snapshot".to_owned(),
-        CheckpointOwner::Retired {} => "a retired generation record".to_owned(),
+        PinOwner::Snapshot { .. } => "a snapshot".to_owned(),
+        PinOwner::Retired {} => "a retired generation record".to_owned(),
     }
 }
 
 pub(super) async fn delete_owned_checkpoint<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    checkpoint_id: &CheckpointId,
+    checkpoint_id: &PinId,
     expected: CheckpointOwnerKind,
 ) -> Result<()> {
     let head = load_namespace_read_state(store, namespace_id)
@@ -87,7 +87,7 @@ pub(super) async fn delete_owned_checkpoint<S: ObjectStore + ?Sized>(
     delete_checkpoint_record(store, namespace_id, checkpoint_id).await
 }
 
-fn not_found(checkpoint_id: &CheckpointId, expected: CheckpointOwnerKind) -> CoreError {
+fn not_found(checkpoint_id: &PinId, expected: CheckpointOwnerKind) -> CoreError {
     match expected {
         CheckpointOwnerKind::Snapshot => CoreError::SnapshotNotFound {
             snapshot_id: checkpoint_id.clone(),
@@ -101,7 +101,7 @@ fn not_found(checkpoint_id: &CheckpointId, expected: CheckpointOwnerKind) -> Cor
 pub(crate) async fn delete_checkpoint<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    checkpoint_id: &CheckpointId,
+    checkpoint_id: &PinId,
 ) -> Result<DeleteCheckpointResponse> {
     delete_owned_checkpoint(
         store,

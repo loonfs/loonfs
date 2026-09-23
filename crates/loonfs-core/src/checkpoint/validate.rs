@@ -44,7 +44,7 @@ pub(super) fn validate_manifest(
 ) -> Result<(), ManifestLoadError> {
     if payload.fork_basis.as_ref().is_some_and(|basis| {
         basis.manifest.owner_namespace_id == payload.namespace_id
-            || basis.manifest.manifest_head_seq > payload.retention_floor_seq
+            || basis.manifest.head_seq > payload.retention_floor_seq
     }) {
         return Err(ManifestLoadError::RunManifestMismatch {
             object_key: object_key.to_owned(),

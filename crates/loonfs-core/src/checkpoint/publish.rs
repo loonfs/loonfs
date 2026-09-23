@@ -75,7 +75,7 @@ pub(crate) async fn publish_manifest<S: ObjectStore + ?Sized>(
         || manifest.envelope().payload().namespace_id != *namespace_id
         || current.as_ref().is_some_and(|loaded| {
             loaded.state.generation == candidate.generation
-                && (candidate.manifest.manifest_head_seq < loaded.state.manifest.manifest_head_seq
+                && (candidate.manifest.head_seq < loaded.state.manifest.head_seq
                     || candidate.retention_floor_seq < loaded.state.retention_floor_seq)
         })
     {
@@ -172,8 +172,8 @@ fn classify_current(
             ManifestPublicationOutcome::PredecessorChanged(current.clone())
         }
     } else if current.folded_wal_no >= candidate.folded_wal_no
-        && (current.manifest.manifest_head_seq > candidate.manifest.manifest_head_seq
-            || (current.manifest.manifest_head_seq == candidate.manifest.manifest_head_seq
+        && (current.manifest.head_seq > candidate.manifest.head_seq
+            || (current.manifest.head_seq == candidate.manifest.head_seq
                 && current.manifest.manifest_no >= candidate.manifest.manifest_no))
     {
         ManifestPublicationOutcome::CoveredByCurrent(current.clone())
@@ -205,7 +205,7 @@ pub(crate) fn manifest_ref_for(
     ManifestRef {
         owner_namespace_id: namespace_id.clone(),
         manifest_no: manifest.payload().manifest_no,
-        manifest_head_seq: manifest.payload().head_seq,
-        manifest_payload_checksum: manifest.payload_checksum().to_owned(),
+        head_seq: manifest.payload().head_seq,
+        payload_checksum: manifest.payload_checksum().to_owned(),
     }
 }

@@ -7,9 +7,7 @@ use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::metadata::MetadataView;
 use loonfs_api::wire::manifest::{lookup_keys, MetadataRow, MetadataRowFamily};
 use loonfs_api::wire::sst_blocks::string_prefix_upper_bound;
-use loonfs_api::{
-    ChangeSeq, CheckpointId, ContentRef, InodeId, InodeKind, PageRequest, RevisionNo,
-};
+use loonfs_api::{ChangeSeq, ContentRef, InodeId, InodeKind, PageRequest, PinId, RevisionNo};
 use loonfs_objectstore::ObjectStore;
 
 /// Minimum number of inode rows scanned at once.
@@ -55,7 +53,7 @@ pub(crate) async fn list_checkpoint_files_page<S: ObjectStore + ?Sized>(
     store: &S,
     segment_cache: Option<&MetadataSegmentCache>,
     head: &crate::namespace::state::NamespaceReadState,
-    checkpoint_id: &CheckpointId,
+    checkpoint_id: &PinId,
     request: PageRequest<CheckpointFilesPageCursor>,
 ) -> Result<CheckpointFilesPage> {
     let namespace_id = &head.namespace_id;
@@ -70,7 +68,7 @@ pub(crate) async fn list_checkpoint_files_page<S: ObjectStore + ?Sized>(
     if segments.manifest().payload().generation != head.generation {
         return Err(crate::commit::WalPublishError::StaleHead.into());
     }
-    let checkpoint_seq = manifest.manifest_head_seq;
+    let checkpoint_seq = manifest.head_seq;
     let view = MetadataView::over_manifest_segments(&segments, checkpoint_seq);
     let mut session = view.session();
 

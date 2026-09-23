@@ -4,9 +4,8 @@
 use crate::fs::{should_invalidate_after_result, ReadCore};
 use crate::metrics::RuntimeInstruments;
 use crate::trace::phase_span;
-use crate::{CheckpointId, Commit, CoreError, NamespaceId, Recency, RuntimeCacheConfig};
+use crate::{Commit, CoreError, NamespaceId, PinId, Recency, RuntimeCacheConfig};
 use crate::{Result, RuntimeError};
-use loonfs_api::SnapshotId;
 use loonfs_core::cache::{MetadataSegmentCacheStats, WalTailProjectionCacheStats};
 use loonfs_core::control::NamespaceReadState;
 use loonfs_core::control::{
@@ -412,7 +411,7 @@ impl ReadCore {
     pub(crate) async fn pinned_read_at_checkpoint(
         &self,
         namespace_id: &NamespaceId,
-        checkpoint_id: &CheckpointId,
+        checkpoint_id: &PinId,
     ) -> Result<(
         loonfs_core::NamespaceReaderEngine<crate::SharedObjectStore>,
         RuntimeReadContext,
@@ -437,7 +436,7 @@ impl ReadCore {
     pub(crate) async fn pinned_read_at_snapshot(
         &self,
         namespace_id: &NamespaceId,
-        snapshot_id: &SnapshotId,
+        snapshot_id: &PinId,
         now_ms: u64,
     ) -> Result<(
         loonfs_core::NamespaceReaderEngine<crate::SharedObjectStore>,
@@ -448,7 +447,7 @@ impl ReadCore {
             self.store(),
             Some(self.inner.metadata_segment_cache.as_ref()),
             &live.head,
-            &snapshot_id.clone().into(),
+            snapshot_id,
             now_ms,
         )
         .await

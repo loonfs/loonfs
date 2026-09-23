@@ -1,12 +1,10 @@
 //! Operation requests and responses for the v0 HTTP API.
 
 use super::ContentToken;
-use crate::SnapshotId;
 use crate::{
     AbsolutePath, AccessGrants, AccessRevisionNo, ActorId, AttributeKey, AttributeValue,
-    AttributesRevisionNo, BindingGeneration, ChangeSeq, CheckpointId, CommitId, ContentRef,
-    DisplayName, InodeId, ManifestNo, NamespaceGeneration, NamespaceId, RevisionNo, WriterEpoch,
-    WriterId,
+    AttributesRevisionNo, BindingGeneration, ChangeSeq, CommitId, ContentRef, DisplayName, InodeId,
+    ManifestNo, NamespaceGeneration, NamespaceId, PinId, RevisionNo, WriterEpoch, WriterId,
 };
 use crate::{NamespaceAccess, PrincipalId, PrincipalScope};
 use serde::{Deserialize, Serialize};
@@ -188,7 +186,7 @@ pub struct ForkNamespaceRequest {
     /// Fork from this live snapshot instead of the current head.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
-    pub snapshot_id: Option<SnapshotId>,
+    pub snapshot_id: Option<PinId>,
 }
 
 /// Current state for one namespace.
@@ -951,7 +949,7 @@ pub struct DeleteCheckpointResponse {
     /// Namespace the checkpoint belonged to.
     pub namespace_id: NamespaceId,
     /// Deleted checkpoint record.
-    pub checkpoint_id: CheckpointId,
+    pub checkpoint_id: PinId,
 }
 
 /// The owner of a checkpoint record.
@@ -986,7 +984,7 @@ pub struct Checkpoint {
     /// Namespace that owns the checkpoint.
     pub namespace_id: NamespaceId,
     /// Durable checkpoint id used to address the checkpoint for deletion.
-    pub checkpoint_id: CheckpointId,
+    pub checkpoint_id: PinId,
     /// Who owns the checkpoint, including the label carried by a user pin.
     pub owner: CheckpointOwnerSummary,
     /// Time the checkpoint record was created, in Unix milliseconds.
@@ -1007,7 +1005,7 @@ pub struct Checkpoint {
 #[cfg_attr(feature = "openapi", schema(as = Snapshot))]
 pub struct SnapshotSummary {
     /// Snapshot id.
-    pub snapshot_id: SnapshotId,
+    pub snapshot_id: PinId,
     /// Namespace whose state the snapshot captured.
     pub namespace_id: NamespaceId,
     /// Snapshot label.
@@ -1030,7 +1028,7 @@ impl SnapshotSummary {
             return None;
         };
         Some(Self {
-            snapshot_id: checkpoint.checkpoint_id.into(),
+            snapshot_id: checkpoint.checkpoint_id,
             namespace_id: checkpoint.namespace_id,
             name,
             captured_seq: checkpoint.captured_seq,
@@ -1075,7 +1073,7 @@ pub struct DeleteSnapshotResponse {
     /// Namespace the snapshot belonged to.
     pub namespace_id: NamespaceId,
     /// Deleted snapshot record.
-    pub snapshot_id: SnapshotId,
+    pub snapshot_id: PinId,
 }
 
 /// How one WAL flush satisfied its goal.
@@ -2337,7 +2335,7 @@ mod tests {
         let namespace_id = NamespaceId::parse("demo").expect("namespace id");
         let checkpoint = Checkpoint {
             namespace_id: namespace_id.clone(),
-            checkpoint_id: CheckpointId::parse("pin_00000000000000000001-0000000000000001")
+            checkpoint_id: PinId::parse("pin_00000000000000000001-0000000000000001")
                 .expect("checkpoint id"),
             owner: CheckpointOwnerSummary::User {
                 name: "release".to_owned(),
@@ -2389,7 +2387,7 @@ mod tests {
     fn optional_response_fields_are_omitted_and_default_when_absent() {
         let checkpoint_json = serde_json::to_value(Checkpoint {
             namespace_id: NamespaceId::parse("demo").expect("namespace id"),
-            checkpoint_id: CheckpointId::parse("pin_00000000000000000001-0000000000000001")
+            checkpoint_id: PinId::parse("pin_00000000000000000001-0000000000000001")
                 .expect("checkpoint id"),
             owner: CheckpointOwnerSummary::User {
                 name: "release".to_owned(),

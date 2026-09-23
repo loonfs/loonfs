@@ -1,4 +1,4 @@
-//! Stateless garbage collection from current manifests and checkpoint records.
+//! Stateless garbage collection from current manifests and pins.
 
 mod collect;
 mod config;

@@ -10,8 +10,8 @@ use crate::context::MutationContext;
 use crate::control_update::{retry_while_contended, CasAttempt, WriteEvidence};
 use crate::error::{CoreError, Result};
 use crate::namespace::state::NamespaceReadState;
-use loonfs_api::wire::control::CheckpointOwner;
-use loonfs_api::{Checkpoint, CheckpointId, DeleteSnapshotResponse, NamespaceId};
+use loonfs_api::wire::control::PinOwner;
+use loonfs_api::{Checkpoint, DeleteSnapshotResponse, NamespaceId, PinId};
 use loonfs_objectstore::keys::checkpoint_record;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 
@@ -20,7 +20,7 @@ pub async fn load_snapshot_read_basis<S: ObjectStore + ?Sized>(
     store: &S,
     segment_cache: Option<&MetadataSegmentCache>,
     live_head: &NamespaceReadState,
-    snapshot_id: &CheckpointId,
+    snapshot_id: &PinId,
     now_ms: u64,
 ) -> Result<CheckpointReadBasis> {
     if !checkpoint_is_visible(live_head, snapshot_id) {
@@ -39,7 +39,7 @@ pub async fn load_snapshot_read_basis<S: ObjectStore + ?Sized>(
 pub(crate) async fn extend_snapshot_expiry<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    checkpoint_id: &CheckpointId,
+    checkpoint_id: &PinId,
     requested_expires_at_ms: u64,
     max_lifetime_ms: u64,
     context: &MutationContext,
@@ -124,7 +124,7 @@ pub(crate) async fn extend_snapshot_expiry<S: ObjectStore + ?Sized>(
 pub(crate) async fn delete_snapshot<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    checkpoint_id: &CheckpointId,
+    checkpoint_id: &PinId,
 ) -> Result<DeleteSnapshotResponse> {
     delete_owned_checkpoint(
         store,
@@ -135,13 +135,13 @@ pub(crate) async fn delete_snapshot<S: ObjectStore + ?Sized>(
     .await?;
     Ok(DeleteSnapshotResponse {
         namespace_id: namespace_id.clone(),
-        snapshot_id: checkpoint_id.clone().into(),
+        snapshot_id: checkpoint_id.clone(),
     })
 }
 
 pub(crate) fn classify_live_snapshot(
     loaded: Option<LoadedCheckpointRecord>,
-    checkpoint_id: &CheckpointId,
+    checkpoint_id: &PinId,
     now_ms: u64,
 ) -> Result<LoadedCheckpointRecord> {
     let Some(loaded) = loaded else {
@@ -165,16 +165,14 @@ pub(crate) fn classify_live_snapshot(
     Ok(loaded)
 }
 
-fn snapshot_expiry_mut(owner: &mut CheckpointOwner) -> Option<&mut u64> {
+fn snapshot_expiry_mut(owner: &mut PinOwner) -> Option<&mut u64> {
     match owner {
-        CheckpointOwner::Snapshot { expires_at_ms, .. } => Some(expires_at_ms),
-        CheckpointOwner::User { .. }
-        | CheckpointOwner::Fork { .. }
-        | CheckpointOwner::Retired {} => None,
+        PinOwner::Snapshot { expires_at_ms, .. } => Some(expires_at_ms),
+        PinOwner::User { .. } | PinOwner::Fork { .. } | PinOwner::Retired {} => None,
     }
 }
 
-fn snapshot_gone(checkpoint_id: &CheckpointId, reason: &str) -> CoreError {
+fn snapshot_gone(checkpoint_id: &PinId, reason: &str) -> CoreError {
     CoreError::SnapshotGone {
         snapshot_id: checkpoint_id.clone(),
         reason: reason.to_owned(),

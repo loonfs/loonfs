@@ -3,9 +3,9 @@
 use super::control::LoadedManifest;
 use crate::checkpoint::record::write_checkpoint_record_if_absent;
 use crate::error::{CoreError, Result};
-use loonfs_api::wire::control::{CheckpointOwner, CheckpointRecordState};
+use loonfs_api::wire::control::{PinOwner, PinPayload};
 use loonfs_api::wire::manifest::NamespaceManifestPayload;
-use loonfs_api::{CheckpointId, ManifestNo, NamespaceGeneration, WalNo, WriterEpoch};
+use loonfs_api::{ManifestNo, NamespaceGeneration, PinId, WalNo, WriterEpoch};
 use loonfs_objectstore::ObjectStore;
 
 pub(super) struct GenerationSuccessor {
@@ -55,15 +55,15 @@ pub(super) async fn write_retired_pin<S: ObjectStore + ?Sized>(
     created_at_ms: u64,
 ) -> Result<()> {
     let tombstone = current.envelope.payload();
-    let retired = CheckpointRecordState {
+    let retired = PinPayload {
         namespace_id: tombstone.namespace_id.clone(),
-        pin_id: CheckpointId::retired(&tombstone.namespace_id, tombstone.manifest_no),
+        pin_id: PinId::retired(&tombstone.namespace_id, tombstone.manifest_no),
         manifest_no: tombstone.manifest_no,
-        manifest_head_seq: tombstone.head_seq,
-        manifest_payload_checksum: current.state.manifest.manifest_payload_checksum.clone(),
+        head_seq: tombstone.head_seq,
+        payload_checksum: current.state.manifest.payload_checksum.clone(),
         head_commit_id: tombstone.head_commit_id.clone(),
         created_at_ms,
-        owner: CheckpointOwner::Retired {},
+        owner: PinOwner::Retired {},
     };
     write_checkpoint_record_if_absent(store, &retired).await
 }

@@ -11,10 +11,10 @@ use crate::commit_engine::NamespaceCommitEngine;
 use crate::context::MutationContext;
 use crate::path::read::load_current_metadata_view;
 use crate::wal::tests::publish;
-use loonfs_api::wire::control::CheckpointOwner;
+use loonfs_api::wire::control::PinOwner;
 use loonfs_api::{
-    AttributeInclusion, ChangeSeq, CheckpointId, ErrorCode, ManifestNo, NamespaceGeneration,
-    NamespaceId, WalNo, WriterId,
+    AttributeInclusion, ChangeSeq, ErrorCode, ManifestNo, NamespaceGeneration, NamespaceId, PinId,
+    WalNo, WriterId,
 };
 use loonfs_objectstore::{
     keys::{content_store, hint, metadata_manifest_object, wal_segment_prefix},
@@ -466,12 +466,12 @@ async fn recreating_a_deleted_namespace_publishes_an_empty_next_generation() {
     assert!(payload.runs.is_empty());
     assert_eq!(payload.folded_wal_no, wal_tip);
 
-    let retired_id = CheckpointId::retired(&namespace_id, tombstone.manifest_no);
+    let retired_id = PinId::retired(&namespace_id, tombstone.manifest_no);
     let retired = load_checkpoint_record(&store, &namespace_id, &retired_id)
         .await
         .expect("load retired pin")
         .expect("retired pin");
-    assert_eq!(retired.state.owner, CheckpointOwner::Retired {});
+    assert_eq!(retired.state.owner, PinOwner::Retired {});
     assert_eq!(retired.state.manifest(), tombstone_ref);
     let raised = load_namespace_hint(&store, &namespace_id)
         .await
@@ -639,18 +639,18 @@ async fn assert_fork_recreation(source_commits: u64, target_commits: u64) {
     let basis = payload.fork_basis.as_ref().expect("fork basis");
     assert_eq!(basis.source_generation, source.generation);
     assert_eq!(basis.manifest.owner_namespace_id, source_id);
-    assert_eq!(basis.manifest.manifest_head_seq, source.head_seq);
+    assert_eq!(basis.manifest.head_seq, source.head_seq);
     let reported_basis = fork.fork_basis.expect("reported fork basis");
     assert_eq!(reported_basis.source_namespace_id, source_id);
     let retired = load_checkpoint_record(
         &store,
         &target_id,
-        &CheckpointId::retired(&target_id, tombstone.manifest_no),
+        &PinId::retired(&target_id, tombstone.manifest_no),
     )
     .await
     .expect("load retired pin")
     .expect("retired pin");
-    assert_eq!(retired.state.owner, CheckpointOwner::Retired {});
+    assert_eq!(retired.state.owner, PinOwner::Retired {});
     assert_eq!(retired.state.manifest(), deleted.state.manifest);
     let raised = load_namespace_hint(&store, &target_id)
         .await

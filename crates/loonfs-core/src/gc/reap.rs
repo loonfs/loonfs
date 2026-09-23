@@ -6,7 +6,7 @@ use crate::checkpoint::record::load_checkpoint_record_at_key;
 use crate::context::MutationContext;
 use crate::control_object::ControlObjectLoadError;
 use crate::error::{CoreError, Result};
-use loonfs_api::wire::control::CheckpointOwner;
+use loonfs_api::wire::control::PinOwner;
 use loonfs_api::RetainedReason;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 
@@ -32,16 +32,16 @@ pub(super) async fn sweep_checkpoint_record<S: ObjectStore + ?Sized>(
         Err(error) => return Err(CoreError::ControlObjectLoad(error)),
     };
     let deletion = match &record.owner {
-        CheckpointOwner::Retired {} => {
+        PinOwner::Retired {} => {
             return Ok(if live.missing_retired_pins.contains(key) {
                 CheckpointSweep::DeleteRetired
             } else {
                 CheckpointSweep::Retain
             });
         }
-        CheckpointOwner::User { .. } => CheckpointSweep::DeleteUser,
-        CheckpointOwner::Snapshot { .. } => CheckpointSweep::DeleteSnapshot,
-        CheckpointOwner::Fork {
+        PinOwner::User { .. } => CheckpointSweep::DeleteUser,
+        PinOwner::Snapshot { .. } => CheckpointSweep::DeleteSnapshot,
+        PinOwner::Fork {
             target_namespace_id,
         } => {
             return Ok(

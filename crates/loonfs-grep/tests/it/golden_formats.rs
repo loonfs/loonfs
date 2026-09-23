@@ -24,7 +24,7 @@ use loonfs_api::wire::sst_blocks::{
     decode_data_block_rows, decode_index_block, BlockHandle, BuiltSegmentBlocks, DecodedDataBlock,
     SegmentBlocksBuilder,
 };
-use loonfs_api::{ChangeSeq, CheckpointId, IndexSegmentId, InodeId, RevisionNo, RunNo};
+use loonfs_api::{ChangeSeq, IndexSegmentId, InodeId, PinId, RevisionNo, RunNo};
 use loonfs_grep::codec::{Gram, GramPosting, IndexRow};
 use loonfs_grep::manifest::{
     decode_grep_hint, decode_grep_manifest, encode_grep_hint, encode_grep_manifest, GrepHint,
@@ -153,7 +153,7 @@ pub(crate) fn sample_backfilling_manifest() -> GrepManifestState {
         GrepIndexStatus::Backfilling {
             target_seq: ChangeSeq(7),
             cursor_inode_id: Some(InodeId(7)),
-            checkpoint_id: CheckpointId::parse("pin_00000000000000000001-0000000000000009")
+            checkpoint_id: PinId::parse("pin_00000000000000000001-0000000000000009")
                 .expect("valid checkpoint id"),
         },
         GrepIndexState {

@@ -32,8 +32,8 @@ use loonfs_api::wire::sst_blocks::{
     DEFAULT_MAX_REORGANIZATION_INPUT_ROWS, DEFAULT_MAX_ROWS_PER_SEGMENT,
 };
 use loonfs_api::{
-    sha256_digest, ChangeSeq, CheckpointId, ContentRef, ErrorCode, IndexSegmentId, InodeId,
-    ManifestNo, NamespaceGeneration, NamespaceId, RevisionNo, RunNo,
+    sha256_digest, ChangeSeq, ContentRef, ErrorCode, IndexSegmentId, InodeId, ManifestNo,
+    NamespaceGeneration, NamespaceId, PinId, RevisionNo, RunNo,
 };
 use loonfs_objectstore::timing::{MonotonicTimer, StdMonotonicTimer};
 use loonfs_objectstore::{ImmutableWriteError, ObjectStore, ObjectStoreError};
@@ -468,7 +468,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
     async fn delete_checkpoint_if_present(
         &self,
         namespace_id: &NamespaceId,
-        checkpoint_id: &CheckpointId,
+        checkpoint_id: &PinId,
     ) -> Result<()> {
         match self
             .maintenance
@@ -660,7 +660,7 @@ fn backfilling_manifest(
     generation: NamespaceGeneration,
     manifest_no: ManifestNo,
     target_seq: ChangeSeq,
-    checkpoint_id: CheckpointId,
+    checkpoint_id: PinId,
     next_run_no: RunNo,
 ) -> Result<GrepManifestState> {
     GrepManifestState::new(
@@ -759,7 +759,7 @@ struct IndexingStats {
 /// prevents a backfill cursor from being paired with change-feed progress.
 enum CollectedProgress {
     Backfill {
-        checkpoint_id: CheckpointId,
+        checkpoint_id: PinId,
         target_seq: ChangeSeq,
         next_cursor: Option<InodeId>,
     },
@@ -790,7 +790,7 @@ impl CollectedProgress {
 /// still included, exactly as the row walk did).
 async fn collect_backfill_unit(
     reads: &NamespaceReads<'_>,
-    checkpoint_id: &CheckpointId,
+    checkpoint_id: &PinId,
     target_seq: ChangeSeq,
     cursor: Option<InodeId>,
     policy: GramIndexBuildPolicy,

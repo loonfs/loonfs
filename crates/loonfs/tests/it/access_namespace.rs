@@ -136,7 +136,7 @@ async fn namespace_operations_need_an_administrator_or_no_subject() {
         .expect("root snapshot");
     assert_eq!(
         member
-            .delete_snapshot(&namespace, &snapshot.checkpoint_id.into())
+            .delete_snapshot(&namespace, &snapshot.checkpoint_id)
             .await
             .expect_err("member snapshot delete")
             .code(),
@@ -332,7 +332,7 @@ async fn a_revoked_administrator_cannot_delete_a_snapshot_through_the_former_wri
         )
         .await
         .expect("create snapshot");
-    let snapshot_id = snapshot.checkpoint_id.into();
+    let snapshot_id = snapshot.checkpoint_id;
     let mut options = loonfs::PutFileOptions::new(loonfs_test_support::test_actor());
     options.commit.subject = Some(subject("root", "prn_root"));
     root.put_file_bytes(&namespace, "/file", b"private payload", options)

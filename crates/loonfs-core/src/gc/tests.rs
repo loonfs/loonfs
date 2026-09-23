@@ -20,10 +20,10 @@ use crate::limits::{
 use crate::path::write::{CommitRequest, FilesystemOperation};
 use loonfs_api::v0::GcResponse;
 use loonfs_api::wire::control::{
-    decode_control_object, CheckpointOwner, CheckpointRecordState, ControlObjectKind,
-    ProxiedStaging, UploadSessionMode, UploadSessionRecordStatus, UploadSessionState,
+    decode_control_object, ControlObjectKind, PinOwner, PinPayload, ProxiedStaging,
+    UploadSessionMode, UploadSessionPayload, UploadSessionRecordStatus,
 };
-use loonfs_api::{CheckpointId, ContentRef, ContentStoreId, ManifestNo, NamespaceId, UploadId};
+use loonfs_api::{ContentRef, ContentStoreId, ManifestNo, NamespaceId, PinId, UploadId};
 use loonfs_objectstore::keys::{
     checkpoint_prefix, hint, metadata_manifest_object, metadata_manifest_prefix, metadata_segment,
     metadata_segment_prefix, wal_segment_prefix,
@@ -66,11 +66,11 @@ fn context(now_ms: u64) -> MutationContext {
 async fn checkpoint_exists<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    checkpoint_id: &CheckpointId,
+    checkpoint_id: &PinId,
 ) -> bool {
     crate::checkpoint::load_checkpoint_record(store, namespace_id, checkpoint_id)
         .await
-        .expect("read checkpoint record")
+        .expect("read pin")
         .is_some()
 }
 
@@ -120,7 +120,7 @@ impl BlockingControlCasTarget {
     fn matches(self, bytes: &[u8]) -> bool {
         match self {
             BlockingControlCasTarget::UploadCompleted | BlockingControlCasTarget::UploadAborted => {
-                let Ok(envelope) = decode_control_object::<UploadSessionState>(
+                let Ok(envelope) = decode_control_object::<UploadSessionPayload>(
                     bytes,
                     ControlObjectKind::UploadSession,
                 ) else {
@@ -223,7 +223,7 @@ async fn gc_reaps_below_floor_segments_after_the_grace_window() {
 async fn write_upload_session(store: &LocalFsStore, namespace_id: &NamespaceId) -> String {
     let upload_id = loonfs_api::UploadId::parse("upl_0123456789abcdef0123456789abcdef")
         .expect("valid upload id");
-    let state = loonfs_api::wire::control::UploadSessionState {
+    let state = loonfs_api::wire::control::UploadSessionPayload {
         namespace_id: namespace_id.clone(),
         owner_generation: loonfs_api::NamespaceGeneration(1),
         content_store_id: crate::namespace::catalog::load_namespace_content_store_id(
@@ -288,11 +288,11 @@ async fn read_upload_session<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     upload_id: &UploadId,
-) -> Option<UploadSessionState> {
+) -> Option<UploadSessionPayload> {
     let key = loonfs_objectstore::keys::upload_session(namespace_id, upload_id);
     let body = store.get(&key, None).await.expect("read upload session")?;
     Some(
-        decode_control_object::<UploadSessionState>(&body, ControlObjectKind::UploadSession)
+        decode_control_object::<UploadSessionPayload>(&body, ControlObjectKind::UploadSession)
             .expect("decode upload session")
             .into_payload(),
     )
@@ -1579,9 +1579,9 @@ async fn gc_reclaims_manifests_superseded_by_wal_flushes() {
         store
             .list_prefix(&checkpoint_prefix(&namespace_id))
             .await
-            .expect("list checkpoint records")
+            .expect("list pins")
             .is_empty(),
-        "a wal flush must not create checkpoint records"
+        "a wal flush must not create pins"
     );
 
     let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
@@ -1668,7 +1668,7 @@ async fn gc_keeps_a_basis_pinned_by_another_owner_after_one_release() {
     let first = crate::checkpoint::create_checkpoint(
         &store,
         &namespace_id,
-        CheckpointOwner::User {
+        PinOwner::User {
             name: "keeper".to_owned(),
             expires_at_ms: None,
         },
@@ -1679,7 +1679,7 @@ async fn gc_keeps_a_basis_pinned_by_another_owner_after_one_release() {
     let second = crate::checkpoint::create_checkpoint(
         &store,
         &namespace_id,
-        CheckpointOwner::User {
+        PinOwner::User {
             name: "releaser".to_owned(),
             expires_at_ms: None,
         },
@@ -1786,7 +1786,7 @@ async fn gc_retains_active_checkpoint_bases() {
 }
 
 /// Reads the single fork-owned record a fork left under the source.
-async fn read_fork_record(store: &LocalFsStore, source: &NamespaceId) -> CheckpointRecordState {
+async fn read_fork_record(store: &LocalFsStore, source: &NamespaceId) -> PinPayload {
     for key in store
         .list_prefix(&checkpoint_prefix(source))
         .await
@@ -1797,13 +1797,10 @@ async fn read_fork_record(store: &LocalFsStore, source: &NamespaceId) -> Checkpo
             .await
             .expect("get record")
             .expect("record exists");
-        let record = decode_control_object::<CheckpointRecordState>(
-            &bytes,
-            ControlObjectKind::CheckpointRecord,
-        )
-        .expect("decode record")
-        .into_payload();
-        if matches!(record.owner, CheckpointOwner::Fork { .. }) {
+        let record = decode_control_object::<PinPayload>(&bytes, ControlObjectKind::Pin)
+            .expect("decode record")
+            .into_payload();
+        if matches!(record.owner, PinOwner::Fork { .. }) {
             return record;
         }
     }
@@ -2093,7 +2090,7 @@ async fn a_fork_retry_keeps_young_pins_and_reclaims_the_abandoned_one_after_grac
     let abandoned = crate::checkpoint::create_checkpoint(
         &store,
         &source,
-        CheckpointOwner::Fork {
+        PinOwner::Fork {
             target_namespace_id: clone.clone(),
         },
         &setup,
@@ -2167,7 +2164,7 @@ async fn a_corrupt_checkpoint_record_and_an_unreadable_one_both_fail_the_pass() 
         LocalFsStore::new(temp_dir.path()).expect("store"),
         KeyPredicate::prefix(checkpoint_prefix(&namespace_id)),
         OperationClass::Read,
-        InjectedError::Transport("checkpoint record read timed out".to_owned()),
+        InjectedError::Transport("pin read timed out".to_owned()),
     );
     let setup = context(1_000);
     bootstrap_namespace(
@@ -2635,7 +2632,7 @@ async fn completed_upload_waits_for_namespace_retirement_then_reclaims() {
 
 #[tokio::test]
 async fn gc_keeps_pinned_and_current_numbers_and_preserves_discovery_from_a_lagging_hint() {
-    use loonfs_api::wire::control::{encode_control_state, ControlObjectKind, HintState};
+    use loonfs_api::wire::control::{encode_control_state, ControlObjectKind, HintPayload};
     let directory = tempdir().expect("directory");
     let store = LocalFsStore::new(directory.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace");
@@ -2672,7 +2669,7 @@ async fn gc_keeps_pinned_and_current_numbers_and_preserves_discovery_from_a_lagg
         .expect("current");
     let bytes = encode_control_state(
         ControlObjectKind::Hint,
-        &HintState {
+        &HintPayload {
             namespace_id: namespace_id.clone(),
             manifest_no: ManifestNo(1),
             wal_no: loonfs_api::WalNo(0),
@@ -2977,19 +2974,19 @@ async fn expiry_and_creation_grace_delete_pins_without_a_released_state() {
     .expect("bootstrap");
     let mut pins = Vec::new();
     for owner in [
-        CheckpointOwner::User {
+        PinOwner::User {
             name: "permanent".to_owned(),
             expires_at_ms: None,
         },
-        CheckpointOwner::User {
+        PinOwner::User {
             name: "expiring".to_owned(),
             expires_at_ms: Some(2_000),
         },
-        CheckpointOwner::Snapshot {
+        PinOwner::Snapshot {
             name: "snapshot".to_owned(),
             expires_at_ms: 2_000,
         },
-        CheckpointOwner::Fork {
+        PinOwner::Fork {
             target_namespace_id: target.clone(),
         },
     ] {
@@ -3084,7 +3081,7 @@ async fn a_pin_naming_an_absent_manifest_is_corruption_before_sweeping() {
     let initial = crate::checkpoint::create_checkpoint(
         &store,
         &namespace_id,
-        CheckpointOwner::User {
+        PinOwner::User {
             name: "initial".to_owned(),
             expires_at_ms: None,
         },

@@ -19,9 +19,9 @@
 //!   decoding could erase a field introduced by an unsupported writer.
 
 use loonfs_api::wire::control::{
-    decode_control_object, CheckpointOwner, CheckpointRecordState, ContentStoreState,
-    ControlObjectEnvelope, ControlObjectKind, ForkBasis, HintState, ManifestRef, NamespaceStatus,
-    ProxiedStaging, UploadSessionMode, UploadSessionRecordStatus, UploadSessionState, WriterBlock,
+    decode_control_object, ContentStorePayload, ControlObjectEnvelope, ControlObjectKind,
+    ForkBasis, HintPayload, ManifestRef, NamespaceStatus, PinOwner, PinPayload, ProxiedStaging,
+    UploadSessionMode, UploadSessionPayload, UploadSessionRecordStatus, WriterBlock,
 };
 use loonfs_api::wire::envelope::EnvelopeCodecError;
 use loonfs_api::wire::manifest::{
@@ -35,9 +35,9 @@ use loonfs_api::wire::wal::{
 };
 use loonfs_api::{
     sha256_digest, AccessGrants, AccessRevisionNo, AccessRight, ActorId, AttributeKey,
-    AttributeValue, Attributes, AttributesRevisionNo, ChangeSeq, CheckpointId, Checksum,
-    ChecksumAlgorithm, CommitId, ContentId, ContentRef, ContentRefKind, ContentStoreId, InodeId,
-    InodeKind, ManifestNo, MetadataSegmentId, NameKey, NamespaceId, PrincipalId, PrincipalScope,
+    AttributeValue, Attributes, AttributesRevisionNo, ChangeSeq, Checksum, ChecksumAlgorithm,
+    CommitId, ContentId, ContentRef, ContentRefKind, ContentStoreId, InodeId, InodeKind,
+    ManifestNo, MetadataSegmentId, NameKey, NamespaceId, PinId, PrincipalId, PrincipalScope,
     RevisionNo, RunNo, UploadId, WalNo, WriterEpoch,
 };
 use serde::de::DeserializeOwned;
@@ -116,8 +116,8 @@ fn commit_id() -> CommitId {
     CommitId::parse("c_00000000000000000000000000000042").expect("valid commit id")
 }
 
-fn checkpoint_id(value: &str) -> CheckpointId {
-    CheckpointId::parse(value).expect("valid checkpoint id")
+fn pin_id(value: &str) -> PinId {
+    PinId::parse(value).expect("valid pin id")
 }
 
 fn content_id(value: &str) -> ContentId {
@@ -453,9 +453,9 @@ fn sample_manifest_ref(number: u64) -> ManifestRef {
         owner_namespace_id: namespace_id(),
         manifest_no: ManifestNo(number),
 
-        manifest_head_seq: ChangeSeq(number),
-        manifest_payload_checksum:
-            "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_owned(),
+        head_seq: ChangeSeq(number),
+        payload_checksum: "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+            .to_owned(),
     }
 }
 
@@ -491,12 +491,12 @@ fn sample_fork_manifest() -> NamespaceManifestPayload {
                 owner_namespace_id: NamespaceId::parse("source").expect("valid namespace id"),
                 manifest_no: ManifestNo(2),
 
-                manifest_head_seq: ChangeSeq(2),
-                manifest_payload_checksum:
+                head_seq: ChangeSeq(2),
+                payload_checksum:
                     "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
                         .to_owned(),
             },
-            source_checkpoint_id: checkpoint_id("pin_00000000000000000002-0000000000000002"),
+            source_pin_id: pin_id("pin_00000000000000000002-0000000000000002"),
         }),
         ..sample_manifest_payload()
     }
@@ -684,7 +684,7 @@ fn control_objects_match_golden_bytes() {
     check_control_golden(
         "control_content_store.v1.json",
         ControlObjectKind::ContentStore,
-        ContentStoreState {
+        ContentStorePayload {
             content_store_id: content_store_id(),
             created_at_ms: 1_000,
         },
@@ -692,72 +692,72 @@ fn control_objects_match_golden_bytes() {
     check_control_golden(
         "control_hint.v1.json",
         ControlObjectKind::Hint,
-        HintState {
+        HintPayload {
             namespace_id: namespace_id(),
             manifest_no: ManifestNo(2),
             wal_no: WalNo(2),
         },
     );
     check_control_golden(
-        "control_checkpoint_record.v1.json",
-        ControlObjectKind::CheckpointRecord,
-        CheckpointRecordState {
-            pin_id: checkpoint_id("pin_00000000000000000002-0000000000000002"),
+        "control_pin.v1.json",
+        ControlObjectKind::Pin,
+        PinPayload {
+            pin_id: pin_id("pin_00000000000000000002-0000000000000002"),
             namespace_id: namespace_id(),
             manifest_no: (sample_manifest_ref(2)).manifest_no,
-            manifest_head_seq: (sample_manifest_ref(2)).manifest_head_seq,
-            manifest_payload_checksum: (sample_manifest_ref(2)).manifest_payload_checksum.clone(),
+            head_seq: (sample_manifest_ref(2)).head_seq,
+            payload_checksum: (sample_manifest_ref(2)).payload_checksum.clone(),
             head_commit_id: commit_id(),
             created_at_ms: 3_000,
-            owner: CheckpointOwner::User {
+            owner: PinOwner::User {
                 name: "nightly".to_owned(),
                 expires_at_ms: None,
             },
         },
     );
     check_control_golden(
-        "control_checkpoint_record_fork.v1.json",
-        ControlObjectKind::CheckpointRecord,
-        CheckpointRecordState {
-            pin_id: checkpoint_id("pin_00000000000000000004-0000000000000004"),
+        "control_pin_fork.v1.json",
+        ControlObjectKind::Pin,
+        PinPayload {
+            pin_id: pin_id("pin_00000000000000000004-0000000000000004"),
             namespace_id: namespace_id(),
             manifest_no: (sample_manifest_ref(4)).manifest_no,
-            manifest_head_seq: (sample_manifest_ref(4)).manifest_head_seq,
-            manifest_payload_checksum: (sample_manifest_ref(4)).manifest_payload_checksum.clone(),
+            head_seq: (sample_manifest_ref(4)).head_seq,
+            payload_checksum: (sample_manifest_ref(4)).payload_checksum.clone(),
             head_commit_id: commit_id(),
             created_at_ms: 3_000,
-            owner: CheckpointOwner::Fork {
+            owner: PinOwner::Fork {
                 target_namespace_id: NamespaceId::parse("clone").expect("valid namespace id"),
             },
         },
     );
     let retired_manifest_no = ManifestNo(5);
     check_control_golden(
-        "control_checkpoint_record_retired.v1.json",
-        ControlObjectKind::CheckpointRecord,
-        CheckpointRecordState {
-            pin_id: CheckpointId::retired(&namespace_id(), retired_manifest_no),
+        "control_pin_retired.v1.json",
+        ControlObjectKind::Pin,
+        PinPayload {
+            pin_id: PinId::retired(&namespace_id(), retired_manifest_no),
             namespace_id: namespace_id(),
             manifest_no: retired_manifest_no,
-            manifest_head_seq: ChangeSeq(5),
-            manifest_payload_checksum: sample_manifest_ref(5).manifest_payload_checksum,
+            head_seq: ChangeSeq(5),
+            payload_checksum: sample_manifest_ref(5).payload_checksum,
             head_commit_id: commit_id(),
             created_at_ms: 3_000,
-            owner: CheckpointOwner::Retired {},
+            owner: PinOwner::Retired {},
         },
     );
     check_control_golden(
-        "control_checkpoint_record_snapshot.v1.json",
-        ControlObjectKind::CheckpointRecord,
-        CheckpointRecordState {
-            pin_id: checkpoint_id("pin_00000000000000000006-0000000000000006"),
+        "control_pin_snapshot.v1.json",
+        ControlObjectKind::Pin,
+        PinPayload {
+            pin_id: pin_id("pin_00000000000000000006-0000000000000006"),
             namespace_id: namespace_id(),
             manifest_no: (sample_manifest_ref(6)).manifest_no,
-            manifest_head_seq: (sample_manifest_ref(6)).manifest_head_seq,
-            manifest_payload_checksum: (sample_manifest_ref(6)).manifest_payload_checksum.clone(),
+            head_seq: (sample_manifest_ref(6)).head_seq,
+            payload_checksum: (sample_manifest_ref(6)).payload_checksum.clone(),
             head_commit_id: commit_id(),
             created_at_ms: 3_000,
-            owner: CheckpointOwner::Snapshot {
+            owner: PinOwner::Snapshot {
                 name: "report-run".to_owned(),
                 expires_at_ms: 9_000,
             },
@@ -766,7 +766,7 @@ fn control_objects_match_golden_bytes() {
     check_control_golden(
         "control_upload_session.v1.json",
         ControlObjectKind::UploadSession,
-        UploadSessionState {
+        UploadSessionPayload {
             namespace_id: namespace_id(),
             owner_generation: loonfs_api::NamespaceGeneration(1),
             content_store_id: content_store_id(),
@@ -787,7 +787,7 @@ fn control_objects_match_golden_bytes() {
     check_control_golden(
         "control_upload_session_direct_put.v1.json",
         ControlObjectKind::UploadSession,
-        UploadSessionState {
+        UploadSessionPayload {
             namespace_id: namespace_id(),
             owner_generation: loonfs_api::NamespaceGeneration(1),
             content_store_id: content_store_id(),
@@ -811,7 +811,7 @@ fn control_objects_match_golden_bytes() {
     check_control_golden(
         "control_upload_session_direct_multipart.v1.json",
         ControlObjectKind::UploadSession,
-        UploadSessionState {
+        UploadSessionPayload {
             namespace_id: namespace_id(),
             owner_generation: loonfs_api::NamespaceGeneration(1),
             content_store_id: content_store_id(),
@@ -835,7 +835,7 @@ fn control_objects_match_golden_bytes() {
     check_control_golden(
         "control_upload_session_staged.v1.json",
         ControlObjectKind::UploadSession,
-        UploadSessionState {
+        UploadSessionPayload {
             namespace_id: namespace_id(),
             owner_generation: loonfs_api::NamespaceGeneration(1),
             content_store_id: content_store_id(),
@@ -855,7 +855,7 @@ fn control_objects_match_golden_bytes() {
     check_control_golden(
         "control_upload_session_subject.v1.json",
         ControlObjectKind::UploadSession,
-        UploadSessionState {
+        UploadSessionPayload {
             namespace_id: namespace_id(),
             owner_generation: loonfs_api::NamespaceGeneration(1),
             content_store_id: content_store_id(),
@@ -875,7 +875,7 @@ fn control_objects_match_golden_bytes() {
     check_control_golden(
         "control_upload_session_claimed.v1.json",
         ControlObjectKind::UploadSession,
-        UploadSessionState {
+        UploadSessionPayload {
             namespace_id: namespace_id(),
             owner_generation: loonfs_api::NamespaceGeneration(1),
             content_store_id: content_store_id(),
@@ -895,7 +895,7 @@ fn control_objects_match_golden_bytes() {
     check_control_golden(
         "control_upload_session_aborted.v1.json",
         ControlObjectKind::UploadSession,
-        UploadSessionState {
+        UploadSessionPayload {
             namespace_id: namespace_id(),
             owner_generation: loonfs_api::NamespaceGeneration(1),
             content_store_id: content_store_id(),
@@ -952,22 +952,22 @@ fn every_control_payload_rejects_unknown_fields_as_corruption() {
     let add_unknown = |payload: &mut serde_json::Value| {
         payload["field_from_the_future"] = serde_json::Value::from(true);
     };
-    assert_control_payload_edit_is_corrupt::<HintState>(
+    assert_control_payload_edit_is_corrupt::<HintPayload>(
         "control_hint.v1.json",
         ControlObjectKind::Hint,
         add_unknown,
     );
-    assert_control_payload_edit_is_corrupt::<ContentStoreState>(
+    assert_control_payload_edit_is_corrupt::<ContentStorePayload>(
         "control_content_store.v1.json",
         ControlObjectKind::ContentStore,
         add_unknown,
     );
-    assert_control_payload_edit_is_corrupt::<CheckpointRecordState>(
-        "control_checkpoint_record.v1.json",
-        ControlObjectKind::CheckpointRecord,
+    assert_control_payload_edit_is_corrupt::<PinPayload>(
+        "control_pin.v1.json",
+        ControlObjectKind::Pin,
         add_unknown,
     );
-    assert_control_payload_edit_is_corrupt::<UploadSessionState>(
+    assert_control_payload_edit_is_corrupt::<UploadSessionPayload>(
         "control_upload_session.v1.json",
         ControlObjectKind::UploadSession,
         add_unknown,
@@ -976,17 +976,17 @@ fn every_control_payload_rejects_unknown_fields_as_corruption() {
 
 #[test]
 fn mutable_control_nested_structs_reject_unknown_fields_as_corruption() {
-    assert_control_payload_edit_is_corrupt::<CheckpointRecordState>(
-        "control_checkpoint_record.v1.json",
-        ControlObjectKind::CheckpointRecord,
+    assert_control_payload_edit_is_corrupt::<PinPayload>(
+        "control_pin.v1.json",
+        ControlObjectKind::Pin,
         |payload| payload["owner"]["field_from_the_future"] = serde_json::Value::from(true),
     );
-    assert_control_payload_edit_is_corrupt::<UploadSessionState>(
+    assert_control_payload_edit_is_corrupt::<UploadSessionPayload>(
         "control_upload_session.v1.json",
         ControlObjectKind::UploadSession,
         |payload| payload["status"]["field_from_the_future"] = serde_json::Value::from(true),
     );
-    assert_control_payload_edit_is_corrupt::<UploadSessionState>(
+    assert_control_payload_edit_is_corrupt::<UploadSessionPayload>(
         "control_upload_session_staged.v1.json",
         ControlObjectKind::UploadSession,
         |payload| {
@@ -994,7 +994,7 @@ fn mutable_control_nested_structs_reject_unknown_fields_as_corruption() {
                 serde_json::Value::from(true);
         },
     );
-    let message = assert_control_payload_edit_is_corrupt::<UploadSessionState>(
+    let message = assert_control_payload_edit_is_corrupt::<UploadSessionPayload>(
         "control_upload_session_claimed.v1.json",
         ControlObjectKind::UploadSession,
         |payload| {
@@ -1005,7 +1005,7 @@ fn mutable_control_nested_structs_reject_unknown_fields_as_corruption() {
         message.contains("unknown field `at_ms`"),
         "unexpected refusal: {message}"
     );
-    assert_control_payload_edit_is_corrupt::<UploadSessionState>(
+    assert_control_payload_edit_is_corrupt::<UploadSessionPayload>(
         "control_upload_session_direct_multipart.v1.json",
         ControlObjectKind::UploadSession,
         |payload| {
@@ -1015,11 +1015,11 @@ fn mutable_control_nested_structs_reject_unknown_fields_as_corruption() {
 }
 
 #[test]
-fn snapshot_checkpoint_records_reject_a_missing_expiry() {
-    let fixture = "control_checkpoint_record_snapshot.v1.json";
-    let message = assert_control_payload_edit_is_corrupt::<CheckpointRecordState>(
+fn snapshot_pins_reject_a_missing_expiry() {
+    let fixture = "control_pin_snapshot.v1.json";
+    let message = assert_control_payload_edit_is_corrupt::<PinPayload>(
         fixture,
-        ControlObjectKind::CheckpointRecord,
+        ControlObjectKind::Pin,
         |payload| {
             payload
                 .get_mut("owner")
@@ -1036,15 +1036,15 @@ fn snapshot_checkpoint_records_reject_a_missing_expiry() {
 }
 
 #[test]
-fn checkpoint_records_reject_an_untagged_or_unknown_owner() {
-    assert_control_payload_edit_is_corrupt::<CheckpointRecordState>(
-        "control_checkpoint_record.v1.json",
-        ControlObjectKind::CheckpointRecord,
+fn pins_reject_an_untagged_or_unknown_owner() {
+    assert_control_payload_edit_is_corrupt::<PinPayload>(
+        "control_pin.v1.json",
+        ControlObjectKind::Pin,
         |payload| payload["owner"]["kind"] = serde_json::Value::from("unknown_owner"),
     );
-    assert_control_payload_edit_is_corrupt::<CheckpointRecordState>(
-        "control_checkpoint_record.v1.json",
-        ControlObjectKind::CheckpointRecord,
+    assert_control_payload_edit_is_corrupt::<PinPayload>(
+        "control_pin.v1.json",
+        ControlObjectKind::Pin,
         |payload| payload["owner"] = serde_json::Value::from("snapshot"),
     );
 }
@@ -1052,7 +1052,7 @@ fn checkpoint_records_reject_an_untagged_or_unknown_owner() {
 #[test]
 fn upload_sessions_reject_an_untagged_or_incomplete_status() {
     for untagged in ["open", "condemned"] {
-        assert_control_payload_edit_is_corrupt::<UploadSessionState>(
+        assert_control_payload_edit_is_corrupt::<UploadSessionPayload>(
             "control_upload_session.v1.json",
             ControlObjectKind::UploadSession,
             |payload| payload["status"] = serde_json::Value::from(untagged),
@@ -1060,7 +1060,7 @@ fn upload_sessions_reject_an_untagged_or_incomplete_status() {
     }
     // Statuses this format does not define are refused by tag alone.
     for unknown_kind in ["active", "condemned"] {
-        assert_control_payload_edit_is_corrupt::<UploadSessionState>(
+        assert_control_payload_edit_is_corrupt::<UploadSessionPayload>(
             "control_upload_session.v1.json",
             ControlObjectKind::UploadSession,
             |payload| payload["status"]["kind"] = serde_json::Value::from(unknown_kind),
@@ -1069,7 +1069,7 @@ fn upload_sessions_reject_an_untagged_or_incomplete_status() {
     // Every status is defined by its own stamp: without one it cannot be
     // aged, so it is not that status.
     for tagged_without_its_stamp in ["open", "completed", "aborted"] {
-        assert_control_payload_edit_is_corrupt::<UploadSessionState>(
+        assert_control_payload_edit_is_corrupt::<UploadSessionPayload>(
             "control_upload_session.v1.json",
             ControlObjectKind::UploadSession,
             |payload| {
@@ -1081,7 +1081,7 @@ fn upload_sessions_reject_an_untagged_or_incomplete_status() {
 
 #[test]
 fn mutable_control_enums_fail_closed_on_unknown_variants() {
-    assert_control_payload_edit_is_corrupt::<UploadSessionState>(
+    assert_control_payload_edit_is_corrupt::<UploadSessionPayload>(
         "control_upload_session_staged.v1.json",
         ControlObjectKind::UploadSession,
         |payload| {
@@ -1089,7 +1089,7 @@ fn mutable_control_enums_fail_closed_on_unknown_variants() {
                 serde_json::Value::from("future_content_kind");
         },
     );
-    assert_control_payload_edit_is_corrupt::<UploadSessionState>(
+    assert_control_payload_edit_is_corrupt::<UploadSessionPayload>(
         "control_upload_session_direct_multipart.v1.json",
         ControlObjectKind::UploadSession,
         |payload| payload["mode"]["kind"] = serde_json::Value::from("future_mode"),
@@ -1099,7 +1099,7 @@ fn mutable_control_enums_fail_closed_on_unknown_variants() {
 #[test]
 fn upload_sessions_reject_the_pre_mode_flat_encoding() {
     // Reject a string mode and mode-specific fields at the top level.
-    assert_control_payload_edit_is_corrupt::<UploadSessionState>(
+    assert_control_payload_edit_is_corrupt::<UploadSessionPayload>(
         "control_upload_session.v1.json",
         ControlObjectKind::UploadSession,
         |payload| {
@@ -1122,20 +1122,20 @@ fn upload_sessions_reject_the_pre_mode_flat_encoding() {
         "multipart_part_size_bytes",
         "staged_content_ref",
     ] {
-        assert_control_payload_edit_is_corrupt::<UploadSessionState>(
+        assert_control_payload_edit_is_corrupt::<UploadSessionPayload>(
             "control_upload_session.v1.json",
             ControlObjectKind::UploadSession,
             |payload| payload[legacy_field] = serde_json::Value::from("direct_put"),
         );
     }
     // A mode must be a tagged object, not a string.
-    assert_control_payload_edit_is_corrupt::<UploadSessionState>(
+    assert_control_payload_edit_is_corrupt::<UploadSessionPayload>(
         "control_upload_session.v1.json",
         ControlObjectKind::UploadSession,
         |payload| payload["mode"] = serde_json::Value::from("direct_put"),
     );
     // Every session must declare a mode.
-    assert_control_payload_edit_is_corrupt::<UploadSessionState>(
+    assert_control_payload_edit_is_corrupt::<UploadSessionPayload>(
         "control_upload_session.v1.json",
         ControlObjectKind::UploadSession,
         |payload| {
@@ -1150,12 +1150,12 @@ fn upload_sessions_reject_the_pre_mode_flat_encoding() {
 #[test]
 fn upload_sessions_reject_a_reference_to_another_content_object() {
     let other = serde_json::Value::from("con_99999999999999999999999999999999");
-    assert_control_payload_edit_is_corrupt::<UploadSessionState>(
+    assert_control_payload_edit_is_corrupt::<UploadSessionPayload>(
         "control_upload_session.v1.json",
         ControlObjectKind::UploadSession,
         |payload| payload["status"]["content_ref"]["content_id"] = other.clone(),
     );
-    assert_control_payload_edit_is_corrupt::<UploadSessionState>(
+    assert_control_payload_edit_is_corrupt::<UploadSessionPayload>(
         "control_upload_session_staged.v1.json",
         ControlObjectKind::UploadSession,
         |payload| {
@@ -1166,7 +1166,7 @@ fn upload_sessions_reject_a_reference_to_another_content_object() {
 
 #[test]
 fn direct_put_sessions_reject_the_pre_completion_claim_record() {
-    let message = assert_control_payload_edit_is_corrupt::<UploadSessionState>(
+    let message = assert_control_payload_edit_is_corrupt::<UploadSessionPayload>(
         "control_upload_session_direct_put.v1.json",
         ControlObjectKind::UploadSession,
         |payload| {
@@ -1198,7 +1198,7 @@ fn completed_direct_sessions_require_the_session_algorithm() {
             "checksum_algorithm": "crc32c"
         }),
     ] {
-        let message = assert_control_payload_edit_is_corrupt::<UploadSessionState>(
+        let message = assert_control_payload_edit_is_corrupt::<UploadSessionPayload>(
             "control_upload_session.v1.json",
             ControlObjectKind::UploadSession,
             |payload| payload["mode"] = mode,
@@ -1212,7 +1212,7 @@ fn completed_direct_sessions_require_the_session_algorithm() {
 
 #[test]
 fn upload_sessions_reject_a_mode_missing_its_own_fields() {
-    assert_control_payload_edit_is_corrupt::<UploadSessionState>(
+    assert_control_payload_edit_is_corrupt::<UploadSessionPayload>(
         "control_upload_session_direct_put.v1.json",
         ControlObjectKind::UploadSession,
         |payload| {
@@ -1227,7 +1227,7 @@ fn upload_sessions_reject_a_mode_missing_its_own_fields() {
         "part_size_bytes",
         "checksum_algorithm",
     ] {
-        assert_control_payload_edit_is_corrupt::<UploadSessionState>(
+        assert_control_payload_edit_is_corrupt::<UploadSessionPayload>(
             "control_upload_session_direct_multipart.v1.json",
             ControlObjectKind::UploadSession,
             |payload| {
@@ -1239,7 +1239,7 @@ fn upload_sessions_reject_a_mode_missing_its_own_fields() {
         );
     }
     // A mode cannot contain fields from another variant.
-    assert_control_payload_edit_is_corrupt::<UploadSessionState>(
+    assert_control_payload_edit_is_corrupt::<UploadSessionPayload>(
         "control_upload_session_direct_multipart.v1.json",
         ControlObjectKind::UploadSession,
         |payload| payload["mode"]["kind"] = serde_json::Value::from("service_proxied"),
@@ -1248,7 +1248,7 @@ fn upload_sessions_reject_a_mode_missing_its_own_fields() {
 
 #[test]
 fn upload_sessions_reject_a_zero_multipart_part_size() {
-    assert_control_payload_edit_is_corrupt::<UploadSessionState>(
+    assert_control_payload_edit_is_corrupt::<UploadSessionPayload>(
         "control_upload_session_direct_multipart.v1.json",
         ControlObjectKind::UploadSession,
         |payload| payload["mode"]["part_size_bytes"] = serde_json::Value::from(0),
@@ -1263,7 +1263,7 @@ fn mutable_control_envelope_rejects_unknown_fields_as_corruption() {
     document["field_from_the_future"] = serde_json::Value::from(true);
     let edited = serde_json::to_vec(&document).expect("encode edited envelope");
 
-    let error = decode_control_object::<HintState>(&edited, ControlObjectKind::Hint)
+    let error = decode_control_object::<HintPayload>(&edited, ControlObjectKind::Hint)
         .expect_err("unknown mutable envelope field must be rejected");
     assert!(
         matches!(error, EnvelopeCodecError::EnvelopeDecode(_)),
@@ -1276,24 +1276,24 @@ fn control_object_decoders_reject_wrong_format_version_without_fallback() {
     let cases = [
         (
             ControlObjectKind::ContentStore,
-            serde_json::to_value(ContentStoreState {
+            serde_json::to_value(ContentStorePayload {
                 content_store_id: content_store_id(),
                 created_at_ms: 1_000,
             })
             .expect("content store state"),
         ),
         (
-            ControlObjectKind::CheckpointRecord,
-            serde_json::to_value(CheckpointRecordState {
-                pin_id: checkpoint_id("pin_00000000000000000005-0000000000000005"),
+            ControlObjectKind::Pin,
+            serde_json::to_value(PinPayload {
+                pin_id: pin_id("pin_00000000000000000005-0000000000000005"),
                 namespace_id: namespace_id(),
                 manifest_no: ManifestNo(5),
 
-                manifest_head_seq: ChangeSeq(5),
-                manifest_payload_checksum: sha256_digest(b"manifest"),
+                head_seq: ChangeSeq(5),
+                payload_checksum: sha256_digest(b"manifest"),
                 head_commit_id: commit_id(),
                 created_at_ms: 3_000,
-                owner: CheckpointOwner::User {
+                owner: PinOwner::User {
                     name: "nightly".to_owned(),
                     expires_at_ms: None,
                 },
@@ -1302,7 +1302,7 @@ fn control_object_decoders_reject_wrong_format_version_without_fallback() {
         ),
         (
             ControlObjectKind::UploadSession,
-            serde_json::to_value(UploadSessionState {
+            serde_json::to_value(UploadSessionPayload {
                 namespace_id: namespace_id(),
                 owner_generation: loonfs_api::NamespaceGeneration(1),
                 content_store_id: content_store_id(),
@@ -1640,7 +1640,7 @@ fn wal_decode_rejects_a_version_one_commit_without_committed_by() {
 
 #[test]
 fn control_object_decode_rejects_tampered_payload_as_checksum_mismatch() {
-    let envelope = HintState {
+    let envelope = HintPayload {
         namespace_id: namespace_id(),
         manifest_no: ManifestNo(2),
         wal_no: WalNo(2),
@@ -1653,7 +1653,7 @@ fn control_object_decode_rejects_tampered_payload_as_checksum_mismatch() {
     document["payload"]["wal_no"] = serde_json::Value::from(999);
     let tampered = serde_json::to_vec(&document).expect("encode tampered document");
 
-    let err = decode_control_object::<HintState>(&tampered, ControlObjectKind::Hint)
+    let err = decode_control_object::<HintPayload>(&tampered, ControlObjectKind::Hint)
         .expect_err("tampered payload must be rejected");
     assert!(
         matches!(err, EnvelopeCodecError::ChecksumMismatch { .. }),

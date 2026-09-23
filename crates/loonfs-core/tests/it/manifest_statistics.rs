@@ -135,7 +135,7 @@ async fn cached_and_replayed_folds_count_commits_once_and_reads_use_only_manifes
             .await
             .expect("folded activity");
         assert_eq!(folded.activity, expected);
-        assert_eq!(folded.manifest.manifest_head_seq, ChangeSeq(4));
+        assert_eq!(folded.manifest.head_seq, ChangeSeq(4));
         assert_eq!(folded.inode_record_count, 5); // Root, two directories, two files.
                                                   // A stale cached fold and a fresh engine both see already-covered activity.
         loonfs_core::fold_wal_tail(&store, None, &ns, input, &StdMonotonicTimer::default())

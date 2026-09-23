@@ -1356,9 +1356,10 @@ impl NamespaceManifestPayload {
             || (is_fork
                 && (successor.retention_floor_seq != successor.head_seq
                     || successor.base_seq > successor.head_seq
-                    || successor.fork_basis.as_ref().is_some_and(|basis| {
-                        basis.manifest.manifest_head_seq != successor.head_seq
-                    })))
+                    || successor
+                        .fork_basis
+                        .as_ref()
+                        .is_some_and(|basis| basis.manifest.head_seq != successor.head_seq)))
         {
             return drift("head_seq");
         }
@@ -1528,10 +1529,10 @@ mod tests {
                         manifest: crate::control::ManifestRef {
                             owner_namespace_id: NamespaceId::parse("source").expect("namespace"),
                             manifest_no: ManifestNo(1),
-                            manifest_head_seq: ChangeSeq(0),
-                            manifest_payload_checksum: "sha256:source".to_owned(),
+                            head_seq: ChangeSeq(0),
+                            payload_checksum: "sha256:source".to_owned(),
                         },
-                        source_checkpoint_id: crate::CheckpointId::parse(
+                        source_pin_id: crate::PinId::parse(
                             "pin_00000000000000000001-0000000000000001",
                         )
                         .expect("checkpoint"),
@@ -1575,13 +1576,11 @@ mod tests {
             manifest: crate::control::ManifestRef {
                 owner_namespace_id: NamespaceId::parse("source").expect("namespace"),
                 manifest_no: ManifestNo(1),
-                manifest_head_seq: ChangeSeq(0),
-                manifest_payload_checksum: "sha256:source".to_owned(),
+                head_seq: ChangeSeq(0),
+                payload_checksum: "sha256:source".to_owned(),
             },
-            source_checkpoint_id: crate::CheckpointId::parse(
-                "pin_00000000000000000001-0000000000000001",
-            )
-            .expect("checkpoint"),
+            source_pin_id: crate::PinId::parse("pin_00000000000000000001-0000000000000001")
+                .expect("checkpoint"),
         });
         deleted.status = crate::control::NamespaceStatus::Deleted {
             deleted_at_ms: 1_500,

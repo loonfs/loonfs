@@ -147,7 +147,7 @@ mod tests {
     use super::*;
     use crate::error::StoreFailureClass;
     use bytes::Bytes;
-    use loonfs_api::wire::control::HintState;
+    use loonfs_api::wire::control::HintPayload;
     use loonfs_api::NamespaceId;
     use loonfs_objectstore::keys::hint;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -168,8 +168,8 @@ mod tests {
         NamespaceId::parse(value).expect("valid namespace id")
     }
 
-    fn encoded_hint(namespace_id: &NamespaceId) -> (HintState, Vec<u8>) {
-        let state = HintState {
+    fn encoded_hint(namespace_id: &NamespaceId) -> (HintPayload, Vec<u8>) {
+        let state = HintPayload {
             namespace_id: namespace_id.clone(),
             manifest_no: loonfs_api::ManifestNo(1),
             wal_no: loonfs_api::WalNo(0),
@@ -191,12 +191,12 @@ mod tests {
         store: &S,
         object_key: &str,
         expected_namespace_id: &NamespaceId,
-    ) -> Result<LoadedControl<HintState>, ControlObjectLoadError> {
+    ) -> Result<LoadedControl<HintPayload>, ControlObjectLoadError> {
         load_control_object(
             store,
             object_key.to_owned(),
             ControlObjectKind::Hint,
-            |state: &HintState| expect_namespace(expected_namespace_id, &state.namespace_id),
+            |state: &HintPayload| expect_namespace(expected_namespace_id, &state.namespace_id),
         )
         .await
     }
@@ -390,7 +390,7 @@ mod tests {
         let (_, bytes) = encoded_hint(&namespace_id);
         write_bytes(&store, &object_key, bytes).await;
 
-        let error = load_control_object::<_, HintState, _>(
+        let error = load_control_object::<_, HintPayload, _>(
             &store,
             object_key.clone(),
             ControlObjectKind::Hint,

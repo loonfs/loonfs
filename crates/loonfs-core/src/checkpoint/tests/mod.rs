@@ -78,8 +78,8 @@ use loonfs_api::wire::sst_blocks::{
     SegmentBlocksBuilder, SegmentIndexEntry, DEFAULT_TARGET_BLOCK_BYTES,
 };
 use loonfs_api::{
-    AbsolutePath, ChangeSeq, CheckpointId, CommitId, DestinationBehavior, EffectiveLimit, InodeId,
-    ManifestNo, NameKey, NamespaceId, RevisionNo, RunNo,
+    AbsolutePath, ChangeSeq, CommitId, DestinationBehavior, EffectiveLimit, InodeId, ManifestNo,
+    NameKey, NamespaceId, PinId, RevisionNo, RunNo,
 };
 use loonfs_objectstore::keys::{
     hint, metadata_manifest_object, metadata_manifest_prefix, metadata_segment_object_key,
@@ -138,7 +138,7 @@ pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
     super::create::create_checkpoint(
         store,
         namespace_id,
-        loonfs_api::wire::control::CheckpointOwner::User {
+        loonfs_api::wire::control::PinOwner::User {
             name: "test-pin".to_owned(),
             expires_at_ms: None,
         },

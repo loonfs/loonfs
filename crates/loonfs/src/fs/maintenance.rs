@@ -9,12 +9,12 @@ use crate::trace::phase_span;
 use crate::FsMaintenance;
 use crate::NamespaceDiagnostics;
 use crate::{
-    AdvanceRetentionResponse, Checkpoint, CheckpointId, CreateCheckpointOptions,
-    DeleteCheckpointResponse, ErrorCode, FlushWalOutcome, FlushWalResponse,
-    ListCheckpointsResponse, MaintenanceCancellation, MaintenanceProbe, MetadataCompactionOutcome,
-    MetadataCompactionResponse, MetadataMaintenanceOptions, MetadataMaintenanceResponse,
-    NamespaceId, ReorganizeStepOutcome, RunMaintenanceRequest, RunMaintenanceResponse,
-    SharedObjectStore, WalFlushStepOutcome,
+    AdvanceRetentionResponse, Checkpoint, CreateCheckpointOptions, DeleteCheckpointResponse,
+    ErrorCode, FlushWalOutcome, FlushWalResponse, ListCheckpointsResponse, MaintenanceCancellation,
+    MaintenanceProbe, MetadataCompactionOutcome, MetadataCompactionResponse,
+    MetadataMaintenanceOptions, MetadataMaintenanceResponse, NamespaceId, PinId,
+    ReorganizeStepOutcome, RunMaintenanceRequest, RunMaintenanceResponse, SharedObjectStore,
+    WalFlushStepOutcome,
 };
 use crate::{ChangeSeq, Result, RuntimeError};
 use loonfs_api::PageRequest;
@@ -771,7 +771,7 @@ impl FsMaintenance {
     pub async fn delete_checkpoint(
         &self,
         namespace_id: &NamespaceId,
-        checkpoint_id: &CheckpointId,
+        checkpoint_id: &PinId,
     ) -> Result<DeleteCheckpointResponse> {
         self.core.record_trace_context(&tracing::Span::current());
         let result = self

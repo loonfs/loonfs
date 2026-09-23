@@ -9,7 +9,7 @@ use crate::limits::CONTENTION_RETRY_LIMIT;
 use bytes::Bytes;
 use loonfs_api::wire::control::{
     encode_control_state, ControlObjectKind, ProxiedStaging, UploadSessionMode,
-    UploadSessionRecordStatus, UploadSessionState,
+    UploadSessionPayload, UploadSessionRecordStatus,
 };
 use loonfs_api::{NamespaceId, UploadId};
 use loonfs_objectstore::keys::upload_session;
@@ -119,7 +119,7 @@ pub(crate) async fn create_control_object_under_generated_id<S: ObjectStore + ?S
 pub(crate) enum UploadSessionUpdate<T> {
     Noop(T),
     Replace {
-        next: Box<UploadSessionState>,
+        next: Box<UploadSessionPayload>,
         outcome: T,
     },
 }
@@ -155,7 +155,7 @@ pub(crate) async fn update_upload_session<S, T, F, Fut>(
 ) -> crate::error::Result<T>
 where
     S: ObjectStore + ?Sized,
-    F: Fn(UploadSessionState) -> Fut,
+    F: Fn(UploadSessionPayload) -> Fut,
     Fut: Future<Output = crate::error::Result<UploadSessionUpdate<T>>>,
 {
     update_upload_session_from_initial(store, namespace_id, upload_id, None, update).await
@@ -167,12 +167,12 @@ pub(crate) async fn update_upload_session_from_initial<S, T, F, Fut>(
     store: &S,
     namespace_id: &NamespaceId,
     upload_id: &UploadId,
-    mut initial: Option<LoadedControl<UploadSessionState>>,
+    mut initial: Option<LoadedControl<UploadSessionPayload>>,
     update: F,
 ) -> crate::error::Result<T>
 where
     S: ObjectStore + ?Sized,
-    F: Fn(UploadSessionState) -> Fut,
+    F: Fn(UploadSessionPayload) -> Fut,
     Fut: Future<Output = crate::error::Result<UploadSessionUpdate<T>>>,
 {
     let update = &update;
@@ -200,7 +200,7 @@ pub(crate) async fn try_update_upload_session<S, T, F, Fut>(
 ) -> crate::error::Result<CasAttempt<T, CoreError>>
 where
     S: ObjectStore + ?Sized,
-    F: FnOnce(UploadSessionState) -> Fut,
+    F: FnOnce(UploadSessionPayload) -> Fut,
     Fut: Future<Output = crate::error::Result<UploadSessionUpdate<T>>>,
 {
     let loaded = load_upload_session_object(store, namespace_id, upload_id).await?;
@@ -209,12 +209,12 @@ where
 
 async fn try_update_loaded_upload_session<S, T, F, Fut>(
     store: &S,
-    loaded: LoadedControl<UploadSessionState>,
+    loaded: LoadedControl<UploadSessionPayload>,
     update: F,
 ) -> crate::error::Result<CasAttempt<T, CoreError>>
 where
     S: ObjectStore + ?Sized,
-    F: FnOnce(UploadSessionState) -> Fut,
+    F: FnOnce(UploadSessionPayload) -> Fut,
     Fut: Future<Output = crate::error::Result<UploadSessionUpdate<T>>>,
 {
     match update(loaded.state).await? {
@@ -252,13 +252,13 @@ pub(crate) async fn load_upload_session_state<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     upload_id: &UploadId,
-) -> crate::error::Result<UploadSessionState> {
+) -> crate::error::Result<UploadSessionPayload> {
     Ok(load_upload_session_object(store, namespace_id, upload_id)
         .await?
         .state)
 }
 
-type LoadedUploadSessionObject = LoadedControl<UploadSessionState>;
+type LoadedUploadSessionObject = LoadedControl<UploadSessionPayload>;
 
 async fn load_upload_session_object<S: ObjectStore + ?Sized>(
     store: &S,
@@ -270,7 +270,7 @@ async fn load_upload_session_object<S: ObjectStore + ?Sized>(
         store,
         object_key,
         ControlObjectKind::UploadSession,
-        |state: &UploadSessionState| {
+        |state: &UploadSessionPayload| {
             expect_namespace(namespace_id, &state.namespace_id)?;
             expect_identity_field("upload id", upload_id.as_str(), state.upload_id.as_str())
         },

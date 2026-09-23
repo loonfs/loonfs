@@ -211,7 +211,7 @@ pub enum KeyClass {
     NamespaceManifest,
     /// Groups immutable metadata segments.
     MetadataSegment,
-    /// Groups checkpoint records and retained-history floors consulted by garbage collection.
+    /// Groups pins and retained-history floors consulted by garbage collection.
     GcControl,
     /// Groups unrecognized keys and coarse listing prefixes.
     Unknown,

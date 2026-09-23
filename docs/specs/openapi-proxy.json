@@ -671,7 +671,7 @@
             "description": "Revision to read, or `None` for the path's current revision.\nCannot be combined with `snapshot_id`."
           },
           "snapshot_id": {
-            "$ref": "#/components/schemas/SnapshotId",
+            "$ref": "#/components/schemas/PinId",
             "description": "Read the file revision captured by this snapshot.\nCannot be combined with `revision_no`."
           }
         },
@@ -829,7 +829,7 @@
             "description": "Namespace the snapshot belonged to."
           },
           "snapshot_id": {
-            "$ref": "#/components/schemas/SnapshotId",
+            "$ref": "#/components/schemas/PinId",
             "description": "Deleted snapshot record."
           }
         },
@@ -2492,6 +2492,12 @@
         ],
         "type": "object"
       },
+      "PinId": {
+        "description": "Durable pin identifier. The manifest number determines which namespace manifest it pins.",
+        "example": "pin_00000000000000000001-0000000000000002",
+        "pattern": "^pin_[0-9]{20}-[0-9a-f]{16}$",
+        "type": "string"
+      },
       "RevisionNo": {
         "description": "Revision number for a file's content. It increases whenever the content is replaced or restored.",
         "format": "int64",
@@ -2590,7 +2596,7 @@
             "description": "Namespace whose state the snapshot captured."
           },
           "snapshot_id": {
-            "$ref": "#/components/schemas/SnapshotId",
+            "$ref": "#/components/schemas/PinId",
             "description": "Snapshot id."
           }
         },
@@ -2603,12 +2609,6 @@
           "expires_at_ms"
         ],
         "type": "object"
-      },
-      "SnapshotId": {
-        "description": "Id of a snapshot.\n\nA snapshot is backed by a checkpoint record and uses that record's\nid, `pin_{manifest_no:020}-{16 lowercase hex}`.",
-        "example": "pin_00000000000000000001-0000000000000002",
-        "pattern": "^pin_[0-9]{20}-[0-9a-f]{16}$",
-        "type": "string"
       },
       "TrashEntry": {
         "description": "One recoverable deletion and its removed directory binding.",
@@ -2986,7 +2986,7 @@
             "name": "snapshot_id",
             "required": false,
             "schema": {
-              "$ref": "#/components/schemas/SnapshotId"
+              "$ref": "#/components/schemas/PinId"
             }
           }
         ],
@@ -3217,7 +3217,7 @@
             "name": "snapshot_id",
             "required": false,
             "schema": {
-              "$ref": "#/components/schemas/SnapshotId"
+              "$ref": "#/components/schemas/PinId"
             }
           }
         ],
@@ -3465,7 +3465,7 @@
             "name": "snapshot_id",
             "required": false,
             "schema": {
-              "$ref": "#/components/schemas/SnapshotId"
+              "$ref": "#/components/schemas/PinId"
             }
           }
         ],
@@ -3580,7 +3580,7 @@
             "name": "snapshot_id",
             "required": false,
             "schema": {
-              "$ref": "#/components/schemas/SnapshotId"
+              "$ref": "#/components/schemas/PinId"
             }
           }
         ],
@@ -4276,7 +4276,7 @@
             "name": "snapshot_id",
             "required": true,
             "schema": {
-              "$ref": "#/components/schemas/SnapshotId"
+              "$ref": "#/components/schemas/PinId"
             }
           }
         ],
@@ -4357,7 +4357,7 @@
             "name": "snapshot_id",
             "required": true,
             "schema": {
-              "$ref": "#/components/schemas/SnapshotId"
+              "$ref": "#/components/schemas/PinId"
             }
           }
         ],

@@ -135,7 +135,7 @@ impl MetricLabel for MaintenanceConclusion {
 /// One reclaimable family: its label, and the count a pass reports for it.
 type GcCategory = (&'static str, fn(&GcResponse) -> u64);
 
-/// Counts each deletion once, with checkpoint records grouped by owner.
+/// Counts each deletion once, with pins grouped by owner.
 const GC_CATEGORIES: [GcCategory; 9] = [
     ("deleted_wal_segments", |gc| gc.deleted.wal_segments),
     ("deleted_metadata_segments", |gc| {

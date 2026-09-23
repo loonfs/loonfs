@@ -1,6 +1,6 @@
 //! Content search requests and responses for the v0 HTTP API.
 
-use crate::{AbsolutePath, ChangeSeq, CheckpointId, InodeId, NamespaceId, RevisionNo, RunNo};
+use crate::{AbsolutePath, ChangeSeq, InodeId, NamespaceId, PinId, RevisionNo, RunNo};
 use serde::{Deserialize, Serialize};
 use xxhash_rust::xxh64::xxh64;
 
@@ -111,7 +111,7 @@ pub enum GrepIndexLifecycle {
         #[cfg_attr(feature = "openapi", schema(nullable = false))]
         cursor_inode_id: Option<InodeId>,
         /// Checkpoint pinning the state being walked.
-        checkpoint_id: CheckpointId,
+        checkpoint_id: PinId,
     },
     /// An index following the change feed through its searchable watermark.
     Active {
@@ -219,7 +219,7 @@ mod tests {
         let backfilling = GrepIndexLifecycle::Backfilling {
             target_seq: ChangeSeq(9),
             cursor_inode_id: Some(InodeId(4)),
-            checkpoint_id: CheckpointId::parse("pin_00000000000000000001-0000000000000009")
+            checkpoint_id: PinId::parse("pin_00000000000000000001-0000000000000009")
                 .expect("checkpoint id"),
         };
         assert_eq!(
@@ -254,7 +254,7 @@ mod tests {
         let backfilling = GrepIndexLifecycle::Backfilling {
             target_seq: ChangeSeq(9),
             cursor_inode_id: None,
-            checkpoint_id: CheckpointId::parse("pin_00000000000000000001-0000000000000009")
+            checkpoint_id: PinId::parse("pin_00000000000000000001-0000000000000009")
                 .expect("checkpoint id"),
         };
         assert!(
@@ -304,7 +304,7 @@ mod tests {
                 lifecycle: GrepIndexLifecycle::Backfilling {
                     target_seq: ChangeSeq(12),
                     cursor_inode_id: Some(InodeId(4)),
-                    checkpoint_id: CheckpointId::parse("pin_00000000000000000001-0000000000000009")
+                    checkpoint_id: PinId::parse("pin_00000000000000000001-0000000000000009")
                         .expect("checkpoint id"),
                 },
                 next_run_no: RunNo(1),

@@ -1,7 +1,7 @@
 //! Pin publication races and verification request counts.
 
 use super::*;
-use loonfs_api::wire::control::CheckpointOwner;
+use loonfs_api::wire::control::PinOwner;
 use loonfs_objectstore::keys::checkpoint_prefix;
 use loonfs_test_support::stores::MetadataMapStore;
 
@@ -48,7 +48,7 @@ async fn pin_creation_retries_after_compaction_and_collection() {
                 let current =
                     compact_and_collect_replaced_segments(&store, &namespace_id, &selected).await;
                 assert_eq!(
-                    selected.state.manifest.manifest_head_seq != current.manifest_head_seq,
+                    selected.state.manifest.head_seq != current.head_seq,
                     advance_head
                 );
                 store.release();
@@ -71,7 +71,7 @@ async fn pin_creation_retries_after_compaction_and_collection() {
         .expect("acknowledged checkpoint remains readable");
         assert_eq!(page.files.len(), if advance_head { 3 } else { 2 });
         assert_eq!(checkpoint.manifest_no, current.manifest_no);
-        assert_eq!(checkpoint.captured_seq, current.manifest_head_seq);
+        assert_eq!(checkpoint.captured_seq, current.head_seq);
         assert_eq!(
             store
                 .list_prefix(&checkpoint_prefix(&namespace_id))
@@ -172,7 +172,7 @@ async fn namespace_deletion_during_pin_verification_deletes_the_pin() {
         create::create_checkpoint_at_basis(
             &store,
             &namespace_id,
-            CheckpointOwner::User {
+            PinOwner::User {
                 name: "racing".to_owned(),
                 expires_at_ms: None
             },
@@ -240,9 +240,9 @@ async fn pin_verification_checks_manifest_identity_with_only_the_current_manifes
     let expected = store.take();
     let mut changed_number = record.clone();
     changed_number.manifest_no = record.manifest_no.successor().expect("next number");
-    changed_number.pin_id = CheckpointId::generate(changed_number.manifest_no);
+    changed_number.pin_id = PinId::generate(changed_number.manifest_no);
     let mut changed_checksum = record.clone();
-    changed_checksum.manifest_payload_checksum = "sha256:different".to_owned();
+    changed_checksum.payload_checksum = "sha256:different".to_owned();
     for (record, expected_verification) in [
         (record, record::CheckpointBasisVerification::Verified),
         (changed_number, record::CheckpointBasisVerification::Invalid),
@@ -301,11 +301,8 @@ async fn fork_owned_checkpoints_reject_user_release() {
         .expect("get record")
         .expect("record exists");
     let fork_record = loonfs_api::wire::control::decode_control_object::<
-        loonfs_api::wire::control::CheckpointRecordState,
-    >(
-        &bytes,
-        loonfs_api::wire::control::ControlObjectKind::CheckpointRecord,
-    )
+        loonfs_api::wire::control::PinPayload,
+    >(&bytes, loonfs_api::wire::control::ControlObjectKind::Pin)
     .expect("decode record")
     .into_payload();
 
@@ -342,7 +339,7 @@ async fn snapshot_owned_checkpoints_reject_user_release() {
     let snapshot = crate::checkpoint::create_checkpoint(
         &store,
         &namespace_id,
-        CheckpointOwner::Snapshot {
+        PinOwner::Snapshot {
             name: "report-run".to_owned(),
             expires_at_ms: u64::MAX,
         },
@@ -369,6 +366,6 @@ async fn snapshot_owned_checkpoints_reject_user_release() {
         &snapshot.checkpoint_id
     )
     .await
-    .expect("read checkpoint record")
+    .expect("read pin")
     .is_some());
 }

@@ -9,7 +9,7 @@ pub struct DownloadOptions {
     /// Download one retained revision instead of the current file.
     pub revision_no: Option<RevisionNo>,
     /// Download the file revision captured by this snapshot.
-    pub snapshot_id: Option<SnapshotId>,
+    pub snapshot_id: Option<PinId>,
 }
 
 /// A direct download returned in verified, bounded chunks.

@@ -86,8 +86,8 @@ where
     })
 }
 
-pub(super) fn parse_snapshot_id(value: &str) -> Result<loonfs_api::SnapshotId, ApiResponseError> {
-    loonfs_api::SnapshotId::parse(value)
+pub(super) fn parse_snapshot_id(value: &str) -> Result<loonfs_api::PinId, ApiResponseError> {
+    loonfs_api::PinId::parse(value)
         .map_err(|error| invalid_path_id_error("snapshot_id", value, error.reason()))
 }
 
