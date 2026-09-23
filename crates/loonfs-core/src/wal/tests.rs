@@ -618,3 +618,73 @@ async fn a_flush_and_collection_during_tip_discovery_cannot_reuse_a_wal_number()
         .expect("file");
     }
 }
+
+#[tokio::test]
+async fn a_warm_probe_reports_a_broken_chain_at_its_own_epoch_as_corruption() {
+    let directory = tempdir().expect("directory");
+    let store = LocalFsStore::new(directory.path()).expect("store");
+    let namespace_id = NamespaceId::parse("warm-probe").expect("namespace");
+    bootstrap_namespace(
+        &store,
+        &namespace_id,
+        &context(1_000),
+        &loonfs_test_support::test_actor(),
+        &loonfs_api::NamespaceAccess::Unrestricted {},
+        false,
+    )
+    .await
+    .expect("create");
+    acquire_writer_epoch(&store, &namespace_id, &context(1_000))
+        .await
+        .expect("fence");
+    let loaded = crate::namespace::read_anchor::load_head_and_metadata_basis(&store, &namespace_id)
+        .await
+        .expect("warm head");
+    let fence = decode_wal_segment_envelope_zstd(
+        &store
+            .get(&wal_segment(&namespace_id, &loaded.head.wal_no), None)
+            .await
+            .expect("get")
+            .expect("fence"),
+    )
+    .expect("decode");
+    let mut broken = fence.payload().clone();
+    broken.wal_no = loaded.head.wal_no.successor().expect("next WAL number");
+    broken.prior_head_seq = ChangeSeq(5);
+    broken.head_seq = ChangeSeq(5);
+    store
+        .put_if_absent(
+            &wal_segment(&namespace_id, &broken.wal_no),
+            encode_wal_segment_envelope_zstd(broken)
+                .expect("encode")
+                .into_bytes()
+                .into(),
+        )
+        .await
+        .expect("same-epoch segment");
+    let mut warm = crate::RuntimeReadContext {
+        head: loaded.head,
+        basis: loaded.basis,
+        segment_cache: std::sync::Arc::new(crate::cache::MetadataSegmentCache::new(
+            Default::default(),
+        )),
+        tail_cache: std::sync::Arc::new(crate::cache::WalTailProjectionCache::new(
+            crate::cache::WalTailProjectionCacheConfig {
+                max_entries: 1,
+                max_rows: usize::MAX,
+                max_decoded_bytes: usize::MAX,
+            },
+            None,
+        )),
+    };
+    let error = super::probe_namespace_wal(&store, &mut warm)
+        .await
+        .expect_err("a same-epoch chain break is corruption, not a stale head");
+    assert!(
+        matches!(
+            error,
+            crate::control_object::ControlObjectLoadError::Codec { .. }
+        ),
+        "{error}"
+    );
+}
