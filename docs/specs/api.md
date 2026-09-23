@@ -465,6 +465,15 @@ and garbage collection are tracked separately for each namespace. Use
 refers to the new copy owned by that namespace. A subject must be an
 administrator of the reference's owner namespace to import it.
 
+An import checks authorization against the owner's current head. A reference
+from the current owner generation uses that head's content store and may read
+resident inline bytes. A reference from an earlier generation uses the content
+store in the tombstone named by that generation's retired pin. The import lists
+the owner's pins and recognizes retired ids by their namespace and manifest
+number. Without that generation's retired pin, the content is missing and the
+import returns `namespace_corrupt`, as for a missing content object. Recreation
+does not let an import read the earlier generation's bytes from the new domain.
+
 ### 5.1 Commit identity and preconditions
 
 A commit is one request: a `commit_id` — a client-generated stable
@@ -1613,6 +1622,18 @@ namespace state plus storage details used by maintenance:
   "live_checkpoints": 4
 }
 ```
+
+#### Namespace statistics
+
+The embedded `load_namespace_statistics` and `load_checkpoint_statistics`
+loaders return `NamespaceStatistics` through one manifest's folded head.
+Newer WAL commits are excluded. The observation includes `generation`, the
+manifest reference, creation time, lifecycle status, folded WAL number,
+activity counters, referenced inode and metadata totals, and any fork basis.
+Counters start at zero in each generation, so comparisons hold within one
+generation of the same namespace. Activity counters are integers from zero
+through 9007199254740991. Their definitions and the footprint calculations are
+in [format section 7.4](format.md#74-statistics).
 
 ### 6.3 `DELETE /v0/namespaces/{ns}`
 

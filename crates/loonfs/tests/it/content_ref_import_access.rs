@@ -9,6 +9,7 @@ use loonfs_api::{
     PrincipalId, PrincipalScope, PrincipalSet, Subject, SubjectId,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
+use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{KeyPredicate, OperationClass, RecordingStore};
 use std::collections::{BTreeMap, BTreeSet};
@@ -251,4 +252,111 @@ async fn deleted_owner_import_uses_updated_access_state_in_the_surviving_head() 
         .expect("surviving access state authorizes administrator");
     assert_eq!(prepared.content_ref().owner_namespace_id, destination);
     assert_ne!(prepared.content_ref().content_id, content_ref.content_id);
+}
+
+#[tokio::test]
+async fn prior_generation_import_uses_its_retired_domain_and_current_authority() {
+    use loonfs_api::{CheckpointId, NamespaceGeneration};
+    use loonfs_core::content::DurableContentValidationError;
+    use loonfs_core::control::load_namespace_current_manifest;
+
+    let (_directory, recording, writer) = open_writer().await;
+    let source = namespace_id("source");
+    let fork = namespace_id("fork");
+    let destination = namespace_id("destination");
+    create_namespace(&writer, &source, acl("administrator")).await;
+    create_namespace(&writer, &destination, NamespaceAccess::unrestricted()).await;
+    let content_ref = publish_inline(&writer, &source).await;
+    writer
+        .fork_namespace(
+            &source,
+            &fork,
+            ForkNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("fork");
+    writer
+        .delete_namespace(&source, DeleteNamespaceOptions::default())
+        .await
+        .expect("delete source");
+    let tombstone = load_namespace_current_manifest(recording.as_ref(), &source)
+        .await
+        .expect("tombstone");
+    let retired_id = CheckpointId::retired(&source, tombstone.envelope.payload().manifest_no);
+    create_namespace(&writer, &source, acl("replacement")).await;
+    let current = load_namespace_current_manifest(recording.as_ref(), &source)
+        .await
+        .expect("current manifest");
+    assert_eq!(
+        current.envelope.payload().generation,
+        NamespaceGeneration(2)
+    );
+    assert_ne!(
+        current.envelope.payload().content_store_id,
+        tombstone.envelope.payload().content_store_id
+    );
+
+    recording.reset();
+    let error = writer
+        .as_subject(subject("administrator"))
+        .prepare_content_ref(&destination, content_ref.clone())
+        .await
+        .expect_err("the prior generation's administrator is refused");
+    assert_forbidden_without_writes(recording.as_ref(), error);
+
+    let importer = writer.as_subject(subject("replacement"));
+    let prepared = importer
+        .prepare_content_ref(&destination, content_ref.clone())
+        .await
+        .expect("import prior generation");
+    assert_eq!(prepared.content_ref().owner_namespace_id, destination);
+    assert_eq!(
+        prepared.content_ref().owner_generation,
+        NamespaceGeneration(1)
+    );
+    assert_ne!(prepared.content_ref().content_id, content_ref.content_id);
+    writer
+        .put_file_prepared(
+            &destination,
+            "/imported",
+            prepared,
+            PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("publish import");
+    assert_eq!(
+        writer
+            .reader()
+            .get_file_bytes(&destination, "/imported")
+            .await
+            .expect("imported bytes")
+            .bytes,
+        b"private inline bytes"
+    );
+
+    recording
+        .delete(&loonfs_objectstore::keys::checkpoint_record(
+            &source,
+            &retired_id,
+        ))
+        .await
+        .expect("delete retired pin");
+    recording.reset();
+    let error = importer
+        .prepare_content_ref(&destination, content_ref)
+        .await
+        .expect_err("generation without a retired pin is missing");
+    assert!(matches!(
+        error,
+        RuntimeError::Core(loonfs_core::Error::DurableContent(
+            DurableContentValidationError::MissingContentGeneration {
+                owner_namespace_id,
+                owner_generation: NamespaceGeneration(1),
+            }
+        )) if owner_namespace_id == source
+    ));
+    let counts = recording.counts();
+    assert_eq!(counts.puts, 0);
+    assert_eq!(counts.compare_and_swaps, 0);
+    assert_eq!(counts.deletes, 0);
 }

@@ -6,7 +6,7 @@ use super::content::{
 };
 use crate::error::CoreError;
 use bytes::Bytes;
-use loonfs_api::{ContentRef, ContentStoreId, NamespaceId};
+use loonfs_api::{ContentRef, ContentStoreId, NamespaceGeneration, NamespaceId};
 use loonfs_objectstore::ObjectStore;
 
 /// Identifies where a published reference's bytes are read from.
@@ -21,12 +21,15 @@ pub enum ContentLocation {
 impl ContentLocation {
     pub(crate) fn resolve(
         namespace_id: &NamespaceId,
+        generation: NamespaceGeneration,
         content_store_id: &ContentStoreId,
         tail: Option<&crate::wal::ProjectedWalTail>,
         content_ref: &ContentRef,
     ) -> Result<Self, DurableContentValidationError> {
         let object_key = content_object_key_for_ref(content_store_id, content_ref)?;
-        if content_ref.owner_namespace_id == *namespace_id {
+        if content_ref.owner_namespace_id == *namespace_id
+            && content_ref.owner_generation == generation
+        {
             if let Some(bytes) = tail.and_then(|tail| tail.inline_content(&content_ref.content_id))
             {
                 return Ok(Self::Tail {
@@ -98,5 +101,53 @@ impl ContentLocation {
                 Ok(bytes)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::wal::ProjectedWalTail;
+    use loonfs_test_support::ids::content_ref;
+
+    #[test]
+    fn resident_content_requires_the_reading_namespace_and_generation() {
+        let bytes = Bytes::from_static(b"resident bytes");
+        let reference = content_ref(&bytes);
+        let content_store_id = ContentStoreId::generate();
+        let mut tail = ProjectedWalTail::default();
+        tail.insert_inline_content(reference.clone(), bytes.clone());
+        let resolve = |namespace_id: &NamespaceId, generation| {
+            ContentLocation::resolve(
+                namespace_id,
+                generation,
+                &content_store_id,
+                Some(&tail),
+                &reference,
+            )
+            .expect("content location")
+        };
+        let object_key =
+            content_object_key_for_ref(&content_store_id, &reference).expect("content object key");
+        assert_eq!(
+            resolve(&reference.owner_namespace_id, reference.owner_generation),
+            ContentLocation::Tail {
+                bytes,
+                object_key: object_key.clone(),
+            }
+        );
+        assert_eq!(
+            resolve(&reference.owner_namespace_id, NamespaceGeneration(2)),
+            ContentLocation::Object {
+                object_key: object_key.clone(),
+            }
+        );
+        assert_eq!(
+            resolve(
+                &NamespaceId::parse("another-reader").expect("namespace"),
+                reference.owner_generation,
+            ),
+            ContentLocation::Object { object_key }
+        );
     }
 }

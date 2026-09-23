@@ -480,7 +480,7 @@ Operations in one request are evaluated in order. Later operations can observe t
 
 The writer must check that a content reference has a supported kind, a correctly encoded checksum, and applicable evidence that the object is durable with the stated size and checksum. Content validation precedes metadata preconditions. Previously established content can be reused only through the namespace's validated state or the admission paths described in section 5.5.
 
-Metadata preconditions include name-slot availability, exact binding generations, file and attribute revisions, ancestor visibility, and directory emptiness. The internal exact-binding check is:
+Metadata preconditions include namespace generation and head sequence, name-slot availability, exact binding generations, file and attribute revisions, ancestor visibility, and directory emptiness. The internal exact-binding check is:
 
 ```text
 binding_is(parent_inode_id, name_key, child_inode_id, bind_seq, bind_delta_index)
@@ -629,7 +629,7 @@ For example, writing a 10-byte file and then replacing it with a 6-byte revision
 
 A fold adds only the activity after its predecessor's covered position. It publishes the counters, runs, head sequence, and folded WAL number together. A competing publication requires the fold to reload the predecessor and count only the remaining tail. A recognized commit retry adds nothing again. If an expired receipt allows a new durable commit, that commit counts as new activity.
 
-Uploads alone, fence records, pins, inline-content extraction, and compaction add no activity. Retention and deletion do not subtract past activity. Every publisher carries forward the counters from the predecessor it actually updates, including when compaction races a newer fold.
+Uploads alone, fence records, pins, inline-content extraction, and compaction add no activity. Retention and deletion do not subtract past activity. Within one generation, every publisher carries forward the counters from the predecessor it actually updates, including when compaction races a newer fold.
 
 Two footprint values are calculated from the manifest's segment descriptors:
 
@@ -640,13 +640,13 @@ Two footprint values are calculated from the manifest's segment descriptors:
 
 The inode count includes retained deleted records. An implicit root counts as zero until stored as an inode record. Metadata bytes exclude content, WAL, manifest and pin JSON, unreferenced outputs, and segments referenced only by other manifests. Shared segments count in each referencing manifest; these totals do not measure unique physical storage.
 
-Statistics reads use one validated manifest without reading segments or replaying newer WAL. Observations include namespace identity, lifecycle status, manifest number, head sequence, and folded WAL number. A pin selects its exact manifest. Compaction can change footprint without changing the logical head, so the manifest number matters too.
+Statistics reads use one validated manifest without reading segments or replaying newer WAL. Observations include namespace identity, generation, lifecycle status, manifest number, head sequence, and folded WAL number. A pin selects its exact manifest. Compaction can change footprint without changing the logical head, so the manifest number matters too.
 
 A fork inherits the source manifest's segment descriptors, so its footprint values begin as the source's. Its counters begin at zero. Activity committed in the source stays in the source's manifests.
 
-Meters compare observations for the same namespace. Billing cursors and policy belong to the application.
+Counters start at zero in each generation. Meters compare observations for the same namespace and generation. Billing cursors and policy belong to the application.
 
-The counters are public integers within the bound in the API specification; exceeding it is an error, and a counter that regresses is corruption.
+The counters are public integers within the bound in the API specification; exceeding it is an error, and a counter that regresses within one generation is corruption.
 
 Grep reports its own referenced segment bytes under Appendix D. Its manifest and indexing position are independent of the core observation. A new fork starts without an index; a failed index read must not be reported as zero bytes.
 
@@ -786,9 +786,11 @@ An inode-preserving rename is namespace-local. Across namespaces, a move is a de
 
 Sharing a content store does not authorize arbitrary reference reuse. A fork can retain references through its source pin; other imports write verified bytes under a fresh destination-owned identity. Reusing another owner's identity would require an additional durable source-side retention protocol.
 
-An import resolves the source reference through its owner's current view, including imports within that namespace. It verifies resident inline bytes or streams the content object, then stages the bytes under a fresh identity owned by the destination's current generation. If the owner is deleted, the import reads the object using the content-store binding in the surviving head. Forks pin manifests, so inherited content is always materialized. Inherited references retain their owner and owner generation.
+An import of the owner's current generation resolves the source reference through the owner's current view, including imports within that namespace. Resident inline bytes are used only when the reference's owner and generation match the reading namespace and generation. Otherwise the import streams the content object. If the owner is deleted, the import uses the content-store binding in the surviving head.
 
-A subject importing a bare reference must be an administrator of its owner namespace. An unrestricted owner and a request with no subject need no administrator grant. A deleted owner uses the access state in its surviving head.
+For a reference from an earlier owner generation, the import lists the owner's pin prefix and keeps only ids equal to `CheckpointId::retired(owner, manifest_no)` for their own manifest number. It loads those tombstones and uses the content-store binding of the one whose `generation` equals `owner_generation`. Without a retired pin for that generation, the content is missing. The import verifies the bytes and stages them under a fresh identity owned by the destination's current generation. Forks pin manifests, so inherited content is always materialized. Inherited references retain their owner and owner generation.
+
+A subject importing a bare reference must be an administrator of its owner namespace. An unrestricted owner and a request with no subject need no administrator grant. Authorization always uses the owner's current head, including after recreation. A deleted owner uses the access state in its surviving head.
 
 ## 10. Retention and compaction
 
@@ -1496,7 +1498,7 @@ The precondition list appears after `message` and retains caller order without s
 
 Precondition inode IDs use their numeric storage representation, not public `ino_` strings. Every listed field is written. Optional fields are `null` when absent.
 
-Precondition sequence and revision values are JSON integers. Paths use validated absolute spelling, and binding generations remain opaque strings. Preconditions affect request identity and validation; they add no separate WAL field or replay delta.
+Precondition namespace generation, sequence, and revision values are JSON integers. Paths use validated absolute spelling, and binding generations remain opaque strings. Preconditions affect request identity and validation; they add no separate WAL field or replay delta.
 
 ### B.4 Strings, integers, and example bytes
 

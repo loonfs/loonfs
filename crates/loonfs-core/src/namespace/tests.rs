@@ -443,6 +443,9 @@ async fn recreating_a_deleted_namespace_publishes_an_empty_next_generation() {
         .await
         .expect("recreated manifest");
     let payload = current.envelope.payload();
+    let statistics = current.statistics().expect("recreated statistics");
+    assert_eq!(statistics.generation, NamespaceGeneration(2));
+    assert_eq!(statistics.activity, Default::default());
     assert_eq!(
         payload.manifest_no,
         tombstone.manifest_no.successor().expect("next manifest")

@@ -7,15 +7,18 @@ use crate::error::{CoreError, Result};
 use crate::namespace::control::{load_current_manifest, LoadedManifest};
 use loonfs_api::wire::control::{ForkBasis, ManifestRef, NamespaceStatus};
 use loonfs_api::wire::manifest::{ManifestActivity, MetadataRowFamily, NamespaceManifestEnvelope};
-use loonfs_api::{CheckpointId, NamespaceId, WalNo};
+use loonfs_api::{CheckpointId, NamespaceGeneration, NamespaceId, WalNo};
 use loonfs_objectstore::ObjectStore;
 
 /// Statistics through the selected manifest's folded head. Newer WAL commits
-/// are excluded.
+/// are excluded. Counters start at zero in each generation, so comparisons
+/// hold within one generation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NamespaceStatistics {
     /// Namespace, manifest number, head sequence, and checksum of this observation.
     pub manifest: ManifestRef,
+    /// Generation whose activity is counted.
+    pub generation: NamespaceGeneration,
     /// Immutable namespace creation time in Unix milliseconds.
     pub created_at_ms: u64,
     /// Lifecycle at this manifest, including whether these are final totals.
@@ -91,6 +94,7 @@ fn manifest_statistics(manifest: &NamespaceManifestEnvelope) -> Result<Namespace
     }
     Ok(NamespaceStatistics {
         manifest: manifest_ref_for(&payload.namespace_id, manifest),
+        generation: payload.generation,
         created_at_ms: payload.created_at_ms,
         status: payload.status,
         last_folded_wal_no: payload.last_folded_wal_no,

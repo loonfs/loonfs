@@ -4,11 +4,11 @@ use crate::checkpoint::load_namespace_manifest_envelope_if_present;
 use crate::checkpoint::record::checkpoint_key_ids;
 use crate::context::MutationContext;
 use crate::control_object::ControlObjectLoadError;
-use crate::error::{CoreError, Result};
+use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::namespace::control::load_current_manifest;
 use futures::StreamExt;
 use loonfs_api::wire::control::{CheckpointRecordState, ForkBasis};
-use loonfs_api::{CheckpointId, NamespaceGeneration, NamespaceId};
+use loonfs_api::{CheckpointId, ContentStoreId, NamespaceGeneration, NamespaceId};
 use loonfs_objectstore::ObjectStore;
 
 pub(super) enum ForkCheckpointReachability {
@@ -113,7 +113,7 @@ async fn classify_prior_generations<S: ObjectStore + ?Sized>(
         let Ok((_, retired_id)) = checkpoint_key_ids(&key) else {
             continue;
         };
-        if retired_id != CheckpointId::retired(target_namespace_id, retired_id.manifest_no()) {
+        if !is_retired_pin(target_namespace_id, &retired_id) {
             continue;
         }
         let manifest_key = loonfs_objectstore::keys::metadata_manifest_object(
@@ -147,4 +147,56 @@ async fn classify_prior_generations<S: ObjectStore + ?Sized>(
         }
     }
     Ok(ForkCheckpointReachability::Reclaimable)
+}
+
+pub(super) fn is_retired_pin(namespace_id: &NamespaceId, pin_id: &CheckpointId) -> bool {
+    *pin_id == CheckpointId::retired(namespace_id, pin_id.manifest_no())
+}
+
+/// Finds the content domain of an unreclaimed generation through its retired pin.
+pub async fn load_retired_content_store<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    generation: NamespaceGeneration,
+) -> Result<Option<ContentStoreId>> {
+    let prefix = loonfs_objectstore::keys::checkpoint_prefix(namespace_id);
+    let mut listing = store.list_prefix_stream(&prefix);
+    while let Some(key) = listing
+        .next()
+        .await
+        .transpose()
+        .map_err(|error| CoreError::store(&prefix, &error))?
+    {
+        let Ok((_, pin_id)) = checkpoint_key_ids(&key) else {
+            continue;
+        };
+        if !is_retired_pin(namespace_id, &pin_id) {
+            continue;
+        }
+        let manifest_key =
+            loonfs_objectstore::keys::metadata_manifest_object(namespace_id, &pin_id.manifest_no());
+        let tombstone = load_namespace_manifest_envelope_if_present(
+            store,
+            namespace_id,
+            &pin_id.manifest_no(),
+            &manifest_key,
+        )
+        .await
+        .map_err(MetadataProjectionLoadError::ManifestLoad)?
+        .ok_or_else(|| {
+            CoreError::NamespaceCorrupt(format!(
+                "retired pin `{key}` names missing manifest `{manifest_key}`"
+            ))
+        })?;
+        let payload = tombstone.payload();
+        if !payload.status.is_deleted() {
+            return Err(CoreError::NamespaceCorrupt(format!(
+                "retired pin `{key}` names an active manifest"
+            )));
+        }
+        if payload.generation == generation {
+            return Ok(Some(payload.content_store_id.clone()));
+        }
+    }
+    Ok(None)
 }

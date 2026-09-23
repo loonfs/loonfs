@@ -60,6 +60,11 @@ pub enum DurableContentValidationError {
     InvalidContentRef(ContentRefValidationError),
     #[error("missing content object `{object_key}`")]
     MissingContentObject { object_key: String },
+    #[error("missing content generation {owner_generation} in namespace `{owner_namespace_id}`")]
+    MissingContentGeneration {
+        owner_namespace_id: NamespaceId,
+        owner_generation: NamespaceGeneration,
+    },
     #[error("content length mismatch for `{object_key}`: expected {expected}, actual {actual}")]
     ContentLengthMismatch {
         object_key: String,
@@ -91,6 +96,7 @@ impl DurableContentValidationError {
         match self {
             Self::InvalidContentRef(_)
             | Self::MissingContentObject { .. }
+            | Self::MissingContentGeneration { .. }
             | Self::ContentLengthMismatch { .. }
             | Self::ContentChecksumMismatch { .. } => ErrorCode::NamespaceCorrupt,
             #[cfg(any(test, feature = "test-support"))]
@@ -977,6 +983,7 @@ mod tests {
     ) -> Result<Vec<u8>, DurableContentValidationError> {
         ContentLocation::resolve(
             &content_ref.owner_namespace_id,
+            content_ref.owner_generation,
             content_store_id,
             None,
             content_ref,
