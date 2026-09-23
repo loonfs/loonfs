@@ -68,10 +68,7 @@ pub(crate) async fn extend_snapshot_expiry<S: ObjectStore + ?Sized>(
                 .min(lifetime_ceiling)
                 .max(*expires_at_ms);
             if *expires_at_ms == new_expires_at_ms {
-                return Ok(CasAttempt::Settled(
-                    super::checkpoint_summary(next)
-                        .expect("a classified snapshot should have a public owner"),
-                ));
+                return Ok(CasAttempt::Settled(super::checkpoint_summary(next)));
             }
             *expires_at_ms = new_expires_at_ms;
             let encoded = encode_checkpoint_record(&next)?;
@@ -79,10 +76,7 @@ pub(crate) async fn extend_snapshot_expiry<S: ObjectStore + ?Sized>(
                 .compare_and_swap(&object_key, &loaded.etag, encoded)
                 .await
             {
-                Ok(_) => Ok(CasAttempt::Settled(
-                    super::checkpoint_summary(next)
-                        .expect("a classified snapshot should have a public owner"),
-                )),
+                Ok(_) => Ok(CasAttempt::Settled(super::checkpoint_summary(next))),
                 Err(ObjectStoreError::PreconditionFailed { .. }) => Ok(CasAttempt::Contended(
                     CoreError::contention_exhausted(&object_key),
                 )),
@@ -106,10 +100,9 @@ pub(crate) async fn extend_snapshot_expiry<S: ObjectStore + ?Sized>(
                     .expires_at_ms()
                     .expect("a classified snapshot should carry an expiry");
                 if expires_at_ms >= new_expires_at_ms {
-                    Ok(WriteEvidence::Landed(
-                        super::checkpoint_summary(current.state)
-                            .expect("a classified snapshot should have a public owner"),
-                    ))
+                    Ok(WriteEvidence::Landed(super::checkpoint_summary(
+                        current.state,
+                    )))
                 } else {
                     Ok(WriteEvidence::Lost(CoreError::contention_exhausted(
                         &object_key,
@@ -168,7 +161,7 @@ pub(crate) fn classify_live_snapshot(
 fn snapshot_expiry_mut(owner: &mut PinOwner) -> Option<&mut u64> {
     match owner {
         PinOwner::Snapshot { expires_at_ms, .. } => Some(expires_at_ms),
-        PinOwner::User { .. } | PinOwner::Fork { .. } | PinOwner::Retired {} => None,
+        PinOwner::User { .. } | PinOwner::Fork { .. } => None,
     }
 }
 

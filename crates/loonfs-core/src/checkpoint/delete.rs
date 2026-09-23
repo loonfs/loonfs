@@ -15,7 +15,6 @@ pub(super) enum CheckpointOwnerKind {
     User,
     Fork,
     Snapshot,
-    Retired,
 }
 
 impl CheckpointOwnerKind {
@@ -24,7 +23,6 @@ impl CheckpointOwnerKind {
             PinOwner::User { .. } => Self::User,
             PinOwner::Fork { .. } => Self::Fork,
             PinOwner::Snapshot { .. } => Self::Snapshot,
-            PinOwner::Retired {} => Self::Retired,
         }
     }
 
@@ -35,7 +33,6 @@ impl CheckpointOwnerKind {
             Self::Snapshot => {
                 "it is deleted through the snapshot delete operation or by its expiry"
             }
-            Self::Retired => "it is deleted when its generation is reclaimed",
         }
     }
 }
@@ -64,7 +61,6 @@ fn owner_description(owner: &PinOwner) -> String {
             ..
         } => format!("owned by fork target `{target_namespace_id}`"),
         PinOwner::Snapshot { .. } => "a snapshot".to_owned(),
-        PinOwner::Retired {} => "a retired generation record".to_owned(),
     }
 }
 

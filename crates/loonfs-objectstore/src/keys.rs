@@ -3,7 +3,10 @@
 //! [durable object family]: ../../../docs/specs/format.md#a8-object-keys
 
 use loonfs_api::wire::manifest::MetadataSegmentRef;
-use loonfs_api::{ContentId, ManifestNo, MetadataSegmentId, NamespaceId, PinId, UploadId, WalNo};
+use loonfs_api::{
+    ContentId, ManifestNo, MetadataSegmentId, NamespaceGeneration, NamespaceId, PinId, UploadId,
+    WalNo,
+};
 
 /// Builds the listing prefix containing every durable object owned by one namespace.
 pub fn namespace_prefix(namespace_id: &NamespaceId) -> String {
@@ -66,6 +69,22 @@ pub fn checkpoint_prefix(namespace_id: &NamespaceId) -> String {
     format!("namespaces/{namespace_id}/pins/")
 }
 
+/// Builds the record key for a known retired generation.
+pub fn retired_generation_record(
+    namespace_id: &NamespaceId,
+    generation: NamespaceGeneration,
+) -> String {
+    format!(
+        "namespaces/{namespace_id}/retired/{:020}.json",
+        generation.0
+    )
+}
+
+/// Lists retired generations in oldest-first order.
+pub fn retired_generation_prefix(namespace_id: &NamespaceId) -> String {
+    format!("namespaces/{namespace_id}/retired/")
+}
+
 /// Builds the listing prefix containing durable upload sessions for one namespace.
 pub fn upload_session_prefix(namespace_id: &NamespaceId) -> String {
     format!("namespaces/{namespace_id}/uploads/")
@@ -93,7 +112,8 @@ mod tests {
     use loonfs_api::wire::manifest::{MetadataRowFamily, MetadataSegmentRef};
     use loonfs_api::wire::sst_blocks::BlockHandle;
     use loonfs_api::{
-        ContentId, ManifestNo, MetadataSegmentId, NamespaceId, PinId, UploadId, WalNo,
+        ContentId, ManifestNo, MetadataSegmentId, NamespaceGeneration, NamespaceId, PinId,
+        UploadId, WalNo,
     };
 
     const CONTENT_ID: &str = "con_abcdef0123456789abcdef0123456789";
@@ -159,6 +179,7 @@ mod tests {
                 .replace("{source_namespace_id}", "ns-1")
                 .replace("{wal_no:020}", &format!("{:020}", 42))
                 .replace("{suffix}", "0123456789abcdef")
+                .replace("{generation:020}", "00000000000000000001")
                 .replace("{manifest_no:020}", "00000000000000000400")
                 .replace("{pin_id}", "pin_00000000000000000001-0000000000000001")
                 .replace("{job_id}", "cmp_00000000000000000000000000000001")
@@ -175,6 +196,10 @@ mod tests {
                 metadata_manifest_object(&namespace_id(), &ManifestNo(400)),
             ),
             ("Pin records", checkpoint_record(&namespace_id(), &pin_id())),
+            (
+                "Retired generation records",
+                super::retired_generation_record(&namespace_id(), NamespaceGeneration(1)),
+            ),
             (
                 "Metadata segments",
                 metadata_segment(&namespace_id(), &metadata_segment_id()),

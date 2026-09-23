@@ -44,23 +44,23 @@ Creating a namespace whose current manifest is deleted recreates it. A fork into
 
 1. Load the current manifest. Active status answers `namespace_exists`, or the current summary with `allow_existing`. Deleted status continues below. An absent namespace takes the ordinary creation path.
 2. Take the WAL tip from the tombstone's folded WAL number. Deletion stamps the discovered tip there, and publishing the tombstone acquired the writer epoch, so no further WAL object can be published under it. Recreation reads no WAL object, which matters because the deleted generation's WAL objects are unprotected and may already be collected.
-3. Write a retired pin over the tombstone with put-if-absent. Its id is `pin_{tombstone_no:020}-` followed by sixteen hex characters derived from the namespace id and the tombstone number, so repeated attempts land on one record. The next section describes the pin.
+3. Write a retired generation record with put-if-absent at `namespaces/{namespace_id}/retired/{generation:020}.json`. Repeated attempts address the same record, and an existing record is success. The next section describes the record.
 4. Build the new manifest from the table above and publish it at the tombstone's number plus one with put-if-absent, within the metadata publication budget, measured from step 1 or, for a fork, from before it creates its source pin.
 5. Publication raises the hint to the new manifest number. A failed raise does not fail the creation.
 
-A losing manifest put reads the winner. An active winner is a concurrent recreation and answers `namespace_exists`, or the winner with `allow_existing`. A newer tombstone means another generation was created and deleted, so recreation retries over that tombstone. A put with an unknown transport outcome confirms its own success only by reading back the exact proposed manifest.
+A losing manifest put reads the winner. An active winner is a concurrent recreation and answers `namespace_exists`, or the winner with `allow_existing`. A newer tombstone means another generation was created and deleted. A plain create retries. A fork selects its target generation before writing its source pin and checks that generation on every publication-loop iteration. A target that has passed that lifetime returns `stale_head`, without rebinding the pin. A put with an unknown transport outcome confirms its own success only by reading back the exact proposed manifest.
 
-A lost attempt can leave its retired pin behind. The pin is over a real tombstone and describes real reclamation work, and its derived id means concurrent attempts wrote one record.
+A lost attempt can leave its retired generation record behind. Concurrent attempts use the same generation-derived key. If the tombstone has already been collected, the next collection pass deletes the record and counts it.
 
 ## Reclaiming a prior generation
 
 A deleted generation still owns the content named by its publication rows and upload sessions. If it was a fork, it still holds a pin under its source. Reclaiming it deletes those exact content keys and that pin. While a deleted manifest is current, the collector finds it through the manifest itself. After recreation the current manifest is active, so the collector needs another way to find prior generations, and there is no mutable object in which to record a retirement deadline.
 
-### Retired pins
+### Retired generation records
 
-A retired pin is a pin record with owner `{"kind": "retired"}` over a tombstone manifest. Recreation writes it before publishing the new generation. It is the collector's index of prior generations: the collector already lists the pin prefix on every pass, and the pin's manifest reference names the tombstone that holds every fact reclamation needs. The pin protects its tombstone and its segments so reclamation can read the publication rows on every attempt. Reclamation deletes the pin last, after which the tombstone is an ordinary old manifest and ages out with the rest.
+A retired generation record uses control-object kind `retired_generation` at format version 1. It contains `namespace_id`, `generation`, a `tombstone` manifest reference, and `created_at_ms`. Recreation writes it before publishing the new generation. The collector lists the `retired/` prefix to discover prior generations. A known generation resolves with one GET; source-side fork-pin classification does not list.
 
-In the owner table of format section 8.1, a retired pin stores no owner fields and lives until its generation is reclaimed. The checkpoint API never lists, reads, creates, or deletes one.
+The record protects its tombstone and the tombstone's segments so reclamation can read the publication rows on every attempt. Loading the tombstone verifies the complete manifest reference and the deleted generation. Reclamation deletes the record last, after which the tombstone ages out as an old manifest. The checkpoint API never encounters these records.
 
 ### Stateless retirement
 
@@ -70,7 +70,7 @@ A tombstone records `deleted_at_ms`, the call clock of the deletion, in its dele
 reclaim_after_ms = deleted_at_ms + max(configured_grace, NAMESPACE_RETIREMENT_GRACE_MS)
 ```
 
-A generation is reclaimable in a collection pass when the pass's clock is at or past that deadline and the pass's complete pin listing holds no pin over the generation's manifest range other than the retired pin itself. The range runs from the tombstone's `generation_first_manifest_no` through the tombstone's own number. A pin's manifest number is part of its id, so this check reads no pin bodies.
+A generation is reclaimable in a collection pass when the pass's clock is at or past that deadline and the pass's complete pin listing holds no pin over the generation's manifest range. The range runs from the tombstone's `generation_first_manifest_no` through the tombstone's own number. A pin's manifest number is part of its id, so this check reads no pin bodies.
 
 The grace constant covers a publication budget, the provider operation deadline and attempt timeout, the direct transfer capability lifetime, and the clock safety margin. Those terms bound how far the deleter's clock can lag the tombstone it publishes. A fork whose installation was in flight when the deletion published writes its pin within the metadata publication budget of its start, which the grace also covers, so a listing taken after the deadline either sees that pin or the fork failed.
 
@@ -82,15 +82,15 @@ There is no retirement publication. A collector never publishes a manifest to re
 
 Reclaiming a tombstone `T`:
 
-1. Load `T` through the retired pin's manifest reference and verify its checksum, or use the current manifest when it is itself deleted.
+1. Load `T` through the retired generation record's tombstone reference and verify its checksum, or use the current manifest when it is itself deleted.
 2. Confirm the deadline and the pin range. Otherwise report the derived deadline and stop.
-3. Confirm that the retired pin still exists, or that the current manifest is still `T`. Then scan publication rows only in segments owned by `T.namespace_id` and delete the exact keys for its owner and generation under the rules of format section 11.8. Inherited segments cannot hold its publication rows, so later passes do not need them after the source pin is released.
+3. Confirm that the retired generation record still exists, or that the current manifest is still `T`. Then scan publication rows only in segments owned by `T.namespace_id` and delete the exact keys for its owner and generation under the rules of format section 11.8. Inherited segments cannot hold its publication rows, so later passes do not need them after the source pin is released.
 4. If `T` has a fork basis, delete the source pin it names.
-5. Delete the retired pin, if there is one and no upload session of this generation remains.
+5. Delete the retired generation record, if there is one and no upload session of this generation remains.
 
-Steps 3 and 4 are idempotent, and a pass that stops early repeats them on its next visit. Step 5 comes last so that a pass which stops early never loses the index entry. A deleted namespace that has not been recreated has no retired pin; the collector reaches its tombstone through the current manifest and runs the same procedure without step 5.
+Steps 3 and 4 are idempotent, and a pass that stops early repeats them on its next visit. Step 5 comes last so that a pass which stops early never loses the index entry. A deleted namespace that has not been recreated has no retired generation record; the collector reaches its tombstone through the current manifest and runs the same procedure without step 5.
 
-Everything else a prior generation left behind is collected by the existing rules. Its manifests are below the hint and unpinned once the retired pin is gone. Its segments are unreferenced once no pinned manifest lists them. Its WAL objects are below the new generation's folded number and floor.
+Everything else a prior generation left behind is collected by the existing rules. Its manifests are below the hint and unpinned once the retired generation record is gone. Its segments are unreferenced once no pinned manifest lists them. Its WAL objects are below the new generation's folded number and floor.
 
 ## Checkpoints across generations
 
@@ -102,9 +102,11 @@ Pins share one prefix. A pin over a manifest below the current manifest's `gener
 
 ### Fork pins whose target was recreated
 
-A fork pin under source `S` is owned by target `T`. The source's collector retains it while `T`'s current manifest names it, and deletes it when `T` names another pin or none, treating the pin as an abandoned installation attempt. A recreated `T` has a different fork basis or none, yet `T`'s earlier generation and any forks of that generation can still reference `S`'s segments through that pin.
+A fork pin under source `S` names target `T` and target generation `g`. The fork reads `T` before writing the pin: absent selects generation 1, deleted selects the next generation, and active returns `namespace_exists` without writing a pin.
 
-When `T`'s current manifest does not name the pin and `T`'s generation is above 1, `S`'s collector lists `T`'s retired pins and loads each tombstone. A tombstone whose fork basis names the pin retains it, and `T`'s own collector deletes it when it reclaims that generation. If no tombstone names it, the pin is an abandoned attempt and is deleted. A target at generation 1 needs no retired-pin reads.
+After creation grace, the source collector discovers `T`'s current manifest. An absent target or a target generation below `g` makes the pin reclaimable. At generation `g`, the target's fork basis must name the pin with the same manifest reference to retain it. A matching pin with a different reference is corruption.
+
+If `T` is beyond `g`, the collector GETs the retired record for `g`, then loads and verifies its tombstone and applies the same fork-basis rule. No listing is needed. An absent record means generation `g` was reclaimed. Reclamation deletes the source pins its tombstone names before deleting the record, so any surviving source pin was an abandoned attempt. An absent tombstone also makes the pin reclaimable. Store read failures retain the pin.
 
 ## Content
 
@@ -112,7 +114,7 @@ Content keys are `namespaces/{owner_namespace_id}/content/{content_id}`. The ref
 
 Completed-upload receipts and content tokens are bound to the namespace and owner generation. An upload session opened under one generation cannot be published in the next: its receipt names the prior generation and admission refuses it. Direct transfer capabilities issued under the old generation expire on their own inside the retirement grace.
 
-A cross-namespace import checks authorization against the owner's current head and reads the reference's own key. A reference from the owner's current generation may use resident inline bytes. Once retirement deletes an earlier generation's object, that object is missing. No retired-pin lookup is needed.
+A cross-namespace import checks authorization against the owner's current head and reads the reference's own key. A reference from the owner's current generation may use resident inline bytes. Once retirement deletes an earlier generation's object, that object is missing. No retired-record lookup is needed.
 
 ## Writers, retries, and the API
 
@@ -128,12 +130,12 @@ Each delete-and-recreate cycle adds a fixed number of objects and grows nothing 
 | Object | Per cycle | Lifetime |
 | --- | --- | --- |
 | Tombstone manifest | 1 | Until its generation is reclaimed and it ages out as an old manifest |
-| Retired pin | 1 | Until its generation is reclaimed |
+| Retired generation record | 1 | Until its generation is reclaimed |
 | New generation's manifest | 1 | An ordinary manifest |
 
 The current manifest carries two integers for generations, whatever their count. Reads and commits load the hint, the current manifest, and the WAL tail, and never learn how many generations exist. A fork basis is one read regardless of the source's history.
 
-Discovering prior generations costs one tombstone read per unreclaimed generation on top of the pin listing the collector already performs. Reclaiming an eligible generation also reads its publication segments and deletes the exact keys named by its rows and sessions. When a collector runs regularly, that is the number of generations deleted within one grace window. When no collector runs, the backlog waits at no cost to anyone else and the first pass clears it. A generation held by a long-lived fork or checkpoint costs one tombstone read per pass until it is released. It blocks nothing else: every generation is reclaimed on its own evidence, in any order.
+Discovering prior generations lists the retired prefix and reads each record and its tombstone. Resolving one known generation needs one record GET and, when present, one tombstone GET. Reclaiming an eligible generation also reads its publication segments and deletes the exact keys named by its rows and sessions. When a collector runs regularly, that is the number of generations deleted within one grace window. When no collector runs, the backlog waits at no cost to anyone else and the first pass clears it. A generation held by a long-lived fork or checkpoint costs one record read and one tombstone read per pass until it is released. It blocks nothing else: every generation is reclaimed on its own evidence, in any order.
 
 ## Alternatives
 
@@ -143,6 +145,6 @@ Discovering prior generations costs one tombstone read per unreclaimed generatio
 
 **A ledger in the manifest.** Recording every unreclaimed generation in the current manifest puts the collector's work list on the hot path. It grows with every cycle until a collector runs, and no collector runs by default.
 
-**A chain of tombstones.** Pointing each manifest at the previous generation's tombstone keeps the current manifest small, but reclamation can only unlink at the head of the chain. A generation held by a fork keeps every older generation linked and revisited on every pass, and the collector has to walk the chain to find its work. Retired pins give each generation its own record, found by a listing the collector already performs and reclaimed independently.
+**A chain of tombstones.** Pointing each manifest at the previous generation's tombstone keeps the current manifest small, but reclamation can only unlink at the head of the chain. A generation held by a fork keeps every older generation linked and revisited on every pass, and the collector has to walk the chain to find its work. Retired generation records give each generation its own record, found by listing the retired prefix and reclaimed independently.
 
 **Sweeping before recreation.** Deleting a namespace's objects before allowing the id again makes creation linear in the namespace's size and breaks every fork that shares those objects.

@@ -12,6 +12,7 @@ pub(crate) mod delete;
 pub(crate) mod fork;
 mod generation;
 pub(crate) mod read_anchor;
+pub(crate) mod retired;
 pub(crate) mod state;
 pub(crate) mod status;
 pub(crate) mod writer_epoch;

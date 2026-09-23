@@ -1089,12 +1089,6 @@
             "minimum": 0,
             "type": "integer"
           },
-          "retired": {
-            "description": "Retired records deleted after their generations are reclaimed.",
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          },
           "snapshot": {
             "description": "Snapshot-owned records deleted after expiry or namespace deletion.",
             "format": "int64",
@@ -1105,8 +1099,7 @@
         "required": [
           "fork",
           "expired",
-          "snapshot",
-          "retired"
+          "snapshot"
         ],
         "type": "object"
       },
@@ -1137,6 +1130,12 @@
             "minimum": 0,
             "type": "integer"
           },
+          "retired_generation_records": {
+            "description": "Records deleted after reclamation or after their tombstone was collected.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
           "upload_sessions": {
             "description": "Upload-session control objects deleted after the reap window.",
             "format": "int64",
@@ -1156,7 +1155,8 @@
           "manifests",
           "upload_sessions",
           "content_objects",
-          "retired_content_objects"
+          "retired_content_objects",
+          "retired_generation_records"
         ],
         "type": "object"
       },

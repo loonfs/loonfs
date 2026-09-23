@@ -1,5 +1,5 @@
 //! Durable control-object shapes: the discovery hint,
-//! pins, upload sessions, and their envelopes (format spec,
+//! pins, retired generations, upload sessions, and their envelopes (format spec,
 //! "Control objects").
 
 use crate::envelope::EnvelopeCodecError;
@@ -24,11 +24,18 @@ pub enum ControlObjectKind {
     Pin,
     /// Tracks staged content through upload completion or cleanup.
     UploadSession,
+    /// Keeps a tombstone addressable until its generation is reclaimed.
+    RetiredGeneration,
 }
 
 impl ControlObjectKind {
     /// Lists every registered control-object family in stable registry order.
-    pub const ALL: [Self; 3] = [Self::Hint, Self::Pin, Self::UploadSession];
+    pub const ALL: [Self; 4] = [
+        Self::Hint,
+        Self::Pin,
+        Self::UploadSession,
+        Self::RetiredGeneration,
+    ];
 
     /// Durable format version for this control object kind.
     ///
@@ -41,6 +48,7 @@ impl ControlObjectKind {
             Self::Hint => 1,
             Self::Pin => 1,
             Self::UploadSession => 1,
+            Self::RetiredGeneration => 1,
         }
     }
 
@@ -50,6 +58,7 @@ impl ControlObjectKind {
             Self::Hint => "hint",
             Self::Pin => "pin",
             Self::UploadSession => "upload_session",
+            Self::RetiredGeneration => "retired_generation",
         }
     }
 
@@ -90,6 +99,20 @@ pub struct ManifestRef {
     pub payload_checksum: String,
 }
 
+/// Keeps a deleted generation addressable independently of its manifest number.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RetiredGenerationPayload {
+    /// Namespace whose generation ended.
+    pub namespace_id: NamespaceId,
+    /// Selects the retired lifetime of this namespace id.
+    pub generation: NamespaceGeneration,
+    /// Verifies the manifest that ended this generation.
+    pub tombstone: ManifestRef,
+    /// Time of the recreation attempt that wrote this record.
+    pub created_at_ms: u64,
+}
+
 /// Durable owner and expiry policy of a pin.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -108,6 +131,8 @@ pub enum PinOwner {
     Fork {
         /// Fork namespace whose continued existence keeps the source basis pinned.
         target_namespace_id: NamespaceId,
+        /// Target lifetime selected before this pin was written.
+        target_generation: NamespaceGeneration,
     },
     /// An application-created read view with a required expiry.
     Snapshot {
@@ -116,8 +141,6 @@ pub enum PinOwner {
         /// When garbage collection may release the pin.
         expires_at_ms: u64,
     },
-    /// Keeps a deleted generation discoverable until it is reclaimed.
-    Retired {},
 }
 
 impl PinOwner {
@@ -127,7 +150,6 @@ impl PinOwner {
             Self::User { expires_at_ms, .. } => *expires_at_ms,
             Self::Fork { .. } => None,
             Self::Snapshot { expires_at_ms, .. } => Some(*expires_at_ms),
-            Self::Retired {} => None,
         }
     }
 }

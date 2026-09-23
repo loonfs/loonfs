@@ -36,18 +36,6 @@ pub(crate) async fn write_checkpoint_record<S: ObjectStore + ?Sized>(
     Ok(())
 }
 
-pub(crate) async fn write_checkpoint_record_if_absent<S: ObjectStore + ?Sized>(
-    store: &S,
-    record: &PinPayload,
-) -> Result<()> {
-    let encoded = encode_checkpoint_record(record)?;
-    let object_key = checkpoint_record(&record.namespace_id, &record.pin_id);
-    match store.put_if_absent(&object_key, encoded).await {
-        Ok(_) | Err(ObjectStoreError::PreconditionFailed { .. }) => Ok(()),
-        Err(error) => Err(CoreError::store(&object_key, &error)),
-    }
-}
-
 pub(crate) fn checkpoint_is_visible(head: &NamespaceReadState, checkpoint_id: &PinId) -> bool {
     checkpoint_id.manifest_no() >= head.generation_first_manifest_no
 }

@@ -14,7 +14,6 @@ pub(super) enum CheckpointSweep {
     DeleteFork,
     DeleteUser,
     DeleteSnapshot,
-    DeleteRetired,
     Gone,
     /// Kept; a user or snapshot pin says when it becomes deletable.
     Retain {
@@ -35,25 +34,18 @@ pub(super) async fn sweep_checkpoint_record<S: ObjectStore + ?Sized>(
         Err(error) => return Err(CoreError::ControlObjectLoad(error)),
     };
     let deletion = match &record.owner {
-        PinOwner::Retired {} => {
-            return Ok(if live.missing_retired_pins.contains(key) {
-                CheckpointSweep::DeleteRetired
-            } else {
-                CheckpointSweep::Retain {
-                    reclaimable_at_ms: None,
-                }
-            });
-        }
         PinOwner::User { .. } => CheckpointSweep::DeleteUser,
         PinOwner::Snapshot { .. } => CheckpointSweep::DeleteSnapshot,
         PinOwner::Fork {
             target_namespace_id,
+            target_generation,
         } => {
             return Ok(
                 match classify_fork_checkpoint(
                     store,
                     &record,
                     target_namespace_id,
+                    *target_generation,
                     grace_window_ms,
                     context,
                 )

@@ -28,8 +28,23 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
 ) -> Result<Namespace> {
     let timer = StdMonotonicTimer::default();
     let started_ms = timer.monotonic_now_ms();
+    let target = super::control::load_current_manifest_if_present(store, new_namespace_id).await?;
+    let target_generation = match target {
+        None => NamespaceGeneration(1),
+        Some(target) if target.envelope.payload().status.is_deleted() => target
+            .state
+            .generation
+            .successor()
+            .map_err(|error| CoreError::Internal(format!("namespace generation {error}")))?,
+        Some(_) => {
+            return Err(CoreError::NamespaceExists {
+                namespace_id: new_namespace_id.clone(),
+            })
+        }
+    };
     let owner = PinOwner::Fork {
         target_namespace_id: new_namespace_id.clone(),
+        target_generation,
     };
     let source_record = if let Some(snapshot_id) = snapshot_id {
         create_snapshot_fork_checkpoint(store, source_namespace_id, snapshot_id, owner, context)
@@ -70,7 +85,7 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
         created_by: actor_id.clone(),
         fork_basis: Some(fork_basis),
         manifest_no: ManifestNo(1),
-        generation: NamespaceGeneration(1),
+        generation: target_generation,
         generation_first_manifest_no: ManifestNo(1),
         retention_floor_seq: fork_seq,
         folded_wal_no: loonfs_api::WalNo(0),
@@ -81,7 +96,14 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
         activity: Default::default(),
         ..source_manifest.payload().clone()
     };
-    if publish_generation(store, &manifest, &timer, started_ms).await?
+    if publish_generation(
+        store,
+        &manifest,
+        Some(target_generation),
+        &timer,
+        started_ms,
+    )
+    .await?
         == GenerationPublication::Exists
     {
         return Err(CoreError::NamespaceExists {

@@ -109,6 +109,7 @@ async fn one_pass_deletes_an_aged_upload_and_every_expired_snapshot_among_many_p
         listings,
         vec![
             checkpoint_prefix(&namespace_id),
+            loonfs_objectstore::keys::retired_generation_prefix(&namespace_id),
             metadata_manifest_prefix(&namespace_id),
             wal_segment_prefix(&namespace_id),
             metadata_segment_prefix(&namespace_id),

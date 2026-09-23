@@ -552,14 +552,6 @@ impl PinId {
             .expect("the pinned manifest number should be valid")
     }
 
-    /// Derives the pin for a deleted namespace generation.
-    pub fn retired(namespace_id: &NamespaceId, manifest_no: ManifestNo) -> Self {
-        let input = format!("retired\n{namespace_id}\n{:020}", manifest_no.0);
-        let digest = crate::digest::sha256_hex(input.as_bytes());
-        Self::parse(format!("pin_{:020}-{}", manifest_no.0, &digest[..16]))
-            .expect("the retired manifest number should be valid")
-    }
-
     /// Returns the manifest number encoded in this id.
     pub fn manifest_no(&self) -> ManifestNo {
         ManifestNo(

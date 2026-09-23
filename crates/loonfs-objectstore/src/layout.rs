@@ -1,6 +1,6 @@
 //! The durable key grammar: object families and key classification.
 
-use loonfs_api::{ManifestNo, UploadId};
+use loonfs_api::{ManifestNo, NamespaceGeneration, UploadId};
 
 /// One family in the [durable object key grammar].
 ///
@@ -17,6 +17,8 @@ pub enum DurableObjectFamily {
     MetadataSegment,
     /// Classifies a pin to a numbered manifest.
     CheckpointRecord,
+    /// Keeps a deleted generation addressable by its generation number.
+    RetiredGeneration,
     /// Classifies a mutable upload-session lifecycle record.
     UploadSession,
     /// Classifies immutable whole-file content bytes.
@@ -100,6 +102,15 @@ pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
                 )
             })
         }
+        ["namespaces", namespace, "retired", generation] => {
+            generation.strip_suffix(".json").map(|identifier| {
+                parsed(
+                    DurableObjectFamily::RetiredGeneration,
+                    Some(namespace),
+                    Some(identifier),
+                )
+            })
+        }
         ["namespaces", namespace, "uploads", upload] => {
             upload.strip_suffix(".json").map(|identifier| {
                 parsed(
@@ -141,6 +152,21 @@ pub fn manifest_no_of(key: &str) -> Option<ManifestNo> {
         return None;
     }
     ManifestNo::parse(number.parse().ok()?).ok()
+}
+
+/// Extracts a retired generation from its twenty-digit durable name.
+pub fn retired_generation_of(key: &str) -> Option<NamespaceGeneration> {
+    let parsed = parse_object_key(key)?;
+    if parsed.family() != DurableObjectFamily::RetiredGeneration {
+        return None;
+    }
+    let number = parsed.identifier()?;
+    if number.len() != 20 || !number.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    NamespaceGeneration::parse(number.parse().ok()?)
+        .ok()
+        .filter(|generation| generation.0 > 0)
 }
 
 /// Extracts and validates an upload identity from its durable key.
@@ -195,6 +221,14 @@ mod tests {
                 Some("00000000000000000001"),
             ),
             (hint(&namespace_id), DurableObjectFamily::Hint, None),
+            (
+                crate::keys::retired_generation_record(
+                    &namespace_id,
+                    loonfs_api::NamespaceGeneration(1),
+                ),
+                DurableObjectFamily::RetiredGeneration,
+                Some("00000000000000000001"),
+            ),
             (
                 metadata_manifest_object(&namespace_id, &manifest_object_id),
                 DurableObjectFamily::MetadataManifest,
