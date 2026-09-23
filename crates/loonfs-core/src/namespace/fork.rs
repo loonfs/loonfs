@@ -1,7 +1,6 @@
 //! Fork installation copies pinned source runs into a new target generation.
 
-use super::recreation::{write_retired_pin, GenerationSuccessor};
-use crate::checkpoint::publish::{encode_manifest, publish_manifest, ManifestPublicationOutcome};
+use super::generation::{publish_generation, GenerationPublication};
 use crate::checkpoint::record::{
     checkpoint_is_visible, delete_checkpoint_record, write_checkpoint_record,
 };
@@ -12,11 +11,7 @@ use crate::checkpoint::{
 use crate::context::MutationContext;
 use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, Result};
-use crate::limits::{FORK_INSTALL_BUDGET_MS, PIN_VERIFY_BUDGET_MS};
-use crate::namespace::bootstrap::{
-    install_namespace_manifest, write_content_store_descriptor, NamespaceInstall,
-};
-use crate::namespace::control::load_current_manifest;
+use crate::limits::PIN_VERIFY_BUDGET_MS;
 use crate::time::{MonotonicTimer, StdMonotonicTimer};
 use loonfs_api::wire::control::{ForkBasis, NamespaceStatus, PinOwner, PinPayload};
 use loonfs_api::wire::manifest::NamespaceManifestPayload;
@@ -87,71 +82,14 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
         activity: Default::default(),
         ..source_manifest.payload().clone()
     };
-    let validate_install = || {
-        if timer.monotonic_now_ms().saturating_sub(started_ms) > FORK_INSTALL_BUDGET_MS {
-            return Err(CoreError::CheckpointUnavailable(format!(
-                "fork of `{source_namespace_id}` into `{new_namespace_id}` exceeded its installation budget"
-            )));
-        }
-        Ok(())
-    };
-    match install_namespace_manifest(store, &manifest, validate_install).await? {
-        NamespaceInstall::Landed => {}
-        NamespaceInstall::Exists => {
-            return Err(CoreError::NamespaceExists {
-                namespace_id: new_namespace_id.clone(),
-            })
-        }
-        NamespaceInstall::Deleted => {
-            recreate_fork_namespace(store, &manifest, &timer, started_ms, validate_install).await?;
-        }
+    if publish_generation(store, &manifest, &timer, started_ms).await?
+        == GenerationPublication::Exists
+    {
+        return Err(CoreError::NamespaceExists {
+            namespace_id: new_namespace_id.clone(),
+        });
     }
-
     crate::namespace::status::load_namespace(store, new_namespace_id).await
-}
-
-async fn recreate_fork_namespace<S: ObjectStore + ?Sized>(
-    store: &S,
-    fork_manifest: &NamespaceManifestPayload,
-    timer: &dyn MonotonicTimer,
-    started_ms: u64,
-    validate_install: impl Fn() -> Result<()>,
-) -> Result<()> {
-    loop {
-        let current = load_current_manifest(store, &fork_manifest.namespace_id).await?;
-        let tombstone = current.envelope.payload();
-        if !tombstone.status.is_deleted() {
-            return Err(CoreError::NamespaceExists {
-                namespace_id: fork_manifest.namespace_id.clone(),
-            });
-        }
-        let successor = GenerationSuccessor::from_tombstone(tombstone)?;
-        let mut payload = fork_manifest.clone();
-        successor.apply_to(&mut payload);
-        let manifest = encode_manifest(payload)?;
-
-        validate_install()?;
-        write_retired_pin(store, &current, fork_manifest.created_at_ms).await?;
-        write_content_store_descriptor(
-            store,
-            &fork_manifest.content_store_id,
-            fork_manifest.created_at_ms,
-        )
-        .await?;
-        validate_install()?;
-        if let ManifestPublicationOutcome::Published(_) = publish_manifest(
-            store,
-            &fork_manifest.namespace_id,
-            manifest,
-            Some(tombstone.manifest_no),
-            timer,
-            started_ms,
-        )
-        .await?
-        {
-            return Ok(());
-        }
-    }
 }
 
 async fn create_snapshot_fork_checkpoint<S: ObjectStore + ?Sized>(

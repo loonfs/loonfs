@@ -721,7 +721,7 @@ A plain create or a fork into an id whose current manifest is a tombstone recrea
 2. Check the metadata publication budget, measured from the start of recreation, before writing a retired pin over the tombstone with put-if-absent. An existing record at its derived id is success.
 3. Write a descriptor with put-if-absent, using a fresh content-store id for a plain create or the source's content-store id for a fork.
 4. Build the next manifest number with the next generation and its own number as `generation_first_manifest_no`. Copy the tombstone's folded WAL number and increment both epochs. For a plain create, head, base, and retention floor start at zero, the inode and run allocators start over, and the manifest is active, has no fork basis or writer, has no runs, carries the genesis commit id, and starts every activity counter at zero. For a fork, copy the pinned source manifest's runs, head, base, head commit ID, allocators, and content-store ID as section 9.2 describes, with the retention floor at the head and activity at zero.
-5. Publish the manifest after the tombstone within the metadata publication budget and, for a fork, its installation budget. Reload when another manifest wins. An active winner answers `namespace_exists`, or its current summary with `allow_existing`.
+5. Publish the manifest after the tombstone within the metadata publication budget, measured from the start of the create or, for a fork, from before its source pin write. Reload when another manifest wins. An active winner answers `namespace_exists`, or its current summary with `allow_existing`.
 6. Publication raises the hint to the new manifest and its folded WAL number. A failed hint raise does not fail creation.
 
 Recreation reads no WAL object. The deleted generation's WAL objects are unprotected and may already be collected.
@@ -736,11 +736,11 @@ A fork starts independent history in the source's content domain:
 2. Load and verify the pinned manifest.
 3. Copy its run references, base sequence, head commit ID, inode allocator, next run number, and content-store ID into the target manifest. The initial head is the captured source sequence, for a fresh id and for a deleted id alike. Preserve every segment's owner.
 4. Set target identity, creation time, and `created_by` from the fork request, immutable `fork_basis` including the pinned source generation, active status, and no writer block. Activity counters start at zero and the retention floor equals the head. For a fresh id, both epochs and the local folded WAL number start at zero. For a deleted id, apply the generation, manifest, WAL, and epoch rules from section 9.1; copy the source's allocators.
-5. Within the fork-installation budget, install a fresh id by writing the shared descriptor, target hint naming manifest 1 and WAL 0, and target manifest 1, in that order. For a deleted id, write the retired pin and shared descriptor, then publish the successor to the tombstone as in section 9.1.
+5. Install the target exactly as section 9.1 installs a create: for a fresh id, the shared descriptor, the target hint naming manifest 1 and WAL 0, and target manifest 1, in that order; for a deleted id, the retired pin, the shared descriptor, and the successor to the tombstone.
 
 The target copies no file bytes or metadata segments. Its head is at least the captured source sequence and every copied run sequence. Its WAL starts at number 1 for a fresh id, or after the tombstone's folded WAL number for a recreated id. Its first data commit is one sequence above its initial head. It can itself be forked immediately because its manifest already lists its inherited runs.
 
-The fixed creation grace on the source pin protects installation. Before initiating the target manifest put, the installer checks elapsed time against `FORK_INSTALL_BUDGET_MS`. The remaining grace covers provider operations and the clock allowance.
+The fixed creation grace on the source pin protects installation. Before initiating the target manifest put, the installer checks the time elapsed since before the source pin write against `METADATA_PUBLICATION_BUDGET_MS`. The remaining grace covers provider operations and the clock allowance.
 
 ### 9.3 Conflicting and unknown installations
 
@@ -1537,7 +1537,6 @@ Publication and collection use the timing relationships below. Configurable sizi
 | `GC_DEFAULT_GRACE_WINDOW_MS` | 3,600,000 | Default configured ordinary grace. |
 | `UNREFERENCED_SEGMENT_MIN_AGE_MS` | 86,400,000 | Segments must be strictly older than this before unreferenced collection. |
 | `METADATA_COMPACTION_BUDGET_MS` | 85,170,000 | Maximum elapsed time before initiating streaming publication. |
-| `FORK_INSTALL_BUDGET_MS` | 900,000 | Fork installation before initiating target manifest publication. |
 | `DIRECT_TRANSFER_URL_TTL_MS` | 900,000 | Lifetime of a direct transfer capability. |
 | `NAMESPACE_RETIREMENT_GRACE_MS` | 2,130,000 | Minimum grace from the deletion call clock. |
 
@@ -1553,13 +1552,6 @@ GC_MIN_GRACE_WINDOW_MS
 
 METADATA_COMPACTION_BUDGET_MS
     = UNREFERENCED_SEGMENT_MIN_AGE_MS - GC_MIN_GRACE_WINDOW_MS
-
-FORK_INSTALL_BUDGET_MS
-    = METADATA_PUBLICATION_BUDGET_MS
-
-GC_MIN_GRACE_WINDOW_MS
-    >= FORK_INSTALL_BUDGET_MS + PROVIDER_OPERATION_DEADLINE_MS
-       + PROVIDER_ATTEMPT_TIMEOUT_MS + GC_SAFETY_MARGIN_MS
 
 NAMESPACE_RETIREMENT_GRACE_MS
     = METADATA_PUBLICATION_BUDGET_MS

@@ -169,6 +169,73 @@ async fn two_creations_race_at_manifest_one() {
     assert_eq!(loser.expect_err("loser").code(), ErrorCode::NamespaceExists);
 }
 
+/// Lands the first manifest-1 put, lets another writer take the namespace,
+/// then reports the put's outcome as unknown.
+#[derive(Debug)]
+struct LostCreateResponseStore {
+    inner: LocalFsStore,
+    namespace_id: NamespaceId,
+    fired: std::sync::Mutex<bool>,
+}
+
+#[async_trait::async_trait]
+impl ObjectStore for LostCreateResponseStore {
+    loonfs_test_support::delegate_object_store!(self => self.inner; except put);
+
+    async fn put(
+        &self,
+        key: &str,
+        bytes: bytes::Bytes,
+        mode: loonfs_objectstore::PutMode,
+    ) -> Result<loonfs_objectstore::ObjectMetadata, loonfs_objectstore::ObjectStoreError> {
+        let first = key == metadata_manifest_object(&self.namespace_id, &ManifestNo(1))
+            && !std::mem::replace(
+                &mut *self
+                    .fired
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()),
+                true,
+            );
+        let landed = self.inner.put(key, bytes, mode).await?;
+        if !first {
+            return Ok(landed);
+        }
+        super::writer_epoch::acquire_writer_epoch(&self.inner, &self.namespace_id, &context())
+            .await
+            .expect("another writer takes the namespace");
+        Err(loonfs_objectstore::ObjectStoreError::transport(
+            key,
+            "response lost",
+        ))
+    }
+}
+
+#[tokio::test]
+async fn a_create_whose_response_was_lost_confirms_its_own_manifest() {
+    let directory = tempdir().expect("directory");
+    let namespace_id = NamespaceId::parse("lost-response").expect("namespace");
+    let store = LostCreateResponseStore {
+        inner: LocalFsStore::new(directory.path()).expect("store"),
+        namespace_id: namespace_id.clone(),
+        fired: std::sync::Mutex::new(false),
+    };
+    let created = bootstrap_namespace(
+        &store,
+        &namespace_id,
+        &context(),
+        &loonfs_test_support::test_actor(),
+        &loonfs_api::NamespaceAccess::Unrestricted {},
+        false,
+    )
+    .await
+    .expect("the create landed even though another writer advanced before it was confirmed");
+    assert_eq!(created.generation, NamespaceGeneration(1));
+    let current = load_current_manifest(&store.inner, &namespace_id)
+        .await
+        .expect("current manifest");
+    assert_eq!(current.envelope.payload().manifest_no, ManifestNo(2));
+}
+
 #[tokio::test]
 async fn nested_forks_read_copied_runs_without_source_control_reads() {
     let directory = tempdir().expect("directory");
@@ -547,7 +614,7 @@ async fn recreating_a_namespace_fences_the_session_that_deleted_it() {
 }
 
 #[tokio::test]
-async fn a_fork_below_the_tombstone_starts_at_its_next_sequence() {
+async fn a_fork_below_the_tombstone_starts_at_the_source_sequence() {
     assert_fork_recreation(1, 3).await;
 }
 
