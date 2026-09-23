@@ -3,9 +3,7 @@
 use super::build::{build_manifest_delta_run_segments, build_manifest_segments};
 use super::cache::MetadataSegmentCache;
 use super::load::load_basis_metadata_segments;
-use super::publish::{
-    encode_manifest, manifest_ref_for, publish_manifest, ManifestPublicationOutcome,
-};
+use super::publish::{encode_manifest, publish_manifest, ManifestPublicationOutcome};
 use super::runs::{flatten_manifest_segments, MetadataLsmPolicy};
 use super::scan::VerifiedMetadataSegments;
 use crate::commit::WalPublishError;
@@ -30,7 +28,7 @@ use futures::{stream, TryStreamExt};
 use loonfs_api::wire::control::ManifestRef;
 use loonfs_api::wire::manifest::{MetadataRunRef, NamespaceManifestPayload, RunTier};
 use loonfs_api::{
-    ChangeSeq, CommitId, FlushWalOutcome, FlushWalResponse, ManifestNo, NamespaceId, RunNo,
+    ChangeSeq, FlushWalOutcome, FlushWalResponse, ManifestNo, NamespaceId, RunNo,
     MAX_PUBLIC_INTEGER,
 };
 use loonfs_objectstore::ObjectStore;
@@ -43,8 +41,6 @@ use tracing::Instrument;
 pub(super) struct FlushedBasis {
     /// Reference to the manifest that covers the head.
     pub(super) manifest: ManifestRef,
-    /// Head commit the basis covers.
-    pub(super) head_commit_id: CommitId,
     /// Head sequence the attempt targeted.
     pub(super) target_head_seq: ChangeSeq,
     /// Current manifest after the attempt.
@@ -133,7 +129,6 @@ async fn try_flush_wal_projection<S: ObjectStore + ?Sized>(
     {
         return Ok(TryFlushWal::Settled(Box::new(FlushedBasis {
             manifest: basis_manifest.clone(),
-            head_commit_id: projection.head.head_commit_id.clone(),
             target_head_seq: head_seq,
             current_manifest_no: basis_manifest.manifest_no,
             current_manifest_head_seq: head_seq,
@@ -150,8 +145,6 @@ async fn try_flush_wal_projection<S: ObjectStore + ?Sized>(
     let manifest = encode_manifest(manifest)?;
     // Written segments may outlive the GC grace if publication exceeds its budget.
     ensure_metadata_publication_budget(timer, publication_started_ms, namespace_id)?;
-    let candidate_ref = manifest_ref_for(namespace_id, manifest.envelope());
-    let candidate_head_commit_id = manifest.envelope().payload().head_commit_id.clone();
     let (outcome, current) = match publish_manifest(
         store,
         namespace_id,
@@ -174,28 +167,10 @@ async fn try_flush_wal_projection<S: ObjectStore + ?Sized>(
         }
         ManifestPublicationOutcome::Installable => return Ok(TryFlushWal::RaceLost),
     };
-    let head_commit_id = if current.manifest == candidate_ref {
-        candidate_head_commit_id
-    } else {
-        let winner = super::load::load_namespace_manifest_envelope(
-            store,
-            namespace_id,
-            &current.manifest.manifest_no,
-        )
-        .await
-        .map_err(MetadataProjectionLoadError::ManifestLoad)?;
-        super::load::ensure_manifest_reference_matches(
-            "published manifest",
-            &current.manifest,
-            &winner,
-        )?;
-        winner.payload().head_commit_id.clone()
-    };
     Ok(TryFlushWal::Settled(Box::new(FlushedBasis {
         current_manifest_no: current.manifest.manifest_no,
         current_manifest_head_seq: current.manifest.head_seq,
         manifest: current.manifest,
-        head_commit_id,
         target_head_seq: head_seq,
         outcome,
     })))

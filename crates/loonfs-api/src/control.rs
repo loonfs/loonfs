@@ -159,12 +159,8 @@ pub struct PinPayload {
     pub namespace_id: NamespaceId,
     /// Positions this record at its manifest number.
     pub pin_id: PinId,
-    /// Must equal the number in `pin_id`.
-    pub manifest_no: ManifestNo,
     /// Greatest sequence in the pinned manifest.
     pub head_seq: ChangeSeq,
-    /// Commit at the pinned manifest head.
-    pub head_commit_id: CommitId,
     /// Verifies the referenced manifest payload.
     pub payload_checksum: String,
     /// Creation time used by collection grace.
@@ -250,8 +246,6 @@ pub struct ForkBasis {
     pub manifest: ManifestRef,
     /// Source pin that holds the basis for as long as the target lives.
     pub source_pin_id: PinId,
-    /// The source generation captured by the pinned manifest.
-    pub source_generation: NamespaceGeneration,
 }
 
 const GENESIS_COMMIT_ID: &str = "c_00000000000000000000000000000000";

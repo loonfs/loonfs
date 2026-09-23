@@ -486,7 +486,6 @@ fn sample_deleted_manifest() -> NamespaceManifestPayload {
 fn sample_fork_manifest() -> NamespaceManifestPayload {
     NamespaceManifestPayload {
         fork_basis: Some(ForkBasis {
-            source_generation: loonfs_api::NamespaceGeneration(1),
             manifest: ManifestRef {
                 owner_namespace_id: NamespaceId::parse("source").expect("valid namespace id"),
                 manifest_no: ManifestNo(2),
@@ -704,10 +703,8 @@ fn control_objects_match_golden_bytes() {
         PinPayload {
             pin_id: pin_id("pin_00000000000000000002-0000000000000002"),
             namespace_id: namespace_id(),
-            manifest_no: (sample_manifest_ref(2)).manifest_no,
             head_seq: (sample_manifest_ref(2)).head_seq,
             payload_checksum: (sample_manifest_ref(2)).payload_checksum.clone(),
-            head_commit_id: commit_id(),
             created_at_ms: 3_000,
             owner: PinOwner::User {
                 name: "nightly".to_owned(),
@@ -721,10 +718,8 @@ fn control_objects_match_golden_bytes() {
         PinPayload {
             pin_id: pin_id("pin_00000000000000000004-0000000000000004"),
             namespace_id: namespace_id(),
-            manifest_no: (sample_manifest_ref(4)).manifest_no,
             head_seq: (sample_manifest_ref(4)).head_seq,
             payload_checksum: (sample_manifest_ref(4)).payload_checksum.clone(),
-            head_commit_id: commit_id(),
             created_at_ms: 3_000,
             owner: PinOwner::Fork {
                 target_namespace_id: NamespaceId::parse("clone").expect("valid namespace id"),
@@ -738,10 +733,8 @@ fn control_objects_match_golden_bytes() {
         PinPayload {
             pin_id: PinId::retired(&namespace_id(), retired_manifest_no),
             namespace_id: namespace_id(),
-            manifest_no: retired_manifest_no,
             head_seq: ChangeSeq(5),
             payload_checksum: sample_manifest_ref(5).payload_checksum,
-            head_commit_id: commit_id(),
             created_at_ms: 3_000,
             owner: PinOwner::Retired {},
         },
@@ -752,10 +745,8 @@ fn control_objects_match_golden_bytes() {
         PinPayload {
             pin_id: pin_id("pin_00000000000000000006-0000000000000006"),
             namespace_id: namespace_id(),
-            manifest_no: (sample_manifest_ref(6)).manifest_no,
             head_seq: (sample_manifest_ref(6)).head_seq,
             payload_checksum: (sample_manifest_ref(6)).payload_checksum.clone(),
-            head_commit_id: commit_id(),
             created_at_ms: 3_000,
             owner: PinOwner::Snapshot {
                 name: "report-run".to_owned(),
@@ -1287,11 +1278,8 @@ fn control_object_decoders_reject_wrong_format_version_without_fallback() {
             serde_json::to_value(PinPayload {
                 pin_id: pin_id("pin_00000000000000000005-0000000000000005"),
                 namespace_id: namespace_id(),
-                manifest_no: ManifestNo(5),
-
                 head_seq: ChangeSeq(5),
                 payload_checksum: sha256_digest(b"manifest"),
-                head_commit_id: commit_id(),
                 created_at_ms: 3_000,
                 owner: PinOwner::User {
                     name: "nightly".to_owned(),

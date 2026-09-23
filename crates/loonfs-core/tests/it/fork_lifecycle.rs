@@ -137,7 +137,6 @@ async fn snapshot_fork_keeps_its_view_after_source_compaction_collection_and_sna
         .expect("fork snapshot");
     assert_eq!(fork.head_seq, snapshot.captured_seq);
     let head = head_state(&store, &target).await;
-    assert_eq!(head.head_commit_id, snapshot_record.head_commit_id);
     assert_eq!(
         head.fork_basis.as_ref().expect("fork basis").manifest,
         snapshot_record.manifest()
@@ -1100,7 +1099,8 @@ async fn fork_namespace_rejects_corrupt_source_manifest_descriptors() {
     .await
     .expect("read source pin")
     .expect("source pin exists");
-    let manifest_key = metadata_manifest_object(&source_namespace_id, &source_record.manifest_no);
+    let manifest_key =
+        metadata_manifest_object(&source_namespace_id, &source_record.pin_id.manifest_no());
     let manifest_bytes = store
         .get(&manifest_key, None)
         .await

@@ -114,10 +114,8 @@ async fn write_retired_pin<S: ObjectStore + ?Sized>(
     let retired = PinPayload {
         namespace_id: tombstone.namespace_id.clone(),
         pin_id: PinId::retired(&tombstone.namespace_id, tombstone.manifest_no),
-        manifest_no: tombstone.manifest_no,
         head_seq: tombstone.head_seq,
         payload_checksum: current.state.manifest.payload_checksum.clone(),
-        head_commit_id: tombstone.head_commit_id.clone(),
         created_at_ms,
         owner: PinOwner::Retired {},
     };

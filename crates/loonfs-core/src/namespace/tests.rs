@@ -704,7 +704,6 @@ async fn assert_fork_recreation(source_commits: u64, target_commits: u64) {
     assert!(payload.writer.is_none());
     assert_eq!(payload.activity, Default::default());
     let basis = payload.fork_basis.as_ref().expect("fork basis");
-    assert_eq!(basis.source_generation, source.generation);
     assert_eq!(basis.manifest.owner_namespace_id, source_id);
     assert_eq!(basis.manifest.head_seq, source.head_seq);
     let reported_basis = fork.fork_basis.expect("reported fork basis");

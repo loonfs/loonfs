@@ -664,7 +664,7 @@ Each pin is stored under `pins/{pin_id}.json`. Its positioned ID identifies the 
 | `fork` | `target_namespace_id` | Retained while the target depends on the source. |
 | `retired` | None | Until its generation is reclaimed. |
 
-The record also stores namespace, manifest number, head sequence, payload checksum, head commit ID, and creation time. It has no lifecycle status. Creating the record establishes the candidate pin; deleting it ends the pin. Fork pins have no expiry or renewal protocol.
+The record also stores namespace, head sequence, payload checksum, and creation time. The manifest number comes from the pin ID. It has no lifecycle status. Creating the record establishes the candidate pin; deleting it ends the pin. Fork pins have no expiry or renewal protocol.
 
 ### 8.2 Creating and verifying a pin
 
@@ -726,7 +726,7 @@ A plain create or a fork into an id whose current manifest is a tombstone recrea
 
 Recreation reads no WAL object. The deleted generation's WAL objects are unprotected and may already be collected.
 
-The retired pin records the tombstone's manifest reference, head commit id, and head sequence. Its creation time comes from the recreation call.
+The retired pin records the tombstone's manifest reference. Its creation time comes from the recreation call.
 
 ### 9.2 Forking a namespace
 
@@ -735,7 +735,7 @@ A fork starts independent history in the source's content domain:
 1. Create a verified source pin whose owner names the target namespace, either from the source head or a live snapshot under section 8.2.
 2. Load and verify the pinned manifest.
 3. Copy its run references, base sequence, head commit ID, inode allocator, next run number, and content-store ID into the target manifest. The initial head is the captured source sequence, for a fresh id and for a deleted id alike. Preserve every segment's owner.
-4. Set target identity, creation time, and `created_by` from the fork request, immutable `fork_basis` including the pinned source generation, active status, and no writer block. Activity counters start at zero and the retention floor equals the head. For a fresh id, both epochs and the local folded WAL number start at zero. For a deleted id, apply the generation, manifest, WAL, and epoch rules from section 9.1; copy the source's allocators.
+4. Set target identity, creation time, and `created_by` from the fork request, immutable `fork_basis`, active status, and no writer block. Activity counters start at zero and the retention floor equals the head. For a fresh id, both epochs and the local folded WAL number start at zero. For a deleted id, apply the generation, manifest, WAL, and epoch rules from section 9.1; copy the source's allocators.
 5. Install the target exactly as section 9.1 installs a create: for a fresh id, the shared descriptor, the target hint naming manifest 1 and WAL 0, and target manifest 1, in that order; for a deleted id, the retired pin, the shared descriptor, and the successor to the tombstone.
 
 The target copies no file bytes or metadata segments. Its head is at least the captured source sequence and every copied run sequence. Its WAL starts at number 1 for a fresh id, or after the tombstone's folded WAL number for a recreated id. Its first data commit is one sequence above its initial head. It can itself be forked immediately because its manifest already lists its inherited runs.
@@ -1152,10 +1152,10 @@ The following tables list the durable payload fields. Their transition rules are
 | --- | --- |
 | Namespace hint | `namespace_id`, `manifest_no`, `wal_no` |
 | Writer block | `writer_id`, `acquired_at_ms` |
-| Fork basis | `manifest`, `source_pin_id`, `source_generation` |
+| Fork basis | `manifest`, `source_pin_id` |
 | Manifest reference | `owner_namespace_id`, `manifest_no`, `head_seq`, `payload_checksum` |
 | Content-store descriptor | `content_store_id`, `created_at_ms` |
-| Pin record | `namespace_id`, `pin_id`, `manifest_no`, `head_seq`, `head_commit_id`, `payload_checksum`, `created_at_ms`, `owner` |
+| Pin record | `namespace_id`, `pin_id`, `head_seq`, `payload_checksum`, `created_at_ms`, `owner` |
 | Upload session | `namespace_id`, `owner_generation`, `content_store_id`, `upload_id`, `content_id`, `created_at_ms`, optional `subject_id`, `mode`, `status` |
 
 Namespace status is `{"kind":"active"}` or `{"kind":"deleted"}` with required `deleted_at_ms` only on the deleted variant. Missing status is invalid. The genesis commit ID is `c_00000000000000000000000000000000`.

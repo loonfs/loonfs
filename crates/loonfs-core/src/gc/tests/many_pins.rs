@@ -34,8 +34,11 @@ async fn one_pass_deletes_an_aged_upload_and_every_expired_snapshot_among_many_p
             .state;
     for number in 0..1025 {
         let record = PinPayload {
-            pin_id: PinId::parse(format!("pin_{:020}-{number:016x}", basis.manifest_no.0))
-                .expect("pin id"),
+            pin_id: PinId::parse(format!(
+                "pin_{:020}-{number:016x}",
+                basis.pin_id.manifest_no().0
+            ))
+            .expect("pin id"),
             owner: PinOwner::Snapshot {
                 name: "expired".to_owned(),
                 expires_at_ms: 2_000,

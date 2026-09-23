@@ -1573,7 +1573,6 @@ mod tests {
                 2 => successor.created_at_ms += 1,
                 3 => {
                     successor.fork_basis = Some(crate::control::ForkBasis {
-                        source_generation: crate::NamespaceGeneration(1),
                         manifest: crate::control::ManifestRef {
                             owner_namespace_id: NamespaceId::parse("source").expect("namespace"),
                             manifest_no: ManifestNo(1),
@@ -1628,7 +1627,6 @@ mod tests {
             super::NamespaceAccess::Unrestricted {},
         );
         deleted.fork_basis = Some(crate::control::ForkBasis {
-            source_generation: crate::NamespaceGeneration(1),
             manifest: crate::control::ManifestRef {
                 owner_namespace_id: NamespaceId::parse("source").expect("namespace"),
                 manifest_no: ManifestNo(1),

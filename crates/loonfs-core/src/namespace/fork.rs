@@ -61,7 +61,6 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
     let fork_basis = ForkBasis {
         manifest: source_record.manifest(),
         source_pin_id: source_record.pin_id.clone(),
-        source_generation: source_manifest.payload().generation,
     };
     let fork_seq = fork_basis.manifest.head_seq;
 
@@ -120,7 +119,7 @@ async fn create_snapshot_fork_checkpoint<S: ObjectStore + ?Sized>(
     )?
     .state;
     let record = PinPayload {
-        pin_id: PinId::generate(snapshot.manifest_no),
+        pin_id: PinId::generate(snapshot.pin_id.manifest_no()),
         created_at_ms: context.now_ms,
         owner,
         ..snapshot

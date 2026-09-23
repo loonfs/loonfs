@@ -756,7 +756,6 @@ async fn checkpoint_creation_deletes_its_pin_when_the_floor_passed_its_manifest(
             expires_at_ms: None,
         },
         initial.basis().manifest().clone(),
-        initial.read_state.head_commit_id.clone(),
         &context,
     )
     .await
@@ -853,7 +852,6 @@ async fn checkpoint_basis_verification_store_failure_deletes_the_record() {
             expires_at_ms: None,
         },
         initial.basis().manifest().clone(),
-        initial.read_state.head_commit_id.clone(),
         &context,
     )
     .await

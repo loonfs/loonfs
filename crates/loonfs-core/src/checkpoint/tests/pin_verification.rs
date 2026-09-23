@@ -177,7 +177,6 @@ async fn namespace_deletion_during_pin_verification_deletes_the_pin() {
                 expires_at_ms: None
             },
             current.state.manifest,
-            current.envelope.payload().head_commit_id.clone(),
             &context,
         ),
         async {
@@ -239,8 +238,13 @@ async fn pin_verification_checks_manifest_identity_with_only_the_current_manifes
         .expect("current manifest");
     let expected = store.take();
     let mut changed_number = record.clone();
-    changed_number.manifest_no = record.manifest_no.successor().expect("next number");
-    changed_number.pin_id = PinId::generate(changed_number.manifest_no);
+    changed_number.pin_id = PinId::generate(
+        record
+            .pin_id
+            .manifest_no()
+            .successor()
+            .expect("next number"),
+    );
     let mut changed_checksum = record.clone();
     changed_checksum.payload_checksum = "sha256:different".to_owned();
     for (record, expected_verification) in [

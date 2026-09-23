@@ -303,7 +303,7 @@ async fn manifest_round_trip_supports_empty_namespace() {
         .state;
     assert!(PinId::parse(record.pin_id.as_str()).is_ok());
     assert_eq!(record.head_seq, ChangeSeq(0));
-    assert_eq!(record.manifest_no, ManifestNo(1));
+    assert_eq!(record.pin_id.manifest_no(), ManifestNo(1));
     let published =
         load_manifest_materialization_for_inspection(&store, &namespace_id, ManifestNo(1))
             .await
@@ -498,7 +498,7 @@ async fn checkpoint_records_are_standalone_files_one_per_pin() {
         .expect("read pin")
         .expect("record exists")
         .state;
-    assert_eq!(record.manifest_no, first.manifest_no);
+    assert_eq!(record.pin_id.manifest_no(), first.manifest_no);
     assert_eq!(record.head_seq, first.captured_seq);
 
     // A new basis mints a new record; both files exist side by side.
@@ -657,7 +657,7 @@ async fn manifest_delta_run_materialization_matches_checkpoint_projection() {
             .expect("read pin")
             .expect("record exists")
             .state;
-        assert_eq!(record.manifest_no, response.manifest_no);
+        assert_eq!(record.pin_id.manifest_no(), response.manifest_no);
     }
     assert!(metadata_states_equivalent(
         &materialization_after.metadata_state,
@@ -992,7 +992,7 @@ async fn create_checkpoint_pins_a_current_basis_without_building_a_new_manifest(
         .expect("read pin")
         .expect("record exists")
         .state;
-    assert_eq!(record.manifest_no, covering_manifest_no);
+    assert_eq!(record.pin_id.manifest_no(), covering_manifest_no);
     assert_eq!(record.payload_checksum, manifest_checksum);
 }
 
