@@ -122,6 +122,15 @@ pub(super) async fn sweep_upload_session<S: ObjectStore + ?Sized>(
             {
                 return Ok(retain_undated());
             }
+            if !delete_unpublished_content_object(
+                sweep.store,
+                &state.namespace_id,
+                &state.content_id,
+            )
+            .await
+            {
+                return Ok(retain_undated());
+            }
             return Ok(UploadSessionSweep::Delete {
                 reclaimed_content: false,
             });
@@ -191,7 +200,6 @@ pub(super) async fn sweep_upload_session<S: ObjectStore + ?Sized>(
                     if !delete_unpublished_content_object(
                         sweep.store,
                         &state.namespace_id,
-                        state.owner_generation,
                         &state.content_id,
                     )
                     .await

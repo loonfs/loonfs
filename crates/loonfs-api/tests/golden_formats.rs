@@ -2716,6 +2716,8 @@ fn every_metadata_row_rejects_unknown_fields() {
 
 fn sample_content_publication_row() -> MetadataRow {
     MetadataRow::ContentPublication(loonfs_api::wire::manifest::ContentPublicationRecord {
+        owner_namespace_id: sample_content_ref().owner_namespace_id,
+        owner_generation: sample_content_ref().owner_generation,
         content_id: sample_content_ref().content_id,
         committed_seq: ChangeSeq(2),
         delta_index: 3,

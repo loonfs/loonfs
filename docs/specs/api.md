@@ -467,10 +467,10 @@ administrator of the reference's owner namespace to import it.
 
 An import checks authorization against the owner's current head. A reference
 from the current owner generation may read resident inline bytes. Otherwise,
-the reference's owner namespace, generation, and content ID determine its
-object key. This includes references from retired generations. Once a
-generation's content prefix is reclaimed, its objects are missing and an
-import returns `namespace_corrupt`, as for any missing content object.
+the reference's owner namespace and content ID determine its object key.
+This includes references from retired generations. Once retirement deletes
+a generation's objects, they are missing and an import returns
+`namespace_corrupt`, as for any missing content object.
 
 ### 5.1 Commit identity and preconditions
 
@@ -1137,8 +1137,8 @@ when the pin was present before deletion. Repeating that deletion on an
 absent pin adds no count. Every count field is present, including zero values.
 
 `content_objects` counts reclamation through completed upload sessions.
-`retired_content_objects` counts successful deletion attempts under a retired
-namespace generation's owner prefix, including a delete that finds the key already absent.
+`retired_content_objects` counts successful deletion attempts of the exact
+content keys a retired generation's publication rows name, including a delete that finds the key already absent.
 A retry can repeat a count; these are attempt counts, not a count of distinct
 objects.
 
@@ -1173,11 +1173,11 @@ Namespace deletion ends access immediately. Ordinary namespace GC then
 conditionally reclaims the namespace's own content. This is asynchronous
 reclamation, with no fixed completion time or guarantee of physical erasure.
 
-Dependent forks and retained checkpoints delay reclamation. GC derives each generation's deadline from its deletion stamp. At or after that deadline, a complete pin listing must contain no pin in the generation's manifest range except its own retired pin. A qualifying pass cleans upload sessions, sweeps that generation's owner prefix, releases its source pin, and deletes its retired pin when no session remains. The current tombstone survives until recreation supersedes it. Every other owner's prefix remains.
+Dependent forks and retained checkpoints delay reclamation. GC derives each generation's deadline from its deletion stamp. At or after that deadline, a complete pin listing must contain no pin in the generation's manifest range except its own retired pin. A qualifying pass cleans upload sessions, deletes the exact content keys that generation's publication rows name, releases its source pin, and deletes its retired pin when no session remains. The current tombstone survives until recreation supersedes it. Every other owner's prefix remains.
 
-Retention is coarse: a deleted ancestor keeps its entire owner-and-generation
-prefix while a live descendant still depends on it. GC does not select individual
-published content objects within that prefix. Deleting a file or tree in an active
+Retention is coarse: a deleted ancestor keeps every object its generation
+published while a live descendant still depends on it. GC does not select
+individual published objects within a generation. Deleting a file or tree in an active
 namespace also does not reclaim its published content, because LoonFS retains
 every file revision.
 
@@ -1189,7 +1189,7 @@ Completed upload sessions in active namespaces use the derived content
 reclamation grace, slightly longer than seven days, before GC can reclaim
 staged content that no retained revision references.
 
-Run GC repeatedly, including after a pass finds an empty owner-and-generation prefix. An
+Run GC repeatedly, including after a pass finds nothing left to delete. An
 already-issued upload capability can write an object after deletion, and a
 late write before a saved cursor is found by the next run. Continued late
 writes, grace windows, dependent forks, retained checkpoints, and maintenance
@@ -1204,8 +1204,8 @@ Retirement also prompts the runner to schedule GC for a fork's source. A
 missed prompt delays reclamation and never permits deletion.
 
 Keep the provider's lifecycle rule for incomplete multipart uploads. Provider
-upload state can exist outside object listings, so deleting an owner-and-generation
-prefix does not replace session abort and provider cleanup. Deleting a key does not erase
+upload state can exist outside object listings, so deleting a generation's
+content objects does not replace session abort and provider cleanup. Deleting a key does not erase
 physical versions retained by bucket versioning or retention locks.
 
 Use `retained` to understand what a pass kept. Inspect checkpoint blockers

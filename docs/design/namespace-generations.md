@@ -54,11 +54,11 @@ A lost attempt can leave its retired pin behind. The pin is over a real tombston
 
 ## Reclaiming a prior generation
 
-A deleted generation still owns content under its generation's content prefix, and if it was a fork it still holds a pin under its source. Reclaiming it sweeps that prefix and deletes that pin. While a deleted manifest is current, the collector finds it through the manifest itself. After recreation the current manifest is active, so the collector needs another way to find prior generations, and there is no mutable object in which to record a retirement deadline.
+A deleted generation still owns the content named by its publication rows and upload sessions. If it was a fork, it still holds a pin under its source. Reclaiming it deletes those exact content keys and that pin. While a deleted manifest is current, the collector finds it through the manifest itself. After recreation the current manifest is active, so the collector needs another way to find prior generations, and there is no mutable object in which to record a retirement deadline.
 
 ### Retired pins
 
-A retired pin is a pin record with owner `{"kind": "retired"}` over a tombstone manifest. Recreation writes it before publishing the new generation. It is the collector's index of prior generations: the collector already lists the pin prefix on every pass, and the pin's manifest reference names the tombstone that holds every fact reclamation needs. The pin protects its tombstone like any other pin, so the ordinary manifest sweep cannot remove the tombstone while reclamation is pending. Reclamation deletes the pin last, after which the tombstone is an ordinary old manifest and ages out with the rest.
+A retired pin is a pin record with owner `{"kind": "retired"}` over a tombstone manifest. Recreation writes it before publishing the new generation. It is the collector's index of prior generations: the collector already lists the pin prefix on every pass, and the pin's manifest reference names the tombstone that holds every fact reclamation needs. The pin protects its tombstone and its segments so reclamation can read the publication rows on every attempt. Reclamation deletes the pin last, after which the tombstone is an ordinary old manifest and ages out with the rest.
 
 In the owner table of format section 8.1, a retired pin stores no owner fields and lives until its generation is reclaimed. The checkpoint API never lists, reads, creates, or deletes one.
 
@@ -84,9 +84,9 @@ Reclaiming a tombstone `T`:
 
 1. Load `T` through the retired pin's manifest reference and verify its checksum, or use the current manifest when it is itself deleted.
 2. Confirm the deadline and the pin range. Otherwise report the derived deadline and stop.
-3. Confirm that the retired pin still exists, or that the current manifest is still `T`. Then sweep `namespaces/{namespace_id}/content/{T.generation}/` under the rules of format section 11.8.
+3. Confirm that the retired pin still exists, or that the current manifest is still `T`. Then scan `T`'s publication rows and delete the exact keys for its owner and generation under the rules of format section 11.8.
 4. If `T` has a fork basis, delete the source pin it names.
-5. Delete the retired pin, if there is one.
+5. Delete the retired pin, if there is one and no upload session of this generation remains.
 
 Steps 3 and 4 are idempotent, and a pass that stops early repeats them on its next visit. Step 5 comes last so that a pass which stops early never loses the index entry. A deleted namespace that has not been recreated has no retired pin; the collector reaches its tombstone through the current manifest and runs the same procedure without step 5.
 
@@ -108,11 +108,11 @@ When `T`'s current manifest does not name the pin and `T`'s generation is above 
 
 ## Content
 
-Content keys are `namespaces/{owner_namespace_id}/content/{owner_generation}/{content_id}`. The reference supplies all three values. The retired owner's sweep deletes only that generation's prefix.
+Content keys are `namespaces/{owner_namespace_id}/content/{content_id}`. The reference supplies the owner namespace and content ID. Retirement deletes the exact keys named by the tombstone's publication rows for that owner and generation, and by its upload sessions. It never lists content.
 
 Completed-upload receipts and content tokens are bound to the namespace and owner generation. An upload session opened under one generation cannot be published in the next: its receipt names the prior generation and admission refuses it. Direct transfer capabilities issued under the old generation expire on their own inside the retirement grace.
 
-A cross-namespace import checks authorization against the owner's current head and reads the reference's own key. A reference from the owner's current generation may use resident inline bytes. Once an earlier generation's content prefix is reclaimed, the object is missing. No retired-pin lookup is needed.
+A cross-namespace import checks authorization against the owner's current head and reads the reference's own key. A reference from the owner's current generation may use resident inline bytes. Once retirement deletes an earlier generation's object, that object is missing. No retired-pin lookup is needed.
 
 ## Writers, retries, and the API
 
@@ -133,13 +133,13 @@ Each delete-and-recreate cycle adds a fixed number of objects and grows nothing 
 
 The current manifest carries two integers for generations, whatever their count. Reads and commits load the hint, the current manifest, and the WAL tail, and never learn how many generations exist. A fork basis is one read regardless of the source's history.
 
-A collection pass costs one tombstone read per unreclaimed generation on top of the pin listing it already performs. When a collector runs regularly, that is the number of generations deleted within one grace window. When no collector runs, the backlog waits at no cost to anyone else and the first pass clears it. A generation held by a long-lived fork or checkpoint costs one tombstone read per pass until it is released. It blocks nothing else: every generation is reclaimed on its own evidence, in any order.
+Discovering prior generations costs one tombstone read per unreclaimed generation on top of the pin listing the collector already performs. Reclaiming an eligible generation also reads its publication segments and deletes the exact keys named by its rows and sessions. When a collector runs regularly, that is the number of generations deleted within one grace window. When no collector runs, the backlog waits at no cost to anyone else and the first pass clears it. A generation held by a long-lived fork or checkpoint costs one tombstone read per pass until it is released. It blocks nothing else: every generation is reclaimed on its own evidence, in any order.
 
 ## Alternatives
 
 **A name-to-id indirection.** Generating a hidden namespace id per creation and mapping the public name to it isolates generations completely. It also adds a lookup to every commit and read, or a cache of that mapping that every server must invalidate on delete. The hot path is the constraint this design serves, so the indirection is not used.
 
-**A key prefix per generation.** Placing each generation under its own key prefix leaves earlier generations exactly as they are. It also means every reference to a manifest or segment must carry the owner's generation. Continuing the counters isolates those objects without adding generation fields to their references. Content keys carry the owner generation because content is reclaimed by owner prefix.
+**A key prefix per generation.** Placing each generation under its own key prefix leaves earlier generations exactly as they are. It also means every reference to a manifest or segment must carry the owner's generation. Continuing the counters isolates those objects without adding generation fields to their references. Content IDs are random and never reused, so content keys do not need a generation.
 
 **A ledger in the manifest.** Recording every unreclaimed generation in the current manifest puts the collector's work list on the hot path. It grows with every cycle until a collector runs, and no collector runs by default.
 

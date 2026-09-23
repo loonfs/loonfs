@@ -384,7 +384,7 @@ async fn prior_generation_import_uses_its_own_key_and_current_authority() {
         .await
         .expect("delete retired pin");
     recording.reset();
-    let source_key = format!("namespaces/source/content/1/{}", content_ref.content_id);
+    let source_key = format!("namespaces/source/content/{}", content_ref.content_id);
     let importer = writer.as_subject(subject("replacement"));
     let prepared = importer
         .prepare_content_ref(&destination, content_ref.clone())
@@ -417,15 +417,7 @@ async fn prior_generation_import_uses_its_own_key_and_current_authority() {
         b"private inline bytes"
     );
 
-    let prefix =
-        loonfs_objectstore::keys::content_owner_prefix(&source, content_ref.owner_generation);
-    for key in recording
-        .list_prefix(&prefix)
-        .await
-        .expect("generation content")
-    {
-        recording.delete(&key).await.expect("delete content");
-    }
+    recording.delete(&source_key).await.expect("delete content");
     recording.reset();
     let error = importer
         .prepare_content_ref(&destination, content_ref)

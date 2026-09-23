@@ -20,9 +20,7 @@ use loonfs_core::content::store_bytes_as_content;
 use loonfs_core::control::load_namespace_read_state;
 use loonfs_core::publish::FilesystemOperation;
 use loonfs_core::{Error as CoreError, ErrorCode, MutationContext};
-use loonfs_objectstore::keys::{
-    content_blob, content_owner_prefix, hint, metadata_manifest_object,
-};
+use loonfs_objectstore::keys::{content_blob, hint, metadata_manifest_object};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{ObjectStore, PutMode};
 use loonfs_test_support::ids::namespace_id;
@@ -368,11 +366,7 @@ async fn a_created_namespace_reads_manifest_one_before_its_first_flush() {
         .expect("read back");
     assert_eq!(file.bytes, b"hello");
     let content_ref = file.entry.content_ref().expect("content reference");
-    let content_key = content_blob(
-        &content_ref.owner_namespace_id,
-        content_ref.owner_generation,
-        &content_ref.content_id,
-    );
+    let content_key = content_blob(&content_ref.owner_namespace_id, &content_ref.content_id);
     let keys = namespace_keys(&store, &namespace_id).await;
     assert!(
         keys.iter().all(|key| key == &hint(&namespace_id)
@@ -742,7 +736,7 @@ async fn fork_namespace_reads_inherited_content_and_isolates_metadata() {
     assert_eq!(
         store.inner().take_get_keys(),
         vec![format!(
-            "namespaces/demo/content/1/{}",
+            "namespaces/demo/content/{}",
             inherited_ref.content_id
         )]
     );
@@ -793,21 +787,11 @@ async fn fork_namespace_reads_inherited_content_and_isolates_metadata() {
     .await
     .expect("clone replace");
     assert_eq!(clone_write.committed_seq, ChangeSeq(2));
-    let owner_keys = store
-        .list_prefix(&content_owner_prefix(
-            &clone_namespace_id,
-            uploaded_ref.owner_generation,
-        ))
+    assert!(store
+        .head(&content_blob(&clone_namespace_id, &uploaded_ref.content_id))
         .await
-        .expect("owner content");
-    assert_eq!(
-        owner_keys,
-        vec![content_blob(
-            &clone_namespace_id,
-            uploaded_ref.owner_generation,
-            &uploaded_ref.content_id
-        )]
-    );
+        .expect("owner content")
+        .is_some());
     assert_eq!(
         read_file_bytes(&store, &source_namespace_id, "/docs/shared.txt")
             .await
@@ -1361,13 +1345,18 @@ async fn gc_preserves_unflushed_data_then_the_current_manifest_tombstone() {
     let current = loonfs_core::control::load_namespace_current_manifest(&store, &namespace_id)
         .await
         .expect("current tombstone");
-    assert_eq!(
-        namespace_keys(&store, &namespace_id).await,
-        vec![
-            hint(&namespace_id),
-            metadata_manifest_object(&namespace_id, &current.state.manifest.manifest_no)
-        ]
+    let mut expected = vec![hint(&namespace_id), current.object_key.clone()];
+    expected.extend(
+        current
+            .envelope
+            .payload()
+            .runs
+            .iter()
+            .flat_map(|run| &run.segments)
+            .map(loonfs_objectstore::keys::metadata_segment_object_key),
     );
+    expected.sort();
+    assert_eq!(namespace_keys(&store, &namespace_id).await, expected);
     assert!(store
         .head(&hint(&namespace_id))
         .await
@@ -1625,18 +1614,16 @@ async fn retired_leaf_content_is_reclaimed_while_live_workspaces_keep_their_cont
     )
     .await
     .expect("write sibling");
-    let source_prefix = content_owner_prefix(&source, loonfs_api::NamespaceGeneration(1));
-    let sibling_prefix = content_owner_prefix(&sibling, loonfs_api::NamespaceGeneration(1));
-    let source_keys = store
-        .list_prefix(&source_prefix)
+    let source_file = read_file_bytes(&store, &source, "/docs/shared.txt")
         .await
-        .expect("source content");
-    let sibling_keys = store
-        .list_prefix(&sibling_prefix)
+        .expect("source");
+    let source_ref = source_file.entry.content_ref().expect("source content");
+    let source_key = content_blob(&source_ref.owner_namespace_id, &source_ref.content_id);
+    let sibling_file = read_file_bytes(&store, &sibling, "/docs/sibling.txt")
         .await
-        .expect("sibling content");
-    assert!(!source_keys.is_empty());
-    assert!(!sibling_keys.is_empty());
+        .expect("sibling");
+    let sibling_ref = sibling_file.entry.content_ref().expect("sibling content");
+    let sibling_key = content_blob(&sibling_ref.owner_namespace_id, &sibling_ref.content_id);
     let config = loonfs_core::GcConfig::default();
     let mut aged = setup.clone();
     aged.now_ms = u64::MAX / 4;
@@ -1655,50 +1642,41 @@ async fn retired_leaf_content_is_reclaimed_while_live_workspaces_keep_their_cont
         )
         .await
         .expect("write leaf");
-        let prefix = content_owner_prefix(&leaf, loonfs_api::NamespaceGeneration(1));
-        assert!(!store
-            .list_prefix(&prefix)
+        submit_operation(
+            &store,
+            &leaf,
+            CommitId::generate(),
+            FilesystemOperation::CopyPath {
+                source_path: AbsolutePath::parse("/docs/shared.txt").expect("source path"),
+                destination_path: AbsolutePath::parse("/docs/copied.txt")
+                    .expect("destination path"),
+                precondition: Default::default(),
+            },
+            &setup,
+        )
+        .await
+        .expect("publish inherited content in target");
+        let leaf_file = read_file_bytes(&store, &leaf, "/docs/own.txt")
             .await
-            .expect("leaf content")
-            .is_empty());
+            .expect("leaf");
+        let leaf_ref = leaf_file.entry.content_ref().expect("leaf content");
+        let leaf_key = content_blob(&leaf_ref.owner_namespace_id, &leaf_ref.content_id);
         namespace_engine(&store, &leaf, &setup)
             .delete_namespace(Default::default())
             .await
             .expect("delete leaf");
-        let mut reclaimed = 0;
-        for call in 0..8 {
-            let report = loonfs_core::gc_namespace(&store, &leaf, &config, &aged)
-                .await
-                .expect("collect leaf");
-            reclaimed += report.deleted.retired_content_objects;
-            if store
-                .list_prefix(&prefix)
-                .await
-                .expect("leaf content")
-                .is_empty()
-            {
-                break;
-            }
-            aged.now_ms = report
-                .reclaim_after_ms
-                .unwrap_or(aged.now_ms + config.grace_window_ms);
-            assert!(call < 7, "leaf reclamation must converge");
+        store.reset();
+        let report = loonfs_core::gc_namespace(&store, &leaf, &config, &aged)
+            .await
+            .expect("collect leaf");
+        assert_eq!(report.deleted.retired_content_objects, 1);
+        assert!(store.snapshot().iter().all(|operation| !matches!(
+            operation, RecordedOperation::List { prefix, .. } if prefix.contains("/content/")
+        )));
+        assert!(store.head(&leaf_key).await.expect("leaf content").is_none());
+        for key in [&source_key, &sibling_key] {
+            assert!(store.head(key).await.expect("retained content").is_some());
         }
-        assert!(reclaimed > 0);
-        assert_eq!(
-            store
-                .list_prefix(&source_prefix)
-                .await
-                .expect("source content"),
-            source_keys
-        );
-        assert_eq!(
-            store
-                .list_prefix(&sibling_prefix)
-                .await
-                .expect("sibling content"),
-            sibling_keys
-        );
         assert_eq!(
             read_file_bytes(&store, &source, "/docs/shared.txt")
                 .await
@@ -1739,13 +1717,11 @@ async fn retired_leaf_content_is_reclaimed_while_live_workspaces_keep_their_cont
             .expect("collect deleted source");
         assert_eq!(report.reclaim_after_ms, Some(source_deadline));
         assert_eq!(report.deleted.retired_content_objects, 0);
-        assert_eq!(
-            store
-                .list_prefix(&source_prefix)
-                .await
-                .expect("source content"),
-            source_keys
-        );
+        assert!(store
+            .head(&source_key)
+            .await
+            .expect("source content")
+            .is_some());
     }
     assert_eq!(
         read_file_bytes(&store, &sibling, "/docs/shared.txt")

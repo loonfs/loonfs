@@ -544,10 +544,6 @@ mod streamed_content {
                 .content_ref()
                 .expect("staged content")
                 .owner_namespace_id,
-            first
-                .content_ref()
-                .expect("staged content")
-                .owner_generation,
             &first.content_ref().expect("staged content").content_id,
         );
         assert_eq!(
@@ -644,10 +640,6 @@ mod streamed_content {
                 .content_ref()
                 .expect("staged content")
                 .owner_namespace_id,
-            staged
-                .content_ref()
-                .expect("staged content")
-                .owner_generation,
             &staged.content_ref().expect("staged content").content_id,
         );
         let stored = blocking
@@ -740,11 +732,7 @@ mod direct_multipart {
         );
         assert_eq!(checksum_algorithm, begin.target.checksum_algorithm);
 
-        let object_key = content_blob(
-            &state.namespace_id,
-            state.owner_generation,
-            &state.content_id,
-        );
+        let object_key = content_blob(&state.namespace_id, &state.content_id);
 
         Session {
             namespace_id,

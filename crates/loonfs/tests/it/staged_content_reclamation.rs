@@ -81,11 +81,7 @@ async fn namespace(runtime: &TestRuntime) -> NamespaceId {
 }
 
 fn content_key(content_ref: &ContentRef) -> String {
-    loonfs_objectstore::keys::content_blob(
-        &content_ref.owner_namespace_id,
-        content_ref.owner_generation,
-        &content_ref.content_id,
-    )
+    loonfs_objectstore::keys::content_blob(&content_ref.owner_namespace_id, &content_ref.content_id)
 }
 
 async fn exists(store: &SharedObjectStore, key: &str) -> bool {

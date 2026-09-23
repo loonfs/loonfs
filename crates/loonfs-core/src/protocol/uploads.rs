@@ -146,7 +146,7 @@ pub(crate) async fn begin_direct_put_upload_target<S: ObjectStore + ?Sized>(
     let catalog = ensure_upload_namespace_available(store, namespace_id).await?;
     let recorded = recorded_subject(namespace_id, catalog.access(), subject)?;
     let content_id = ContentId::generate();
-    let object_key = content_blob(namespace_id, catalog.generation(), &content_id);
+    let object_key = content_blob(namespace_id, &content_id);
     let session = create_upload_session(
         store,
         &catalog,
@@ -178,11 +178,10 @@ pub(crate) async fn begin_direct_multipart_upload_target<S: ObjectStore + ?Sized
     let part_size_bytes = multipart_part_size(options.part_size_bytes)?;
     let recorded = recorded_subject(namespace_id, catalog.access(), subject)?;
     let content_id = ContentId::generate();
-    let object_key = content_blob(namespace_id, catalog.generation(), &content_id);
+    let object_key = content_blob(namespace_id, &content_id);
 
     let provider_upload_id =
-        create_content_multipart_upload(store, namespace_id, catalog.generation(), &content_id)
-            .await?;
+        create_content_multipart_upload(store, namespace_id, &content_id).await?;
     let session = NewUploadSession::direct_multipart(
         content_id.clone(),
         &provider_upload_id,
@@ -195,7 +194,6 @@ pub(crate) async fn begin_direct_multipart_upload_target<S: ObjectStore + ?Sized
             let _ = abort_unpublished_multipart_upload(
                 store,
                 namespace_id,
-                catalog.generation(),
                 &content_id,
                 &provider_upload_id,
             )
@@ -279,11 +277,7 @@ pub(crate) async fn direct_multipart_part_targets<S: ObjectStore + ?Sized>(
     }
 
     Ok(MultipartPartTargets {
-        object_key: content_blob(
-            &session.namespace_id,
-            session.owner_generation,
-            &session.content_id,
-        ),
+        object_key: content_blob(&session.namespace_id, &session.content_id),
         provider_upload_id: provider_upload_id.to_owned(),
         parts,
     })
@@ -1080,7 +1074,6 @@ pub(crate) async fn stage_owned_stream<S: ObjectStore + ?Sized>(
             "content object `{}` already holds bytes under a freshly minted identity",
             content_blob(
                 &staged.content_ref.owner_namespace_id,
-                staged.content_ref.owner_generation,
                 &staged.content_ref.content_id
             )
         )));
@@ -1229,7 +1222,6 @@ pub(crate) async fn abort_upload<S: ObjectStore + ?Sized>(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AbandonedUpload {
     owner_namespace_id: NamespaceId,
-    owner_generation: NamespaceGeneration,
     content_id: ContentId,
     provider_multipart_upload_id: Option<String>,
 }
@@ -1244,7 +1236,6 @@ impl AbandonedUpload {
         };
         Self {
             owner_namespace_id: state.namespace_id.clone(),
-            owner_generation: state.owner_generation,
             content_id: state.content_id.clone(),
             provider_multipart_upload_id,
         }
@@ -1261,13 +1252,7 @@ impl AbandonedUpload {
         if !self.release_provider(store).await {
             return false;
         }
-        delete_unpublished_content_object(
-            store,
-            &self.owner_namespace_id,
-            self.owner_generation,
-            &self.content_id,
-        )
-        .await
+        delete_unpublished_content_object(store, &self.owner_namespace_id, &self.content_id).await
     }
 
     pub(crate) async fn release_provider<S: ObjectStore + ?Sized>(&self, store: &S) -> bool {
@@ -1275,7 +1260,6 @@ impl AbandonedUpload {
             if !abort_unpublished_multipart_upload(
                 store,
                 &self.owner_namespace_id,
-                self.owner_generation,
                 &self.content_id,
                 provider_upload_id,
             )
@@ -1320,11 +1304,7 @@ pub(crate) async fn get_upload_status<S: ObjectStore + ?Sized>(
     let direct_put_object_key = if matches!(loaded.status, UploadSessionRecordStatus::Open { .. })
         && matches!(loaded.mode, UploadSessionMode::DirectPut { .. })
     {
-        Some(content_blob(
-            namespace_id,
-            loaded.owner_generation,
-            &loaded.content_id,
-        ))
+        Some(content_blob(namespace_id, &loaded.content_id))
     } else {
         None
     };
@@ -1722,10 +1702,6 @@ mod tests {
                 .content_ref()
                 .expect("staged content")
                 .owner_namespace_id,
-            staged
-                .content_ref()
-                .expect("staged content")
-                .owner_generation,
             &staged.content_ref().expect("staged content").content_id,
         );
         (
@@ -2081,7 +2057,7 @@ mod tests {
         .await
         .expect("bootstrap");
         let content_id = ContentId::generate();
-        let content_key = content_blob(&namespace_id, NamespaceGeneration(1), &content_id);
+        let content_key = content_blob(&namespace_id, &content_id);
         store
             .put(
                 &content_key,
@@ -2092,7 +2068,6 @@ mod tests {
             .expect("write unpublished content");
         let abandoned = AbandonedUpload {
             owner_namespace_id: namespace_id.clone(),
-            owner_generation: NamespaceGeneration(1),
             content_id,
             provider_multipart_upload_id: Some("unsupported-provider-upload".to_owned()),
         };

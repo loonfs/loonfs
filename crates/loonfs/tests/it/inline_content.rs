@@ -134,11 +134,7 @@ async fn reader_downloads_materialize_tail_content_by_path_and_inode() {
 
         assert_eq!(
             object_key,
-            content_blob(
-                &namespace_id,
-                content_ref.owner_generation,
-                &content_ref.content_id
-            )
+            content_blob(&namespace_id, &content_ref.content_id)
         );
         assert_eq!(
             store
@@ -230,11 +226,7 @@ async fn imports_read_the_owners_tail_before_folding_and_object_after_folding() 
         .expect("destination namespace");
     let content_ref = publish_inline(&store, &source, Some(subject)).await;
 
-    let source_key = content_blob(
-        &source,
-        content_ref.owner_generation,
-        &content_ref.content_id,
-    );
+    let source_key = content_blob(&source, &content_ref.content_id);
     assert!(store.head(&source_key).await.expect("head").is_none());
     for folded in [false, true] {
         if folded {
@@ -408,11 +400,7 @@ async fn imports_of_fork_content_read_the_deleted_owners_key() {
         let content_ref = entry.content_ref().expect("fork reference");
         assert_eq!(content_ref.owner_namespace_id, source);
 
-        let source_key = content_blob(
-            &source,
-            content_ref.owner_generation,
-            &content_ref.content_id,
-        );
+        let source_key = content_blob(&source, &content_ref.content_id);
         recording.reset();
         writer
             .put_file_content_ref(

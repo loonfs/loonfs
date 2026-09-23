@@ -935,7 +935,6 @@ async fn read_content_ref_refuses_bytes_that_do_not_match_the_reference() {
     // check is what has to catch it.
     let object_key = loonfs_objectstore::keys::content_blob(
         &content_ref.owner_namespace_id,
-        content_ref.owner_generation,
         &content_ref.content_id,
     );
     store

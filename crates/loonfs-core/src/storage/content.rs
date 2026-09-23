@@ -191,10 +191,9 @@ pub(crate) async fn verify_durable_content_checksum<S: ObjectStore + ?Sized>(
 pub(crate) async fn create_content_multipart_upload<S: ObjectStore + ?Sized>(
     store: &S,
     owner_namespace_id: &NamespaceId,
-    owner_generation: NamespaceGeneration,
     content_id: &ContentId,
 ) -> crate::error::Result<String> {
-    let object_key = content_blob(owner_namespace_id, owner_generation, content_id);
+    let object_key = content_blob(owner_namespace_id, content_id);
     store
         .create_multipart_upload(&object_key)
         .await
@@ -211,11 +210,7 @@ pub(crate) async fn complete_content_multipart_upload<S: ObjectStore + ?Sized>(
     provider_upload_id: &str,
     parts: &[MultipartPart],
 ) -> crate::error::Result<MultipartCompletion> {
-    let object_key = content_blob(
-        &expected.owner_namespace_id,
-        expected.owner_generation,
-        &expected.content_id,
-    );
+    let object_key = content_blob(&expected.owner_namespace_id, &expected.content_id);
     store
         .complete_multipart_upload(&object_key, provider_upload_id, parts, &expected.checksum)
         .await
@@ -236,10 +231,9 @@ pub(crate) async fn complete_content_multipart_upload<S: ObjectStore + ?Sized>(
 pub(crate) async fn delete_unpublished_content_object<S: ObjectStore + ?Sized>(
     store: &S,
     owner_namespace_id: &NamespaceId,
-    owner_generation: NamespaceGeneration,
     content_id: &ContentId,
 ) -> bool {
-    let object_key = content_blob(owner_namespace_id, owner_generation, content_id);
+    let object_key = content_blob(owner_namespace_id, content_id);
     match store.delete(&object_key).await {
         Ok(()) => true,
         Err(error) => {
@@ -265,11 +259,10 @@ pub(crate) async fn delete_unpublished_content_object<S: ObjectStore + ?Sized>(
 pub(crate) async fn abort_unpublished_multipart_upload<S: ObjectStore + ?Sized>(
     store: &S,
     owner_namespace_id: &NamespaceId,
-    owner_generation: NamespaceGeneration,
     content_id: &ContentId,
     provider_upload_id: &str,
 ) -> bool {
-    let object_key = content_blob(owner_namespace_id, owner_generation, content_id);
+    let object_key = content_blob(owner_namespace_id, content_id);
     match store
         .abort_multipart_upload(&object_key, provider_upload_id)
         .await
@@ -589,7 +582,6 @@ pub(crate) fn content_object_key_for_ref(
         .map_err(DurableContentValidationError::InvalidContentRef)?;
     Ok(content_blob(
         &content_ref.owner_namespace_id,
-        content_ref.owner_generation,
         &content_ref.content_id,
     ))
 }
@@ -759,7 +751,7 @@ pub(crate) async fn stage_streamed_under_content_id<S: ObjectStore + ?Sized>(
     body: ByteStream,
     payload_kind: StreamedPayloadKind,
 ) -> Result<StagedStream, CoreError> {
-    let object_key = content_blob(&owner_namespace_id, owner_generation, &content_id);
+    let object_key = content_blob(&owner_namespace_id, &content_id);
     let observed = Arc::new(Mutex::new(StreamedPayload::default()));
     let hashed = {
         let observed = Arc::clone(&observed);
@@ -847,11 +839,7 @@ pub(crate) async fn stage_bytes_under_content_id<S: ObjectStore + ?Sized>(
     bytes: &[u8],
 ) -> Result<StoredContent, CoreError> {
     let content_ref = ContentRef::blob_v1(owner_namespace_id, owner_generation, content_id, bytes);
-    let object_key = content_blob(
-        &content_ref.owner_namespace_id,
-        content_ref.owner_generation,
-        &content_ref.content_id,
-    );
+    let object_key = content_blob(&content_ref.owner_namespace_id, &content_ref.content_id);
     // Create-only plus the byte check stay on this write even though a
     // random id cannot collide: if this key is ever occupied by different
     // bytes, that is corruption, and it must fail loudly rather than be
@@ -1686,11 +1674,7 @@ mod tests {
     }
 
     async fn put_content_object(store: &impl ObjectStore, content_ref: &ContentRef, bytes: &[u8]) {
-        let key = content_blob(
-            &content_ref.owner_namespace_id,
-            content_ref.owner_generation,
-            &content_ref.content_id,
-        );
+        let key = content_blob(&content_ref.owner_namespace_id, &content_ref.content_id);
         store
             .put_if_absent(&key, Bytes::copy_from_slice(bytes))
             .await

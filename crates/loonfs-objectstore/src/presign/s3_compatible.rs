@@ -515,7 +515,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::{Duration, UNIX_EPOCH};
 
-    const CONTENT_KEY: &str = "namespaces/demo/content/1/con_0123456789abcdef0123456789abcdef";
+    const CONTENT_KEY: &str = "namespaces/demo/content/con_0123456789abcdef0123456789abcdef";
 
     const FIXTURE_ACCESS_KEY_ID: &str = "AKIAIOSFODNN7EXAMPLE";
     const FIXTURE_SECRET_ACCESS_KEY: &str = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";

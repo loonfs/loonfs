@@ -2822,7 +2822,6 @@ async fn put_streamed_writes_a_multi_part_payload_one_part_at_a_time() {
     let payload = distinct_bytes(MEMORY_BOUND_PAYLOAD_BYTES);
     let key = loonfs_objectstore::keys::content_blob(
         &loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
-        loonfs_api::NamespaceGeneration(1),
         &loonfs_api::ContentId::parse("con_0123456789abcdef0123456789abcdef").expect("content id"),
     );
     // Use HTTP-sized chunks so the store must regroup them.
@@ -5024,7 +5023,6 @@ async fn download_body_streams_one_chunk_and_aborts_on_late_corruption() {
 
             let key = loonfs_objectstore::keys::content_blob(
                 &entry.content_ref().expect("file").owner_namespace_id,
-                entry.content_ref().expect("file").owner_generation,
                 &entry.content_ref().expect("file").content_id,
             );
             let mut changed = payload.clone();

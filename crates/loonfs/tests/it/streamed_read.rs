@@ -164,11 +164,7 @@ async fn a_streamed_read_rejects_content_that_stopped_matching_its_reference() {
         .expect("stat file");
     let content_ref = entry.content_ref().cloned().expect("a file has content");
 
-    let key = content_blob(
-        &content_ref.owner_namespace_id,
-        content_ref.owner_generation,
-        &content_ref.content_id,
-    );
+    let key = content_blob(&content_ref.owner_namespace_id, &content_ref.content_id);
     let mut corrupted = payload.clone();
     corrupted[0] ^= 0xff;
     store(temp_dir.path())
