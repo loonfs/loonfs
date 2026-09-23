@@ -746,9 +746,7 @@ fn classify_key(key: &str) -> KeyClass {
         }
         DurableObjectFamily::MetadataSegment => KeyClass::MetadataSegment,
         DurableObjectFamily::CheckpointRecord => KeyClass::GcControl,
-        DurableObjectFamily::UploadSession | DurableObjectFamily::ContentStore => {
-            KeyClass::Metadata
-        }
+        DurableObjectFamily::UploadSession => KeyClass::Metadata,
     }
 }
 

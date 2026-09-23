@@ -21,9 +21,8 @@
 | **Display name** | The stored spelling of a directory entry's name. |
 | **Name key** | The normalized and case-folded value used for sibling-name comparison and lookup. |
 | **Revision** | One committed content state of a file, ordered by a revision number scoped to that inode. |
-| **Content store** | A domain of immutable file objects identified by `content_store_id`, shared by a namespace and its forks. |
-| **Content object** | The complete bytes of one uploaded file, stored immutably under the original owner's prefix. |
-| **Content reference** | A `blob_v1` record containing the original owner namespace, content ID, complete size, and checksum. |
+| **Content object** | The complete bytes of one uploaded file, stored immutably under `namespaces/{owner_namespace_id}/content/{owner_generation}/`. |
+| **Content reference** | A `blob_v1` record containing the original owner namespace, owner generation, content ID, complete size, and checksum. |
 | **Upload session** | A durable record for one upload, with a fixed identity and mode and an open, completed, or aborted status. Completion alone does not commit a file. |
 | **Metadata segment** | An immutable, sorted set of rows in one metadata family, stored in independently readable blocks. |
 | **Run** | The metadata segments produced together, identified by a manifest-allocated run number. |
@@ -41,7 +40,7 @@
 | **Precondition** | A requirement checked against the applicable metadata state before a new mutation is accepted. |
 | **Writer epoch** | A namespace-local fencing counter. A writer session cannot publish after another session acquires a newer epoch. |
 | **Compare-and-swap (CAS)** | A conditional update that succeeds only if the object's compare token still matches the version previously read. |
-| **Control object** | A structured durable record for discovery, retained views, content domains, or upload state. Its kind determines its update rules. |
+| **Control object** | A structured durable record for discovery, retained views, or upload state. Its kind determines its update rules. |
 | **Family group** | Related metadata row families that compaction processes together, such as the two bind indexes and unbinds. |
 | **Compactor epoch** | A namespace-wide counter in the manifest that fences compaction publications from older runtime claims. |
 | **GC pass** | One complete collection call with freshly loaded roots, an in-memory live set, and a fixed call clock. |

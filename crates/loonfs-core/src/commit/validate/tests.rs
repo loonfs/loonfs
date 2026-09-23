@@ -190,7 +190,6 @@ fn validation_context(
 ) -> TestValidationContext<'_> {
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let head = NamespaceReadState {
-        content_store_id: loonfs_api::ContentStoreId::generate(),
         created_at_ms: 1_000,
         created_by: loonfs_test_support::test_actor(),
         access: loonfs_api::NamespaceAccess::Unrestricted {},

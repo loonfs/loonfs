@@ -180,16 +180,11 @@ async fn materialize_inline_content<S: ObjectStore + ?Sized>(
     store: &S,
     projection: &ManifestProjection<'_, S>,
 ) -> Result<()> {
-    let content_store_id = &projection
-        .manifest_segments
-        .manifest()
-        .payload()
-        .content_store_id;
     let values = projection
         .tail_state
         .inline_values()
         .map(|value| {
-            let key = content_object_key_for_ref(content_store_id, &value.content_ref)?;
+            let key = content_object_key_for_ref(&value.content_ref)?;
             validate_loaded_content_bytes(key.clone(), &value.content_ref, &value.bytes)?;
             Ok((key, value))
         })

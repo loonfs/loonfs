@@ -216,7 +216,7 @@ async fn maintenance_preserves_namespace_identity_and_writer() {
         .await
         .expect("namespace state");
     assert_eq!(after.namespace_id, before.namespace_id);
-    assert_eq!(after.content_store_id, before.content_store_id);
+
     assert_eq!(after.created_at_ms, before.created_at_ms);
     assert_eq!(after.fork_basis, before.fork_basis);
     assert_eq!(after.writer_epoch, before.writer_epoch);

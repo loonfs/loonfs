@@ -114,8 +114,7 @@ async fn failed_manifest_and_over_budget_retries_keep_materialized_content() {
         *input.basis.manifest()
     );
     for value in &values {
-        let key = content_object_key_for_ref(&input.head.content_store_id, value.content_ref())
-            .expect("key");
+        let key = content_object_key_for_ref(value.content_ref()).expect("key");
         assert_eq!(
             store
                 .get(&key, None)
@@ -250,8 +249,7 @@ async fn an_existing_different_object_is_corruption_and_stops_manifest_publicati
     .await
     .expect("publish");
     let input = engine.wal_fold_input().expect("tail");
-    let key =
-        content_object_key_for_ref(&input.head.content_store_id, value.content_ref()).expect("key");
+    let key = content_object_key_for_ref(value.content_ref()).expect("key");
     store
         .put(&key, Bytes::from_static(b"wrong"), PutMode::CreateIfAbsent)
         .await
@@ -296,8 +294,7 @@ async fn a_materialization_transport_failure_remains_retryable() {
     .await
     .expect("publish");
     let input = engine.wal_fold_input().expect("tail");
-    let key =
-        content_object_key_for_ref(&input.head.content_store_id, value.content_ref()).expect("key");
+    let key = content_object_key_for_ref(value.content_ref()).expect("key");
     store
         .put(&key, value.bytes().clone(), PutMode::CreateIfAbsent)
         .await

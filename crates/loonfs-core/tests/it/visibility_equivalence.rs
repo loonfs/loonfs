@@ -112,7 +112,7 @@ impl VisibilityHarness {
             loonfs_core::control::load_namespace_catalog_entry(&self.store, self.namespace_id())
                 .await
                 .expect("load namespace catalog");
-        let prepared = prepare_stored_content(&catalog, stored).expect("prepare stored content");
+        let prepared = prepare_stored_content(&catalog, stored);
         self.publish(CommitCandidate::prepared(
             CommitRequest::single(
                 CommitId::generate(),

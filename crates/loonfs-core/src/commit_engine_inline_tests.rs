@@ -221,7 +221,6 @@ async fn inline_retry_identity_uses_bytes_and_distinguishes_staged_content() {
         .expect("stage");
     let proof = PreparedContent::for_durable_content_write(
         engine.namespace_id.clone(),
-        staged.content_store_id().clone(),
         staged.content_ref().clone(),
     );
     let inline = InlineContent::new(
@@ -294,7 +293,6 @@ async fn invalid_inline_candidates_write_nothing() {
     mismatched.content =
         ContentPreparation::Ready(vec![PreparedContent::for_durable_content_write(
             engine.namespace_id.clone(),
-            staged.content_store_id().clone(),
             staged.content_ref().clone(),
         )]);
     let mut wrong_checksum = mismatched.clone();
@@ -376,7 +374,6 @@ async fn inline_tail_replay_matches_publication_and_materializes_before_metadata
     assert_eq!(reloaded.tail_state, advanced.tail_state);
     assert_no_writes(&store);
     let folded_wal_no = advanced.head.wal_no;
-    let content_store_id = advanced.head.content_store_id.clone();
     for (index, input) in [Some(advanced), Some(reloaded), None]
         .into_iter()
         .enumerate()
@@ -395,11 +392,8 @@ async fn inline_tail_replay_matches_publication_and_materializes_before_metadata
             assert_eq!(flushed.outcome, FlushWalOutcome::Published);
             fold_tests::assert_content_before_metadata(&store, values.len());
             for value in &values {
-                let key = crate::storage::content::content_object_key_for_ref(
-                    &content_store_id,
-                    value.content_ref(),
-                )
-                .expect("content key");
+                let key = crate::storage::content::content_object_key_for_ref(value.content_ref())
+                    .expect("content key");
                 assert_eq!(
                     store
                         .get(&key, None)

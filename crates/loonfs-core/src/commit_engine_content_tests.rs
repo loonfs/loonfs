@@ -6,13 +6,12 @@ use crate::limits::{
     COMPLETED_UPLOAD_ADMISSION_WINDOW_MS, CONTENT_RECLAMATION_GRACE_MS, GC_MIN_GRACE_WINDOW_MS,
 };
 use crate::namespace::bootstrap::bootstrap_namespace;
-use crate::namespace::catalog::load_namespace_content_store_id;
 use crate::namespace::control::load_namespace_read_state;
 use crate::protocol::{
     begin_service_proxied_upload, complete_upload, upload_content, CompletedUpload,
     ResolvedUploadCompletion,
 };
-use loonfs_api::{AbsolutePath, ContentStoreId, DestinationBehavior, WriterId};
+use loonfs_api::{AbsolutePath, DestinationBehavior, WriterId};
 use loonfs_objectstore::keys::{content_blob, hint, wal_segment_prefix};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::stores::{BlockingStore, KeyPredicate, OperationClass};
@@ -39,7 +38,7 @@ async fn completed_upload<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     context: &MutationContext,
-) -> (CompletedUpload, ContentStoreId) {
+) -> CompletedUpload {
     let upload = begin_service_proxied_upload(store, namespace_id, None, context)
         .await
         .expect("begin upload");
@@ -52,9 +51,6 @@ async fn completed_upload<S: ObjectStore + ?Sized>(
     )
     .await
     .expect("stage upload");
-    let content_store_id = load_namespace_content_store_id(store, namespace_id)
-        .await
-        .expect("content store");
     let completed = complete_upload(
         store,
         namespace_id,
@@ -65,7 +61,7 @@ async fn completed_upload<S: ObjectStore + ?Sized>(
     )
     .await
     .expect("complete upload");
-    (completed, content_store_id)
+    completed
 }
 
 fn put_candidate(completed: &CompletedUpload) -> CommitCandidate {
@@ -124,7 +120,7 @@ async fn a_completed_upload_token_cannot_publish_after_namespace_deletion() {
     )
     .await
     .expect("bootstrap");
-    let (completed, _) = completed_upload(&store, &namespace_id, &setup).await;
+    let completed = completed_upload(&store, &namespace_id, &setup).await;
     let catalog = load_namespace_catalog_entry(&store, &namespace_id)
         .await
         .expect("catalog");
@@ -184,9 +180,8 @@ async fn content_reclaimed_during_view_load_cannot_be_published() {
     )
     .await
     .expect("bootstrap");
-    let (completed, content_store_id) = completed_upload(&store, &namespace_id, &setup).await;
+    let completed = completed_upload(&store, &namespace_id, &setup).await;
     let content_key = content_blob(
-        &content_store_id,
         &namespace_id,
         completed.prepared.content_ref().owner_generation,
         &completed.prepared.content_ref().content_id,
@@ -277,7 +272,7 @@ async fn content_expiring_after_the_put_starts_does_not_undo_the_commit() {
     )
     .await
     .expect("bootstrap");
-    let (completed, _) = completed_upload(&store, &namespace_id, &setup).await;
+    let completed = completed_upload(&store, &namespace_id, &setup).await;
     let timer = Arc::new(PublicationTimer::default());
     let mut engine =
         NamespaceCommitEngine::new(namespace_id.clone()).monotonic_timer(timer.clone());
@@ -394,8 +389,8 @@ async fn swap_accepts_any_valid_matching_proof_and_expired_receipt_replays_witho
     )
     .await
     .expect("bootstrap");
-    let (completed, _) = completed_upload(&store, &namespace_id, &setup).await;
-    let (unused, _) = completed_upload(&store, &namespace_id, &setup).await;
+    let completed = completed_upload(&store, &namespace_id, &setup).await;
+    let unused = completed_upload(&store, &namespace_id, &setup).await;
     let catalog = load_namespace_catalog_entry(&store, &namespace_id)
         .await
         .expect("catalog");
@@ -530,7 +525,7 @@ async fn retained_receipt_minting_stops_at_the_upload_issuance_deadline() {
     )
     .await
     .expect("bootstrap");
-    let (completed, _) = completed_upload(&store, &namespace_id, &setup).await;
+    let completed = completed_upload(&store, &namespace_id, &setup).await;
     let receipt = completed.receipt.expect("eligible receipt");
     let deadline_ms = setup.now_ms + COMPLETED_UPLOAD_RECEIPT_WINDOW_MS;
     for now_ms in [setup.now_ms, deadline_ms - 1] {

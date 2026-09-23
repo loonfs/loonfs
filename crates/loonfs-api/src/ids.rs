@@ -335,8 +335,7 @@ pub fn generated_id(prefix: &'static str) -> String {
 
 /// Draws 128 fresh random bits.
 ///
-/// Generated ids hex-encode these bytes. Content ids use the same generator,
-/// which keeps their shard prefixes uniformly distributed.
+/// Generated ids hex-encode these bytes.
 fn random_128() -> [u8; 16] {
     let mut bytes = [0_u8; 16];
     getrandom::fill(&mut bytes).expect("the system random generator must be available");
@@ -512,14 +511,6 @@ string_id! {
 }
 
 string_id! {
-    /// Durable id for an immutable content store.
-    ///
-    /// Content stores own file bytes. Namespaces point at content stores.
-    ContentStoreId,
-    prefix = "cs"
-}
-
-string_id! {
     /// Client-supplied idempotency key for one logical commit.
     ///
     /// Reuse the same `CommitId` when retrying the same request. The accepted
@@ -611,13 +602,7 @@ string_id! {
 }
 
 string_id! {
-    /// Durable identity of one immutable content object.
-    ///
-    /// The body is 128 fully random bits, with no time component: content
-    /// object keys shard on the id's leading characters, and a clock-derived
-    /// prefix would put every upload in one window into one shard. The id
-    /// names *which object*, never what it contains — integrity evidence
-    /// rides [`crate::ContentRef`] beside it.
+    /// Random identity of one immutable content object.
     ContentId,
     prefix = "con",
     schema(
@@ -625,28 +610,6 @@ string_id! {
         example = "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41"
     )
 }
-
-impl ContentId {
-    /// Returns the two-character components for both content-key shard levels.
-    ///
-    /// Every valid id has a 32-character lowercase hex body, so this never
-    /// panics.
-    pub fn shard_prefixes(&self) -> [&str; CONTENT_ID_SHARD_LEVELS] {
-        let first_start = CONTENT_ID_PREFIX_LEN;
-        let second_start = first_start + CONTENT_ID_SHARD_WIDTH;
-        [
-            &self.0[first_start..second_start],
-            &self.0[second_start..second_start + CONTENT_ID_SHARD_WIDTH],
-        ]
-    }
-}
-
-/// Byte length of the `con_` marker that precedes a content id's hex body.
-const CONTENT_ID_PREFIX_LEN: usize = "con_".len();
-/// Number of directory levels used to shard content objects.
-const CONTENT_ID_SHARD_LEVELS: usize = 2;
-/// Number of content-id body characters in each shard directory name.
-const CONTENT_ID_SHARD_WIDTH: usize = 2;
 
 string_id! {
     /// Durable id for one metadata segment.
@@ -841,9 +804,9 @@ impl fmt::Display for InodeKind {
 #[cfg(test)]
 mod tests {
     use super::{
-        next_public_ordinal, BindingGeneration, ChangeSeq, CommitId, ContentId, ContentStoreId,
-        InodeId, ManifestNo, MetadataSegmentId, NameKey, NamespaceId, PinId, RevisionNo, RunNo,
-        UploadId, WalNo, WriterEpoch, WriterId, MAX_PUBLIC_INTEGER,
+        next_public_ordinal, BindingGeneration, ChangeSeq, CommitId, ContentId, InodeId,
+        ManifestNo, MetadataSegmentId, NameKey, NamespaceId, PinId, RevisionNo, RunNo, UploadId,
+        WalNo, WriterEpoch, WriterId, MAX_PUBLIC_INTEGER,
     };
     use crate::AttributesRevisionNo;
     use std::collections::BTreeSet;
@@ -980,12 +943,6 @@ mod tests {
             "commit-1"
         );
         assert_eq!(
-            ContentStoreId::try_from("cs_00000000000000000000000000000001")
-                .expect("valid content store id")
-                .as_str(),
-            "cs_00000000000000000000000000000001"
-        );
-        assert_eq!(
             PinId::try_from("pin_00000000000000000001-0000000000000001")
                 .expect("valid pin id")
                 .as_str(),
@@ -1000,7 +957,6 @@ mod tests {
 
         assert!(NamespaceId::try_from("invalid/name").is_err());
         assert!(CommitId::try_from("invalid/name").is_err());
-        assert!(ContentStoreId::try_from("cs_0000000000000000000000000000000g").is_err());
         assert!(PinId::try_from("pin_00000000000000000001-000000000000000g").is_err());
         assert!(NameKey::try_from("a/b").is_err());
     }
@@ -1013,13 +969,6 @@ mod tests {
         let commit_id: CommitId =
             serde_json::from_str(r#""commit-1""#).expect("valid commit id json");
         assert_eq!(commit_id.as_str(), "commit-1");
-        let content_store_id: ContentStoreId =
-            serde_json::from_str(r#""cs_00000000000000000000000000000001""#)
-                .expect("valid content store id json");
-        assert_eq!(
-            content_store_id.as_str(),
-            "cs_00000000000000000000000000000001"
-        );
         let pin_id: PinId = serde_json::from_str(r#""pin_00000000000000000001-0000000000000001""#)
             .expect("valid pin id json");
         assert_eq!(pin_id.as_str(), "pin_00000000000000000001-0000000000000001");
@@ -1030,41 +979,10 @@ mod tests {
         let commit_error = serde_json::from_str::<CommitId>(r#""invalid/name""#)
             .expect_err("invalid commit id json");
         assert!(commit_error.to_string().contains("commit_id"));
-        let content_store_error =
-            serde_json::from_str::<ContentStoreId>(r#""cs_0000000000000000000000000000000g""#)
-                .expect_err("invalid content store id json");
-        assert!(content_store_error.to_string().contains("generated id"));
         let pin_error =
             serde_json::from_str::<PinId>(r#""pin_00000000000000000001-000000000000000g""#)
                 .expect_err("invalid pin id json");
         assert!(pin_error.to_string().contains("generated id"));
-    }
-
-    #[test]
-    fn generated_content_store_id_parse_requires_prefix_and_lower_hex_body() {
-        let parsed = ContentStoreId::parse("cs_00000000000000000000000000000001")
-            .expect("valid content store id");
-
-        assert_eq!(parsed.as_str(), "cs_00000000000000000000000000000001");
-        let hyphenated_content_store_id = ["cs", "1"].join("-");
-        for value in [
-            hyphenated_content_store_id.as_str(),
-            "upl_00000000000000000000000000000001",
-            "content-stores/foo",
-            "cs_",
-            "cs_abcdef",
-            "cs_0000000000000000000000000000000",
-            "cs_000000000000000000000000000000001",
-            "cs_ABCDEF00000000000000000000000000",
-            "cs_0000000000000000000000000000000g",
-            " cs_00000000000000000000000000000001",
-            "cs_00000000000000000000000000000001 ",
-        ] {
-            assert!(
-                ContentStoreId::parse(value).is_err(),
-                "expected invalid content store id {value:?}"
-            );
-        }
     }
 
     #[test]
@@ -1115,36 +1033,16 @@ mod tests {
     }
 
     #[test]
-    fn generated_content_ids_are_unique_and_shard_uniformly() {
+    fn generated_content_ids_are_unique() {
         let mut ids = BTreeSet::new();
-        let mut first_level_shards = BTreeSet::new();
-        let mut leaf_shards = BTreeSet::new();
         for _ in 0..512 {
             let id = ContentId::generate();
             assert_generated_id_shape(id.as_str(), "con");
-            let [first, second] = id.shard_prefixes();
-            assert_eq!(first, &id.as_str()["con_".len().."con_".len() + 2]);
-            assert_eq!(second, &id.as_str()["con_".len() + 2.."con_".len() + 4]);
-            first_level_shards.insert(first.to_owned());
-            leaf_shards.insert(format!("{first}/{second}"));
             assert!(
                 ids.insert(id.clone()),
                 "generated duplicate content id {id}"
             );
         }
-        // 512 draws over 256 first-level and 65,536 leaf shards: a generator
-        // with a fixed or clock-derived prefix would collapse into a handful
-        // of shards.
-        assert!(
-            first_level_shards.len() > 128,
-            "content id first-level shards are not spread: {} distinct",
-            first_level_shards.len()
-        );
-        assert!(
-            leaf_shards.len() > 480,
-            "content id leaf shards are not spread: {} distinct",
-            leaf_shards.len()
-        );
     }
 
     #[test]

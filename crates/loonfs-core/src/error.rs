@@ -558,10 +558,6 @@ impl CoreError {
             | CoreError::Forbidden { .. }
             | CoreError::NamespaceUnrestricted { .. }
             | CoreError::StaleHeadPrecondition { .. } => None,
-            #[cfg(any(test, feature = "test-support"))]
-            CoreError::DurableContent(DurableContentValidationError::ContentStoreMismatch {
-                ..
-            }) => None,
         }
     }
 

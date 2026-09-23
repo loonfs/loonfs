@@ -1,6 +1,6 @@
 //! Namespace creation, fork installation, and terminal lifecycle guards.
 //!
-//! Tests cover descriptor creation, conditional manifest installation, and
+//! Tests cover conditional manifest installation and
 //! namespace state before the first metadata publication.
 
 #![allow(clippy::panic)]
@@ -10,7 +10,7 @@ use crate::common::commit_split_support::*;
 use crate::common::namespace_engine;
 use bytes::Bytes;
 use loonfs_api::{
-    wire::control::{decode_control_object, ContentStorePayload, ControlObjectKind, PinOwner},
+    wire::control::PinOwner,
     wire::manifest::{
         decode_namespace_manifest_json, encode_namespace_manifest_json, MetadataRowFamily,
     },
@@ -21,7 +21,7 @@ use loonfs_core::control::load_namespace_read_state;
 use loonfs_core::publish::FilesystemOperation;
 use loonfs_core::{Error as CoreError, ErrorCode, MutationContext};
 use loonfs_objectstore::keys::{
-    content_blob, content_owner_prefix, content_store, hint, metadata_manifest_object,
+    content_blob, content_owner_prefix, hint, metadata_manifest_object,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{ObjectStore, PutMode};
@@ -342,16 +342,6 @@ async fn a_created_namespace_reads_manifest_one_before_its_first_flush() {
         ],
         "creation installs manifest one"
     );
-    let head = load_namespace_read_state(&store, &namespace_id)
-        .await
-        .expect("load head");
-    assert_eq!(
-        store
-            .list_prefix("content-stores/")
-            .await
-            .expect("list content stores"),
-        vec![content_store(&head.content_store_id)],
-    );
 
     let root_entry = resolve_path(&store, &namespace_id, "/")
         .await
@@ -373,19 +363,23 @@ async fn a_created_namespace_reads_manifest_one_before_its_first_flush() {
     )
     .await
     .expect("a fresh namespace accepts writes");
-    assert_eq!(
-        read_file_bytes(&store, &namespace_id, "/docs/first.txt")
-            .await
-            .expect("read back")
-            .bytes,
-        b"hello"
+    let file = read_file_bytes(&store, &namespace_id, "/docs/first.txt")
+        .await
+        .expect("read back");
+    assert_eq!(file.bytes, b"hello");
+    let content_ref = file.entry.content_ref().expect("content reference");
+    let content_key = content_blob(
+        &content_ref.owner_namespace_id,
+        content_ref.owner_generation,
+        &content_ref.content_id,
     );
     let keys = namespace_keys(&store, &namespace_id).await;
     assert!(
         keys.iter().all(|key| key == &hint(&namespace_id)
+            || key == &content_key
             || key.starts_with(&format!("namespaces/{namespace_id}/manifests/"))
             || key.starts_with(&format!("namespaces/{}/wal/", namespace_id.as_str()))),
-        "only control and WAL objects exist before the first flush: {keys:?}"
+        "only control, WAL, and the uploaded content exist before the first flush: {keys:?}"
     );
 
     namespace_engine(&store, &namespace_id, &context)
@@ -414,7 +408,7 @@ async fn a_created_namespace_reads_manifest_one_before_its_first_flush() {
 }
 
 #[tokio::test]
-async fn namespace_create_recovers_when_manifest_one_lands_ambiguously() {
+async fn namespace_create_reports_exists_when_manifest_one_lands_ambiguously() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
     let store = FailStore::new(
@@ -426,11 +420,11 @@ async fn namespace_create_recovers_when_manifest_one_lands_ambiguously() {
     .apply_then_fail();
     store.fail_next(1);
 
-    let created = bootstrap_namespace(&store, &namespace_id, &mutation_context())
+    let error = bootstrap_namespace(&store, &namespace_id, &mutation_context())
         .await
-        .expect("head identity reconciles the landed create");
+        .expect_err("matching first manifests do not prove authorship");
 
-    assert_eq!(created.namespace_id, namespace_id);
+    assert_eq!(error.code(), ErrorCode::NamespaceExists);
     assert_eq!(store.attempts(), 1);
     assert_eq!(
         head_state(&store, &namespace_id).await.status,
@@ -589,7 +583,7 @@ async fn fork_install_recovers_when_target_manifest_one_lands_ambiguously() {
 }
 
 #[tokio::test]
-async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
+async fn fork_namespace_reads_inherited_content_and_isolates_metadata() {
     async fn upload_content<S: ObjectStore + ?Sized>(
         store: &S,
         namespace_id: &NamespaceId,
@@ -619,10 +613,10 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
     }
 
     let temp_dir = tempdir().expect("tempdir");
-    let store = RecordingStore::metadata_segments(RecordingStore::new(
+    let store = Arc::new(RecordingStore::metadata_segments(RecordingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
         KeyPredicate::content_blob(),
-    ));
+    )));
     let context = mutation_context();
     let source_namespace_id = namespace_id("demo");
     let clone_namespace_id = NamespaceId::parse("clone").expect("valid namespace id");
@@ -655,7 +649,6 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
 
     let source_head = head_state(&store, &source_namespace_id).await;
     assert_eq!(source_head.seq, ChangeSeq(1));
-    let content_store_id = source_head.content_store_id.clone();
     store.reset();
     store.inner().reset();
     let forked = fork_namespace(&store, &source_namespace_id, &clone_namespace_id, &context)
@@ -680,7 +673,7 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
     );
 
     let clone_head = head_state(&store, &clone_namespace_id).await;
-    assert_eq!(clone_head.content_store_id, content_store_id);
+
     assert_eq!(clone_head.seq, ChangeSeq(1));
     let fork_basis = clone_head.fork_basis.clone().expect("fork basis");
     assert_eq!(fork_basis.manifest.owner_namespace_id, source_namespace_id);
@@ -728,21 +721,29 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
     assert_eq!(source_entry.content_ref(), clone_entry.content_ref());
     let inherited_ref = source_entry.content_ref().expect("file content").clone();
     assert_eq!(inherited_ref.owner_namespace_id, source_namespace_id);
+    let source_hint = hint(&source_namespace_id);
+    let source_manifests = loonfs_objectstore::keys::metadata_manifest_prefix(&source_namespace_id);
+    let guarded = FailStore::new(
+        store.clone(),
+        KeyPredicate::new(move |key| key == source_hint || key.starts_with(&source_manifests)),
+        OperationClass::Read,
+        InjectedError::Transport("source head must not be read".to_owned()),
+    );
+    guarded.fail_all();
     assert_eq!(
-        read_file_bytes(&store, &clone_namespace_id, "/docs/shared.txt")
+        read_file_bytes(&guarded, &clone_namespace_id, "/docs/shared.txt")
             .await
             .expect("read clone")
             .bytes,
         b"base"
     );
+    assert_eq!(guarded.attempts(), 0);
     assert_eq!(store.inner().counts().puts, 0);
     assert_eq!(
         store.inner().take_get_keys(),
-        vec![content_blob(
-            &content_store_id,
-            &source_namespace_id,
-            inherited_ref.owner_generation,
-            &inherited_ref.content_id
+        vec![format!(
+            "namespaces/demo/content/1/{}",
+            inherited_ref.content_id
         )]
     );
     let stale_clone_changes = list_changes_after(&store, &clone_namespace_id, ChangeSeq(0))
@@ -794,7 +795,6 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
     assert_eq!(clone_write.committed_seq, ChangeSeq(2));
     let owner_keys = store
         .list_prefix(&content_owner_prefix(
-            &content_store_id,
             &clone_namespace_id,
             uploaded_ref.owner_generation,
         ))
@@ -803,17 +803,10 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
     assert_eq!(
         owner_keys,
         vec![content_blob(
-            &content_store_id,
             &clone_namespace_id,
             uploaded_ref.owner_generation,
             &uploaded_ref.content_id
         )]
-    );
-    assert_eq!(
-        head_state(&store, &clone_namespace_id)
-            .await
-            .content_store_id,
-        content_store_id
     );
     assert_eq!(
         read_file_bytes(&store, &source_namespace_id, "/docs/shared.txt")
@@ -1176,7 +1169,6 @@ async fn a_create_losing_to_a_foreign_head_reports_the_id_as_taken() {
     // Another writer's complete head for the same id, already durable.
     let foreign = loonfs_api::wire::manifest::NamespaceManifestPayload::initial(
         namespace_id.clone(),
-        loonfs_api::ContentStoreId::generate(),
         1_000,
         loonfs_test_support::test_actor(),
         loonfs_api::NamespaceAccess::Unrestricted {},
@@ -1384,7 +1376,7 @@ async fn gc_preserves_unflushed_data_then_the_current_manifest_tombstone() {
 }
 
 #[tokio::test]
-async fn creation_and_fork_install_descriptor_hint_and_manifest_in_order() {
+async fn creation_and_fork_install_hint_and_manifest_in_order() {
     let directory = tempdir().expect("tempdir");
     let store = RecordingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
@@ -1395,10 +1387,6 @@ async fn creation_and_fork_install_descriptor_hint_and_manifest_in_order() {
     bootstrap_namespace(&store, &source, &context)
         .await
         .expect("bootstrap");
-    let head = load_namespace_read_state(&store, &source)
-        .await
-        .expect("head");
-    let descriptor_key = content_store(&head.content_store_id);
     let puts: Vec<_> = store
         .take()
         .into_iter()
@@ -1410,29 +1398,12 @@ async fn creation_and_fork_install_descriptor_hint_and_manifest_in_order() {
     assert_eq!(
         puts,
         vec![
-            (descriptor_key.clone(), PutMode::CreateIfAbsent),
             (hint(&source), PutMode::CreateIfAbsent),
             (
                 metadata_manifest_object(&source, &ManifestNo(1)),
                 PutMode::CreateIfAbsent
             ),
         ]
-    );
-    let bytes = store
-        .get(&descriptor_key, None)
-        .await
-        .expect("get descriptor")
-        .expect("descriptor");
-    let descriptor =
-        decode_control_object::<ContentStorePayload>(&bytes, ControlObjectKind::ContentStore)
-            .expect("decode descriptor")
-            .into_payload();
-    assert_eq!(
-        descriptor,
-        ContentStorePayload {
-            content_store_id: head.content_store_id.clone(),
-            created_at_ms: head.created_at_ms,
-        }
     );
     store.reset();
     let target = namespace_id("target");
@@ -1447,24 +1418,18 @@ async fn creation_and_fork_install_descriptor_hint_and_manifest_in_order() {
                 key,
                 mode: PutMode::CreateIfAbsent,
                 ..
-            } if key == descriptor_key || key.starts_with(&format!("namespaces/{target}/")) => {
-                Some(key)
-            }
+            } if key.starts_with(&format!("namespaces/{target}/")) => Some(key),
             _ => None,
         })
         .collect();
     assert_eq!(
         puts,
         vec![
-            descriptor_key,
             hint(&target),
             metadata_manifest_object(&target, &ManifestNo(1))
         ]
     );
-    let fork_head = load_namespace_read_state(&store, &target)
-        .await
-        .expect("fork head");
-    assert_eq!(fork_head.content_store_id, descriptor.content_store_id);
+
     for allow_existing in [false, true] {
         store.reset();
         let result = if allow_existing {
@@ -1538,7 +1503,7 @@ async fn bootstrap_of_a_deleted_namespace_recreates_it_once() {
 }
 
 #[tokio::test]
-async fn bootstrap_hint_read_failures_never_create_a_descriptor() {
+async fn bootstrap_hint_read_failures_write_nothing() {
     for injected in [
         InjectedError::Transport("hint read failed".to_owned()),
         InjectedError::PermissionDenied("hint read denied".to_owned()),
@@ -1604,11 +1569,11 @@ async fn bootstrap_of_a_corrupt_hint_writes_nothing() {
 }
 
 #[tokio::test]
-async fn a_creator_losing_after_namespace_discovery_leaves_only_an_orphan_descriptor() {
+async fn a_creator_losing_after_namespace_discovery_leaves_no_extra_objects() {
     let directory = tempdir().expect("tempdir");
     let store = loonfs_test_support::stores::BlockingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
-        KeyPredicate::prefix("content-stores/"),
+        KeyPredicate::exact(hint(&namespace_id("demo"))),
         OperationClass::PutCreateIfAbsent,
     );
     let namespace_id = namespace_id("demo");
@@ -1627,13 +1592,6 @@ async fn a_creator_losing_after_namespace_discovery_leaves_only_an_orphan_descri
         ErrorCode::NamespaceExists
     );
     assert_eq!(winner.namespace_id, namespace_id);
-    let head = head_state(&store, &namespace_id).await;
-    let descriptors = store
-        .list_prefix("content-stores/")
-        .await
-        .expect("descriptors");
-    assert_eq!(descriptors.len(), 2);
-    assert!(descriptors.contains(&content_store(&head.content_store_id)));
     assert_eq!(
         namespace_keys(&store, &namespace_id).await,
         vec![
@@ -1667,17 +1625,8 @@ async fn retired_leaf_content_is_reclaimed_while_live_workspaces_keep_their_cont
     )
     .await
     .expect("write sibling");
-    let content_store_id = head_state(&store, &source).await.content_store_id;
-    let source_prefix = content_owner_prefix(
-        &content_store_id,
-        &source,
-        loonfs_api::NamespaceGeneration(1),
-    );
-    let sibling_prefix = content_owner_prefix(
-        &content_store_id,
-        &sibling,
-        loonfs_api::NamespaceGeneration(1),
-    );
+    let source_prefix = content_owner_prefix(&source, loonfs_api::NamespaceGeneration(1));
+    let sibling_prefix = content_owner_prefix(&sibling, loonfs_api::NamespaceGeneration(1));
     let source_keys = store
         .list_prefix(&source_prefix)
         .await
@@ -1706,8 +1655,7 @@ async fn retired_leaf_content_is_reclaimed_while_live_workspaces_keep_their_cont
         )
         .await
         .expect("write leaf");
-        let prefix =
-            content_owner_prefix(&content_store_id, &leaf, loonfs_api::NamespaceGeneration(1));
+        let prefix = content_owner_prefix(&leaf, loonfs_api::NamespaceGeneration(1));
         assert!(!store
             .list_prefix(&prefix)
             .await

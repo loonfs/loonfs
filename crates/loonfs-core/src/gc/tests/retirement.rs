@@ -13,8 +13,8 @@ async fn deleted_generation_uses_its_deletion_clock_without_publishing_a_manifes
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::any(),
     );
-    let (content_store_id, deadline) = retired_content_namespace(&store, &namespace_id).await;
-    let keys = owned_content_keys(&store, &content_store_id, &namespace_id).await;
+    let deadline = retired_content_namespace(&store, &namespace_id).await;
+    let keys = owned_content_keys(&store, &namespace_id).await;
     let before = crate::namespace::control::load_current_manifest(&store, &namespace_id)
         .await
         .expect("tombstone");
@@ -85,12 +85,7 @@ async fn open_direct_upload_outlives_retirement_and_still_gets_provider_cleanup(
         .await
         .expect("prepare capability");
         let expires_at_ms = clock.now_ms() + DIRECT_TRANSFER_URL_TTL_MS;
-        let content_store_id =
-            crate::namespace::catalog::load_namespace_content_store_id(&inner, &namespace_id)
-                .await
-                .expect("content store");
         let owner_prefix = loonfs_objectstore::keys::content_owner_prefix(
-            &content_store_id,
             &namespace_id,
             loonfs_api::NamespaceGeneration(1),
         );
@@ -128,7 +123,6 @@ async fn open_direct_upload_outlives_retirement_and_still_gets_provider_cleanup(
             panic!("expected multipart session");
         };
         let late_content_key = loonfs_objectstore::keys::content_blob(
-            &content_store_id,
             &namespace_id,
             late_state.owner_generation,
             &late_state.content_id,
@@ -231,7 +225,7 @@ async fn open_direct_upload_outlives_retirement_and_still_gets_provider_cleanup(
                 .put_if_absent(&late_key, late_session)
                 .await
                 .expect("late session record");
-            let store = RecordingStore::new(store, KeyPredicate::prefix("content-stores/"));
+            let store = RecordingStore::new(store, KeyPredicate::content_blob());
             let reclaimed = gc_namespace(&store, &namespace_id, &config, &context(clock.now_ms()))
                 .await
                 .expect("session from reclaimed generation");
@@ -261,7 +255,7 @@ async fn a_retired_pin_to_a_collected_manifest_is_deleted_without_protecting_obj
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::any(),
     );
-    let (_, deadline) = retired_content_namespace(&store, &namespace_id).await;
+    let deadline = retired_content_namespace(&store, &namespace_id).await;
     let tombstone = crate::namespace::control::load_current_manifest(&store, &namespace_id)
         .await
         .expect("tombstone");

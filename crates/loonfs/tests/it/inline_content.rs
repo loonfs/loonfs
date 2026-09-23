@@ -131,13 +131,10 @@ async fn reader_downloads_materialize_tail_content_by_path_and_inode() {
                 .object_key
         };
         assert_eq!(recording.count(OperationClass::Put), 1);
-        let catalog = loonfs_core::control::load_namespace_catalog_entry(&store, &namespace_id)
-            .await
-            .expect("catalog");
+
         assert_eq!(
             object_key,
             content_blob(
-                catalog.content_store_id(),
                 &namespace_id,
                 content_ref.owner_generation,
                 &content_ref.content_id
@@ -232,11 +229,8 @@ async fn imports_read_the_owners_tail_before_folding_and_object_after_folding() 
         .await
         .expect("destination namespace");
     let content_ref = publish_inline(&store, &source, Some(subject)).await;
-    let catalog = loonfs_core::control::load_namespace_catalog_entry(&store, &source)
-        .await
-        .expect("catalog");
+
     let source_key = content_blob(
-        catalog.content_store_id(),
         &source,
         content_ref.owner_generation,
         &content_ref.content_id,
@@ -356,7 +350,7 @@ async fn same_namespace_imports_read_inline_bytes_without_a_content_request() {
 }
 
 #[tokio::test]
-async fn imports_of_fork_content_read_the_deleted_owners_content_store() {
+async fn imports_of_fork_content_read_the_deleted_owners_key() {
     for inline in [false, true] {
         let directory = tempfile::tempdir().expect("directory");
         let recording = Arc::new(RecordingStore::new(
@@ -413,19 +407,8 @@ async fn imports_of_fork_content_read_the_deleted_owners_content_store() {
             .expect("fork entry");
         let content_ref = entry.content_ref().expect("fork reference");
         assert_eq!(content_ref.owner_namespace_id, source);
-        let source_catalog = loonfs_core::control::load_namespace_catalog_entry(&store, &source)
-            .await
-            .expect("deleted source catalog");
-        let destination_catalog =
-            loonfs_core::control::load_namespace_catalog_entry(&store, &destination)
-                .await
-                .expect("destination catalog");
-        assert_ne!(
-            source_catalog.content_store_id(),
-            destination_catalog.content_store_id()
-        );
+
         let source_key = content_blob(
-            source_catalog.content_store_id(),
             &source,
             content_ref.owner_generation,
             &content_ref.content_id,

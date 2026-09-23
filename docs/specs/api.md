@@ -436,14 +436,14 @@ put-if-absent. Accepting a request into a batch does not mean it has committed.
 
 With the embedded `loonfs::FsWriter`, you can prepare content separately from
 committing it. Call `prepare_file_bytes` with the file's bytes. Files at or below
-the enabled inline threshold stay in memory; other files are uploaded to the
-content store. To import existing content, call `prepare_content_ref`. The bytes
+the enabled inline threshold stay in memory; other files are uploaded as
+content objects. To import existing content, call `prepare_content_ref`. The bytes
 are verified and copied to a new object owned by the destination namespace.
 Both calls return an opaque prepared value.
 
 Use `put_file_prepared` to commit that value. Inline bytes may need to be
 uploaded first if WAL limits are reached. Already uploaded content requires no
-further content-store I/O during publication. For an upload session,
+further content-object I/O during publication. For an upload session,
 `complete_upload_prepared` returns both the completion response and a prepared
 value. Over HTTP, include either inline bytes or a content reference with its
 content token in the commit request.
@@ -458,21 +458,19 @@ remote upload tokens (section 6.3; format spec, "Garbage collection", rule 11)
 and prevents publication from referring to content that may have been reclaimed.
 Prepared inline bytes have no expiry.
 
-Prepared content belongs to one namespace and content store. Two namespaces
-cannot share a prepared value, even if they use the same content store: uploads
-and garbage collection are tracked separately for each namespace. Use
+Prepared content belongs to one namespace. Two namespaces cannot share a
+prepared value: uploads and garbage collection are tracked separately for each
+namespace. Use
 `prepare_content_ref` to import content into another namespace. The result
 refers to the new copy owned by that namespace. A subject must be an
 administrator of the reference's owner namespace to import it.
 
 An import checks authorization against the owner's current head. A reference
-from the current owner generation uses that head's content store and may read
-resident inline bytes. A reference from an earlier generation uses the content
-store in the tombstone named by that generation's retired pin. The import lists
-the owner's pins and recognizes retired ids by their namespace and manifest
-number. Without that generation's retired pin, the content is missing and the
-import returns `namespace_corrupt`, as for a missing content object. Recreation
-does not let an import read the earlier generation's bytes from the new domain.
+from the current owner generation may read resident inline bytes. Otherwise,
+the reference's owner namespace, generation, and content ID determine its
+object key. This includes references from retired generations. Once a
+generation's content prefix is reclaimed, its objects are missing and an
+import returns `namespace_corrupt`, as for any missing content object.
 
 ### 5.1 Commit identity and preconditions
 
@@ -1175,7 +1173,7 @@ Namespace deletion ends access immediately. Ordinary namespace GC then
 conditionally reclaims the namespace's own content. This is asynchronous
 reclamation, with no fixed completion time or guarantee of physical erasure.
 
-Dependent forks and retained checkpoints delay reclamation. GC derives each generation's deadline from its deletion stamp. At or after that deadline, a complete pin listing must contain no pin in the generation's manifest range except its own retired pin. A qualifying pass cleans upload sessions, sweeps that generation's owner prefix, releases its source pin, and deletes its retired pin when no session remains. The current tombstone survives until recreation supersedes it. The shared descriptor and every other owner's prefix remain.
+Dependent forks and retained checkpoints delay reclamation. GC derives each generation's deadline from its deletion stamp. At or after that deadline, a complete pin listing must contain no pin in the generation's manifest range except its own retired pin. A qualifying pass cleans upload sessions, sweeps that generation's owner prefix, releases its source pin, and deletes its retired pin when no session remains. The current tombstone survives until recreation supersedes it. Every other owner's prefix remains.
 
 Retention is coarse: a deleted ancestor keeps its entire owner-and-generation
 prefix while a live descendant still depends on it. GC does not select individual
@@ -1519,7 +1517,7 @@ such as `{ns}`, `{source_ns}`, or an implementation-internal `:namespace` are
 only path parameter names for the same namespace id value; v0 does not accept
 or emit a namespace `name` alias.
 
-Create and fork install descriptor, hint, and manifest 1 in order. The
+Create and fork install hint and manifest 1 in order. The
 conditional put of manifest 1 decides first-generation existence ([format: namespace lifecycle](format.md#9-namespace-lifecycle-and-forks)). A create or fork that loses that write to
 another active namespace answers `namespace_exists` (409). A create or a fork into an id
 whose current manifest is deleted publishes its next generation. There is no partially created
@@ -1527,8 +1525,11 @@ namespace, so there is no third answer and nothing to repair.
 
 A new request after a lost creation acknowledgement returns
 `namespace_exists`, unless it explicitly allows an existing namespace.
-Read-back of the exact proposed manifest can resolve an ambiguous install
-within the original attempt.
+Within the original attempt, an exact manifest read-back after an unknown
+transport outcome confirms a fork because its source pin is unique. For a
+plain create or recreate, matching bytes answer `namespace_exists`, or the
+existing summary when the caller allows an existing namespace, because they
+do not prove which caller created the namespace.
 
 The examples below are representative, not exhaustive. Responses may gain
 fields within v0; clients must ignore JSON fields they do not recognize.
@@ -1658,7 +1659,7 @@ reclamation. Deletion itself reclaims nothing. Dependent forks, retained
 checkpoints, grace windows, and maintenance not running can all delay
 reclamation. Continued writes through already-issued capabilities can also
 leave objects for later passes. A maintenance run with `kind` set to `gc` ages out unneeded WAL,
-metadata, and pins. GC derives `reclaim_after_ms` from the current tombstone's deletion stamp and the retirement grace. After recreation, retired pins preserve prior tombstones for the same checks. Once a generation's deadline passes and the complete pin listing contains no other pin in its manifest range, the pass reclaims its owned content and source pin. It deletes the retired pin last, only when no upload session of that generation remains. It publishes no retirement manifest. A pass can reclaim multiple generations independently. The current manifest survives, and the shared content-store descriptor, other owners' objects, and generations that are not eligible remain.
+metadata, and pins. GC derives `reclaim_after_ms` from the current tombstone's deletion stamp and the retirement grace. After recreation, retired pins preserve prior tombstones for the same checks. Once a generation's deadline passes and the complete pin listing contains no other pin in its manifest range, the pass reclaims its owned content and source pin. It deletes the retired pin last, only when no upload session of that generation remains. It publishes no retirement manifest. A pass can reclaim multiple generations independently. The current manifest survives, and other owners' objects and generations that are not eligible remain.
 
 Run GC repeatedly to catch late writes and keep the provider's incomplete
 multipart-upload lifecycle rule. Deleting an object key does not erase
@@ -1899,6 +1900,13 @@ current path. Deleted files remain readable while their revision rows are
 retained. A directory returns `path_conflict`, an unknown inode returns
 `inode_not_found`, and an unknown revision returns `revision_not_found`.
 
+Embedded by-reference reads require administrator access to the reading
+namespace. The namespace's pinned view must contain a publication for the
+content, including publications inherited through a fork. A reference absent
+from that view returns `path_not_found` without reading content bytes, even
+when the reading namespace owns it. Content published after a snapshot is
+not readable through that snapshot.
+
 ```json
 {
   "namespace_id": "demo",
@@ -2066,7 +2074,7 @@ returns `invalid_request` before any storage write. The complete JSON body,
 including base64 content and all other fields, must also fit
 `commit.max_request_body_bytes`, 2 MiB by default.
 
-Some inline files may be uploaded to the content store before the commit to
+Some inline files may be uploaded as content objects before the commit to
 meet the configured WAL limits. All operations still commit together. Retry
 the same request with the same inline bytes and commit ID, even if those bytes
 were stored separately. The retry rules in section 5.2 apply.
@@ -2577,7 +2585,7 @@ PUT; both determine the final size while uploading.
 
 **Receipt expiry and re-minting.** The `content_token` is the
 upload's receipt: it is minted only from a session the store already says is
-completed, it names one `{namespace, content store, content_ref}` triple, and
+completed, it names one `{namespace, content_ref}` pair, and
 it is short-lived — a commit is expected to follow the upload promptly, and a
 rejected receipt is not an error the client has to plan around. Durability
 lives in the session, not in the receipt: reading the session mints another
@@ -2927,7 +2935,7 @@ Forking does not extend the snapshot, and later deletion does not affect the for
 The fork records the `Loonfs-Actor` header as `created_by`, independently of the source's creator.
 Namespace creation and forking produce no change-feed event.
 
-The new namespace shares the source namespace's content store and starts with
+The new namespace reads inherited content at each reference's owner key and starts with
 independent future namespace metadata. The fork creates a fork-owned source checkpoint so the
 source-owned immutable metadata segments stay available for as long as the
 target may still read them. It renews the checkpoint with compare-and-swap,
@@ -2940,7 +2948,7 @@ deleted id alike. The target's first data commit is one sequence above that head
 
 If the target ID is active, the server returns `namespace_exists`. If it is
 deleted, the fork recreates the id as its next generation with the source
-runs and content-store id.
+runs.
 If the source checkpoint cannot be renewed, the server returns
 `checkpoint_unavailable` and no target namespace is installed.
 
@@ -3071,8 +3079,8 @@ A conforming server must:
    numbered WAL objects;
 3. validate that referenced content is already durable before publish;
 4. preserve `(namespace_id, inode_id)` as canonical identity;
-5. resolve namespace content through the immutable `content_store_id` in the
-   current manifest;
+5. resolve content through the reference's owner namespace, owner generation,
+   and content ID;
 6. implement tombstone-first delete;
 7. serve replay from the highest numbered verified manifest found through
    `hint.json`, plus the numbered WAL objects after the folded boundary, replayed

@@ -1,8 +1,8 @@
 //! Content preparation proofs and short-lived tokens used by producers.
 //!
 //! A token can be created only from a durable, completed upload session. It
-//! proves that the named content was verified before publication. Namespace
-//! and store binding plus token expiry are preserved when converting it to
+//! proves that the named content was verified before publication. Namespace,
+//! content reference, and token expiry are preserved when converting it to
 //! [`PreparedContent`] and checked again when a publish batch admits the
 //! proof.
 
@@ -11,12 +11,11 @@ use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
 use crate::storage::inline_content::InlineContent;
 use base64::Engine as _;
 use loonfs_api::v0::ContentToken;
-use loonfs_api::{ContentId, ContentRef, ContentStoreId, NamespaceGeneration, NamespaceId};
+use loonfs_api::{ContentId, ContentRef, NamespaceGeneration, NamespaceId};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 const TOKEN_VERSION: &str = "vct2";
-const GENERATED_CONTENT_STORE_ID_BYTES: usize = "cs_00000000000000000000000000000000".len();
 
 /// Evidence read from a durable upload session in its completed state.
 ///
@@ -26,7 +25,6 @@ const GENERATED_CONTENT_STORE_ID_BYTES: usize = "cs_0000000000000000000000000000
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompletedUploadReceipt {
     namespace_id: NamespaceId,
-    content_store_id: ContentStoreId,
     content_ref: ContentRef,
     completed_at_ms: u64,
 }
@@ -34,13 +32,11 @@ pub struct CompletedUploadReceipt {
 impl CompletedUploadReceipt {
     pub(crate) fn for_completed_session(
         namespace_id: NamespaceId,
-        content_store_id: ContentStoreId,
         content_ref: ContentRef,
         completed_at_ms: u64,
     ) -> Self {
         Self {
             namespace_id,
-            content_store_id,
             content_ref,
             completed_at_ms,
         }
@@ -63,7 +59,6 @@ enum PreparedContentKind {
     Inline(InlineContent),
     Staged {
         namespace_id: NamespaceId,
-        content_store_id: ContentStoreId,
         content_ref: ContentRef,
         expires_at_ms: u64,
     },
@@ -98,13 +93,11 @@ impl PreparedContent {
             PreparedContentKind::Inline(value) => value.bytes().len(),
             PreparedContentKind::Staged {
                 namespace_id,
-                content_store_id,
                 content_ref,
                 ..
             } => namespace_id
                 .as_str()
                 .len()
-                .saturating_add(content_store_id.as_str().len())
                 .saturating_add(content_ref.content_id.as_str().len())
                 .saturating_add(content_ref.checksum.value.len()),
         }
@@ -117,7 +110,6 @@ impl PreparedContent {
         namespace_id
             .as_str()
             .len()
-            .saturating_add(GENERATED_CONTENT_STORE_ID_BYTES)
             .saturating_add(content_ref.content_id.as_str().len())
             .saturating_add(content_ref.checksum.value.len())
     }
@@ -129,22 +121,19 @@ impl PreparedContent {
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn for_durable_content_write(
         namespace_id: NamespaceId,
-        content_store_id: ContentStoreId,
         content_ref: ContentRef,
     ) -> Self {
-        Self::for_completed_upload(namespace_id, content_store_id, content_ref, u64::MAX)
+        Self::for_completed_upload(namespace_id, content_ref, u64::MAX)
     }
 
     pub(crate) fn for_completed_upload(
         namespace_id: NamespaceId,
-        content_store_id: ContentStoreId,
         content_ref: ContentRef,
         expires_at_ms: u64,
     ) -> Self {
         Self {
             kind: PreparedContentKind::Staged {
                 namespace_id,
-                content_store_id,
                 content_ref,
                 expires_at_ms,
             },
@@ -154,7 +143,6 @@ impl PreparedContent {
     pub(crate) fn admits(
         &self,
         namespace_id: &NamespaceId,
-        content_store_id: &ContentStoreId,
         content_ref: &ContentRef,
         now_ms: u64,
     ) -> bool {
@@ -162,12 +150,10 @@ impl PreparedContent {
             PreparedContentKind::Inline(_) => false,
             PreparedContentKind::Staged {
                 namespace_id: expected_namespace_id,
-                content_store_id: expected_content_store_id,
                 content_ref: expected_content_ref,
                 expires_at_ms,
             } => {
                 expected_namespace_id == namespace_id
-                    && expected_content_store_id == content_store_id
                     && expected_content_ref == content_ref
                     && now_ms <= *expires_at_ms
             }
@@ -187,10 +173,6 @@ impl PreparedContent {
 struct ContentTokenPayload {
     version: String,
     namespace_id: NamespaceId,
-    /// Where the content lives. Namespaces may share a content store, so
-    /// binding both ends keeps a receipt from admitting anything outside the
-    /// exact pairing the completed session was for.
-    content_store_id: ContentStoreId,
     content_ref: ContentRef,
     expires_at_ms: u64,
 }
@@ -205,8 +187,6 @@ pub enum ContentTokenError {
     NamespaceMismatch,
     #[error("content token content ref mismatch")]
     ContentRefMismatch,
-    #[error("content token content store mismatch")]
-    ContentStoreMismatch,
     #[error("content token has expired")]
     Expired,
     #[error("content token codec error: {0}")]
@@ -238,7 +218,6 @@ pub fn mint_content_token(
     let payload = ContentTokenPayload {
         version: TOKEN_VERSION.to_owned(),
         namespace_id: receipt.namespace_id.clone(),
-        content_store_id: receipt.content_store_id.clone(),
         content_ref: receipt.content_ref.clone(),
         expires_at_ms,
     };
@@ -287,9 +266,6 @@ pub fn verify_content_token(
     if payload.namespace_id != *catalog.namespace_id() {
         return Err(ContentTokenError::NamespaceMismatch);
     }
-    if payload.content_store_id != *catalog.content_store_id() {
-        return Err(ContentTokenError::ContentStoreMismatch);
-    }
     if payload.content_ref != token.content_ref {
         return Err(ContentTokenError::ContentRefMismatch);
     }
@@ -299,7 +275,6 @@ pub fn verify_content_token(
 
     Ok(PreparedContent::for_completed_upload(
         payload.namespace_id,
-        payload.content_store_id,
         payload.content_ref,
         payload.expires_at_ms,
     ))
@@ -328,30 +303,19 @@ mod tests {
     use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
     use crate::namespace::state::NamespaceReadState;
     use loonfs_api::v0::ContentToken;
-    use loonfs_api::{ContentId, ContentRef, ContentStoreId, NamespaceId};
+    use loonfs_api::{ContentId, ContentRef, NamespaceId};
 
-    const CONTENT_STORE: &str = "cs_00000000000000000000000000000001";
-
-    fn catalog_entry(
-        namespace_id: NamespaceId,
-        content_store: &str,
-    ) -> VerifiedNamespaceCatalogEntry {
+    fn catalog_entry(namespace_id: NamespaceId) -> VerifiedNamespaceCatalogEntry {
         VerifiedNamespaceCatalogEntry::from_head(&NamespaceReadState::initial(
             namespace_id,
-            ContentStoreId::parse(content_store).expect("content store id"),
             1_000,
             loonfs_test_support::test_actor(),
         ))
     }
 
-    fn receipt(
-        namespace_id: &NamespaceId,
-        content_store: &str,
-        content_ref: &ContentRef,
-    ) -> CompletedUploadReceipt {
+    fn receipt(namespace_id: &NamespaceId, content_ref: &ContentRef) -> CompletedUploadReceipt {
         CompletedUploadReceipt::for_completed_session(
             namespace_id.clone(),
-            ContentStoreId::parse(content_store).expect("content store id"),
             content_ref.clone(),
             1_000,
         )
@@ -366,24 +330,15 @@ mod tests {
             ContentId::generate(),
             b"hello",
         );
-        let token = mint_content_token(
-            "secret",
-            &receipt(&namespace, CONTENT_STORE, &content),
-            1_000,
-        )
-        .expect("mint");
-        let catalog = catalog_entry(namespace, CONTENT_STORE);
+        let token =
+            mint_content_token("secret", &receipt(&namespace, &content), 1_000).expect("mint");
+        let catalog = catalog_entry(namespace);
 
         let prepared =
             verify_content_token("secret", &catalog, &token, 1_000).expect("verify token");
 
         assert_eq!(prepared.content_ref(), &content);
-        assert!(prepared.admits(
-            catalog.namespace_id(),
-            catalog.content_store_id(),
-            &content,
-            1_000,
-        ));
+        assert!(prepared.admits(catalog.namespace_id(), &content, 1_000,));
     }
 
     #[test]
@@ -396,22 +351,13 @@ mod tests {
             ContentId::generate(),
             b"hello",
         );
-        let token = mint_content_token(
-            "secret",
-            &receipt(&namespace, CONTENT_STORE, &content),
-            1_000,
-        )
-        .expect("mint");
-        let catalog = catalog_entry(namespace, CONTENT_STORE);
+        let token =
+            mint_content_token("secret", &receipt(&namespace, &content), 1_000).expect("mint");
+        let catalog = catalog_entry(namespace);
         let admission =
             verify_content_token("secret", &catalog, &token, 1_000).expect("verify token");
 
-        assert!(!admission.admits(
-            &other_namespace,
-            catalog.content_store_id(),
-            &content,
-            1_000,
-        ));
+        assert!(!admission.admits(&other_namespace, &content, 1_000,));
     }
 
     #[test]
@@ -423,12 +369,8 @@ mod tests {
             ContentId::parse("con_0123456789abcdef0123456789abcdef").expect("content id"),
             b"hello",
         );
-        let token = mint_content_token(
-            "secret",
-            &receipt(&namespace, CONTENT_STORE, &content),
-            1_000,
-        )
-        .expect("mint");
+        let token =
+            mint_content_token("secret", &receipt(&namespace, &content), 1_000).expect("mint");
         let (payload_part, _) = token.token.split_once('.').expect("signed token");
         let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(payload_part)
@@ -436,7 +378,7 @@ mod tests {
 
         assert_eq!(
             payload,
-            br#"{"version":"vct2","namespace_id":"demo","content_store_id":"cs_00000000000000000000000000000001","content_ref":{"kind":"blob_v1","owner_namespace_id":"demo","owner_generation":1,"content_id":"con_0123456789abcdef0123456789abcdef","size_bytes":5,"checksum":{"algorithm":"sha256","value":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"}},"expires_at_ms":3601000}"#
+            br#"{"version":"vct2","namespace_id":"demo","content_ref":{"kind":"blob_v1","owner_namespace_id":"demo","owner_generation":1,"content_id":"con_0123456789abcdef0123456789abcdef","size_bytes":5,"checksum":{"algorithm":"sha256","value":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"}},"expires_at_ms":3601000}"#
         );
         let mut old_payload: serde_json::Value = serde_json::from_slice(&payload).expect("payload");
         old_payload["version"] = serde_json::json!("vct1");
@@ -449,7 +391,7 @@ mod tests {
         let signature = loonfs_objectstore::crypto::hmac_sha256(b"secret", payload_part.as_bytes());
         let mut old_token = token;
         old_token.token = format!("{payload_part}.{}", super::base64_url(&signature));
-        let catalog = catalog_entry(namespace, CONTENT_STORE);
+        let catalog = catalog_entry(namespace);
         assert_eq!(
             verify_content_token("secret", &catalog, &old_token, 1_000),
             Err(ContentTokenError::Malformed)
@@ -466,13 +408,9 @@ mod tests {
             b"hello",
         );
         let issued_at_ms = 1_000;
-        let token = mint_content_token(
-            "secret",
-            &receipt(&namespace, CONTENT_STORE, &content),
-            issued_at_ms,
-        )
-        .expect("mint");
-        let catalog = catalog_entry(namespace, CONTENT_STORE);
+        let token = mint_content_token("secret", &receipt(&namespace, &content), issued_at_ms)
+            .expect("mint");
+        let catalog = catalog_entry(namespace);
         let prepared = verify_content_token(
             "secret",
             &catalog,
@@ -483,23 +421,20 @@ mod tests {
 
         assert!(prepared.admits(
             catalog.namespace_id(),
-            catalog.content_store_id(),
             &content,
             issued_at_ms + CONTENT_RECEIPT_TTL_MS,
         ));
         assert!(!prepared.admits(
             catalog.namespace_id(),
-            catalog.content_store_id(),
             &content,
             issued_at_ms + CONTENT_RECEIPT_TTL_MS + 1,
         ));
     }
 
     #[test]
-    fn token_rejects_wrong_secret_namespace_store_content_and_expiry() {
+    fn token_rejects_wrong_secret_namespace_content_and_expiry() {
         let namespace = NamespaceId::parse("demo").expect("namespace");
         let other_namespace = NamespaceId::parse("other").expect("namespace");
-        let other_store = "cs_00000000000000000000000000000002";
         let content = ContentRef::blob_v1(
             namespace.clone(),
             NamespaceGeneration(1),
@@ -513,30 +448,16 @@ mod tests {
             b"other",
         );
         let issued_at_ms = 1_000;
-        let token = mint_content_token(
-            "secret",
-            &receipt(&namespace, CONTENT_STORE, &content),
-            issued_at_ms,
-        )
-        .expect("mint");
-        let catalog = catalog_entry(namespace.clone(), CONTENT_STORE);
-        let other_catalog = catalog_entry(other_namespace, CONTENT_STORE);
+        let token = mint_content_token("secret", &receipt(&namespace, &content), issued_at_ms)
+            .expect("mint");
+        let catalog = catalog_entry(namespace.clone());
+        let other_catalog = catalog_entry(other_namespace);
 
         assert!(verify_content_token("other", &catalog, &token, 1_000).is_err());
         assert_eq!(
             verify_content_token("secret", &other_catalog, &token, 1_000),
             Err(ContentTokenError::NamespaceMismatch),
-            "sharing a content store must not share token authorization"
-        );
-        assert_eq!(
-            verify_content_token(
-                "secret",
-                &catalog_entry(namespace, other_store),
-                &token,
-                1_000
-            ),
-            Err(ContentTokenError::ContentStoreMismatch),
-            "a receipt names the store its content is durable in"
+            "receipts belong to one namespace"
         );
         assert!(verify_content_token(
             "secret",

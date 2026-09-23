@@ -156,12 +156,10 @@ mod tests {
     fn put_file_candidate(
         commit_id: &str,
         absolute_path: &str,
-        content_store_id: &loonfs_api::ContentStoreId,
         content_ref: loonfs_api::ContentRef,
     ) -> CommitCandidate {
         let admission = PreparedContent::for_durable_content_write(
             NamespaceId::parse("demo").expect("namespace id"),
-            content_store_id.clone(),
             content_ref.clone(),
         );
         CommitCandidate::prepared(
@@ -296,7 +294,6 @@ mod tests {
             vec![put_file_candidate(
                 "seed-docs",
                 "/docs/seed.txt",
-                staged.content_store_id(),
                 staged.content_ref().clone(),
             )],
             &context,
@@ -383,18 +380,8 @@ mod tests {
             &store,
             &namespace_id,
             vec![
-                put_file_candidate(
-                    "create-wide-a",
-                    "/wide/a.txt",
-                    staged.content_store_id(),
-                    staged.content_ref().clone(),
-                ),
-                put_file_candidate(
-                    "create-wide-b",
-                    "/wide/b.txt",
-                    staged.content_store_id(),
-                    staged.content_ref().clone(),
-                ),
+                put_file_candidate("create-wide-a", "/wide/a.txt", staged.content_ref().clone()),
+                put_file_candidate("create-wide-b", "/wide/b.txt", staged.content_ref().clone()),
             ],
             &context,
         )
@@ -490,13 +477,11 @@ mod tests {
                 put_file_candidate(
                     "create-a-first",
                     "/docs/a.txt",
-                    staged.content_store_id(),
                     staged.content_ref().clone(),
                 ),
                 put_file_candidate(
                     "create-a-second",
                     "/docs/a.txt",
-                    staged.content_store_id(),
                     staged.content_ref().clone(),
                 ),
             ],
@@ -527,7 +512,6 @@ mod tests {
                 put_file_candidate(
                     "create-doomed",
                     "/docs/doomed.txt",
-                    staged.content_store_id(),
                     staged.content_ref().clone(),
                 ),
                 CommitCandidate::new(CommitRequest::single(

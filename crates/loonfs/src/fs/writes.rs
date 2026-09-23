@@ -411,27 +411,10 @@ impl FsWriter {
             .pinned_metadata_read(&content_ref.owner_namespace_id)
             .await?;
         owner.require_administrator(&context).await?;
-        if content_ref.owner_generation < context.head.generation {
-            let content_store_id = loonfs_core::control::load_retired_content_store(
-                self.core.store(),
-                &content_ref.owner_namespace_id,
-                content_ref.owner_generation,
-            )
-            .await?
-            .ok_or_else(|| {
-                loonfs_core::Error::from(
-                    loonfs_core::content::DurableContentValidationError::MissingContentGeneration {
-                        owner_namespace_id: content_ref.owner_namespace_id.clone(),
-                        owner_generation: content_ref.owner_generation,
-                    },
-                )
-            })?;
-            return Ok(engine
-                .import_content_ref(&catalog, &content_store_id, &content_ref)
-                .await?);
-        }
         // Forks pin manifests, so inherited content from a deleted owner is already an object.
-        if !context.head.status.is_deleted() {
+        if content_ref.owner_generation == context.head.generation
+            && !context.head.status.is_deleted()
+        {
             if let loonfs_core::content::ContentLocation::Tail { bytes, .. } = owner
                 .resolve_content_location(&content_ref, &context)
                 .await?
@@ -439,13 +422,10 @@ impl FsWriter {
                 return Ok(engine.stage_owned_bytes(&catalog, &bytes).await?);
             }
         }
-        Ok(engine
-            .import_content_ref(&catalog, &context.head.content_store_id, &content_ref)
-            .await?)
+        Ok(engine.import_content_ref(&catalog, &content_ref).await?)
     }
 
-    /// Verifies an authorized content token against the namespace's durable
-    /// content-store binding.
+    /// Verifies an authorized content token for this namespace generation.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.prepare",
@@ -475,8 +455,6 @@ impl FsWriter {
         ))
     }
 
-    /// Loads the namespace identity used to bind prepared content to its
-    /// content store.
     pub(crate) async fn load_namespace_catalog_for_content_preparation(
         &self,
         namespace_id: &NamespaceId,

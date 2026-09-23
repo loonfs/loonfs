@@ -163,12 +163,8 @@ async fn a_streamed_read_rejects_content_that_stopped_matching_its_reference() {
         .await
         .expect("stat file");
     let content_ref = entry.content_ref().cloned().expect("a file has content");
-    let catalog =
-        loonfs::control::load_namespace_catalog_entry(&store(temp_dir.path()), &namespace_id)
-            .await
-            .expect("load catalog");
+
     let key = content_blob(
-        catalog.content_store_id(),
         &content_ref.owner_namespace_id,
         content_ref.owner_generation,
         &content_ref.content_id,

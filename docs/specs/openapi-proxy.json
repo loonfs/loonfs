@@ -586,7 +586,7 @@
         "type": "object"
       },
       "ContentId": {
-        "description": "Durable identity of one immutable content object.\n\nThe body is 128 fully random bits, with no time component: content\nobject keys shard on the id's leading characters, and a clock-derived\nprefix would put every upload in one window into one shard. The id\nnames *which object*, never what it contains — integrity evidence\nrides [`crate::ContentRef`] beside it.",
+        "description": "Random identity of one immutable content object.",
         "example": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
         "pattern": "^con_[0-9a-f]{32}$",
         "type": "string"

@@ -155,14 +155,14 @@ async fn records_get_success_bytes_out() {
 
     store
         .put_overwrite(
-            "content-stores/cs_abc/objects/demo/1/ab/cd/con_abcdef0123456789abcdef0123456789",
+            "namespaces/demo/content/1/con_abcdef0123456789abcdef0123456789",
             bytes(b"abcdef"),
         )
         .await
         .expect("put object");
     let bytes = store
         .get(
-            "content-stores/cs_abc/objects/demo/1/ab/cd/con_abcdef0123456789abcdef0123456789",
+            "namespaces/demo/content/1/con_abcdef0123456789abcdef0123456789",
             Some(ByteRange {
                 start_inclusive: 1,
                 end_exclusive: 4,
@@ -329,20 +329,11 @@ async fn classifies_durable_key_families() {
         .await
         .expect("put pin");
 
-    store
-        .put_if_absent(
-            &loonfs_objectstore::keys::content_store(&loonfs_api::ContentStoreId::generate()),
-            bytes(b"descriptor"),
-        )
-        .await
-        .expect("put content store descriptor");
-
     let samples = recorder.samples();
     assert_eq!(samples[0].key_class, KeyClass::WalSegment);
     assert_eq!(samples[1].key_class, KeyClass::NamespaceManifest);
     assert_eq!(samples[2].key_class, KeyClass::MetadataSegment);
     assert_eq!(samples[3].key_class, KeyClass::GcControl);
-    assert_eq!(samples[4].key_class, KeyClass::Metadata);
 }
 
 #[tokio::test]

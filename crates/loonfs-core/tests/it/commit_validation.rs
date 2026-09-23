@@ -7,9 +7,6 @@
 
 use crate::common::commit_split_support::*;
 use crate::common::namespace_engine;
-use async_trait::async_trait;
-use bytes::Bytes;
-use futures::stream::BoxStream;
 use loonfs_api::{
     v0::{FilesystemChange, UploadSessionStatus},
     AbsolutePath, ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior, InodeId,
@@ -22,95 +19,10 @@ use loonfs_core::limits::{COMPLETED_UPLOAD_ADMISSION_WINDOW_MS, CONTENT_RECEIPT_
 use loonfs_core::publish::{CommitCandidate, CommitRequest, FilesystemOperation};
 use loonfs_core::{Error as CoreError, ErrorCode, ResolvedUploadCompletion};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
-use loonfs_objectstore::{
-    ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
-};
+use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::ids::namespace_id;
-use loonfs_test_support::stores::OperationClass;
-use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use loonfs_test_support::stores::{KeyPredicate, OperationClass, RecordingStore};
 use tempfile::tempdir;
-
-/// A store that fails any read of the content-store keyspace, so a test can
-/// assert that validation never went looking for content at all.
-#[derive(Debug)]
-struct ContentStoreAccessLimitStore {
-    inner: LocalFsStore,
-    content_store_accesses: AtomicUsize,
-    max_content_store_accesses: usize,
-}
-
-impl ContentStoreAccessLimitStore {
-    fn new(root: impl AsRef<Path>, max_content_store_accesses: usize) -> Self {
-        Self {
-            inner: LocalFsStore::new(root.as_ref()).expect("store"),
-            content_store_accesses: AtomicUsize::new(0),
-            max_content_store_accesses,
-        }
-    }
-
-    fn content_store_access_count(&self) -> usize {
-        self.content_store_accesses.load(Ordering::SeqCst)
-    }
-
-    fn record_content_store_access(&self, key: &str) -> Result<(), ObjectStoreError> {
-        if !key.starts_with("content-stores/") {
-            return Ok(());
-        }
-
-        let previous = self.content_store_accesses.fetch_add(1, Ordering::SeqCst);
-        if previous >= self.max_content_store_accesses {
-            return Err(ObjectStoreError::transport(
-                key,
-                "unexpected content-store descriptor access",
-            ));
-        }
-        Ok(())
-    }
-}
-
-#[async_trait]
-impl ObjectStore for ContentStoreAccessLimitStore {
-    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        self.record_content_store_access(key)?;
-        self.inner.head(key).await
-    }
-
-    async fn get(
-        &self,
-        key: &str,
-        range: Option<ByteRange>,
-    ) -> Result<Option<Bytes>, ObjectStoreError> {
-        self.record_content_store_access(key)?;
-        self.inner.get(key, range).await
-    }
-
-    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
-        self.record_content_store_access(key)?;
-        self.inner.get_with_metadata(key).await
-    }
-
-    async fn put(
-        &self,
-        key: &str,
-        bytes: Bytes,
-        mode: PutMode,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
-        self.inner.put(key, bytes, mode).await
-    }
-
-    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
-        self.inner.delete(key).await
-    }
-
-    fn list_prefix_from_stream(
-        &self,
-        prefix: &str,
-        start_after: Option<&str>,
-    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
-        self.inner.list_prefix_from_stream(prefix, start_after)
-    }
-}
 
 fn put_file(absolute_path: &str, content_ref: loonfs_api::ContentRef) -> FilesystemOperation {
     FilesystemOperation::PutFile {
@@ -656,7 +568,7 @@ async fn restore_revision_does_not_revalidate_retained_content_before_publish() 
 }
 
 #[tokio::test]
-async fn metadata_only_mutation_does_not_validate_content_store_refs() {
+async fn metadata_only_mutation_does_not_validate_content_refs() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
@@ -674,7 +586,10 @@ async fn metadata_only_mutation_does_not_validate_content_store_refs() {
     .await
     .expect("seed file");
 
-    let guarded_store = ContentStoreAccessLimitStore::new(temp_dir.path(), 0);
+    let guarded_store = RecordingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyPredicate::content_blob(),
+    );
     let response = submit_operation(
         &guarded_store,
         &namespace_id("demo"),
@@ -687,9 +602,9 @@ async fn metadata_only_mutation_does_not_validate_content_store_refs() {
 
     assert_eq!(response.committed_seq, ChangeSeq(2));
     assert_eq!(
-        guarded_store.content_store_access_count(),
+        guarded_store.count(OperationClass::Read),
         0,
-        "the namespace's content store is a field in its head; metadata-only validation must not touch the content-store keyspace at all",
+        "metadata-only validation must not read content",
     );
 }
 
@@ -716,7 +631,10 @@ async fn a_put_with_preconditions_reports_missing_content_before_the_stale_revis
         .await
         .expect("resolve replace target");
 
-    let guarded_store = ContentStoreAccessLimitStore::new(temp_dir.path(), 0);
+    let guarded_store = RecordingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyPredicate::content_blob(),
+    );
     let missing_content = content_ref("missing-content");
     let error = publish_namespace_commits_batch(
         &guarded_store,
@@ -748,7 +666,7 @@ async fn a_put_with_preconditions_reports_missing_content_before_the_stale_revis
             loonfs_core::publish::ContentPreparationError::ContentNotPrepared { ref content_id }
         ) if *content_id == missing_content.content_id
     ));
-    assert_eq!(guarded_store.content_store_access_count(), 0);
+    assert_eq!(guarded_store.count(OperationClass::Read), 0);
 }
 
 #[tokio::test]

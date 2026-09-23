@@ -19,9 +19,9 @@
 //!   decoding could erase a field introduced by an unsupported writer.
 
 use loonfs_api::wire::control::{
-    decode_control_object, ContentStorePayload, ControlObjectEnvelope, ControlObjectKind,
-    ForkBasis, HintPayload, ManifestRef, NamespaceStatus, PinOwner, PinPayload, ProxiedStaging,
-    UploadSessionMode, UploadSessionPayload, UploadSessionRecordStatus, WriterBlock,
+    decode_control_object, ControlObjectEnvelope, ControlObjectKind, ForkBasis, HintPayload,
+    ManifestRef, NamespaceStatus, PinOwner, PinPayload, ProxiedStaging, UploadSessionMode,
+    UploadSessionPayload, UploadSessionRecordStatus, WriterBlock,
 };
 use loonfs_api::wire::envelope::EnvelopeCodecError;
 use loonfs_api::wire::manifest::{
@@ -36,9 +36,9 @@ use loonfs_api::wire::wal::{
 use loonfs_api::{
     sha256_digest, AccessGrants, AccessRevisionNo, AccessRight, ActorId, AttributeKey,
     AttributeValue, Attributes, AttributesRevisionNo, ChangeSeq, Checksum, ChecksumAlgorithm,
-    CommitId, ContentId, ContentRef, ContentRefKind, ContentStoreId, InodeId, InodeKind,
-    ManifestNo, MetadataSegmentId, NameKey, NamespaceId, PinId, PrincipalId, PrincipalScope,
-    RevisionNo, RunNo, UploadId, WalNo, WriterEpoch,
+    CommitId, ContentId, ContentRef, ContentRefKind, InodeId, InodeKind, ManifestNo,
+    MetadataSegmentId, NameKey, NamespaceId, PinId, PrincipalId, PrincipalScope, RevisionNo, RunNo,
+    UploadId, WalNo, WriterEpoch,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -381,7 +381,6 @@ fn sample_manifest_payload() -> NamespaceManifestPayload {
             mutations: loonfs_api::wire::manifest::ActivityCounter::parse(14_000)
                 .expect("activity"),
         },
-        content_store_id: content_store_id(),
         created_at_ms: 1_000,
         created_by: loonfs_api::ActorId::parse("test").expect("actor"),
         access: NamespaceAccess::Unrestricted {},
@@ -681,14 +680,6 @@ fn manifest_status_rejects_unknown_fields_as_corruption() {
 #[test]
 fn control_objects_match_golden_bytes() {
     check_control_golden(
-        "control_content_store.v1.json",
-        ControlObjectKind::ContentStore,
-        ContentStorePayload {
-            content_store_id: content_store_id(),
-            created_at_ms: 1_000,
-        },
-    );
-    check_control_golden(
         "control_hint.v1.json",
         ControlObjectKind::Hint,
         HintPayload {
@@ -760,7 +751,6 @@ fn control_objects_match_golden_bytes() {
         UploadSessionPayload {
             namespace_id: namespace_id(),
             owner_generation: loonfs_api::NamespaceGeneration(1),
-            content_store_id: content_store_id(),
             upload_id: UploadId::parse("upl_0123456789abcdef0123456789abcdef")
                 .expect("valid upload id"),
             content_id: content_id("con_0123456789abcdef0123456789abcdef"),
@@ -781,7 +771,6 @@ fn control_objects_match_golden_bytes() {
         UploadSessionPayload {
             namespace_id: namespace_id(),
             owner_generation: loonfs_api::NamespaceGeneration(1),
-            content_store_id: content_store_id(),
             upload_id: UploadId::parse("upl_abcdef0123456789abcdef0123456789")
                 .expect("valid upload id"),
             content_id: content_id("con_0123456789abcdef0123456789abcdef"),
@@ -805,7 +794,6 @@ fn control_objects_match_golden_bytes() {
         UploadSessionPayload {
             namespace_id: namespace_id(),
             owner_generation: loonfs_api::NamespaceGeneration(1),
-            content_store_id: content_store_id(),
             upload_id: UploadId::parse("upl_22222222222222222222222222222222")
                 .expect("valid upload id"),
             content_id: content_id("con_22222222222222222222222222222222"),
@@ -829,7 +817,6 @@ fn control_objects_match_golden_bytes() {
         UploadSessionPayload {
             namespace_id: namespace_id(),
             owner_generation: loonfs_api::NamespaceGeneration(1),
-            content_store_id: content_store_id(),
             upload_id: UploadId::parse("upl_33333333333333333333333333333333")
                 .expect("valid upload id"),
             content_id: content_id("con_0123456789abcdef0123456789abcdef"),
@@ -849,7 +836,6 @@ fn control_objects_match_golden_bytes() {
         UploadSessionPayload {
             namespace_id: namespace_id(),
             owner_generation: loonfs_api::NamespaceGeneration(1),
-            content_store_id: content_store_id(),
             upload_id: UploadId::parse("upl_33333333333333333333333333333333")
                 .expect("valid upload id"),
             content_id: content_id("con_0123456789abcdef0123456789abcdef"),
@@ -869,7 +855,6 @@ fn control_objects_match_golden_bytes() {
         UploadSessionPayload {
             namespace_id: namespace_id(),
             owner_generation: loonfs_api::NamespaceGeneration(1),
-            content_store_id: content_store_id(),
             upload_id: UploadId::parse("upl_44444444444444444444444444444444")
                 .expect("valid upload id"),
             content_id: content_id("con_44444444444444444444444444444444"),
@@ -889,7 +874,6 @@ fn control_objects_match_golden_bytes() {
         UploadSessionPayload {
             namespace_id: namespace_id(),
             owner_generation: loonfs_api::NamespaceGeneration(1),
-            content_store_id: content_store_id(),
             upload_id: UploadId::parse("upl_11111111111111111111111111111111")
                 .expect("valid upload id"),
             content_id: content_id("con_11111111111111111111111111111111"),
@@ -946,11 +930,6 @@ fn every_control_payload_rejects_unknown_fields_as_corruption() {
     assert_control_payload_edit_is_corrupt::<HintPayload>(
         "control_hint.v1.json",
         ControlObjectKind::Hint,
-        add_unknown,
-    );
-    assert_control_payload_edit_is_corrupt::<ContentStorePayload>(
-        "control_content_store.v1.json",
-        ControlObjectKind::ContentStore,
         add_unknown,
     );
     assert_control_payload_edit_is_corrupt::<PinPayload>(
@@ -1266,14 +1245,6 @@ fn mutable_control_envelope_rejects_unknown_fields_as_corruption() {
 fn control_object_decoders_reject_wrong_format_version_without_fallback() {
     let cases = [
         (
-            ControlObjectKind::ContentStore,
-            serde_json::to_value(ContentStorePayload {
-                content_store_id: content_store_id(),
-                created_at_ms: 1_000,
-            })
-            .expect("content store state"),
-        ),
-        (
             ControlObjectKind::Pin,
             serde_json::to_value(PinPayload {
                 pin_id: pin_id("pin_00000000000000000005-0000000000000005"),
@@ -1293,7 +1264,6 @@ fn control_object_decoders_reject_wrong_format_version_without_fallback() {
             serde_json::to_value(UploadSessionPayload {
                 namespace_id: namespace_id(),
                 owner_generation: loonfs_api::NamespaceGeneration(1),
-                content_store_id: content_store_id(),
                 upload_id: UploadId::parse("upl_11111111111111111111111111111111")
                     .expect("valid upload id"),
                 content_id: content_id("con_11111111111111111111111111111111"),
@@ -1366,10 +1336,6 @@ fn metadata_row_family_wire_tags_are_pinned() {
         ],
         "family tags are durable bytes in every manifest descriptor"
     );
-}
-
-fn content_store_id() -> ContentStoreId {
-    ContentStoreId::parse("cs_0123456789abcdef0123456789abcdef").expect("valid content store id")
 }
 
 // ---------------------------------------------------------------------------

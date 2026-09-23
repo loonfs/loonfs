@@ -11,7 +11,7 @@ use crate::{
     ContentId, ContentRef, DisplayName, InodeId, InodeKind, ManifestNo, MetadataSegmentId, NameKey,
     NamespaceGeneration, NamespaceId, RevisionNo, RunNo,
 };
-use crate::{ContentStoreId, PrincipalScope, WalNo, WriterEpoch};
+use crate::{PrincipalScope, WalNo, WriterEpoch};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -1172,8 +1172,6 @@ impl ManifestActivity {
 pub struct NamespaceManifestPayload {
     /// Namespace whose materialized state this manifest describes.
     pub namespace_id: NamespaceId,
-    /// Content domain shared by this generation and its forks.
-    pub content_store_id: ContentStoreId,
     /// Current generation's creation stamp in Unix milliseconds.
     pub created_at_ms: u64,
     /// Actor that created the current generation, as supplied by the application.
@@ -1243,14 +1241,12 @@ impl NamespaceManifestPayload {
     /// Constructs manifest 1 with the root inode reserved.
     pub fn initial(
         namespace_id: NamespaceId,
-        content_store_id: ContentStoreId,
         created_at_ms: u64,
         created_by: ActorId,
         access: NamespaceAccess,
     ) -> Self {
         Self {
             namespace_id,
-            content_store_id,
             created_at_ms,
             created_by,
             access,
@@ -1385,9 +1381,6 @@ impl NamespaceManifestPayload {
         if successor.generation_first_manifest_no != self.generation_first_manifest_no {
             return invalid("generation_first_manifest_no");
         }
-        if successor.content_store_id != self.content_store_id {
-            return invalid("content_store_id");
-        }
         if successor.created_at_ms != self.created_at_ms {
             return invalid("created_at_ms");
         }
@@ -1480,7 +1473,6 @@ mod tests {
         };
         let initial = NamespaceManifestPayload::initial(
             NamespaceId::parse("activity").expect("namespace"),
-            crate::ContentStoreId::parse("cs_00000000000000000000000000000001").expect("store"),
             0,
             crate::ActorId::parse("test").expect("actor"),
             super::NamespaceAccess::unrestricted(),
@@ -1547,8 +1539,6 @@ mod tests {
     fn successor_preserves_identity_within_a_generation() {
         let initial = NamespaceManifestPayload::initial(
             NamespaceId::parse("original").expect("namespace"),
-            crate::ContentStoreId::parse("cs_00000000000000000000000000000001")
-                .expect("content store"),
             1_000,
             crate::ActorId::parse("test").expect("actor"),
             super::NamespaceAccess::Unrestricted {},
@@ -1557,21 +1547,15 @@ mod tests {
         next.manifest_no = ManifestNo(2);
         for (field, change) in [
             ("namespace_id", 0),
-            ("content_store_id", 1),
-            ("created_at_ms", 2),
-            ("fork_basis", 3),
-            ("access", 4),
+            ("created_at_ms", 1),
+            ("fork_basis", 2),
+            ("access", 3),
         ] {
             let mut successor = next.clone();
             match change {
                 0 => successor.namespace_id = NamespaceId::parse("changed").expect("namespace"),
-                1 => {
-                    successor.content_store_id =
-                        crate::ContentStoreId::parse("cs_00000000000000000000000000000002")
-                            .expect("content store")
-                }
-                2 => successor.created_at_ms += 1,
-                3 => {
+                1 => successor.created_at_ms += 1,
+                2 => {
                     successor.fork_basis = Some(crate::control::ForkBasis {
                         manifest: crate::control::ManifestRef {
                             owner_namespace_id: NamespaceId::parse("source").expect("namespace"),
@@ -1620,8 +1604,6 @@ mod tests {
     fn successor_identity_accepts_only_the_next_generation_from_a_tombstone() {
         let mut deleted = NamespaceManifestPayload::initial(
             NamespaceId::parse("original").expect("namespace"),
-            crate::ContentStoreId::parse("cs_00000000000000000000000000000001")
-                .expect("content store"),
             1_000,
             crate::ActorId::parse("first").expect("actor"),
             super::NamespaceAccess::Unrestricted {},
@@ -1642,8 +1624,6 @@ mod tests {
 
         let mut recreated = NamespaceManifestPayload::initial(
             deleted.namespace_id.clone(),
-            crate::ContentStoreId::parse("cs_00000000000000000000000000000002")
-                .expect("content store"),
             3_000,
             crate::ActorId::parse("second").expect("actor"),
             super::NamespaceAccess::Acl {
@@ -1733,8 +1713,6 @@ mod tests {
     fn namespace_manifest_codec_round_trips_base_only_materialization() {
         let (envelope, encoded) = encode_namespace_manifest_json(NamespaceManifestPayload {
             activity: Default::default(),
-            content_store_id: crate::ContentStoreId::parse("cs_0123456789abcdef0123456789abcdef")
-                .expect("content store"),
             created_at_ms: 1_000,
             created_by: crate::ActorId::parse("test").expect("actor"),
             access: super::NamespaceAccess::Unrestricted {},
@@ -1783,8 +1761,6 @@ mod tests {
     fn namespace_manifest_codec_round_trips_inherited_source_segments() {
         let (envelope, encoded) = encode_namespace_manifest_json(NamespaceManifestPayload {
             activity: Default::default(),
-            content_store_id: crate::ContentStoreId::parse("cs_0123456789abcdef0123456789abcdef")
-                .expect("content store"),
             created_at_ms: 1_000,
             created_by: crate::ActorId::parse("test").expect("actor"),
             access: super::NamespaceAccess::Unrestricted {},

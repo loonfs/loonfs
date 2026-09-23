@@ -310,7 +310,7 @@ mod tests {
         let object_key = hint(&namespace_id);
         let (_, bytes) = encoded_hint(&namespace_id);
         let mut document: Value = serde_json::from_slice(&bytes).expect("envelope json");
-        document["kind"] = Value::String(ControlObjectKind::ContentStore.as_str().to_owned());
+        document["kind"] = Value::String(ControlObjectKind::Pin.as_str().to_owned());
         write_bytes(
             &store,
             &object_key,

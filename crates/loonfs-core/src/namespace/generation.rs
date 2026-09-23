@@ -7,11 +7,11 @@ use crate::error::{CoreError, Result};
 use crate::time::MonotonicTimer;
 use bytes::Bytes;
 use loonfs_api::wire::control::{
-    encode_control_state, ContentStorePayload, ControlObjectKind, HintPayload, PinOwner, PinPayload,
+    encode_control_state, ControlObjectKind, HintPayload, PinOwner, PinPayload,
 };
 use loonfs_api::wire::manifest::NamespaceManifestPayload;
 use loonfs_api::{ManifestNo, PinId, WalNo};
-use loonfs_objectstore::keys::{content_store, hint};
+use loonfs_objectstore::keys::hint;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 use serde::Serialize;
 
@@ -48,10 +48,8 @@ pub(super) async fn publish_generation<S: ObjectStore + ?Sized>(
                     namespace_id,
                 )?;
                 write_retired_pin(store, tombstone, payload.created_at_ms).await?;
-                write_content_store_descriptor(store, &payload).await?;
             }
             None => {
-                write_content_store_descriptor(store, &payload).await?;
                 let first = HintPayload {
                     namespace_id: namespace_id.clone(),
                     manifest_no: ManifestNo(1),
@@ -120,23 +118,6 @@ async fn write_retired_pin<S: ObjectStore + ?Sized>(
         owner: PinOwner::Retired {},
     };
     write_checkpoint_record_if_absent(store, &retired).await
-}
-
-async fn write_content_store_descriptor<S: ObjectStore + ?Sized>(
-    store: &S,
-    payload: &NamespaceManifestPayload,
-) -> Result<()> {
-    let descriptor = ContentStorePayload {
-        content_store_id: payload.content_store_id.clone(),
-        created_at_ms: payload.created_at_ms,
-    };
-    put_control_if_absent(
-        store,
-        content_store(&payload.content_store_id),
-        ControlObjectKind::ContentStore,
-        &descriptor,
-    )
-    .await
 }
 
 /// Writes a control object that concurrent attempts write identically, so an

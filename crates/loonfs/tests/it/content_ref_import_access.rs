@@ -1,4 +1,4 @@
-//! Source authorization for embedded bare content reference imports.
+//! Authorization for embedded content reference reads and imports.
 
 use loonfs::{
     CreateNamespaceOptions, DeleteNamespaceOptions, ForkNamespaceOptions, FsWriter, PutFileOptions,
@@ -95,6 +95,70 @@ async fn publish_inline(writer: &FsWriter, namespace_id: &NamespaceId) -> Conten
 fn assert_forbidden_without_writes(recording: &RecordingStore<LocalFsStore>, error: RuntimeError) {
     assert_eq!(error.code(), ErrorCode::Forbidden);
     assert_eq!(recording.count(OperationClass::Put), 0);
+}
+
+#[tokio::test]
+async fn by_reference_reads_require_publication_in_the_reading_view() {
+    let (_directory, recording, writer) = open_writer().await;
+    let source = namespace_id("private");
+    let destination = namespace_id("unrestricted");
+    create_namespace(&writer, &source, acl("administrator")).await;
+    create_namespace(&writer, &destination, NamespaceAccess::unrestricted()).await;
+    let private_ref = publish_inline(&writer, &source).await;
+    loonfs::FsMaintenance::builder_with_store(recording.clone())
+        .actor_id(loonfs_test_support::test_actor().as_str())
+        .build()
+        .await
+        .expect("maintenance")
+        .flush_wal(&source)
+        .await
+        .expect("materialize private content");
+    let reader = writer.reader().as_subject(subject("stranger"));
+    assert_eq!(
+        reader
+            .get_file_bytes(&source, "/source")
+            .await
+            .expect_err("private path is unreadable")
+            .code(),
+        ErrorCode::PathNotFound
+    );
+    let pinned = reader
+        .pin_namespace(&destination)
+        .await
+        .expect("pin before publication");
+    let own_ref = publish_inline(&writer, &destination).await;
+    assert_eq!(
+        reader
+            .read_content_ref(&destination, &own_ref, u64::MAX)
+            .await
+            .expect("current view has published its own reference"),
+        b"private inline bytes"
+    );
+
+    recording.reset();
+    assert_eq!(
+        reader
+            .read_content_ref(&destination, &private_ref, u64::MAX)
+            .await
+            .expect_err("unrelated namespace has not published private content")
+            .code(),
+        ErrorCode::PathNotFound
+    );
+    assert_eq!(
+        pinned
+            .read_content_ref(&own_ref, u64::MAX)
+            .await
+            .expect_err("pinned view predates its own content publication")
+            .code(),
+        ErrorCode::PathNotFound
+    );
+    assert!(recording.snapshot().iter().all(|operation| !matches!(
+        loonfs_objectstore::layout::parse_object_key(operation.key()),
+        Some(key) if key.family() == loonfs_objectstore::layout::DurableObjectFamily::ContentBlob
+    )));
+    assert_eq!(recording.count(OperationClass::Put), 0);
+    assert_eq!(recording.count(OperationClass::CompareAndSwap), 0);
+    assert_eq!(recording.count(OperationClass::Delete), 0);
 }
 
 #[tokio::test]
@@ -236,6 +300,18 @@ async fn deleted_owner_import_uses_updated_access_state_in_the_surviving_head() 
         .delete_namespace(&source, DeleteNamespaceOptions::default())
         .await
         .expect("delete source");
+    assert_eq!(
+        writer
+            .reader()
+            .as_subject(subject("replacement"))
+            .pin_namespace(&fork)
+            .await
+            .expect("pin fork")
+            .read_content_ref(&content_ref, u64::MAX)
+            .await
+            .expect("fork published the inherited reference"),
+        b"private inline bytes"
+    );
 
     recording.reset();
     let error = writer
@@ -255,7 +331,7 @@ async fn deleted_owner_import_uses_updated_access_state_in_the_surviving_head() 
 }
 
 #[tokio::test]
-async fn prior_generation_import_uses_its_retired_domain_and_current_authority() {
+async fn prior_generation_import_uses_its_own_key_and_current_authority() {
     use loonfs_api::{NamespaceGeneration, PinId};
     use loonfs_core::content::DurableContentValidationError;
     use loonfs_core::control::load_namespace_current_manifest;
@@ -291,10 +367,6 @@ async fn prior_generation_import_uses_its_retired_domain_and_current_authority()
         current.envelope.payload().generation,
         NamespaceGeneration(2)
     );
-    assert_ne!(
-        current.envelope.payload().content_store_id,
-        tombstone.envelope.payload().content_store_id
-    );
 
     recording.reset();
     let error = writer
@@ -304,11 +376,22 @@ async fn prior_generation_import_uses_its_retired_domain_and_current_authority()
         .expect_err("the prior generation's administrator is refused");
     assert_forbidden_without_writes(recording.as_ref(), error);
 
+    recording
+        .delete(&loonfs_objectstore::keys::checkpoint_record(
+            &source,
+            &retired_id,
+        ))
+        .await
+        .expect("delete retired pin");
+    recording.reset();
+    let source_key = format!("namespaces/source/content/1/{}", content_ref.content_id);
     let importer = writer.as_subject(subject("replacement"));
     let prepared = importer
         .prepare_content_ref(&destination, content_ref.clone())
         .await
-        .expect("import prior generation");
+        .expect("import prior generation without a retired pin");
+    assert!(recording.take_get_keys().contains(&source_key));
+    assert_eq!(recording.count(OperationClass::List), 0);
     assert_eq!(prepared.content_ref().owner_namespace_id, destination);
     assert_eq!(
         prepared.content_ref().owner_generation,
@@ -334,31 +417,31 @@ async fn prior_generation_import_uses_its_retired_domain_and_current_authority()
         b"private inline bytes"
     );
 
-    recording
-        .delete(&loonfs_objectstore::keys::checkpoint_record(
-            &source,
-            &retired_id,
-        ))
+    let prefix =
+        loonfs_objectstore::keys::content_owner_prefix(&source, content_ref.owner_generation);
+    for key in recording
+        .list_prefix(&prefix)
         .await
-        .expect("delete retired pin");
+        .expect("generation content")
+    {
+        recording.delete(&key).await.expect("delete content");
+    }
     recording.reset();
     let error = importer
         .prepare_content_ref(&destination, content_ref)
         .await
-        .expect_err("generation without a retired pin is missing");
+        .expect_err("reclaimed generation content is missing");
     assert!(matches!(
         error,
         RuntimeError::Core(loonfs_core::Error::DurableContent(
-            DurableContentValidationError::MissingContentGeneration {
-                owner_namespace_id,
-                owner_generation: NamespaceGeneration(1),
-            }
-        )) if owner_namespace_id == source
+            DurableContentValidationError::MissingContentObject { object_key }
+        )) if object_key == source_key
     ));
     let counts = recording.counts();
     assert_eq!(counts.puts, 0);
     assert_eq!(counts.compare_and_swaps, 0);
     assert_eq!(counts.deletes, 0);
+    assert_eq!(recording.count(OperationClass::List), 0);
 }
 
 #[tokio::test]

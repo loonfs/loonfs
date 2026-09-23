@@ -90,11 +90,20 @@ pub(super) fn leave_a_partial_download(
 ///
 /// Callers use a unique size so the match identifies one fixture object.
 pub(super) fn content_object_path(store_root: &Path, size_bytes: u64) -> PathBuf {
-    let objects = walkdir::WalkDir::new(store_root.join("content-stores"))
+    let objects = walkdir::WalkDir::new(store_root.join("namespaces"))
         .into_iter()
         .filter_map(|entry| entry.ok())
         .filter(|entry| {
             entry.file_type().is_file()
+                && entry
+                    .path()
+                    .strip_prefix(store_root)
+                    .ok()
+                    .and_then(|path| path.to_str())
+                    .and_then(loonfs_objectstore::layout::parse_object_key)
+                    .is_some_and(|key| {
+                        key.family() == loonfs_objectstore::layout::DurableObjectFamily::ContentBlob
+                    })
                 && entry
                     .metadata()
                     .is_ok_and(|metadata| metadata.len() == size_bytes)

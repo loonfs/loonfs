@@ -72,11 +72,7 @@ async fn sweep_content<S: ObjectStore + ?Sized>(
     tombstone: &NamespaceManifestPayload,
     report: &mut GcResponse,
 ) -> Result<()> {
-    let prefix = content_owner_prefix(
-        &tombstone.content_store_id,
-        namespace_id,
-        tombstone.generation,
-    );
+    let prefix = content_owner_prefix(namespace_id, tombstone.generation);
     let generation = tombstone.generation.to_string();
     let mut listing = store.list_prefix_stream(&prefix);
     while let Some(key) = listing

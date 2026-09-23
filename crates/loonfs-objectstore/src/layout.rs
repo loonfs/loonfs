@@ -21,8 +21,6 @@ pub enum DurableObjectFamily {
     UploadSession,
     /// Classifies immutable whole-file content bytes.
     ContentBlob,
-    /// Identifies the content domain stored under a content-store prefix.
-    ContentStore,
 }
 
 /// Reports the durable family and identifiers recoverable from a recognized key.
@@ -40,7 +38,7 @@ impl<'a> ParsedObjectKey<'a> {
         self.family
     }
 
-    /// Returns the namespace path component, or `None` for the content-store descriptor.
+    /// Returns the namespace path component.
     pub fn owner_namespace_id(&self) -> Option<&'a str> {
         self.owner_namespace_id
     }
@@ -63,13 +61,7 @@ impl<'a> ParsedObjectKey<'a> {
 pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
     let segments: Vec<_> = key.split('/').collect();
     match segments.as_slice() {
-        ["content-stores", content_store_id, "store.json"] => Some(parsed(
-            DurableObjectFamily::ContentStore,
-            None,
-            None,
-            Some(content_store_id),
-        )),
-        ["content-stores", _, "objects", owner_namespace_id, owner_generation, _, _, content_id]
+        ["namespaces", owner_namespace_id, "content", owner_generation, content_id]
             if valid_generation(owner_generation) =>
         {
             Some(parsed(
@@ -205,13 +197,12 @@ mod tests {
 
     use super::{parse_object_key, DurableObjectFamily};
     use crate::keys::{
-        checkpoint_record, content_blob, content_owner_prefix, content_store, hint,
-        metadata_manifest_object, metadata_segment, metadata_segment_prefix, upload_session,
-        wal_segment, wal_segment_prefix,
+        checkpoint_record, content_blob, content_owner_prefix, hint, metadata_manifest_object,
+        metadata_segment, metadata_segment_prefix, upload_session, wal_segment, wal_segment_prefix,
     };
     use loonfs_api::{
-        ContentId, ContentStoreId, ManifestNo, MetadataSegmentId, NamespaceGeneration, NamespaceId,
-        PinId, UploadId, WalNo,
+        ContentId, ManifestNo, MetadataSegmentId, NamespaceGeneration, NamespaceId, PinId,
+        UploadId, WalNo,
     };
 
     #[test]
@@ -223,16 +214,9 @@ mod tests {
             .expect("metadata segment id");
         let pin_id = PinId::parse("pin_00000000000000000001-0000000000000001").expect("pin id");
         let upload_id = UploadId::parse("upl_00000000000000000000000000000001").expect("upload id");
-        let content_store_id =
-            ContentStoreId::parse("cs_00000000000000000000000000000001").expect("content store id");
         let content_id =
             ContentId::parse("con_abcdef0123456789abcdef0123456789").expect("content id");
         let cases = [
-            (
-                content_store(&content_store_id),
-                DurableObjectFamily::ContentStore,
-                Some(content_store_id.as_str()),
-            ),
             (
                 wal_segment(&namespace_id, &wal_no),
                 DurableObjectFamily::WalSegment,
@@ -260,12 +244,7 @@ mod tests {
                 Some(upload_id.as_str()),
             ),
             (
-                content_blob(
-                    &content_store_id,
-                    &namespace_id,
-                    NamespaceGeneration(7),
-                    &content_id,
-                ),
+                content_blob(&namespace_id, NamespaceGeneration(7), &content_id),
                 DurableObjectFamily::ContentBlob,
                 Some(content_id.as_str()),
             ),
@@ -274,10 +253,7 @@ mod tests {
         for (key, family, identifier) in cases {
             let parsed = parse_object_key(&key).expect("built key should parse");
             assert_eq!(parsed.family(), family);
-            assert_eq!(
-                parsed.owner_namespace_id(),
-                (!matches!(family, DurableObjectFamily::ContentStore)).then_some("ns-1")
-            );
+            assert_eq!(parsed.owner_namespace_id(), Some("ns-1"));
             assert_eq!(parsed.identifier(), identifier);
             assert_eq!(
                 parsed.owner_generation(),
@@ -287,20 +263,14 @@ mod tests {
         let a = NamespaceId::parse("a").expect("owner");
         let ab = NamespaceId::parse("ab").expect("owner");
         let generation = NamespaceGeneration(7);
-        let a_prefix = content_owner_prefix(&content_store_id, &a, generation);
-        let ab_prefix = content_owner_prefix(&content_store_id, &ab, generation);
-        assert_eq!(
-            a_prefix,
-            format!("content-stores/{content_store_id}/objects/a/7/")
-        );
-        assert_eq!(
-            ab_prefix,
-            format!("content-stores/{content_store_id}/objects/ab/7/")
-        );
+        let a_prefix = content_owner_prefix(&a, generation);
+        let ab_prefix = content_owner_prefix(&ab, generation);
+        assert_eq!(a_prefix, "namespaces/a/content/7/");
+        assert_eq!(ab_prefix, "namespaces/ab/content/7/");
         assert!(!ab_prefix.starts_with(&a_prefix));
         for owner in [a, ab] {
-            let key = content_blob(&content_store_id, &owner, generation, &content_id);
-            assert!(key.starts_with(&content_owner_prefix(&content_store_id, &owner, generation,)));
+            let key = content_blob(&owner, generation, &content_id);
+            assert!(key.starts_with(&content_owner_prefix(&owner, generation,)));
             assert_eq!(
                 parse_object_key(&key)
                     .expect("content key")
@@ -308,15 +278,12 @@ mod tests {
                 Some(owner.as_str())
             );
         }
-        assert!(parse_object_key(&format!(
-            "content-stores/{content_store_id}/objects/ab/ab/cd/{content_id}"
-        ))
-        .is_none());
+        assert!(parse_object_key(&format!("namespaces/ab/content/{content_id}")).is_none());
         for generation in ["0", "01", "future"] {
-            assert!(parse_object_key(&format!(
-                "content-stores/{content_store_id}/objects/ab/{generation}/ab/cd/{content_id}"
-            ))
-            .is_none());
+            assert!(
+                parse_object_key(&format!("namespaces/ab/content/{generation}/{content_id}"))
+                    .is_none()
+            );
         }
     }
 
@@ -325,9 +292,6 @@ mod tests {
         let namespace_id = NamespaceId::parse("ns-1").expect("namespace id");
         let segment_id =
             MetadataSegmentId::parse("seg_00000000000000000000000000000001").expect("segment id");
-        let content_store_id = ContentStoreId::generate();
-        assert!(!content_store(&content_store_id)
-            .starts_with(&format!("content-stores/{content_store_id}/objects/")));
         let segment = metadata_segment(&namespace_id, &segment_id);
 
         assert!(segment.starts_with(&metadata_segment_prefix(&namespace_id)));
@@ -345,7 +309,7 @@ mod tests {
             "namespaces/ns-1/metadata/compactions/cmp_1/segments/seg_1.tmp",
             "namespaces/ns-1/metadata/compactions/cmp_1/lease.json",
             "namespaces/ns-1/metadata/compaction_leases/unknown.json",
-            "content-stores/cs-1/objects/ab/deadbeef",
+            "namespaces/ab/content/deadbeef",
         ] {
             assert!(
                 parse_object_key(key).is_none(),

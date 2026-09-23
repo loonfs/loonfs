@@ -87,7 +87,6 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "content_changed",
     "content_objects",
     "content_ref",
-    "content_store_id",
     "content_token",
     "content_tokens",
     "copy_path",
@@ -2822,8 +2821,6 @@ async fn put_streamed_writes_a_multi_part_payload_one_part_at_a_time() {
 
     let payload = distinct_bytes(MEMORY_BOUND_PAYLOAD_BYTES);
     let key = loonfs_objectstore::keys::content_blob(
-        &loonfs_api::ContentStoreId::parse("cs_00000000000000000000000000000001")
-            .expect("valid content store id"),
         &loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
         loonfs_api::NamespaceGeneration(1),
         &loonfs_api::ContentId::parse("con_0123456789abcdef0123456789abcdef").expect("content id"),
@@ -5024,11 +5021,8 @@ async fn download_body_streams_one_chunk_and_aborts_on_late_corruption() {
                 .get_path_entry(&ns, "/large.bin", Default::default())
                 .await
                 .expect("entry");
-            let catalog = loonfs::control::load_namespace_catalog_entry(&plain, &ns)
-                .await
-                .expect("catalog");
+
             let key = loonfs_objectstore::keys::content_blob(
-                catalog.content_store_id(),
                 &entry.content_ref().expect("file").owner_namespace_id,
                 entry.content_ref().expect("file").owner_generation,
                 &entry.content_ref().expect("file").content_id,

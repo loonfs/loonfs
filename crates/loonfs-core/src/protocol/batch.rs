@@ -221,7 +221,6 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
                 candidate,
                 namespace_id,
                 view.head.generation,
-                view.content_store_id(),
                 publication_now_ms,
             ) {
                 return abort_batch(slots, &error);

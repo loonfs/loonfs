@@ -286,8 +286,7 @@ mod tests {
         let signed = issuer
             .presign_put(
                 PresignedPutRequest {
-                    object_key:
-                        "content-stores/cs/objects/01/23/con_0123456789abcdef0123456789abcdef",
+                    object_key: "namespaces/demo/content/1/con_0123456789abcdef0123456789abcdef",
                     expires_in: Duration::from_secs(900),
                 },
                 UNIX_EPOCH + Duration::from_secs(1_700_000_000),
@@ -297,7 +296,7 @@ mod tests {
 
         assert!(signed
             .url
-            .starts_with("https://storage.googleapis.com/bucket/tenant-a/content-stores/"));
+            .starts_with("https://storage.googleapis.com/bucket/tenant-a/namespaces/"));
         assert_eq!(
             signed
                 .headers
@@ -500,8 +499,7 @@ mod tests {
         let signed = issuer
             .presign_put(
                 PresignedPutRequest {
-                    object_key:
-                        "content-stores/cs/objects/01/23/con_0123456789abcdef0123456789abcdef",
+                    object_key: "namespaces/demo/content/1/con_0123456789abcdef0123456789abcdef",
                     expires_in: Duration::from_secs(900),
                 },
                 UNIX_EPOCH + Duration::from_secs(1_700_000_000),
@@ -509,9 +507,9 @@ mod tests {
             .await
             .expect("presign");
 
-        assert!(signed.url.starts_with(
-            "https://account.r2.cloudflarestorage.com/bucket/tenant-a/content-stores/"
-        ));
+        assert!(signed
+            .url
+            .starts_with("https://account.r2.cloudflarestorage.com/bucket/tenant-a/namespaces/"));
         assert!(!signed.url.starts_with("https://bucket.account."));
     }
 
