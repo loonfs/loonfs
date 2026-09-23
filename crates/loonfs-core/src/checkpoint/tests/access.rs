@@ -78,9 +78,10 @@ async fn a_published_segment_answers_at_the_sequence_the_read_asks_for() {
         flatten_manifest_segments(segments),
     )
     .await;
-    let verified = load_manifest_segments_for_inspection(&store, None, &namespace_id, &manifest)
-        .await
-        .expect("load manifest segments");
+    let verified =
+        load_manifest_segments_for_inspection(&store, None, &namespace_id, &manifest, None)
+            .await
+            .expect("load manifest segments");
 
     for (visible_seq, expected) in [
         (9, &records[2]),
@@ -139,9 +140,10 @@ async fn every_metadata_source_resolves_the_same_effective_rights() {
         flatten_manifest_segments(segments),
     )
     .await;
-    let verified = load_manifest_segments_for_inspection(&store, None, &namespace_id, &manifest)
-        .await
-        .expect("load manifest segments");
+    let verified =
+        load_manifest_segments_for_inspection(&store, None, &namespace_id, &manifest, None)
+            .await
+            .expect("load manifest segments");
     let view = MetadataView::over_manifest_segments(&verified, visible_seq);
     let mut state_reads = state.reads_at_seq(visible_seq);
     let mut view_reads = view.reads();

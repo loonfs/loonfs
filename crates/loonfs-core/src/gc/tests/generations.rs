@@ -349,7 +349,7 @@ async fn tombstone_segments_survive_scan_failures_until_the_retired_record_is_de
 
 #[tokio::test]
 async fn fork_classification_reads_only_the_current_target_and_its_named_retirement() {
-    use crate::gc::fork_checkpoints::{classify_fork_checkpoint, ForkCheckpointReachability};
+    use crate::gc::fork_checkpoints::fork_checkpoint_is_retained;
     use loonfs_api::{ChangeSeq, NamespaceGeneration};
     use loonfs_objectstore::keys::retired_generation_record;
     let directory = tempdir().expect("directory");
@@ -390,13 +390,10 @@ async fn fork_classification_reads_only_the_current_target_and_its_named_retirem
     ] {
         store.reset();
         let decision =
-            classify_fork_checkpoint(&store, &record, namespace_id, generation, GRACE_MS, &aged)
+            fork_checkpoint_is_retained(&store, &record, namespace_id, generation, GRACE_MS, &aged)
                 .await
                 .expect("classification");
-        assert_eq!(
-            matches!(decision, ForkCheckpointReachability::Retained { .. }),
-            expected_retained
-        );
+        assert_eq!(decision, expected_retained);
         assert_eq!(store.counts().lists, 0);
         assert_eq!(store.counts().heads, 0);
         assert_eq!(store.take_get_keys(), requests);
@@ -427,7 +424,7 @@ async fn fork_classification_reads_only_the_current_target_and_its_named_retirem
         retired_key.clone(),
     ];
     store.reset();
-    let decision = classify_fork_checkpoint(
+    let decision = fork_checkpoint_is_retained(
         &store,
         &record,
         &target,
@@ -437,10 +434,7 @@ async fn fork_classification_reads_only_the_current_target_and_its_named_retirem
     )
     .await
     .expect("retired target");
-    assert!(matches!(
-        decision,
-        ForkCheckpointReachability::Retained { .. }
-    ));
+    assert!(decision);
     assert_eq!(store.counts().lists, 0);
     assert_eq!(store.counts().gets_with_metadata, 2);
     assert_eq!(
@@ -450,7 +444,7 @@ async fn fork_classification_reads_only_the_current_target_and_its_named_retirem
 
     let mut invalid_reference = record.clone();
     invalid_reference.head_seq = ChangeSeq(record.head_seq.0 + 1);
-    let error = classify_fork_checkpoint(
+    let error = fork_checkpoint_is_retained(
         &store,
         &invalid_reference,
         &target,
@@ -466,6 +460,7 @@ async fn fork_classification_reads_only_the_current_target_and_its_named_retirem
             .await
             .expect("record read")
             .expect("record");
+    let valid_record = retired.clone();
     retired.tombstone.payload_checksum = "sha256:incorrect".to_owned();
     let bytes = loonfs_api::wire::control::encode_control_state(
         ControlObjectKind::RetiredGeneration,
@@ -476,7 +471,7 @@ async fn fork_classification_reads_only_the_current_target_and_its_named_retirem
         .put_overwrite(&retired_key, bytes.into())
         .await
         .expect("replace reference");
-    let error = classify_fork_checkpoint(
+    let error = fork_checkpoint_is_retained(
         &store,
         &record,
         &target,
@@ -489,23 +484,33 @@ async fn fork_classification_reads_only_the_current_target_and_its_named_retirem
     assert_eq!(error.code(), loonfs_api::ErrorCode::NamespaceCorrupt);
 
     store
+        .put_overwrite(
+            &retired_key,
+            loonfs_api::wire::control::encode_control_state(
+                ControlObjectKind::RetiredGeneration,
+                &valid_record,
+            )
+            .expect("valid record")
+            .into(),
+        )
+        .await
+        .expect("restore record");
+    store
         .delete(&tombstone.object_key)
         .await
-        .expect("collect tombstone");
-    let decision = classify_fork_checkpoint(
-        &store,
-        &record,
-        &target,
-        NamespaceGeneration(1),
-        GRACE_MS,
-        &aged,
-    )
-    .await
-    .expect("missing tombstone");
-    assert!(matches!(decision, ForkCheckpointReachability::Reclaimable));
+        .expect("delete tombstone");
+    store.reset();
+    for namespace_id in [&source, &target] {
+        let error = gc_namespace(&store, namespace_id, &config(), &aged)
+            .await
+            .expect_err("missing retired tombstone");
+        assert_eq!(error.code(), loonfs_api::ErrorCode::NamespaceCorrupt);
+    }
+    assert_eq!(store.counts().puts, 0);
+    assert_eq!(store.counts().deletes, 0);
     store.delete(&retired_key).await.expect("collect record");
     store.reset();
-    let decision = classify_fork_checkpoint(
+    let decision = fork_checkpoint_is_retained(
         &store,
         &record,
         &target,
@@ -515,7 +520,7 @@ async fn fork_classification_reads_only_the_current_target_and_its_named_retirem
     )
     .await
     .expect("missing record");
-    assert!(matches!(decision, ForkCheckpointReachability::Reclaimable));
+    assert!(!decision);
     assert_eq!(store.counts().lists, 0);
     assert_eq!(store.take_get_keys(), requests);
 }

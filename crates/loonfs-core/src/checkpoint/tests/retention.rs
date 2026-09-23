@@ -221,6 +221,7 @@ async fn retention_advancement_uses_published_manifest_and_updates_floor_only() 
         None,
         &namespace_id,
         &manifest.manifest.manifest_no,
+        None,
     )
     .await
     .expect("load current manifest")
@@ -296,6 +297,7 @@ async fn retention_floor_does_not_advance_past_a_missing_basis_segment() {
         None,
         &namespace_id,
         &manifest.manifest.manifest_no,
+        None,
     )
     .await
     .expect("load current manifest");
@@ -361,6 +363,7 @@ async fn retention_floor_does_not_advance_when_a_basis_segment_cannot_be_checked
         None,
         &namespace_id,
         &manifest.manifest.manifest_no,
+        None,
     )
     .await
     .expect("load current manifest");
@@ -1820,7 +1823,7 @@ async fn select_reorganization_window<S: ObjectStore + ?Sized>(
 ) {
     let manifest_number = current_manifest_number(store, namespace_id).await;
     let segments =
-        load_manifest_segments_for_inspection(store, None, namespace_id, &manifest_number)
+        load_manifest_segments_for_inspection(store, None, namespace_id, &manifest_number, None)
             .await
             .expect("load manifest segments");
     let group = requested_group.unwrap_or_else(|| {

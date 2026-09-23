@@ -152,6 +152,7 @@ pub(crate) async fn load_manifest_segments<'a, S: ObjectStore + ?Sized>(
         segment_cache,
         &reference.owner_namespace_id,
         &reference.manifest_no,
+        None,
     )
     .await
     .map_err(|error| {
@@ -176,6 +177,7 @@ pub(crate) async fn load_manifest_segments_for_inspection<'a, S: ObjectStore + ?
     segment_cache: Option<&'a MetadataSegmentCache>,
     namespace_id: &NamespaceId,
     manifest_no: &ManifestNo,
+    owner_namespace_id: Option<&NamespaceId>,
 ) -> Result<VerifiedMetadataSegments<'a, S>, ManifestLoadError> {
     let manifest_key = metadata_manifest_object(namespace_id, manifest_no);
     // Manifests are immutable per object key, so the decoded and validated
@@ -218,7 +220,16 @@ pub(crate) async fn load_manifest_segments_for_inspection<'a, S: ObjectStore + ?
         }
         None => fetch().await?,
     };
-    let (manifest, scan_runs) = decoded.into_manifest(&manifest_key)?;
+    let (manifest, mut scan_runs) = decoded.into_manifest(&manifest_key)?;
+    if let Some(owner_namespace_id) = owner_namespace_id {
+        for run in Arc::make_mut(&mut scan_runs) {
+            for family in &mut run.segments {
+                family
+                    .segments
+                    .retain(|segment| &segment.owner_namespace_id == owner_namespace_id);
+            }
+        }
+    }
     let segments = VerifiedMetadataSegments {
         store,
         segment_cache,
@@ -227,23 +238,6 @@ pub(crate) async fn load_manifest_segments_for_inspection<'a, S: ObjectStore + ?
         scan_runs,
         block_memo: SessionBlockMemo::default(),
     };
-    Ok(segments)
-}
-
-pub(crate) async fn load_owned_manifest_segments_for_inspection<'a, S: ObjectStore + ?Sized>(
-    store: &'a S,
-    namespace_id: &NamespaceId,
-    manifest_no: &ManifestNo,
-) -> Result<VerifiedMetadataSegments<'a, S>, ManifestLoadError> {
-    let mut segments =
-        load_manifest_segments_for_inspection(store, None, namespace_id, manifest_no).await?;
-    for run in Arc::make_mut(&mut segments.scan_runs) {
-        for family in &mut run.segments {
-            family
-                .segments
-                .retain(|segment| &segment.owner_namespace_id == namespace_id);
-        }
-    }
     Ok(segments)
 }
 

@@ -543,7 +543,7 @@ async fn load_current_manifest_segments<'a, S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
 ) -> VerifiedMetadataSegments<'a, S> {
     let manifest_number = current_manifest_number(store, namespace_id).await;
-    load_manifest_segments_for_inspection(store, None, namespace_id, &manifest_number)
+    load_manifest_segments_for_inspection(store, None, namespace_id, &manifest_number, None)
         .await
         .expect("load the current manifest's segments")
 }

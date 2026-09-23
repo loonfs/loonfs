@@ -1129,7 +1129,7 @@ Every call reads the current manifest and uses one fixed clock. It keeps its liv
 
 A GC response groups related counts. `deleted` contains `wal_segments`,
 `metadata_segments`, `manifests`, `upload_sessions`, `content_objects`,
-`retired_content_objects`, and `retired_generation_records`. A retired generation record is counted when reclamation deletes it after its generation has no retained upload sessions, or when the same pass deletes a record whose tombstone is absent. `deleted_checkpoints_by_owner` contains `fork`, `expired`, and `snapshot` counts for pins deleted in the pass.
+`retired_content_objects`, and `retired_generation_records`. A retired generation record is counted when reclamation deletes it after its generation's content and source pin. `deleted_checkpoints_by_owner` contains `fork`, `expired`, and `snapshot` counts for pins deleted in the pass.
 Their sum is the total number of pins deleted. Each deletion
 is counted once. A target's deletion of its source pin contributes to `fork`
 when the pin was present before deletion. Repeating that deletion on an

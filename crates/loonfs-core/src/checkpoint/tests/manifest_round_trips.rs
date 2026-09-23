@@ -33,7 +33,7 @@ async fn overflowing_section_handles_are_rejected_before_segment_reads() {
             .expect("store fixture");
         store.reset();
         assert!(matches!(
-            load_manifest_segments_for_inspection(&store, None, &namespace_id, &manifest_no)
+            load_manifest_segments_for_inspection(&store, None, &namespace_id, &manifest_no, None)
                 .await,
             Err(ManifestLoadError::SegmentDescriptorMismatch { message, .. })
                 if message == "section byte range exceeds address space"

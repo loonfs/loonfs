@@ -42,11 +42,14 @@ pub(crate) async fn load_retired_generation<S: ObjectStore + ?Sized>(
 pub(crate) async fn load_retired_tombstone<S: ObjectStore + ?Sized>(
     store: &S,
     record: &RetiredGenerationPayload,
-) -> Result<Option<NamespaceManifestPayload>> {
+) -> Result<NamespaceManifestPayload> {
     let Some(loaded) =
         load_discovered_manifest(store, &record.namespace_id, record.tombstone.manifest_no).await?
     else {
-        return Ok(None);
+        return Err(CoreError::NamespaceCorrupt(format!(
+            "retired generation `{}` of `{}` names missing tombstone `{}`",
+            record.generation, record.namespace_id, record.tombstone.manifest_no,
+        )));
     };
     ensure_manifest_reference_matches("retired generation", &record.tombstone, &loaded.envelope)?;
     let payload = loaded.envelope.payload();
@@ -56,5 +59,5 @@ pub(crate) async fn load_retired_tombstone<S: ObjectStore + ?Sized>(
             record.generation, record.namespace_id,
         )));
     }
-    Ok(Some(payload.clone()))
+    Ok(payload.clone())
 }

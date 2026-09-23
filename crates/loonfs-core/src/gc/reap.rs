@@ -1,6 +1,6 @@
 //! Age checks and pin deletion decisions.
 
-use super::fork_checkpoints::{classify_fork_checkpoint, ForkCheckpointReachability};
+use super::fork_checkpoints::fork_checkpoint_is_retained;
 use super::live_set::LiveSet;
 use crate::checkpoint::record::load_checkpoint_record_at_key;
 use crate::context::MutationContext;
@@ -40,33 +40,30 @@ pub(super) async fn sweep_checkpoint_record<S: ObjectStore + ?Sized>(
             target_namespace_id,
             target_generation,
         } => {
-            return Ok(
-                match classify_fork_checkpoint(
-                    store,
-                    &record,
-                    target_namespace_id,
-                    *target_generation,
-                    grace_window_ms,
-                    context,
-                )
-                .await?
-                {
-                    ForkCheckpointReachability::Reclaimable => CheckpointSweep::DeleteFork,
-                    ForkCheckpointReachability::Retained { reason } => {
-                        tracing::debug!(object_key = key, reason, "retaining fork pin");
-                        CheckpointSweep::Retain {
-                            reclaimable_at_ms: None,
-                        }
-                    }
-                },
-            );
+            return if fork_checkpoint_is_retained(
+                store,
+                &record,
+                target_namespace_id,
+                *target_generation,
+                grace_window_ms,
+                context,
+            )
+            .await?
+            {
+                tracing::debug!(object_key = key, "retaining fork pin");
+                Ok(CheckpointSweep::Retain {
+                    reclaimable_at_ms: None,
+                })
+            } else {
+                Ok(CheckpointSweep::DeleteFork)
+            };
         }
     };
     let expires_at_ms = record
         .owner
         .expires_at_ms()
         .map(|expiry| expiry.saturating_add(grace_window_ms));
-    let ages_out_at_ms = (live.namespace_deleted
+    let ages_out_at_ms = (live.current_tombstone().is_some()
         || record.pin_id.manifest_no() < live.generation_first_manifest_no)
         .then(|| record.created_at_ms.saturating_add(grace_window_ms));
     let reclaimable_at_ms = expires_at_ms.into_iter().chain(ages_out_at_ms).min();

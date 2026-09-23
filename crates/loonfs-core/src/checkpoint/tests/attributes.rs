@@ -240,9 +240,10 @@ async fn a_published_segment_answers_at_the_sequence_the_read_asks_for() {
         flatten_manifest_segments(segments),
     )
     .await;
-    let verified = load_manifest_segments_for_inspection(&store, None, &namespace_id, &manifest)
-        .await
-        .expect("load manifest segments");
+    let verified =
+        load_manifest_segments_for_inspection(&store, None, &namespace_id, &manifest, None)
+            .await
+            .expect("load manifest segments");
 
     for (visible_seq, expected_revision, expected_owner) in [
         (9_u64, 3_u64, "hopper"),

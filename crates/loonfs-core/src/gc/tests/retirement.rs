@@ -83,13 +83,13 @@ async fn retired_fork_reclaims_without_reading_inherited_segments() {
     .expect("release source pin with retained session");
     assert_eq!(first.deleted.retired_content_objects, 1);
     assert_eq!(first.deleted_checkpoints_by_owner.fork, 1);
-    assert_eq!(first.deleted.retired_generation_records, 0);
+    assert_eq!(first.deleted.retired_generation_records, 1);
     assert!(!checkpoint_exists(&store, &source, source_pin).await);
     assert!(store
         .head(&record_key)
         .await
         .expect("retired record")
-        .is_some());
+        .is_none());
     assert!(read_upload_session(&store, &target, &upload.upload_id)
         .await
         .is_some());
@@ -106,14 +106,14 @@ async fn retired_fork_reclaims_without_reading_inherited_segments() {
     let repeated = gc_namespace(&store, &target, &config(), &context(expired_at_ms))
         .await
         .expect("repeat retirement after source collection");
-    assert_eq!(repeated.deleted.retired_content_objects, 1);
+    assert_eq!(repeated.deleted.retired_content_objects, 0);
     assert_eq!(repeated.deleted_checkpoints_by_owner.fork, 0);
     assert_eq!(repeated.deleted.retired_generation_records, 0);
     assert!(store
         .head(&record_key)
         .await
         .expect("retired record")
-        .is_some());
+        .is_none());
     let finished = gc_namespace(
         &store,
         &target,
@@ -122,9 +122,9 @@ async fn retired_fork_reclaims_without_reading_inherited_segments() {
     )
     .await
     .expect("finish retirement after session cleanup");
-    assert_eq!(finished.deleted.retired_content_objects, 1);
+    assert_eq!(finished.deleted.retired_content_objects, 0);
     assert_eq!(finished.deleted.upload_sessions, 1);
-    assert_eq!(finished.deleted.retired_generation_records, 1);
+    assert_eq!(finished.deleted.retired_generation_records, 0);
     assert!(store
         .head(&record_key)
         .await
@@ -310,14 +310,11 @@ async fn open_direct_upload_outlives_retirement_and_still_gets_provider_cleanup(
         assert_eq!(store.counts().lists, 0);
         assert_eq!(store.inner().open_uploads(), 2);
         assert_eq!(store.inner().aborts(), 0);
-        assert_eq!(
-            store
-                .head(&record_key)
-                .await
-                .expect("retired record")
-                .is_some(),
-            recreate
-        );
+        assert!(store
+            .head(&record_key)
+            .await
+            .expect("retired record")
+            .is_none());
         let open_session = read_upload_session(&store, &namespace_id, &upload.session.upload_id)
             .await
             .expect("open session");
@@ -333,23 +330,17 @@ async fn open_direct_upload_outlives_retirement_and_still_gets_provider_cleanup(
             .expect("provider cleanup after retirement");
         assert_eq!(store.inner().aborts(), 1);
         assert_eq!(store.inner().open_uploads(), 1);
-        assert_eq!(
-            store
-                .head(&record_key)
-                .await
-                .expect("retired record")
-                .is_some(),
-            recreate
-        );
+        assert!(store
+            .head(&record_key)
+            .await
+            .expect("retired record")
+            .is_none());
         clock.advance_ms(config.grace_window_ms);
         let reaped = gc_namespace(&store, &namespace_id, &config, &context(clock.now_ms()))
             .await
             .expect("reap session");
         assert_eq!(reaped.deleted.upload_sessions, 1);
-        assert_eq!(
-            reaped.deleted.retired_generation_records,
-            u64::from(recreate)
-        );
+        assert_eq!(reaped.deleted.retired_generation_records, 0);
         assert!(store
             .head(&record_key)
             .await
@@ -374,7 +365,7 @@ async fn open_direct_upload_outlives_retirement_and_still_gets_provider_cleanup(
             let reclaimed = gc_namespace(&store, &namespace_id, &config, &context(clock.now_ms()))
                 .await
                 .expect("session from reclaimed generation");
-            assert_eq!(reclaimed.deleted.upload_sessions, 1);
+            assert_eq!(reclaimed.deleted.upload_sessions, 0);
             assert_eq!(reclaimed.deleted.content_objects, 0);
             assert_eq!(store.counts().deletes, 1);
             assert_eq!(store.inner().inner().aborts(), 3);
@@ -387,6 +378,12 @@ async fn open_direct_upload_outlives_retirement_and_still_gets_provider_cleanup(
                 .await
                 .expect("collected late content")
                 .is_none());
+            clock.advance_ms(config.grace_window_ms);
+            let reaped = gc_namespace(&store, &namespace_id, &config, &context(clock.now_ms()))
+                .await
+                .expect("reap late session after abort grace");
+            assert_eq!(reaped.deleted.upload_sessions, 1);
+            assert!(store.head(&late_key).await.expect("late session").is_none());
             assert_eq!(store.counts().lists, 0);
             assert_eq!(store.inner().inner().open_uploads(), 0);
             assert!(store
@@ -399,67 +396,7 @@ async fn open_direct_upload_outlives_retirement_and_still_gets_provider_cleanup(
 }
 
 #[tokio::test]
-async fn a_retired_record_to_a_collected_manifest_is_deleted_without_protecting_objects() {
-    let directory = tempdir().expect("directory");
-    let namespace_id = NamespaceId::parse("missing-retired-manifest").expect("namespace");
-    let store = RecordingStore::new(
-        LocalFsStore::new(directory.path()).expect("store"),
-        KeyPredicate::any(),
-    );
-    let (deadline, _) = retired_content_namespace(&store, &namespace_id).await;
-    let tombstone = crate::namespace::control::load_current_manifest(&store, &namespace_id)
-        .await
-        .expect("tombstone");
-    bootstrap_namespace(
-        &store,
-        &namespace_id,
-        &deadline,
-        &loonfs_test_support::test_actor(),
-        &loonfs_api::NamespaceAccess::unrestricted(),
-        false,
-    )
-    .await
-    .expect("recreate");
-    let record_key = loonfs_objectstore::keys::retired_generation_record(
-        &namespace_id,
-        tombstone.state.generation,
-    );
-    let record_bytes = store
-        .get(&record_key, None)
-        .await
-        .expect("read record")
-        .expect("record");
-    gc_namespace(&store, &namespace_id, &config(), &deadline)
-        .await
-        .expect("reclaim generation");
-    assert!(store
-        .head(&record_key)
-        .await
-        .expect("retired record")
-        .is_none());
-    store
-        .delete(&tombstone.object_key)
-        .await
-        .expect("collect tombstone");
-    store
-        .put_if_absent(&record_key, record_bytes)
-        .await
-        .expect("late record");
-    store.reset();
-    let report = gc_namespace(&store, &namespace_id, &config(), &deadline)
-        .await
-        .expect("collect late record");
-    assert_eq!(report.deleted.retired_generation_records, 1);
-    assert!(store
-        .head(&record_key)
-        .await
-        .expect("retired record")
-        .is_none());
-    assert_eq!(store.counts().puts, 0);
-}
-
-#[tokio::test]
-async fn reclaimed_generation_sessions_delete_content_before_the_record_for_every_status() {
+async fn reclaimed_generation_sessions_wait_for_grace_and_delete_content_before_the_record() {
     use loonfs_objectstore::keys::{content_blob, upload_session};
     let directory = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("reclaimed-sessions").expect("namespace");
@@ -498,7 +435,7 @@ async fn reclaimed_generation_sessions_delete_content_before_the_record_for_ever
             },
             status: match status {
                 0 => UploadSessionRecordStatus::Open {
-                    expires_at_ms: u64::MAX,
+                    expires_at_ms: deadline.now_ms + UPLOAD_SESSION_LEASE_MS,
                 },
                 1 => UploadSessionRecordStatus::Aborted {
                     aborted_at_ms: deadline.now_ms,
@@ -527,6 +464,26 @@ async fn reclaimed_generation_sessions_delete_content_before_the_record_for_ever
             )
             .await
             .expect("late session");
+        let recording = RecordingStore::new(store.clone(), KeyPredicate::any());
+        let cleanup_at_ms = match state.status {
+            UploadSessionRecordStatus::Open { expires_at_ms } => expires_at_ms + GRACE_MS,
+            UploadSessionRecordStatus::Aborted { aborted_at_ms } => aborted_at_ms + GRACE_MS,
+            UploadSessionRecordStatus::Completed { .. } => deadline.now_ms,
+        };
+        if status < 2 {
+            let waiting = gc_namespace(
+                &recording,
+                &namespace_id,
+                &config(),
+                &context(cleanup_at_ms - 1),
+            )
+            .await
+            .expect("before session deadline");
+            assert_eq!(waiting.next_reclamation_at_ms, Some(cleanup_at_ms));
+            assert_eq!(recording.counts().deletes, 0);
+            assert_eq!(recording.counts().puts, 0);
+        }
+        let cleanup = context(cleanup_at_ms);
         let failing = FailStore::new(
             store.clone(),
             KeyPredicate::exact(&content_key),
@@ -534,7 +491,7 @@ async fn reclaimed_generation_sessions_delete_content_before_the_record_for_ever
             InjectedError::Transport("content cleanup failed".to_owned()),
         );
         failing.fail_next(1);
-        let retained = gc_namespace(&failing, &namespace_id, &config(), &deadline)
+        let retained = gc_namespace(&failing, &namespace_id, &config(), &cleanup)
             .await
             .expect("retain failed cleanup");
         assert_eq!(retained.deleted.upload_sessions, 0);
@@ -543,8 +500,31 @@ async fn reclaimed_generation_sessions_delete_content_before_the_record_for_ever
             .await
             .expect("retry record")
             .is_some());
-        let recording = RecordingStore::new(store.clone(), KeyPredicate::any());
-        let cleaned = gc_namespace(&recording, &namespace_id, &config(), &deadline)
+        let cleanup = if status == 0 {
+            let aborted = read_upload_session(&store, &namespace_id, &state.upload_id)
+                .await
+                .expect("aborted session");
+            assert!(
+                matches!(aborted.status, UploadSessionRecordStatus::Aborted { aborted_at_ms } if aborted_at_ms == cleanup_at_ms)
+            );
+            let waiting = gc_namespace(
+                &recording,
+                &namespace_id,
+                &config(),
+                &context(cleanup_at_ms + GRACE_MS - 1),
+            )
+            .await
+            .expect("before abort grace");
+            assert_eq!(
+                waiting.next_reclamation_at_ms,
+                Some(cleanup_at_ms + GRACE_MS)
+            );
+            context(cleanup_at_ms + GRACE_MS)
+        } else {
+            cleanup
+        };
+        recording.reset();
+        let cleaned = gc_namespace(&recording, &namespace_id, &config(), &cleanup)
             .await
             .expect("retry cleanup");
         assert_eq!(cleaned.deleted.upload_sessions, 1);
@@ -559,5 +539,74 @@ async fn reclaimed_generation_sessions_delete_content_before_the_record_for_ever
         assert_eq!(deleted, [content_key.clone(), session_key.clone()]);
         assert!(store.head(&content_key).await.expect("content").is_none());
         assert!(store.head(&session_key).await.expect("session").is_none());
+    }
+}
+
+#[tokio::test]
+async fn current_tombstones_are_reclaimed_once_without_confirming_the_head_or_record() {
+    for with_record in [false, true] {
+        let directory = tempdir().expect("directory");
+        let namespace_id = NamespaceId::parse("current-retirement").expect("namespace");
+        let store = RecordingStore::new(
+            LocalFsStore::new(directory.path()).expect("store"),
+            KeyPredicate::any(),
+        );
+        let (deadline, keys) = retired_content_namespace(&store, &namespace_id).await;
+        let tombstone = crate::namespace::control::load_current_manifest(&store, &namespace_id)
+            .await
+            .expect("tombstone");
+        let record_key = loonfs_objectstore::keys::retired_generation_record(
+            &namespace_id,
+            tombstone.state.generation,
+        );
+        if with_record {
+            let record = loonfs_api::wire::control::RetiredGenerationPayload {
+                namespace_id: namespace_id.clone(),
+                generation: tombstone.state.generation,
+                tombstone: tombstone.state.manifest.clone(),
+                created_at_ms: 1_001,
+            };
+            store
+                .put_if_absent(
+                    &record_key,
+                    loonfs_api::wire::control::encode_control_state(
+                        ControlObjectKind::RetiredGeneration,
+                        &record,
+                    )
+                    .expect("record bytes")
+                    .into(),
+                )
+                .await
+                .expect("record before recreation finishes");
+        }
+        store.reset();
+        let report = gc_namespace(&store, &namespace_id, &config(), &deadline)
+            .await
+            .expect("reclaim current tombstone");
+        assert_eq!(report.deleted.retired_content_objects, keys.len() as u64);
+        assert_eq!(
+            report.deleted.retired_generation_records,
+            u64::from(with_record)
+        );
+        assert!(!store.snapshot().iter().any(|operation| {
+            matches!(operation, loonfs_test_support::stores::RecordedOperation::Head { key } if key == &record_key)
+        }));
+        assert_eq!(store.counts().puts, 0);
+        assert_eq!(
+            store
+                .take_get_keys()
+                .iter()
+                .filter(|key| **key == hint(&namespace_id))
+                .count(),
+            1
+        );
+        for key in keys {
+            assert!(store.head(&key).await.expect("owned content").is_none());
+        }
+        assert!(store
+            .head(&record_key)
+            .await
+            .expect("retired record")
+            .is_none());
     }
 }

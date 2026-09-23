@@ -18,30 +18,22 @@ use std::collections::BTreeSet;
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum GenerationState {
     Current,
-    /// Deleted and inside its retirement grace.
-    Waiting {
-        deadline_ms: u64,
-    },
-    /// Past its grace, but a pin in its manifest range still holds it.
-    Held,
+    Retained { until: Option<u64> },
     Eligible,
-    Reclaimed,
 }
 
 pub(super) struct RetiredGeneration {
-    pub(super) key: String,
-    pub(super) reference: loonfs_api::wire::control::ManifestRef,
-    pub(super) tombstone: Option<NamespaceManifestPayload>,
+    pub(super) record_key: Option<String>,
+    pub(super) tombstone: NamespaceManifestPayload,
 }
 
 pub(super) struct LiveSet {
     pub(super) owner_generation: NamespaceGeneration,
     pub(super) generation_first_manifest_no: ManifestNo,
-    pub(super) namespace_deleted: bool,
-    pub(super) current_tombstone: Option<NamespaceManifestPayload>,
     pub(super) retired_generations: Vec<RetiredGeneration>,
     pub(super) discovery_start_manifest_no: ManifestNo,
     pub(super) objects: BTreeSet<String>,
+    current_tombstone: Option<ManifestNo>,
     listed_pins: BTreeSet<PinId>,
     unrecognized_pin: bool,
     grace_window_ms: u64,
@@ -61,11 +53,18 @@ impl LiveSet {
         let mut live = Self {
             owner_generation: head.generation,
             generation_first_manifest_no: head.generation_first_manifest_no,
-            namespace_deleted: head.status.is_deleted(),
-            current_tombstone: head.status.is_deleted().then(|| head.clone()),
-            retired_generations: Vec::new(),
+            retired_generations: head
+                .status
+                .is_deleted()
+                .then(|| RetiredGeneration {
+                    record_key: None,
+                    tombstone: head.clone(),
+                })
+                .into_iter()
+                .collect(),
             discovery_start_manifest_no: anchor.manifest.discovery_start_manifest_no,
             objects: BTreeSet::from([anchor.manifest.object_key.clone()]),
+            current_tombstone: head.status.is_deleted().then_some(head.manifest_no),
             listed_pins: BTreeSet::new(),
             unrecognized_pin: false,
             grace_window_ms: grace_window_ms.max(NAMESPACE_RETIREMENT_GRACE_MS),
@@ -172,20 +171,34 @@ impl LiveSet {
             };
             let tombstone =
                 crate::namespace::retired::load_retired_tombstone(store, &record).await?;
-            if let Some(tombstone) = &tombstone {
-                self.protect_manifest(
-                    metadata_manifest_object(namespace_id, &record.tombstone.manifest_no),
+            self.protect_manifest(
+                metadata_manifest_object(namespace_id, &tombstone.manifest_no),
+                &tombstone,
+            );
+            if let Some(retired) = self
+                .retired_generations
+                .iter_mut()
+                .find(|retired| retired.tombstone.manifest_no == tombstone.manifest_no)
+            {
+                retired.record_key = Some(key);
+            } else {
+                self.retired_generations.push(RetiredGeneration {
+                    record_key: Some(key),
                     tombstone,
-                );
+                });
             }
-            self.retired_generations.push(RetiredGeneration {
-                key,
-                reference: record.tombstone,
-                tombstone,
-            });
         }
-        self.retired_generations
-            .sort_by(|left, right| left.key.cmp(&right.key));
+        let current_tombstone = self.current_tombstone;
+        self.retired_generations.sort_by(|left, right| {
+            (
+                Some(left.tombstone.manifest_no) != current_tombstone,
+                &left.record_key,
+            )
+                .cmp(&(
+                    Some(right.tombstone.manifest_no) != current_tombstone,
+                    &right.record_key,
+                ))
+        });
         Ok(())
     }
 
@@ -195,11 +208,16 @@ impl LiveSet {
     }
 
     pub(super) fn tombstones(&self) -> impl Iterator<Item = &NamespaceManifestPayload> {
-        self.current_tombstone.iter().chain(
-            self.retired_generations
-                .iter()
-                .filter_map(|record| record.tombstone.as_ref()),
-        )
+        self.retired_generations
+            .iter()
+            .map(|retired| &retired.tombstone)
+    }
+
+    pub(super) fn current_tombstone(&self) -> Option<&NamespaceManifestPayload> {
+        self.current_tombstone.and_then(|manifest_no| {
+            self.tombstones()
+                .find(|tombstone| tombstone.manifest_no == manifest_no)
+        })
     }
 
     pub(super) fn deadline(&self, tombstone: &NamespaceManifestPayload) -> u64 {
@@ -211,6 +229,9 @@ impl LiveSet {
     }
 
     pub(super) fn generation_state(&self, generation: NamespaceGeneration) -> GenerationState {
+        if generation > self.owner_generation {
+            return GenerationState::Retained { until: None };
+        }
         if let Some(tombstone) = self
             .tombstones()
             .find(|tombstone| tombstone.generation == generation)
@@ -221,14 +242,16 @@ impl LiveSet {
                     && id.manifest_no() <= tombstone.manifest_no
             });
             if self.now_ms < deadline_ms {
-                GenerationState::Waiting { deadline_ms }
+                GenerationState::Retained {
+                    until: Some(deadline_ms),
+                }
             } else if pinned || self.unrecognized_pin {
-                GenerationState::Held
+                GenerationState::Retained { until: None }
             } else {
                 GenerationState::Eligible
             }
         } else if generation < self.owner_generation {
-            GenerationState::Reclaimed
+            GenerationState::Eligible
         } else {
             GenerationState::Current
         }

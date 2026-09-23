@@ -2854,49 +2854,6 @@ async fn retired_owner_calls_restart_retry_deletes_and_collect_late_writes() {
 }
 
 #[tokio::test]
-async fn retired_owner_head_recheck_fails_without_writes() {
-    let directory = tempdir().expect("directory");
-    let namespace_id = NamespaceId::parse("owner-head-recheck").expect("namespace");
-    let inner = LocalFsStore::new(directory.path()).expect("store");
-    let (deadline, keys) = retired_content_namespace(&inner, &namespace_id).await;
-    let store = RecordingStore::new(
-        BlockingStore::new(
-            FailStore::new(
-                inner,
-                KeyPredicate::manifest(&namespace_id),
-                OperationClass::Read,
-                InjectedError::Transport("head recheck failed".to_owned()),
-            ),
-            KeyPredicate::exact(loonfs_objectstore::keys::upload_session_prefix(
-                &namespace_id,
-            )),
-            OperationClass::List,
-        ),
-        KeyPredicate::any(),
-    );
-    store.inner().block_next();
-    let config = config();
-    let (result, ()) = tokio::join!(
-        gc_namespace(&store, &namespace_id, &config, &deadline),
-        async {
-            store.inner().wait_until_blocked().await;
-            store.inner().inner().fail_next(1);
-            store.inner().release();
-        }
-    );
-    assert_eq!(
-        result.expect_err("head recheck fails").code(),
-        crate::error::ErrorCode::ServerError
-    );
-    assert_eq!(store.counts().deletes, 0);
-    assert_eq!(store.counts().puts, 0);
-    assert_eq!(store.counts().compare_and_swaps, 0);
-    for key in keys {
-        assert!(store.head(&key).await.expect("owned content").is_some());
-    }
-}
-
-#[tokio::test]
 async fn expiry_and_creation_grace_delete_pins_without_a_released_state() {
     let directory = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("pin-grace").expect("namespace");

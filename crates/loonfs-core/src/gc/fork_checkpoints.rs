@@ -9,12 +9,6 @@ use loonfs_api::wire::control::{ForkBasis, PinPayload};
 use loonfs_api::{NamespaceGeneration, NamespaceId};
 use loonfs_objectstore::ObjectStore;
 
-#[derive(Debug)]
-pub(super) enum ForkCheckpointReachability {
-    Reclaimable,
-    Retained { reason: &'static str },
-}
-
 pub(super) async fn delete_source_checkpoint<S: ObjectStore + ?Sized>(
     store: &S,
     basis: &ForkBasis,
@@ -37,67 +31,58 @@ pub(super) async fn delete_source_checkpoint<S: ObjectStore + ?Sized>(
     Ok(present)
 }
 
-pub(super) async fn classify_fork_checkpoint<S: ObjectStore + ?Sized>(
+pub(super) async fn fork_checkpoint_is_retained<S: ObjectStore + ?Sized>(
     store: &S,
     record: &PinPayload,
     target_namespace_id: &NamespaceId,
     target_generation: NamespaceGeneration,
     grace_window_ms: u64,
     context: &MutationContext,
-) -> Result<ForkCheckpointReachability> {
+) -> Result<bool> {
     if context.now_ms.saturating_sub(record.created_at_ms) < grace_window_ms {
-        return Ok(ForkCheckpointReachability::Retained {
-            reason: "target_creation_in_flight",
-        });
+        return Ok(true);
     }
-    match classify_target(store, record, target_namespace_id, target_generation).await {
+    match target_retains_checkpoint(store, record, target_namespace_id, target_generation).await {
         Err(CoreError::ControlObjectLoad(error @ ControlObjectLoadError::Store { .. })) => {
             tracing::warn!(
                 namespace_id = %target_namespace_id,
                 error = %error,
                 "the fork target did not read; retaining its source pin"
             );
-            Ok(ForkCheckpointReachability::Retained {
-                reason: "target_head_unreadable",
-            })
+            Ok(true)
         }
         result => result,
     }
 }
 
-async fn classify_target<S: ObjectStore + ?Sized>(
+async fn target_retains_checkpoint<S: ObjectStore + ?Sized>(
     store: &S,
     record: &PinPayload,
     target_namespace_id: &NamespaceId,
     target_generation: NamespaceGeneration,
-) -> Result<ForkCheckpointReachability> {
+) -> Result<bool> {
     let Some(target) = load_current_manifest_if_present(store, target_namespace_id).await? else {
-        return Ok(ForkCheckpointReachability::Reclaimable);
+        return Ok(false);
     };
     let target = target.envelope.payload();
     match target.generation.cmp(&target_generation) {
-        std::cmp::Ordering::Less => Ok(ForkCheckpointReachability::Reclaimable),
-        std::cmp::Ordering::Equal => classify_basis(record, target.fork_basis.as_ref()),
+        std::cmp::Ordering::Less => Ok(false),
+        std::cmp::Ordering::Equal => basis_retains_checkpoint(record, target.fork_basis.as_ref()),
         std::cmp::Ordering::Greater => {
             let Some(retired) =
                 load_retired_generation(store, target_namespace_id, target_generation).await?
             else {
-                return Ok(ForkCheckpointReachability::Reclaimable);
+                return Ok(false);
             };
-            let Some(tombstone) = load_retired_tombstone(store, &retired).await? else {
-                return Ok(ForkCheckpointReachability::Reclaimable);
-            };
-            classify_basis(record, tombstone.fork_basis.as_ref())
+            let tombstone = load_retired_tombstone(store, &retired).await?;
+            basis_retains_checkpoint(record, tombstone.fork_basis.as_ref())
         }
     }
 }
 
-fn classify_basis(
-    record: &PinPayload,
-    basis: Option<&ForkBasis>,
-) -> Result<ForkCheckpointReachability> {
+fn basis_retains_checkpoint(record: &PinPayload, basis: Option<&ForkBasis>) -> Result<bool> {
     let Some(basis) = basis.filter(|basis| basis.source_pin_id == record.pin_id) else {
-        return Ok(ForkCheckpointReachability::Reclaimable);
+        return Ok(false);
     };
     if basis.manifest != record.manifest() {
         return Err(CoreError::NamespaceCorrupt(format!(
@@ -105,7 +90,5 @@ fn classify_basis(
             record.pin_id
         )));
     }
-    Ok(ForkCheckpointReachability::Retained {
-        reason: "referenced_by_target",
-    })
+    Ok(true)
 }

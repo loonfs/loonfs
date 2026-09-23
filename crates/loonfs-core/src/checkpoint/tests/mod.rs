@@ -499,7 +499,7 @@ pub(crate) async fn segment_keys_of_the_current_manifest<S: ObjectStore + ?Sized
     let segment_prefix = loonfs_objectstore::keys::metadata_segment_prefix(namespace_id);
     let manifest_number = current_manifest_number(store, namespace_id).await;
     let staged: BTreeSet<String> =
-        load_manifest_segments_for_inspection(store, None, namespace_id, &manifest_number)
+        load_manifest_segments_for_inspection(store, None, namespace_id, &manifest_number, None)
             .await
             .expect("load the published manifest")
             .manifest()
