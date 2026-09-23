@@ -465,8 +465,9 @@ for an extended period. No action is required unless failures repeat.
 
 Deleted namespaces are not enumerated for maintenance. Assign them explicitly
 with `loonfs maintenance loop --namespaces <id>` and keep running GC until a
-pass reports no `deleted.retired_content_objects` and no future
-`next_reclamation_at_ms`. Late writes through already-issued upload
+pass completes after `reclaim_after_ms` with no future `next_reclamation_at_ms`.
+`deleted.retired_content_objects` counts attempts and repeats on every later
+pass, so it is not a sign of remaining work. Late writes through already-issued upload
 capabilities and dependent forks can extend reclamation. An empty pass does
 not rule out later writes, so keep these namespaces assigned to the loop.
 See the API spec's [namespace deletion section](../../../docs/specs/api.md#63-delete-v0namespacesns)

@@ -1139,7 +1139,8 @@ absent pin adds no count. Every count field is present, including zero values.
 `retired_content_objects` counts successful deletion attempts of the exact
 content keys a retired generation's publication rows name, including a delete that finds the key already absent.
 A retry can repeat a count; these are attempt counts, not a count of distinct
-objects.
+objects, and a tombstone that is never recreated repeats them on every pass.
+The maintenance loop does not treat this count as progress.
 
 Every core GC response carries `retained`, the candidates the pass kept, split by
 the decision that spared each one. The reasons are a closed
