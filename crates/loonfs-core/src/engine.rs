@@ -725,6 +725,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         let location = if content_ref.owner_namespace_id != self.namespace_id {
             ContentLocation::resolve(
                 &self.namespace_id,
+                context.head.generation,
                 catalog.content_store_id(),
                 None,
                 content_ref,
@@ -739,6 +740,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             if let Some(tail) = context.tail_cache.get(&key) {
                 ContentLocation::resolve(
                     &self.namespace_id,
+                    context.head.generation,
                     catalog.content_store_id(),
                     Some(&tail),
                     content_ref,

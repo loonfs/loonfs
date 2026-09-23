@@ -104,7 +104,7 @@ impl LiveSet {
                     &mut manifests,
                 )
                 .await?;
-            if pin_id == CheckpointId::retired(namespace_id, pin_id.manifest_no()) {
+            if super::fork_checkpoints::is_retired_pin(namespace_id, &pin_id) {
                 if !payload.status.is_deleted() {
                     return Err(CoreError::NamespaceCorrupt(format!(
                         "retired pin `{key}` names an active manifest"

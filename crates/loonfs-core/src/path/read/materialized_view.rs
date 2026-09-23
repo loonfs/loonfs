@@ -383,6 +383,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
     ) -> Result<ContentLocation> {
         Ok(ContentLocation::resolve(
             &self.namespace_id,
+            self.head.generation,
             &self.content_store_id,
             Some(&self.wal_tail),
             content_ref,

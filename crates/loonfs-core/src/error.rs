@@ -500,6 +500,7 @@ impl CoreError {
             CoreError::DurableContent(
                 DurableContentValidationError::InvalidContentRef(_)
                 | DurableContentValidationError::MissingContentObject { .. }
+                | DurableContentValidationError::MissingContentGeneration { .. }
                 | DurableContentValidationError::ContentLengthMismatch { .. }
                 | DurableContentValidationError::ContentChecksumMismatch { .. },
             )

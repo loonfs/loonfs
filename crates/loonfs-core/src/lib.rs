@@ -132,6 +132,7 @@ pub mod control {
         load_snapshot_read_basis, CheckpointReadBasis, NamespaceStatistics,
     };
     pub use crate::control_object::{ControlObjectLoadError, LoadedControl};
+    pub use crate::gc::load_retired_content_store;
     pub use crate::namespace::catalog::{
         load_namespace_catalog_entry, VerifiedNamespaceCatalogEntry,
     };
