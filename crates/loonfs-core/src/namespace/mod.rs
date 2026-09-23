@@ -11,6 +11,7 @@ pub(crate) mod control;
 pub(crate) mod delete;
 pub(crate) mod fork;
 pub(crate) mod read_anchor;
+mod recreation;
 pub(crate) mod state;
 pub(crate) mod status;
 pub(crate) mod writer_epoch;

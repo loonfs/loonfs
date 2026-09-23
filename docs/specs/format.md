@@ -37,9 +37,9 @@ This specification defines the storage layout, encodings, read and write protoco
 
 ### 1.1 Namespaces and identity
 
-A namespace is a directory tree with its own ordered metadata history. Its `namespace_id` names a sequence of generations. Generation 1 begins when the id is first created. Creating an id whose current manifest is deleted begins the next generation. Each generation starts with an empty tree and continues the id's counters.
+A namespace is a directory tree with its own ordered metadata history. Its `namespace_id` names a sequence of generations. Generation 1 begins when the id is first created. Creating or forking into an id whose current manifest is deleted begins the next generation. A plain create starts with an empty tree; a fork starts with the source tree. Both continue the id's counters.
 
-Each namespace id starts with manifest number 1. Its current manifest records the generation, identity, content-store ID, creation time, lifecycle, and writer authority. The manifest and later WAL objects together describe the current metadata state. Creating manifest 1 with put-if-absent installs the first generation. Manifest and WAL numbers continue across generations. Each generation starts at sequence zero with inode ID 2 available; sequences and inode IDs identify state within one generation.
+Each namespace id starts with manifest number 1. Its current manifest records the generation, identity, content-store ID, creation time, lifecycle, and writer authority. The manifest and later WAL objects together describe the current metadata state. Creating manifest 1 with put-if-absent installs the first generation. Manifest and WAL numbers continue across generations. A plain recreation starts at sequence zero with inode ID 2 available; a fork into a deleted id starts at the captured source sequence, as every fork does. Sequences and inode IDs identify state within one generation.
 
 An item within a namespace is identified by `(namespace_id, inode_id)`. Inode IDs are integers in storage. The public API represents the same IDs as strings such as `ino_42`.
 
@@ -311,7 +311,7 @@ A cold read loads `hint.json`, loads the manifest at its `manifest_no`, and prob
 | Hint names manifest 1, which is absent | Installation has not completed. |
 | A higher hinted manifest is absent | Corruption; hints cannot run ahead of publication. |
 | A required object is unreadable or invalid | Error; do not treat it as absence. |
-| Current manifest is deleted | `namespace_deleted` for ordinary namespace operations. Namespace creation recreates the id as its next generation. |
+| Current manifest is deleted | `namespace_deleted` for ordinary namespace operations. A create or a fork into the id recreates it as its next generation. |
 
 Every namespace has its own manifest from installation. A newly created namespace's empty manifest represents root inode 1 at sequence zero. A fork's initial manifest lists the source runs it inherits. Its `fork_basis` records provenance and the retaining pin; readers do not follow that field to select a different basis.
 
@@ -583,7 +583,7 @@ A namespace manifest describes one complete metadata file set through `head_seq`
 
 A run is the collection of segments produced together. `run_no` is allocated from the manifest's `next_run_no`, which advances when that run is published. A WAL flush allocates one run number across the families it writes. A compaction allocates a run number for its selected family group.
 
-Each run records `run_seq`, `tier`, and its segment descriptors. Within one run, each family's segments have dense, zero-based `segment_index` values and strictly separated ascending key ranges. Different runs can overlap because a later run can contain additional rows for the same inode, name slot, or revision history.
+Each run records `run_seq`, `tier`, and its segment descriptors. A non-empty manifest must have a run at `base_seq` and a run at `head_seq`, and all run sequences lie between them. An empty active manifest has equal head, base, and floor sequences and the genesis commit id. Within one run, each family's segments have dense, zero-based `segment_index` values and strictly separated ascending key ranges. Different runs can overlap because a later run can contain additional rows for the same inode, name slot, or revision history.
 
 The manifest must not contain duplicate run numbers or a run number at or above `next_run_no`. A family's segment ranges must not overlap or descend. Metadata producers must not write the same logical row key twice within one run.
 
@@ -593,7 +593,7 @@ The `commits` and `commit_receipts` families hold one row each per retained comm
 
 ### 7.2 Publishing a materialized file set
 
-A flush starts from the verified manifest and discovered WAL tip. It materializes the required numbers after `last_folded_wal_no`, writes new segments, and publishes the next manifest with `last_folded_wal_no` set to the captured tip. A fence is folded even when the logical sequence does not change.
+A flush starts from the verified manifest and discovered WAL tip. It materializes the required numbers after `last_folded_wal_no`, writes new segments, and publishes the next manifest with `last_folded_wal_no` set to the captured tip. A fence is folded even when the logical sequence does not change. Ordinary flushes write a run at the head when materializing new state.
 
 Before writing segments or publishing the manifest, a flush writes every inline value it covers as a content object, verified against its reference. A manifest whose `last_folded_wal_no` is `n` implies a content object exists for every inline value in WAL segments up to `n`. WAL collection's rule is unchanged because it already requires each segment to be at or below `last_folded_wal_no`.
 
@@ -605,7 +605,7 @@ The bounded metadata publication budget runs from before the first output segmen
 
 After publication, raise the hint within the publication budget. Failure to raise it does not undo the manifest. GC preserves manifest numbers at or above the hint observed for its pass so discovery can cross a lagging hint. Intermediate manifests retained for discovery do not independently retain their runs.
 
-Forks follow the same path from their own manifest 1. Publishing a target-owned manifest does not imply copying inherited segments into the target's prefix; each segment retains its owner.
+Forks follow the same path from their generation's first manifest. Publishing a target-owned manifest does not imply copying inherited segments into the target's prefix; each segment retains its owner.
 
 ### 7.3 Recovery material and maintenance policy
 
@@ -716,13 +716,13 @@ For an absent namespace, build manifest 1 with a new content-store ID, the names
 
 Write the content-store descriptor, hint naming manifest 1 and WAL 0, then manifest 1, all with put-if-absent. Descriptor and hint collisions are permitted. The manifest put decides which installation wins. A hint left before that put does not establish namespace existence.
 
-Creating an id whose current manifest is a tombstone recreates it:
+A plain create or a fork into an id whose current manifest is a tombstone recreates it. A fork first creates and verifies its source pin under section 9.2:
 
 1. Load the current manifest. If it is active, return `namespace_exists`, or its current summary with `allow_existing`. Otherwise it is the tombstone, and its folded WAL number is the WAL tip of the deleted generation.
 2. Write a retired pin over the tombstone with put-if-absent. An existing record at its derived id is success.
-3. Write a descriptor for a fresh content-store id with put-if-absent.
-4. Build the next manifest number with the next generation and its own number as `generation_first_manifest_no`. Head, base, and retention floor start at zero, and the inode and run allocators start over. Copy the tombstone's folded WAL number. Increment both epochs. Use the request's creation time, creator, and access mode. The manifest is active, has no fork basis or writer, has no runs, carries the genesis commit id, and starts every activity counter at zero.
-5. Publish the manifest after the tombstone within the metadata publication budget. Reload and retry when another manifest wins.
+3. Write a descriptor with put-if-absent, using a fresh content-store id for a plain create or the source's content-store id for a fork.
+4. Build the next manifest number with the next generation and its own number as `generation_first_manifest_no`. Copy the tombstone's folded WAL number and increment both epochs. For a plain create, head, base, and retention floor start at zero, the inode and run allocators start over, and the manifest is active, has no fork basis or writer, has no runs, carries the genesis commit id, and starts every activity counter at zero. For a fork, copy the pinned source manifest's runs, head, base, head commit ID, allocators, and content-store ID as section 9.2 describes, with the retention floor at the head and activity at zero.
+5. Publish the manifest after the tombstone within the metadata publication budget and, for a fork, its installation budget. Reload when another manifest wins. An active winner answers `namespace_exists`, or its current summary with `allow_existing`.
 6. Publication raises the hint to the new manifest and its folded WAL number. A failed hint raise does not fail creation.
 
 Recreation reads no WAL object. The deleted generation's WAL objects are unprotected and may already be collected.
@@ -735,19 +735,19 @@ A fork starts independent history in the source's content domain:
 
 1. Create a verified source pin whose owner names the target namespace, either from the source head or a live snapshot under section 8.2.
 2. Load and verify the pinned manifest.
-3. Copy its run references, head sequence, head commit ID, inode allocator, next run number, and content-store ID into target manifest 1. Preserve every segment's owner.
-4. Set target identity, creation time, and `created_by` from the fork request, immutable `fork_basis`, active status, no writer block, and both epochs zero. Activity counters start at zero. The local folded WAL number starts at zero; the retention floor starts at the fork point.
-5. Within the fork-installation budget, write the shared descriptor, target hint naming manifest 1 and WAL 0, and target manifest 1, in that order.
+3. Copy its run references, base sequence, head commit ID, inode allocator, next run number, and content-store ID into the target manifest. The initial head is the captured source sequence, for a fresh id and for a deleted id alike. Preserve every segment's owner.
+4. Set target identity, creation time, and `created_by` from the fork request, immutable `fork_basis` including the pinned source generation, active status, and no writer block. Activity counters start at zero and the retention floor equals the head. For a fresh id, both epochs and the local folded WAL number start at zero. For a deleted id, apply the successor counters and allocator maxima from section 9.1.
+5. Within the fork-installation budget, install a fresh id by writing the shared descriptor, target hint naming manifest 1 and WAL 0, and target manifest 1, in that order. For a deleted id, write the retired pin and shared descriptor, then publish the successor to the tombstone as in section 9.1.
 
-The target copies no file bytes or metadata segments. Its WAL starts at number 1, and its first data commit is one sequence above the fork point. It can itself be forked immediately because its manifest already lists its inherited runs.
+The target copies no file bytes or metadata segments. Its head is at least the captured source sequence and every copied run sequence. Its WAL starts at number 1 for a fresh id, or after the tombstone's folded WAL number for a recreated id. Its first data commit is one sequence above its initial head. It can itself be forked immediately because its manifest already lists its inherited runs.
 
 The fixed creation grace on the source pin protects installation. Before initiating the target manifest put, the installer checks elapsed time against `FORK_INSTALL_BUDGET_MS`. The remaining grace covers provider operations and the clock allowance.
 
 ### 9.3 Conflicting and unknown installations
 
-A losing manifest-1 put reads the winner and verifies its namespace identity. Current active status means `namespace_exists`; current deleted status enters the recreation procedure. A recreation manifest put that loses reloads the current manifest. An active winner means another recreation succeeded. A newer tombstone means another generation was created and deleted, so recreation retries over that tombstone. Invalid bytes or key/payload disagreement are corruption. No loser overwrites the winner.
+A losing manifest-1 put reads the winner and verifies its namespace identity. Current active status means `namespace_exists`; current deleted status enters the recreation procedure for either a create or a fork. A recreation manifest put that loses reloads the current manifest. An active winner means another recreation succeeded. A newer tombstone means another generation was created and deleted, so recreation retries over that tombstone. Invalid bytes or key/payload disagreement are corruption. No loser overwrites the winner.
 
-A confirmed precondition failure is a conflict. A put with an unknown transport outcome can confirm its own success only by reading back the exact proposed manifest 1. An explicit `allow_existing` retry can instead return an existing active namespace.
+A confirmed precondition failure is a conflict. A put with an unknown transport outcome can confirm its own success only by reading back the exact proposed manifest. An explicit `allow_existing` retry can instead return an existing active namespace.
 
 Abandoned attempts can leave a descriptor, hint, or fork pin. Descriptor and hint leftovers do not install a namespace. An unused fork pin is collected after its installation grace under section 11.7.
 
@@ -755,7 +755,7 @@ Abandoned attempts can leave a descriptor, hint, or fork pin. Descriptor and hin
 
 Deletion uses the acquired writer epoch. After admitted commits finish, it folds the remaining WAL, then publishes the next manifest with deleted status. The manifest records `deleted_at_ms` from the deletion call's clock. Deletion initiates tombstone publication within `METADATA_PUBLICATION_BUDGET_MS` of capturing that clock. Its runs, counters, and folded WAL boundary cover the final head, so every WAL object of the deleted generation is at or below `last_folded_wal_no`. A failed fold leaves the namespace active; deletion can be retried. Previously committed data remains committed.
 
-An operation that observes deletion returns `namespace_deleted`. A cached reader can still use its active view until the next manifest revalidation is due. Deletion neither immediately removes content nor deletes the shared content domain.
+An ordinary operation that observes deletion returns `namespace_deleted`. A create or a fork into the id recreates it. A cached reader can still use its active view until the next manifest revalidation is due. Deletion neither immediately removes content nor deletes the shared content domain.
 
 The current deleted manifest is the generation's tombstone. It protects no current WAL or runs, but retained pins still protect their referenced manifests and segments.
 
@@ -1151,7 +1151,7 @@ The following tables list the durable payload fields. Their transition rules are
 | --- | --- |
 | Namespace hint | `namespace_id`, `manifest_no`, `wal_no` |
 | Writer block | `writer_id`, `acquired_at_ms` |
-| Fork basis | `manifest`, `source_checkpoint_id` |
+| Fork basis | `manifest`, `source_checkpoint_id`, `source_generation` |
 | Manifest reference | `owner_namespace_id`, `manifest_no`, `manifest_head_seq`, `manifest_payload_checksum` |
 | Content-store descriptor | `content_store_id`, `created_at_ms` |
 | Pin record | `namespace_id`, `pin_id`, `manifest_no`, `manifest_head_seq`, `manifest_payload_checksum`, `head_commit_id`, `created_at_ms`, `owner` |

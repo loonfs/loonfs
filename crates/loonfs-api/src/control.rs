@@ -246,11 +246,12 @@ impl NamespaceStatus {
 #[serde(deny_unknown_fields)]
 pub struct ForkBasis {
     /// Source manifest used as the target's initial state. Its owner must
-    /// differ from the target namespace. `manifest_head_seq` is the target's
-    /// initial sequence.
+    /// differ from the target namespace.
     pub manifest: ManifestRef,
     /// Source checkpoint record pinning the basis for as long as the target lives.
     pub source_checkpoint_id: CheckpointId,
+    /// The source generation captured by the pinned manifest.
+    pub source_generation: NamespaceGeneration,
 }
 
 const GENESIS_COMMIT_ID: &str = "c_00000000000000000000000000000000";

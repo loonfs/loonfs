@@ -5666,17 +5666,7 @@
                 }
               }
             },
-            "description": "Namespace already exists or is partial"
-          },
-          "410": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "Namespace id was deleted and retired"
+            "description": "Namespace already exists"
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"

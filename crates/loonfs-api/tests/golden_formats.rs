@@ -487,6 +487,7 @@ fn sample_deleted_manifest() -> NamespaceManifestPayload {
 fn sample_fork_manifest() -> NamespaceManifestPayload {
     NamespaceManifestPayload {
         fork_basis: Some(ForkBasis {
+            source_generation: loonfs_api::NamespaceGeneration(1),
             manifest: ManifestRef {
                 owner_namespace_id: NamespaceId::parse("source").expect("valid namespace id"),
                 manifest_no: ManifestNo(2),
