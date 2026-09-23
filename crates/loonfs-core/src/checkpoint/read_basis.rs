@@ -87,6 +87,9 @@ pub(crate) async fn load_checkpoint_read_basis_from_record<S: ObjectStore + ?Siz
     let PinnedCheckpointBasis { manifest, segments } =
         load_pinned_checkpoint_basis_from_record(store, segment_cache, record).await?;
     let envelope = segments.manifest();
+    if envelope.payload().generation != live_head.generation {
+        return Err(crate::commit::WalPublishError::StaleHead.into());
+    }
     Ok(CheckpointReadBasis {
         head: head_from_manifest(live_head, envelope),
         basis: MetadataBasis(manifest),

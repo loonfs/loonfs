@@ -8,7 +8,7 @@ use crate::metadata::MetadataView;
 use loonfs_api::wire::manifest::{lookup_keys, MetadataRow, MetadataRowFamily};
 use loonfs_api::wire::sst_blocks::string_prefix_upper_bound;
 use loonfs_api::{
-    ChangeSeq, CheckpointId, ContentRef, InodeId, InodeKind, NamespaceId, PageRequest, RevisionNo,
+    ChangeSeq, CheckpointId, ContentRef, InodeId, InodeKind, PageRequest, RevisionNo,
 };
 use loonfs_objectstore::ObjectStore;
 
@@ -54,14 +54,12 @@ pub struct CheckpointFilesPage {
 pub(crate) async fn list_checkpoint_files_page<S: ObjectStore + ?Sized>(
     store: &S,
     segment_cache: Option<&MetadataSegmentCache>,
-    namespace_id: &NamespaceId,
+    head: &crate::namespace::state::NamespaceReadState,
     checkpoint_id: &CheckpointId,
     request: PageRequest<CheckpointFilesPageCursor>,
 ) -> Result<CheckpointFilesPage> {
-    let head = crate::namespace::control::load_namespace_read_state(store, namespace_id)
-        .await
-        .map_err(CoreError::ControlObjectLoad)?;
-    if !checkpoint_is_visible(&head, checkpoint_id) {
+    let namespace_id = &head.namespace_id;
+    if !checkpoint_is_visible(head, checkpoint_id) {
         return Err(CoreError::CheckpointUnavailable(format!(
             "checkpoint `{checkpoint_id}` does not exist in namespace `{namespace_id}`"
         )));
@@ -69,6 +67,9 @@ pub(crate) async fn list_checkpoint_files_page<S: ObjectStore + ?Sized>(
     let PinnedCheckpointBasis { manifest, segments } =
         load_pinned_checkpoint_basis(store, segment_cache, namespace_id, checkpoint_id).await?;
 
+    if segments.manifest().payload().generation != head.generation {
+        return Err(crate::commit::WalPublishError::StaleHead.into());
+    }
     let checkpoint_seq = manifest.manifest_head_seq;
     let view = MetadataView::over_manifest_segments(&segments, checkpoint_seq);
     let mut session = view.session();

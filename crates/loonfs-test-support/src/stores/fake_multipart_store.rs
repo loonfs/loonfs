@@ -59,7 +59,7 @@ pub struct FakeMultipartStore<S> {
     open: Mutex<BTreeMap<String, OpenUpload>>,
     stored_checksums: Mutex<BTreeMap<String, Checksum>>,
     next_id: AtomicUsize,
-    aborts: AtomicUsize,
+    aborts: Mutex<Vec<(String, String)>>,
 }
 
 impl<S> FakeMultipartStore<S> {
@@ -77,14 +77,22 @@ impl<S> FakeMultipartStore<S> {
             open: Mutex::new(BTreeMap::new()),
             stored_checksums: Mutex::new(BTreeMap::new()),
             next_id: AtomicUsize::new(1),
-            aborts: AtomicUsize::new(0),
+            aborts: Mutex::new(Vec::new()),
         }
     }
 
     /// How many aborts this store has been asked for, including aborts of
     /// uploads it no longer knows about.
     pub fn aborts(&self) -> usize {
-        self.aborts.load(Ordering::SeqCst)
+        self.abort_records().len()
+    }
+
+    /// Keys and provider IDs supplied to abort requests, in request order.
+    pub fn abort_records(&self) -> Vec<(String, String)> {
+        self.aborts
+            .lock()
+            .expect("abort records lock should not be poisoned")
+            .clone()
     }
 
     /// How many uploads are still open.
@@ -235,11 +243,18 @@ impl<S: ObjectStore> ObjectStore for FakeMultipartStore<S> {
         Ok(MultipartCompletion::Assembled)
     }
 
-    async fn abort_multipart_upload(&self, _key: &str, provider_upload_id: &str) -> Result<()> {
-        self.aborts.fetch_add(1, Ordering::SeqCst);
-        // An upload the provider no longer has is already in the state an
-        // abort is trying to reach, and an assembled object is untouched.
-        self.lock().remove(provider_upload_id);
+    async fn abort_multipart_upload(&self, key: &str, provider_upload_id: &str) -> Result<()> {
+        self.aborts
+            .lock()
+            .expect("abort records lock should not be poisoned")
+            .push((key.to_owned(), provider_upload_id.to_owned()));
+        let mut open = self.lock();
+        if open
+            .get(provider_upload_id)
+            .is_some_and(|upload| upload.object_key == key)
+        {
+            open.remove(provider_upload_id);
+        }
         Ok(())
     }
 

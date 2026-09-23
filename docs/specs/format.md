@@ -41,7 +41,7 @@ A namespace is a directory tree with its own ordered metadata history. Its `name
 
 Each namespace id starts with manifest number 1. Its current manifest records the generation, identity, content-store ID, creation time, lifecycle, and writer authority. The manifest and later WAL objects together describe the current metadata state. Creating manifest 1 with put-if-absent installs the first generation. Manifest and WAL numbers continue across generations. A plain recreation starts at sequence zero with inode ID 2 available; a fork into a deleted id starts at the captured source sequence, as every fork does. Sequences and inode IDs identify state within one generation.
 
-An item within a namespace is identified by `(namespace_id, inode_id)`. Inode IDs are integers in storage. The public API represents the same IDs as strings such as `ino_42`.
+An item reference retained across generations uses `(namespace_id, generation, inode_id)`. A commit position retained across generations uses `(namespace_id, generation, committed_seq)`. Inode IDs are integers in storage. The public API represents the same IDs as strings such as `ino_42`.
 
 A fork is a new namespace initialized from a retained view of another namespace. It starts with the same files while sharing their stored objects; subsequent commits belong to the target's independent history. Section 9 describes how the shared objects remain retained.
 
@@ -372,7 +372,7 @@ Content inherited through a fork is always read from a content object. WAL repla
 
 Every content read must validate the reference's kind and checksum algorithm, then verify the complete byte length and checksum. These checks apply to both sources. WAL replay verifies the record envelope but does not recompute each file's checksum. A HEAD request can check an object's existence and size, but the content read must still verify the bytes. A missing required object or a failed validation must fail the read.
 
-Reclaiming a WAL object does not remove bytes already held in a read view's projection. If that projection must be rebuilt and the required WAL objects are gone, the read must fail. Finding a content object is insufficient because the missing WAL is also required to reconstruct the view's metadata.
+Before materializing inline bytes for a direct download, verify that the current manifest has the view's generation. An earlier generation returns missing content. This check also applies to retained in-memory views. Reclaiming a WAL object does not remove bytes already held in a read view's projection. If that projection must be rebuilt and the required WAL objects are gone, the read must fail. Finding a content object is insufficient because the missing WAL is also required to reconstruct the view's metadata.
 
 For a streamed read, the full-file checksum is verified only after the complete stream has been processed. The transport must report a verification failure even if some bytes have already reached the client. For provider-direct downloads, the client receives bytes directly from object storage; the [API specification][api-spec] defines its verification responsibilities.
 
@@ -396,7 +396,7 @@ Reading speculative bytes does not by itself establish freshness or change reten
 
 Every new content object is associated with an upload session before it becomes eligible for metadata publication. The content ID is allocated when the session is created, before the file bytes are read. New content belongs to the session's namespace generation and is stored under that owner-and-generation prefix. A session belongs to the generation in which it opened.
 
-An upload session contains `namespace_id`, `owner_generation`, `upload_id`, `content_id`, `created_at_ms`, optional `subject_id`, a tagged `mode`, and a tagged `status`.
+An upload session contains `namespace_id`, `owner_generation`, `content_store_id`, `upload_id`, `content_id`, `created_at_ms`, optional `subject_id`, a tagged `mode`, and a tagged `status`.
 
 | Status | Stored fields | Meaning |
 | --- | --- | --- |
@@ -543,7 +543,7 @@ While the receipt is retained, an equal fingerprint under the same `commit_id` i
 
 Inline content is identified by its bytes. While the commit receipt is retained, retrying the same request with the same inline bytes returns the original commit, even if a new content ID was assigned. Changed bytes or a different subject return `commit_id_reuse_conflict`.
 
-Check for the commit receipt before uploading inline bytes to the content store. If the receipt is still available, return the original result for an identical request or a reuse conflict for a changed request. Neither requires another upload, even after a restart or on another server.
+Before returning a retained publication receipt, check for a successor to its manifest with HEAD when manifest revalidation is due. A present successor invalidates the projection and requires ordinary publication discovery and writer fencing. Repeated replays share that check for the namespace within the revalidation interval. Check for the commit receipt before uploading inline bytes to the content store. If the receipt is still available, return the original result for an identical request or a reuse conflict for a changed request. Neither requires another upload, even after a restart or on another server.
 
 The guarantee is bounded by retention. Receipts below the retention floor can be removed during compaction. Once a receipt is gone, the old ID cannot be distinguished from an unused ID and a later request can execute as a new mutation. A receipt that has not yet been compacted may still be available, but callers must not depend on that extra lifetime.
 
@@ -567,9 +567,9 @@ Each delta has a `delta_index`, and its wrapper has a `semantic_op_index` identi
 
 The change feed is ordered by logical commit, not by physical WAL object. A segment containing three commits contains three commit boundaries in the feed. Within a commit, semantic filesystem events follow request-operation order; one operation can produce several events.
 
-A consumer resuming after sequence N reads the `commits` family of the current file set and then the commits in the unfolded WAL after it. Fence objects produce no change events. If its cursor is older than the retention floor, it must bootstrap from a fresh checkpoint instead. Sequences restart when a deleted namespace ID is recreated, so a cursor from an earlier generation is refused only while it is above the new head; a consumer that can span a recreation compares the namespace's generation. The API's event shapes and cursor contract are specified in [the API specification][api-spec].
+A consumer resuming after sequence N reads the `commits` family of the current file set and then the commits in the unfolded WAL after it. Fence objects produce no change events. If its cursor is older than the retention floor, it must bootstrap from a fresh checkpoint instead. Sequences restart when a deleted namespace ID is recreated, so a cursor from an earlier generation is refused when it is below the retention floor or above the head. A cursor within that range is accepted. A consumer that can span a recreation compares the namespace's generation. The API's event shapes and cursor contract are specified in [the API specification][api-spec].
 
-A consumer that requires permanent event history must retain its own copy before the floor advances. Use `(namespace_id, committed_seq)` for a commit's position and `inode_id` for item identity. A commit ID is useful for correlation, but is not a permanent unique event key because it can be reused after receipt reclamation.
+A consumer that requires permanent event history must retain its own copy before the floor advances. Use `(namespace_id, generation, committed_seq)` for a commit's position and `(namespace_id, generation, inode_id)` for item identity. A commit ID is useful for correlation, but is not a permanent unique event key because it can be reused after receipt reclamation.
 
 ## 7. Materializing metadata
 
@@ -599,7 +599,7 @@ Before writing segments or publishing the manifest, a flush writes every inline 
 
 Publication uses put-if-absent at `predecessor.manifest_no + 1`. A lost put loads the winning manifest. A flush already covered by the winner needs no further publication; coverage includes WAL position as well as sequence. Otherwise it rebuilds against the new predecessor. Reorganization and compaction additionally require their selected inputs to remain valid.
 
-Successors preserve namespace identity and cannot lower head sequence, writer epoch, folded WAL number, the retention floor, or cumulative activity counters. The one exception is a generation boundary, where the next generation starts every activity counter at zero. A successor at the same head must preserve those counters exactly. Compaction must also use the current compactor epoch. Deletion is terminal within a generation.
+Within one generation, successors preserve namespace identity and cannot lower head sequence, writer epoch, folded WAL number, the retention floor, allocators, or cumulative activity counters. A successor at the same head within that generation must preserve activity counters exactly. At a generation boundary, head, floor, and allocators follow section 9.1. A plain recreation starts them over. A fork copies the source head and allocators and sets its floor to that head. Every activity counter starts at zero. Manifest numbers, WAL numbers, and epochs continue across the boundary. Compaction must also use the current compactor epoch. Deletion is terminal within a generation.
 
 The bounded metadata publication budget runs from before the first output segment write until initiation of the manifest put. An expired attempt publishes nothing further. Its unreferenced output remains subject to segment-age collection rules. Streaming compaction has the longer bound in section 10.4.
 
@@ -640,7 +640,7 @@ Two footprint values are calculated from the manifest's segment descriptors:
 
 The inode count includes retained deleted records. An implicit root counts as zero until stored as an inode record. Metadata bytes exclude content, WAL, manifest and pin JSON, unreferenced outputs, and segments referenced only by other manifests. Shared segments count in each referencing manifest; these totals do not measure unique physical storage.
 
-Statistics reads use one validated manifest without reading segments or replaying newer WAL. Observations include namespace identity, generation, lifecycle status, manifest number, head sequence, and folded WAL number. A pin selects its exact manifest. Compaction can change footprint without changing the logical head, so the manifest number matters too.
+Statistics reads use one validated manifest without reading segments or replaying newer WAL. Observations include namespace identity, generation, lifecycle status, manifest number, head sequence, and folded WAL number. Checkpoint statistics read the current manifest for generation visibility and the pinned manifest for the numbers. They do not discover the WAL tip. Compaction can change footprint without changing the logical head, so the manifest number matters too.
 
 A fork inherits the source manifest's segment descriptors, so its footprint values begin as the source's. Its counters begin at zero. Activity committed in the source stays in the source's manifests.
 
@@ -719,7 +719,7 @@ Write the content-store descriptor, hint naming manifest 1 and WAL 0, then manif
 A plain create or a fork into an id whose current manifest is a tombstone recreates it. A fork first creates and verifies its source pin under section 9.2:
 
 1. Load the current manifest. If it is active, return `namespace_exists`, or its current summary with `allow_existing`. Otherwise it is the tombstone, and its folded WAL number is the WAL tip of the deleted generation.
-2. Write a retired pin over the tombstone with put-if-absent. An existing record at its derived id is success.
+2. Check the metadata publication budget, measured from the start of recreation, before writing a retired pin over the tombstone with put-if-absent. An existing record at its derived id is success.
 3. Write a descriptor with put-if-absent, using a fresh content-store id for a plain create or the source's content-store id for a fork.
 4. Build the next manifest number with the next generation and its own number as `generation_first_manifest_no`. Copy the tombstone's folded WAL number and increment both epochs. For a plain create, head, base, and retention floor start at zero, the inode and run allocators start over, and the manifest is active, has no fork basis or writer, has no runs, carries the genesis commit id, and starts every activity counter at zero. For a fork, copy the pinned source manifest's runs, head, base, head commit ID, allocators, and content-store ID as section 9.2 describes, with the retention floor at the head and activity at zero.
 5. Publish the manifest after the tombstone within the metadata publication budget and, for a fork, its installation budget. Reload when another manifest wins. An active winner answers `namespace_exists`, or its current summary with `allow_existing`.
@@ -736,7 +736,7 @@ A fork starts independent history in the source's content domain:
 1. Create a verified source pin whose owner names the target namespace, either from the source head or a live snapshot under section 8.2.
 2. Load and verify the pinned manifest.
 3. Copy its run references, base sequence, head commit ID, inode allocator, next run number, and content-store ID into the target manifest. The initial head is the captured source sequence, for a fresh id and for a deleted id alike. Preserve every segment's owner.
-4. Set target identity, creation time, and `created_by` from the fork request, immutable `fork_basis` including the pinned source generation, active status, and no writer block. Activity counters start at zero and the retention floor equals the head. For a fresh id, both epochs and the local folded WAL number start at zero. For a deleted id, apply the successor counters and allocator maxima from section 9.1.
+4. Set target identity, creation time, and `created_by` from the fork request, immutable `fork_basis` including the pinned source generation, active status, and no writer block. Activity counters start at zero and the retention floor equals the head. For a fresh id, both epochs and the local folded WAL number start at zero. For a deleted id, apply the generation, manifest, WAL, and epoch rules from section 9.1; copy the source's allocators.
 5. Within the fork-installation budget, install a fresh id by writing the shared descriptor, target hint naming manifest 1 and WAL 0, and target manifest 1, in that order. For a deleted id, write the retired pin and shared descriptor, then publish the successor to the tombstone as in section 9.1.
 
 The target copies no file bytes or metadata segments. Its head is at least the captured source sequence and every copied run sequence. Its WAL starts at number 1 for a fresh id, or after the tombstone's folded WAL number for a recreated id. Its first data commit is one sequence above its initial head. It can itself be forked immediately because its manifest already lists its inherited runs.
@@ -882,7 +882,7 @@ Every age decision uses the call's fixed `now_ms`. A later call reads fresh root
 | Hint's observed manifest number | All manifest numbers at or above it, so discovery can probe forward. Intermediate numbers do not protect additional runs. |
 | Current active manifest's folded boundary | Every WAL number above `last_folded_wal_no`. |
 
-Pin bodies are not needed to identify these roots: the manifest number is part of the pin key. Bodies are read later for owner and expiry decisions. A pin naming a missing manifest is corruption. Each listed pin protects its files for the whole pass, even if that pass deletes the pin.
+Pin bodies are not needed to identify these roots: the manifest number is part of the pin key. Bodies are read later for owner and expiry decisions. A pin naming a missing manifest is corruption, except for a retired pin. A retired pin whose manifest is absent protects nothing and is deleted in the pin sweep with the retired count. Each listed pin protects its files for the whole pass, even if that pass deletes the pin.
 
 A retention floor may pass a pinned manifest's head sequence. That does not remove its protection. Reads through the pin use the pinned file set directly.
 
@@ -940,12 +940,12 @@ Uploads are collected through their session records. The active current generati
 | Current-generation session in a deleted namespace, generation pending | Retain; report the generation's derived deadline. |
 | Completed session in an eligible current deleted generation | Delete content, then the record; no publication lookup or additional completion grace is required. |
 | Prior-generation session, generation pending | Retain; report that generation's derived deadline. |
-| Prior-generation session, generation eligible | Use the retired namespace rules with the session's generation and the tombstone's content-store ID. Open and aborted sessions keep their expiry, abort grace, and provider cleanup rules. Completed sessions delete content, then the record. |
-| Prior-generation session, generation reclaimed | Its content prefix is already gone. For open and aborted sessions, run provider cleanup with the session's generation and the head's content-store ID. Then delete the record. |
+| Prior-generation session, generation eligible | Use the retired namespace rules with the session's generation and content-store ID. Open and aborted sessions keep their expiry, abort grace, and provider cleanup rules. Completed sessions delete content, then the record. |
+| Prior-generation session, generation reclaimed | Its content prefix is already gone. For open and aborted sessions, run provider cleanup with the session's generation and content-store ID. Then delete the record. |
 
 Before completion, a session owns its random content identity exclusively and cannot issue admission evidence. In current or eligible generations, cleanup first wins the terminal transition, then removes content and any provider transfer. A failed cleanup leaves the record for another attempt. Open and aborted sessions still require provider cleanup after namespace retirement because provider upload state can exist outside object listings.
 
-Cleanup derives every content key from the generation recorded on the session. An active current generation uses its current content store. A pass records each generation with a retained session and keeps that generation's retired pin until a pass leaves no session behind. A generation below the head with no retired pin is reclaimed: recreation writes the pin before publishing the new head.
+Cleanup derives every content key and provider cleanup target from the generation and content-store ID recorded when the session opened. A pass records each generation with a retained session and keeps that generation's retired pin until a pass leaves no session behind. A generation below the head with no retired pin is reclaimed: recreation writes the pin before publishing the new head.
 
 For eligible completed uploads on an active namespace, the collector loads a metadata view lazily and looks up `content_id` in the WAL projection and `content_publications` family. It does not scan every revision. These publication rows are retained permanently, independently of commit receipts and the retention floor. If publication is found, only the session record is removed. If no publication exists, content is deleted before the session. An error permits neither a speculative content deletion nor removal of retry evidence.
 
@@ -974,7 +974,7 @@ Every token mint checks the original completion time. A retained receipt cannot 
 
 User and snapshot pins become collectable after expiry plus `T`, or creation plus `T` on a deleted namespace. A pin whose manifest number is below the head's `generation_first_manifest_no` also uses creation plus `T`. A user pin with no expiry remains until explicit deletion only within the active current generation. Pin deletion is direct; IDs are never reused.
 
-A retired pin is retained before any age check. Reclaiming its generation removes it.
+A retired pin with a present manifest is retained before any age check. Reclaiming its generation removes it. A retired pin whose manifest is absent is deleted in the pin sweep.
 
 Fork pins use this decision table:
 
@@ -1157,7 +1157,7 @@ The following tables list the durable payload fields. Their transition rules are
 | Manifest reference | `owner_namespace_id`, `manifest_no`, `manifest_head_seq`, `manifest_payload_checksum` |
 | Content-store descriptor | `content_store_id`, `created_at_ms` |
 | Pin record | `namespace_id`, `pin_id`, `manifest_no`, `manifest_head_seq`, `manifest_payload_checksum`, `head_commit_id`, `created_at_ms`, `owner` |
-| Upload session | `namespace_id`, `owner_generation`, `upload_id`, `content_id`, `created_at_ms`, optional `subject_id`, `mode`, `status` |
+| Upload session | `namespace_id`, `owner_generation`, `content_store_id`, `upload_id`, `content_id`, `created_at_ms`, optional `subject_id`, `mode`, `status` |
 
 Namespace status is `{"kind":"active"}` or `{"kind":"deleted"}` with required `deleted_at_ms` only on the deleted variant. Missing status is invalid. The genesis commit ID is `c_00000000000000000000000000000000`.
 

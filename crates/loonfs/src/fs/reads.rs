@@ -849,9 +849,14 @@ impl FsReader {
     ) -> Result<CheckpointFilesPage> {
         self.core.record_trace_context(&tracing::Span::current());
         let (engine, read_context) = self.core.pinned_read(namespace_id).await?;
-        Ok(engine
+        let result = engine
             .list_checkpoint_files_page(checkpoint_id, request, &read_context)
-            .await?)
+            .await
+            .map_err(crate::RuntimeError::from);
+        if super::should_invalidate_after_result(&result) {
+            self.core.invalidate_namespace_read_cache(namespace_id);
+        }
+        result
     }
 
     /// Resolves the current state of each inode ID.

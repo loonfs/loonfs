@@ -109,7 +109,7 @@ pub(super) async fn sweep_upload_session<S: ObjectStore + ?Sized>(
         return Ok(retain_undated());
     }
     let generation_state = sweep.live.generation_state(state.owner_generation);
-    let content_store_id = sweep.live.generation_content_store(state.owner_generation);
+    let content_store_id = &state.content_store_id;
     match generation_state {
         GenerationState::Pending { deadline_ms } => return Ok(retain_until(deadline_ms)),
         GenerationState::Reclaimed => {

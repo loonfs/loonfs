@@ -55,6 +55,18 @@ impl ContentLocation {
         match self {
             Self::Object { object_key } => Ok(object_key),
             Self::Tail { bytes, object_key } => {
+                let current = crate::namespace::control::load_current_manifest(
+                    store,
+                    &content_ref.owner_namespace_id,
+                )
+                .await?;
+                if current.state.generation != content_ref.owner_generation {
+                    return Err(DurableContentValidationError::MissingContentGeneration {
+                        owner_namespace_id: content_ref.owner_namespace_id.clone(),
+                        owner_generation: content_ref.owner_generation,
+                    }
+                    .into());
+                }
                 validate_loaded_content_bytes(object_key.clone(), content_ref, &bytes)?;
                 if let Some(stored) = store
                     .get(&object_key, None)

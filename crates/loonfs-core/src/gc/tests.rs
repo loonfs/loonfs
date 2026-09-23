@@ -226,6 +226,12 @@ async fn write_upload_session(store: &LocalFsStore, namespace_id: &NamespaceId) 
     let state = loonfs_api::wire::control::UploadSessionState {
         namespace_id: namespace_id.clone(),
         owner_generation: loonfs_api::NamespaceGeneration(1),
+        content_store_id: crate::namespace::catalog::load_namespace_content_store_id(
+            store,
+            namespace_id,
+        )
+        .await
+        .expect("content store"),
         upload_id: upload_id.clone(),
         content_id: loonfs_api::ContentId::generate(),
         created_at_ms: 1_000,

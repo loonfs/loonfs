@@ -206,6 +206,19 @@ async fn forks_start_activity_at_zero_and_inherit_the_selected_checkpoint_footpr
     write_file_bytes(&store, &parent, "/file", b"newer", &context, Some("newer"))
         .await
         .expect("write");
+    let unavailable_wal = FailStore::new(
+        LocalFsStore::new(dir.path()).expect("statistics store"),
+        KeyPredicate::prefix(loonfs_objectstore::keys::wal_segment_prefix(&parent)),
+        OperationClass::Read,
+        InjectedError::PermissionDenied("WAL unavailable".to_owned()),
+    );
+    unavailable_wal.fail_all();
+    assert_eq!(
+        load_checkpoint_statistics(&unavailable_wal, &parent, &snapshot.checkpoint_id)
+            .await
+            .expect("checkpoint statistics exclude newer WAL"),
+        baseline
+    );
     engine.flush_wal().await.expect("fold parent");
     engine
         .fork_namespace(

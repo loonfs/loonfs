@@ -424,7 +424,12 @@ impl ReadCore {
             &live.head,
             checkpoint_id,
         )
-        .await?;
+        .await
+        .map_err(RuntimeError::from);
+        if should_invalidate_after_result(&pinned) {
+            self.invalidate_namespace_read_cache(namespace_id);
+        }
+        let pinned = pinned?;
         Ok(self.pinned_read_at_basis(namespace_id, pinned, &live))
     }
 
@@ -446,7 +451,12 @@ impl ReadCore {
             &snapshot_id.clone().into(),
             now_ms,
         )
-        .await?;
+        .await
+        .map_err(RuntimeError::from);
+        if should_invalidate_after_result(&pinned) {
+            self.invalidate_namespace_read_cache(namespace_id);
+        }
+        let pinned = pinned?;
         Ok(self.pinned_read_at_basis(namespace_id, pinned, &live))
     }
 

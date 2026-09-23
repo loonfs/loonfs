@@ -1547,6 +1547,11 @@ impl NamespacePublisher {
     fn engine_for<'slot>(&self, slot: &'slot mut EngineSlot) -> &'slot mut NamespaceCommitEngine {
         slot.engine.get_or_insert_with(|| {
             NamespaceCommitEngine::new(self.namespace_id.clone())
+                .manifest_revalidation_interval_ms(
+                    self.read_core
+                        .runtime_cache_config()
+                        .manifest_revalidation_interval_ms,
+                )
                 .segment_cache(self.read_core.metadata_segment_cache())
                 .writer_session(Arc::clone(&slot.session))
         })

@@ -1073,7 +1073,7 @@ expired. The maintenance checkpoint listing keeps expired records visible until
 collection deletes them. Snapshot deletion removes the pin. A second delete returns
 `snapshot_not_found`.
 
-Snapshot reads in an ACL namespace require `read` and `history` on the historical inode, evaluated at the current head.
+Snapshot reads in an ACL namespace require `read` and `history` on the historical inode, evaluated at the current head. The pinned manifest and authorization head must belong to the same generation. A mismatch returns `stale_head` and invalidates the runtime's cached head so a retry uses current grants.
 
 These operations manage the snapshot lifetime. Path stat, inode stat, path directory listing,
 inode children listing, file content, download, and change-feed requests accept an optional
@@ -1132,7 +1132,7 @@ Every call reads the current manifest and uses one fixed clock. It keeps its liv
 A GC response groups related counts. `deleted` contains `wal_segments`,
 `metadata_segments`, `manifests`, `upload_sessions`, `content_objects`, and
 `retired_content_objects`. `deleted_checkpoints_by_owner` contains `fork`,
-`expired`, `snapshot`, and `retired` counts for checkpoint records deleted in the pass. A retired pin is counted when reclamation deletes it after its generation has no retained upload sessions.
+`expired`, `snapshot`, and `retired` counts for checkpoint records deleted in the pass. A retired pin is counted when reclamation deletes it after its generation has no retained upload sessions, or when the pin sweep deletes a pin whose manifest is absent.
 Their sum is the total number of checkpoint records deleted. Each deletion
 is counted once. A target's deletion of its source pin contributes to `fork`
 when the pin was present before deletion. Repeating that deletion on an
@@ -2871,8 +2871,9 @@ resumes with `after_seq={next_after_seq}`.
 
 `after_seq` may equal the current namespace head, which returns an empty page.
 Sequences start over when a deleted namespace id is recreated. A cursor from an
-earlier generation is refused only while it is above the new head; a consumer
-that can span a recreation compares `generation` on the namespace object and
+earlier generation is refused when it is below the retention floor or above the
+head. A cursor within that range is accepted. A consumer that can span a
+recreation compares `generation` on the namespace object and
 rebootstraps when it changes.
 A value above the head is invalid: accepting an unpublished sequence would let
 a consumer silently skip commits as the namespace catches up.

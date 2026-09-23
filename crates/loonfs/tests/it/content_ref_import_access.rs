@@ -360,3 +360,98 @@ async fn prior_generation_import_uses_its_retired_domain_and_current_authority()
     assert_eq!(counts.compare_and_swaps, 0);
     assert_eq!(counts.deletes, 0);
 }
+
+#[tokio::test]
+async fn pinned_reads_refuse_authorization_from_an_earlier_generation() {
+    let (_directory, recording, writer) = open_writer().await;
+    let source = namespace_id("new-grants");
+    let target = namespace_id("old-grants");
+    create_namespace(&writer, &source, acl("administrator")).await;
+    publish_inline(&writer, &source).await;
+    create_namespace(&writer, &target, acl("old-reader")).await;
+    let mut options = PutFileOptions::new(loonfs_test_support::test_actor());
+    options.commit.subject = Some(subject("old-reader"));
+    writer
+        .put_file_bytes(&target, "/source", b"old bytes", options)
+        .await
+        .expect("old file");
+    let mut readers = Vec::new();
+    for _ in 0..3 {
+        let store: SharedObjectStore = recording.clone();
+        let reader = loonfs::FsReader::builder_with_store(store)
+            .runtime_cache(loonfs::RuntimeCacheConfig {
+                manifest_revalidation_interval_ms: 60_000,
+                ..Default::default()
+            })
+            .build()
+            .await
+            .expect("reader")
+            .as_subject(subject("old-reader"));
+        reader
+            .get_path_entry(&target, "/source", Default::default())
+            .await
+            .expect("warm old grants");
+        readers.push(reader);
+    }
+    writer
+        .delete_namespace(&target, Default::default())
+        .await
+        .expect("delete");
+    writer
+        .fork_namespace(
+            &source,
+            &target,
+            ForkNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("fork new grants");
+    let snapshot = writer
+        .create_snapshot(
+            &target,
+            loonfs::CreateSnapshotOptions {
+                name: "new-generation".to_owned(),
+                expires_at_ms: 4_102_444_800_000,
+            },
+        )
+        .await
+        .expect("snapshot");
+    for (index, reader) in readers.iter().enumerate() {
+        let result = match index {
+            0 => reader
+                .pin_namespace_at_checkpoint(&target, &snapshot.checkpoint_id)
+                .await
+                .map(|_| ()),
+            1 => reader
+                .pin_namespace_at_snapshot(&target, &snapshot.checkpoint_id.clone().into())
+                .await
+                .map(|_| ()),
+            _ => reader
+                .list_checkpoint_files_page(
+                    &target,
+                    &snapshot.checkpoint_id,
+                    loonfs_api::PageRequest {
+                        limit: loonfs_api::PaginationPolicy::default()
+                            .resolve_limit(None)
+                            .expect("limit"),
+                        cursor: None,
+                    },
+                )
+                .await
+                .map(|_| ()),
+        };
+        assert!(
+            matches!(result, Err(RuntimeError::Core(error)) if error.code() == ErrorCode::StaleHead)
+        );
+        let pinned = reader
+            .pin_namespace_at_checkpoint(&target, &snapshot.checkpoint_id)
+            .await
+            .expect("retry with current generation");
+        let error = pinned
+            .get_file_bytes("/source")
+            .await
+            .expect_err("old grants cannot read the new generation");
+        assert!(
+            matches!(error, RuntimeError::Core(error) if error.code() == ErrorCode::PathNotFound)
+        );
+    }
+}

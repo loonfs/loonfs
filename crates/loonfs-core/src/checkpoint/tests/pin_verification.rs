@@ -58,7 +58,9 @@ async fn pin_creation_retries_after_compaction_and_collection() {
         let page = crate::checkpoint::list_checkpoint_files_page(
             &store,
             None,
-            &namespace_id,
+            &crate::namespace::control::load_namespace_read_state(&store, &namespace_id)
+                .await
+                .expect("head"),
             &checkpoint.checkpoint_id,
             loonfs_api::PageRequest {
                 cursor: None,
@@ -195,6 +197,8 @@ async fn namespace_deletion_during_pin_verification_deletes_the_pin() {
                 Default::default(),
                 writer,
                 &context,
+                &crate::time::StdMonotonicTimer::default(),
+                0,
             )
             .await
             .expect("delete namespace during verification");
