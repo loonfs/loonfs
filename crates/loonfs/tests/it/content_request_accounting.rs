@@ -12,7 +12,7 @@ use loonfs::{
     ErrorCode, FsWriter, NamespaceId, PutFileOptions, RevisionNo, RuntimeError, SharedObjectStore,
     CONTENT_READ_CHUNK_BYTES,
 };
-use loonfs_api::{ContentId, ContentStoreId};
+use loonfs_api::ContentId;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::stores::{
     BlockingStore, FailStore, InjectedError, KeyPredicate, RecordingStore,
@@ -59,11 +59,11 @@ impl RequestLog {
             Arc::new(LocalFsStore::new(root).expect("create local-fs store"));
         let other = Arc::new(RecordingStore::new(
             inner,
-            KeyPredicate::new(|key| !key.starts_with("content-stores/")),
+            KeyPredicate::new(|key| !is_content_key(key)),
         ));
         let content = Arc::new(RecordingStore::new(
             other.clone() as SharedObjectStore,
-            KeyPredicate::prefix("content-stores/"),
+            KeyPredicate::content_blob(),
         ));
         Self {
             store: content.clone(),
@@ -156,8 +156,6 @@ async fn build_initialized_writer(
         )
         .await
         .expect("create namespace");
-    // The immutable content-store descriptor shares the content-key prefix. Warm it before
-    // resetting a phase so content counts describe blob staging and validation alone.
     writer
         .create_directory(
             namespace_id,
@@ -167,29 +165,6 @@ async fn build_initialized_writer(
         .await
         .expect("warm namespace catalog");
     writer
-}
-
-/// Points a namespace at another namespace's content store, standing in for
-/// a deployment that provisioned both against one shared keyspace. The
-/// binding lives in the manifest, so this rewrites the test manifest.
-async fn bind_namespace_to_content_store(
-    store: &SharedObjectStore,
-    namespace_id: &NamespaceId,
-    content_store_id: ContentStoreId,
-) {
-    let current = loonfs_core::control::load_namespace_current_manifest(store, namespace_id)
-        .await
-        .expect("load manifest");
-    let mut payload = current.envelope.into_payload();
-    payload.content_store_id = content_store_id;
-    let bytes = loonfs_api::wire::manifest::encode_namespace_manifest_json(payload)
-        .expect("encode manifest")
-        .into_parts()
-        .1;
-    store
-        .put_overwrite(&current.object_key, Bytes::from(bytes))
-        .await
-        .expect("bind fixture content store");
 }
 
 /// Full external preparation performs one content HEAD and one full GET.
@@ -381,11 +356,7 @@ async fn independent_namespaces_sharing_a_store_reject_each_others_prepared_cont
         )
         .await
         .expect("create independent target namespace");
-    let source_catalog = loonfs_core::control::load_namespace_catalog_entry(&store, &source)
-        .await
-        .expect("load source catalog");
-    bind_namespace_to_content_store(&store, &target, source_catalog.content_store_id().clone())
-        .await;
+
     writer
         .create_directory(
             &target,
@@ -591,8 +562,6 @@ async fn proxied_upload_completion_proof_publishes_without_additional_content_io
         .await
         .expect("upload content");
     let upload_counts = harness.recording.snapshot();
-    // One blob PUT and nothing else: the namespace's content store is a
-    // field in its manifest, so staging never reads the content-store keyspace.
     assert_eq!(
         upload_counts.operations(KeyClass::Content),
         OperationCounts {
@@ -685,9 +654,6 @@ async fn direct_put_completion_avoids_blob_get_and_prepared_publish_uses_no_cont
         .clone();
     let prepared = completed.prepared;
     assert_eq!(completed.response.content_ref(), Some(&content_ref));
-    // The session path reuses the runtime-resolved immutable store binding
-    // and proves the provider write with one object HEAD; it never reads the
-    // uploaded blob or reloads the content-store descriptor.
     let completion_counts = harness.recording.snapshot();
     assert_eq!(
         completion_counts.operations(KeyClass::Content),
@@ -1212,4 +1178,10 @@ async fn mixed_batch_publishes_admitted_put_and_rejects_unprepared_put_without_c
 
     assert_content_not_prepared(error, &content_ref);
     assert_content_counts(recording.snapshot(), 0, 0, 0, 0);
+}
+
+fn is_content_key(key: &str) -> bool {
+    loonfs_objectstore::layout::parse_object_key(key).is_some_and(|key| {
+        key.family() == loonfs_objectstore::layout::DurableObjectFamily::ContentBlob
+    })
 }

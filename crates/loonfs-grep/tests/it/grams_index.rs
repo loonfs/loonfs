@@ -40,7 +40,7 @@ fn request(pattern: &str) -> GrepRequest {
 /// object behind one file's bytes by diffing around its write.
 async fn content_blob_keys(store: &SharedObjectStore) -> BTreeSet<String> {
     store
-        .list_prefix("content-stores/")
+        .list_prefix("namespaces/")
         .await
         .expect("list content blobs")
         .into_iter()

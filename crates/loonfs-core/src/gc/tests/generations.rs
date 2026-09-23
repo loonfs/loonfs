@@ -30,23 +30,22 @@ async fn recreated_namespace_reclaims_only_eligible_prior_content_and_its_retire
     let namespace_id = NamespaceId::parse("recreated").expect("namespace");
     let inner = LocalFsStore::new(directory.path()).expect("store");
     create(&inner, &namespace_id, 1_000).await;
-    let (upload_id, _, content_store_id, _) =
+    let (upload_id, _, _) =
         complete_upload_for_gc(&inner, &namespace_id, b"old", &context(1_000)).await;
-    let old_keys = owned_content_keys(&inner, &content_store_id, &namespace_id).await;
+    let old_keys = owned_content_keys(&inner, &namespace_id).await;
     delete_namespace(&inner, &namespace_id, Default::default(), &context(2_000))
         .await
         .expect("delete");
     let pin_id = retired_pin(&inner, &namespace_id).await;
     create(&inner, &namespace_id, 3_000).await;
-    let (_, current_content, current_store_id, _) =
+    let (_, current_content, _) =
         complete_upload_for_gc(&inner, &namespace_id, b"new", &context(3_000)).await;
     let current_key = content_blob(
-        &current_store_id,
         &namespace_id,
         current_content.owner_generation,
         &current_content.content_id,
     );
-    let prefix = content_owner_prefix(&content_store_id, &namespace_id, NamespaceGeneration(1));
+    let prefix = content_owner_prefix(&namespace_id, NamespaceGeneration(1));
     let store = RecordingStore::new(inner, KeyPredicate::prefix(&prefix));
     let deadline = 2_000 + GRACE_MS;
     let before = gc_namespace(&store, &namespace_id, &config(), &context(deadline - 1))
@@ -92,11 +91,7 @@ async fn prior_generation_pin_blocks_reclamation_for_the_whole_pass_that_deletes
     let namespace_id = NamespaceId::parse("pinned-generation").expect("namespace");
     let store = LocalFsStore::new(directory.path()).expect("store");
     create(&store, &namespace_id, 1_000).await;
-    let content_store_id =
-        crate::namespace::catalog::load_namespace_content_store_id(&store, &namespace_id)
-            .await
-            .expect("content store");
-    let keys = owned_content_keys(&store, &content_store_id, &namespace_id).await;
+    let keys = owned_content_keys(&store, &namespace_id).await;
     let pin = create_checkpoint(&store, &namespace_id, &context(2_100))
         .await
         .expect("user pin");

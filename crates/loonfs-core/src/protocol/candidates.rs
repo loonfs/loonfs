@@ -14,7 +14,7 @@ use crate::path::write::{CommitRequest, FilesystemOperation, PublishPlanningSess
 use crate::storage::content_admission::PreparedContent;
 use crate::storage::inline_content::InlineContent;
 use loonfs_api::v0::Commit;
-use loonfs_api::{CommitId, ContentId, ContentStoreId, NamespaceGeneration, NamespaceId};
+use loonfs_api::{CommitId, ContentId, NamespaceGeneration, NamespaceId};
 use loonfs_objectstore::ObjectStore;
 use std::collections::{HashMap, HashSet};
 
@@ -131,7 +131,6 @@ pub(super) async fn prepare_candidate_request<S: ObjectStore + ?Sized>(
         candidate,
         namespace_id,
         view.head.generation,
-        view.content_store_id(),
         committed_at_ms,
     ) {
         return CandidateAdmission::independent(Err(error));
@@ -162,7 +161,6 @@ pub(super) fn validate_candidate_content_references(
     candidate: &CommitCandidate,
     namespace_id: &NamespaceId,
     namespace_generation: NamespaceGeneration,
-    content_store_id: &ContentStoreId,
     now_ms: u64,
 ) -> Result<()> {
     match candidate.content_preparation() {
@@ -172,7 +170,6 @@ pub(super) fn validate_candidate_content_references(
             candidate.inline_content(),
             namespace_id,
             namespace_generation,
-            content_store_id,
             now_ms,
         ),
         ContentPreparation::Rejected(error) => Err(error.clone().into()),
@@ -286,7 +283,6 @@ fn validate_commit_content_references(
     inline_content: &[InlineContent],
     namespace_id: &NamespaceId,
     namespace_generation: NamespaceGeneration,
-    content_store_id: &ContentStoreId,
     now_ms: u64,
 ) -> Result<()> {
     let inline_by_content_id = validate_inline_content_references(
@@ -323,9 +319,9 @@ fn validate_commit_content_references(
         let admitted = admissions_by_content_id
             .get(&content_ref.content_id)
             .is_some_and(|candidates| {
-                candidates.iter().any(|admission| {
-                    admission.admits(namespace_id, content_store_id, content_ref, now_ms)
-                })
+                candidates
+                    .iter()
+                    .any(|admission| admission.admits(namespace_id, content_ref, now_ms))
             });
         if !admitted {
             return Err(ContentPreparationError::ContentNotPrepared {

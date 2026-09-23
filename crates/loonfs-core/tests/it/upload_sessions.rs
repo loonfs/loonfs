@@ -234,6 +234,7 @@ async fn a_completed_direct_upload_is_missing_and_not_prepared_after_recreation(
             checksum: Checksum::sha256(bytes),
         },
     };
+
     let catalog = loonfs_core::control::load_namespace_catalog_entry(&store, &namespace_id)
         .await
         .expect("generation one catalog");
@@ -538,11 +539,7 @@ mod streamed_content {
         .expect_err("different bytes into one session conflict");
         assert_eq!(error.code(), ErrorCode::UploadContentConflict);
 
-        let catalog = loonfs_core::control::load_namespace_catalog_entry(&store, &namespace_id)
-            .await
-            .expect("catalog");
         let object_key = content_blob(
-            catalog.content_store_id(),
             &first
                 .content_ref()
                 .expect("staged content")
@@ -642,12 +639,7 @@ mod streamed_content {
             }
         };
 
-        let catalog =
-            loonfs_core::control::load_namespace_catalog_entry(blocking.as_ref(), &namespace_id)
-                .await
-                .expect("catalog");
         let object_key = content_blob(
-            catalog.content_store_id(),
             &staged
                 .content_ref()
                 .expect("staged content")
@@ -747,11 +739,8 @@ mod direct_multipart {
             "the geometry it handed out is the geometry it recorded"
         );
         assert_eq!(checksum_algorithm, begin.target.checksum_algorithm);
-        let catalog = loonfs_core::control::load_namespace_catalog_entry(store, &namespace_id)
-            .await
-            .expect("catalog");
+
         let object_key = content_blob(
-            catalog.content_store_id(),
             &state.namespace_id,
             state.owner_generation,
             &state.content_id,

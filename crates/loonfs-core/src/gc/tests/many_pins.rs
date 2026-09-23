@@ -52,12 +52,7 @@ async fn one_pass_deletes_an_aged_upload_and_every_expired_snapshot_among_many_p
     let session = UploadSessionPayload {
         namespace_id: namespace_id.clone(),
         owner_generation: loonfs_api::NamespaceGeneration(1),
-        content_store_id: crate::namespace::catalog::load_namespace_content_store_id(
-            &store,
-            &namespace_id,
-        )
-        .await
-        .expect("content store"),
+
         upload_id: UploadId::generate(),
         content_id: loonfs_api::ContentId::generate(),
         created_at_ms: setup.now_ms,
@@ -90,7 +85,7 @@ async fn one_pass_deletes_an_aged_upload_and_every_expired_snapshot_among_many_p
     assert_eq!(report.deleted.upload_sessions, 1);
     assert_eq!(report.deleted_checkpoints_by_owner.snapshot, 1025);
     assert_eq!(report.retained.checkpoint_not_deletable, 1);
-    assert_eq!(store.counts().deletes, 1026);
+    assert_eq!(store.counts().deletes, 1027);
     let operations = store.take();
     assert_eq!(
         operations

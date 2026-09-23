@@ -81,10 +81,9 @@ impl ResolvedFileContent {
             .contains(&self.content_ref.size_bytes)
     }
 
-    /// Requires equal store bindings and every content-reference field.
+    /// Requires equality of every content-reference field.
     pub fn has_same_content(&self, other: &Self) -> bool {
-        self.location.object_key() == other.location.object_key()
-            && self.content_ref == other.content_ref
+        self.content_ref == other.content_ref
     }
 }
 
@@ -662,7 +661,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         context: &RuntimeReadContext,
     ) -> Result<CheckpointFilesPage> {
         // Rejects a mismatched or deleted namespace before any read work.
-        self.live_catalog(context)?;
+        self.ensure_live_context(context)?;
         crate::checkpoint::list_checkpoint_files_page(
             &self.store,
             Some(context.segment_cache.as_ref()),
@@ -720,13 +719,12 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         context: &RuntimeReadContext,
     ) -> Result<Vec<u8>> {
         self.require_administrator(context).await?;
-        let catalog = self.live_catalog(context)?;
+        self.ensure_live_context(context)?;
         crate::path::read::ensure_within_read_limit(content_ref.size_bytes, Some(max_bytes))?;
         let location = if content_ref.owner_namespace_id != self.namespace_id {
             ContentLocation::resolve(
                 &self.namespace_id,
                 context.head.generation,
-                catalog.content_store_id(),
                 None,
                 content_ref,
             )?
@@ -741,7 +739,6 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
                 ContentLocation::resolve(
                     &self.namespace_id,
                     context.head.generation,
-                    catalog.content_store_id(),
                     Some(&tail),
                     content_ref,
                 )?
@@ -754,11 +751,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         Ok(location.get_bytes(&self.store, content_ref).await?)
     }
 
-    /// Returns the namespace catalog derived from the pinned head after checking
-    /// that the head belongs to this namespace and is not deleted.
-    ///
-    /// Use this for read paths that do not load a full metadata view.
-    fn live_catalog(&self, context: &RuntimeReadContext) -> Result<VerifiedNamespaceCatalogEntry> {
+    fn ensure_live_context(&self, context: &RuntimeReadContext) -> Result<()> {
         if context.head.namespace_id != self.namespace_id {
             return Err(crate::error::CoreError::NamespaceCorrupt(format!(
                 "head namespace `{}` does not match requested namespace `{}`",
@@ -766,7 +759,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             )));
         }
         crate::namespace::control::ensure_namespace_live(&context.head)?;
-        Ok(VerifiedNamespaceCatalogEntry::from_head(&context.head))
+        Ok(())
     }
 
     /// Lists one revision page for an inode against the pinned runtime read context.
@@ -1049,7 +1042,6 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     pub async fn import_content_ref(
         &self,
         catalog: &VerifiedNamespaceCatalogEntry,
-        source_content_store_id: &loonfs_api::ContentStoreId,
         content_ref: &ContentRef,
     ) -> Result<PreparedContent>
     where
@@ -1058,8 +1050,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         let catalog = self.own_catalog(catalog)?;
         let context = self.mutation_context()?;
         let (_object_key, body) =
-            open_content_import_reader(self.store.clone(), source_content_store_id, content_ref)
-                .await?;
+            open_content_import_reader(self.store.clone(), content_ref).await?;
         crate::protocol::stage_owned_stream(
             &self.store,
             catalog,
@@ -1139,15 +1130,9 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         upload_id: &UploadId,
         subject: Option<&Subject>,
     ) -> Result<UploadSessionView> {
-        let content_store_id = crate::namespace::catalog::load_namespace_content_store_id(
-            &self.store,
-            &self.namespace_id,
-        )
-        .await?;
         crate::protocol::get_upload_status(
             &self.store,
             &self.namespace_id,
-            &content_store_id,
             upload_id,
             subject,
             self.now_ms()?,

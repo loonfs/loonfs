@@ -7,8 +7,8 @@ use crate::metadata::{AccessRevisionRecord, InodeRecord, MetadataState};
 use crate::time::{MonotonicTimer, StdMonotonicTimer};
 use loonfs_api::wire::manifest::{NamespaceAccess, NamespaceManifestPayload};
 use loonfs_api::{
-    AccessRevisionNo, ActorId, ChangeSeq, ContentStoreId, ErrorCode, InodeKind, Namespace,
-    NamespaceId, ROOT_INODE_ID,
+    AccessRevisionNo, ActorId, ChangeSeq, ErrorCode, InodeKind, Namespace, NamespaceId,
+    ROOT_INODE_ID,
 };
 use loonfs_objectstore::ObjectStore;
 use thiserror::Error;
@@ -65,7 +65,6 @@ pub(crate) async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
     let started_ms = timer.monotonic_now_ms();
     let start = NamespaceManifestPayload::initial(
         namespace_id.clone(),
-        ContentStoreId::generate(),
         context.now_ms,
         actor_id.clone(),
         access.clone(),

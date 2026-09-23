@@ -343,7 +343,6 @@ async fn foreign_references_resolve_to_objects_and_object_downloads_do_not_write
         b"foreign",
     );
     let key = content_blob(
-        &context.head.content_store_id,
         &foreign.owner_namespace_id,
         foreign.owner_generation,
         &foreign.content_id,
@@ -387,7 +386,6 @@ async fn foreign_references_resolve_to_objects_and_object_downloads_do_not_write
         ),
         vec![PreparedContent::for_durable_content_write(
             publisher.namespace_id.clone(),
-            stored.content_store_id().clone(),
             stored.content_ref().clone(),
         )],
     );
@@ -440,7 +438,6 @@ async fn direct_downloads_materialize_once_and_do_not_write_after_a_flush() {
             .entry
             .inode_id;
         let key = content_blob(
-            &context.head.content_store_id,
             &publisher.namespace_id,
             value.content_ref().owner_generation,
             &value.content_ref().content_id,
@@ -612,7 +609,6 @@ async fn inline_checksum_failures_match_object_validation() {
     assert_eq!(flush_error.to_string(), error.to_string());
     assert_no_writes(&store);
     let key = content_blob(
-        &context.head.content_store_id,
         &publisher.namespace_id,
         corrupt_ref.owner_generation,
         &corrupt_ref.content_id,

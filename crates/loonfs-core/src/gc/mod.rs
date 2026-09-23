@@ -14,5 +14,4 @@ mod uploads;
 
 pub use collect::gc_namespace;
 pub use config::GcConfig;
-pub use fork_checkpoints::load_retired_content_store;
 pub use reap::{delete_if_aged, GraceAge};

@@ -515,8 +515,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::{Duration, UNIX_EPOCH};
 
-    const CONTENT_KEY: &str =
-        "content-stores/cs/objects/01/23/con_0123456789abcdef0123456789abcdef";
+    const CONTENT_KEY: &str = "namespaces/demo/content/1/con_0123456789abcdef0123456789abcdef";
 
     const FIXTURE_ACCESS_KEY_ID: &str = "AKIAIOSFODNN7EXAMPLE";
     const FIXTURE_SECRET_ACCESS_KEY: &str = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
@@ -722,7 +721,7 @@ mod tests {
         assert!(!signed.headers.contains_key("x-amz-checksum-sha256"));
         assert!(signed
             .url
-            .starts_with("https://bucket.s3.us-east-1.amazonaws.com/tenant-a/content-stores/"));
+            .starts_with("https://bucket.s3.us-east-1.amazonaws.com/tenant-a/namespaces/"));
         assert!(signed
             .url
             .contains("X-Amz-SignedHeaders=host%3Bif-none-match"));
@@ -819,7 +818,7 @@ mod tests {
             .contains("X-Amz-SignedHeaders=host%3Bx-amz-checksum-mode"));
         assert!(signed
             .url
-            .starts_with("https://bucket.s3.us-east-1.amazonaws.com/tenant-a/content-stores/"));
+            .starts_with("https://bucket.s3.us-east-1.amazonaws.com/tenant-a/namespaces/"));
     }
 
     #[tokio::test]
@@ -844,7 +843,7 @@ mod tests {
         assert!(!signed.url.to_ascii_lowercase().contains("range"));
         assert!(signed
             .url
-            .starts_with("https://bucket.s3.us-east-1.amazonaws.com/tenant-a/content-stores/"));
+            .starts_with("https://bucket.s3.us-east-1.amazonaws.com/tenant-a/namespaces/"));
         assert!(!signed.url.contains("secret"));
     }
 
@@ -954,7 +953,7 @@ mod tests {
 
         assert!(signed
             .url
-            .starts_with("https://bucket.s3.us-east-2.amazonaws.com/tenant-a/content-stores/"));
+            .starts_with("https://bucket.s3.us-east-2.amazonaws.com/tenant-a/namespaces/"));
         assert!(!signed.url.contains("bucket.bucket"));
     }
 

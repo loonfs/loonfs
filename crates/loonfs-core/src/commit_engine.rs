@@ -983,8 +983,8 @@ mod tests {
     use crate::namespace::control::load_namespace_read_state;
     use futures::StreamExt;
     use loonfs_api::{
-        ChangeSeq, ContentRef, ContentStoreId, PrincipalId, PrincipalScope, PrincipalSet, Subject,
-        SubjectId, WriterEpoch,
+        ChangeSeq, ContentRef, PrincipalId, PrincipalScope, PrincipalSet, Subject, SubjectId,
+        WriterEpoch,
     };
     use loonfs_objectstore::keys::wal_segment_prefix;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -1033,7 +1033,6 @@ mod tests {
         );
         let proof = PreparedContent::for_durable_content_write(
             NamespaceId::parse("demo").expect("namespace"),
-            ContentStoreId::parse("cs_00000000000000000000000000000001").expect("store"),
             ContentRef::blob_v1(
                 loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
                 loonfs_api::NamespaceGeneration(1),
@@ -1123,11 +1122,8 @@ mod tests {
             ContentId::generate(),
             b"proof",
         );
-        let prepared = PreparedContent::for_durable_content_write(
-            namespace_id.clone(),
-            ContentStoreId::parse("cs_00000000000000000000000000000001").expect("content store id"),
-            content_ref,
-        );
+        let prepared =
+            PreparedContent::for_durable_content_write(namespace_id.clone(), content_ref);
         let oversized_proofs = CommitCandidate::prepared(
             create_dir_request("too-many-proofs", "docs"),
             vec![prepared; crate::limits::MAX_COMMIT_CONTENT_TOKENS + 1],

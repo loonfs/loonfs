@@ -25,7 +25,6 @@ A generation boundary is therefore a lifecycle transition on the existing manife
 | `writer_epoch`, `compactor_epoch` | Increment. Sessions and compactors that captured the previous generation are fenced. |
 | `generation` | Increments. A newly created namespace is generation 1. |
 | `generation_first_manifest_no` | Becomes the new manifest's own number. |
-| `content_store_id` | A fresh domain for a plain recreation; the source's domain for a fork. |
 | `created_at_ms`, `created_by` | Taken from the create or fork request. |
 | `access` | Taken from the create request for a plain recreation; copied from the source for a fork. |
 | `fork_basis` | Absent for a plain recreation; the fork's basis for a fork. |
@@ -39,22 +38,21 @@ Sequences and inode ids repeat across generations, as row ids do when a database
 
 ## Recreating a namespace
 
-Creating a namespace whose current manifest is deleted recreates it. A fork into a deleted id recreates it the same way, with the source's runs and content domain. There is no separate operation and no flag. The create response and the namespace object carry `generation`.
+Creating a namespace whose current manifest is deleted recreates it. A fork into a deleted id recreates it the same way, with the source's runs. There is no separate operation and no flag. The create response and the namespace object carry `generation`.
 
 1. Load the current manifest. Active status answers `namespace_exists`, or the current summary with `allow_existing`. Deleted status continues below. An absent namespace takes the ordinary creation path.
 2. Take the WAL tip from the tombstone's folded WAL number. Deletion stamps the discovered tip there, and publishing the tombstone acquired the writer epoch, so no further WAL object can be published under it. Recreation reads no WAL object, which matters because the deleted generation's WAL objects are unprotected and may already be collected.
 3. Write a retired pin over the tombstone with put-if-absent. Its id is `pin_{tombstone_no:020}-` followed by sixteen hex characters derived from the namespace id and the tombstone number, so repeated attempts land on one record. The next section describes the pin.
-4. Write the content-store descriptor with put-if-absent, for a fresh domain on a plain recreation or the source's domain on a fork.
-5. Build the new manifest from the table above and publish it at the tombstone's number plus one with put-if-absent, within the metadata publication budget, measured from step 1 or, for a fork, from before it creates its source pin.
-6. Publication raises the hint to the new manifest number. A failed raise does not fail the creation.
+4. Build the new manifest from the table above and publish it at the tombstone's number plus one with put-if-absent, within the metadata publication budget, measured from step 1 or, for a fork, from before it creates its source pin.
+5. Publication raises the hint to the new manifest number. A failed raise does not fail the creation.
 
 A losing manifest put reads the winner. An active winner is a concurrent recreation and answers `namespace_exists`, or the winner with `allow_existing`. A newer tombstone means another generation was created and deleted, so recreation retries over that tombstone. A put with an unknown transport outcome confirms its own success only by reading back the exact proposed manifest.
 
-A lost attempt can leave its retired pin and its descriptor behind. The pin is over a real tombstone and describes real reclamation work, and its derived id means concurrent attempts wrote one record. The descriptor is an unused domain, as a lost ordinary creation can leave, and is never collected.
+A lost attempt can leave its retired pin behind. The pin is over a real tombstone and describes real reclamation work, and its derived id means concurrent attempts wrote one record.
 
 ## Reclaiming a prior generation
 
-A deleted generation still owns content under its owner prefix in its content domain, and if it was a fork it still holds a pin under its source. Reclaiming it sweeps that prefix and deletes that pin. While a deleted manifest is current, the collector finds it through the manifest itself. After recreation the current manifest is active, so the collector needs another way to find prior generations, and there is no mutable object in which to record a retirement deadline.
+A deleted generation still owns content under its generation's content prefix, and if it was a fork it still holds a pin under its source. Reclaiming it sweeps that prefix and deletes that pin. While a deleted manifest is current, the collector finds it through the manifest itself. After recreation the current manifest is active, so the collector needs another way to find prior generations, and there is no mutable object in which to record a retirement deadline.
 
 ### Retired pins
 
@@ -84,7 +82,7 @@ Reclaiming a tombstone `T`:
 
 1. Load `T` through the retired pin's manifest reference and verify its checksum, or use the current manifest when it is itself deleted.
 2. Confirm the deadline and the pin range. Otherwise report the derived deadline and stop.
-3. Confirm that the retired pin still exists, or that the current manifest is still `T`. Then sweep `content-stores/{T.content_store_id}/objects/{namespace_id}/{T.generation}/` under the rules of format section 11.8.
+3. Confirm that the retired pin still exists, or that the current manifest is still `T`. Then sweep `namespaces/{namespace_id}/content/{T.generation}/` under the rules of format section 11.8.
 4. If `T` has a fork basis, delete the source pin it names.
 5. Delete the retired pin, if there is one.
 
@@ -108,11 +106,11 @@ When `T`'s current manifest does not name the pin and `T`'s generation is above 
 
 ## Content
 
-Content keys carry the owner namespace id and owner generation. Two generations never share an owner prefix because the prefix carries the generation, whichever content domain they use. The retired owner's sweep deletes only that generation's prefix. Content references carry both owner fields; the domain comes from the manifest a reader resolves them through.
+Content keys are `namespaces/{owner_namespace_id}/content/{owner_generation}/{content_id}`. The reference supplies all three values. The retired owner's sweep deletes only that generation's prefix.
 
 Completed-upload receipts and content tokens are bound to the namespace and owner generation. An upload session opened under one generation cannot be published in the next: its receipt names the prior generation and admission refuses it. Direct transfer capabilities issued under the old generation expire on their own inside the retirement grace.
 
-A cross-namespace import that reads content from a deleted owner resolves the content-store id from the pinned manifest it imports through, not from the owner's current manifest. The owner's current manifest may belong to a later generation with a different domain.
+A cross-namespace import checks authorization against the owner's current head and reads the reference's own key. A reference from the owner's current generation may use resident inline bytes. Once an earlier generation's content prefix is reclaimed, the object is missing. No retired-pin lookup is needed.
 
 ## Writers, retries, and the API
 
@@ -129,7 +127,6 @@ Each delete-and-recreate cycle adds a fixed number of objects and grows nothing 
 | --- | --- | --- |
 | Tombstone manifest | 1 | Until its generation is reclaimed and it ages out as an old manifest |
 | Retired pin | 1 | Until its generation is reclaimed |
-| Content-store descriptor | 1 for a plain recreation; shared for a fork | Never collected, like every descriptor |
 | New generation's manifest | 1 | An ordinary manifest |
 
 The current manifest carries two integers for generations, whatever their count. Reads and commits load the hint, the current manifest, and the WAL tail, and never learn how many generations exist. A fork basis is one read regardless of the source's history.

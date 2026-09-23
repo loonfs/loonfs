@@ -11,7 +11,7 @@ use crate::path::read::{load_metadata_view, LoadedMetadataView, ReadLoadContext}
 use crate::protocol::AbandonedUpload;
 use crate::storage::content::delete_unpublished_content_object;
 use loonfs_api::wire::control::{UploadSessionPayload, UploadSessionRecordStatus};
-use loonfs_api::{ContentStoreId, NamespaceId};
+use loonfs_api::NamespaceId;
 use loonfs_objectstore::ObjectStore;
 use tokio::sync::OnceCell;
 
@@ -109,7 +109,6 @@ pub(super) async fn sweep_upload_session<S: ObjectStore + ?Sized>(
         return Ok(retain_undated());
     }
     let generation_state = sweep.live.generation_state(state.owner_generation);
-    let content_store_id = &state.content_store_id;
     match generation_state {
         GenerationState::Waiting { deadline_ms } => return Ok(retain_until(deadline_ms)),
         GenerationState::Held => return Ok(retain_undated()),
@@ -118,7 +117,7 @@ pub(super) async fn sweep_upload_session<S: ObjectStore + ?Sized>(
                 state.status,
                 UploadSessionRecordStatus::Open { .. } | UploadSessionRecordStatus::Aborted { .. }
             ) && !AbandonedUpload::of(state)
-                .release_provider(sweep.store, content_store_id)
+                .release_provider(sweep.store)
                 .await
             {
                 return Ok(retain_undated());
@@ -132,7 +131,7 @@ pub(super) async fn sweep_upload_session<S: ObjectStore + ?Sized>(
     let retired_content = generation_state == GenerationState::Eligible;
     match &state.status {
         UploadSessionRecordStatus::Open { expires_at_ms, .. } => {
-            abort_expired_session(sweep, state, content_store_id, *expires_at_ms).await
+            abort_expired_session(sweep, state, *expires_at_ms).await
         }
         UploadSessionRecordStatus::Aborted { aborted_at_ms } => {
             if sweep.context.now_ms.saturating_sub(*aborted_at_ms) < sweep.grace_window_ms {
@@ -142,10 +141,7 @@ pub(super) async fn sweep_upload_session<S: ObjectStore + ?Sized>(
             }
             // Repeat provider cleanup so a later pass completes work left by a crash
             // after the abort CAS.
-            if !AbandonedUpload::of(state)
-                .release(sweep.store, content_store_id)
-                .await
-            {
+            if !AbandonedUpload::of(state).release(sweep.store).await {
                 return Ok(retain_undated());
             }
             // Do not count this as reclaimed content. Abort cleanup runs even when no
@@ -194,7 +190,6 @@ pub(super) async fn sweep_upload_session<S: ObjectStore + ?Sized>(
                 ContentReference::Absent => {
                     if !delete_unpublished_content_object(
                         sweep.store,
-                        content_store_id,
                         &state.namespace_id,
                         state.owner_generation,
                         &state.content_id,
@@ -234,7 +229,6 @@ fn retain_undated() -> UploadSessionSweep {
 async fn abort_expired_session<S: ObjectStore + ?Sized>(
     sweep: &UploadSweepContext<'_, S>,
     state: &UploadSessionPayload,
-    content_store_id: &ContentStoreId,
     expires_at_ms: u64,
 ) -> Result<UploadSessionSweep> {
     if sweep.context.now_ms.saturating_sub(expires_at_ms) < sweep.grace_window_ms {
@@ -264,7 +258,7 @@ async fn abort_expired_session<S: ObjectStore + ?Sized>(
     match aborted {
         // Keep the newly aborted record until its post-abort grace period expires.
         Ok(CasAttempt::Settled(Some(abandoned))) => {
-            let _ = abandoned.release(sweep.store, content_store_id).await;
+            let _ = abandoned.release(sweep.store).await;
             Ok(retain_until(
                 sweep.context.now_ms.saturating_add(sweep.grace_window_ms),
             ))

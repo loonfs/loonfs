@@ -6,7 +6,6 @@ use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::limits::MAX_UNFLUSHED_WAL_SEGMENTS;
 use crate::metadata::{CommitReceiptRecord, MetadataView};
 use crate::namespace::basis::{MetadataBasis, MetadataBasisIdentity};
-use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
 use crate::namespace::read_anchor::load_head_and_metadata_basis;
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::writer_epoch::ensure_writer_not_fenced;
@@ -14,12 +13,11 @@ use crate::wal::load_replayed_wal_tail;
 use crate::wal::ProjectedWalTail;
 use loonfs_api::v0::Commit;
 use loonfs_api::wire::control::AcquiredWriter;
-use loonfs_api::{ChangeSeq, CommitId, ContentStoreId, NamespaceId};
+use loonfs_api::{ChangeSeq, CommitId, NamespaceId};
 use loonfs_objectstore::ObjectStore;
 use std::sync::Arc;
 
 pub(crate) struct PublishMetadataView<'a, S: ObjectStore + ?Sized> {
-    content_store_id: ContentStoreId,
     pub(super) head: NamespaceReadState,
     pub(super) acquired_writer: AcquiredWriter,
     manifest_segments: VerifiedMetadataSegments<'a, S>,
@@ -34,10 +32,6 @@ pub(crate) struct PublishMetadataView<'a, S: ObjectStore + ?Sized> {
 impl<S: ObjectStore + ?Sized> PublishMetadataView<'_, S> {
     pub(crate) fn metadata_view(&self) -> MetadataView<'_, '_, S> {
         MetadataView::from_loaded_head(&self.head, &self.manifest_segments, &self.tail_state.rows)
-    }
-
-    pub(crate) fn content_store_id(&self) -> &ContentStoreId {
-        &self.content_store_id
     }
 
     pub(super) fn write_stop(&self) -> Option<u64> {
@@ -185,7 +179,6 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
         ));
     }
     ensure_writer_not_fenced(&head, &acquired_writer)?;
-    let catalog_entry = VerifiedNamespaceCatalogEntry::from_head(&head);
     let loaded_basis = load_basis_metadata_segments(store, segment_cache, &loaded.basis).await?;
     let key = PublishProjectionKey {
         namespace_id: namespace_id.clone(),
@@ -205,7 +198,6 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
 
     Ok((
         PublishMetadataView {
-            content_store_id: catalog_entry.content_store_id().clone(),
             head,
             acquired_writer,
             manifest_segments,
@@ -278,8 +270,6 @@ mod tests {
     fn projection(key: PublishProjectionKey) -> PublishTailProjection {
         let mut head = NamespaceReadState::initial(
             key.namespace_id.clone(),
-            ContentStoreId::parse("cs_0123456789abcdef0123456789abcdef")
-                .expect("valid content store id"),
             1_000,
             loonfs_test_support::test_actor(),
         );

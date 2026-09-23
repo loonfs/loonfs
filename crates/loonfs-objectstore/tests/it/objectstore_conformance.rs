@@ -416,8 +416,6 @@ fn probe_report_lines(report: &StoreProbeReport) -> String {
 /// Returns the object key used by the stored-checksum test.
 fn stored_checksum_test_key() -> String {
     content_blob(
-        &loonfs_api::ContentStoreId::parse("cs_00000000000000000000000000000001")
-            .expect("valid content store id"),
         &loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
         loonfs_api::NamespaceGeneration(1),
         &ContentId::parse("con_9a41c07d55e2410fb3c6d8e1f2a3b4c5").expect("valid content id"),
@@ -466,8 +464,6 @@ async fn assert_put_stores_a_trustworthy_checksum<S: ObjectStore>(store: &S, pro
 /// The content key a streamed-write exercise writes to and cleans up.
 fn streamed_write_key() -> String {
     content_blob(
-        &loonfs_api::ContentStoreId::parse("cs_00000000000000000000000000000001")
-            .expect("valid content store id"),
         &loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
         loonfs_api::NamespaceGeneration(1),
         &ContentId::parse("con_5723ea9d1c4b48f0a1d2e3f4a5b6c7d8").expect("valid content id"),
@@ -521,12 +517,15 @@ async fn assert_streamed_write_round_trips<S: ObjectStore>(store: &S) {
     );
 
     store.delete(&key).await.expect("delete streamed object");
-    let prefix = key.rsplit_once('/').expect("content key has a shard").0;
+    let prefix = key
+        .rsplit_once('/')
+        .expect("content key has a generation prefix")
+        .0;
     assert!(
         store
             .list_prefix(&format!("{prefix}/"))
             .await
-            .expect("list the streamed object's shard")
+            .expect("list the streamed object's generation prefix")
             .is_empty(),
         "a streamed-write exercise leaves nothing behind"
     );

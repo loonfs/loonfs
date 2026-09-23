@@ -814,8 +814,6 @@ async fn manifest_run_rejects_rows_after_run_seq() {
     .expect("write empty metadata run segments");
     let manifest = encode_namespace_manifest_json(NamespaceManifestPayload {
         activity: Default::default(),
-        content_store_id: loonfs_api::ContentStoreId::parse("cs_0123456789abcdef0123456789abcdef")
-            .expect("content store"),
         created_at_ms: 1_000,
         created_by: loonfs_test_support::test_actor(),
         access: loonfs_api::NamespaceAccess::Unrestricted {},

@@ -80,20 +80,8 @@ async fn namespace(runtime: &TestRuntime) -> NamespaceId {
     namespace_id
 }
 
-/// The object key one staged reference lives at.
-async fn content_key(
-    store: &SharedObjectStore,
-    namespace_id: &NamespaceId,
-    content_ref: &ContentRef,
-) -> String {
-    let content_store_id =
-        loonfs::control::load_namespace_catalog_entry(store.as_ref(), namespace_id)
-            .await
-            .expect("load namespace catalog")
-            .content_store_id()
-            .clone();
+fn content_key(content_ref: &ContentRef) -> String {
     loonfs_objectstore::keys::content_blob(
-        &content_store_id,
         &content_ref.owner_namespace_id,
         content_ref.owner_generation,
         &content_ref.content_id,
@@ -138,7 +126,7 @@ async fn content_prepared_and_never_published_is_reclaimed_with_its_session() {
         .prepare_file_bytes(&namespace_id, b"never published")
         .await
         .expect("prepare content");
-    let orphan_key = content_key(&store, &namespace_id, prepared.content_ref()).await;
+    let orphan_key = content_key(prepared.content_ref());
     assert!(exists(&store, &orphan_key).await);
 
     let staged_at_ms = loonfs::current_time_ms().expect("wall clock");
@@ -191,7 +179,7 @@ async fn a_published_put_keeps_its_content_and_loses_only_the_session_record() {
         .content_ref()
         .cloned()
         .expect("a file carries a content ref");
-    let published_key = content_key(&store, &namespace_id, &content_ref).await;
+    let published_key = content_key(&content_ref);
 
     let report = collect(
         &store,
@@ -240,14 +228,14 @@ async fn imported_content_survives_collection_in_the_source_namespace() {
         .await
         .expect("prepare source content");
     let source_ref = source_prepared.content_ref().clone();
-    let source_key = content_key(&store, &source, &source_ref).await;
+    let source_key = content_key(&source_ref);
     let imported = runtime
         .writer
         .prepare_content_ref(&target, source_ref)
         .await
         .expect("import source content");
     let imported_ref = imported.content_ref().clone();
-    let imported_key = content_key(&store, &target, &imported_ref).await;
+    let imported_key = content_key(&imported_ref);
     assert_ne!(
         source_key, imported_key,
         "import must mint a fresh identity"
@@ -310,7 +298,7 @@ async fn a_conflicting_upload_is_reclaimed_and_the_published_content_survives() 
         .content_ref()
         .cloned()
         .expect("a file carries a content ref");
-    let committed_key = content_key(&store, &namespace_id, &committed_content_ref).await;
+    let committed_key = content_key(&committed_content_ref);
 
     let retry = runtime
         .writer

@@ -327,8 +327,7 @@ mod tests {
     use loonfs_api::ChecksumAlgorithm;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-    const CONTENT_KEY: &str =
-        "content-stores/cs/objects/01/23/con_0123456789abcdef0123456789abcdef";
+    const CONTENT_KEY: &str = "namespaces/demo/content/1/con_0123456789abcdef0123456789abcdef";
     /// 2023-11-14T22:13:20Z, the instant every expected signature below was
     /// produced at.
     const SIGNING_EPOCH_SECS: u64 = 1_700_000_000;
@@ -344,18 +343,12 @@ mod tests {
          %2F20231114%2Fauto%2Fstorage%2Fgoog4_request\
          &X-Goog-Date=20231114T221320Z&X-Goog-Expires=900";
 
-    // The expected signatures below were produced by Google's own
-    // `google-cloud-storage` Python client (`generate_signed_url_v4`) against
-    // this fixture key, at a pinned timestamp. They are therefore an
-    // independent implementation's answer, not this module's own output
-    // recorded back: a construction bug here -- a wrong credential scope, a
-    // dropped signed header, a mis-encoded path -- changes the signature and
-    // fails these tests.
-    const PUT_PREFIXED_SIGNATURE: &str = "83f8dbb6139d451909bb06f6fdcac0bc4fe0f3343266af7244cfb896d1230c0942962db84554a7cac021eb9cde6a81279f031bdd4735e10c9915c684357452df2f0844e7ad2ded8d69f3e63b7f678330213564093a2668a371227b4aceab01364cdf5f12ee6661a8d95cd76b35cea7eacc80eb950caa3bd96a99c6b5a1fc73e59d9c026528ffe7362c3228038a8e57a71dd9f0706010ba0327dbdeac39f6d0281860a0918cbb9ef564c8a05c14a79d3b9266ef8e466be901ea1a539cb483f50590ca6dac5a038498a5a74d591b22c25739ee9eb994ec9186c4d7b47d6871fec10881d031d8c1aba6acdc488980921db54c412a974ca1fc91805d76dc05a9ec11";
-    const GET_PREFIXED_SIGNATURE: &str = "0a3a4a24c04a97eafee5fc2038c2a5d774f8246d8a69a1cca83a9c0c3585cd4a0516f2727d4c270112b1a8fd9f7d9c274ba42a27d81898266752233c877a61b7c1e4d47a9126033347382242a8b10e29656e28188492bede3f5108da056d77e572193633e7d28a075282c0b99f96437d13f674532b9a078114130b45789d427d8f5d108efacf07c27ebcbe1a460af18470c8f8289929c4fb60049b6ff0c7ed7cfa95f2b4063980faf342a75a2cead80d4e21d9cd9ee152779c0b549ad16d650a211c938e1febbbbb77d943e77344eb9ed89e0a3971d2ef89075971dae7a3be163fcec135f2036f3d31b15121773fb1f9f2307d0a6b5b4bbdf18d236d7742e89a";
-    const HEAD_PREFIXED_SIGNATURE: &str = "19357d0b1acda281239c83d61e360fad813d2ae5323cc1803d6669f6665062cf6dd639382d1ba37e9ae46f53c166908da32314a1b68c3af9adae8e2bd405af49f5b7e9ea6c096a32a7def051f925bcde9f972470e50398eb4787ec7fef560926c3bf5a1baf7efbf57201a0d2cfb593654680e3122f807e4e7452adc04e142fb8ccd9aa126a28400acca5dbb2f08de129edd1a4608fb116f9ae11efbfed83f762d4d1b9765a8c8c4ebbbe3de3bc8ffffcc370aaaba40ee6f01e6bc59bd053a41e1714f1bbb3ae061847ff6b4c3ece7532cf3b6568024c3705cd568876e3a1c2547958e188146be944915657923614257cb857db1691718efaf16d2b88a0afebdd";
-    const PUT_UNPREFIXED_SIGNATURE: &str = "9d6513f548d0462b2ce600d888135635da7e9f63ec715a71b2db7931a395a76f259dfa926e2dbe215009154aa33373cae2c29ca3d5fe3c0c42b143cea0c73b02c1325d8d88e001a5d13f123c2eaed8af4a98a3c15e411543775476457c1926146f50f92db72b16c39a0042b8f0486939e2d8c9bb43e174aaf14ef4db73663c07cbf679e92f92290ea97450c3c1335a4c7d9753ef9e1760634021f5480d127fe21a8e94f264b5bcd703f1e8fff99bf469240ec5e83fde4149b400be6a3d7856e99a646146fc7554b495c3abf4d59c1d3e8e3bf28c04028202f7117a0a6a3ee68d00cd23de762aa3fa0fb78f8fc2160c06393c089254a59dfad57f28cffb246048";
-    const GET_ESCAPED_SIGNATURE: &str = "32a9b708f6681f2725b500fd65776c471170a8c52bf912473f69c029264303d07c8e33619300384a175c5390ba89b12aeaa127dac514a19d0d6c53a4d39794b65dd85c0842662be728b9437454767352969a6f588c70525fb5306fc5463663ab364bdcd1a85469e9a7bb8fa5d87073b97f028809836cbac7ebd056104d847cd4c59bf8ea27b7116b8b3116ad93b3ff8b2ef73e0c5b5afc8a19312c5a042b2659fbe991f5ee0b4c7d36af73ed428266c8be2c6766370332afadbfc342a5c4dde67805fa2517cd2ae1eab4e77579fb4e8df3f53b38788de706e28253d55ed47c873c4556691f377c84a613de67ac8f977f743bfdaa7ff61e3ae4227254b9e7d536";
+    // Independent Python canonicalization and OpenSSL signing pin the exact request.
+    const PUT_PREFIXED_SIGNATURE: &str = "3e74ead682136fae71d81780f6fdad130156769da91da4001268ebafc5f31bf1c6cb5e8869483ed0ee812c5717f5e3301e466103499670b0be79ef4c8a4b83113834006ded6e2f192cab8c33affee746f1d72115ef3d71a60e19719fe424f273639b5486753dcf5593c72c98a412bbd8e61a4064379ffd5bf5b0b9373bb0ea42e720caf4db794a0bcfbc009504ef2c152ac50c823e7ae2b7a97f40db277e0f7561a9314131f3c3805b6eca5a4e78a4319807b423d8ee050003f9bbecb3ce1c0cea5be6260cf3f4b610de68af3d53c8c13309d0d6cb68427ec1c98f250dd87d664347384b97d8559e398c4425c1a7007809304e212ed8a40aa61a274f18c07b0d";
+    const GET_PREFIXED_SIGNATURE: &str = "5379d28b4c40de130ef15367df57eb297b40da5156e42c85747f5940eac5296ef8408d779cacaf49e0c74e536d253798985af2e200fb9d2d3c80c6e9ab11b24d47f3c6633c6a94dd122c6d0adb0f33b377365eddf9f433dd4e53d2168510ba2238688b96d34e588280857e7d8ec1b5482e6ec1526854e47aaa5a6ffc8afb913e17f1dfa7b59073c73e0197bf411c029bfd894e78fcbeeac3f70f9666118dcd53f6cd93e36c997a427750f0d005e012c96c07fe2607c57a606daf4e1ad166d7582f67a103697e7a85b5d5dafc73dd6e63fd130d71d5560ba27362cc490ed5f5e47ccdfa51ac42cbe92cae976da944c3d920b7d8ebd44b11f2ef8b313f83dd1796";
+    const HEAD_PREFIXED_SIGNATURE: &str = "4525bf649bf2cab8ad9af4e9bd0434f6649ab94443aa01c9a17b58613e5efc34cb754cfe95a21a45902bf046c6db074954b37abd39dcd07bb334fa9df7bed4bccc6ac9f0ac386691ff6a5088802a1a85d6def4f6fc97d70b1dd7dce64d691d254f555d90e7a8f8a979a70f0d6772af943e109711df9ae13817cdf82f71fb5fd17ec7f3db632ee6f8f07140d66911b767d9bd2a0712ad0de43198e1e6fbdad16401f06e494ff21e25ef2321d1374df0bc9338018b2972fa6693626d95fd5d4b8599b84fcee6eadecfe08375928b4e931c25219dd2e8670a6eeeb863665381fc3078876286ff78b99ca13796f7df78d808e158150b43f18dd8d5203c5b4cbca356";
+    const PUT_UNPREFIXED_SIGNATURE: &str = "050c3d185f67287307e11afe5b0e540ebe8d70b97c739da1bf0d00411b52a64a158eb589f7bb533124d97c2fc8fa05f7854fee792d6b133955e927897daf306e302f308483fcbb172f4b857f191778df47e1a07e87f5ffa949e699740b365c534ba19a14d8eb428dfd470efa908b0436e4f39e0737ed49770d0d92aa5cd1cc8c1e6e67d8e45e9a9d0ec3762d3d2eac099f4d2ef703f16d43ad39caf00ad245ec5b1516cd3e9a614b414e0200b7d2b5cd61271fc0267fa6de302745ac9c9d67e198d91d8fa9c7236e5a0ada145b9f553de0d2af55285a99de09627a54685d08f8252cb625dff68a9ad7eb48c2963466ebc10772dfaa6d93c6c6516b5ac4840620";
+    const GET_ESCAPED_SIGNATURE: &str = "9ce2dae7e53be04a9600633cba86125e16d01b8a903c708d026913777e7717b69766387dafcc9c95eaefe2fe49872b3779834aedef86d5f6d63557edd0320c8f542d2cdaa2d3429dab81043f65938d3f7cb26f98614a3bd63b32a6a808cc9830998903b45f5b94d4bc309206a7702f85e5158eeb1f495540bb98f6101ba68b5f521208058bc4f3c838804441a98fe14987ebc99bba62ba484138c593c497323e890157483ee1225e2473a79ea804774a0850a18bd89cf0ede27238a43a35a13e6a8711d8cc7ddd2d31029e42c4d8c3ee830156b5d5e2600d3d733287f89a18b227c216975a8fb235834d2fc5a4d50cedf2fb6cbb84a7c640fb4b06ac035325bc";
 
     fn signing_time() -> SystemTime {
         UNIX_EPOCH + Duration::from_secs(SIGNING_EPOCH_SECS)
@@ -528,7 +521,8 @@ mod tests {
         let signed = presigner(Some("tenant-a"))
             .presign_get(
                 PresignedGetRequest {
-                    object_key: "content-stores/cs/objects/a b/c+d/e~f/con_0123456789abcdef0123456789abcdef",
+                    object_key:
+                        "namespaces/a b/c+d/e~f/content/1/con_0123456789abcdef0123456789abcdef",
                     expires_in: EXPIRES_IN,
                 },
                 signing_time(),
@@ -539,8 +533,8 @@ mod tests {
         assert_eq!(
             signed.url,
             format!(
-                "https://storage.googleapis.com/bucket/tenant-a/content-stores/cs/objects\
-                 /a%20b/c%2Bd/e~f/con_0123456789abcdef0123456789abcdef?{EXPECTED_CREDENTIAL}\
+                "https://storage.googleapis.com/bucket/tenant-a/namespaces\
+                 /a%20b/c%2Bd/e~f/content/1/con_0123456789abcdef0123456789abcdef?{EXPECTED_CREDENTIAL}\
                  &X-Goog-SignedHeaders=host&X-Goog-Signature={GET_ESCAPED_SIGNATURE}"
             )
         );

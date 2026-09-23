@@ -49,6 +49,8 @@ pub(crate) async fn publish_manifest<S: ObjectStore + ?Sized>(
     timer: &dyn MonotonicTimer,
     started_ms: u64,
 ) -> Result<ManifestPublicationOutcome> {
+    let starts_generation = manifest.envelope().payload().manifest_no
+        == manifest.envelope().payload().generation_first_manifest_no;
     let candidate = CurrentManifest {
         manifest: manifest_ref_for(namespace_id, manifest.envelope()),
         generation: manifest.envelope().payload().generation,
@@ -74,7 +76,12 @@ pub(crate) async fn publish_manifest<S: ObjectStore + ?Sized>(
                 current.state.clone(),
             ));
         }
-        match classify_current(&current.state, &candidate, expected_predecessor) {
+        match classify_current(
+            &current.state,
+            &candidate,
+            expected_predecessor,
+            starts_generation,
+        ) {
             ManifestPublicationOutcome::Installable => {}
             outcome => return Ok(outcome),
         }
@@ -108,7 +115,14 @@ pub(crate) async fn publish_manifest<S: ObjectStore + ?Sized>(
     {
         Ok(_) => ManifestPublicationOutcome::Published(candidate.clone()),
         Err(ObjectStoreError::PreconditionFailed { .. }) => {
-            classify_current_manifest(store, namespace_id, &candidate, expected_predecessor).await?
+            classify_current_manifest(
+                store,
+                namespace_id,
+                &candidate,
+                expected_predecessor,
+                starts_generation,
+            )
+            .await?
         }
         Err(error @ ObjectStoreError::Transport { .. }) => {
             settle_control_write::<_, CoreError, (), CoreError, _, _>(
@@ -133,6 +147,7 @@ pub(crate) async fn publish_manifest<S: ObjectStore + ?Sized>(
                         namespace_id,
                         &candidate,
                         expected_predecessor,
+                        starts_generation,
                     )
                     .await?
                     {
@@ -169,9 +184,15 @@ fn classify_current(
     current: &CurrentManifest,
     candidate: &CurrentManifest,
     expected_predecessor: Option<ManifestNo>,
+    starts_generation: bool,
 ) -> ManifestPublicationOutcome {
     if current.manifest == candidate.manifest {
-        ManifestPublicationOutcome::Published(current.clone())
+        // Concurrent creates can have identical payloads. Only a put or ambiguous read-back confirms installation.
+        if starts_generation {
+            ManifestPublicationOutcome::CoveredByCurrent(current.clone())
+        } else {
+            ManifestPublicationOutcome::Published(current.clone())
+        }
     } else if current.compactor_epoch > candidate.compactor_epoch {
         ManifestPublicationOutcome::PredecessorChanged(current.clone())
     } else if current.folded_wal_no >= candidate.folded_wal_no
@@ -190,12 +211,18 @@ async fn classify_current_manifest<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     candidate: &CurrentManifest,
     expected_predecessor: Option<ManifestNo>,
+    starts_generation: bool,
 ) -> Result<ManifestPublicationOutcome> {
     Ok(load_current_manifest_if_present(store, namespace_id)
         .await
         .map_err(CoreError::ControlObjectLoad)?
         .map_or(ManifestPublicationOutcome::Installable, |loaded| {
-            classify_current(&loaded.state, candidate, expected_predecessor)
+            classify_current(
+                &loaded.state,
+                candidate,
+                expected_predecessor,
+                starts_generation,
+            )
         }))
 }
 

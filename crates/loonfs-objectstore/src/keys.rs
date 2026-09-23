@@ -4,8 +4,8 @@
 
 use loonfs_api::wire::manifest::MetadataSegmentRef;
 use loonfs_api::{
-    ContentId, ContentStoreId, ManifestNo, MetadataSegmentId, NamespaceGeneration, NamespaceId,
-    PinId, UploadId, WalNo,
+    ContentId, ManifestNo, MetadataSegmentId, NamespaceGeneration, NamespaceId, PinId, UploadId,
+    WalNo,
 };
 
 /// Builds the listing prefix containing every durable object owned by one namespace.
@@ -79,29 +79,21 @@ pub fn upload_session(namespace_id: &NamespaceId, upload_id: &UploadId) -> Strin
     format!("namespaces/{namespace_id}/uploads/{upload_id}.json")
 }
 
-/// Builds the descriptor key beside a content domain's objects.
-pub fn content_store(content_store_id: &ContentStoreId) -> String {
-    format!("content-stores/{content_store_id}/store.json")
-}
-
 /// Builds a listing prefix that excludes other owners, including longer namespace ids.
 pub fn content_owner_prefix(
-    content_store_id: &ContentStoreId,
     owner_namespace_id: &NamespaceId,
     owner_generation: NamespaceGeneration,
 ) -> String {
-    format!("content-stores/{content_store_id}/objects/{owner_namespace_id}/{owner_generation}/")
+    format!("namespaces/{owner_namespace_id}/content/{owner_generation}/")
 }
 
 /// Builds the immutable content-object key for one content identity.
 pub fn content_blob(
-    content_store_id: &ContentStoreId,
     owner_namespace_id: &NamespaceId,
     owner_generation: NamespaceGeneration,
     content_id: &ContentId,
 ) -> String {
-    let [first_shard, second_shard] = content_id.shard_prefixes();
-    format!("content-stores/{content_store_id}/objects/{owner_namespace_id}/{owner_generation}/{first_shard}/{second_shard}/{content_id}")
+    format!("namespaces/{owner_namespace_id}/content/{owner_generation}/{content_id}")
 }
 
 #[cfg(test)]
@@ -110,15 +102,14 @@ mod tests {
     #![allow(clippy::disallowed_methods)]
 
     use super::{
-        checkpoint_record, content_blob, content_store, hint, metadata_manifest_object,
-        metadata_segment, metadata_segment_object_key, upload_session, wal_segment,
-        wal_segment_prefix,
+        checkpoint_record, content_blob, hint, metadata_manifest_object, metadata_segment,
+        metadata_segment_object_key, upload_session, wal_segment, wal_segment_prefix,
     };
     use loonfs_api::wire::manifest::{MetadataRowFamily, MetadataSegmentRef};
     use loonfs_api::wire::sst_blocks::BlockHandle;
     use loonfs_api::{
-        ContentId, ContentStoreId, ManifestNo, MetadataSegmentId, NamespaceGeneration, NamespaceId,
-        PinId, UploadId, WalNo,
+        ContentId, ManifestNo, MetadataSegmentId, NamespaceGeneration, NamespaceId, PinId,
+        UploadId, WalNo,
     };
 
     const CONTENT_ID: &str = "con_abcdef0123456789abcdef0123456789";
@@ -129,11 +120,6 @@ mod tests {
 
     fn namespace_id() -> NamespaceId {
         NamespaceId::parse("ns-1").expect("valid namespace id")
-    }
-
-    fn content_store_id() -> ContentStoreId {
-        ContentStoreId::parse("cs_00000000000000000000000000000001")
-            .expect("valid content store id")
     }
 
     fn pin_id() -> PinId {
@@ -187,7 +173,6 @@ mod tests {
                 .replace("{namespace_id}", "ns-1")
                 .replace("{owner_namespace_id}", "ns-1")
                 .replace("{source_namespace_id}", "ns-1")
-                .replace("{content_store_id}", "cs_00000000000000000000000000000001")
                 .replace("{owner_generation}", "7")
                 .replace("{wal_no:020}", &format!("{:020}", 42))
                 .replace("{suffix}", "0123456789abcdef")
@@ -197,16 +182,10 @@ mod tests {
                 .replace("{group}", "bindings")
                 .replace("{segment_id}", "seg_00000000000000000000000000000001")
                 .replace("{upload_id}", "upl_00000000000000000000000000000001")
-                .replace("{content_id[4..6]}", &CONTENT_ID[4..6])
-                .replace("{content_id[6..8]}", &CONTENT_ID[6..8])
                 .replace("{content_id}", CONTENT_ID)
         };
 
         let built = [
-            (
-                "Content store descriptors",
-                content_store(&content_store_id()),
-            ),
             ("WAL segments", wal_segment(&namespace_id(), &WalNo(42))),
             (
                 "Namespace manifests",
@@ -224,12 +203,7 @@ mod tests {
             ("Hint", hint(&namespace_id())),
             (
                 "Content objects",
-                content_blob(
-                    &content_store_id(),
-                    &namespace_id(),
-                    NamespaceGeneration(7),
-                    &content_id(),
-                ),
+                content_blob(&namespace_id(), NamespaceGeneration(7), &content_id()),
             ),
         ];
 

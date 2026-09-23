@@ -80,7 +80,9 @@ fn report(phase: &str, gets: &[RecordedGet], segments: &SegmentMap) {
             "wal".to_owned()
         } else if key.contains("/manifests/") {
             "manifest".to_owned()
-        } else if key.contains("content-stores/") {
+        } else if loonfs_objectstore::layout::parse_object_key(key).is_some_and(|key| {
+            key.family() == loonfs_objectstore::layout::DurableObjectFamily::ContentBlob
+        }) {
             "content".to_owned()
         } else {
             "control".to_owned()

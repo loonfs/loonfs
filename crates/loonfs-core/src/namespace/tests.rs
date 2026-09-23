@@ -17,7 +17,7 @@ use loonfs_api::{
     WalNo, WriterId,
 };
 use loonfs_objectstore::{
-    keys::{content_store, hint, metadata_manifest_object, wal_segment_prefix},
+    keys::{hint, metadata_manifest_object, wal_segment_prefix},
     layout::wal_no_of,
     local_fs_store::LocalFsStore,
     ObjectStore,
@@ -72,7 +72,7 @@ fn an_acl_namespace_begins_with_the_root_grants_as_its_root_access_row() {
 }
 
 #[tokio::test]
-async fn creation_installs_descriptor_hint_and_manifest_then_reads_genesis() {
+async fn creation_installs_hint_and_manifest_then_reads_genesis() {
     let directory = tempdir().expect("directory");
     let store = RecordingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
@@ -110,12 +110,11 @@ async fn creation_installs_descriptor_hint_and_manifest_then_reads_genesis() {
     assert_eq!(
         puts,
         vec![
-            content_store(&payload.content_store_id),
             hint(&namespace_id),
             metadata_manifest_object(&namespace_id, &ManifestNo(1))
         ]
     );
-    assert_eq!(store.counts().create_if_absent_puts, 3);
+    assert_eq!(store.counts().create_if_absent_puts, 2);
     let root = load_current_metadata_view(&store, &namespace_id)
         .await
         .expect("view")
@@ -529,7 +528,6 @@ async fn recreating_a_deleted_namespace_publishes_an_empty_next_generation() {
     );
     assert_eq!(payload.next_run_no, loonfs_api::RunNo(0));
     assert!(payload.writer_epoch > tombstone.writer_epoch);
-    assert_ne!(payload.content_store_id, tombstone.content_store_id);
     assert!(payload.runs.is_empty());
     assert_eq!(payload.folded_wal_no, wal_tip);
 
@@ -692,7 +690,6 @@ async fn assert_fork_recreation(source_commits: u64, target_commits: u64) {
     assert_eq!(payload.base_seq, source.base_seq);
     assert_eq!(payload.head_commit_id, source.head_commit_id);
     assert_eq!(payload.runs, source.runs);
-    assert_eq!(payload.content_store_id, source.content_store_id);
     assert_eq!(payload.next_inode_id, source.next_inode_id);
     assert_eq!(payload.next_run_no, source.next_run_no);
     assert_eq!(

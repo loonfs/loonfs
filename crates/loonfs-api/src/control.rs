@@ -4,8 +4,8 @@
 
 use crate::envelope::EnvelopeCodecError;
 use crate::{
-    ChangeSeq, ChecksumAlgorithm, CommitId, ContentId, ContentRef, ContentStoreId, ManifestNo,
-    NamespaceGeneration, NamespaceId, PinId, SubjectId, UploadId,
+    ChangeSeq, ChecksumAlgorithm, CommitId, ContentId, ContentRef, ManifestNo, NamespaceGeneration,
+    NamespaceId, PinId, SubjectId, UploadId,
 };
 use crate::{WriterEpoch, WriterId};
 use serde::de::DeserializeOwned;
@@ -24,18 +24,11 @@ pub enum ControlObjectKind {
     Pin,
     /// Tracks staged content through upload completion or cleanup.
     UploadSession,
-    /// Identifies the content domain held by a backend.
-    ContentStore,
 }
 
 impl ControlObjectKind {
     /// Lists every registered control-object family in stable registry order.
-    pub const ALL: [Self; 4] = [
-        Self::Hint,
-        Self::Pin,
-        Self::UploadSession,
-        Self::ContentStore,
-    ];
+    pub const ALL: [Self; 3] = [Self::Hint, Self::Pin, Self::UploadSession];
 
     /// Durable format version for this control object kind.
     ///
@@ -48,7 +41,6 @@ impl ControlObjectKind {
             Self::Hint => 1,
             Self::Pin => 1,
             Self::UploadSession => 1,
-            Self::ContentStore => 1,
         }
     }
 
@@ -58,7 +50,6 @@ impl ControlObjectKind {
             Self::Hint => "hint",
             Self::Pin => "pin",
             Self::UploadSession => "upload_session",
-            Self::ContentStore => "content_store",
         }
     }
 
@@ -66,16 +57,6 @@ impl ControlObjectKind {
     pub fn parse(value: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|kind| kind.as_str() == value)
     }
-}
-
-/// Identifies a content domain in its physical backend.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ContentStorePayload {
-    /// Domain whose objects share this descriptor's prefix.
-    pub content_store_id: ContentStoreId,
-    /// Unix-millisecond stamp from the domain's creation context.
-    pub created_at_ms: u64,
 }
 
 /// Starts manifest discovery without selecting the current version.
@@ -426,8 +407,6 @@ pub struct UploadSessionPayload {
     pub namespace_id: NamespaceId,
     /// Generation of the namespace when the session opened; the content key and every reference the session mints carry it.
     pub owner_generation: NamespaceGeneration,
-    /// Content domain selected when the session opened.
-    pub content_store_id: ContentStoreId,
     /// Durable session identity used by staging and completion requests.
     pub upload_id: UploadId,
     /// Content object this session writes, allocated when the session began.
@@ -518,7 +497,6 @@ impl UploadSessionPayload {
 struct StrictUploadSessionPayload {
     namespace_id: NamespaceId,
     owner_generation: NamespaceGeneration,
-    content_store_id: ContentStoreId,
     upload_id: UploadId,
     content_id: ContentId,
     created_at_ms: u64,
@@ -630,7 +608,6 @@ impl<'de> Deserialize<'de> for UploadSessionPayload {
         let session = Self {
             namespace_id: record.namespace_id,
             owner_generation: record.owner_generation,
-            content_store_id: record.content_store_id,
             upload_id: record.upload_id,
             content_id: record.content_id,
             created_at_ms: record.created_at_ms,
@@ -708,8 +685,6 @@ mod tests {
         let session = UploadSessionPayload {
             namespace_id: NamespaceId::parse("demo").expect("namespace id"),
             owner_generation: crate::NamespaceGeneration(1),
-            content_store_id: crate::ContentStoreId::parse("cs_0123456789abcdef0123456789abcdef")
-                .expect("content store id"),
             upload_id: UploadId::parse("upl_0123456789abcdef0123456789abcdef").expect("upload id"),
             content_id: content_ref.content_id.clone(),
             created_at_ms: 1_000,
@@ -776,10 +751,6 @@ mod tests {
                 let session = UploadSessionPayload {
                     namespace_id: NamespaceId::parse("demo").expect("namespace id"),
                     owner_generation: crate::NamespaceGeneration(1),
-                    content_store_id: crate::ContentStoreId::parse(
-                        "cs_0123456789abcdef0123456789abcdef",
-                    )
-                    .expect("content store id"),
                     upload_id: UploadId::parse("upl_0123456789abcdef0123456789abcdef")
                         .expect("upload id"),
                     content_id: content_ref.content_id.clone(),

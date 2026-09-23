@@ -10,8 +10,8 @@ use crate::storage::content_admission::PreparedContent;
 use bytes::Bytes;
 use futures::StreamExt;
 use loonfs_api::{
-    Checksum, ContentId, ContentRef, ContentRefValidationError, ContentStoreId, ErrorCode,
-    NamespaceGeneration, NamespaceId, PathEntry, Sha256, StreamingChecksum,
+    Checksum, ContentId, ContentRef, ContentRefValidationError, ErrorCode, NamespaceGeneration,
+    NamespaceId, PathEntry, Sha256, StreamingChecksum,
 };
 use loonfs_objectstore::keys::content_blob;
 use loonfs_objectstore::{
@@ -27,7 +27,6 @@ use thiserror::Error;
 #[allow(unreachable_pub)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredContent {
-    content_store_id: ContentStoreId,
     #[cfg(any(test, feature = "test-support"))]
     object_key: String,
     content_ref: ContentRef,
@@ -41,11 +40,6 @@ impl StoredContent {
 
     pub fn into_content_ref(self) -> ContentRef {
         self.content_ref
-    }
-
-    #[cfg(test)]
-    pub(crate) fn content_store_id(&self) -> &ContentStoreId {
-        &self.content_store_id
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -79,14 +73,6 @@ pub enum DurableContentValidationError {
         expected: String,
         actual: String,
     },
-    #[error(
-        "stored content belongs to content store `{actual}`, not namespace-bound store `{expected}`"
-    )]
-    #[cfg(any(test, feature = "test-support"))]
-    ContentStoreMismatch {
-        expected: ContentStoreId,
-        actual: ContentStoreId,
-    },
     #[error("object store error for `{object_key}`: {message}")]
     Store { object_key: String, message: String },
 }
@@ -99,8 +85,6 @@ impl DurableContentValidationError {
             | Self::MissingContentGeneration { .. }
             | Self::ContentLengthMismatch { .. }
             | Self::ContentChecksumMismatch { .. } => ErrorCode::NamespaceCorrupt,
-            #[cfg(any(test, feature = "test-support"))]
-            Self::ContentStoreMismatch { .. } => ErrorCode::NamespaceCorrupt,
             Self::Store { .. } => ErrorCode::ServerError,
         }
     }
@@ -109,10 +93,9 @@ impl DurableContentValidationError {
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) async fn validate_durable_content_reference<S: ObjectStore + ?Sized>(
     store: &S,
-    content_store_id: &ContentStoreId,
     content_ref: &ContentRef,
 ) -> Result<(), DurableContentValidationError> {
-    let object_key = content_object_key_for_ref(content_store_id, content_ref)?;
+    let object_key = content_object_key_for_ref(content_ref)?;
     validate_content_size(store, &object_key, content_ref).await?;
     let bytes = load_required_object(store, &object_key, None).await?;
     validate_loaded_content_bytes(object_key, content_ref, &bytes)
@@ -121,11 +104,9 @@ pub(crate) async fn validate_durable_content_reference<S: ObjectStore + ?Sized>(
 /// Opens a verified chunked reader over an existing object for import.
 pub(crate) async fn open_content_import_reader<S: ObjectStore + 'static>(
     store: S,
-    content_store_id: &ContentStoreId,
     content_ref: &ContentRef,
 ) -> Result<(String, ByteStream), DurableContentValidationError> {
-    let source =
-        FileContentStream::open_import(store, content_store_id, content_ref.clone()).await?;
+    let source = FileContentStream::open_import(store, content_ref.clone()).await?;
     let object_key = source.location.object_key().to_owned();
     let stream_key = object_key.clone();
     let body = futures::stream::try_unfold(source, move |mut source| {
@@ -144,47 +125,28 @@ pub(crate) async fn open_content_import_reader<S: ObjectStore + 'static>(
     Ok((object_key, body))
 }
 
-/// Prepares content from an acknowledged LoonFS-managed durable write.
-///
-/// Consuming [`StoredContent`] ties the proof to the successful return from
-/// [`store_bytes_as_content`] or `store_bytes_as_content_with_store_id`. The
-/// verified catalog prevents pairing that acknowledgement with an unrelated
-/// namespace binding.
+/// Prepares content from an acknowledged durable write.
 #[cfg(any(test, feature = "test-support"))]
 pub fn prepare_stored_content(
     catalog: &VerifiedNamespaceCatalogEntry,
     stored_content: StoredContent,
-) -> Result<PreparedContent, DurableContentValidationError> {
-    if stored_content.content_store_id != *catalog.content_store_id() {
-        return Err(DurableContentValidationError::ContentStoreMismatch {
-            expected: catalog.content_store_id().clone(),
-            actual: stored_content.content_store_id,
-        });
-    }
-    let content_store_id = stored_content.content_store_id;
+) -> PreparedContent {
     let content_ref = stored_content.content_ref;
-    Ok(PreparedContent::for_durable_content_write(
-        catalog.namespace_id().clone(),
-        content_store_id,
-        content_ref,
-    ))
+    PreparedContent::for_durable_content_write(catalog.namespace_id().clone(), content_ref)
 }
 
 /// Fully validates an existing durable content reference for publication.
 ///
-/// The verified catalog selects the store to validate. This performs one
-/// object HEAD followed by one full GET and checksum check.
+/// Performs one object HEAD followed by one full GET and checksum check.
 #[cfg(any(test, feature = "test-support"))]
 pub async fn prepare_existing_content_ref<S: ObjectStore + ?Sized>(
     store: &S,
     catalog: &VerifiedNamespaceCatalogEntry,
     content_ref: ContentRef,
 ) -> Result<PreparedContent, DurableContentValidationError> {
-    let content_store_id = catalog.content_store_id();
-    validate_durable_content_reference(store, content_store_id, &content_ref).await?;
+    validate_durable_content_reference(store, &content_ref).await?;
     Ok(PreparedContent::for_durable_content_write(
         catalog.namespace_id().clone(),
-        content_store_id.clone(),
         content_ref,
     ))
 }
@@ -195,10 +157,9 @@ pub async fn prepare_existing_content_ref<S: ObjectStore + ?Sized>(
 /// delete the unpublished object when the values do not match.
 pub(crate) async fn verify_durable_content_checksum<S: ObjectStore + ?Sized>(
     store: &S,
-    content_store_id: &ContentStoreId,
     content_ref: &ContentRef,
 ) -> Result<(), DurableContentValidationError> {
-    let object_key = content_object_key_for_ref(content_store_id, content_ref)?;
+    let object_key = content_object_key_for_ref(content_ref)?;
     let stored = match store.head_stored_checksum(&object_key).await {
         Ok(Some(stored)) => stored,
         Ok(None) => return Err(DurableContentValidationError::MissingContentObject { object_key }),
@@ -229,17 +190,11 @@ pub(crate) async fn verify_durable_content_checksum<S: ObjectStore + ?Sized>(
 
 pub(crate) async fn create_content_multipart_upload<S: ObjectStore + ?Sized>(
     store: &S,
-    content_store_id: &ContentStoreId,
     owner_namespace_id: &NamespaceId,
     owner_generation: NamespaceGeneration,
     content_id: &ContentId,
 ) -> crate::error::Result<String> {
-    let object_key = content_blob(
-        content_store_id,
-        owner_namespace_id,
-        owner_generation,
-        content_id,
-    );
+    let object_key = content_blob(owner_namespace_id, owner_generation, content_id);
     store
         .create_multipart_upload(&object_key)
         .await
@@ -252,13 +207,11 @@ pub(crate) async fn create_content_multipart_upload<S: ObjectStore + ?Sized>(
 /// and a repeated completion reconciles from whatever the provider holds.
 pub(crate) async fn complete_content_multipart_upload<S: ObjectStore + ?Sized>(
     store: &S,
-    content_store_id: &ContentStoreId,
     expected: &ContentRef,
     provider_upload_id: &str,
     parts: &[MultipartPart],
 ) -> crate::error::Result<MultipartCompletion> {
     let object_key = content_blob(
-        content_store_id,
         &expected.owner_namespace_id,
         expected.owner_generation,
         &expected.content_id,
@@ -282,17 +235,11 @@ pub(crate) async fn complete_content_multipart_upload<S: ObjectStore + ?Sized>(
 #[must_use]
 pub(crate) async fn delete_unpublished_content_object<S: ObjectStore + ?Sized>(
     store: &S,
-    content_store_id: &ContentStoreId,
     owner_namespace_id: &NamespaceId,
     owner_generation: NamespaceGeneration,
     content_id: &ContentId,
 ) -> bool {
-    let object_key = content_blob(
-        content_store_id,
-        owner_namespace_id,
-        owner_generation,
-        content_id,
-    );
+    let object_key = content_blob(owner_namespace_id, owner_generation, content_id);
     match store.delete(&object_key).await {
         Ok(()) => true,
         Err(error) => {
@@ -317,18 +264,12 @@ pub(crate) async fn delete_unpublished_content_object<S: ObjectStore + ?Sized>(
 #[must_use]
 pub(crate) async fn abort_unpublished_multipart_upload<S: ObjectStore + ?Sized>(
     store: &S,
-    content_store_id: &ContentStoreId,
     owner_namespace_id: &NamespaceId,
     owner_generation: NamespaceGeneration,
     content_id: &ContentId,
     provider_upload_id: &str,
 ) -> bool {
-    let object_key = content_blob(
-        content_store_id,
-        owner_namespace_id,
-        owner_generation,
-        content_id,
-    );
+    let object_key = content_blob(owner_namespace_id, owner_generation, content_id);
     match store
         .abort_multipart_upload(&object_key, provider_upload_id)
         .await
@@ -400,10 +341,9 @@ impl<S: ObjectStore> FileContentStream<S> {
 
     async fn open_import(
         store: S,
-        content_store_id: &ContentStoreId,
         content_ref: ContentRef,
     ) -> Result<Self, DurableContentValidationError> {
-        let object_key = content_object_key_for_ref(content_store_id, &content_ref)?;
+        let object_key = content_object_key_for_ref(&content_ref)?;
         Self::open_inner(
             store,
             ContentLocation::Object { object_key },
@@ -642,14 +582,12 @@ pub(crate) async fn get_speculative_content_bytes<S: ObjectStore + ?Sized>(
 }
 
 pub(crate) fn content_object_key_for_ref(
-    content_store_id: &ContentStoreId,
     content_ref: &ContentRef,
 ) -> Result<String, DurableContentValidationError> {
     content_ref
         .validate()
         .map_err(DurableContentValidationError::InvalidContentRef)?;
     Ok(content_blob(
-        content_store_id,
         &content_ref.owner_namespace_id,
         content_ref.owner_generation,
         &content_ref.content_id,
@@ -747,9 +685,7 @@ pub(crate) async fn materialize_content<S: ObjectStore + ?Sized>(
     Ok(())
 }
 
-/// Plants durable content under a fresh identity, resolving the namespace's
-/// content store first. See `store_bytes_as_content_with_store_id` for
-/// what this is for and what it is not.
+/// Plants test content under a fresh identity owned by the current namespace generation.
 #[tracing::instrument(
     level = "debug",
     name = "loonfs.phase",
@@ -764,9 +700,8 @@ pub async fn store_bytes_as_content<S: ObjectStore + ?Sized>(
     bytes: &[u8],
 ) -> Result<StoredContent, CoreError> {
     let catalog = load_namespace_catalog_entry(store, owner_namespace_id).await?;
-    store_bytes_as_content_with_store_id(
+    store_bytes_as_content_for_owner(
         store,
-        catalog.content_store_id().clone(),
         owner_namespace_id.clone(),
         catalog.generation(),
         bytes,
@@ -780,16 +715,14 @@ pub async fn store_bytes_as_content<S: ObjectStore + ?Sized>(
 /// [`crate::protocol::stage_owned_bytes`] so the object has a durable owner
 /// before it is written and can later become eligible for reclamation.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) async fn store_bytes_as_content_with_store_id<S: ObjectStore + ?Sized>(
+pub(crate) async fn store_bytes_as_content_for_owner<S: ObjectStore + ?Sized>(
     store: &S,
-    content_store_id: ContentStoreId,
     owner_namespace_id: NamespaceId,
     owner_generation: NamespaceGeneration,
     bytes: &[u8],
 ) -> Result<StoredContent, CoreError> {
     stage_bytes_under_content_id(
         store,
-        content_store_id,
         owner_namespace_id,
         owner_generation,
         ContentId::generate(),
@@ -820,19 +753,13 @@ pub(crate) enum StreamedPayloadKind {
 /// session claims prevent concurrent writes to the same random content ID.
 pub(crate) async fn stage_streamed_under_content_id<S: ObjectStore + ?Sized>(
     store: &S,
-    content_store_id: ContentStoreId,
     owner_namespace_id: NamespaceId,
     owner_generation: NamespaceGeneration,
     content_id: ContentId,
     body: ByteStream,
     payload_kind: StreamedPayloadKind,
 ) -> Result<StagedStream, CoreError> {
-    let object_key = content_blob(
-        &content_store_id,
-        &owner_namespace_id,
-        owner_generation,
-        &content_id,
-    );
+    let object_key = content_blob(&owner_namespace_id, owner_generation, &content_id);
     let observed = Arc::new(Mutex::new(StreamedPayload::default()));
     let hashed = {
         let observed = Arc::clone(&observed);
@@ -914,7 +841,6 @@ struct StreamedPayload {
 /// that minted the id earlier (an upload session allocates at `begin`).
 pub(crate) async fn stage_bytes_under_content_id<S: ObjectStore + ?Sized>(
     store: &S,
-    content_store_id: ContentStoreId,
     owner_namespace_id: NamespaceId,
     owner_generation: NamespaceGeneration,
     content_id: ContentId,
@@ -922,7 +848,6 @@ pub(crate) async fn stage_bytes_under_content_id<S: ObjectStore + ?Sized>(
 ) -> Result<StoredContent, CoreError> {
     let content_ref = ContentRef::blob_v1(owner_namespace_id, owner_generation, content_id, bytes);
     let object_key = content_blob(
-        &content_store_id,
         &content_ref.owner_namespace_id,
         content_ref.owner_generation,
         &content_ref.content_id,
@@ -936,7 +861,6 @@ pub(crate) async fn stage_bytes_under_content_id<S: ObjectStore + ?Sized>(
         .await?;
 
     Ok(StoredContent {
-        content_store_id,
         #[cfg(any(test, feature = "test-support"))]
         object_key,
         content_ref,
@@ -963,12 +887,12 @@ pub(super) async fn load_required_object<S: ObjectStore + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::{
-        store_bytes_as_content_with_store_id, validate_durable_content_reference,
+        store_bytes_as_content_for_owner, validate_durable_content_reference,
         verify_durable_content_checksum, ContentLocation, CoreError, DurableContentValidationError,
         FileContentStream, NonZeroU64,
     };
     use bytes::Bytes;
-    use loonfs_api::{Checksum, ContentId, ContentRef, ContentRefKind, ContentStoreId, PathEntry};
+    use loonfs_api::{Checksum, ContentId, ContentRef, ContentRefKind, PathEntry};
     use loonfs_objectstore::keys::content_blob;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_objectstore::ObjectStore;
@@ -978,13 +902,11 @@ mod tests {
 
     async fn get_durable_content_bytes<S: ObjectStore + ?Sized>(
         store: &S,
-        content_store_id: &ContentStoreId,
         content_ref: &ContentRef,
     ) -> Result<Vec<u8>, DurableContentValidationError> {
         ContentLocation::resolve(
             &content_ref.owner_namespace_id,
             content_ref.owner_generation,
-            content_store_id,
             None,
             content_ref,
         )?
@@ -994,26 +916,26 @@ mod tests {
 
     #[tokio::test]
     async fn validate_content_ref_success() {
-        let (_temp_dir, store, content_store_id) = test_store();
+        let (_temp_dir, store) = test_store();
         let bytes = b"whole file bytes";
         let content_ref = content_ref(bytes);
-        put_content_object(&store, &content_store_id, &content_ref, bytes).await;
+        put_content_object(&store, &content_ref, bytes).await;
 
-        validate_durable_content_reference(&store, &content_store_id, &content_ref)
+        validate_durable_content_reference(&store, &content_ref)
             .await
             .expect("validate content ref");
     }
 
     #[tokio::test]
     async fn validate_content_ref_reads_and_hashes_the_bytes() {
-        let (_temp_dir, inner, content_store_id) = test_store();
+        let (_temp_dir, inner) = test_store();
         let store = RecordingStore::new(inner, KeyPredicate::content_blob());
         let bytes = b"whole file bytes";
         let content_ref = content_ref(bytes);
-        put_content_object(&store, &content_store_id, &content_ref, bytes).await;
+        put_content_object(&store, &content_ref, bytes).await;
 
         store.reset();
-        validate_durable_content_reference(&store, &content_store_id, &content_ref)
+        validate_durable_content_reference(&store, &content_ref)
             .await
             .expect("validate content ref");
         assert_eq!(store.count(OperationClass::Read), 1);
@@ -1021,12 +943,12 @@ mod tests {
 
     #[tokio::test]
     async fn get_durable_content_bytes_accepts_empty_files() {
-        let (_temp_dir, store, content_store_id) = test_store();
+        let (_temp_dir, store) = test_store();
         let bytes = b"";
         let content_ref = content_ref(bytes);
-        put_content_object(&store, &content_store_id, &content_ref, bytes).await;
+        put_content_object(&store, &content_ref, bytes).await;
 
-        let bytes = get_durable_content_bytes(&store, &content_store_id, &content_ref)
+        let bytes = get_durable_content_bytes(&store, &content_ref)
             .await
             .expect("read empty content ref");
         assert!(bytes.is_empty());
@@ -1034,10 +956,10 @@ mod tests {
 
     #[tokio::test]
     async fn validate_content_ref_rejects_missing_object() {
-        let (_temp_dir, store, content_store_id) = test_store();
+        let (_temp_dir, store) = test_store();
         let content_ref = content_ref(b"missing");
 
-        let err = validate_durable_content_reference(&store, &content_store_id, &content_ref)
+        let err = validate_durable_content_reference(&store, &content_ref)
             .await
             .expect_err("missing object");
         assert!(matches!(
@@ -1048,12 +970,12 @@ mod tests {
 
     #[tokio::test]
     async fn validate_content_ref_rejects_size_mismatch() {
-        let (_temp_dir, store, content_store_id) = test_store();
+        let (_temp_dir, store) = test_store();
         let mut content_ref = content_ref(b"abc");
-        put_content_object(&store, &content_store_id, &content_ref, b"abc").await;
+        put_content_object(&store, &content_ref, b"abc").await;
         content_ref.size_bytes += 1;
 
-        let err = validate_durable_content_reference(&store, &content_store_id, &content_ref)
+        let err = validate_durable_content_reference(&store, &content_ref)
             .await
             .expect_err("size mismatch");
         assert!(matches!(
@@ -1064,7 +986,7 @@ mod tests {
 
     #[tokio::test]
     async fn validate_content_ref_rejects_checksum_mismatch() {
-        let (_temp_dir, store, content_store_id) = test_store();
+        let (_temp_dir, store) = test_store();
         let expected = content_ref(b"expected");
         // Same id, different bytes: identity alone can no longer prove
         // content, so the checksum has to.
@@ -1074,9 +996,9 @@ mod tests {
             expected.content_id.clone(),
             b"mismatch",
         );
-        put_content_object(&store, &content_store_id, &planted, b"mismatch").await;
+        put_content_object(&store, &planted, b"mismatch").await;
 
-        let err = validate_durable_content_reference(&store, &content_store_id, &expected)
+        let err = validate_durable_content_reference(&store, &expected)
             .await
             .expect_err("checksum mismatch");
         assert!(matches!(
@@ -1087,7 +1009,7 @@ mod tests {
 
     #[tokio::test]
     async fn read_verifies_a_reference_whose_only_evidence_is_a_crc32c() {
-        let (_temp_dir, store, content_store_id) = test_store();
+        let (_temp_dir, store) = test_store();
         let bytes = b"transferred straight to the provider";
         let content_ref = ContentRef {
             kind: ContentRefKind::BlobV1,
@@ -1097,22 +1019,22 @@ mod tests {
             size_bytes: bytes.len() as u64,
             checksum: Checksum::crc32c(bytes),
         };
-        put_content_object(&store, &content_store_id, &content_ref, bytes).await;
+        put_content_object(&store, &content_ref, bytes).await;
 
-        let read = get_durable_content_bytes(&store, &content_store_id, &content_ref)
+        let read = get_durable_content_bytes(&store, &content_ref)
             .await
             .expect("a crc32c-only reference verifies by its crc");
         assert_eq!(read, bytes);
 
         // Same length, different bytes: only the checksum can tell.
-        let (_temp_dir, store, content_store_id) = test_store();
+        let (_temp_dir, store) = test_store();
         let planted = ContentRef {
             checksum: Checksum::crc32c(b"transferred straight to the PROVIDER"),
             ..content_ref
         };
-        put_content_object(&store, &content_store_id, &planted, bytes).await;
+        put_content_object(&store, &planted, bytes).await;
         assert!(matches!(
-            get_durable_content_bytes(&store, &content_store_id, &planted)
+            get_durable_content_bytes(&store, &planted)
                 .await
                 .expect_err("crc mismatch"),
             DurableContentValidationError::ContentChecksumMismatch { .. }
@@ -1121,7 +1043,7 @@ mod tests {
 
     #[tokio::test]
     async fn read_verifies_a_reference_whose_only_evidence_is_a_crc64nvme() {
-        let (_temp_dir, store, content_store_id) = test_store();
+        let (_temp_dir, store) = test_store();
         let bytes = b"provider-assembled bytes";
         let content_ref = ContentRef {
             kind: ContentRefKind::BlobV1,
@@ -1131,22 +1053,22 @@ mod tests {
             size_bytes: bytes.len() as u64,
             checksum: Checksum::crc64nvme(bytes),
         };
-        put_content_object(&store, &content_store_id, &content_ref, bytes).await;
+        put_content_object(&store, &content_ref, bytes).await;
 
-        let read = get_durable_content_bytes(&store, &content_store_id, &content_ref)
+        let read = get_durable_content_bytes(&store, &content_ref)
             .await
             .expect("a crc-only reference verifies by its crc");
         assert_eq!(read, bytes);
 
         // Same length, different bytes: only the checksum can tell.
-        let (_temp_dir, store, content_store_id) = test_store();
+        let (_temp_dir, store) = test_store();
         let planted = ContentRef {
             checksum: Checksum::crc64nvme(b"provider-assembled BYTES"),
             ..content_ref.clone()
         };
-        put_content_object(&store, &content_store_id, &planted, bytes).await;
+        put_content_object(&store, &planted, bytes).await;
         assert!(matches!(
-            get_durable_content_bytes(&store, &content_store_id, &planted)
+            get_durable_content_bytes(&store, &planted)
                 .await
                 .expect_err("crc mismatch"),
             DurableContentValidationError::ContentChecksumMismatch { .. }
@@ -1155,14 +1077,14 @@ mod tests {
 
     #[tokio::test]
     async fn checksum_verification_proves_the_object_without_reading_it() {
-        let (_temp_dir, inner, content_store_id) = test_store();
+        let (_temp_dir, inner) = test_store();
         let store = RecordingStore::new(inner, KeyPredicate::content_blob());
         let bytes = b"provider-verified bytes";
         let content_ref = content_ref(bytes);
-        put_content_object(&store, &content_store_id, &content_ref, bytes).await;
+        put_content_object(&store, &content_ref, bytes).await;
 
         store.reset();
-        verify_durable_content_checksum(&store, &content_store_id, &content_ref)
+        verify_durable_content_checksum(&store, &content_ref)
             .await
             .expect("verify content ref");
         assert_eq!(
@@ -1174,11 +1096,11 @@ mod tests {
 
     #[tokio::test]
     async fn checksum_verification_rejects_missing_size_and_checksum_drift() {
-        let (_temp_dir, store, content_store_id) = test_store();
+        let (_temp_dir, store) = test_store();
         let bytes = b"abc";
         let content_ref = content_ref(bytes);
 
-        let err = verify_durable_content_checksum(&store, &content_store_id, &content_ref)
+        let err = verify_durable_content_checksum(&store, &content_ref)
             .await
             .expect_err("missing object");
         assert!(matches!(
@@ -1186,11 +1108,11 @@ mod tests {
             DurableContentValidationError::MissingContentObject { .. }
         ));
 
-        put_content_object(&store, &content_store_id, &content_ref, bytes).await;
+        put_content_object(&store, &content_ref, bytes).await;
         let mut wrong_size = content_ref.clone();
         wrong_size.size_bytes += 1;
         assert!(matches!(
-            verify_durable_content_checksum(&store, &content_store_id, &wrong_size)
+            verify_durable_content_checksum(&store, &wrong_size)
                 .await
                 .expect_err("size mismatch"),
             DurableContentValidationError::ContentLengthMismatch { .. }
@@ -1202,7 +1124,7 @@ mod tests {
         let mut wrong_checksum = content_ref.clone();
         wrong_checksum.checksum = Checksum::sha256(b"other bytes");
         assert!(matches!(
-            verify_durable_content_checksum(&store, &content_store_id, &wrong_checksum)
+            verify_durable_content_checksum(&store, &wrong_checksum)
                 .await
                 .expect_err("checksum mismatch"),
             DurableContentValidationError::ContentChecksumMismatch { .. }
@@ -1224,21 +1146,19 @@ mod tests {
 
     #[tokio::test]
     async fn staging_identical_bytes_twice_mints_two_distinct_objects() {
-        let (_temp_dir, store, content_store_id) = test_store();
+        let (_temp_dir, store) = test_store();
         let bytes = b"identical payload";
 
-        let first = store_bytes_as_content_with_store_id(
+        let first = store_bytes_as_content_for_owner(
             &store,
-            content_store_id.clone(),
             loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
             loonfs_api::NamespaceGeneration(1),
             bytes,
         )
         .await
         .expect("first stage");
-        let second = store_bytes_as_content_with_store_id(
+        let second = store_bytes_as_content_for_owner(
             &store,
-            content_store_id,
             loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
             loonfs_api::NamespaceGeneration(1),
             bytes,
@@ -1310,22 +1230,20 @@ mod tests {
 
     async fn open_stream<S: ObjectStore>(
         store: S,
-        content_store_id: &ContentStoreId,
         content_ref: &ContentRef,
     ) -> Result<FileContentStream<S>, DurableContentValidationError> {
-        open_stream_at(store, content_store_id, content_ref, 0).await
+        open_stream_at(store, content_ref, 0).await
     }
 
     async fn open_stream_at<S: ObjectStore>(
         store: S,
-        content_store_id: &ContentStoreId,
         content_ref: &ContentRef,
         start_offset: u64,
     ) -> Result<FileContentStream<S>, DurableContentValidationError> {
         FileContentStream::open(
             store,
             super::ContentLocation::Object {
-                object_key: super::content_object_key_for_ref(content_store_id, content_ref)?,
+                object_key: super::content_object_key_for_ref(content_ref)?,
             },
             test_entry(),
             content_ref.clone(),
@@ -1337,12 +1255,12 @@ mod tests {
 
     #[tokio::test]
     async fn a_streamed_read_returns_the_object_one_chunk_at_a_time() {
-        let (_temp_dir, store, content_store_id) = test_store();
+        let (_temp_dir, store) = test_store();
         let bytes = payload(3 * TEST_CHUNK_BYTES as usize + 7);
         let content_ref = content_ref(&bytes);
-        put_content_object(&store, &content_store_id, &content_ref, &bytes).await;
+        put_content_object(&store, &content_ref, &bytes).await;
 
-        let mut stream = open_stream(&store, &content_store_id, &content_ref)
+        let mut stream = open_stream(&store, &content_ref)
             .await
             .expect("open stream");
         let mut chunks = Vec::new();
@@ -1360,12 +1278,12 @@ mod tests {
 
     #[tokio::test]
     async fn a_finished_stream_repeats_its_verdict() {
-        let (_temp_dir, store, content_store_id) = test_store();
+        let (_temp_dir, store) = test_store();
         let bytes = payload(TEST_CHUNK_BYTES as usize + 3);
         let content_ref = content_ref(&bytes);
-        put_content_object(&store, &content_store_id, &content_ref, &bytes).await;
+        put_content_object(&store, &content_ref, &bytes).await;
 
-        let mut stream = open_stream(&store, &content_store_id, &content_ref)
+        let mut stream = open_stream(&store, &content_ref)
             .await
             .expect("open stream");
         while stream.next_chunk().await.expect("chunk").is_some() {}
@@ -1375,15 +1293,15 @@ mod tests {
 
     #[tokio::test]
     async fn a_resumed_read_fetches_only_the_rest_and_verifies_all_of_it() {
-        let (_temp_dir, inner, content_store_id) = test_store();
+        let (_temp_dir, inner) = test_store();
         let store = RecordingStore::new(inner, KeyPredicate::content_blob());
         let bytes = payload(3 * TEST_CHUNK_BYTES as usize);
         let content_ref = content_ref(&bytes);
-        put_content_object(&store, &content_store_id, &content_ref, &bytes).await;
+        put_content_object(&store, &content_ref, &bytes).await;
 
         let held = 2 * TEST_CHUNK_BYTES as usize;
         store.reset();
-        let mut stream = open_stream_at(&store, &content_store_id, &content_ref, held as u64)
+        let mut stream = open_stream_at(&store, &content_ref, held as u64)
             .await
             .expect("open stream");
         stream
@@ -1407,15 +1325,15 @@ mod tests {
 
     #[tokio::test]
     async fn a_resumed_read_holds_the_prefix_to_the_same_verdict() {
-        let (_temp_dir, inner, content_store_id) = test_store();
+        let (_temp_dir, inner) = test_store();
         let store = RecordingStore::new(inner, KeyPredicate::content_blob());
         let bytes = payload(2 * TEST_CHUNK_BYTES as usize);
         let content_ref = content_ref(&bytes);
-        put_content_object(&store, &content_store_id, &content_ref, &bytes).await;
+        put_content_object(&store, &content_ref, &bytes).await;
         let held = TEST_CHUNK_BYTES as usize;
 
         store.reset();
-        let mut unfed = open_stream_at(&store, &content_store_id, &content_ref, held as u64)
+        let mut unfed = open_stream_at(&store, &content_ref, held as u64)
             .await
             .expect("open stream");
         let err = unfed.next_chunk().await.expect_err("prefix still owed");
@@ -1435,7 +1353,7 @@ mod tests {
             "nothing is fetched until the stream has what it skipped"
         );
 
-        let mut wrong = open_stream_at(&store, &content_store_id, &content_ref, held as u64)
+        let mut wrong = open_stream_at(&store, &content_ref, held as u64)
             .await
             .expect("open stream");
         wrong
@@ -1465,13 +1383,13 @@ mod tests {
 
     #[tokio::test]
     async fn a_resumed_prefix_may_be_folded_in_pieces() {
-        let (_temp_dir, store, content_store_id) = test_store();
+        let (_temp_dir, store) = test_store();
         let bytes = payload(2 * TEST_CHUNK_BYTES as usize);
         let content_ref = content_ref(&bytes);
-        put_content_object(&store, &content_store_id, &content_ref, &bytes).await;
+        put_content_object(&store, &content_ref, &bytes).await;
         let held = TEST_CHUNK_BYTES as usize;
 
-        let mut stream = open_stream_at(&store, &content_store_id, &content_ref, held as u64)
+        let mut stream = open_stream_at(&store, &content_ref, held as u64)
             .await
             .expect("open stream");
         for piece in bytes[..held].chunks(64) {
@@ -1486,15 +1404,15 @@ mod tests {
 
     #[tokio::test]
     async fn a_prefix_longer_than_the_content_is_refused() {
-        let (_temp_dir, inner, content_store_id) = test_store();
+        let (_temp_dir, inner) = test_store();
         let store = RecordingStore::new(inner, KeyPredicate::content_blob());
         let bytes = payload(2 * TEST_CHUNK_BYTES as usize);
         let content_ref = content_ref(&bytes);
-        put_content_object(&store, &content_store_id, &content_ref, &bytes).await;
+        put_content_object(&store, &content_ref, &bytes).await;
         let held = TEST_CHUNK_BYTES as usize;
 
         store.reset();
-        let mut stream = open_stream_at(&store, &content_store_id, &content_ref, held as u64)
+        let mut stream = open_stream_at(&store, &content_ref, held as u64)
             .await
             .expect("open stream");
         let overlong = payload(bytes.len() + 1);
@@ -1516,12 +1434,12 @@ mod tests {
 
     #[tokio::test]
     async fn a_prefix_offered_after_a_fetch_is_refused() {
-        let (_temp_dir, store, content_store_id) = test_store();
+        let (_temp_dir, store) = test_store();
         let bytes = payload(2 * TEST_CHUNK_BYTES as usize);
         let content_ref = content_ref(&bytes);
-        put_content_object(&store, &content_store_id, &content_ref, &bytes).await;
+        put_content_object(&store, &content_ref, &bytes).await;
 
-        let mut stream = open_stream(&store, &content_store_id, &content_ref)
+        let mut stream = open_stream(&store, &content_ref)
             .await
             .expect("open stream");
         stream.next_chunk().await.expect("chunk").expect("a chunk");
@@ -1536,13 +1454,13 @@ mod tests {
 
     #[tokio::test]
     async fn a_prefix_offered_after_the_end_is_refused() {
-        let (_temp_dir, store, content_store_id) = test_store();
+        let (_temp_dir, store) = test_store();
         // Empty content reaches its verdict without fetching, which leaves
         // only the finished-stream guard between this fold and the digest.
         let content_ref = content_ref(b"");
-        put_content_object(&store, &content_store_id, &content_ref, b"").await;
+        put_content_object(&store, &content_ref, b"").await;
 
-        let mut stream = open_stream(&store, &content_store_id, &content_ref)
+        let mut stream = open_stream(&store, &content_ref)
             .await
             .expect("open stream");
         assert!(stream.next_chunk().await.expect("verified end").is_none());
@@ -1557,13 +1475,13 @@ mod tests {
 
     #[tokio::test]
     async fn a_streamed_read_of_an_empty_object_verifies_without_fetching() {
-        let (_temp_dir, inner, content_store_id) = test_store();
+        let (_temp_dir, inner) = test_store();
         let store = RecordingStore::new(inner, KeyPredicate::content_blob());
         let content_ref = content_ref(b"");
-        put_content_object(&store, &content_store_id, &content_ref, b"").await;
+        put_content_object(&store, &content_ref, b"").await;
 
         store.reset();
-        let mut stream = open_stream(&store, &content_store_id, &content_ref)
+        let mut stream = open_stream(&store, &content_ref)
             .await
             .expect("open stream");
         assert!(stream.next_chunk().await.expect("verified end").is_none());
@@ -1576,7 +1494,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_streamed_read_verifies_a_reference_whose_only_evidence_is_a_crc32c() {
-        let (_temp_dir, store, content_store_id) = test_store();
+        let (_temp_dir, store) = test_store();
         let bytes = payload(2 * TEST_CHUNK_BYTES as usize + 5);
         let content_ref = ContentRef {
             kind: ContentRefKind::BlobV1,
@@ -1586,9 +1504,9 @@ mod tests {
             size_bytes: bytes.len() as u64,
             checksum: Checksum::crc32c(&bytes),
         };
-        put_content_object(&store, &content_store_id, &content_ref, &bytes).await;
+        put_content_object(&store, &content_ref, &bytes).await;
 
-        let mut stream = open_stream(&store, &content_store_id, &content_ref)
+        let mut stream = open_stream(&store, &content_ref)
             .await
             .expect("open stream");
         let mut fetched = Vec::new();
@@ -1597,15 +1515,13 @@ mod tests {
         }
         assert_eq!(fetched, bytes);
 
-        let (_temp_dir, store, content_store_id) = test_store();
+        let (_temp_dir, store) = test_store();
         let planted = ContentRef {
             checksum: Checksum::crc32c(&payload(bytes.len() + 1)),
             ..content_ref
         };
-        put_content_object(&store, &content_store_id, &planted, &bytes).await;
-        let mut stream = open_stream(&store, &content_store_id, &planted)
-            .await
-            .expect("open stream");
+        put_content_object(&store, &planted, &bytes).await;
+        let mut stream = open_stream(&store, &planted).await.expect("open stream");
         let verdict = loop {
             match stream.next_chunk().await {
                 Ok(Some(_)) => continue,
@@ -1637,7 +1553,7 @@ mod tests {
     }
 
     async fn assert_resumed_checksum_verification(checksum: fn(&[u8]) -> Checksum) {
-        let (_temp_dir, inner, content_store_id) = test_store();
+        let (_temp_dir, inner) = test_store();
         let store = RecordingStore::new(inner, KeyPredicate::content_blob());
         let bytes = payload(2 * TEST_CHUNK_BYTES as usize);
         let content_ref = ContentRef {
@@ -1648,11 +1564,11 @@ mod tests {
             size_bytes: bytes.len() as u64,
             checksum: checksum(&bytes),
         };
-        put_content_object(&store, &content_store_id, &content_ref, &bytes).await;
+        put_content_object(&store, &content_ref, &bytes).await;
         let held = TEST_CHUNK_BYTES as usize;
 
         store.reset();
-        let mut stream = open_stream_at(&store, &content_store_id, &content_ref, held as u64)
+        let mut stream = open_stream_at(&store, &content_ref, held as u64)
             .await
             .expect("open stream");
         stream
@@ -1671,7 +1587,7 @@ mod tests {
 
         // The prefix is part of the verdict here too: wrong bytes below the
         // resume point fail the whole read.
-        let mut wrong = open_stream_at(&store, &content_store_id, &content_ref, held as u64)
+        let mut wrong = open_stream_at(&store, &content_ref, held as u64)
             .await
             .expect("open stream");
         wrong
@@ -1699,7 +1615,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_streamed_read_rejects_an_object_that_does_not_match_its_reference() {
-        let (_temp_dir, store, content_store_id) = test_store();
+        let (_temp_dir, store) = test_store();
         let bytes = payload(2 * TEST_CHUNK_BYTES as usize);
         let expected = content_ref(&bytes);
         // Same id and same length, different bytes: only the digest can tell.
@@ -1711,11 +1627,9 @@ mod tests {
             expected.content_id.clone(),
             &planted,
         );
-        put_content_object(&store, &content_store_id, &planted_ref, &planted).await;
+        put_content_object(&store, &planted_ref, &planted).await;
 
-        let mut stream = open_stream(&store, &content_store_id, &expected)
-            .await
-            .expect("open stream");
+        let mut stream = open_stream(&store, &expected).await.expect("open stream");
         let mut chunks = 0;
         let err = loop {
             match stream.next_chunk().await {
@@ -1736,10 +1650,10 @@ mod tests {
 
     #[tokio::test]
     async fn a_streamed_read_reports_a_missing_object_when_it_opens() {
-        let (_temp_dir, store, content_store_id) = test_store();
+        let (_temp_dir, store) = test_store();
         let content_ref = content_ref(b"never stored");
 
-        let err = open_stream(&store, &content_store_id, &content_ref)
+        let err = open_stream(&store, &content_ref)
             .await
             .expect_err("missing object");
         assert!(matches!(
@@ -1750,13 +1664,13 @@ mod tests {
 
     #[tokio::test]
     async fn a_streamed_read_rejects_an_object_of_the_wrong_length() {
-        let (_temp_dir, store, content_store_id) = test_store();
+        let (_temp_dir, store) = test_store();
         let bytes = payload(TEST_CHUNK_BYTES as usize + 1);
         let mut content_ref = content_ref(&bytes);
-        put_content_object(&store, &content_store_id, &content_ref, &bytes).await;
+        put_content_object(&store, &content_ref, &bytes).await;
         content_ref.size_bytes += 1;
 
-        let err = open_stream(&store, &content_store_id, &content_ref)
+        let err = open_stream(&store, &content_ref)
             .await
             .expect_err("length mismatch");
         assert!(matches!(
@@ -1765,22 +1679,14 @@ mod tests {
         ));
     }
 
-    fn test_store() -> (tempfile::TempDir, LocalFsStore, ContentStoreId) {
+    fn test_store() -> (tempfile::TempDir, LocalFsStore) {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
-        let content_store_id = ContentStoreId::parse("cs_00000000000000000000000000000001")
-            .expect("valid content store id");
-        (temp_dir, store, content_store_id)
+        (temp_dir, store)
     }
 
-    async fn put_content_object(
-        store: &impl ObjectStore,
-        content_store_id: &ContentStoreId,
-        content_ref: &ContentRef,
-        bytes: &[u8],
-    ) {
+    async fn put_content_object(store: &impl ObjectStore, content_ref: &ContentRef, bytes: &[u8]) {
         let key = content_blob(
-            content_store_id,
             &content_ref.owner_namespace_id,
             content_ref.owner_generation,
             &content_ref.content_id,

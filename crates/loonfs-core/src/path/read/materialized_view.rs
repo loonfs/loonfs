@@ -16,7 +16,6 @@ use crate::metadata::{
     ResolvedVisiblePath, RevisionRecord, VisibleChildEntry, METADATA_VIEW_SESSION_COUNTER_FIELDS,
 };
 use crate::namespace::basis::MetadataBasis;
-use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
 #[cfg(test)]
 use crate::namespace::read_anchor::load_head_and_metadata_basis;
 use crate::namespace::state::NamespaceReadState;
@@ -27,9 +26,9 @@ use crate::wal::ProjectedWalTail;
 use loonfs_api::v0::DirectoryBinding;
 use loonfs_api::{
     AbsolutePath, AccessRight, AccessRights, AttributeInclusion, AttributesProjection, ChangeSeq,
-    CommitId, ContentRef, ContentStoreId, DirectoryPageCursor, DisplayName, FileBytes,
-    FileRevision, FileRevisionsPageCursor, InodeId, InodeKind, ManifestNo, NamespaceId, Page,
-    PageRequest, PathEntry, PathEntryKind, RevisionNo, TrashEntry, TrashPageCursor,
+    CommitId, ContentRef, DirectoryPageCursor, DisplayName, FileBytes, FileRevision,
+    FileRevisionsPageCursor, InodeId, InodeKind, ManifestNo, NamespaceId, Page, PageRequest,
+    PathEntry, PathEntryKind, RevisionNo, TrashEntry, TrashPageCursor,
 };
 use loonfs_objectstore::ObjectStore;
 use std::collections::HashMap;
@@ -155,7 +154,6 @@ pub struct DirectDownloadByInodeTarget {
 /// engine's read methods.
 pub(crate) struct LoadedMetadataView<'a, S: ObjectStore + ?Sized> {
     pub(super) namespace_id: NamespaceId,
-    pub(super) content_store_id: ContentStoreId,
     pub(super) head: NamespaceReadState,
     pub(super) segments: VerifiedMetadataSegments<'a, S>,
     wal_tail: Arc<ProjectedWalTail>,
@@ -197,7 +195,6 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 head.namespace_id, namespace_id
             )));
         }
-        let catalog_entry = VerifiedNamespaceCatalogEntry::from_head(&head);
         let manifest_no = basis.manifest_no();
         let loaded_basis =
             load_basis_metadata_segments(store, load_context.segment_cache, basis).await?;
@@ -218,7 +215,6 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             if let Some(wal_tail) = cache.get(&cache_key) {
                 return Ok(Self {
                     namespace_id: namespace_id.clone(),
-                    content_store_id: catalog_entry.content_store_id().clone(),
                     head,
                     segments,
                     wal_tail,
@@ -241,7 +237,6 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         }
         Ok(Self {
             namespace_id: namespace_id.clone(),
-            content_store_id: catalog_entry.content_store_id().clone(),
             head,
             segments,
             wal_tail,
@@ -384,7 +379,6 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         Ok(ContentLocation::resolve(
             &self.namespace_id,
             self.head.generation,
-            &self.content_store_id,
             Some(&self.wal_tail),
             content_ref,
         )?)

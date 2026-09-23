@@ -1524,7 +1524,6 @@ fn openapi_documents_string_id_contracts_without_dead_schemas() {
         content_id.get("example").and_then(Value::as_str),
         Some("con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41")
     );
-    assert!(!schemas.contains_key("ContentStoreId"));
     assert!(!schemas.contains_key("FilesystemChangeCreated"));
     assert!(
         !raw.contains(r#""created""#),

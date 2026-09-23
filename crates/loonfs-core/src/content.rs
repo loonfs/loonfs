@@ -1,8 +1,5 @@
 //! Public facade over the durable content storage helpers.
 
-// Reading content by reference is `NamespaceEngine::read_content_ref`: it
-// resolves the namespace's content store from the pinned head and applies
-// the caller's byte budget, so no consumer needs the raw store read.
 pub use crate::protocol::CompletedUpload;
 pub use crate::storage::content::DurableContentValidationError;
 #[cfg(any(test, feature = "test-support"))]

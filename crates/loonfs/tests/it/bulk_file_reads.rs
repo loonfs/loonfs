@@ -933,14 +933,7 @@ async fn read_content_ref_refuses_bytes_that_do_not_match_the_reference() {
 
     // Same length, different bytes: the size check passes and the digest
     // check is what has to catch it.
-    let content_store_id =
-        loonfs_core::control::load_namespace_catalog_entry(store.as_ref(), &namespace_id)
-            .await
-            .expect("load namespace catalog")
-            .content_store_id()
-            .clone();
     let object_key = loonfs_objectstore::keys::content_blob(
-        &content_store_id,
         &content_ref.owner_namespace_id,
         content_ref.owner_generation,
         &content_ref.content_id,
