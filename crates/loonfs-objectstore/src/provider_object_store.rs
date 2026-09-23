@@ -2200,7 +2200,7 @@ mod tests {
 
     const MULTIPART_TEST_THRESHOLD: u64 = 1024;
     const MULTIPART_TEST_PART: u64 = 512;
-    const MULTIPART_KEY: &str = "namespaces/demo/content/1/con_abcdef0123456789abcdef0123456789";
+    const MULTIPART_KEY: &str = "namespaces/demo/content/con_abcdef0123456789abcdef0123456789";
 
     /// Retrying store with a test-sized multipart geometry: payloads of
     /// 1024+ bytes go multipart in 512-byte parts.

@@ -28,7 +28,6 @@ pub enum DurableObjectFamily {
 pub struct ParsedObjectKey<'a> {
     family: DurableObjectFamily,
     owner_namespace_id: Option<&'a str>,
-    owner_generation: Option<&'a str>,
     identifier: Option<&'a str>,
 }
 
@@ -41,11 +40,6 @@ impl<'a> ParsedObjectKey<'a> {
     /// Returns the namespace path component.
     pub fn owner_namespace_id(&self) -> Option<&'a str> {
         self.owner_namespace_id
-    }
-
-    /// Returns the content owner's generation path component.
-    pub fn owner_generation(&self) -> Option<&'a str> {
-        self.owner_generation
     }
 
     /// Returns the family-specific identifier when the key carries one.
@@ -61,16 +55,11 @@ impl<'a> ParsedObjectKey<'a> {
 pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
     let segments: Vec<_> = key.split('/').collect();
     match segments.as_slice() {
-        ["namespaces", owner_namespace_id, "content", owner_generation, content_id]
-            if valid_generation(owner_generation) =>
-        {
-            Some(parsed(
-                DurableObjectFamily::ContentBlob,
-                Some(owner_namespace_id),
-                Some(owner_generation),
-                Some(content_id),
-            ))
-        }
+        ["namespaces", owner_namespace_id, "content", content_id] => Some(parsed(
+            DurableObjectFamily::ContentBlob,
+            Some(owner_namespace_id),
+            Some(content_id),
+        )),
         ["namespaces", namespace, "wal", segment] => segment
             .strip_suffix(".wal.zst")
             .filter(|identifier| parse_wal_no(identifier).is_some())
@@ -78,22 +67,17 @@ pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
                 parsed(
                     DurableObjectFamily::WalSegment,
                     Some(namespace),
-                    None,
                     Some(identifier),
                 )
             }),
-        ["namespaces", namespace, "hint.json"] => Some(parsed(
-            DurableObjectFamily::Hint,
-            Some(namespace),
-            None,
-            None,
-        )),
+        ["namespaces", namespace, "hint.json"] => {
+            Some(parsed(DurableObjectFamily::Hint, Some(namespace), None))
+        }
         ["namespaces", namespace, "manifests", manifest] => {
             manifest.strip_suffix(".json").map(|identifier| {
                 parsed(
                     DurableObjectFamily::MetadataManifest,
                     Some(namespace),
-                    None,
                     Some(identifier),
                 )
             })
@@ -103,7 +87,6 @@ pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
                 parsed(
                     DurableObjectFamily::MetadataSegment,
                     Some(namespace),
-                    None,
                     Some(identifier),
                 )
             })
@@ -113,7 +96,6 @@ pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
                 parsed(
                     DurableObjectFamily::CheckpointRecord,
                     Some(namespace),
-                    None,
                     Some(identifier),
                 )
             })
@@ -123,19 +105,12 @@ pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
                 parsed(
                     DurableObjectFamily::UploadSession,
                     Some(namespace),
-                    None,
                     Some(identifier),
                 )
             })
         }
         _ => None,
     }
-}
-
-fn valid_generation(generation: &str) -> bool {
-    !generation.is_empty()
-        && !generation.starts_with('0')
-        && generation.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 /// Parses the fixed-width WAL number in a segment key.
@@ -179,13 +154,11 @@ pub fn upload_id_of(key: &str) -> Option<UploadId> {
 fn parsed<'a>(
     family: DurableObjectFamily,
     owner_namespace_id: Option<&'a str>,
-    owner_generation: Option<&'a str>,
     identifier: Option<&'a str>,
 ) -> ParsedObjectKey<'a> {
     ParsedObjectKey {
         family,
         owner_namespace_id,
-        owner_generation,
         identifier,
     }
 }
@@ -197,12 +170,11 @@ mod tests {
 
     use super::{parse_object_key, DurableObjectFamily};
     use crate::keys::{
-        checkpoint_record, content_blob, content_owner_prefix, hint, metadata_manifest_object,
-        metadata_segment, metadata_segment_prefix, upload_session, wal_segment, wal_segment_prefix,
+        checkpoint_record, content_blob, hint, metadata_manifest_object, metadata_segment,
+        metadata_segment_prefix, upload_session, wal_segment, wal_segment_prefix,
     };
     use loonfs_api::{
-        ContentId, ManifestNo, MetadataSegmentId, NamespaceGeneration, NamespaceId, PinId,
-        UploadId, WalNo,
+        ContentId, ManifestNo, MetadataSegmentId, NamespaceId, PinId, UploadId, WalNo,
     };
 
     #[test]
@@ -244,7 +216,7 @@ mod tests {
                 Some(upload_id.as_str()),
             ),
             (
-                content_blob(&namespace_id, NamespaceGeneration(7), &content_id),
+                content_blob(&namespace_id, &content_id),
                 DurableObjectFamily::ContentBlob,
                 Some(content_id.as_str()),
             ),
@@ -255,22 +227,11 @@ mod tests {
             assert_eq!(parsed.family(), family);
             assert_eq!(parsed.owner_namespace_id(), Some("ns-1"));
             assert_eq!(parsed.identifier(), identifier);
-            assert_eq!(
-                parsed.owner_generation(),
-                (family == DurableObjectFamily::ContentBlob).then_some("7")
-            );
         }
-        let a = NamespaceId::parse("a").expect("owner");
-        let ab = NamespaceId::parse("ab").expect("owner");
-        let generation = NamespaceGeneration(7);
-        let a_prefix = content_owner_prefix(&a, generation);
-        let ab_prefix = content_owner_prefix(&ab, generation);
-        assert_eq!(a_prefix, "namespaces/a/content/7/");
-        assert_eq!(ab_prefix, "namespaces/ab/content/7/");
-        assert!(!ab_prefix.starts_with(&a_prefix));
-        for owner in [a, ab] {
-            let key = content_blob(&owner, generation, &content_id);
-            assert!(key.starts_with(&content_owner_prefix(&owner, generation,)));
+        for owner in ["a", "ab"] {
+            let owner = NamespaceId::parse(owner).expect("owner");
+            let key = content_blob(&owner, &content_id);
+            assert_eq!(key, format!("namespaces/{owner}/content/{content_id}"));
             assert_eq!(
                 parse_object_key(&key)
                     .expect("content key")
@@ -278,13 +239,7 @@ mod tests {
                 Some(owner.as_str())
             );
         }
-        assert!(parse_object_key(&format!("namespaces/ab/content/{content_id}")).is_none());
-        for generation in ["0", "01", "future"] {
-            assert!(
-                parse_object_key(&format!("namespaces/ab/content/{generation}/{content_id}"))
-                    .is_none()
-            );
-        }
+        assert!(parse_object_key(&format!("namespaces/ab/content/7/{content_id}")).is_none());
     }
 
     #[test]
@@ -309,7 +264,7 @@ mod tests {
             "namespaces/ns-1/metadata/compactions/cmp_1/segments/seg_1.tmp",
             "namespaces/ns-1/metadata/compactions/cmp_1/lease.json",
             "namespaces/ns-1/metadata/compaction_leases/unknown.json",
-            "namespaces/ab/content/deadbeef",
+            "namespaces/ab/content/1/deadbeef",
         ] {
             assert!(
                 parse_object_key(key).is_none(),

@@ -107,10 +107,10 @@ Each file revision contains one `ContentRef`. The current kind, `blob_v1`, repre
 
 A reference contains the original owner namespace, that owner's generation, a random content ID, the complete size, and a full-object checksum. It does not contain a bucket address or object-store path.
 
-The owner namespace, owner generation, and content ID in the reference determine the key:
+The owner namespace and content ID in the reference determine the key:
 
 ```text
-namespaces/{owner_namespace_id}/content/{owner_generation}/{content_id}
+namespaces/{owner_namespace_id}/content/{content_id}
 ```
 
 The original owner's manifest is not required to read inherited content. This matters for forks: a descendant can continue reading the exact objects in its pinned basis after the source namespace is deleted.
@@ -173,7 +173,7 @@ Each namespace records an access mode in its manifest, fixed at creation: `unres
 
 ### 2.1 Storage layout
 
-Content objects live beside their owner's metadata. A fork reads inherited content at the source owner's key. A generation's content is reclaimed by deleting its prefix.
+Content objects live beside their owner's metadata. A fork reads inherited content at the source owner's key. Retirement deletes the exact objects that the tombstone's publication rows and upload sessions name.
 
 ```text
 namespaces/{namespace_id}/
@@ -183,7 +183,7 @@ namespaces/{namespace_id}/
 ├── segments/{segment_id}.sst.zst
 ├── pins/{pin_id}.json
 ├── uploads/{upload_id}.json
-├── content/{owner_generation}/{content_id}
+├── content/{content_id}
 └── extensions/{extension_name}/...
 ```
 
@@ -380,7 +380,7 @@ Reading speculative bytes does not by itself establish freshness or change reten
 
 ### 5.1 Upload sessions
 
-Every new content object is associated with an upload session before it becomes eligible for metadata publication. The content ID is allocated when the session is created, before the file bytes are read. New content belongs to the session's namespace generation and is stored under that owner-and-generation prefix. A session belongs to the generation in which it opened.
+Every new content object is associated with an upload session before it becomes eligible for metadata publication. The content ID is allocated when the session is created, before the file bytes are read. New content belongs to the session's namespace generation and is stored at `namespaces/{owner_namespace_id}/content/{content_id}`. A session belongs to the generation in which it opened.
 
 An upload session contains `namespace_id`, `owner_generation`, `upload_id`, `content_id`, `created_at_ms`, optional `subject_id`, a tagged `mode`, and a tagged `status`.
 
@@ -744,7 +744,7 @@ Deletion uses the acquired writer epoch. After admitted commits finish, it folds
 
 An ordinary operation that observes deletion returns `namespace_deleted`. A create or a fork into the id recreates it. A cached reader can still use its active view until the next manifest revalidation is due. Deletion does not immediately remove content.
 
-The current deleted manifest is the generation's tombstone. It protects no current WAL or runs, but retained pins still protect their referenced manifests and segments.
+The current deleted manifest is the generation's tombstone. It protects its runs until recreation supersedes it; the retired pin then keeps those runs protected until reclamation finishes. It protects no current WAL.
 
 ### 9.5 Retirement
 
@@ -862,12 +862,14 @@ Every age decision uses the call's fixed `now_ms`. A later call reads fresh root
 | Evidence captured for the pass | Objects protected |
 | --- | --- |
 | Current active namespace manifest | The manifest and every segment in its runs. |
-| Current deleted manifest or a retired pin's tombstone | The tombstone itself; its runs are not roots. |
-| Every recognized pin key in the complete listing | The numbered manifest in its ID and every segment in that manifest when it is active. |
+| Current deleted manifest or a retired pin's tombstone | The tombstone and every segment in its runs. A retired pin protects them for the whole pass that deletes it. |
+| Every recognized pin key in the complete listing | The numbered manifest in its ID and every segment in that manifest. |
 | Hint's observed manifest number | All manifest numbers at or above it, so discovery can probe forward. Intermediate numbers do not protect additional runs. |
 | Current active manifest's folded boundary | Every WAL number above `folded_wal_no`. |
 
 Pin bodies are not needed to identify these roots: the manifest number is part of the pin key. Bodies are read later for owner and expiry decisions. A pin naming a missing manifest is corruption, except for a retired pin. A retired pin whose manifest is absent protects nothing and is deleted in the pin sweep with the retired count. Each listed pin protects its files for the whole pass, even if that pass deletes the pin.
+
+Tombstone segments remain roots because retirement reads their publication rows to find exact content keys; after the retired pin is deleted and the tombstone is no longer current, the ordinary segment-age sweep can remove them.
 
 A retention floor may pass a pinned manifest's head sequence. That does not remove its protection. Reads through the pin use the pinned file set directly.
 
@@ -913,7 +915,7 @@ A failed required-root read stops collection. An uncertain fork-target read reta
 
 ### 11.6 Upload-session cleanup
 
-Uploads are collected through their session records. The active current generation's published-content prefix is not enumerated. Waiting, held, and reclaimed generation rules take precedence over the session status rules.
+Uploads are collected through their session records. Content prefixes are never enumerated. Waiting, held, and reclaimed generation rules take precedence over the session status rules.
 
 | Session and namespace | Action |
 | --- | --- |
@@ -924,13 +926,13 @@ Uploads are collected through their session records. The active current generati
 | Completed session in an active namespace, after content grace | Check publication evidence. Keep published content; delete unreferenced content. Remove the session after successful cleanup or a confirmed publication. |
 | Session in a deleted generation inside its retirement grace | Retain; report the generation's derived deadline. |
 | Session in a deleted generation that pins hold after its grace | Retain; report no time of its own. |
-| Completed session in an eligible current deleted generation | Delete content, then the record; no publication lookup or additional completion grace is required. |
-| Prior-generation session, generation eligible | Use the retired namespace rules with the session's namespace, generation, and content ID. Open and aborted sessions keep their expiry, abort grace, and provider cleanup rules. Completed sessions delete content, then the record. |
-| Prior-generation session, generation reclaimed | Its content prefix is already gone. For open and aborted sessions, run provider cleanup with the session's namespace, generation, and content ID. Then delete the record. |
+| Completed session in an eligible current deleted generation | Delete the session's exact content key, then the record; no publication lookup or additional completion grace is required. |
+| Prior-generation session, generation eligible | Use the retired namespace rules. The session's namespace and content ID select its exact key. Open and aborted sessions keep their expiry, abort grace, and provider cleanup rules. Completed sessions delete that key, then the record. |
+| Prior-generation session, generation reclaimed | For open and aborted sessions, run provider cleanup. For every status, delete the exact key named by the session's namespace and content ID before deleting the record. A failed cleanup retains the record. |
 
 Before completion, a session owns its random content identity exclusively and cannot issue admission evidence. In current or eligible generations, cleanup first wins the terminal transition, then removes content and any provider transfer. A failed cleanup leaves the record for another attempt. Open and aborted sessions still require provider cleanup after namespace retirement because provider upload state can exist outside object listings.
 
-Cleanup derives every content key and provider cleanup target from the namespace, generation, and content ID recorded when the session opened. A pass records each generation with a retained session and keeps that generation's retired pin until a pass leaves no session behind. A generation below the head with no retired pin is reclaimed: recreation writes the pin before publishing the new head.
+Cleanup derives every content key and provider cleanup target from the namespace and content ID recorded when the session opened. A pass records each generation with a retained session and keeps that generation's retired pin until a pass leaves no session behind. A generation below the head with no retired pin is reclaimed: recreation writes the pin before publishing the new head.
 
 For eligible completed uploads on an active namespace, the collector loads a metadata view lazily and looks up `content_id` in the WAL projection and `content_publications` family. It does not scan every revision. These publication rows are retained permanently, independently of commit receipts and the retention floor. If publication is found, only the session record is removed. If no publication exists, content is deleted before the session. An error permits neither a speculative content deletion nor removal of retry evidence.
 
@@ -986,11 +988,11 @@ After session cleanup, reclaim each eligible generation: the current tombstone f
 For each eligible tombstone `T`:
 
 1. Confirm the evidence. For a retired pin, `head` its key and require it to be present. For the current tombstone, reload the current manifest and require the same manifest number. A mismatch skips this generation without error. A failed read stops the call.
-2. List and sweep `namespaces/{namespace_id}/content/{T.generation}/`. Every deleted key must parse as a content blob with the exact namespace owner and generation. Retain and report every other key. No additional age check is required. A deletion failure ends the call.
+2. Open the metadata segments named by `T` and page through the whole `content_publications` family. For each row whose `owner_namespace_id` equals `T.namespace_id` and `owner_generation` equals `T.generation`, delete `namespaces/{owner_namespace_id}/content/{content_id}`. Skip every other row. Its object belongs to another owner, whose lifecycle and the fork pin protect it. Count successful deletions, including `NotFound`, in `deleted.retired_content_objects`. Do not list content or apply an additional age check. A segment read failure or deletion failure ends the call before either pin is released.
 3. If `T.fork_basis` is present, delete its source pin. Count the deletion when the pin was present.
 4. For a retired pin, delete it only if this pass left no upload session of its generation behind. Count it under `deleted_checkpoints_by_owner.retired`. A retained session leaves the pin for the next pass.
 
-Content and source-pin cleanup are idempotent. Deleting the retired pin last preserves the tombstone until cleanup finishes. The current tombstone remains when the namespace is never recreated. Later passes repeat its owner-prefix sweep, including keys that sort before those examined by earlier passes.
+Content and source-pin cleanup are idempotent. Deleting the retired pin last preserves the tombstone until cleanup finishes. The current tombstone remains when the namespace is never recreated. Later passes read the same publication rows and repeat the same exact deletes. No progress record or journal is stored.
 
 ## 12. Encodings, versions, and extensions
 
@@ -1119,7 +1121,7 @@ For example, the 15 UTF-8 bytes represented by `Hello, LoonFS!\n`, with a single
 }
 ```
 
-The key is `namespaces/{owner_namespace_id}/content/{owner_generation}/{content_id}`. The generation is an unpadded positive decimal number.
+The key is `namespaces/{owner_namespace_id}/content/{content_id}`. Content IDs are random and never reused.
 
 A checksum is `{ "algorithm": <name>, "value": <lowercase hex> }`:
 
@@ -1241,7 +1243,7 @@ Rows are kind-tagged CBOR objects in the data blocks. The row-kind schema and th
 | `active_deletion` | `root_inode_id`, `deletion_seq`, `action` |
 | `commit_receipt` | `commit_id`, `committed_seq`, `semantic_commit_fingerprint` |
 | `commit` | `seq`, `commit_id`, `committed_by`, `semantic_commit_fingerprint`, `committed_at_ms`, `message?`, `deltas` |
-| `content_publication` | `content_id`, `committed_seq`, `delta_index` |
+| `content_publication` | `owner_namespace_id`, `owner_generation`, `content_id`, `committed_seq`, `delta_index` |
 | `attributes_revision` | `inode_id`, `attributes_revision_no`, `committed_seq`, `commit_id`, `delta_index`, `committed_by`, `committed_at_ms`, `attributes` |
 | `access_revision` | `inode_id`, `access_revision_no`, `committed_seq`, `commit_id`, `delta_index`, `committed_by`, `committed_at_ms`, `boundary`, `grants` |
 
@@ -1289,7 +1291,7 @@ Bloom filters use the following keys, which are not always full row keys:
 | `attributes` | `attribute-{inode_id:020}` |
 | `access` | `access-{inode_id:020}` |
 
-Every delta that appends a file revision also produces a content-publication row. Repeated references to the same content within one commit share one row with the first publishing delta index. These rows survive every base rebuild, regardless of retention floor.
+Every delta that appends a file revision also produces a content-publication row with the reference's original owner namespace and generation. Repeated references to the same content within one commit share one row with the first publishing delta index. These rows survive every base rebuild, regardless of retention floor.
 
 The family groups are fixed:
 
@@ -1397,7 +1399,7 @@ These patterns define the core object families. Segment owners can differ from t
 | **Metadata segments** | `namespaces/{owner_namespace_id}/segments/{segment_id}.sst.zst` |
 | **Upload sessions** | `namespaces/{namespace_id}/uploads/{upload_id}.json` |
 | **Hint** | `namespaces/{namespace_id}/hint.json` |
-| **Content objects** | `namespaces/{owner_namespace_id}/content/{owner_generation}/{content_id}` |
+| **Content objects** | `namespaces/{owner_namespace_id}/content/{content_id}` |
 
 ## Appendix B. Semantic commit fingerprints
 

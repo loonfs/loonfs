@@ -3,10 +3,7 @@
 //! [durable object family]: ../../../docs/specs/format.md#a8-object-keys
 
 use loonfs_api::wire::manifest::MetadataSegmentRef;
-use loonfs_api::{
-    ContentId, ManifestNo, MetadataSegmentId, NamespaceGeneration, NamespaceId, PinId, UploadId,
-    WalNo,
-};
+use loonfs_api::{ContentId, ManifestNo, MetadataSegmentId, NamespaceId, PinId, UploadId, WalNo};
 
 /// Builds the listing prefix containing every durable object owned by one namespace.
 pub fn namespace_prefix(namespace_id: &NamespaceId) -> String {
@@ -79,21 +76,9 @@ pub fn upload_session(namespace_id: &NamespaceId, upload_id: &UploadId) -> Strin
     format!("namespaces/{namespace_id}/uploads/{upload_id}.json")
 }
 
-/// Builds a listing prefix that excludes other owners, including longer namespace ids.
-pub fn content_owner_prefix(
-    owner_namespace_id: &NamespaceId,
-    owner_generation: NamespaceGeneration,
-) -> String {
-    format!("namespaces/{owner_namespace_id}/content/{owner_generation}/")
-}
-
 /// Builds the immutable content-object key for one content identity.
-pub fn content_blob(
-    owner_namespace_id: &NamespaceId,
-    owner_generation: NamespaceGeneration,
-    content_id: &ContentId,
-) -> String {
-    format!("namespaces/{owner_namespace_id}/content/{owner_generation}/{content_id}")
+pub fn content_blob(owner_namespace_id: &NamespaceId, content_id: &ContentId) -> String {
+    format!("namespaces/{owner_namespace_id}/content/{content_id}")
 }
 
 #[cfg(test)]
@@ -108,8 +93,7 @@ mod tests {
     use loonfs_api::wire::manifest::{MetadataRowFamily, MetadataSegmentRef};
     use loonfs_api::wire::sst_blocks::BlockHandle;
     use loonfs_api::{
-        ContentId, ManifestNo, MetadataSegmentId, NamespaceGeneration, NamespaceId, PinId,
-        UploadId, WalNo,
+        ContentId, ManifestNo, MetadataSegmentId, NamespaceId, PinId, UploadId, WalNo,
     };
 
     const CONTENT_ID: &str = "con_abcdef0123456789abcdef0123456789";
@@ -173,7 +157,6 @@ mod tests {
                 .replace("{namespace_id}", "ns-1")
                 .replace("{owner_namespace_id}", "ns-1")
                 .replace("{source_namespace_id}", "ns-1")
-                .replace("{owner_generation}", "7")
                 .replace("{wal_no:020}", &format!("{:020}", 42))
                 .replace("{suffix}", "0123456789abcdef")
                 .replace("{manifest_no:020}", "00000000000000000400")
@@ -203,7 +186,7 @@ mod tests {
             ("Hint", hint(&namespace_id())),
             (
                 "Content objects",
-                content_blob(&namespace_id(), NamespaceGeneration(7), &content_id()),
+                content_blob(&namespace_id(), &content_id()),
             ),
         ];
 

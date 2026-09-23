@@ -181,11 +181,7 @@ async fn content_reclaimed_during_view_load_cannot_be_published() {
     .await
     .expect("bootstrap");
     let completed = completed_upload(&store, &namespace_id, &setup).await;
-    let content_key = content_blob(
-        &namespace_id,
-        completed.prepared.content_ref().owner_generation,
-        &completed.prepared.content_ref().content_id,
-    );
+    let content_key = content_blob(&namespace_id, &completed.prepared.content_ref().content_id);
     let publication = context(setup.now_ms + COMPLETED_UPLOAD_ADMISSION_WINDOW_MS - 1);
     let reclaimed = context(setup.now_ms + CONTENT_RECLAMATION_GRACE_MS + 1);
     let timer = Arc::new(PublicationTimer::default());

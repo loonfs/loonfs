@@ -286,7 +286,7 @@ mod tests {
         let signed = issuer
             .presign_put(
                 PresignedPutRequest {
-                    object_key: "namespaces/demo/content/1/con_0123456789abcdef0123456789abcdef",
+                    object_key: "namespaces/demo/content/con_0123456789abcdef0123456789abcdef",
                     expires_in: Duration::from_secs(900),
                 },
                 UNIX_EPOCH + Duration::from_secs(1_700_000_000),
@@ -499,7 +499,7 @@ mod tests {
         let signed = issuer
             .presign_put(
                 PresignedPutRequest {
-                    object_key: "namespaces/demo/content/1/con_0123456789abcdef0123456789abcdef",
+                    object_key: "namespaces/demo/content/con_0123456789abcdef0123456789abcdef",
                     expires_in: Duration::from_secs(900),
                 },
                 UNIX_EPOCH + Duration::from_secs(1_700_000_000),

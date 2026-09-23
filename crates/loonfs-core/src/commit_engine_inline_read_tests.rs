@@ -342,11 +342,7 @@ async fn foreign_references_resolve_to_objects_and_object_downloads_do_not_write
         value.content_ref().content_id.clone(),
         b"foreign",
     );
-    let key = content_blob(
-        &foreign.owner_namespace_id,
-        foreign.owner_generation,
-        &foreign.content_id,
-    );
+    let key = content_blob(&foreign.owner_namespace_id, &foreign.content_id);
     store
         .put(
             &key,
@@ -445,11 +441,7 @@ async fn direct_downloads_materialize_once_and_do_not_write_after_a_flush() {
             .expect("resolve")
             .entry
             .inode_id;
-        let key = content_blob(
-            &publisher.namespace_id,
-            value.content_ref().owner_generation,
-            &value.content_ref().content_id,
-        );
+        let key = content_blob(&publisher.namespace_id, &value.content_ref().content_id);
         store.reset();
         for _ in 0..2 {
             let target = engine
@@ -616,11 +608,7 @@ async fn inline_checksum_failures_match_object_validation() {
     assert_eq!(flush_error.code(), loonfs_api::ErrorCode::NamespaceCorrupt);
     assert_eq!(flush_error.to_string(), error.to_string());
     assert_no_writes(&store);
-    let key = content_blob(
-        &publisher.namespace_id,
-        corrupt_ref.owner_generation,
-        &corrupt_ref.content_id,
-    );
+    let key = content_blob(&publisher.namespace_id, &corrupt_ref.content_id);
     store
         .put(&key, Bytes::from_static(b"wrong"), PutMode::CreateIfAbsent)
         .await

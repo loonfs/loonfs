@@ -387,6 +387,10 @@ impl ActiveDeletionRecord {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ContentPublicationRecord {
+    /// Selects the namespace that owns the content object.
+    pub owner_namespace_id: NamespaceId,
+    /// Selects the generation whose retirement can delete the object.
+    pub owner_generation: NamespaceGeneration,
     /// Stored directly in the row key and Bloom filter key.
     pub content_id: ContentId,
     /// Distinguishes later publications of the same content.
@@ -2004,6 +2008,8 @@ mod tests {
             (
                 MetadataRowFamily::ContentPublications,
                 super::MetadataRow::ContentPublication(super::ContentPublicationRecord {
+                    owner_namespace_id: NamespaceId::parse("demo").expect("namespace"),
+                    owner_generation: crate::NamespaceGeneration(1),
                     content_id: crate::ContentId::parse("con_0123456789abcdef0123456789abcdef")
                         .expect("valid content id"),
                     committed_seq: ChangeSeq(12),

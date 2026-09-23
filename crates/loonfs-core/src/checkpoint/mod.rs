@@ -75,8 +75,8 @@ pub(crate) use self::flush::flush_wal;
 pub(crate) use self::list::list_checkpoints_page;
 pub(crate) use self::load::{
     ensure_manifest_reference_matches, load_basis_metadata_segments,
-    load_namespace_manifest_envelope, load_namespace_manifest_envelope_if_present,
-    LoadedMetadataBasis,
+    load_manifest_segments_for_inspection, load_namespace_manifest_envelope,
+    load_namespace_manifest_envelope_if_present, LoadedMetadataBasis,
 };
 pub(crate) use self::record::load_checkpoint_record;
 pub use self::reorganize::metadata_maintenance_due;

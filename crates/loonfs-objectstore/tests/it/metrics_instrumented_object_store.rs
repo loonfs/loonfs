@@ -155,14 +155,14 @@ async fn records_get_success_bytes_out() {
 
     store
         .put_overwrite(
-            "namespaces/demo/content/1/con_abcdef0123456789abcdef0123456789",
+            "namespaces/demo/content/con_abcdef0123456789abcdef0123456789",
             bytes(b"abcdef"),
         )
         .await
         .expect("put object");
     let bytes = store
         .get(
-            "namespaces/demo/content/1/con_abcdef0123456789abcdef0123456789",
+            "namespaces/demo/content/con_abcdef0123456789abcdef0123456789",
             Some(ByteRange {
                 start_inclusive: 1,
                 end_exclusive: 4,
