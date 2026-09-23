@@ -14,6 +14,7 @@ pub(super) enum CheckpointSweep {
     DeleteFork,
     DeleteUser,
     DeleteSnapshot,
+    DeleteRetired,
     Gone,
     Retain,
 }
@@ -31,7 +32,13 @@ pub(super) async fn sweep_checkpoint_record<S: ObjectStore + ?Sized>(
         Err(error) => return Err(CoreError::ControlObjectLoad(error)),
     };
     let deletion = match &record.owner {
-        CheckpointOwner::Retired {} => return Ok(CheckpointSweep::Retain),
+        CheckpointOwner::Retired {} => {
+            return Ok(if live.missing_retired_pins.contains(key) {
+                CheckpointSweep::DeleteRetired
+            } else {
+                CheckpointSweep::Retain
+            });
+        }
         CheckpointOwner::User { .. } => CheckpointSweep::DeleteUser,
         CheckpointOwner::Snapshot { .. } => CheckpointSweep::DeleteSnapshot,
         CheckpointOwner::Fork {

@@ -432,6 +432,8 @@ pub struct UploadSessionState {
     pub namespace_id: NamespaceId,
     /// Generation of the namespace when the session opened; the content key and every reference the session mints carry it.
     pub owner_generation: NamespaceGeneration,
+    /// Content domain selected when the session opened.
+    pub content_store_id: ContentStoreId,
     /// Durable session identity used by staging and completion requests.
     pub upload_id: UploadId,
     /// Content object this session writes, allocated when the session began.
@@ -522,6 +524,7 @@ impl UploadSessionState {
 struct StrictUploadSessionState {
     namespace_id: NamespaceId,
     owner_generation: NamespaceGeneration,
+    content_store_id: ContentStoreId,
     upload_id: UploadId,
     content_id: ContentId,
     created_at_ms: u64,
@@ -633,6 +636,7 @@ impl<'de> Deserialize<'de> for UploadSessionState {
         let session = Self {
             namespace_id: record.namespace_id,
             owner_generation: record.owner_generation,
+            content_store_id: record.content_store_id,
             upload_id: record.upload_id,
             content_id: record.content_id,
             created_at_ms: record.created_at_ms,
@@ -710,6 +714,8 @@ mod tests {
         let session = UploadSessionState {
             namespace_id: NamespaceId::parse("demo").expect("namespace id"),
             owner_generation: crate::NamespaceGeneration(1),
+            content_store_id: crate::ContentStoreId::parse("cs_0123456789abcdef0123456789abcdef")
+                .expect("content store id"),
             upload_id: UploadId::parse("upl_0123456789abcdef0123456789abcdef").expect("upload id"),
             content_id: content_ref.content_id.clone(),
             created_at_ms: 1_000,
@@ -776,6 +782,10 @@ mod tests {
                 let session = UploadSessionState {
                     namespace_id: NamespaceId::parse("demo").expect("namespace id"),
                     owner_generation: crate::NamespaceGeneration(1),
+                    content_store_id: crate::ContentStoreId::parse(
+                        "cs_0123456789abcdef0123456789abcdef",
+                    )
+                    .expect("content store id"),
                     upload_id: UploadId::parse("upl_0123456789abcdef0123456789abcdef")
                         .expect("upload id"),
                     content_id: content_ref.content_id.clone(),

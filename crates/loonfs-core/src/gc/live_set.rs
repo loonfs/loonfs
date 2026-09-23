@@ -8,9 +8,7 @@ use crate::namespace::read_anchor::NamespaceReadAnchor;
 use crate::wal::{object_is_required, required_from};
 use futures::StreamExt;
 use loonfs_api::wire::manifest::NamespaceManifestPayload;
-use loonfs_api::{
-    CheckpointId, ContentStoreId, ManifestNo, NamespaceGeneration, NamespaceId, WalNo,
-};
+use loonfs_api::{CheckpointId, ManifestNo, NamespaceGeneration, NamespaceId, WalNo};
 use loonfs_objectstore::keys::{
     checkpoint_prefix, metadata_manifest_object, metadata_segment_object_key,
 };
@@ -32,12 +30,12 @@ pub(super) struct RetiredPin {
 }
 
 pub(super) struct LiveSet {
-    pub(super) content_store_id: ContentStoreId,
     pub(super) owner_generation: NamespaceGeneration,
     pub(super) generation_first_manifest_no: ManifestNo,
     pub(super) namespace_deleted: bool,
     pub(super) current_tombstone: Option<NamespaceManifestPayload>,
     pub(super) retired_pins: Vec<RetiredPin>,
+    pub(super) missing_retired_pins: BTreeSet<String>,
     pub(super) discovery_start_manifest_no: ManifestNo,
     pub(super) objects: BTreeSet<String>,
     listed_pins: BTreeSet<CheckpointId>,
@@ -57,12 +55,12 @@ impl LiveSet {
     ) -> Result<Self> {
         let head = anchor.manifest.envelope.payload();
         let mut live = Self {
-            content_store_id: head.content_store_id.clone(),
             owner_generation: head.generation,
             generation_first_manifest_no: head.generation_first_manifest_no,
             namespace_deleted: head.status.is_deleted(),
             current_tombstone: head.status.is_deleted().then(|| head.clone()),
             retired_pins: Vec::new(),
+            missing_retired_pins: BTreeSet::new(),
             discovery_start_manifest_no: anchor.manifest.discovery_start_manifest_no,
             objects: BTreeSet::from([anchor.manifest.object_key.clone()]),
             listed_pins: BTreeSet::new(),
@@ -104,6 +102,10 @@ impl LiveSet {
                     &mut manifests,
                 )
                 .await?;
+            let Some(payload) = payload else {
+                live.missing_retired_pins.insert(key);
+                continue;
+            };
             if super::fork_checkpoints::is_retired_pin(namespace_id, &pin_id) {
                 if !payload.status.is_deleted() {
                     return Err(CoreError::NamespaceCorrupt(format!(
@@ -130,9 +132,9 @@ impl LiveSet {
         manifest_no: ManifestNo,
         root_key: &str,
         manifests: &mut BTreeMap<ManifestNo, NamespaceManifestPayload>,
-    ) -> Result<NamespaceManifestPayload> {
+    ) -> Result<Option<NamespaceManifestPayload>> {
         if let Some(payload) = manifests.get(&manifest_no) {
-            return Ok(payload.clone());
+            return Ok(Some(payload.clone()));
         }
         let key = metadata_manifest_object(namespace_id, &manifest_no);
         let envelope =
@@ -140,12 +142,17 @@ impl LiveSet {
                 .await
                 .map_err(|error| {
                     CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
-                })?
-                .ok_or_else(|| {
-                    CoreError::NamespaceCorrupt(format!(
-                        "root `{root_key}` pins missing manifest `{key}`"
-                    ))
                 })?;
+        let Some(envelope) = envelope else {
+            if checkpoint_key_ids(root_key)
+                .is_ok_and(|(_, id)| super::fork_checkpoints::is_retired_pin(namespace_id, &id))
+            {
+                return Ok(None);
+            }
+            return Err(CoreError::NamespaceCorrupt(format!(
+                "root `{root_key}` pins missing manifest `{key}`"
+            )));
+        };
         let payload = envelope.payload();
         self.objects.insert(key);
         if !payload.status.is_deleted() {
@@ -158,7 +165,7 @@ impl LiveSet {
             );
         }
         manifests.insert(manifest_no, payload.clone());
-        Ok(payload.clone())
+        Ok(Some(payload.clone()))
     }
 
     pub(super) fn protects_wal(&self, key: &str) -> bool {
@@ -202,16 +209,5 @@ impl LiveSet {
         } else {
             GenerationState::Current
         }
-    }
-
-    pub(super) fn generation_content_store(
-        &self,
-        generation: NamespaceGeneration,
-    ) -> &ContentStoreId {
-        self.tombstones()
-            .find(|tombstone| tombstone.generation == generation)
-            .map_or(&self.content_store_id, |tombstone| {
-                &tombstone.content_store_id
-            })
     }
 }

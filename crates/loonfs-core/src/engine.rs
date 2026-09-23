@@ -666,7 +666,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         crate::checkpoint::list_checkpoint_files_page(
             &self.store,
             Some(context.segment_cache.as_ref()),
-            &self.namespace_id,
+            &context.head,
             checkpoint_id,
             request,
         )

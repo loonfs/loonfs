@@ -246,6 +246,7 @@ async fn recreate_namespace<S: ObjectStore + ?Sized>(
         successor.apply_to(&mut payload);
 
         let manifest = encode_manifest(payload)?;
+        crate::checkpoint::ensure_metadata_publication_budget(&timer, started_ms, namespace_id)?;
         write_retired_pin(store, &current, context.now_ms).await?;
         write_content_store_descriptor(
             store,

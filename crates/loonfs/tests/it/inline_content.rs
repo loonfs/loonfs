@@ -108,6 +108,14 @@ async fn reader_downloads_materialize_tail_content_by_path_and_inode() {
             .await
             .expect("entry")
             .inode_id;
+        let pinned = reader
+            .pin_namespace(&namespace_id)
+            .await
+            .expect("retain inline view");
+        pinned
+            .get_file_bytes("/file")
+            .await
+            .expect("retain inline bytes");
         recording.reset();
         let object_key = if by_inode {
             reader
@@ -144,6 +152,33 @@ async fn reader_downloads_materialize_tail_content_by_path_and_inode() {
                 .as_ref(),
             b"inline content"
         );
+        writer
+            .delete_namespace(&namespace_id, Default::default())
+            .await
+            .expect("delete generation");
+        writer
+            .create_namespace(
+                &namespace_id,
+                CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+            )
+            .await
+            .expect("recreate");
+        store
+            .delete(&object_key)
+            .await
+            .expect("collect old content");
+        recording.reset();
+        let error = pinned
+            .create_download("/file")
+            .await
+            .expect_err("old view cannot materialize content");
+        assert!(matches!(
+            error,
+            loonfs::RuntimeError::Core(loonfs_core::Error::DurableContent(
+                loonfs_core::content::DurableContentValidationError::MissingContentGeneration { .. }
+            ))
+        ));
+        assert_eq!(recording.count(OperationClass::Put), 0);
     }
 }
 

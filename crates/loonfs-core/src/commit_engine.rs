@@ -522,6 +522,8 @@ pub struct NamespaceCommitEngine {
     namespace_id: NamespaceId,
     publish_tail_projection: Option<PublishTailProjection>,
     projection_loaded_ms: Option<u64>,
+    manifest_checked_ms: Option<u64>,
+    manifest_revalidation_interval_ms: u64,
     /// This session's epoch and fencing for the namespace; see
     /// [`WriterSessionState`].
     session: SharedWriterSessionState,
@@ -538,6 +540,8 @@ impl NamespaceCommitEngine {
             namespace_id,
             publish_tail_projection: None,
             projection_loaded_ms: None,
+            manifest_checked_ms: None,
+            manifest_revalidation_interval_ms: 1_000,
             session: SharedWriterSessionState::default(),
             timer: Arc::new(StdMonotonicTimer::default()),
             segment_cache: None,
@@ -565,6 +569,11 @@ impl NamespaceCommitEngine {
         self
     }
 
+    pub fn manifest_revalidation_interval_ms(mut self, interval_ms: u64) -> Self {
+        self.manifest_revalidation_interval_ms = interval_ms;
+        self
+    }
+
     pub fn segment_cache(mut self, segment_cache: Arc<MetadataSegmentCache>) -> Self {
         self.segment_cache = Some(segment_cache);
         self
@@ -575,6 +584,7 @@ impl NamespaceCommitEngine {
     pub fn invalidate_projection(&mut self) {
         self.publish_tail_projection = None;
         self.projection_loaded_ms = None;
+        self.manifest_checked_ms = None;
     }
 
     /// The generation of the head this engine last published against, without
@@ -594,8 +604,26 @@ impl NamespaceCommitEngine {
             .map(PublishTailProjection::weight)
     }
 
-    /// Whether the retained tail contains a receipt, without loading a projection.
-    pub fn has_retained_commit_receipt(&self, commit_id: &CommitId) -> bool {
+    async fn revalidate_projection<S: ObjectStore + ?Sized>(&mut self, store: &S) -> Result<()> {
+        let Some(projection) = self.publish_tail_projection.as_ref() else {
+            return Ok(());
+        };
+        let now_ms = self.timer.monotonic_now_ms();
+        if self.manifest_checked_ms.is_some_and(|checked_ms| {
+            now_ms.saturating_sub(checked_ms) < self.manifest_revalidation_interval_ms
+        }) {
+            return Ok(());
+        }
+        if projection.manifest_is_current(store).await? {
+            self.manifest_checked_ms = Some(now_ms);
+        } else {
+            self.invalidate_projection();
+        }
+        Ok(())
+    }
+
+    /// Whether the retained tail contains a receipt, without a store request.
+    fn retains_commit_receipt(&self, commit_id: &CommitId) -> bool {
         self.publish_tail_projection
             .as_ref()
             .is_some_and(|projection| {
@@ -605,6 +633,21 @@ impl NamespaceCommitEngine {
                     .find_commit_receipt(commit_id)
                     .is_some()
             })
+    }
+
+    /// Whether the retained tail contains a receipt. A retained receipt is
+    /// answered only after the manifest passes its revalidation, so a
+    /// recreated namespace cannot replay an earlier generation's commit.
+    pub async fn has_retained_commit_receipt<S: ObjectStore + ?Sized>(
+        &mut self,
+        store: &S,
+        commit_id: &CommitId,
+    ) -> Result<bool> {
+        if !self.retains_commit_receipt(commit_id) {
+            return Ok(false);
+        }
+        self.revalidate_projection(store).await?;
+        Ok(self.retains_commit_receipt(commit_id))
     }
 
     /// The retained projection as a fold input, or `None` when the engine
@@ -665,6 +708,7 @@ impl NamespaceCommitEngine {
         options: DeleteNamespaceOptions,
         context: &MutationContext,
     ) -> Result<DeleteNamespaceResponse> {
+        let started_ms = self.timer.monotonic_now_ms();
         let acquired_writer = self.session_writer_epoch(store, context).await?;
         let deleted = crate::namespace::delete::delete_namespace(
             store,
@@ -672,6 +716,8 @@ impl NamespaceCommitEngine {
             options,
             acquired_writer,
             context,
+            self.timer.as_ref(),
+            started_ms,
         )
         .await;
         self.invalidate_projection();
@@ -751,17 +797,32 @@ impl NamespaceCommitEngine {
         {
             self.invalidate_projection();
         }
-        let projection_loaded_ms = self.projection_loaded_ms.unwrap_or(attempt_started_ms);
-        let (publish_view, projection) = match load_publish_metadata_view(
-            store,
-            self.segment_cache.as_deref(),
-            &self.namespace_id,
-            acquired_writer,
-            self.publish_tail_projection.as_ref(),
-            tail_options,
-        )
-        .await
+        // A fresh publish is fenced by its WAL put; only a replay answered
+        // from a retained receipt needs the manifest revalidated first.
+        let revalidated = if candidates
+            .iter()
+            .any(|candidate| self.retains_commit_receipt(candidate.commit_id()))
         {
+            self.revalidate_projection(store).await
+        } else {
+            Ok(())
+        };
+        let loaded = match revalidated {
+            Ok(()) => {
+                load_publish_metadata_view(
+                    store,
+                    self.segment_cache.as_deref(),
+                    &self.namespace_id,
+                    acquired_writer,
+                    self.publish_tail_projection.as_ref(),
+                    tail_options,
+                )
+                .await
+            }
+            Err(error) => Err(error),
+        };
+        let projection_loaded_ms = self.projection_loaded_ms.unwrap_or(attempt_started_ms);
+        let (publish_view, projection) = match loaded {
             Ok(value) => value,
             Err(error) => {
                 self.invalidate_projection();
@@ -792,6 +853,11 @@ impl NamespaceCommitEngine {
         )
         .await;
         self.projection_loaded_ms = Some(projection_loaded_ms);
+        // A cold load read the current manifest, so the successor probe waits
+        // a full interval before its first request.
+        if self.manifest_checked_ms.is_none() {
+            self.manifest_checked_ms = Some(projection_loaded_ms);
+        }
         let (wal_tail_segments, wal_tail_inline_bytes, resulting_read_state) =
             self.update_publish_tail_projection(projection, published.effect, tail_options);
         NamespaceCommitEnginePublishResult {
@@ -903,6 +969,10 @@ mod content_tests;
 #[cfg(test)]
 #[path = "commit_engine_inline_tests.rs"]
 mod inline_tests;
+
+#[cfg(test)]
+#[path = "commit_engine_generation_tests.rs"]
+mod generation_tests;
 
 #[cfg(test)]
 mod tests {

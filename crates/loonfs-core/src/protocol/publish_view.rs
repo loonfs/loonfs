@@ -113,6 +113,22 @@ impl PublishTailProjection {
         self.key == *key && self.within_limits(options)
     }
 
+    pub(crate) async fn manifest_is_current<S: ObjectStore + ?Sized>(
+        &self,
+        store: &S,
+    ) -> Result<bool> {
+        let Ok(next) = self.basis().manifest_no().successor() else {
+            return Ok(true);
+        };
+        let key =
+            loonfs_objectstore::keys::metadata_manifest_object(&self.head.namespace_id, &next);
+        Ok(store
+            .head(&key)
+            .await
+            .map_err(|error| CoreError::store(&key, &error))?
+            .is_none())
+    }
+
     pub(crate) fn weight(&self) -> PublishTailWeight {
         PublishTailWeight {
             rows: self.tail_state.rows.row_count(),

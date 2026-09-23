@@ -493,7 +493,13 @@ async fn swap_accepts_any_valid_matching_proof_and_expired_receipt_replays_witho
                 .map(|key| key.family());
             let reads_wal = matches!(
                 operation,
-                RecordedOperation::Get { .. } | RecordedOperation::GetWithMetadata { .. }
+                RecordedOperation::Get {
+                    result_bytes: 1..,
+                    ..
+                } | RecordedOperation::GetWithMetadata {
+                    result_bytes: 1..,
+                    ..
+                }
             ) && family
                 == Some(loonfs_objectstore::layout::DurableObjectFamily::WalSegment);
             family != Some(loonfs_objectstore::layout::DurableObjectFamily::ContentBlob)

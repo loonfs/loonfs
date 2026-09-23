@@ -469,6 +469,7 @@ async fn create_upload_session_with_state<S: ObjectStore + ?Sized>(
     let state = UploadSessionState {
         namespace_id: catalog.namespace_id().clone(),
         owner_generation: catalog.generation(),
+        content_store_id: catalog.content_store_id().clone(),
         upload_id: upload_id.clone(),
         content_id: session.content_id,
         created_at_ms: context.now_ms,
@@ -1980,6 +1981,7 @@ mod tests {
         let session = UploadSessionState {
             namespace_id: NamespaceId::parse("demo").expect("namespace id"),
             owner_generation: NamespaceGeneration(1),
+            content_store_id: ContentStoreId::generate(),
             upload_id: UploadId::parse("upl_00000000000000000000000000000001").expect("upload id"),
             content_id: ContentId::parse("con_00000000000000000000000000000001")
                 .expect("content id"),

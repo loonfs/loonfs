@@ -5,7 +5,7 @@ use crate::error::{CoreError, Result};
 use crate::namespace::read_anchor::load_read_anchor;
 use crate::namespace::writer_epoch::ensure_writer_not_fenced;
 use crate::options::DeleteNamespaceOptions;
-use crate::time::{MonotonicTimer, StdMonotonicTimer};
+use crate::time::MonotonicTimer;
 use loonfs_api::wire::control::{AcquiredWriter, NamespaceStatus};
 use loonfs_api::{DeleteNamespaceResponse, NamespaceId};
 use loonfs_objectstore::ObjectStore;
@@ -16,9 +16,9 @@ pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
     options: DeleteNamespaceOptions,
     acquired_writer: AcquiredWriter,
     context: &crate::context::MutationContext,
+    timer: &dyn MonotonicTimer,
+    started_ms: u64,
 ) -> Result<DeleteNamespaceResponse> {
-    let timer = StdMonotonicTimer::default();
-    let started_ms = timer.monotonic_now_ms();
     loop {
         let anchor = load_read_anchor(store, namespace_id).await?;
         let head = &anchor.read_state;
@@ -37,6 +37,7 @@ pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
         // before publishing a terminal manifest, so its rows and totals cover
         // the same head. A failed fold leaves the namespace active.
         if anchor.manifest.envelope.payload().last_folded_wal_no != head.wal_no {
+            crate::checkpoint::ensure_metadata_publication_budget(timer, started_ms, namespace_id)?;
             crate::checkpoint::flush_wal(store, namespace_id).await?;
             continue;
         }
@@ -55,7 +56,7 @@ pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
                 namespace_id,
                 manifest,
                 Some(anchor.manifest.state.manifest.manifest_no),
-                &timer,
+                timer,
                 started_ms
             )
             .await?,
