@@ -151,7 +151,7 @@ Commits also record a timestamp and optional message. An actor is a required, ap
 | Metadata | Actor and timestamp fields |
 | --- | --- |
 | Inode creation | `created_by`, `created_at_ms` |
-| File revision and commit receipt | `committed_by`, `committed_at_ms` |
+| File revision | `committed_by`, `committed_at_ms` |
 | Tombstone event and listed active deletion | `deleted_by`, `deleted_at_ms` |
 | Attribute revision | `updated_by`, `updated_at_ms` |
 | Access revision | `updated_by`, `updated_at_ms` |
@@ -1268,7 +1268,7 @@ Rows are kind-tagged CBOR objects in the data blocks. The row-kind schema and th
 | `file_revision` | `inode_id`, `revision_no`, `committed_seq`, `commit_id`, `committed_at_ms`, `committed_by`, `delta_index`, `content_ref` |
 | `tombstone` | `root_inode_id`, `generation`, `commit_id`, `action`, `deleted_at_ms`, `deleted_by` |
 | `active_deletion` | `root_inode_id`, `deletion_seq`, `action` |
-| `commit_receipt` | `commit_id`, `committed_by`, `semantic_commit_fingerprint`, `committed_seq`, `committed_at_ms`, `message?` |
+| `commit_receipt` | `commit_id`, `committed_seq`, `semantic_commit_fingerprint` |
 | `commit` | `seq`, `commit_id`, `committed_by`, `semantic_commit_fingerprint`, `committed_at_ms`, `message?`, `deltas` |
 | `content_publication` | `content_id`, `committed_seq`, `delta_index` |
 | `attributes_revision` | `inode_id`, `attributes_revision_no`, `committed_seq`, `commit_id`, `delta_index`, `updated_by`, `updated_at_ms`, `attributes` |

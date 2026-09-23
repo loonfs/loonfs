@@ -13,9 +13,7 @@ mod writer;
 pub(crate) use self::discover::discover_tip;
 pub use self::discover::probe_namespace_wal;
 use self::frame::WalTailLoadRequest;
-use self::frame::{
-    DecodedWalRecord, PreparedWalSegment, ReplayedWalTail, ValidatedWalSegment, ValidatedWalTail,
-};
+use self::frame::{PreparedWalSegment, ReplayedWalTail, ValidatedWalSegment, ValidatedWalTail};
 pub(crate) use self::frame::{WalSegmentError, WalTailLoadError};
 pub use self::projected_tail::ProjectedWalTail;
 pub(crate) use self::publish::publish_segment;

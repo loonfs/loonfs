@@ -2,13 +2,12 @@
 
 pub(crate) use super::frame::WalSegmentError;
 use super::ProjectedWalTail;
-use super::{DecodedWalRecord, ReplayedWalTail, ValidatedWalTail};
+use super::{ReplayedWalTail, ValidatedWalSegment, ValidatedWalTail};
 use crate::commit::next_inode_after;
 use crate::error::MetadataProjectionLoadError;
-use crate::metadata::CommitReceiptRecord;
 use crate::namespace::state::NamespaceReadState;
 use bytes::Bytes;
-use loonfs_api::wire::wal::{WalCommitDelta, WalDelta, WalSegmentEnvelope};
+use loonfs_api::wire::wal::{WalCommitDelta, WalCommitPayload, WalDelta, WalSegmentEnvelope};
 use loonfs_api::{ChangeSeq, InodeId, NamespaceId, WriterEpoch};
 
 pub(crate) fn project_validated_wal_tail(
@@ -26,7 +25,7 @@ pub(crate) fn project_validated_wal_tail(
             &replayed.resulting_head,
             &replayed.projected_tail,
             expected_writer_epoch,
-            segment.decoded_records(),
+            segment,
         )?;
         let payload = segment.envelope().payload();
         if replayed.resulting_head.next_inode_id != payload.next_inode_id {
@@ -59,28 +58,32 @@ pub(crate) fn ensure_replayed_head_matches(
     Ok(())
 }
 
-pub(crate) fn replay_wal_records<'a, I>(
+pub(crate) fn replay_wal_records(
     base_head: &NamespaceReadState,
     base_tail: &ProjectedWalTail,
     expected_writer_epoch: Option<WriterEpoch>,
-    records: I,
-) -> Result<ReplayedWalTail, WalSegmentError>
-where
-    I: IntoIterator<Item = DecodedWalRecord<'a>>,
-{
+    segment: &ValidatedWalSegment,
+) -> Result<ReplayedWalTail, WalSegmentError> {
     let mut current_head = base_head.clone();
     let mut current_tail = base_tail.clone();
+    let payload = segment.envelope().payload();
 
-    for record in records {
-        validate_replay_record(&current_head, expected_writer_epoch, &record)?;
-        for value in record.inline_content {
+    for record in &payload.records {
+        validate_replay_record(
+            &current_head,
+            expected_writer_epoch,
+            &payload.namespace_id,
+            payload.writer_epoch,
+            record,
+        )?;
+        for value in &record.inline_content {
             let content_ref = record
                 .deltas
                 .iter()
                 .find_map(|delta| match &delta.delta {
                     WalDelta::AppendFileRevision { content_ref, .. }
                         if content_ref.content_id == value.content_id
-                            && content_ref.owner_namespace_id == *record.namespace_id =>
+                            && content_ref.owner_namespace_id == payload.namespace_id =>
                     {
                         Some(content_ref)
                     }
@@ -94,17 +97,7 @@ where
         current_head.head_commit_id = record.commit_id.clone();
         current_head.next_inode_id =
             replay_next_inode_id_from_commit_deltas(current_head.next_inode_id, &record.deltas);
-        current_tail.apply_commit_parts(
-            CommitReceiptRecord {
-                commit_id: record.commit_id.clone(),
-                committed_by: record.committed_by.clone(),
-                semantic_commit_fingerprint: record.semantic_commit_fingerprint.clone(),
-                committed_seq: record.seq,
-                committed_at_ms: record.committed_at_ms,
-                message: record.message.map(str::to_owned),
-            },
-            &record.deltas,
-        )?;
+        current_tail.apply_commit(record)?;
     }
 
     Ok(ReplayedWalTail {
@@ -116,12 +109,14 @@ where
 fn validate_replay_record(
     current_head: &NamespaceReadState,
     expected_writer_epoch: Option<WriterEpoch>,
-    record: &DecodedWalRecord<'_>,
+    namespace_id: &NamespaceId,
+    writer_epoch: WriterEpoch,
+    record: &WalCommitPayload,
 ) -> Result<(), WalSegmentError> {
-    if record.namespace_id != &current_head.namespace_id {
+    if namespace_id != &current_head.namespace_id {
         return Err(WalSegmentError::NamespaceMismatch {
             expected: current_head.namespace_id.clone(),
-            actual: record.namespace_id.clone(),
+            actual: namespace_id.clone(),
         });
     }
     let expected_seq = current_head
@@ -137,10 +132,10 @@ fn validate_replay_record(
     if let Some(expected_max) = expected_writer_epoch {
         // A visible tail may contain older epochs after writer takeover; it
         // must never contain records from an epoch beyond the current head.
-        if record.writer_epoch > expected_max {
+        if writer_epoch > expected_max {
             return Err(WalSegmentError::WriterEpochMismatch {
                 expected_max,
-                actual: record.writer_epoch,
+                actual: writer_epoch,
             });
         }
     }

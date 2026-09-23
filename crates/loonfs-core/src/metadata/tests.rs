@@ -504,27 +504,18 @@ fn find_commit_receipt_returns_latest_matching_receipt() {
         vec![
             CommitReceiptRecord {
                 commit_id: commit_id.clone(),
-                committed_by: loonfs_test_support::test_actor(),
-                semantic_commit_fingerprint: fingerprint("old"),
                 committed_seq: ChangeSeq(1),
-                committed_at_ms: 4_200,
-                message: Some("old message".to_owned()),
+                semantic_commit_fingerprint: fingerprint("old"),
             },
             CommitReceiptRecord {
                 commit_id: CommitId::parse("other-commit").expect("valid commit id"),
-                committed_by: loonfs_test_support::test_actor(),
-                semantic_commit_fingerprint: fingerprint("other"),
                 committed_seq: ChangeSeq(3),
-                committed_at_ms: 4_200,
-                message: None,
+                semantic_commit_fingerprint: fingerprint("other"),
             },
             CommitReceiptRecord {
                 commit_id: commit_id.clone(),
-                committed_by: loonfs_test_support::test_actor(),
-                semantic_commit_fingerprint: fingerprint("new"),
                 committed_seq: ChangeSeq(2),
-                committed_at_ms: 4_200,
-                message: Some("new message".to_owned()),
+                semantic_commit_fingerprint: fingerprint("new"),
             },
         ],
         Vec::new(),
@@ -586,11 +577,8 @@ fn metadata_builder_tracks_the_highest_row_sequence() {
     });
     builder.push_commit_receipt(CommitReceiptRecord {
         commit_id: CommitId::parse("indexed-commit").expect("valid commit id"),
-        committed_by: loonfs_test_support::test_actor(),
-        semantic_commit_fingerprint: fingerprint("fingerprint"),
         committed_seq: ChangeSeq(3),
-        committed_at_ms: 4_200,
-        message: Some("replace indexed file".to_owned()),
+        semantic_commit_fingerprint: fingerprint("fingerprint"),
     });
     let metadata_state = builder.finish();
 
