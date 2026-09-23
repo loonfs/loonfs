@@ -6,11 +6,15 @@ use super::uploads::{
     sweep_upload_session, PublicationView, UploadSessionSweep, UploadSweepContext,
 };
 use crate::context::MutationContext;
+use crate::control_update::load_upload_session_state;
 use crate::error::{CoreError, Result};
 use crate::limits::UNREFERENCED_SEGMENT_MIN_AGE_MS;
-use loonfs_api::{DeletedObjectCounts, GcResponse, NamespaceId, RetainedReason};
+use loonfs_api::{
+    DeletedObjectCounts, GcResponse, NamespaceGeneration, NamespaceId, RetainedReason,
+};
 use loonfs_objectstore::layout::upload_id_of;
 use loonfs_objectstore::ObjectStore;
+use std::collections::BTreeSet;
 
 pub(super) struct Sweep<'a, 'store, S: ObjectStore + ?Sized> {
     pub(super) store: &'store S,
@@ -20,7 +24,7 @@ pub(super) struct Sweep<'a, 'store, S: ObjectStore + ?Sized> {
     pub(super) live: &'a LiveSet,
     pub(super) view: &'a PublicationView<'a, 'store, S>,
     pub(super) upload_sweep: UploadSweepContext<'a, S>,
-    pub(super) checkpoints_retained: &'a mut bool,
+    pub(super) retained_sessions: &'a mut BTreeSet<NamespaceGeneration>,
     pub(super) report: &'a mut GcResponse,
 }
 
@@ -28,7 +32,6 @@ impl<S: ObjectStore + ?Sized> Sweep<'_, '_, S> {
     pub(super) async fn candidate(&mut self, family: CandidateFamily, key: &str) -> Result<()> {
         if !family.recognizes(key) {
             self.report.retain(RetainedReason::UnrecognizedKey);
-            *self.checkpoints_retained |= family == CandidateFamily::Checkpoints;
             return Ok(());
         }
         match family {
@@ -44,27 +47,8 @@ impl<S: ObjectStore + ?Sized> Sweep<'_, '_, S> {
                 self.process_aged_family(family, key, |counts| &mut counts.manifests)
                     .await
             }
-            CandidateFamily::Checkpoints => {
-                *self.checkpoints_retained |= !self.process_checkpoint(key).await?;
-                Ok(())
-            }
+            CandidateFamily::Checkpoints => self.process_checkpoint(key).await,
             CandidateFamily::UploadSessions => self.process_upload_session(key).await,
-            CandidateFamily::OwnedContent => {
-                let prefix = family.prefix(self.namespace_id, self.live);
-                let owner_generation = self.live.owner_generation.to_string();
-                if !key.starts_with(&prefix)
-                    || loonfs_objectstore::layout::parse_object_key(key).is_none_or(|parsed| {
-                        parsed.owner_namespace_id() != Some(self.namespace_id.as_str())
-                            || parsed.owner_generation() != Some(owner_generation.as_str())
-                    })
-                {
-                    self.report.retain(RetainedReason::UnrecognizedKey);
-                    return Ok(());
-                }
-                self.delete_key(key).await?;
-                self.report.deleted.retired_content_objects += 1;
-                Ok(())
-            }
         }
     }
     async fn process_aged_family(
@@ -122,12 +106,12 @@ impl<S: ObjectStore + ?Sized> Sweep<'_, '_, S> {
         }
         Ok(())
     }
-    async fn process_checkpoint(&mut self, key: &str) -> Result<bool> {
+    async fn process_checkpoint(&mut self, key: &str) -> Result<()> {
         let decision = sweep_checkpoint_record(
             self.store,
             key,
             self.grace_window_ms,
-            self.live.namespace_deleted,
+            self.live,
             self.mutation,
         )
         .await?;
@@ -137,15 +121,15 @@ impl<S: ObjectStore + ?Sized> Sweep<'_, '_, S> {
             CheckpointSweep::DeleteSnapshot => {
                 &mut self.report.deleted_checkpoints_by_owner.snapshot
             }
-            CheckpointSweep::Gone => return Ok(true),
+            CheckpointSweep::Gone => return Ok(()),
             CheckpointSweep::Retain => {
                 self.report.retain(RetainedReason::CheckpointNotDeletable);
-                return Ok(false);
+                return Ok(());
             }
         };
         *count += 1;
         self.delete_key(key).await?;
-        Ok(true)
+        Ok(())
     }
 
     async fn process_upload_session(&mut self, key: &str) -> Result<()> {
@@ -153,7 +137,16 @@ impl<S: ObjectStore + ?Sized> Sweep<'_, '_, S> {
             self.report.retain(RetainedReason::UnrecognizedKey);
             return Ok(());
         };
-        match sweep_upload_session(&self.upload_sweep, &upload_id, self.view).await? {
+        let state = match load_upload_session_state(self.store, self.namespace_id, &upload_id).await
+        {
+            Ok(state) => state,
+            Err(CoreError::UploadNotFound { .. }) => {
+                self.report.retain(RetainedReason::UploadSessionUndecided);
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        };
+        match sweep_upload_session(&self.upload_sweep, &state, self.view).await? {
             UploadSessionSweep::Delete { reclaimed_content } => {
                 self.delete_key(key).await?;
                 self.report.deleted.upload_sessions += 1;
@@ -162,6 +155,7 @@ impl<S: ObjectStore + ?Sized> Sweep<'_, '_, S> {
                 }
             }
             UploadSessionSweep::Retain { reclaimable_at_ms } => {
+                self.retained_sessions.insert(state.owner_generation);
                 self.report.retain(match reclaimable_at_ms {
                     Some(_) => RetainedReason::UploadSessionWindow,
                     None => RetainedReason::UploadSessionUndecided,

@@ -1095,6 +1095,12 @@
             "minimum": 0,
             "type": "integer"
           },
+          "retired": {
+            "description": "Retired records deleted after their generations are reclaimed.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
           "snapshot": {
             "description": "Snapshot-owned records deleted after expiry or namespace deletion.",
             "format": "int64",
@@ -1105,7 +1111,8 @@
         "required": [
           "fork",
           "expired",
-          "snapshot"
+          "snapshot",
+          "retired"
         ],
         "type": "object"
       },
@@ -3844,13 +3851,13 @@
             "description": "Namespace the pass ran against."
           },
           "next_reclamation_at_ms": {
-            "description": "The earliest known future reclamation time observed by this pass.",
+            "description": "The earliest pending generation deadline or future upload cleanup time.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
           },
           "reclaim_after_ms": {
-            "description": "The deleted head's irrevocable owner-prefix collection deadline.",
+            "description": "The current tombstone's deletion time plus the configured retirement grace.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"

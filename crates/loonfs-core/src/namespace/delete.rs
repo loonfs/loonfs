@@ -2,8 +2,6 @@
 
 use crate::checkpoint::publish::{encode_manifest, publish_manifest, ManifestPublicationOutcome};
 use crate::error::{CoreError, Result};
-use crate::limits::RETIREMENT_PUBLICATION_BUDGET_MS;
-use crate::namespace::control::load_current_manifest;
 use crate::namespace::read_anchor::load_read_anchor;
 use crate::namespace::writer_epoch::ensure_writer_not_fenced;
 use crate::options::DeleteNamespaceOptions;
@@ -49,7 +47,6 @@ pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
             .map_err(|error| CoreError::Internal(format!("manifest number {error}")))?;
         payload.status = NamespaceStatus::Deleted {
             deleted_at_ms: context.now_ms,
-            reclaim_after_ms: None,
         };
         let manifest = encode_manifest(payload)?;
         if matches!(
@@ -68,68 +65,6 @@ pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
                 namespace_id: namespace_id.clone(),
                 head_seq: head.seq,
             });
-        }
-    }
-}
-
-pub(crate) async fn retire_namespace<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    expected_generation: loonfs_api::NamespaceGeneration,
-    grace_window_ms: u64,
-    call_now_ms: u64,
-    timer: &dyn MonotonicTimer,
-    started_ms: u64,
-) -> Result<Option<u64>> {
-    let deadline = call_now_ms
-        .checked_add(grace_window_ms.max(crate::limits::NAMESPACE_RETIREMENT_GRACE_MS))
-        .ok_or_else(|| CoreError::Internal("namespace retirement deadline overflow".to_owned()))?;
-    loop {
-        let current = load_current_manifest(store, namespace_id).await?;
-        let mut payload = current.envelope.payload().clone();
-        if payload.generation != expected_generation {
-            return Ok(None);
-        }
-        if !payload.status.is_deleted() {
-            return Err(CoreError::NamespaceCorrupt(
-                "a deleted namespace became active".to_owned(),
-            ));
-        }
-        if let Some(deadline) = payload.status.reclaim_after_ms() {
-            return Ok(Some(deadline));
-        }
-        payload.manifest_no = payload
-            .manifest_no
-            .successor()
-            .map_err(|error| CoreError::Internal(format!("manifest number {error}")))?;
-        payload.status = NamespaceStatus::Deleted {
-            deleted_at_ms: payload
-                .status
-                .deleted_at_ms()
-                .expect("a deleted namespace should carry its deletion stamp"),
-            reclaim_after_ms: Some(deadline),
-        };
-        let manifest = encode_manifest(payload)?;
-        let elapsed_ms = timer.monotonic_now_ms().saturating_sub(started_ms);
-        if elapsed_ms > RETIREMENT_PUBLICATION_BUDGET_MS {
-            return Err(CoreError::MetadataPublicationBudgetExceeded {
-                elapsed_ms,
-                budget_ms: RETIREMENT_PUBLICATION_BUDGET_MS,
-            });
-        }
-        if matches!(
-            publish_manifest(
-                store,
-                namespace_id,
-                manifest,
-                Some(current.state.manifest.manifest_no),
-                timer,
-                started_ms
-            )
-            .await?,
-            ManifestPublicationOutcome::Published(_)
-        ) {
-            return Ok(Some(deadline));
         }
     }
 }

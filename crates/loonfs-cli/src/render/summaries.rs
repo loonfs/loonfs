@@ -220,7 +220,7 @@ pub(super) fn checkpoint_owner_label(owner: &CheckpointOwnerSummary) -> String {
     }
 }
 
-fn gc_deleted_counts(report: &GcResponse) -> [(&'static str, u64); 9] {
+fn gc_deleted_counts(report: &GcResponse) -> [(&'static str, u64); 10] {
     let deleted = &report.deleted;
     let checkpoints = &report.deleted_checkpoints_by_owner;
     [
@@ -230,6 +230,7 @@ fn gc_deleted_counts(report: &GcResponse) -> [(&'static str, u64); 9] {
         ("fork checkpoints", checkpoints.fork),
         ("expired checkpoints", checkpoints.expired),
         ("snapshot checkpoints", checkpoints.snapshot),
+        ("retired checkpoints", checkpoints.retired),
         ("upload sessions", deleted.upload_sessions),
         ("content objects", deleted.content_objects),
         ("retired content objects", deleted.retired_content_objects),
@@ -254,18 +255,10 @@ pub(super) fn gc_summary(report: &GcResponse) -> String {
     );
     push_top_retention_reason(&mut summary, report);
     if let Some(deadline) = report.reclaim_after_ms {
-        // A future retirement deadline always contributes to the run's earliest deadline.
-        if report
-            .next_reclamation_at_ms
-            .is_some_and(|next| next <= deadline)
-        {
-            summary.push_str(&format!(
-                "\nnamespace is retired; its content becomes collectable at {}",
-                format_utc_ms(deadline)
-            ));
-        } else {
-            summary.push_str("\nnamespace is retired; its owner prefix is collectable");
-        }
+        summary.push_str(&format!(
+            "\nnamespace generation can be reclaimed at or after {} when no pins remain",
+            format_utc_ms(deadline)
+        ));
     }
     summary
 }

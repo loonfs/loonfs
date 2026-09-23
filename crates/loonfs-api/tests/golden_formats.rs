@@ -478,7 +478,6 @@ fn sample_deleted_manifest() -> NamespaceManifestPayload {
     NamespaceManifestPayload {
         status: NamespaceStatus::Deleted {
             deleted_at_ms: 1_500_000,
-            reclaim_after_ms: None,
         },
         ..sample_manifest_payload()
     }
@@ -2990,7 +2989,6 @@ fn namespace_manifest_lifecycle_variants_match_golden_bytes() {
     let mut retired = sample_deleted_manifest();
     retired.status = NamespaceStatus::Deleted {
         deleted_at_ms: 1_500_000,
-        reclaim_after_ms: Some(2_000_000),
     };
     for (name, payload) in [
         (

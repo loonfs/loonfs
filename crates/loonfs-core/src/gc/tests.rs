@@ -47,6 +47,7 @@ use loonfs_test_support::stores::{
 };
 use tempfile::tempdir;
 
+mod generations;
 mod many_pins;
 mod retirement;
 
@@ -362,12 +363,7 @@ async fn deleted_namespace_reclaims_down_to_its_tombstone() {
         .expect("tombstone");
     assert!(current.envelope.payload().status.is_deleted());
     assert_eq!(current.envelope.payload().activity, final_activity);
-    assert!(current
-        .envelope
-        .payload()
-        .status
-        .reclaim_after_ms()
-        .is_some());
+
     assert!(store
         .head(&current.object_key)
         .await
@@ -475,7 +471,7 @@ async fn fork_protected_bases_survive_source_deletion_until_the_target_dies() {
         .expect("clone releases source pin");
     assert!(!checkpoint_exists(&store, &source, &fork_record.pin_id).await);
 
-    let again = context(deadline + GRACE_MS);
+    let again = context(now_after_newest_object(&store, &source, GRACE_MS + 1).await);
     let report = gc_namespace(&store, &source, &config(), &again)
         .await
         .expect("idempotent pass");
@@ -1859,7 +1855,7 @@ async fn retired_targets_release_their_source_pins_and_retry_failed_deletes() {
     delete_namespace(&store, &clone, DeleteNamespaceOptions::default(), &setup)
         .await
         .expect("terminal delete of the fork target");
-    let aged = context(now_after_newest_object(&store, &source, GRACE_MS + 1).await);
+    let aged = context(setup.now_ms + GRACE_MS - 1);
 
     let waiting = gc_namespace(&store, &source, &config(), &aged)
         .await
@@ -1907,6 +1903,7 @@ async fn retired_targets_release_their_source_pins_and_retry_failed_deletes() {
         .expect("manifest")
         .is_some());
     let store = store.inner().inner();
+    let aged = context(now_after_newest_object(store, &source, GRACE_MS + 1).await);
     let next_pass = gc_namespace(store, &source, &config(), &aged)
         .await
         .expect("collect basis");
@@ -2417,7 +2414,7 @@ async fn provider_age_reserves_the_clock_margin_before_deletion() {
 }
 
 #[tokio::test]
-async fn competing_collectors_preserve_the_winning_retirement_deadline() {
+async fn competing_collectors_derive_the_same_retirement_deadline() {
     let directory = tempdir().expect("tempdir");
     let inner = LocalFsStore::new(directory.path()).expect("store");
     let namespace_id = NamespaceId::parse("retirement-race").expect("namespace id");
@@ -2442,8 +2439,8 @@ async fn competing_collectors_preserve_the_winning_retirement_deadline() {
     .expect("delete");
     let store = BlockingStore::new(
         inner,
-        KeyPredicate::manifest(&namespace_id),
-        OperationClass::PutCreateIfAbsent,
+        KeyPredicate::exact(checkpoint_prefix(&namespace_id)),
+        OperationClass::List,
     );
     store.block_next();
     let first_clock = context(GRACE_MS);
@@ -2458,7 +2455,7 @@ async fn competing_collectors_preserve_the_winning_retirement_deadline() {
             result
         }
     );
-    let deadline = second_clock.now_ms + GRACE_MS;
+    let deadline = setup.now_ms + GRACE_MS;
     assert_eq!(
         first.expect("losing collector").reclaim_after_ms,
         Some(deadline)
@@ -2470,7 +2467,7 @@ async fn competing_collectors_preserve_the_winning_retirement_deadline() {
 }
 
 #[tokio::test]
-async fn uncertain_retirement_reads_back_and_failed_retirement_writes_nothing_further() {
+async fn retirement_never_attempts_manifest_publication() {
     for landed in [false, true] {
         let directory = tempdir().expect("tempdir");
         let inner = LocalFsStore::new(directory.path()).expect("store");
@@ -2508,17 +2505,11 @@ async fn uncertain_retirement_reads_back_and_failed_retirement_writes_nothing_fu
         store.fail_next(1);
         let store = RecordingStore::new(store, KeyPredicate::any());
         let result = gc_namespace(&store, &namespace_id, &config(), &context(GRACE_MS)).await;
-        assert_eq!(result.is_ok(), landed);
-        let head = crate::namespace::control::load_namespace_read_state(&store, &namespace_id)
-            .await
-            .expect("head");
         assert_eq!(
-            head.status.reclaim_after_ms(),
-            landed.then_some(GRACE_MS * 2)
+            result.expect("derived retirement").reclaim_after_ms,
+            Some(setup.now_ms + GRACE_MS)
         );
-        if !landed {
-            assert_eq!(store.counts().create_if_absent_puts, 1);
-        }
+        assert_eq!(store.counts().puts, 0);
     }
 }
 
@@ -2579,7 +2570,7 @@ async fn owned_content_keys<S: ObjectStore>(
 
 #[tokio::test]
 async fn completed_upload_waits_for_namespace_retirement_then_reclaims() {
-    for first_run_ms in [1_000, CONTENT_RECLAMATION_GRACE_MS + 1_000] {
+    for first_run_ms in [1_000, GRACE_MS] {
         let directory = tempdir().expect("tempdir");
         let store = LocalFsStore::new(directory.path()).expect("store");
         let namespace_id = NamespaceId::parse("completed-retired").expect("namespace");

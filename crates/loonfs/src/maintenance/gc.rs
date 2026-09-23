@@ -113,6 +113,7 @@ fn reclaimed_anything(gc: &GcResponse) -> bool {
         || gc.deleted_checkpoints_by_owner.fork > 0
         || gc.deleted_checkpoints_by_owner.expired > 0
         || gc.deleted_checkpoints_by_owner.snapshot > 0
+        || gc.deleted_checkpoints_by_owner.retired > 0
 }
 
 #[cfg(test)]

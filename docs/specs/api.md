@@ -1114,36 +1114,16 @@ request path and never a presigned capability handed to a client.
 
 Routes under `/v0/maintenance/` belong to the `maintenance/v0` API group. `GET /v0/namespaces/{ns}/grep` belongs to `query/v0`. Everything else shown belongs to `filesystem/v0`.
 
-When a GC pass sees a future reclamation deadline, its response includes
-`next_reclamation_at_ms`, the soonest time still ahead of the pass at which
-something it retained becomes reclaimable: an open upload session's lease
-plus the grace window, an aborted session's grace, or a completed session's
-derived content-reclamation grace, or the retired namespace's
-`reclaim_after_ms`. A scheduler reads it to decide when to
-run the namespace again rather than tracking upload deadlines itself. It
-describes only what this pass examined. Candidates that age out on their
-object timestamps carry no time here, so its absence does not mean that
-nothing remains to collect.
+A GC response includes `next_reclamation_at_ms` when a generation is pending or an upload session has a future cleanup time. It is the earliest of the pending generation deadlines and future upload cleanup times examined by the pass. A pending generation's deadline can already be past when pins still prevent reclamation. Upload cleanup times include lease plus grace, abort grace, and completed-content grace. Candidates that age out by provider timestamps carry no time here. Absence does not mean that nothing remains to collect.
 
-`reclaim_after_ms` is present only when the deleted manifest records retirement.
-It is omitted for an active namespace or a deleted namespace still waiting on
-pins. A future deadline means the namespace is waiting on grace. Retirement
-is irrevocable and the deadline never changes. A call whose clock is before
-the deadline reports it through `next_reclamation_at_ms`. Retirement itself
-deletes no content.
+`reclaim_after_ms` is present when the current manifest is deleted. It equals `deleted_at_ms + max(configured_grace, NAMESPACE_RETIREMENT_GRACE_MS)`, including when pins still block reclamation. It is absent for an active namespace. Retired pins provide the same derived deadline for prior generations. No retirement deadline is stored and collection publishes no manifest.
 
-Every call reads the current manifest and uses one fixed clock. It keeps
-its live set in memory and writes no collection progress. Every family lists
-from the beginning and sweeps to the end. The collector uses a separate
-complete pin listing to find retained manifests. A retained pin, an unrecognized
-pin key, or an uncertain pin load prevents namespace retirement. A candidate the live set retains
-needs no further store request. Other candidates require an age check, a
-record read, or a deletion. Manifest read failures fail the call before sweeping.
+Every call reads the current manifest and uses one fixed clock. It keeps its live set in memory and writes no collection progress. Every family lists from the beginning and sweeps to the end. The collector uses a separate complete pin listing to find retained manifests and check generation eligibility. Pins in a tombstone's manifest range block reclamation except for its own retired pin. Pins deleted later in the pass still count. An unrecognized pin key blocks every generation. Manifest read failures fail the call before sweeping.
 
 A GC response groups related counts. `deleted` contains `wal_segments`,
 `metadata_segments`, `manifests`, `upload_sessions`, `content_objects`, and
 `retired_content_objects`. `deleted_checkpoints_by_owner` contains `fork`,
-`expired`, and `snapshot` counts for checkpoint records deleted in the pass.
+`expired`, `snapshot`, and `retired` counts for checkpoint records deleted in the pass. A retired pin is counted when reclamation deletes it after its generation has no retained upload sessions.
 Their sum is the total number of checkpoint records deleted. Each deletion
 is counted once. A target's deletion of its source pin contributes to `fork`
 when the pin was present before deletion. Repeating that deletion on an
@@ -1168,13 +1148,12 @@ that reason, and the fields sum to the total:
 | `unrecognized_key` | A key under a swept family that this collector does not recognize as one of its own. Never deleted, whatever its age. |
 | `checkpoint_not_deletable` | A pin retained by its owner or its grace window. |
 | `upload_session_window` | An upload session waiting out a window a clock resolves — the same waits `next_reclamation_at_ms` reports. |
-| `upload_session_undecided` | An upload session held for a reason no clock resolves: a lost compare-and-swap, a record that vanished mid-pass, a content cleanup failure, or a deleted namespace still waiting for retirement. |
+| `upload_session_undecided` | An upload session held for a reason no clock resolves: a lost compare-and-swap, a record that vanished mid-pass, or a content cleanup failure. |
 
 Retention is counted per candidate examined, not per object in the
 namespace, so one object two passes both examine is counted by each.
 
-The current manifest and every manifest number in the pin key listing protect their metadata
-segments. An unreferenced object becomes eligible for collection after its
+Active current and pinned manifests protect their metadata segments. A tombstone protects only itself. An unreferenced object becomes eligible for collection after its
 own provider timestamp is at least `grace_window_ms` old. Metadata segments
 use the separate `UNREFERENCED_SEGMENT_MIN_AGE_MS` age gate and must be
 strictly older than that bound. A live namespace
@@ -1187,12 +1166,7 @@ Namespace deletion ends access immediately. Ordinary namespace GC then
 conditionally reclaims the namespace's own content. This is asynchronous
 reclamation, with no fixed completion time or guarantee of physical erasure.
 
-Dependent forks and retained checkpoints delay retirement. A complete
-post-deletion checkpoint sweep must retain no record before GC records
-`reclaim_after_ms` on the deleted manifest. A later call whose clock is at or after
-that deadline lists and deletes recognized content objects under that namespace
-generation's owner prefix. It keeps the current manifest, content-store descriptor,
-every other generation, and every other owner's prefix.
+Dependent forks and retained checkpoints delay reclamation. GC derives each generation's deadline from its deletion stamp. At or after that deadline, a complete pin listing must contain no pin in the generation's manifest range except its own retired pin. A qualifying pass cleans upload sessions, sweeps that generation's owner prefix, releases its source pin, and deletes its retired pin when no session remains. The current tombstone survives until recreation supersedes it. The shared descriptor and every other owner's prefix remain.
 
 Retention is coarse: a deleted ancestor keeps its entire owner-and-generation
 prefix while a live descendant still depends on it. GC does not select individual
@@ -1663,14 +1637,7 @@ reclamation. Deletion itself reclaims nothing. Dependent forks, retained
 checkpoints, grace windows, and maintenance not running can all delay
 reclamation. Continued writes through already-issued capabilities can also
 leave objects for later passes. A maintenance run with `kind` set to `gc` ages out unneeded WAL,
-metadata, and checkpoint records. Once a complete post-deletion checkpoint
-sweep retains no record, it records retirement on the deleted manifest as a fixed
-`reclaim_after_ms`. The current manifest survives permanently. Retirement itself deletes
-no content. A later GC call whose clock is at or after the deadline sweeps the
-namespace generation's owner prefix, including previously published content
-whose upload record is gone. A deleted ancestor retains that owner-and-generation
-prefix while a live descendant depends on it. The shared content-store descriptor,
-other generations, and other owners' objects remain.
+metadata, and checkpoint records. GC derives `reclaim_after_ms` from the current tombstone's deletion stamp and the retirement grace. After recreation, retired pins preserve prior tombstones for the same checks. Once a generation's deadline passes and the complete pin listing contains no other pin in its manifest range, the pass reclaims its owned content and source pin. It deletes the retired pin last, only when no upload session of that generation remains. It publishes no retirement manifest. A pass can reclaim multiple generations independently. The current manifest survives, and the shared content-store descriptor, other owners' objects, and generations that are not eligible remain.
 
 Run GC repeatedly to catch late writes and keep the provider's incomplete
 multipart-upload lifecycle rule. Deleting an object key does not erase

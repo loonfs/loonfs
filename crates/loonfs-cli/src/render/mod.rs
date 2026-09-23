@@ -717,6 +717,7 @@ mod tests {
         pass.deleted.content_objects = 1;
         pass.deleted.retired_content_objects = 7;
         pass.deleted_checkpoints_by_owner.fork = 2;
+        pass.deleted_checkpoints_by_owner.retired = 1;
         for _ in 0..4 {
             pass.retain(RetainedReason::WithinGraceWindow);
         }
@@ -729,23 +730,23 @@ mod tests {
             "{summary}"
         );
         assert!(summary.contains("2 fork checkpoints"), "{summary}");
-        assert!(!summary.contains("namespace is retired"), "{summary}");
+        assert!(summary.contains("1 retired checkpoints"), "{summary}");
+        assert!(
+            !summary.contains("namespace generation can be reclaimed"),
+            "{summary}"
+        );
 
         pass.reclaim_after_ms = Some(1_700_000_000_000);
-        for next in [1_699_999_999_000, 1_700_000_000_000] {
-            pass.next_reclamation_at_ms = Some(next);
-            assert_eq!(
-                gc_summary(&pass).lines().last(),
-                Some(
-                    "namespace is retired; its content becomes collectable at 2023-11-14 22:13:20Z"
-                )
-            );
-        }
-        for next in [None, Some(1_700_000_001_000)] {
+        for next in [
+            Some(1_699_999_999_000),
+            Some(1_700_000_000_000),
+            None,
+            Some(1_700_000_001_000),
+        ] {
             pass.next_reclamation_at_ms = next;
             assert_eq!(
                 gc_summary(&pass).lines().last(),
-                Some("namespace is retired; its owner prefix is collectable")
+                Some("namespace generation can be reclaimed at or after 2023-11-14 22:13:20Z when no pins remain")
             );
         }
         let empty = gc_summary(&GcResponse::empty(
