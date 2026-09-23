@@ -49,8 +49,9 @@ pub(crate) async fn publish_manifest<S: ObjectStore + ?Sized>(
     timer: &dyn MonotonicTimer,
     started_ms: u64,
 ) -> Result<ManifestPublicationOutcome> {
-    let starts_generation = manifest.envelope().payload().manifest_no
-        == manifest.envelope().payload().generation_first_manifest_no;
+    let plain_generation_start = manifest.envelope().payload().manifest_no
+        == manifest.envelope().payload().generation_first_manifest_no
+        && manifest.envelope().payload().fork_basis.is_none();
     let candidate = CurrentManifest {
         manifest: manifest_ref_for(namespace_id, manifest.envelope()),
         generation: manifest.envelope().payload().generation,
@@ -80,7 +81,7 @@ pub(crate) async fn publish_manifest<S: ObjectStore + ?Sized>(
             &current.state,
             &candidate,
             expected_predecessor,
-            starts_generation,
+            plain_generation_start,
         ) {
             ManifestPublicationOutcome::Installable => {}
             outcome => return Ok(outcome),
@@ -120,7 +121,7 @@ pub(crate) async fn publish_manifest<S: ObjectStore + ?Sized>(
                 namespace_id,
                 &candidate,
                 expected_predecessor,
-                starts_generation,
+                plain_generation_start,
             )
             .await?
         }
@@ -137,20 +138,25 @@ pub(crate) async fn publish_manifest<S: ObjectStore + ?Sized>(
                     )
                     .await
                     .map_err(CoreError::ControlObjectLoad)?;
-                    if landed.is_some_and(|landed| landed.state.manifest == candidate.manifest) {
-                        return Ok(WriteEvidence::Landed(
-                            ManifestPublicationOutcome::Published(candidate.clone()),
-                        ));
-                    }
-                    match classify_current_manifest(
-                        store,
-                        namespace_id,
-                        &candidate,
-                        expected_predecessor,
-                        starts_generation,
-                    )
-                    .await?
-                    {
+                    let outcome = match landed {
+                        Some(landed) => classify_current(
+                            &landed.state,
+                            &candidate,
+                            expected_predecessor,
+                            plain_generation_start,
+                        ),
+                        None => {
+                            classify_current_manifest(
+                                store,
+                                namespace_id,
+                                &candidate,
+                                expected_predecessor,
+                                plain_generation_start,
+                            )
+                            .await?
+                        }
+                    };
+                    match outcome {
                         ManifestPublicationOutcome::Installable => Ok(WriteEvidence::Unknown),
                         outcome => Ok(WriteEvidence::Landed(outcome)),
                     }
@@ -184,11 +190,11 @@ fn classify_current(
     current: &CurrentManifest,
     candidate: &CurrentManifest,
     expected_predecessor: Option<ManifestNo>,
-    starts_generation: bool,
+    plain_generation_start: bool,
 ) -> ManifestPublicationOutcome {
     if current.manifest == candidate.manifest {
-        // Concurrent creates can have identical payloads. Only a put or ambiguous read-back confirms installation.
-        if starts_generation {
+        // Plain creates can have identical payloads; fork source pins are unique.
+        if plain_generation_start {
             ManifestPublicationOutcome::CoveredByCurrent(current.clone())
         } else {
             ManifestPublicationOutcome::Published(current.clone())
@@ -211,7 +217,7 @@ async fn classify_current_manifest<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     candidate: &CurrentManifest,
     expected_predecessor: Option<ManifestNo>,
-    starts_generation: bool,
+    plain_generation_start: bool,
 ) -> Result<ManifestPublicationOutcome> {
     Ok(load_current_manifest_if_present(store, namespace_id)
         .await
@@ -221,7 +227,7 @@ async fn classify_current_manifest<S: ObjectStore + ?Sized>(
                 &loaded.state,
                 candidate,
                 expected_predecessor,
-                starts_generation,
+                plain_generation_start,
             )
         }))
 }

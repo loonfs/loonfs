@@ -720,34 +720,17 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     ) -> Result<Vec<u8>> {
         self.require_administrator(context).await?;
         self.ensure_live_context(context)?;
+        let view = self.load_read_view(context).await?;
+        if view
+            .metadata_view()
+            .find_content_publication(&content_ref.content_id)
+            .await?
+            .is_none()
+        {
+            return Err(CoreError::PathNotFound(content_ref.content_id.to_string()));
+        }
         crate::path::read::ensure_within_read_limit(content_ref.size_bytes, Some(max_bytes))?;
-        let location = if content_ref.owner_namespace_id != self.namespace_id {
-            ContentLocation::resolve(
-                &self.namespace_id,
-                context.head.generation,
-                None,
-                content_ref,
-            )?
-        } else {
-            let key = crate::cache::WalTailProjectionCacheKey {
-                namespace_id: self.namespace_id.clone(),
-                manifest_no: context.basis.manifest_no(),
-                manifest_head_seq: context.basis.manifest().head_seq,
-                head_seq: context.head.seq,
-            };
-            if let Some(tail) = context.tail_cache.get(&key) {
-                ContentLocation::resolve(
-                    &self.namespace_id,
-                    context.head.generation,
-                    Some(&tail),
-                    content_ref,
-                )?
-            } else {
-                self.load_read_view(context)
-                    .await?
-                    .resolve_content_location(content_ref)?
-            }
-        };
+        let location = view.resolve_content_location(content_ref)?;
         Ok(location.get_bytes(&self.store, content_ref).await?)
     }
 

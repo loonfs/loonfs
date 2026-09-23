@@ -230,6 +230,10 @@ impl FsReadSnapshot {
     }
 
     /// Reads and verifies immutable content selected from this snapshot.
+    ///
+    /// Requires namespace administrator access. Content must be published in
+    /// this pinned view, including through a fork. Otherwise returns
+    /// `path_not_found` without reading content bytes.
     pub async fn read_content_ref(
         &self,
         content_ref: &ContentRef,
@@ -894,13 +898,14 @@ impl FsReader {
 
     /// Reads one immutable content object by reference.
     ///
+    /// Requires namespace administrator access. Content must be published in
+    /// the namespace's pinned view, including through a fork. Otherwise returns
+    /// `path_not_found` without reading content bytes.
+    ///
     /// `max_bytes` is checked against the declared size before fetching. It is
     /// independent of the deployment's download limit so callers can apply a
     /// smaller memory budget. The read fails if the returned size or digest
     /// does not match the reference.
-    ///
-    /// This does not increment the latest-metadata-view metric because it
-    /// reads immutable content directly.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.read_content_ref",

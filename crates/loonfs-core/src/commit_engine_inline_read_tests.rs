@@ -363,8 +363,16 @@ async fn foreign_references_resolve_to_objects_and_object_downloads_do_not_write
             .expect("foreign read"),
         b"foreign"
     );
-    assert_eq!(store.snapshot().len(), 1);
-    assert_eq!(store.snapshot()[0].key(), key);
+    let requests = store.snapshot();
+    let content_requests = requests
+        .iter()
+        .filter(|operation| matches!(
+            loonfs_objectstore::layout::parse_object_key(operation.key()),
+            Some(key) if key.family() == loonfs_objectstore::layout::DurableObjectFamily::ContentBlob
+        ))
+        .map(|operation| operation.key())
+        .collect::<Vec<_>>();
+    assert_eq!(content_requests, [key.as_str()]);
     let view = load_current_metadata_view(&store, &publisher.namespace_id)
         .await
         .expect("view");

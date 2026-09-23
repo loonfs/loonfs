@@ -22,7 +22,9 @@ use loonfs_objectstore::{
     local_fs_store::LocalFsStore,
     ObjectStore,
 };
-use loonfs_test_support::stores::{BlockingStore, KeyPredicate, OperationClass, RecordingStore};
+use loonfs_test_support::stores::{
+    BlockingStore, FailStore, InjectedError, KeyPredicate, OperationClass, RecordingStore,
+};
 use tempfile::tempdir;
 
 fn context() -> MutationContext {
@@ -210,7 +212,7 @@ impl ObjectStore for LostCreateResponseStore {
 }
 
 #[tokio::test]
-async fn a_create_whose_response_was_lost_confirms_its_own_manifest() {
+async fn a_plain_create_whose_response_was_lost_cannot_claim_an_advanced_namespace() {
     let directory = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("lost-response").expect("namespace");
     let store = LostCreateResponseStore {
@@ -218,7 +220,7 @@ async fn a_create_whose_response_was_lost_confirms_its_own_manifest() {
         namespace_id: namespace_id.clone(),
         fired: std::sync::Mutex::new(false),
     };
-    let created = bootstrap_namespace(
+    let error = bootstrap_namespace(
         &store,
         &namespace_id,
         &context(),
@@ -227,12 +229,59 @@ async fn a_create_whose_response_was_lost_confirms_its_own_manifest() {
         false,
     )
     .await
-    .expect("the create landed even though another writer advanced before it was confirmed");
-    assert_eq!(created.generation, NamespaceGeneration(1));
+    .expect_err("identical first manifests do not prove who created the namespace");
+    assert_eq!(error.code(), ErrorCode::NamespaceExists);
     let current = load_current_manifest(&store.inner, &namespace_id)
         .await
         .expect("current manifest");
     assert_eq!(current.envelope.payload().manifest_no, ManifestNo(2));
+}
+
+#[tokio::test]
+async fn an_ambiguous_first_manifest_confirms_only_a_forks_creation() {
+    let directory = tempdir().expect("directory");
+    let source = NamespaceId::parse("source").expect("source");
+    let target = NamespaceId::parse("target").expect("target");
+    let source_key = metadata_manifest_object(&source, &ManifestNo(1));
+    let target_key = metadata_manifest_object(&target, &ManifestNo(1));
+    let store = FailStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::new(move |key| key == source_key || key == target_key),
+        OperationClass::PutCreateIfAbsent,
+        InjectedError::Transport("response lost".to_owned()),
+    )
+    .apply_then_fail();
+    store.fail_next(2);
+    let actor_id = loonfs_test_support::test_actor();
+    let error = bootstrap_namespace(
+        &store,
+        &source,
+        &context(),
+        &actor_id,
+        &loonfs_api::NamespaceAccess::unrestricted(),
+        false,
+    )
+    .await
+    .expect_err("plain create cannot prove authorship from matching bytes");
+    assert_eq!(error.code(), ErrorCode::NamespaceExists);
+    let existing = bootstrap_namespace(
+        &store,
+        &source,
+        &context(),
+        &actor_id,
+        &loonfs_api::NamespaceAccess::unrestricted(),
+        true,
+    )
+    .await
+    .expect("allow existing returns the landed namespace");
+    assert_eq!(existing.generation, NamespaceGeneration(1));
+    let created = fork_namespace(&store, &source, &target, &actor_id, None, &context())
+        .await
+        .expect("fork source pin proves authorship from matching bytes");
+    assert_eq!(created.generation, NamespaceGeneration(1));
+    assert!(created.fork_basis.is_some());
+    assert_eq!(store.attempts(), 2);
+    assert_eq!(store.remaining(), 0);
 }
 
 #[tokio::test]

@@ -408,7 +408,7 @@ async fn a_created_namespace_reads_manifest_one_before_its_first_flush() {
 }
 
 #[tokio::test]
-async fn namespace_create_recovers_when_manifest_one_lands_ambiguously() {
+async fn namespace_create_reports_exists_when_manifest_one_lands_ambiguously() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
     let store = FailStore::new(
@@ -420,11 +420,11 @@ async fn namespace_create_recovers_when_manifest_one_lands_ambiguously() {
     .apply_then_fail();
     store.fail_next(1);
 
-    let created = bootstrap_namespace(&store, &namespace_id, &mutation_context())
+    let error = bootstrap_namespace(&store, &namespace_id, &mutation_context())
         .await
-        .expect("head identity reconciles the landed create");
+        .expect_err("matching first manifests do not prove authorship");
 
-    assert_eq!(created.namespace_id, namespace_id);
+    assert_eq!(error.code(), ErrorCode::NamespaceExists);
     assert_eq!(store.attempts(), 1);
     assert_eq!(
         head_state(&store, &namespace_id).await.status,

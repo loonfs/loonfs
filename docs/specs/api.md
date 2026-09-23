@@ -1525,8 +1525,11 @@ namespace, so there is no third answer and nothing to repair.
 
 A new request after a lost creation acknowledgement returns
 `namespace_exists`, unless it explicitly allows an existing namespace.
-Read-back of the exact proposed manifest can resolve an ambiguous install
-within the original attempt.
+Within the original attempt, an exact manifest read-back after an unknown
+transport outcome confirms a fork because its source pin is unique. For a
+plain create or recreate, matching bytes answer `namespace_exists`, or the
+existing summary when the caller allows an existing namespace, because they
+do not prove which caller created the namespace.
 
 The examples below are representative, not exhaustive. Responses may gain
 fields within v0; clients must ignore JSON fields they do not recognize.
@@ -1896,6 +1899,13 @@ The inode content route reads and verifies a revision without resolving a
 current path. Deleted files remain readable while their revision rows are
 retained. A directory returns `path_conflict`, an unknown inode returns
 `inode_not_found`, and an unknown revision returns `revision_not_found`.
+
+Embedded by-reference reads require administrator access to the reading
+namespace. The namespace's pinned view must contain a publication for the
+content, including publications inherited through a fork. A reference absent
+from that view returns `path_not_found` without reading content bytes, even
+when the reading namespace owns it. Content published after a snapshot is
+not readable through that snapshot.
 
 ```json
 {
