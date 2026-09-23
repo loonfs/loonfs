@@ -37,7 +37,7 @@ pub(crate) fn encode_manifest(
     name = "loonfs.phase",
     err(level = "warn"),
     skip_all,
-    fields(phase = "publish_manifest", key_class = "namespace_manifest")
+    fields(phase = "publish_manifest", key_class = "manifest")
 )]
 pub(crate) async fn publish_manifest<S: ObjectStore + ?Sized>(
     store: &S,
@@ -51,7 +51,7 @@ pub(crate) async fn publish_manifest<S: ObjectStore + ?Sized>(
         manifest: manifest_ref_for(namespace_id, manifest.envelope()),
         generation: manifest.envelope().payload().generation,
         retention_floor_seq: manifest.envelope().payload().retention_floor_seq,
-        last_folded_wal_no: manifest.envelope().payload().last_folded_wal_no,
+        folded_wal_no: manifest.envelope().payload().folded_wal_no,
         compactor_epoch: manifest.envelope().payload().compactor_epoch,
     };
     let current = load_current_manifest_if_present(store, namespace_id)
@@ -97,9 +97,7 @@ pub(crate) async fn publish_manifest<S: ObjectStore + ?Sized>(
                     .to_owned(),
             ));
         }
-        if manifest.envelope().payload().last_folded_wal_no
-            < current.envelope.payload().last_folded_wal_no
-        {
+        if manifest.envelope().payload().folded_wal_no < current.envelope.payload().folded_wal_no {
             return Err(CoreError::NamespaceCorrupt(
                 "manifest lowers a WAL counter".to_owned(),
             ));
@@ -145,7 +143,7 @@ pub(crate) async fn publish_manifest<S: ObjectStore + ?Sized>(
             store,
             namespace_id,
             candidate.manifest.manifest_no,
-            candidate.last_folded_wal_no,
+            candidate.folded_wal_no,
             None,
         )
         .await
@@ -173,7 +171,7 @@ fn classify_current(
         } else {
             ManifestPublicationOutcome::PredecessorChanged(current.clone())
         }
-    } else if current.last_folded_wal_no >= candidate.last_folded_wal_no
+    } else if current.folded_wal_no >= candidate.folded_wal_no
         && (current.manifest.manifest_head_seq > candidate.manifest.manifest_head_seq
             || (current.manifest.manifest_head_seq == candidate.manifest.manifest_head_seq
                 && current.manifest.manifest_no >= candidate.manifest.manifest_no))

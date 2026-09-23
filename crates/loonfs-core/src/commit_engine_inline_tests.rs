@@ -417,10 +417,7 @@ async fn inline_tail_replay_matches_publication_and_materializes_before_metadata
             crate::namespace::control::load_current_manifest(&store, &engine.namespace_id)
                 .await
                 .expect("manifest");
-        assert_eq!(
-            manifest.envelope.payload().last_folded_wal_no,
-            folded_wal_no
-        );
+        assert_eq!(manifest.envelope.payload().folded_wal_no, folded_wal_no);
         assert_eq!(
             store
                 .list_prefix(&wal_segment_prefix(&engine.namespace_id))

@@ -19,7 +19,7 @@ A generation boundary is therefore a lifecycle transition on the existing manife
 | Manifest field | At a generation boundary |
 | --- | --- |
 | `manifest_no` | Continues. |
-| `last_folded_wal_no` | Copied from the tombstone, which records the WAL tip at deletion, so no earlier WAL object replays into the new tree. |
+| `folded_wal_no` | Copied from the tombstone, which records the WAL tip at deletion, so no earlier WAL object replays into the new tree. |
 | `head_seq`, `base_seq`, `retention_floor_seq` | Zero for a plain recreation. For a fork, the head and floor are the captured source sequence and the base is the source's, exactly as for a fresh fork. |
 | `next_inode_id`, `next_run_no` | Restart at 2 and 0 for a plain recreation; a fork takes the source's allocators. Inode ids are unique within a generation. |
 | `writer_epoch`, `compactor_epoch` | Increment. Sessions and compactors that captured the previous generation are fenced. |

@@ -61,8 +61,13 @@ pub(super) async fn load_segment_data_block<S: ObjectStore + ?Sized>(
             return Ok(decoded_data_cache_block(decoded));
         }
         let object_key = metadata_segment_object_key(descriptor);
-        let bytes =
-            load_section_bytes(store, &object_key, handle.offset, handle.stored_len as u64).await?;
+        let bytes = load_section_bytes(
+            store,
+            &object_key,
+            handle.offset,
+            handle.stored_bytes as u64,
+        )
+        .await?;
         offer_stored_block(
             segment_cache,
             descriptor,
@@ -151,9 +156,9 @@ pub(super) async fn load_segment_data_block_span<S: ObjectStore + ?Sized>(
         let mut span_bytes = 0u64;
         while cursor < entries.len()
             && blocks[cursor].is_none()
-            && span_bytes + u64::from(entries[cursor].block.stored_len) <= MAX_BULK_LOAD_BYTES
+            && span_bytes + u64::from(entries[cursor].block.stored_bytes) <= MAX_BULK_LOAD_BYTES
         {
-            span_bytes += u64::from(entries[cursor].block.stored_len);
+            span_bytes += u64::from(entries[cursor].block.stored_bytes);
             cursor += 1;
         }
         // A single block larger than the fetch cap still fetches alone.
@@ -251,7 +256,7 @@ async fn load_and_publish_span<S: ObjectStore + ?Sized>(
 ) -> Result<Option<DecodedMetadataSegmentBlock>, ManifestLoadError> {
     let first = &span[0].block;
     let last = &span[span.len() - 1].block;
-    let span_len = last.offset + u64::from(last.stored_len) - first.offset;
+    let span_len = last.offset + u64::from(last.stored_bytes) - first.offset;
     let object_key = metadata_segment_object_key(descriptor);
     let bytes = load_section_bytes(store, &object_key, first.offset, span_len).await?;
     let mut first_block = None;
@@ -259,7 +264,7 @@ async fn load_and_publish_span<S: ObjectStore + ?Sized>(
     for entry in span {
         let handle = entry.block;
         let begin = (handle.offset - first.offset) as usize;
-        let stored = &bytes[begin..begin + handle.stored_len as usize];
+        let stored = &bytes[begin..begin + handle.stored_bytes as usize];
         let decoded = Arc::new(
             decode_data_block(stored, &handle)
                 .map_err(|err| segment_codec_error(&object_key, err))?,

@@ -24,7 +24,7 @@ pub struct NamespaceStatistics {
     /// Lifecycle at this manifest, including whether these are final totals.
     pub status: NamespaceStatus,
     /// Highest namespace-local WAL number included in this observation.
-    pub last_folded_wal_no: WalNo,
+    pub folded_wal_no: WalNo,
     /// Activity committed in this namespace.
     pub activity: ManifestActivity,
     /// Explicit retained inode records. An implicit genesis root counts as zero.
@@ -96,7 +96,7 @@ fn manifest_statistics(manifest: &NamespaceManifestEnvelope) -> Result<Namespace
         generation: payload.generation,
         created_at_ms: payload.created_at_ms,
         status: payload.status,
-        last_folded_wal_no: payload.last_folded_wal_no,
+        folded_wal_no: payload.folded_wal_no,
         activity: payload.activity,
         inode_record_count,
         metadata_stored_bytes,

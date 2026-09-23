@@ -26,14 +26,14 @@ pub const NAMESPACE_MANIFEST_FORMAT_VERSION: u32 = 1;
 #[serde(rename_all = "snake_case")]
 pub enum NamespaceManifestKind {
     /// Marks the file-set descriptor used to materialize a namespace snapshot.
-    NamespaceManifest,
+    Manifest,
 }
 
 impl NamespaceManifestKind {
     /// Returns the frozen envelope discriminator written to durable storage.
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::NamespaceManifest => "namespace_manifest",
+            Self::Manifest => "manifest",
         }
     }
 }
@@ -1189,7 +1189,7 @@ pub struct NamespaceManifestPayload {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub writer: Option<WriterBlock>,
     /// Highest WAL number represented by the runs.
-    pub last_folded_wal_no: WalNo,
+    pub folded_wal_no: WalNo,
     /// Positive publication number matching the manifest object key.
     pub manifest_no: ManifestNo,
     /// Which generation of this namespace id the manifest describes.
@@ -1268,7 +1268,7 @@ impl NamespaceManifestPayload {
             writer_epoch: WriterEpoch(0),
             next_inode_id: crate::FIRST_ALLOCATABLE_INODE_ID,
             next_run_no: RunNo(0),
-            last_folded_wal_no: WalNo(0),
+            folded_wal_no: WalNo(0),
             retention_floor_seq: ChangeSeq(0),
             runs: Vec::new(),
         }
@@ -1362,8 +1362,8 @@ impl NamespaceManifestPayload {
         {
             return drift("head_seq");
         }
-        if successor.last_folded_wal_no != self.last_folded_wal_no {
-            return drift("last_folded_wal_no");
+        if successor.folded_wal_no != self.folded_wal_no {
+            return drift("folded_wal_no");
         }
         if !is_fork && successor.next_inode_id != crate::FIRST_ALLOCATABLE_INODE_ID {
             return drift("next_inode_id");
@@ -1389,7 +1389,7 @@ pub fn encode_namespace_manifest_json(
     payload: NamespaceManifestPayload,
 ) -> Result<crate::envelope::EncodedEnvelope<NamespaceManifestPayload>, EnvelopeCodecError> {
     crate::envelope::encode_json_envelope(
-        NamespaceManifestKind::NamespaceManifest.as_str(),
+        NamespaceManifestKind::Manifest.as_str(),
         NAMESPACE_MANIFEST_FORMAT_VERSION,
         payload,
     )
@@ -1403,7 +1403,7 @@ pub fn encode_namespace_manifest_json(
 pub fn decode_namespace_manifest_json(
     bytes: &[u8],
 ) -> Result<NamespaceManifestEnvelope, EnvelopeCodecError> {
-    let expected_kind = NamespaceManifestKind::NamespaceManifest;
+    let expected_kind = NamespaceManifestKind::Manifest;
     let decoded =
         crate::envelope::decode_json_envelope(bytes, NAMESPACE_MANIFEST_FORMAT_VERSION, |found| {
             crate::envelope::verify_kind(expected_kind.as_str(), found)
@@ -1482,7 +1482,7 @@ mod tests {
 
             payload["activity"][field] = (crate::MAX_PUBLIC_INTEGER + 1).into();
             let (_, encoded) = crate::envelope::encode_json_envelope(
-                super::NamespaceManifestKind::NamespaceManifest.as_str(),
+                super::NamespaceManifestKind::Manifest.as_str(),
                 super::NAMESPACE_MANIFEST_FORMAT_VERSION,
                 payload,
             )
@@ -1679,7 +1679,7 @@ mod tests {
 
     #[test]
     fn namespace_manifest_kind_string_matches_serde() {
-        let kind = super::NamespaceManifestKind::NamespaceManifest;
+        let kind = super::NamespaceManifestKind::Manifest;
         let serialized = serde_json::to_value(kind).expect("serialize kind");
         assert_eq!(serialized, serde_json::Value::from(kind.as_str()));
     }
@@ -1696,7 +1696,7 @@ mod tests {
             fork_basis: None,
             status: crate::control::NamespaceStatus::Active {},
             writer: None,
-            last_folded_wal_no: crate::WalNo(0),
+            folded_wal_no: crate::WalNo(0),
             compactor_epoch: 0,
             namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
             manifest_no: ManifestNo(10),
@@ -1746,7 +1746,7 @@ mod tests {
             fork_basis: None,
             status: crate::control::NamespaceStatus::Active {},
             writer: None,
-            last_folded_wal_no: crate::WalNo(0),
+            folded_wal_no: crate::WalNo(0),
             compactor_epoch: 0,
             namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
             manifest_no: ManifestNo(12),
@@ -2181,14 +2181,14 @@ mod tests {
             max_row_key: String::new(),
             index_block: BlockHandle {
                 offset: 0,
-                stored_len: 0,
-                decoded_len: 0,
+                stored_bytes: 0,
+                decoded_bytes: 0,
                 crc32c: 0,
             },
             filter_block: BlockHandle {
                 offset: 0,
-                stored_len: 0,
-                decoded_len: 0,
+                stored_bytes: 0,
+                decoded_bytes: 0,
                 crc32c: 0,
             },
             filter_inline: None,

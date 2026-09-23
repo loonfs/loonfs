@@ -211,7 +211,7 @@ async fn fences_fold_and_are_reclaimed_at_the_folded_boundary() {
         .await
         .expect("manifest");
     assert_eq!(current.envelope.payload().head_seq, ChangeSeq(0));
-    assert_eq!(current.envelope.payload().last_folded_wal_no, WalNo(1));
+    assert_eq!(current.envelope.payload().folded_wal_no, WalNo(1));
     let config = crate::gc::GcConfig {
         grace_window_ms: crate::limits::GC_MIN_GRACE_WINDOW_MS,
     };
@@ -276,7 +276,7 @@ async fn a_same_sequence_writer_acquisition_does_not_cover_a_fence_flush() {
         .await
         .expect("manifest");
     assert_eq!(current.envelope.payload().head_seq, ChangeSeq(0));
-    assert_eq!(current.envelope.payload().last_folded_wal_no, WalNo(2));
+    assert_eq!(current.envelope.payload().folded_wal_no, WalNo(2));
 }
 
 fn directory(name: &str) -> CommitCandidate {

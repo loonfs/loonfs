@@ -1115,7 +1115,7 @@ async fn segment_object_bytes(
 
 fn stored_block_bytes(object: &Bytes, handle: &BlockHandle) -> Bytes {
     let start = handle.offset as usize;
-    object.slice(start..start + handle.stored_len as usize)
+    object.slice(start..start + handle.stored_bytes as usize)
 }
 
 /// Puts the named blocks into the decoded cache, as an earlier read through
@@ -1273,7 +1273,7 @@ async fn a_narrow_data_block_load_fills_the_local_cache_and_then_reads_from_it()
             },
             RecordedStoredMetadataBlockCall::Insert {
                 key: data_key.clone(),
-                bytes: entry.block.stored_len as usize,
+                bytes: entry.block.stored_bytes as usize,
             },
         ],
         "a cold load probes the local cache, misses, and offers what it fetched"
@@ -1399,7 +1399,7 @@ async fn a_corrupt_local_entry_on_a_narrow_load_is_dropped_and_refetched() {
             },
             RecordedStoredMetadataBlockCall::Insert {
                 key: corrupt_key,
-                bytes: entry.block.stored_len as usize,
+                bytes: entry.block.stored_bytes as usize,
             },
         ],
         "the narrow load should drop the bad copy and offer the fetched bytes"

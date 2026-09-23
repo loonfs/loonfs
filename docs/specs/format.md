@@ -226,7 +226,7 @@ Content IDs are `con_` followed by 32 random lowercase hexadecimal characters. M
 
 Creation and fork write the hint before manifest 1, nothing deletes a live namespace's hint, and a reader that finds no hint reports the namespace as absent without listing.
 
-The current manifest is authoritative for the namespace's identity, status, writer epoch, and compactor epoch. Its runs describe materialized metadata through `head_seq`, and `last_folded_wal_no` identifies the WAL boundary already included in those runs.
+The current manifest is authoritative for the namespace's identity, status, writer epoch, and compactor epoch. Its runs describe materialized metadata through `head_seq`, and `folded_wal_no` identifies the WAL boundary already included in those runs.
 
 Every WAL object records the head sequence, head commit ID, and inode allocation high-water mark after it. A fence advances the WAL number and writer epoch without adding a logical commit, and repeats the head commit ID and allocator it received.
 
@@ -332,7 +332,7 @@ This example assumes 12 is the discovered WAL tip. Manifest and WAL discovery mu
 
 ### 4.2 Replaying the visible WAL
 
-After selecting a manifest, discover the WAL tip by probing consecutive numbers. If the hint names a WAL number above `last_folded_wal_no`, load that object and probe forward from it; otherwise probe from the folded boundary. The first absent successor ends discovery. Replay still requires every WAL number between the folded boundary and the discovered tip, including numbers below the hint.
+After selecting a manifest, discover the WAL tip by probing consecutive numbers. If the hint names a WAL number above `folded_wal_no`, load that object and probe forward from it; otherwise probe from the folded boundary. The first absent successor ends discovery. Replay still requires every WAL number between the folded boundary and the discovered tip, including numbers below the hint.
 
 Each data segment must contain contiguous commits following its `prior_head_seq`. Namespace identity, WAL number, sequence range, head commit ID, allocation state, and writer epoch must validate. Empty fence segments contain no metadata changes. Epochs cannot decrease along the log or exceed the current manifest's epoch. If a WAL object exposes a newer epoch, reload the manifest before deciding that the object is invalid.
 
@@ -592,9 +592,9 @@ The `commits` and `commit_receipts` families hold one row each per retained comm
 
 ### 7.2 Publishing a materialized file set
 
-A flush starts from the verified manifest and discovered WAL tip. It materializes the required numbers after `last_folded_wal_no`, writes new segments, and publishes the next manifest with `last_folded_wal_no` set to the captured tip. A fence is folded even when the logical sequence does not change. Ordinary flushes write a run at the head when materializing new state.
+A flush starts from the verified manifest and discovered WAL tip. It materializes the required numbers after `folded_wal_no`, writes new segments, and publishes the next manifest with `folded_wal_no` set to the captured tip. A fence is folded even when the logical sequence does not change. Ordinary flushes write a run at the head when materializing new state.
 
-Before writing segments or publishing the manifest, a flush writes every inline value it covers as a content object, verified against its reference. A manifest whose `last_folded_wal_no` is `n` implies a content object exists for every inline value in WAL segments up to `n`. WAL collection's rule is unchanged because it already requires each segment to be at or below `last_folded_wal_no`.
+Before writing segments or publishing the manifest, a flush writes every inline value it covers as a content object, verified against its reference. A manifest whose `folded_wal_no` is `n` implies a content object exists for every inline value in WAL segments up to `n`. WAL collection's rule is unchanged because it already requires each segment to be at or below `folded_wal_no`.
 
 Publication uses put-if-absent at `predecessor.manifest_no + 1`. A lost put loads the winning manifest. A flush already covered by the winner needs no further publication; coverage includes WAL position as well as sequence. Otherwise it rebuilds against the new predecessor. Reorganization and compaction additionally require their selected inputs to remain valid.
 
@@ -635,7 +635,7 @@ Two footprint values are calculated from the manifest's segment descriptors:
 | Value | Calculation |
 | --- | --- |
 | `inode_record_count` | Sum of `row_count` for `inodes` segments. |
-| `metadata_stored_bytes` | Sum of `index_block.offset + index_block.stored_len` for all referenced segments. |
+| `metadata_stored_bytes` | Sum of `index_block.offset + index_block.stored_bytes` for all referenced segments. |
 
 The inode count includes retained deleted records. An implicit root counts as zero until stored as an inode record. Metadata bytes exclude content, WAL, manifest and pin JSON, unreferenced outputs, and segments referenced only by other manifests. Shared segments count in each referencing manifest; these totals do not measure unique physical storage.
 
@@ -752,7 +752,7 @@ Abandoned attempts can leave a descriptor, hint, or fork pin. Descriptor and hin
 
 ### 9.4 Deleting a namespace
 
-Deletion uses the acquired writer epoch. After admitted commits finish, it folds the remaining WAL, then publishes the next manifest with deleted status. The manifest records `deleted_at_ms` from the deletion call's clock. Deletion initiates tombstone publication within `METADATA_PUBLICATION_BUDGET_MS` of capturing that clock. Its runs, counters, and folded WAL boundary cover the final head, so every WAL object of the deleted generation is at or below `last_folded_wal_no`. A failed fold leaves the namespace active; deletion can be retried. Previously committed data remains committed.
+Deletion uses the acquired writer epoch. After admitted commits finish, it folds the remaining WAL, then publishes the next manifest with deleted status. The manifest records `deleted_at_ms` from the deletion call's clock. Deletion initiates tombstone publication within `METADATA_PUBLICATION_BUDGET_MS` of capturing that clock. Its runs, counters, and folded WAL boundary cover the final head, so every WAL object of the deleted generation is at or below `folded_wal_no`. A failed fold leaves the namespace active; deletion can be retried. Previously committed data remains committed.
 
 An ordinary operation that observes deletion returns `namespace_deleted`. A create or a fork into the id recreates it. A cached reader can still use its active view until the next manifest revalidation is due. Deletion neither immediately removes content nor deletes the shared content domain.
 
@@ -879,7 +879,7 @@ Every age decision uses the call's fixed `now_ms`. A later call reads fresh root
 | Current deleted manifest or a retired pin's tombstone | The tombstone itself; its runs are not roots. |
 | Every recognized pin key in the complete listing | The numbered manifest in its ID and every segment in that manifest when it is active. |
 | Hint's observed manifest number | All manifest numbers at or above it, so discovery can probe forward. Intermediate numbers do not protect additional runs. |
-| Current active manifest's folded boundary | Every WAL number above `last_folded_wal_no`. |
+| Current active manifest's folded boundary | Every WAL number above `folded_wal_no`. |
 
 Pin bodies are not needed to identify these roots: the manifest number is part of the pin key. Bodies are read later for owner and expiry decisions. A pin naming a missing manifest is corruption, except for a retired pin. A retired pin whose manifest is absent protects nothing and is deleted in the pin sweep with the retired count. Each listed pin protects its files for the whole pass, even if that pass deletes the pin.
 
@@ -892,7 +892,7 @@ Being unreferenced makes an object a candidate; it does not make it immediately 
 | Family | Conditions for deletion |
 | --- | --- |
 | Namespace manifest | Below the observed hint and unpinned; its provider age is at least `T`, and its immediate successor, if present, is also at least `T` old. |
-| WAL object in an active namespace | At or below `last_folded_wal_no`, with provider age at least `T`. |
+| WAL object in an active namespace | At or below `folded_wal_no`, with provider age at least `T`. |
 | WAL object in a deleted namespace | Provider age at least `T`; no current WAL is protected. |
 | Metadata segment | No root lists it, and its provider age is strictly greater than 24 hours. |
 | Pin record | Owner-specific rules in section 11.7. |
@@ -1075,7 +1075,7 @@ This appendix is the field and encoding reference for the protocols above. Field
 | Object | Envelope kind | Encoding | Version |
 | --- | --- | --- | --- |
 | WAL segment | `wal_segment` | zstd-compressed CBOR envelope with CBOR payload bytes | 1 |
-| Namespace manifest | `namespace_manifest` | Uncompressed JSON | 1 |
+| Namespace manifest | `manifest` | Uncompressed JSON | 1 |
 | Namespace hint | `hint` | Uncompressed JSON | 1 |
 | Metadata segment | No envelope | Block sections described in A.7 | Governed by namespace manifest version 1 |
 | Pin record | `checkpoint_record` | Uncompressed JSON | 1 |
@@ -1174,7 +1174,7 @@ A namespace manifest contains:
 | `fork_basis?` | Source reference and pin identity, immutable within a generation. |
 | `status` | Active or deleted state for this generation. |
 | `writer?` | Diagnostic writer block. |
-| `last_folded_wal_no` | Highest local WAL number incorporated into the file set. |
+| `folded_wal_no` | Highest local WAL number incorporated into the file set. |
 | `manifest_no` | Positive number matching the object key. |
 | `generation` | Positive namespace generation. Generation 1 is the first creation; recreation increments it. |
 | `generation_first_manifest_no` | Positive manifest number at which this generation began, no later than `manifest_no`. |
@@ -1339,11 +1339,11 @@ Each handle is an encoded object with the following fields:
 | Field | Type | Meaning |
 | --- | --- | --- |
 | `offset` | `u64` | Zero-based byte offset in the complete segment. |
-| `stored_len` | `u32` | Number of stored bytes in the section. |
-| `decoded_len` | `u32` | Expected length after decompression, or the uncompressed length for a filter. |
+| `stored_bytes` | `u32` | Number of stored bytes in the section. |
+| `decoded_bytes` | `u32` | Expected length after decompression, or the uncompressed length for a filter. |
 | `crc32c` | `u32` | CRC32C of the exact stored section bytes. |
 
-For each section, the returned byte count must match `stored_len`, the stored-byte CRC must match `crc32c`, and the decoded length must match `decoded_len`. Both lengths fit in `u32`. Readers stop decompression after at most `decoded_len + 1` bytes. The extra byte reports a decoded-length mismatch without expanding the rest of an invalid section. This caps decompressed output, not vector capacity or the total memory of decoded rows and parser state. Appendix C.4 describes initial allocation sizing.
+For each section, the returned byte count must match `stored_bytes`, the stored-byte CRC must match `crc32c`, and the decoded length must match `decoded_bytes`. Both lengths fit in `u32`. Readers stop decompression after at most `decoded_bytes + 1` bytes. The extra byte reports a decoded-length mismatch without expanding the rest of an invalid section. This caps decompressed output, not vector capacity or the total memory of decoded rows and parser state. Appendix C.4 describes initial allocation sizing.
 
 #### Data blocks
 
@@ -1620,7 +1620,7 @@ These are reference producer and runtime defaults. A target size can be exceeded
 
 `manifest_revalidation_interval_ms` is the minimum monotonic interval between checks for a successor to the cached manifest. It also paces the writer's hint raise.
 
-A decoder cannot use target block or segment sizes as hard allocation bounds. The reference block reader initially reserves at most the smaller of `decoded_len` and 64 KiB. Further allocation follows bytes actually decompressed. Output stops at the declared length plus one byte as specified in Appendix A.7; vector capacity can exceed that output length. This does not impose a smaller maximum block size. Request admission limits are specified in the [API specification][api-spec].
+A decoder cannot use target block or segment sizes as hard allocation bounds. The reference block reader initially reserves at most the smaller of `decoded_bytes` and 64 KiB. Further allocation follows bytes actually decompressed. Output stops at the declared length plus one byte as specified in Appendix A.7; vector capacity can exceed that output length. This does not impose a smaller maximum block size. Request admission limits are specified in the [API specification][api-spec].
 
 The hard WAL document limit is specified in [Appendix A.5](#a5-wal-records).
 
@@ -1641,7 +1641,7 @@ The `grep_hint` version-1 JSON payload contains `namespace_id` and `manifest_no`
 
 A `grep_manifest` version-1 payload contains `namespace_id`, `generation`, `manifest_no`, `status`, `index`, and `segments`. The generation is the namespace generation the index was built for; an index from another generation is rebuilt from a fresh checkpoint. Its namespace and number must agree with the key. Both envelopes verify their stored payload checksum and reject unknown kinds, versions, fields, and invalid nested state. The hint contains no separate manifest checksum.
 
-`index_stored_bytes` is the sum of `index_block.offset + index_block.stored_len` for its referenced segments, using checked arithmetic. This calculation needs no segment reads. Report it with the grep manifest number and full indexing status, including any partial-commit position. Confirmed absence means zero referenced index bytes; a read failure remains an error.
+`index_stored_bytes` is the sum of `index_block.offset + index_block.stored_bytes` for its referenced segments, using checked arithmetic. This calculation needs no segment reads. Report it with the grep manifest number and full indexing status, including any partial-commit position. Confirmed absence means zero referenced index bytes; a read failure remains an error.
 
 Discovery loads the hinted manifest and probes successive numbers until not-found. A missing hint or missing manifest 1 means grep is not enabled. A missing higher hinted manifest is corruption. Queries validate a cached manifest with a HEAD of its successor on every query; a present successor reloads discovery. Decoded manifests can be cached by namespace and number.
 

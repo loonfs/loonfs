@@ -48,12 +48,12 @@ pub(super) async fn rewrite_manifest_segment(
     // A rewritten segment's filter changes size, and a descriptor that inlines
     // a filter must inline the one it actually has: manifest load compares the
     // two. Derived exactly as `write_manifest_segment` derives it.
-    descriptor.filter_inline = (built.filter.stored_len
+    descriptor.filter_inline = (built.filter.stored_bytes
         <= super::super::build::INLINE_SEGMENT_FILTER_MAX_BYTES)
         .then(|| {
             let start = built.filter.offset as usize;
             loonfs_api::wire::hex::hex_encode_bytes(
-                &built.bytes[start..start + built.filter.stored_len as usize],
+                &built.bytes[start..start + built.filter.stored_bytes as usize],
             )
         });
     descriptor.filter_block = built.filter;
@@ -760,12 +760,12 @@ async fn manifest_load_names_the_segment_codec_for_a_pre_commit_id_row() {
     descriptor.min_row_key = built.min_row_key;
     descriptor.max_row_key = built.max_row_key;
     descriptor.index_block = built.index;
-    descriptor.filter_inline = (built.filter.stored_len
+    descriptor.filter_inline = (built.filter.stored_bytes
         <= super::super::build::INLINE_SEGMENT_FILTER_MAX_BYTES)
         .then(|| {
             let start = built.filter.offset as usize;
             loonfs_api::wire::hex::hex_encode_bytes(
-                &built.bytes[start..start + built.filter.stored_len as usize],
+                &built.bytes[start..start + built.filter.stored_bytes as usize],
             )
         });
     descriptor.filter_block = built.filter;

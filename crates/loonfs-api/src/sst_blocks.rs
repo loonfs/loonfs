@@ -55,17 +55,17 @@ const FILTER_HASH_SEED_TWO: u64 = 0x9e37_79b9_7f4a_7c15;
 pub(crate) const ZSTD_LEVEL: i32 = 3;
 
 /// Where one stored section lives inside a segment object, and how to
-/// verify it: the CRC32C of the stored bytes and their decoded length.
+/// verify it: `stored_bytes`, `decoded_bytes`, and the CRC32C of the stored bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BlockHandle {
     /// Zero-based byte offset of the section within its immutable segment object.
     pub offset: u64,
     /// Number of bytes to range-read and checksum before decoding.
-    pub stored_len: u32,
+    pub stored_bytes: u32,
     /// Expected byte length after optional section decompression.
-    pub decoded_len: u32,
-    /// CRC32C over the exact `stored_len` bytes at `offset`.
+    pub decoded_bytes: u32,
+    /// CRC32C over the exact `stored_bytes` bytes at `offset`.
     pub crc32c: u32,
 }
 
@@ -100,10 +100,10 @@ pub struct BuiltSegmentBlocks {
 impl BuiltSegmentBlocks {
     /// Encodes a small stored filter for an inline segment descriptor.
     pub fn inline_filter_hex(&self) -> Option<String> {
-        (self.filter.stored_len <= DEFAULT_INLINE_FILTER_MAX_BYTES).then(|| {
+        (self.filter.stored_bytes <= DEFAULT_INLINE_FILTER_MAX_BYTES).then(|| {
             let start = self.filter.offset as usize;
             crate::wire::hex::hex_encode_bytes(
-                &self.bytes[start..start + self.filter.stored_len as usize],
+                &self.bytes[start..start + self.filter.stored_bytes as usize],
             )
         })
     }
@@ -380,7 +380,7 @@ pub fn decode_index_block(
         let end = entry
             .block
             .offset
-            .checked_add(u64::from(entry.block.stored_len))
+            .checked_add(u64::from(entry.block.stored_bytes))
             .ok_or_else(|| {
                 SstBlockCodecError::Malformed(format!(
                     "index block `{}` byte range overflows",
@@ -613,8 +613,8 @@ fn append_section(
     };
     let handle = BlockHandle {
         offset: bytes.len() as u64,
-        stored_len: stored.len() as u32,
-        decoded_len: payload.len() as u32,
+        stored_bytes: stored.len() as u32,
+        decoded_bytes: payload.len() as u32,
         crc32c: crc32c::crc32c(&stored),
     };
     bytes.extend_from_slice(&stored);
@@ -626,9 +626,9 @@ fn decode_section(
     handle: &BlockHandle,
     compressed: bool,
 ) -> Result<Vec<u8>, SstBlockCodecError> {
-    if stored.len() != handle.stored_len as usize {
+    if stored.len() != handle.stored_bytes as usize {
         return Err(SstBlockCodecError::StoredLengthMismatch {
-            expected: handle.stored_len,
+            expected: handle.stored_bytes,
             actual: stored.len(),
         });
     }
@@ -641,27 +641,27 @@ fn decode_section(
     }
     let payload = if compressed {
         let mut payload =
-            Vec::with_capacity((handle.decoded_len as usize).min(DEFAULT_TARGET_BLOCK_BYTES));
+            Vec::with_capacity((handle.decoded_bytes as usize).min(DEFAULT_TARGET_BLOCK_BYTES));
         zstd::Decoder::new(stored)
             .and_then(|decoder| {
                 decoder
-                    .take(u64::from(handle.decoded_len) + 1)
+                    .take(u64::from(handle.decoded_bytes) + 1)
                     .read_to_end(&mut payload)
             })
             .map_err(|error| SstBlockCodecError::Codec(error.to_string()))?;
         payload
     } else {
-        if stored.len() != handle.decoded_len as usize {
+        if stored.len() != handle.decoded_bytes as usize {
             return Err(SstBlockCodecError::DecodedLengthMismatch {
-                expected: handle.decoded_len,
+                expected: handle.decoded_bytes,
                 actual: stored.len(),
             });
         }
         stored.to_vec()
     };
-    if payload.len() != handle.decoded_len as usize {
+    if payload.len() != handle.decoded_bytes as usize {
         return Err(SstBlockCodecError::DecodedLengthMismatch {
-            expected: handle.decoded_len,
+            expected: handle.decoded_bytes,
             actual: payload.len(),
         });
     }
@@ -785,13 +785,13 @@ mod tests {
         );
         let built = builder.finish().expect("finish segment");
         let start = built.index.offset as usize;
-        let end = start + built.index.stored_len as usize;
+        let end = start + built.index.stored_bytes as usize;
         let index = decode_index_block(&built.bytes[start..end], &built.index).expect("index");
         assert_eq!(
             decoded_bytes,
             index
                 .iter()
-                .map(|entry| entry.block.decoded_len as usize)
+                .map(|entry| entry.block.decoded_bytes as usize)
                 .sum::<usize>(),
         );
     }
@@ -827,7 +827,7 @@ mod tests {
     }
 
     fn section<'a>(bytes: &'a [u8], handle: &BlockHandle) -> &'a [u8] {
-        &bytes[handle.offset as usize..handle.offset as usize + handle.stored_len as usize]
+        &bytes[handle.offset as usize..handle.offset as usize + handle.stored_bytes as usize]
     }
 
     fn encode_index(entries: &[SegmentIndexEntry]) -> (Vec<u8>, BlockHandle) {
@@ -838,13 +838,13 @@ mod tests {
         (bytes, handle)
     }
 
-    fn index_entry(last_row_key: &str, offset: u64, stored_len: u32) -> SegmentIndexEntry {
+    fn index_entry(last_row_key: &str, offset: u64, stored_bytes: u32) -> SegmentIndexEntry {
         SegmentIndexEntry {
             last_row_key: last_row_key.to_owned(),
             block: BlockHandle {
                 offset,
-                stored_len,
-                decoded_len: stored_len,
+                stored_bytes,
+                decoded_bytes: stored_bytes,
                 crc32c: 0,
             },
         }
@@ -951,7 +951,7 @@ mod tests {
         .expect("index");
         assert_eq!(calibration.len(), 1, "the calibration segment is one block");
         let restarts = rows.div_ceil(RESTART_INTERVAL);
-        let entry_bytes = calibration[0].block.decoded_len as usize - 4 * restarts - 4;
+        let entry_bytes = calibration[0].block.decoded_bytes as usize - 4 * restarts - 4;
 
         let mut builder =
             SegmentBlocksBuilder::new(NonZeroUsize::new(entry_bytes).expect("positive target"));
@@ -1081,7 +1081,7 @@ mod tests {
     fn block_expansion_stops_after_the_first_byte_beyond_the_declared_length() {
         let mut bytes = Vec::new();
         let mut handle = append_section(&mut bytes, &[0; 1024], true).expect("compress block");
-        handle.decoded_len = 8;
+        handle.decoded_bytes = 8;
         assert_eq!(
             decode_data_block(&bytes, &handle).expect_err("expansion exceeds the handle"),
             SstBlockCodecError::DecodedLengthMismatch {
@@ -1095,7 +1095,7 @@ mod tests {
     fn a_large_declared_length_does_not_require_a_large_initial_allocation() {
         let mut bytes = Vec::new();
         let mut handle = append_section(&mut bytes, &[0; 4], true).expect("compress block");
-        handle.decoded_len = u32::MAX;
+        handle.decoded_bytes = u32::MAX;
         assert_eq!(
             decode_index_block(&bytes, &handle).expect_err("declared length exceeds expansion"),
             SstBlockCodecError::DecodedLengthMismatch {
@@ -1125,8 +1125,8 @@ mod tests {
             assert_eq!(
                 error,
                 SstBlockCodecError::StoredLengthMismatch {
-                    expected: handle.stored_len,
-                    actual: handle.stored_len as usize - 1,
+                    expected: handle.stored_bytes,
+                    actual: handle.stored_bytes as usize - 1,
                 }
             );
         }

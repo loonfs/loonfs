@@ -95,7 +95,7 @@ async fn creation_installs_descriptor_hint_and_manifest_then_reads_genesis() {
     let payload = manifest.envelope.payload();
     assert_eq!(payload.manifest_no, ManifestNo(1));
     assert!(payload.runs.is_empty());
-    assert_eq!(payload.last_folded_wal_no, WalNo(0));
+    assert_eq!(payload.folded_wal_no, WalNo(0));
     let puts = store
         .snapshot()
         .into_iter()
@@ -422,7 +422,7 @@ async fn recreating_a_deleted_namespace_publishes_an_empty_next_generation() {
         .filter_map(|key| wal_no_of(key))
         .max()
         .expect("the deleted generation published wal objects");
-    assert_eq!(tombstone.last_folded_wal_no, wal_tip);
+    assert_eq!(tombstone.folded_wal_no, wal_tip);
     for key in &wal_keys {
         store.delete(key).await.expect("collect wal object");
     }
@@ -464,7 +464,7 @@ async fn recreating_a_deleted_namespace_publishes_an_empty_next_generation() {
     assert!(payload.writer_epoch > tombstone.writer_epoch);
     assert_ne!(payload.content_store_id, tombstone.content_store_id);
     assert!(payload.runs.is_empty());
-    assert_eq!(payload.last_folded_wal_no, wal_tip);
+    assert_eq!(payload.folded_wal_no, wal_tip);
 
     let retired_id = CheckpointId::retired(&namespace_id, tombstone.manifest_no);
     let retired = load_checkpoint_record(&store, &namespace_id, &retired_id)
@@ -633,7 +633,7 @@ async fn assert_fork_recreation(source_commits: u64, target_commits: u64) {
         tombstone.writer_epoch.successor().expect("next epoch")
     );
     assert_eq!(payload.compactor_epoch, tombstone.compactor_epoch + 1);
-    assert_eq!(payload.last_folded_wal_no, tombstone.last_folded_wal_no);
+    assert_eq!(payload.folded_wal_no, tombstone.folded_wal_no);
     assert!(payload.writer.is_none());
     assert_eq!(payload.activity, Default::default());
     let basis = payload.fork_basis.as_ref().expect("fork basis");
@@ -656,7 +656,7 @@ async fn assert_fork_recreation(source_commits: u64, target_commits: u64) {
         .await
         .expect("raised hint");
     assert_eq!(raised.state.manifest_no, payload.manifest_no);
-    assert_eq!(raised.state.wal_no, tombstone.last_folded_wal_no);
+    assert_eq!(raised.state.wal_no, tombstone.folded_wal_no);
 
     let view = load_current_metadata_view(&store, &target_id)
         .await

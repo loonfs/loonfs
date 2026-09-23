@@ -22,9 +22,9 @@ pub(crate) async fn discover_tip<S: ObjectStore + ?Sized>(
     if state.status.is_deleted() {
         return Ok(state);
     }
-    let start = manifest.hinted_wal_no.max(state.last_folded_wal_no);
+    let start = manifest.hinted_wal_no.max(state.folded_wal_no);
     let mut previous_epoch = WriterEpoch(0);
-    if start > state.last_folded_wal_no {
+    if start > state.folded_wal_no {
         // The hint skips the folded prefix, so the hinted segment is the
         // first position the walk can be contiguous from.
         let (object_key, segment) = load_required_segment(store, namespace_id, start).await?;

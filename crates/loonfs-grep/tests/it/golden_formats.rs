@@ -210,14 +210,14 @@ pub(crate) fn segment_ref(
         max_row_key: "gram-7a7a7a-00000000000000000099".to_owned(),
         index_block: BlockHandle {
             offset: 128,
-            stored_len: 48,
-            decoded_len: 96,
+            stored_bytes: 48,
+            decoded_bytes: 96,
             crc32c: 305_419_896,
         },
         filter_block: BlockHandle {
             offset: 176,
-            stored_len: 16,
-            decoded_len: 16,
+            stored_bytes: 16,
+            decoded_bytes: 16,
             crc32c: 2_591_069_104,
         },
         filter_inline: (number == 1).then(|| "00112233445566778899aabbccddeeff".to_owned()),
@@ -268,7 +268,7 @@ fn sample_gram_postings_segment() -> BuiltSegmentBlocks {
 }
 
 fn segment_section<'a>(bytes: &'a [u8], handle: &BlockHandle) -> &'a [u8] {
-    &bytes[handle.offset as usize..handle.offset as usize + handle.stored_len as usize]
+    &bytes[handle.offset as usize..handle.offset as usize + handle.stored_bytes as usize]
 }
 
 /// Reads back the block a fixture pins. The fixture stores the decompressed
@@ -279,8 +279,8 @@ fn decode_golden_data_block(name: &str) -> DecodedDataBlock<IndexRow> {
     let stored = zstd::stream::encode_all(payload.as_slice(), 0).expect("compress the block");
     let handle = BlockHandle {
         offset: 0,
-        stored_len: stored.len() as u32,
-        decoded_len: payload.len() as u32,
+        stored_bytes: stored.len() as u32,
+        decoded_bytes: payload.len() as u32,
         crc32c: crc32c::crc32c(&stored),
     };
     decode_data_block_rows::<IndexRow>(&stored, &handle).expect("decode golden data block")

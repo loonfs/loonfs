@@ -163,7 +163,7 @@ pub async fn load_namespace_flush_basis<S: ObjectStore + ?Sized>(
     let loaded = load_namespace_head_basis(store, expected_namespace_id).await?;
     Ok(NamespaceFlushBasis {
         head_seq: loaded.head.seq,
-        has_unflushed_wal_tail: loaded.head.last_folded_wal_no < loaded.head.wal_no,
+        has_unflushed_wal_tail: loaded.head.folded_wal_no < loaded.head.wal_no,
     })
 }
 
