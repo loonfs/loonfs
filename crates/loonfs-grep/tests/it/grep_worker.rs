@@ -377,6 +377,7 @@ async fn exhausted_run_numbers_fail_as_server_errors_without_writing_the_manifes
     let current_state = current.manifest_state();
     let maximum_state = GrepManifestState::new(
         namespace_id.clone(),
+        current_state.generation(),
         current.manifest_no().successor().expect("next number"),
         current_state.status().clone(),
         GrepIndexState {
@@ -664,6 +665,177 @@ async fn restart_retains_its_checkpoint_when_the_manifest_write_result_is_ambigu
     let checkpoint_id = assert_fresh_backfill_attempt(&store, &namespace_id).await;
     assert_ne!(checkpoint_id, previous_checkpoint_id);
     writer.shutdown().await.expect("shutdown");
+}
+
+async fn create_namespace_with_files(
+    store: &SharedObjectStore,
+    namespace_id: &NamespaceId,
+    prefix: &str,
+    content: &[u8],
+    file_count: u64,
+) -> FsWriter {
+    let writer = FsWriter::builder_with_store(store.clone())
+        .writer_id("generation-test-writer")
+        .min_publish_interval_ms(0)
+        .build()
+        .await
+        .expect("writer");
+    writer
+        .create_namespace(
+            namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("create namespace generation");
+    for index in 0..file_count {
+        writer
+            .put_file_bytes(
+                namespace_id,
+                &format!("/{prefix}-{index}.txt"),
+                content,
+                PutFileOptions::new(loonfs_test_support::test_actor()),
+            )
+            .await
+            .expect("write file");
+    }
+    writer
+}
+
+#[tokio::test]
+async fn namespace_recreation_rebuilds_the_index_regardless_of_the_old_cursor() {
+    use loonfs::{MaintenanceJob, MaintenanceProbe};
+    use loonfs_api::{v0::GrepIndexLifecycle, NamespaceGeneration};
+    use loonfs_grep::GrepMaintenanceJob;
+
+    for file_count in [1, 2, 3] {
+        let temp_dir = tempdir().expect("tempdir");
+        let store: SharedObjectStore =
+            Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
+        let namespace_id = NamespaceId::parse("recreated-index").expect("namespace id");
+        let writer =
+            create_namespace_with_files(&store, &namespace_id, "old", b"obsolete content", 2).await;
+        let host = GrepHost::with_runtime_cache(
+            &store,
+            "recreated-index-maintenance",
+            loonfs::RuntimeCacheConfig {
+                manifest_revalidation_interval_ms: 0,
+                ..Default::default()
+            },
+        )
+        .await;
+        host.enable_grep_index(&namespace_id)
+            .await
+            .expect("build index");
+        let old = host
+            .worker
+            .manifest_state(&namespace_id)
+            .await
+            .expect("manifest")
+            .expect("index");
+        assert_eq!(old.generation(), NamespaceGeneration(1));
+        assert_eq!(
+            old.status()
+                .active_watermark()
+                .expect("active")
+                .built_through_seq(),
+            ChangeSeq(2)
+        );
+        assert_eq!(
+            host.grep(&namespace_id, &request("obsolete"), default_page_limit())
+                .await
+                .expect("warm query cache")
+                .matches
+                .len(),
+            2
+        );
+        writer
+            .delete_namespace(&namespace_id, DeleteNamespaceOptions::default())
+            .await
+            .expect("delete namespace");
+        create_namespace_with_files(
+            &store,
+            &namespace_id,
+            "new",
+            b"replacement content",
+            file_count,
+        )
+        .await;
+        let head = NamespaceReads::new(&host.reader, &namespace_id)
+            .head()
+            .await
+            .expect("head");
+        assert_eq!(head.generation, NamespaceGeneration(2));
+        assert_eq!(head.head_seq, ChangeSeq(file_count));
+        assert_eq!(
+            host.worker
+                .get_grep_index(&namespace_id)
+                .await
+                .expect("status")
+                .lifecycle,
+            GrepIndexLifecycle::Disabled,
+        );
+        for (pattern, allow_scan, allow_stale) in [
+            ("replacement", false, false),
+            ("replacement", false, true),
+            (".*", true, false),
+        ] {
+            let mut query = request(pattern);
+            query.allow_scan = allow_scan;
+            query.allow_stale = allow_stale;
+            let result = host.grep(&namespace_id, &query, default_page_limit()).await;
+            assert!(matches!(result, Err(GrepError::NotEnabled)), "{result:?}");
+        }
+        let policy = GramIndexBuildPolicy::default();
+        let job = GrepMaintenanceJob::new(host.worker.clone(), policy);
+        assert_eq!(
+            job.probe(&namespace_id).await.expect("probe generation"),
+            MaintenanceProbe::Due
+        );
+        assert_eq!(
+            host.worker
+                .build_step(&namespace_id, policy)
+                .await
+                .expect("restart index"),
+            GrepBuildOutcome::BackfillRestarted {
+                target_seq: ChangeSeq(file_count)
+            },
+        );
+        assert_fresh_backfill_attempt(&store, &namespace_id).await;
+        let restarted = host
+            .worker
+            .manifest_state(&namespace_id)
+            .await
+            .expect("manifest")
+            .expect("index");
+        assert_eq!(restarted.generation(), NamespaceGeneration(2));
+        drive_worker_to_current(&host.worker, &namespace_id, policy).await;
+        let rebuilt = host
+            .worker
+            .manifest_state(&namespace_id)
+            .await
+            .expect("manifest")
+            .expect("index");
+        assert_eq!(rebuilt.generation(), NamespaceGeneration(2));
+        assert!(rebuilt.segments().iter().all(|segment| !old
+            .segments()
+            .iter()
+            .any(|old| old.segment_id == segment.segment_id)));
+        let response = host
+            .grep(&namespace_id, &request("replacement"), default_page_limit())
+            .await
+            .expect("new files");
+        assert_eq!(response.built_through_seq, ChangeSeq(file_count));
+        assert_eq!(response.matches.len(), file_count as usize);
+        for (index, found) in response.matches.iter().enumerate() {
+            assert_eq!(found.path.as_str(), format!("/new-{index}.txt"));
+        }
+        assert!(host
+            .grep(&namespace_id, &request("obsolete"), default_page_limit())
+            .await
+            .expect("old files absent")
+            .matches
+            .is_empty());
+    }
 }
 
 #[tokio::test]
@@ -2320,6 +2492,7 @@ async fn gc_preserves_discovery_and_applies_successor_and_segment_age_rules() {
         };
         let state = GrepManifestState::new(
             namespace_id.clone(),
+            loonfs_api::NamespaceGeneration(1),
             ManifestNo(number),
             GrepIndexStatus::Active {
                 built_through_seq: ChangeSeq(0),

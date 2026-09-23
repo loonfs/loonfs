@@ -1653,7 +1653,7 @@ namespaces/{namespace_id}/extensions/grep/
 
 The `grep_hint` version-1 JSON payload contains `namespace_id` and `manifest_no`. Enabling writes a hint naming manifest 1, then creates manifest 1 with put-if-absent. A hint collision is permitted; the manifest put decides installation. Later publications use the next contiguous number.
 
-A `grep_manifest` version-1 payload contains `namespace_id`, `manifest_no`, `status`, `index`, and `segments`. Its namespace and number must agree with the key. Both envelopes verify their stored payload checksum and reject unknown kinds, versions, fields, and invalid nested state. The hint contains no separate manifest checksum.
+A `grep_manifest` version-1 payload contains `namespace_id`, `generation`, `manifest_no`, `status`, `index`, and `segments`. The generation is the namespace generation the index was built for; an index from another generation is rebuilt from a fresh checkpoint. Its namespace and number must agree with the key. Both envelopes verify their stored payload checksum and reject unknown kinds, versions, fields, and invalid nested state. The hint contains no separate manifest checksum.
 
 `index_stored_bytes` is the sum of `index_block.offset + index_block.stored_len` for its referenced segments, using checked arithmetic. This calculation needs no segment reads. Report it with the grep manifest number and full indexing status, including any partial-commit position. Confirmed absence means zero referenced index bytes; a read failure remains an error.
 

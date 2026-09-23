@@ -95,8 +95,9 @@ impl GrepService {
     async fn load_index_snapshot<S: ObjectStore + ?Sized>(
         &self,
         store: &S,
-        namespace_id: &NamespaceId,
+        reads: &PinnedNamespaceReads<'_>,
     ) -> Result<MaterializedGrepIndexSnapshot> {
+        let namespace_id = reads.namespace_id();
         let cached = self
             .current_manifests
             .lock()
@@ -120,7 +121,7 @@ impl GrepService {
                 Err(_) => false,
             };
             if !successor_present {
-                return materialized_snapshot_from_state(state);
+                return materialized_snapshot_from_state(state, reads);
             }
         }
         let current = load_current_grep_manifest(store, namespace_id)
@@ -155,7 +156,7 @@ impl GrepService {
         {
             *entry = Arc::downgrade(&state);
         }
-        materialized_snapshot_from_state(state)
+        materialized_snapshot_from_state(state, reads)
     }
 
     async fn plan_query<'a, S: ObjectStore>(
@@ -189,9 +190,7 @@ impl GrepService {
             }
             None => None,
         };
-        let snapshot = self
-            .load_index_snapshot(store, reads.namespace_id())
-            .await?;
+        let snapshot = self.load_index_snapshot(store, &reads).await?;
         let pattern = regex::bytes::RegexBuilder::new(&request.pattern)
             .case_insensitive(request.case_insensitive)
             .multi_line(true)
@@ -306,7 +305,16 @@ impl GrepService {
 
 fn materialized_snapshot_from_state(
     state: Arc<GrepManifestState>,
+    reads: &PinnedNamespaceReads<'_>,
 ) -> Result<MaterializedGrepIndexSnapshot> {
+    if state.generation() != reads.generation()
+        || state
+            .status()
+            .active_watermark()
+            .is_some_and(|resume| resume.built_through_seq() > reads.head_seq())
+    {
+        return Err(GrepError::NotEnabled);
+    }
     // Queries require an active index and its watermark. Disabled and
     // backfilling indexes return their corresponding errors.
     let resume = match state.status() {

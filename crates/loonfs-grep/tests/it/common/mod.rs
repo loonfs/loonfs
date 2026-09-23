@@ -113,8 +113,9 @@ impl GrepHost {
             GrepIndexStatus::Backfilling { target_seq, .. } => Some(*target_seq),
             GrepIndexStatus::Active { .. } => Some(
                 NamespaceReads::new(&self.reader, namespace_id)
-                    .head_seq()
-                    .await?,
+                    .head()
+                    .await?
+                    .head_seq,
             ),
         };
         if let Some(target_seq) = target_seq {

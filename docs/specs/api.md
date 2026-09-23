@@ -3006,7 +3006,8 @@ hidden from the checkpoint backfill, and the change event names only that
 root. With `allow_stale`, the query serves indexed-only results and reports
 `tail_scanned: false`. The worker starts a fresh checkpoint backfill
 before advancing its watermark past the undelete, so a later exact query
-includes the restored subtree.
+includes the restored subtree. A changed namespace generation also rebuilds
+the index from a fresh checkpoint.
 
 The `path_prefix` value is a complete absolute path, not a partial textual
 segment prefix. The server resolves it using the name-key folding rule
