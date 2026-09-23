@@ -314,6 +314,7 @@ fn sample_wal_payload() -> WalSegmentPayload {
         namespace_id: namespace_id(),
         wal_no: WalNo(2),
         next_inode_id: InodeId(10),
+        head_commit_id: commit_id(),
         writer_epoch: WriterEpoch(3),
         base_head_seq: ChangeSeq(1),
         start_seq: ChangeSeq(2),
@@ -367,6 +368,7 @@ fn sample_wal_inline_content_payload() -> WalSegmentPayload {
     });
     payload.end_seq = ChangeSeq(3);
     payload.records.push(without_inline_content);
+    payload.head_commit_id = payload.records[1].commit_id.clone();
     payload
 }
 

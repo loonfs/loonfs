@@ -206,11 +206,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
             )
         }
     };
-    let last_plan = &accepted_commits
-        .last()
-        .expect("accepted commits should be nonempty")
-        .commit;
-    let resulting_head = resulting_head_after(&wal, &view.head, last_plan.commit_id.clone());
+    let resulting_head = resulting_head_after(&wal, &view.head);
     let now_ms = clock.timer.monotonic_now_ms();
     let elapsed_ms = now_ms.saturating_sub(clock.attempt_started_ms);
     let Some(publication_now_ms) = context.now_ms.checked_add(elapsed_ms) else {

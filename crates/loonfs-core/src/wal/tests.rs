@@ -11,13 +11,15 @@ use crate::namespace::{
 };
 use crate::path::read::load_current_metadata_view;
 use crate::protocol::PublishTailOptions;
-use loonfs_api::wire::wal::{decode_wal_segment_envelope_zstd, encode_wal_segment_envelope_zstd};
+use loonfs_api::wire::wal::{
+    decode_wal_segment_envelope_zstd, encode_wal_segment_envelope_zstd, WalCommitPayload,
+};
 use loonfs_api::{
     AbsolutePath, AttributeInclusion, ChangeSeq, CommitId, ErrorCode, InodeId, ManifestNo,
     NamespaceId, WalNo, WriterEpoch, WriterId,
 };
-use loonfs_objectstore::keys::hint;
-use loonfs_objectstore::{keys::wal_segment, local_fs_store::LocalFsStore, ObjectStore};
+use loonfs_objectstore::keys::{hint, wal_segment, wal_segment_prefix};
+use loonfs_objectstore::{local_fs_store::LocalFsStore, ObjectStore};
 use loonfs_test_support::stores::{
     BlockingStore, KeyPredicate, MetadataMapStore, OperationClass, RecordingStore,
 };
@@ -55,6 +57,53 @@ async fn readers_reject_invalid_numbers_epochs_sequences_and_allocation_summarie
         &store.get(&key, None).await.expect("get").expect("fence"),
     )
     .expect("decode");
+
+    let mut data_payload = original.payload().clone();
+    data_payload.start_seq = ChangeSeq(1);
+    data_payload.end_seq = ChangeSeq(1);
+    data_payload.head_commit_id = CommitId::parse("wrong-data-head").expect("commit");
+    data_payload.records = vec![WalCommitPayload {
+        seq: ChangeSeq(1),
+        commit_id: CommitId::parse("data-record").expect("commit"),
+        committed_by: loonfs_test_support::test_actor(),
+        semantic_commit_fingerprint: serde_json::from_str(r#""v1:sha256:test""#)
+            .expect("fingerprint"),
+        committed_at_ms: 1_000,
+        message: None,
+        deltas: Vec::new(),
+        inline_content: Vec::new(),
+    }];
+    let data = encode_wal_segment_envelope_zstd(data_payload).expect("data segment");
+    assert_eq!(
+        super::replay::validate_wal_segment_for_replay(
+            &namespace_id,
+            ChangeSeq(0),
+            data.envelope(),
+        ),
+        Err(super::WalSegmentError::SegmentSummaryMismatch)
+    );
+
+    let mut fence_payload = original.payload().clone();
+    fence_payload.head_commit_id = CommitId::parse("wrong-fence-head").expect("commit");
+    let fence = encode_wal_segment_envelope_zstd(fence_payload)
+        .expect("fence segment")
+        .into_envelope();
+    let current = load_current_manifest(&store, &namespace_id)
+        .await
+        .expect("manifest");
+    let base_head = crate::namespace::state::NamespaceReadState::from(current.envelope.payload());
+    let tail =
+        super::ValidatedWalTail::new(vec![super::ValidatedWalSegment::new(key.clone(), fence)]);
+    assert_eq!(
+        super::replay::project_validated_wal_tail(
+            &base_head,
+            &super::ProjectedWalTail::default(),
+            Some(WriterEpoch(2)),
+            &tail,
+        ),
+        Err(super::WalSegmentError::SegmentSummaryMismatch)
+    );
+
     for changed in 0..5 {
         let mut payload = original.payload().clone();
         match changed {
@@ -81,6 +130,54 @@ async fn readers_reject_invalid_numbers_epochs_sequences_and_allocation_summarie
             "case {changed}: {error}"
         );
     }
+}
+
+#[tokio::test]
+async fn hinted_fences_carry_the_head_commit_without_reading_earlier_wal() {
+    let directory = tempdir().expect("directory");
+    let namespace_id = NamespaceId::parse("hinted-fences").expect("namespace");
+    let store = RecordingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::prefix(wal_segment_prefix(&namespace_id)),
+    );
+    bootstrap_namespace(
+        &store,
+        &namespace_id,
+        &context(1_000),
+        &loonfs_test_support::test_actor(),
+        &loonfs_api::NamespaceAccess::Unrestricted {},
+        false,
+    )
+    .await
+    .expect("create");
+    let mut engine = NamespaceCommitEngine::new(namespace_id.clone());
+    let committed = publish(&mut engine, &store, "data")
+        .await
+        .expect("data commit");
+    acquire_writer_epoch(&store, &namespace_id, &context(1_000))
+        .await
+        .expect("first fence");
+    acquire_writer_epoch(&store, &namespace_id, &context(1_000))
+        .await
+        .expect("second fence");
+    crate::namespace::control::raise_namespace_hint(&store, &namespace_id, WalNo(3), None)
+        .await
+        .expect("raise hint");
+    drop(engine);
+    store.reset();
+
+    let head = crate::namespace::control::load_namespace_read_state(&store, &namespace_id)
+        .await
+        .expect("cold discovery");
+    assert_eq!(head.head_commit_id, committed.commit_id);
+    assert_eq!(
+        store.take_get_keys(),
+        vec![
+            wal_segment(&namespace_id, &WalNo(3)),
+            wal_segment(&namespace_id, &WalNo(4)),
+            wal_segment(&namespace_id, &WalNo(5)),
+        ]
+    );
 }
 
 #[tokio::test]

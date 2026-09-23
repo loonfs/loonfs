@@ -6,7 +6,7 @@ use crate::namespace::state::NamespaceReadState;
 use loonfs_api::wire::wal::{
     encode_wal_segment_envelope_zstd, WalCommitPayload, WalSegmentPayload,
 };
-use loonfs_api::{ChangeSeq, CommitId, NamespaceId, WalNo, WriterEpoch};
+use loonfs_api::{ChangeSeq, NamespaceId, WalNo, WriterEpoch};
 
 pub(crate) fn prepare_wal_segment(
     namespace_id: NamespaceId,
@@ -56,6 +56,11 @@ pub(crate) fn prepare_wal_segment(
         .checked_sub(1)
         .map(ChangeSeq)
         .ok_or(WalSegmentError::SeqOverflow)?;
+    let head_commit_id = payload_records
+        .last()
+        .expect("payload records should be nonempty")
+        .commit_id
+        .clone();
     let payload = WalSegmentPayload {
         namespace_id,
         wal_no,
@@ -64,6 +69,7 @@ pub(crate) fn prepare_wal_segment(
             .expect("records should be nonempty")
             .commit
             .resulting_next_inode_id,
+        head_commit_id,
         writer_epoch,
         base_head_seq,
         start_seq,
@@ -83,6 +89,7 @@ pub(crate) fn prepare_fence_segment(
         wal_no: next_wal_no(head)?,
         writer_epoch,
         next_inode_id: head.next_inode_id,
+        head_commit_id: head.head_commit_id.clone(),
         base_head_seq: head.seq,
         start_seq: head.seq,
         end_seq: head.seq,
@@ -93,12 +100,11 @@ pub(crate) fn prepare_fence_segment(
 pub(crate) fn resulting_head_after(
     segment: &PreparedWalSegment,
     head: &NamespaceReadState,
-    head_commit_id: CommitId,
 ) -> NamespaceReadState {
     let payload = segment.envelope().payload();
     NamespaceReadState {
         seq: payload.end_seq,
-        head_commit_id,
+        head_commit_id: payload.head_commit_id.clone(),
         next_inode_id: payload.next_inode_id,
         wal_no: payload.wal_no,
         ..head.clone()

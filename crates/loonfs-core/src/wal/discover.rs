@@ -24,7 +24,6 @@ pub(crate) async fn discover_tip<S: ObjectStore + ?Sized>(
     }
     let start = manifest.hinted_wal_no.max(state.last_folded_wal_no);
     let mut previous_epoch = WriterEpoch(0);
-    let mut last_record = None;
     if start > state.last_folded_wal_no {
         // The hint skips the folded prefix, so the hinted segment is the
         // first position the walk can be contiguous from.
@@ -32,7 +31,7 @@ pub(crate) async fn discover_tip<S: ObjectStore + ?Sized>(
         let payload = segment.payload();
         validate_wal_segment_for_replay(namespace_id, payload.base_head_seq, &segment)
             .map_err(|error| corrupt(&object_key, error))?;
-        apply_segment(&mut state, &segment, &mut last_record, &object_key)?;
+        apply_segment(&mut state, &segment, &object_key)?;
         previous_epoch = payload.writer_epoch;
     }
     let mut walk = WalWalk::after(namespace_id, state.wal_no, state.seq);
@@ -41,29 +40,8 @@ pub(crate) async fn discover_tip<S: ObjectStore + ?Sized>(
         if previous_epoch > payload.writer_epoch {
             return Err(corrupt(segment.object_key(), "WAL writer epoch decreases"));
         }
-        apply_segment(
-            &mut state,
-            segment.envelope(),
-            &mut last_record,
-            segment.object_key(),
-        )?;
+        apply_segment(&mut state, segment.envelope(), segment.object_key())?;
         previous_epoch = payload.writer_epoch;
-    }
-    let mut prior = start;
-    while last_record.is_none()
-        && state.seq > manifest.envelope.payload().head_seq
-        && prior > state.last_folded_wal_no
-    {
-        let (_, segment) = load_required_segment(store, namespace_id, prior).await?;
-        last_record = segment
-            .payload()
-            .records
-            .last()
-            .map(|record| record.commit_id.clone());
-        prior = WalNo(prior.0 - 1);
-    }
-    if let Some(commit_id) = last_record {
-        state.head_commit_id = commit_id;
     }
     Ok(state)
 }
@@ -84,7 +62,6 @@ async fn load_required_segment<S: ObjectStore + ?Sized>(
 pub(super) fn apply_segment(
     state: &mut NamespaceReadState,
     segment: &WalSegmentEnvelope,
-    last_record: &mut Option<loonfs_api::CommitId>,
     object_key: &str,
 ) -> Result<(), ControlObjectLoadError> {
     let payload = segment.payload();
@@ -94,9 +71,7 @@ pub(super) fn apply_segment(
     state.wal_no = payload.wal_no;
     state.seq = payload.end_seq;
     state.next_inode_id = payload.next_inode_id;
-    if let Some(record) = payload.records.last() {
-        *last_record = Some(record.commit_id.clone());
-    }
+    state.head_commit_id = payload.head_commit_id.clone();
     Ok(())
 }
 
@@ -139,7 +114,6 @@ pub async fn probe_namespace_wal<S: ObjectStore + ?Sized>(
         head_seq: state.seq,
     };
     let mut projected_tail = None;
-    let mut last_record = None;
     let mut walk = WalWalk::after(&context.head.namespace_id, state.wal_no, state.seq);
     loop {
         let segment = match walk.next(store).await {
@@ -159,12 +133,7 @@ pub async fn probe_namespace_wal<S: ObjectStore + ?Sized>(
             projected_tail = context.tail_cache.get(&cache_key);
         }
         let before = state.clone();
-        apply_segment(
-            &mut state,
-            segment.envelope(),
-            &mut last_record,
-            segment.object_key(),
-        )?;
+        apply_segment(&mut state, segment.envelope(), segment.object_key())?;
         if let Some(current) = projected_tail {
             let object_key = segment.object_key().to_owned();
             let tail = ValidatedWalTail::new(vec![segment]);
@@ -172,9 +141,6 @@ pub async fn probe_namespace_wal<S: ObjectStore + ?Sized>(
                 project_validated_wal_tail(&before, &current, Some(state.writer_epoch), &tail)
                     .map_err(|error| corrupt(&object_key, error))?;
             projected_tail = Some(Arc::new(replayed.projected_tail));
-        }
-        if let Some(commit_id) = &last_record {
-            state.head_commit_id = commit_id.clone();
         }
     }
     if let Some(projected_tail) = projected_tail {
