@@ -367,7 +367,8 @@ Maintenance
     --json includes every retention reason.
     Repeated GC runs reclaim a deleted namespace's own content once it retires,
     with deleted.content_objects counting completed-session reclamation and
-    deleted.retired_content_objects counting owner-prefix deletion attempts.
+    deleted.retired_content_objects counting deletion attempts through its
+    publication rows, which repeat on every pass.
 
   loonfs maintenance store probe
     Test the object-store operations LoonFS requires. The command creates

@@ -11,7 +11,7 @@ use loonfs_api::wire::manifest::{
 use loonfs_api::wire::sst_blocks::string_prefix_upper_bound;
 use loonfs_api::{GcResponse, NamespaceGeneration, NamespaceId};
 use loonfs_objectstore::keys::content_blob;
-use loonfs_objectstore::{ObjectStore, ObjectStoreError};
+use loonfs_objectstore::ObjectStore;
 use std::collections::BTreeSet;
 
 const PUBLICATION_SCAN_PAGE_ROWS: usize = 256;
@@ -87,7 +87,7 @@ async fn delete_retired_record<S: ObjectStore + ?Sized>(
     report: &mut GcResponse,
 ) -> Result<()> {
     match store.delete(&record.key).await {
-        Ok(()) | Err(ObjectStoreError::NotFound { .. }) => {
+        Ok(()) => {
             report.deleted.retired_generation_records += 1;
             Ok(())
         }
@@ -165,9 +165,7 @@ async fn sweep_content<S: ObjectStore + ?Sized>(
             }
             let key = content_blob(&record.owner_namespace_id, &record.content_id);
             match store.delete(&key).await {
-                Ok(()) | Err(ObjectStoreError::NotFound { .. }) => {
-                    report.deleted.retired_content_objects += 1
-                }
+                Ok(()) => report.deleted.retired_content_objects += 1,
                 Err(error) => return Err(CoreError::store(&key, &error)),
             }
         }
