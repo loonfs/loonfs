@@ -1034,7 +1034,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             .transpose()?;
         let binding_generation = resolved
             .binding_generation
-            .map(|generation| generation.encode(&self.namespace_id))
+            .map(|generation| generation.encode(&self.namespace_id, self.head.generation))
             .transpose()
             .map_err(|error| {
                 CoreError::Internal(format!(

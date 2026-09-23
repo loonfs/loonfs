@@ -157,6 +157,33 @@ async fn http_paginates_checkpoint_inventory_and_rejects_invalid_requests() {
     assert_eq!(raw.checkpoints.len(), 1);
     assert!(raw.next_cursor.is_some());
 
+    harness
+        .client
+        .delete_namespace(&demo, None)
+        .await
+        .expect("delete namespace");
+    let deleted_page = harness
+        .client
+        .list_checkpoints_page(&demo, Some(1), Some(&foreign_cursor))
+        .await
+        .expect("resume checkpoints in deleted namespace");
+    assert_eq!(deleted_page.checkpoints.len(), 1);
+    harness
+        .client
+        .create_namespace(
+            &demo,
+            &loonfs_test_support::test_actor(),
+            loonfs_api::NamespaceAccess::unrestricted(),
+        )
+        .await
+        .expect("recreate namespace");
+    assert_invalid_request(
+        harness
+            .client
+            .list_checkpoints_page(&demo, Some(1), Some(&foreign_cursor))
+            .await,
+    );
+
     harness.server.abort();
 }
 

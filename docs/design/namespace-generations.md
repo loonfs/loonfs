@@ -1,12 +1,12 @@
 # Namespace generations
 
-A namespace id can be deleted and created again right away. The new namespace is a new generation of the same id. It starts empty for a plain create or with the source tree for a fork, shares the id's object prefix with every earlier generation, and continues the id's counters from where the previous generation stopped. Nothing an earlier generation published is renamed, rewritten, or overwritten. Earlier generations stay in place until nothing needs them, and forks of them keep working.
+A namespace id can be deleted and created again right away. The new namespace is a new generation of the same id. It starts empty for a plain create or with the source tree for a fork, shares the id's object prefix with every earlier generation, and continues the id's durable object numbers while restarting its logical counters. Nothing an earlier generation published is renamed, rewritten, or overwritten. Earlier generations stay in place until nothing needs them, and forks of them keep working.
 
 This note describes the design. The [storage format specification](../specs/format.md) defines the durable objects it builds on.
 
 ## Why counters continue
 
-Two things make a delete-and-recreate expensive in a naive design: cleaning up before the create, and telling old references from new ones after it. LoonFS avoids both by never restarting a counter.
+Two things make a delete-and-recreate expensive in a naive design: cleaning up before the create, and telling old references from new ones after it. LoonFS avoids both by continuing durable object numbers across generations.
 
 - Manifests, WAL objects, and pins are numbered immutable objects created with put-if-absent. A number names one object forever. If a new generation restarted at number 1, a cached reader or a fork basis could not tell the first generation's manifest 3 from the second's.
 - A fork basis names one manifest by owner, number, and checksum, and a pin under the owner protects it. Resolving the basis is one read. It does not pass through the owner's history and does not depend on how many generations the owner has had since.
@@ -35,6 +35,8 @@ A generation boundary is therefore a lifecycle transition on the existing manife
 The successor rule allows these fields to change only when `generation` increments, and allows `generation` to increment only after a tombstone. Within a generation the identity fields are immutable and a tombstone has no successor. The first manifest of every generation, manifest 1 included, passes one rule: it is active with no writer and zero activity, and either it has a fork basis and its head and floor are the captured source sequence, or it is empty with zero sequences, the genesis commit id, and fresh allocators. Its root inode and any root access grants are synthesized at the generation's first sequence with the generation's creation time.
 
 Sequences and inode ids repeat across generations, as row ids do when a database drops and recreates a table under one name. A change-feed cursor or an inode reference taken in an earlier generation is not distinguishable by its value. The feed refuses a cursor above the current head, but once the new generation passes that sequence the cursor is accepted and the consumer applies new events to an old tree. A consumer that can span a recreation compares `generation` on the namespace object and rebootstraps when it changes. The same holds for `expected_head_seq` and inode-addressed preconditions. The server-side grep index records the generation it indexed and rebuilds on a change.
+
+Binding tokens and namespace-scoped checkpoint cursors belong to the generation that issued them. A recreated namespace rejects those from an earlier generation with the same error as those from another namespace.
 
 ## Recreating a namespace
 

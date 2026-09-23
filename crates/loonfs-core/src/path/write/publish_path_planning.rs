@@ -10,7 +10,7 @@ use crate::metadata::{MetadataView, ResolvedVisiblePath, VisiblePathError};
 use crate::path::read;
 use loonfs_api::{
     AbsolutePath, BindingGeneration as BindingGenerationToken, DestinationBehavior, DisplayName,
-    InodeId, InodeKind, NameKey, NamespaceAccess, NamespaceId, ROOT_INODE_ID,
+    InodeId, InodeKind, NameKey, NamespaceAccess, NamespaceGeneration, NamespaceId, ROOT_INODE_ID,
 };
 use loonfs_api::{AccessGrants, AccessRight, AccessRights, PrincipalId};
 use loonfs_objectstore::ObjectStore;
@@ -51,6 +51,7 @@ impl CompiledFilesystemOperation {
 
 pub(super) struct PublishPathPlanningView<'a, 'view, 'store, S: ObjectStore + ?Sized> {
     pub(super) namespace_id: &'a NamespaceId,
+    pub(super) namespace_generation: NamespaceGeneration,
     pub(super) access: &'a NamespaceAccess,
     pub(super) authorizer: &'a Authorizer<'a>,
     pub(super) view: &'a MetadataView<'view, 'store, S>,
@@ -115,12 +116,16 @@ pub(super) fn check_binding_generation<S: ObjectStore + ?Sized>(
     resolved: &ResolvedVisiblePath,
     expected_binding_generation: &BindingGenerationToken,
 ) -> Result<()> {
-    let expected = BindingGeneration::decode(expected_binding_generation, view.namespace_id)
-        .map_err(|error| CoreError::InvalidCommitField {
-            field: "expected_binding_generation",
-            message: format!("invalid expected binding generation: {error}"),
-            precondition_index: None,
-        })?;
+    let expected = BindingGeneration::decode(
+        expected_binding_generation,
+        view.namespace_id,
+        view.namespace_generation,
+    )
+    .map_err(|error| CoreError::InvalidCommitField {
+        field: "expected_binding_generation",
+        message: format!("invalid expected binding generation: {error}"),
+        precondition_index: None,
+    })?;
     let Some(current) = resolved.binding_generation else {
         return Err(CoreError::RootMutationForbidden);
     };
@@ -128,14 +133,16 @@ pub(super) fn check_binding_generation<S: ObjectStore + ?Sized>(
         return Err(CoreError::BindingGenerationMismatch {
             inode_id: resolved.inode_id,
             expected_binding_generation: expected_binding_generation.clone(),
-            actual_binding_generation: Some(current.encode(view.namespace_id).map_err(
-                |error| {
-                    CoreError::Internal(format!(
-                        "failed to encode the binding generation of inode `{}`: {error}",
-                        resolved.inode_id
-                    ))
-                },
-            )?),
+            actual_binding_generation: Some(
+                current
+                    .encode(view.namespace_id, view.namespace_generation)
+                    .map_err(|error| {
+                        CoreError::Internal(format!(
+                            "failed to encode the binding generation of inode `{}`: {error}",
+                            resolved.inode_id
+                        ))
+                    })?,
+            ),
             precondition_index: None,
         });
     }

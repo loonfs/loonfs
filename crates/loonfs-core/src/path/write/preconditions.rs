@@ -24,6 +24,7 @@ pub(super) async fn evaluate_preconditions<S: ObjectStore + ?Sized>(
     let authorizer = Authorizer::for_request(&head.namespace_id, &head.access, authority)?;
     let view = PublishPathPlanningView {
         namespace_id: &head.namespace_id,
+        namespace_generation: head.generation,
         access: &head.access,
         authorizer: &authorizer,
         view: pre_state,

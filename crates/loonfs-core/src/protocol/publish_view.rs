@@ -53,6 +53,7 @@ impl<S: ObjectStore + ?Sized> PublishMetadataView<'_, S> {
         super::changes::find_committed_change_at(
             &self.metadata_view(),
             &self.head.namespace_id,
+            self.head.generation,
             committed_seq,
         )
         .await

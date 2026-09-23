@@ -97,6 +97,7 @@ pub(crate) async fn prepare_commit_against_publish_view<S: ObjectStore + ?Sized>
             let resolution_view = resolved.view();
             let view = PublishPathPlanningView {
                 namespace_id: &head.namespace_id,
+                namespace_generation: head.generation,
                 access: &head.access,
                 authorizer: &authorizer,
                 view: &resolution_view,
