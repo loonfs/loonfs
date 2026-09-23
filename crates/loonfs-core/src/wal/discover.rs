@@ -1,6 +1,6 @@
 //! Discovers the WAL tip and advances cached namespace views.
 
-use super::frame::{ValidatedWalTail, WalTailLoadError};
+use super::frame::{ValidatedWalSegment, ValidatedWalTail, WalTailLoadError};
 use super::reader::{load_wal_segment, WalWalk};
 use super::replay::{project_validated_wal_tail, validate_wal_segment_for_replay};
 use crate::cache::WalTailProjectionCacheKey;
@@ -101,7 +101,9 @@ pub(super) fn corrupt(object_key: &str, error: impl std::fmt::Display) -> Contro
 }
 
 /// Probes the next WAL number and extends the cached tail with returned segments.
-/// Returns false when a different writer epoch requires full discovery.
+/// Returns false when the next segment has another writer epoch, which requires
+/// full discovery. Writer acquisition and recreation both raise the epoch, so a
+/// segment at the cached epoch must continue the cached head.
 pub async fn probe_namespace_wal<S: ObjectStore + ?Sized>(
     store: &S,
     context: &mut RuntimeReadContext,
@@ -114,21 +116,17 @@ pub async fn probe_namespace_wal<S: ObjectStore + ?Sized>(
         head_seq: state.seq,
     };
     let mut projected_tail = None;
-    let mut walk = WalWalk::after(&context.head.namespace_id, state.wal_no, state.seq);
-    loop {
-        let segment = match walk.next(store).await {
-            Ok(Some(segment)) => segment,
-            Ok(None) => break,
-            // A segment the cached head cannot explain belongs to a manifest
-            // published after it, such as a recreated generation whose
-            // sequences start over. The fresh load is authoritative for
-            // corruption.
-            Err(WalTailLoadError::Replay { .. }) => return Ok(false),
-            Err(error) => return Err(wal_error(error)),
+    while let Ok(wal_no) = state.wal_no.successor() {
+        let loaded = load_wal_segment(store, &state.namespace_id, wal_no).await;
+        let Some(envelope) = loaded.envelope.map_err(wal_error)? else {
+            break;
         };
-        if segment.envelope().payload().writer_epoch != state.writer_epoch {
+        if envelope.payload().writer_epoch != state.writer_epoch {
             return Ok(false);
         }
+        validate_wal_segment_for_replay(&state.namespace_id, state.seq, &envelope)
+            .map_err(|error| corrupt(&loaded.object_key, error))?;
+        let segment = ValidatedWalSegment::new(loaded.object_key, envelope);
         if state.wal_no == context.head.wal_no {
             projected_tail = context.tail_cache.get(&cache_key);
         }
