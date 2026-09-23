@@ -75,11 +75,6 @@ pub(crate) async fn load_checkpoint_record_at_key<S: ObjectStore + ?Sized>(
                 "checkpoint id",
                 checkpoint_id.as_str(),
                 state.pin_id.as_str(),
-            )?;
-            expect_identity_field(
-                "manifest number",
-                &checkpoint_id.manifest_no().to_string(),
-                &state.manifest_no.to_string(),
             )
         },
     )
@@ -178,7 +173,7 @@ pub(crate) async fn verify_checkpoint_basis<S: ObjectStore + ?Sized>(
 mod tests {
     use super::*;
     use loonfs_api::wire::control::PinOwner;
-    use loonfs_api::{ChangeSeq, CommitId, ManifestNo};
+    use loonfs_api::ChangeSeq;
     use loonfs_objectstore::keys::hint;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use tempfile::{tempdir, TempDir};
@@ -201,12 +196,8 @@ mod tests {
         PinPayload {
             pin_id,
             namespace_id: namespace_id.clone(),
-            manifest_no: ManifestNo(1),
-
             head_seq: ChangeSeq(1),
             payload_checksum: "sha256:test".to_owned(),
-            head_commit_id: CommitId::parse("c_00000000000000000000000000000001")
-                .expect("commit id"),
             created_at_ms: 1,
             owner: PinOwner::User {
                 name: "test".to_owned(),
@@ -242,31 +233,6 @@ mod tests {
                 .expect_err("invalid key id should fail");
             assert!(matches!(error, ControlObjectLoadError::KeyLayout { .. }));
         }
-    }
-
-    #[tokio::test]
-    async fn loader_rejects_a_pin_number_that_disagrees_with_its_key() {
-        let (_directory, store) = local_store();
-        let namespace_id = namespace("demo");
-        let pin_id = checkpoint("pin_00000000000000000001-0000000000000001");
-        let object_key = checkpoint_record(&namespace_id, &pin_id);
-        let mut foreign = record(namespace_id, pin_id);
-        foreign.manifest_no = ManifestNo(2);
-        let bytes = encode_checkpoint_record(&foreign).expect("record bytes");
-        store
-            .put_overwrite(&object_key, bytes)
-            .await
-            .expect("write record");
-
-        let error = load_checkpoint_record_at_key(&store, &object_key)
-            .await
-            .expect_err("a mismatched manifest number should fail");
-
-        assert!(matches!(
-            error,
-            ControlObjectLoadError::IdentityMismatch { field, .. }
-                if field == "manifest number"
-        ));
     }
 
     #[tokio::test]

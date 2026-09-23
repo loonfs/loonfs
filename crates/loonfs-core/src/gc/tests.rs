@@ -441,7 +441,7 @@ async fn fork_protected_bases_survive_source_deletion_until_the_target_dies() {
 
     // The deleted source keeps exactly what the living clone needs.
     let fork_record = read_fork_record(&store, &source).await;
-    let basis_key = metadata_manifest_object(&source, &fork_record.manifest_no);
+    let basis_key = metadata_manifest_object(&source, &fork_record.pin_id.manifest_no());
     let aged = context(now_after_newest_object(&store, &source, GRACE_MS + 1).await);
     let report = gc_namespace(&store, &source, &config(), &aged)
         .await
@@ -1725,7 +1725,7 @@ async fn gc_keeps_a_basis_pinned_by_another_owner_after_one_release() {
         crate::checkpoint::load_namespace_manifest_envelope(
             &store,
             &namespace_id,
-            &keeper.manifest_no,
+            &keeper.pin_id.manifest_no(),
         )
         .await
         .is_ok(),
@@ -1779,7 +1779,7 @@ async fn gc_retains_active_checkpoint_bases() {
     assert!(crate::checkpoint::load_namespace_manifest_envelope(
         &store,
         &namespace_id,
-        &first_record.manifest_no,
+        &first_record.pin_id.manifest_no(),
     )
     .await
     .is_ok());
@@ -1901,7 +1901,10 @@ async fn retired_targets_release_their_source_pins_and_retry_failed_deletes() {
     assert_eq!(repeated.deleted_checkpoints_by_owner.fork, 0);
     assert_eq!(store.counts().deletes, 3);
     assert!(store
-        .head(&metadata_manifest_object(&source, &fork_record.manifest_no))
+        .head(&metadata_manifest_object(
+            &source,
+            &fork_record.pin_id.manifest_no()
+        ))
         .await
         .expect("manifest")
         .is_some());
@@ -1910,7 +1913,13 @@ async fn retired_targets_release_their_source_pins_and_retry_failed_deletes() {
     let next_pass = gc_namespace(store, &source, &config(), &aged)
         .await
         .expect("collect basis");
-    assert_basis_reaped(store, &source, &next_pass, &fork_record.manifest_no).await;
+    assert_basis_reaped(
+        store,
+        &source,
+        &next_pass,
+        &fork_record.pin_id.manifest_no(),
+    )
+    .await;
     stat_root(store, &source).await;
 }
 
@@ -2053,7 +2062,7 @@ async fn gc_never_releases_a_fork_record_while_its_target_lives() {
     assert!(crate::checkpoint::load_namespace_manifest_envelope(
         &store,
         &source,
-        &fork_record.manifest_no,
+        &fork_record.pin_id.manifest_no(),
     )
     .await
     .is_ok());

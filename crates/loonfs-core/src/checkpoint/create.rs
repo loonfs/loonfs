@@ -46,7 +46,6 @@ pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
                 namespace_id,
                 owner.clone(),
                 basis.manifest.clone(),
-                basis.head_commit_id.clone(),
                 context,
             )
             .await
@@ -69,7 +68,6 @@ pub(crate) async fn create_checkpoint_at_basis<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     owner: PinOwner,
     manifest: loonfs_api::wire::control::ManifestRef,
-    head_commit_id: loonfs_api::CommitId,
     context: &MutationContext,
 ) -> Result<Checkpoint> {
     validate_checkpoint_owner(&owner)?;
@@ -78,10 +76,8 @@ pub(crate) async fn create_checkpoint_at_basis<S: ObjectStore + ?Sized>(
     let record = PinPayload {
         pin_id: checkpoint_id.clone(),
         namespace_id: namespace_id.clone(),
-        manifest_no: manifest.manifest_no,
         head_seq: manifest.head_seq,
         payload_checksum: manifest.payload_checksum,
-        head_commit_id,
         created_at_ms: context.now_ms,
         owner,
     };

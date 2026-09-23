@@ -107,11 +107,11 @@ fn checkpoint_summary(
     };
     Some(loonfs_api::Checkpoint {
         namespace_id: record.namespace_id,
+        manifest_no: record.pin_id.manifest_no(),
         checkpoint_id: record.pin_id,
         owner,
         created_at_ms: record.created_at_ms,
         expires_at_ms,
         captured_seq: record.head_seq,
-        manifest_no: record.manifest_no,
     })
 }
