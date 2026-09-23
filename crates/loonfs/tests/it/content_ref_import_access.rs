@@ -422,7 +422,7 @@ async fn pinned_reads_refuse_authorization_from_an_earlier_generation() {
                 .await
                 .map(|_| ()),
             1 => reader
-                .pin_namespace_at_snapshot(&target, &snapshot.checkpoint_id.clone().into())
+                .pin_namespace_at_snapshot(&target, &snapshot.checkpoint_id)
                 .await
                 .map(|_| ()),
             _ => reader
