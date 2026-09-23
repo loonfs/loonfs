@@ -238,7 +238,7 @@ fn sample_grants() -> AccessGrants {
 fn sample_wal_payload() -> WalSegmentPayload {
     let deltas = vec![
         WalCommitDelta {
-            semantic_op_index: 0,
+            semantic_operation_index: 0,
             delta: WalDelta::CreateInode {
                 delta_index: 0,
                 inode_id: InodeId(7),
@@ -246,7 +246,7 @@ fn sample_wal_payload() -> WalSegmentPayload {
             },
         },
         WalCommitDelta {
-            semantic_op_index: 0,
+            semantic_operation_index: 0,
             delta: WalDelta::BindDirentry {
                 delta_index: 1,
                 parent_inode_id: InodeId(1),
@@ -256,7 +256,7 @@ fn sample_wal_payload() -> WalSegmentPayload {
             },
         },
         WalCommitDelta {
-            semantic_op_index: 1,
+            semantic_operation_index: 1,
             delta: WalDelta::UnbindDirentry {
                 delta_index: 2,
                 parent_inode_id: InodeId(1),
@@ -269,7 +269,7 @@ fn sample_wal_payload() -> WalSegmentPayload {
             },
         },
         WalCommitDelta {
-            semantic_op_index: 2,
+            semantic_operation_index: 2,
             delta: WalDelta::AppendFileRevision {
                 delta_index: 3,
                 inode_id: InodeId(5),
@@ -278,7 +278,7 @@ fn sample_wal_payload() -> WalSegmentPayload {
             },
         },
         WalCommitDelta {
-            semantic_op_index: 3,
+            semantic_operation_index: 3,
             delta: WalDelta::TombstoneSubtree {
                 delta_index: 4,
                 root_inode_id: InodeId(9),
@@ -291,7 +291,7 @@ fn sample_wal_payload() -> WalSegmentPayload {
             },
         },
         WalCommitDelta {
-            semantic_op_index: 4,
+            semantic_operation_index: 4,
             delta: WalDelta::AppendAttributesRevision {
                 delta_index: 5,
                 inode_id: InodeId(5),
@@ -300,7 +300,7 @@ fn sample_wal_payload() -> WalSegmentPayload {
             },
         },
         WalCommitDelta {
-            semantic_op_index: 5,
+            semantic_operation_index: 5,
             delta: WalDelta::AppendAccessRevision {
                 delta_index: 6,
                 inode_id: InodeId(5),
@@ -313,12 +313,11 @@ fn sample_wal_payload() -> WalSegmentPayload {
     WalSegmentPayload {
         namespace_id: namespace_id(),
         wal_no: WalNo(2),
-        next_inode_id: InodeId(10),
-        head_commit_id: commit_id(),
         writer_epoch: WriterEpoch(3),
-        base_head_seq: ChangeSeq(1),
-        start_seq: ChangeSeq(2),
-        end_seq: ChangeSeq(2),
+        prior_head_seq: ChangeSeq(1),
+        head_seq: ChangeSeq(2),
+        head_commit_id: commit_id(),
+        next_inode_id: InodeId(10),
         records: vec![WalCommitPayload {
             seq: ChangeSeq(2),
             commit_id: commit_id(),
@@ -358,7 +357,7 @@ fn sample_wal_inline_content_payload() -> WalSegmentPayload {
         b"",
     );
     payload.records[0].deltas.push(WalCommitDelta {
-        semantic_op_index: 5,
+        semantic_operation_index: 5,
         delta: WalDelta::AppendFileRevision {
             delta_index: 6,
             inode_id: InodeId(6),
@@ -366,7 +365,7 @@ fn sample_wal_inline_content_payload() -> WalSegmentPayload {
             content_ref: empty_content_ref,
         },
     });
-    payload.end_seq = ChangeSeq(3);
+    payload.head_seq = ChangeSeq(3);
     payload.records.push(without_inline_content);
     payload.head_commit_id = payload.records[1].commit_id.clone();
     payload
@@ -1581,7 +1580,7 @@ fn wal_decode_rejects_unknown_payload_fields() {
 fn wal_decode_rejects_unknown_fields_inside_tombstone_deltas() {
     let envelope = wal_payload_with_deltas(vec![
         WalCommitDelta {
-            semantic_op_index: 0,
+            semantic_operation_index: 0,
             delta: WalDelta::TombstoneSubtree {
                 delta_index: 0,
                 root_inode_id: InodeId(9),
@@ -1594,7 +1593,7 @@ fn wal_decode_rejects_unknown_fields_inside_tombstone_deltas() {
             },
         },
         WalCommitDelta {
-            semantic_op_index: 1,
+            semantic_operation_index: 1,
             delta: WalDelta::RevokeSubtreeTombstone {
                 delta_index: 1,
                 root_inode_id: InodeId(9),
@@ -2027,7 +2026,7 @@ fn sample_commit_row() -> MetadataRow {
         message: None,
         deltas: vec![
             WalCommitDelta {
-                semantic_op_index: 0,
+                semantic_operation_index: 0,
                 delta: WalDelta::CreateInode {
                     delta_index: 0,
                     inode_id: InodeId(2),
@@ -2035,7 +2034,7 @@ fn sample_commit_row() -> MetadataRow {
                 },
             },
             WalCommitDelta {
-                semantic_op_index: 0,
+                semantic_operation_index: 0,
                 delta: WalDelta::BindDirentry {
                     delta_index: 1,
                     parent_inode_id: InodeId(1),

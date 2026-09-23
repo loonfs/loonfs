@@ -26,7 +26,7 @@ pub(crate) fn wal_payload_from_materialized_commit(
             .deltas
             .iter()
             .map(|delta| WalCommitDelta {
-                semantic_op_index: delta.semantic_op_index,
+                semantic_operation_index: delta.semantic_operation_index,
                 delta: delta.wal_delta.clone(),
             })
             .collect(),

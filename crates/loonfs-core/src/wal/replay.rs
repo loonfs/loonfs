@@ -147,7 +147,7 @@ fn validate_replay_record(
 
 pub(crate) fn validate_wal_segment_for_replay(
     expected_namespace_id: &NamespaceId,
-    expected_base_head_seq: ChangeSeq,
+    expected_prior_head_seq: ChangeSeq,
     envelope: &WalSegmentEnvelope,
 ) -> Result<(), WalSegmentError> {
     if &envelope.payload().namespace_id != expected_namespace_id {
@@ -157,35 +157,26 @@ pub(crate) fn validate_wal_segment_for_replay(
         });
     }
 
-    if envelope.payload().base_head_seq != expected_base_head_seq {
-        return Err(WalSegmentError::BaseHeadSeqMismatch {
-            expected: expected_base_head_seq,
-            actual: envelope.payload().base_head_seq,
+    if envelope.payload().prior_head_seq != expected_prior_head_seq {
+        return Err(WalSegmentError::PriorHeadSeqMismatch {
+            expected: expected_prior_head_seq,
+            actual: envelope.payload().prior_head_seq,
         });
     }
 
     if envelope.payload().records.is_empty() {
-        if envelope.payload().start_seq != expected_base_head_seq
-            || envelope.payload().end_seq != expected_base_head_seq
-        {
+        if envelope.payload().head_seq != expected_prior_head_seq {
             return Err(WalSegmentError::SegmentSummaryMismatch);
         }
         return Ok(());
     }
-    let expected_start = expected_base_head_seq
+    let expected_first_seq = expected_prior_head_seq
         .successor()
         .map_err(|_| WalSegmentError::SeqOverflow)?;
 
-    if envelope.payload().start_seq != expected_start {
-        return Err(WalSegmentError::NonContiguousSeq {
-            expected: expected_start,
-            actual: envelope.payload().start_seq,
-        });
-    }
-    if envelope.payload().records.first().map(|record| record.seq)
-        != Some(envelope.payload().start_seq)
+    if envelope.payload().records.first().map(|record| record.seq) != Some(expected_first_seq)
         || envelope.payload().records.last().map(|record| record.seq)
-            != Some(envelope.payload().end_seq)
+            != Some(envelope.payload().head_seq)
         || envelope
             .payload()
             .records
@@ -196,9 +187,7 @@ pub(crate) fn validate_wal_segment_for_replay(
         return Err(WalSegmentError::SegmentSummaryMismatch);
     }
     for (offset, record) in envelope.payload().records.iter().enumerate() {
-        let expected = envelope
-            .payload()
-            .start_seq
+        let expected = expected_first_seq
             .0
             .checked_add(offset as u64)
             .map(ChangeSeq)

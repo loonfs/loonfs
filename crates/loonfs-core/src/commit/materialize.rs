@@ -8,7 +8,7 @@ use loonfs_api::{InodeKind, RevisionNo};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MaterializedCommitDelta {
-    pub semantic_op_index: u32,
+    pub semantic_operation_index: u32,
     pub wal_delta: WalDelta,
 }
 
@@ -305,13 +305,13 @@ fn deleted_direntry(binding: &ResolvedBinding) -> DeletedDirentry {
 
 fn push_unbind_delta(
     deltas: &mut Vec<MaterializedCommitDelta>,
-    semantic_op_index: u32,
+    semantic_operation_index: u32,
     delta_index: u32,
     binding: &ResolvedBinding,
 ) {
     push_delta(
         deltas,
-        semantic_op_index,
+        semantic_operation_index,
         WalDelta::UnbindDirentry {
             delta_index,
             parent_inode_id: binding.parent_inode_id,
@@ -326,11 +326,11 @@ fn push_unbind_delta(
 
 fn push_delta(
     deltas: &mut Vec<MaterializedCommitDelta>,
-    semantic_op_index: u32,
+    semantic_operation_index: u32,
     wal_delta: WalDelta,
 ) {
     deltas.push(MaterializedCommitDelta {
-        semantic_op_index,
+        semantic_operation_index,
         wal_delta,
     });
 }

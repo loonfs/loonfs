@@ -558,13 +558,12 @@ async fn inline_checksum_failures_match_object_validation() {
         .expect("decode")
         .into_payload();
     payload.wal_no = WalNo(input.head.wal_no.0 + 1);
-    payload.base_head_seq = input.head.seq;
-    payload.start_seq = ChangeSeq(input.head.seq.0 + 1);
-    payload.end_seq = payload.start_seq;
+    payload.prior_head_seq = input.head.seq;
+    payload.head_seq = ChangeSeq(input.head.seq.0 + 1);
     let mut corrupt_ref = value.content_ref().clone();
     corrupt_ref.content_id = ContentId::generate();
     let record = &mut payload.records[0];
-    record.seq = payload.start_seq;
+    record.seq = payload.head_seq;
     record.commit_id = CommitId::parse("corrupt").expect("commit");
     record
         .deltas

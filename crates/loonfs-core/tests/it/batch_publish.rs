@@ -259,12 +259,18 @@ async fn batch_commit_writes_one_segment_and_expands_change_feed() {
         .expect("read wal")
         .expect("wal exists");
     let segment = decode_wal_segment_envelope_zstd(&wal_bytes).expect("decode segment");
-    assert_eq!(segment.payload().start_seq, ChangeSeq(1));
-    assert_eq!(segment.payload().end_seq, ChangeSeq(2));
+    assert_eq!(segment.payload().prior_head_seq, ChangeSeq(0));
+    assert_eq!(segment.payload().head_seq, ChangeSeq(2));
     assert_eq!(segment.payload().records.len(), 2);
     assert_eq!(segment.payload().records[0].deltas.len(), 2);
-    assert_eq!(segment.payload().records[0].deltas[0].semantic_op_index, 0);
-    assert_eq!(segment.payload().records[0].deltas[1].semantic_op_index, 0);
+    assert_eq!(
+        segment.payload().records[0].deltas[0].semantic_operation_index,
+        0
+    );
+    assert_eq!(
+        segment.payload().records[0].deltas[1].semantic_operation_index,
+        0
+    );
     match &segment.payload().records[0].deltas[1].delta {
         WalDelta::BindDirentry {
             name_key,
