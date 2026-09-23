@@ -507,7 +507,6 @@ async fn a_resumed_multipart_put_uses_the_recorded_checksum_algorithm() {
     let uploaded = ContentRef {
         kind: ContentRefKind::BlobV1,
         owner_namespace_id: loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
-        owner_generation: loonfs_api::NamespaceGeneration(1),
         content_id: ContentId::generate(),
         size_bytes: payload.len() as u64,
         checksum: Checksum::crc32c(&payload),

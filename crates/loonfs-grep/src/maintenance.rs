@@ -102,12 +102,7 @@ impl<S: ObjectStore + Clone + Send + Sync + 'static> MaintenanceJob for GrepMain
             } => {
                 let built_through_seq = *built_through_seq;
                 match self.worker.reads(namespace_id).head().await {
-                    Ok(head)
-                        if head.generation == manifest.manifest_state().generation()
-                            && head.head_seq == built_through_seq =>
-                    {
-                        Ok(MaintenanceProbe::Idle)
-                    }
+                    Ok(head) if head.head_seq == built_through_seq => Ok(MaintenanceProbe::Idle),
                     Ok(_) => Ok(MaintenanceProbe::Due),
                     Err(error) if has_nothing_to_index(&error) => Ok(MaintenanceProbe::Idle),
                     Err(error) => Err(probe_failure(namespace_id, error)),

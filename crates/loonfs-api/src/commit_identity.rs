@@ -656,12 +656,8 @@ mod tests {
     fn inline_identity_rejects_other_checksum_algorithms() {
         let namespace_id = NamespaceId::parse("demo").expect("namespace");
         let content_id = ContentId::generate();
-        let mut content_ref = ContentRef::blob_v1(
-            namespace_id.clone(),
-            crate::NamespaceGeneration(1),
-            content_id.clone(),
-            b"bytes",
-        );
+        let mut content_ref =
+            ContentRef::blob_v1(namespace_id.clone(), content_id.clone(), b"bytes");
         content_ref.checksum = Checksum::crc32c(b"bytes");
         let operation = FilesystemOperation::PutFileRevisionByInode {
             inode_id: InodeId(2),
@@ -973,7 +969,6 @@ mod tests {
     fn put_file_preconditions_change_the_fingerprint_deterministically() {
         let content_ref = ContentRef::blob_v1(
             crate::NamespaceId::parse("demo").expect("namespace id"),
-            crate::NamespaceGeneration(1),
             ContentId::parse("con_0123456789abcdef0123456789abcdef").expect("content id"),
             b"put bytes",
         );
@@ -1055,14 +1050,12 @@ mod tests {
         for content_ref in [
             ContentRef::blob_v1(
                 crate::NamespaceId::parse("demo").expect("namespace id"),
-                crate::NamespaceGeneration(1),
                 content_id.clone(),
                 bytes,
             ),
             ContentRef {
                 kind: ContentRefKind::BlobV1,
                 owner_namespace_id: crate::NamespaceId::parse("demo").expect("namespace id"),
-                owner_generation: crate::NamespaceGeneration(1),
                 content_id: content_id.clone(),
                 size_bytes: bytes.len() as u64,
                 checksum: Checksum::crc32c(bytes),
@@ -1070,7 +1063,6 @@ mod tests {
             ContentRef {
                 kind: ContentRefKind::BlobV1,
                 owner_namespace_id: crate::NamespaceId::parse("demo").expect("namespace id"),
-                owner_generation: crate::NamespaceGeneration(1),
                 content_id: content_id.clone(),
                 size_bytes: bytes.len() as u64,
                 checksum: Checksum::crc64nvme(bytes),
@@ -1117,13 +1109,11 @@ mod tests {
         let bytes = b"identical bytes, two uploads";
         let first = ContentRef::blob_v1(
             crate::NamespaceId::parse("demo").expect("namespace id"),
-            crate::NamespaceGeneration(1),
             ContentId::generate(),
             bytes,
         );
         let second = ContentRef::blob_v1(
             crate::NamespaceId::parse("demo").expect("namespace id"),
-            crate::NamespaceGeneration(1),
             ContentId::generate(),
             bytes,
         );
@@ -1216,7 +1206,6 @@ mod tests {
         let path = AbsolutePath::parse("/a.txt").expect("path");
         let content_ref = ContentRef::blob_v1(
             crate::NamespaceId::parse("demo").expect("namespace id"),
-            crate::NamespaceGeneration(1),
             ContentId::generate(),
             b"hello",
         );

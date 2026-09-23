@@ -2,19 +2,16 @@
 
 use super::error::ApiResponseError;
 use loonfs::publish::InlineContent;
-use loonfs::FsWriter;
 use loonfs_api::{
     ContentId, ErrorCode, FilesystemOperation, NamespaceId, FEATURE_COMMIT_INLINE_CONTENT,
 };
 
-pub(super) async fn prepare_inline_content(
-    writer: &FsWriter,
+pub(super) fn prepare_inline_content(
     namespace_id: &NamespaceId,
     operations: &mut [FilesystemOperation],
     threshold: Option<usize>,
 ) -> Result<Vec<InlineContent>, ApiResponseError> {
     let mut values = Vec::new();
-    let mut owner_generation = None;
     for (index, operation) in operations.iter_mut().enumerate() {
         let (content_ref, inline_content) = match operation {
             FilesystemOperation::PutFile {
@@ -60,23 +57,7 @@ pub(super) async fn prepare_inline_content(
             )
             .with_param(format!("/operations/{index}/inline_content")));
         }
-        let owner_generation = match owner_generation {
-            Some(generation) => generation,
-            None => {
-                let generation = writer
-                    .namespace_generation(namespace_id)
-                    .await
-                    .map_err(ApiResponseError::for_namespace(namespace_id))?;
-                owner_generation = Some(generation);
-                generation
-            }
-        };
-        let value = InlineContent::new(
-            namespace_id.clone(),
-            owner_generation,
-            ContentId::generate(),
-            bytes.into(),
-        );
+        let value = InlineContent::new(namespace_id.clone(), ContentId::generate(), bytes.into());
         *content_ref = Some(value.content_ref().clone());
         values.push(value);
     }

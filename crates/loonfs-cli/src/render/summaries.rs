@@ -220,7 +220,7 @@ pub(super) fn checkpoint_owner_label(owner: &CheckpointOwnerSummary) -> String {
     }
 }
 
-fn gc_deleted_counts(report: &GcResponse) -> [(&'static str, u64); 10] {
+fn gc_deleted_counts(report: &GcResponse) -> [(&'static str, u64); 9] {
     let deleted = &report.deleted;
     let checkpoints = &report.deleted_checkpoints_by_owner;
     [
@@ -230,10 +230,6 @@ fn gc_deleted_counts(report: &GcResponse) -> [(&'static str, u64); 10] {
         ("fork checkpoints", checkpoints.fork),
         ("expired checkpoints", checkpoints.expired),
         ("snapshot checkpoints", checkpoints.snapshot),
-        (
-            "retired generation records",
-            deleted.retired_generation_records,
-        ),
         ("upload sessions", deleted.upload_sessions),
         ("content objects", deleted.content_objects),
         ("retired content objects", deleted.retired_content_objects),
@@ -259,7 +255,7 @@ pub(super) fn gc_summary(report: &GcResponse) -> String {
     push_top_retention_reason(&mut summary, report);
     if let Some(deadline) = report.reclaim_after_ms {
         summary.push_str(&format!(
-            "\nnamespace generation can be reclaimed at or after {} when no pins remain",
+            "\nnamespace can be reclaimed at or after {} when no pins remain",
             format_utc_ms(deadline)
         ));
     }

@@ -179,24 +179,22 @@ fn decoder_rejects_the_string_format_version_without_a_shim() {
 }
 
 #[test]
-fn decoder_rejects_a_manifest_that_omits_its_generation_or_event_index() {
-    for (path, field) in [("", "generation"), ("/status", "next_event_index")] {
-        let edited = edited_document(ACTIVE_MANIFEST_FIXTURE, "", |payload| {
-            payload
-                .pointer_mut(path)
-                .expect("fixture object")
-                .as_object_mut()
-                .expect("object")
-                .remove(field);
-        });
+fn decoder_rejects_a_manifest_that_omits_its_event_index() {
+    let edited = edited_document(ACTIVE_MANIFEST_FIXTURE, "", |payload| {
+        payload
+            .pointer_mut("/status")
+            .expect("fixture object")
+            .as_object_mut()
+            .expect("object")
+            .remove("next_event_index");
+    });
 
-        assert!(matches!(
-            decode_grep_manifest(&edited),
-            Err(GrepEnvelopeCodecError::Envelope(
-                EnvelopeCodecError::PayloadDecode(_)
-            ))
-        ));
-    }
+    assert!(matches!(
+        decode_grep_manifest(&edited),
+        Err(GrepEnvelopeCodecError::Envelope(
+            EnvelopeCodecError::PayloadDecode(_)
+        ))
+    ));
 }
 
 #[test]
@@ -256,7 +254,6 @@ fn constructor_rejects_reorganization_segment_mismatch() {
     assert!(matches!(
         GrepManifestState::new(
             namespace_id("docs"),
-            loonfs_api::NamespaceGeneration(1),
             loonfs_api::ManifestNo(1),
             GrepIndexStatus::Active {
                 built_through_seq: ChangeSeq(7),
@@ -277,7 +274,6 @@ fn constructor_rejects_a_segment_with_no_rows() {
     assert!(matches!(
         GrepManifestState::new(
             namespace_id("docs"),
-            loonfs_api::NamespaceGeneration(1),
             loonfs_api::ManifestNo(1),
             GrepIndexStatus::Active {
                 built_through_seq: ChangeSeq(7),
@@ -308,7 +304,6 @@ fn index_bytes_reject_overflow_and_disabled_indexes_have_no_bytes() {
     }
     let oversized = GrepManifestState::new(
         source.namespace_id().clone(),
-        source.generation(),
         source.manifest_no(),
         source.status().clone(),
         source.index().clone(),

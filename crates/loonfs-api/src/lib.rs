@@ -118,8 +118,8 @@ pub use ids::{
     generated_id, next_public_ordinal, BindingGeneration, BindingGenerationValidationError,
     ChangeSeq, CommitId, CommitIdValidationError, ContentId, GeneratedIdValidationError,
     IndexSegmentId, InodeId, InodeKind, ManifestNo, MetadataCompactionId, MetadataSegmentId,
-    NameKey, NameKeyValidationError, NamespaceGeneration, NamespaceId, NamespaceIdValidationError,
-    PinId, PublicOrdinalRangeError, RevisionNo, RunNo, UploadId, WalNo, WriterEpoch, WriterId,
+    NameKey, NameKeyValidationError, NamespaceId, NamespaceIdValidationError, PinId,
+    PublicOrdinalRangeError, RevisionNo, RunNo, UploadId, WalNo, WriterEpoch, WriterId,
     WriterIdValidationError, FIRST_ALLOCATABLE_INODE_ID, MAX_ID_BYTES, MAX_NAME_KEY_BYTES,
     MAX_PUBLIC_INTEGER, ROOT_INODE_ID,
 };

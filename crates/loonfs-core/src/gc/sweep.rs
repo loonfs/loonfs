@@ -9,12 +9,9 @@ use crate::context::MutationContext;
 use crate::control_update::load_upload_session_state;
 use crate::error::{CoreError, Result};
 use crate::limits::UNREFERENCED_SEGMENT_MIN_AGE_MS;
-use loonfs_api::{
-    DeletedObjectCounts, GcResponse, NamespaceGeneration, NamespaceId, RetainedReason,
-};
+use loonfs_api::{DeletedObjectCounts, GcResponse, NamespaceId, RetainedReason};
 use loonfs_objectstore::layout::upload_id_of;
 use loonfs_objectstore::ObjectStore;
-use std::collections::BTreeSet;
 
 pub(super) struct Sweep<'a, 'store, S: ObjectStore + ?Sized> {
     pub(super) store: &'store S,
@@ -24,7 +21,6 @@ pub(super) struct Sweep<'a, 'store, S: ObjectStore + ?Sized> {
     pub(super) live: &'a LiveSet,
     pub(super) view: &'a PublicationView<'a, 'store, S>,
     pub(super) upload_sweep: UploadSweepContext<'a, S>,
-    pub(super) retained_sessions: &'a mut BTreeSet<NamespaceGeneration>,
     pub(super) report: &'a mut GcResponse,
 }
 
@@ -156,7 +152,6 @@ impl<S: ObjectStore + ?Sized> Sweep<'_, '_, S> {
                 }
             }
             UploadSessionSweep::Retain { reclaimable_at_ms } => {
-                self.retained_sessions.insert(state.owner_generation);
                 self.report.retain(match reclaimable_at_ms {
                     Some(_) => RetainedReason::UploadSessionWindow,
                     None => RetainedReason::UploadSessionUndecided,

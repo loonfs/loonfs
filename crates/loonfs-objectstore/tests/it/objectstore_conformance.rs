@@ -517,13 +517,13 @@ async fn assert_streamed_write_round_trips<S: ObjectStore>(store: &S) {
     store.delete(&key).await.expect("delete streamed object");
     let prefix = key
         .rsplit_once('/')
-        .expect("content key has a generation prefix")
+        .expect("content key has a content prefix")
         .0;
     assert!(
         store
             .list_prefix(&format!("{prefix}/"))
             .await
-            .expect("list the streamed object's generation prefix")
+            .expect("list the streamed object's content prefix")
             .is_empty(),
         "a streamed-write exercise leaves nothing behind"
     );

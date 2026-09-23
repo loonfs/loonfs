@@ -7,18 +7,15 @@ use crate::error::{CoreError, Result};
 use crate::namespace::control::{load_current_manifest, LoadedManifest};
 use loonfs_api::wire::control::{ForkBasis, ManifestRef, NamespaceStatus};
 use loonfs_api::wire::manifest::{ManifestActivity, MetadataRowFamily, NamespaceManifestEnvelope};
-use loonfs_api::{NamespaceGeneration, NamespaceId, PinId, WalNo};
+use loonfs_api::{NamespaceId, PinId, WalNo};
 use loonfs_objectstore::ObjectStore;
 
 /// Statistics through the selected manifest's folded head. Newer WAL commits
-/// are excluded. Counters start at zero in each generation, so comparisons
-/// hold within one generation.
+/// are excluded. Counters start at zero and comparisons hold within one namespace.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NamespaceStatistics {
     /// Namespace, manifest number, head sequence, and checksum of this observation.
     pub manifest: ManifestRef,
-    /// Generation whose activity is counted.
-    pub generation: NamespaceGeneration,
     /// Immutable namespace creation time in Unix milliseconds.
     pub created_at_ms: u64,
     /// Lifecycle at this manifest, including whether these are final totals.
@@ -61,13 +58,6 @@ pub async fn load_checkpoint_statistics<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     checkpoint_id: &PinId,
 ) -> Result<NamespaceStatistics> {
-    let current = load_current_manifest(store, namespace_id).await?;
-    let head = crate::namespace::state::NamespaceReadState::from(current.envelope.payload());
-    if !super::record::checkpoint_is_visible(&head, checkpoint_id) {
-        return Err(CoreError::CheckpointUnavailable(format!(
-            "checkpoint `{checkpoint_id}` does not exist in namespace `{namespace_id}`"
-        )));
-    }
     let pinned = load_pinned_checkpoint_basis(store, None, namespace_id, checkpoint_id).await?;
     manifest_statistics(pinned.segments.manifest())
 }
@@ -93,7 +83,6 @@ fn manifest_statistics(manifest: &NamespaceManifestEnvelope) -> Result<Namespace
     }
     Ok(NamespaceStatistics {
         manifest: manifest_ref_for(&payload.namespace_id, manifest),
-        generation: payload.generation,
         created_at_ms: payload.created_at_ms,
         status: payload.status,
         folded_wal_no: payload.folded_wal_no,

@@ -254,7 +254,6 @@ fn state(
 ) -> GrepManifestState {
     GrepManifestState::new(
         namespace_id,
-        loonfs_api::NamespaceGeneration(1),
         manifest_no,
         GrepIndexStatus::Active {
             built_through_seq: ChangeSeq(0),

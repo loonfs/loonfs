@@ -2,9 +2,7 @@
 
 use super::error::GrepManifestStateError;
 use loonfs_api::wire::sst_blocks::BlockHandle;
-use loonfs_api::{
-    ChangeSeq, IndexSegmentId, InodeId, ManifestNo, NamespaceGeneration, NamespaceId, PinId, RunNo,
-};
+use loonfs_api::{ChangeSeq, IndexSegmentId, InodeId, ManifestNo, NamespaceId, PinId, RunNo};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -210,7 +208,6 @@ pub struct GrepSegmentRef {
 #[serde(deny_unknown_fields)]
 pub struct GrepManifestState {
     namespace_id: NamespaceId,
-    generation: NamespaceGeneration,
     manifest_no: ManifestNo,
     status: GrepIndexStatus,
     index: GrepIndexState,
@@ -221,7 +218,6 @@ impl GrepManifestState {
     /// Creates a manifest payload after validating its cross-field invariants.
     pub fn new(
         namespace_id: NamespaceId,
-        generation: NamespaceGeneration,
         manifest_no: ManifestNo,
         status: GrepIndexStatus,
         index: GrepIndexState,
@@ -229,7 +225,6 @@ impl GrepManifestState {
     ) -> Result<Self, GrepManifestStateError> {
         let state = Self {
             namespace_id,
-            generation,
             manifest_no,
             status,
             index,
@@ -241,10 +236,6 @@ impl GrepManifestState {
 
     pub fn namespace_id(&self) -> &NamespaceId {
         &self.namespace_id
-    }
-
-    pub fn generation(&self) -> NamespaceGeneration {
-        self.generation
     }
 
     pub fn manifest_no(&self) -> ManifestNo {

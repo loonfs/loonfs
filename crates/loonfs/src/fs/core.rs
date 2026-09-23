@@ -343,11 +343,6 @@ impl ReadCore {
     }
 }
 
-/// A pinned read changes nothing, so only a head its pin has outrun is stale.
-pub(crate) fn is_stale_head<T>(result: &Result<T>) -> bool {
-    matches!(result, Err(RuntimeError::Core(error)) if error.code() == ErrorCode::StaleHead)
-}
-
 pub(crate) fn should_invalidate_after_result<T>(result: &Result<T>) -> bool {
     match result {
         Ok(_) => true,

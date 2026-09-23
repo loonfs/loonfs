@@ -136,7 +136,7 @@ impl MetricLabel for MaintenanceConclusion {
 type GcCategory = (&'static str, fn(&GcResponse) -> u64);
 
 /// Counts each deletion once, with pins grouped by owner.
-const GC_CATEGORIES: [GcCategory; 9] = [
+const GC_CATEGORIES: [GcCategory; 8] = [
     ("deleted_wal_segments", |gc| gc.deleted.wal_segments),
     ("deleted_metadata_segments", |gc| {
         gc.deleted.metadata_segments
@@ -152,9 +152,6 @@ const GC_CATEGORIES: [GcCategory; 9] = [
     ("deleted_content_objects", |gc| gc.deleted.content_objects),
     ("deleted_snapshot_checkpoints", |gc| {
         gc.deleted_checkpoints_by_owner.snapshot
-    }),
-    ("deleted_retired_generation_records", |gc| {
-        gc.deleted.retired_generation_records
     }),
 ];
 
@@ -1619,7 +1616,6 @@ mod tests {
             deleted: loonfs_api::DeletedObjectCounts {
                 wal_segments: 3,
                 content_objects: 5,
-                retired_generation_records: 1,
                 ..loonfs_api::DeletedObjectCounts::default()
             },
             deleted_checkpoints_by_owner: loonfs_api::DeletedCheckpointsByOwner {
@@ -1659,12 +1655,11 @@ mod tests {
         assert_eq!(counter(&snapshot, "loonfs.gc.retained", &[]), 4);
         // Every family registers at construction, so a scrape names the
         // whole reclaimable vocabulary rather than only what has happened.
-        assert_eq!(snapshot.by_name("loonfs.gc.reclaimed").count(), 9);
+        assert_eq!(snapshot.by_name("loonfs.gc.reclaimed").count(), 8);
         for (category, expected) in [
             ("deleted_fork_checkpoints", 4),
             ("deleted_expired_checkpoints", 6),
             ("deleted_snapshot_checkpoints", 14),
-            ("deleted_retired_generation_records", 2),
         ] {
             assert_eq!(
                 counter(&snapshot, "loonfs.gc.reclaimed", &[("category", category)]),

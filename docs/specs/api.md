@@ -166,7 +166,7 @@ hoc.
 | `maintenance.grep.index` | Maintaining a namespace's grep index: `GET /v0/maintenance/namespaces/{ns}/grep/index` and its `enable`, `disable`, and `gc` routes. | The maintenance half of the grep capability, and independent of `query.grep`: searching an index and keeping one built are separately deployable, so a deployment may advertise either key alone. A deployment that maintains no index answers all four routes `not_supported` with this key. |
 | `filesystem.namespaces.create` | Creating namespaces (`POST /v0/namespaces`). | |
 | `filesystem.namespaces.fork` | Forking namespaces (`POST /v0/namespaces/{ns}/forks`). | |
-| `filesystem.namespaces.delete` | Deleting namespaces (`DELETE /v0/namespaces/{ns}`). | Ends the current generation. Creating the id again starts its next generation. Metadata and the namespace's own content become conditionally reclaimable through maintenance runs with `kind` set to `gc` (section 6.3). A deployment may still advertise `false` and answer `not_supported`. |
+| `filesystem.namespaces.delete` | Deleting namespaces (`DELETE /v0/namespaces/{ns}`). | Deletion is terminal. Metadata and the namespace's own content become conditionally reclaimable through maintenance runs with `kind` set to `gc` (section 6.3). A deployment may still advertise `false` and answer `not_supported`. |
 | `filesystem.snapshots` | Creating, listing, extending, and releasing snapshots under `/v0/namespaces/{ns}/snapshots`. | |
 | `filesystem.attributes` | Writing inode attributes (`update_attributes`) and projecting them onto `GET /filesystem/entry` and `GET /filesystem/entries`. | Implemented by the core runtime rather than composed by a host, so a deployment serving `filesystem/v0` advertises it. |
 | `filesystem.inodes.list_children` | Listing a directory's children by parent inode ID (`GET /v0/namespaces/{ns}/inodes/{inode_id}/children`). | Implemented by the core runtime rather than composed by a host, so a deployment serving `filesystem/v0` advertises it. The key exists so inode-driven sync clients can gate on deployments built before the route existed. |
@@ -281,7 +281,7 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | `route_not_found` | 404 | No route matches the request path. |
 | `method_not_allowed` | 405 | The path exists but does not serve this HTTP method. |
 | `namespace_not_found` | 404 | The namespace has no installed manifest, so it does not exist. |
-| `namespace_deleted` | 410 | The namespace's current manifest is deleted. Ordinary operations fail. A create or a fork into the id starts its next generation. |
+| `namespace_deleted` | 410 | The namespace's current manifest is deleted. Ordinary operations fail. A create or fork into the deleted id also fails. |
 | `checkpoint_not_found` | 404 | The checkpoint id names no existing pin. |
 | `snapshot_not_found` | 404 | The snapshot id names no pin. Refresh state or choose another snapshot. |
 | `snapshot_gone` | 410 | The snapshot has expired, or was deleted while a fork was verifying its selected snapshot. |
@@ -465,12 +465,7 @@ namespace. Use
 refers to the new copy owned by that namespace. A subject must be an
 administrator of the reference's owner namespace to import it.
 
-An import checks authorization against the owner's current head. A reference
-from the current owner generation may read resident inline bytes. Otherwise,
-the reference's owner namespace and content ID determine its object key.
-This includes references from retired generations. Once retirement deletes
-a generation's objects, they are missing and an import returns
-`namespace_corrupt`, as for any missing content object.
+An import checks authorization against the owner’s current head. A reference that matches the owner’s resident content may read those bytes. Otherwise, the reference’s owner namespace and content ID determine its object key. Once retirement deletes the object, an import returns `namespace_corrupt`, as for any missing content object.
 
 ### 5.1 Commit identity and preconditions
 
@@ -522,9 +517,9 @@ and is not an endpoint name in the move and copy family. `local` and
 
 Commit bodies reject unknown fields so a misspelled precondition cannot be ignored. For example, dropping a letter from `expected_revision_no` returns `invalid_request` instead of applying a write without that precondition.
 
-Every named entry includes a `binding_generation`, an opaque token identifying its current parent/name binding. Creating, moving, or undeleting an entry produces a new token; content and attribute writes do not. Clients must not parse or order these tokens. A token is valid only for the namespace generation that issued it; a recreated namespace rejects tokens from earlier generations as it rejects those of another namespace.
+Every named entry includes a `binding_generation`, an opaque token identifying its current parent/name binding. Creating, moving, or undeleting an entry produces a new token; content and attribute writes do not. Clients must not parse or order these tokens. A token is valid only for the namespace that issued it.
 
-Inode-addressed moves and deletes require the token as `expected_binding_generation`. A valid token that no longer matches returns `binding_generation_mismatch`; a malformed token or one from another namespace or generation returns `invalid_request`. The precondition is part of the commit's identity and is evaluated after any earlier operations in the same request.
+Inode-addressed moves and deletes require the token as `expected_binding_generation`. A valid token that no longer matches returns `binding_generation_mismatch`; a malformed token or one from another namespace returns `invalid_request`. The precondition is part of the commit's identity and is evaluated after any earlier operations in the same request.
 
 The server validates each request against authoritative namespace state and
 may reject it immediately. A tentatively accepted request becomes one
@@ -1013,8 +1008,6 @@ floor has advanced.
 
 A checkpoint name is a label, not a key. Every create call generates a new record, so the same name may identify multiple checkpoints. Create and list use one checkpoint object with `namespace_id`, `checkpoint_id`, `owner`, `created_at_ms`, optional `expires_at_ms`, `captured_seq`, and `manifest_no`. Create returns this object directly. For API-created checkpoints, `owner` is `user` with the requested `name`, and `created_at_ms` is the durable record timestamp.
 
-Checkpoint and snapshot records from a prior namespace generation are not listed. Reading, deleting, extending, listing files through, or forking from one answers exactly as if that record had been deleted. Internal retired generation records are never exposed by checkpoint or snapshot operations.
-
 The id is `pin_{manifest_no:020}-{16 lowercase hex}`. It identifies the
 manifest used by checkpoint and snapshot reads. Every pin has a fresh id.
 
@@ -1045,7 +1038,7 @@ A missing id, including one already deleted, returns `checkpoint_not_found`.
 
 `limit` follows the advertised pagination limits. `next_cursor` is omitted
 after the final page. Cursors are opaque and tied to this namespace and
-operation; clients should only return them unchanged. A namespace-scoped cursor is valid only for the namespace generation that issued it; a recreated namespace rejects cursors from earlier generations as it rejects those of another namespace, with `invalid_request`.
+operation; clients should only return them unchanged. A namespace-scoped cursor from another namespace returns `invalid_request`.
 
 This is a live listing, not a snapshot. Checkpoints created, deleted, or
 collected while a client is paging can affect later pages.
@@ -1071,7 +1064,7 @@ expired. The maintenance checkpoint listing keeps expired records visible until
 collection deletes them. Snapshot deletion removes the pin. A second delete returns
 `snapshot_not_found`.
 
-Snapshot reads in an ACL namespace require `read` and `history` on the historical inode, evaluated at the current head. The pinned manifest and authorization head must belong to the same generation. A mismatch returns `stale_head` and invalidates the runtime's cached head so a retry uses current grants.
+Snapshot reads in an ACL namespace require `read` and `history` on the historical inode, evaluated at the current head.
 
 These operations manage the snapshot lifetime. Path stat, inode stat, path directory listing,
 inode children listing, file content, download, and change-feed requests accept an optional
@@ -1121,15 +1114,15 @@ request path and never a presigned capability handed to a client.
 
 Routes under `/v0/maintenance/` belong to the `maintenance/v0` API group. `GET /v0/namespaces/{ns}/grep` belongs to `query/v0`. Everything else shown belongs to `filesystem/v0`.
 
-A GC response includes `next_reclamation_at_ms` when a deleted generation is inside its retirement grace, a retained user or snapshot pin has a future deletion time, or an upload session has a future cleanup time. It is the earliest of those future times examined by the pass. A generation that a user or snapshot pin holds after its grace is reported at that pin's deletion time. A fork pin carries no time. Upload cleanup times include lease plus grace, abort grace, and completed-content grace. Candidates that age out by provider timestamps carry no time here. Absence does not mean that nothing remains to collect.
+A GC response includes `next_reclamation_at_ms` when a deleted namespace is inside its retirement grace, a retained user or snapshot pin has a future deletion time, or an upload session has a future cleanup time. It is the earliest of those future times examined by the pass. A namespace that a user or snapshot pin holds after its grace is reported at that pin's deletion time. A fork pin carries no time. Upload cleanup times include lease plus grace, abort grace, and completed-content grace. Candidates that age out by provider timestamps carry no time here. Absence does not mean that nothing remains to collect.
 
-`reclaim_after_ms` is present when the current manifest is deleted. It equals `deleted_at_ms + max(configured_grace, NAMESPACE_RETIREMENT_GRACE_MS)`, including when pins still block reclamation. It is absent for an active namespace. Retired generation records provide the same derived deadline for prior generations. No retirement deadline is stored and collection publishes no manifest.
+`reclaim_after_ms` is present when the current manifest is deleted. It equals `deleted_at_ms + max(configured_grace, NAMESPACE_RETIREMENT_GRACE_MS)`, including when pins still block reclamation. It is absent for an active namespace. No retirement deadline is stored and collection publishes no manifest.
 
-Every call reads the current manifest and uses one fixed clock. It keeps its live set in memory and writes no collection progress. Every family lists from the beginning and sweeps to the end. The collector uses a separate complete pin listing to find retained manifests and check generation eligibility. It discovers prior tombstones by listing retired generation records. Pins in a tombstone's manifest range block reclamation. Pins deleted later in the pass still count. An unrecognized pin key blocks every generation. Manifest read failures fail the call before sweeping.
+Every call reads the current manifest and uses one fixed clock. It keeps its live set in memory and writes no collection progress. Every family lists from the beginning and sweeps to the end. The collector uses a separate complete pin listing to find retained manifests and check retirement eligibility. Any pin on the namespace blocks reclamation, including unrecognized keys and pins deleted later in the pass. Manifest read failures fail the call before sweeping.
 
 A GC response groups related counts. `deleted` contains `wal_segments`,
 `metadata_segments`, `manifests`, `upload_sessions`, `content_objects`,
-`retired_content_objects`, and `retired_generation_records`. A retired generation record is counted when reclamation deletes it after its generation has no retained upload sessions, or when the same pass deletes a record whose tombstone is absent. `deleted_checkpoints_by_owner` contains `fork`, `expired`, and `snapshot` counts for pins deleted in the pass.
+and `retired_content_objects`. `deleted_checkpoints_by_owner` contains `fork`, `expired`, and `snapshot` counts for pins deleted in the pass.
 Their sum is the total number of pins deleted. Each deletion
 is counted once. A target's deletion of its source pin contributes to `fork`
 when the pin was present before deletion. Repeating that deletion on an
@@ -1137,9 +1130,9 @@ absent pin adds no count. Every count field is present, including zero values.
 
 `content_objects` counts reclamation through completed upload sessions.
 `retired_content_objects` counts successful deletion attempts of the exact
-content keys a retired generation's publication rows name, including a delete that finds the key already absent.
+content keys the tombstone’s publication rows name, including a delete that finds the key already absent.
 A retry can repeat a count; these are attempt counts, not a count of distinct
-objects, and a tombstone that is never recreated repeats them on every pass.
+objects, and a tombstone repeats them on every pass.
 The maintenance loop does not treat this count as progress.
 
 Every core GC response carries `retained`, the candidates the pass kept, split by
@@ -1160,7 +1153,7 @@ that reason, and the fields sum to the total:
 Retention is counted per candidate examined, not per object in the
 namespace, so one object two passes both examine is counted by each.
 
-Current and pinned manifests protect their metadata segments. A retired generation record protects its tombstone and its metadata segments until reclamation completes. An unreferenced object becomes eligible for collection after its
+Current and pinned manifests protect their metadata segments. The current tombstone and its metadata segments remain rooted after content reclamation. An unreferenced object becomes eligible for collection after its
 own provider timestamp is at least `grace_window_ms` old. Metadata segments
 use the separate `UNREFERENCED_SEGMENT_MIN_AGE_MS` age gate and must be
 strictly older than that bound. A live namespace
@@ -1173,11 +1166,11 @@ Namespace deletion ends access immediately. Ordinary namespace GC then
 conditionally reclaims the namespace's own content. This is asynchronous
 reclamation, with no fixed completion time or guarantee of physical erasure.
 
-Dependent forks and retained checkpoints delay reclamation. GC derives each generation's deadline from its deletion stamp. At or after that deadline, a complete pin listing must contain no pin in the generation's manifest range. A qualifying pass cleans upload sessions, deletes the exact content keys that generation's publication rows name, releases its source pin, and deletes its retired generation record when no session remains. The current tombstone survives until recreation supersedes it. Every other owner's prefix remains.
+Dependent forks and retained checkpoints delay reclamation. GC derives the deadline from the tombstone’s deletion stamp. At or after that deadline, a complete pin listing must contain no pin on the namespace. A qualifying pass cleans upload sessions, deletes the exact content keys named by the tombstone’s own publication rows, and releases its source pin. The tombstone, hint, and its metadata segments remain. Purging those records is a separate operation outside this API. Every other owner’s prefix remains.
 
-Retention is coarse: a deleted ancestor keeps every object its generation
+Retention is coarse: a deleted ancestor keeps every object it
 published while a live descendant still depends on it. GC does not select
-individual published objects within a generation. Deleting a file or tree in an active
+individual published objects within a namespace. Deleting a file or tree in an active
 namespace also does not reclaim its published content, because LoonFS retains
 every file revision.
 
@@ -1204,7 +1197,7 @@ Retirement also prompts the runner to schedule GC for a fork's source. A
 missed prompt delays reclamation and never permits deletion.
 
 Keep the provider's lifecycle rule for incomplete multipart uploads. Provider
-upload state can exist outside object listings, so deleting a generation's
+upload state can exist outside object listings, so deleting a namespace's
 content objects does not replace session abort and provider cleanup. Deleting a key does not erase
 physical versions retained by bucket versioning or retention locks.
 
@@ -1431,12 +1424,7 @@ upload along with the object it was writing. Aborting an upload that already
 assembled its object is safe on every supported provider: it succeeds and
 leaves the object alone.
 
-A content reference contains `kind`, `owner_namespace_id`, `owner_generation`,
-`content_id`, `size_bytes`, and `checksum`. The owner and owner generation name
-the namespace generation that originally wrote the bytes. Clients echo the
-server's reference unchanged; both fields are required in requests and visible
-in responses. Neither changes on a fork or restore. Recording them reclaims
-nothing by itself.
+A content reference contains `kind`, `owner_namespace_id`, `content_id`, `size_bytes`, and `checksum`. The owner names the namespace that originally wrote the bytes. Clients echo the complete reference unchanged. The owner does not change on a fork or restore.
 
 A server may return a short-lived `content_token` for completed content.
 Clients treat the token as opaque and can copy it directly into a commit
@@ -1447,7 +1435,7 @@ window remains open. The separate `content_ref` remains available afterward.
 {
   "namespace_id": "demo",
   "upload_id": "upl_...",
-  "content_ref": { "kind": "blob_v1", "owner_namespace_id": "demo", "owner_generation": 1, "content_id": "con_9f2a...", "size_bytes": 1234, "checksum": { "algorithm": "sha256", "value": "..." } }
+  "content_ref": { "kind": "blob_v1", "owner_namespace_id": "demo", "content_id": "con_9f2a...", "size_bytes": 1234, "checksum": { "algorithm": "sha256", "value": "..." } }
 }
 ```
 
@@ -1466,7 +1454,7 @@ tokens naming other refs are ignored.
   "commit_id": "commit-a",
   "content_tokens": [
     {
-      "content_ref": { "kind": "blob_v1", "owner_namespace_id": "demo", "owner_generation": 1, "content_id": "con_9f2a...", "size_bytes": 1234, "checksum": { "algorithm": "sha256", "value": "..." } },
+      "content_ref": { "kind": "blob_v1", "owner_namespace_id": "demo", "content_id": "con_9f2a...", "size_bytes": 1234, "checksum": { "algorithm": "sha256", "value": "..." } },
       "token": "opaque-server-token"
     }
   ],
@@ -1474,7 +1462,7 @@ tokens naming other refs are ignored.
     {
       "kind": "put_file",
       "path": "/docs/report.pdf",
-      "content_ref": { "kind": "blob_v1", "owner_namespace_id": "demo", "owner_generation": 1, "content_id": "con_9f2a...", "size_bytes": 1234, "checksum": { "algorithm": "sha256", "value": "..." } },
+      "content_ref": { "kind": "blob_v1", "owner_namespace_id": "demo", "content_id": "con_9f2a...", "size_bytes": 1234, "checksum": { "algorithm": "sha256", "value": "..." } },
       "behavior": "no_replace"
     }
   ]
@@ -1504,7 +1492,6 @@ starts at sequence 0 with a retention floor of 0:
 ```json
 {
   "namespace_id": "demo",
-  "generation": 1,
   "created_at_ms": 1752623000000,
   "created_by": "usr_8f3c",
   "head_seq": 0,
@@ -1517,17 +1504,13 @@ such as `{ns}`, `{source_ns}`, or an implementation-internal `:namespace` are
 only path parameter names for the same namespace id value; v0 does not accept
 or emit a namespace `name` alias.
 
-Create and fork install hint and manifest 1 in order. The
-conditional put of manifest 1 decides first-generation existence ([format: namespace lifecycle](format.md#9-namespace-lifecycle-and-forks)). A create or fork that loses that write to
-another active namespace answers `namespace_exists` (409). A create or a fork into an id
-whose current manifest is deleted publishes its next generation. There is no partially created
-namespace. A fork whose selected lifetime has passed returns `stale_head`.
+Create and fork install hint and manifest 1 in order. The conditional put of manifest 1 decides existence ([format: namespace lifecycle](format.md#9-namespace-lifecycle-and-forks)). A create or fork that loses that write to another active namespace answers `namespace_exists` (409). A create or fork into a deleted id answers `namespace_deleted` (410) before writing anything. There is no partially created namespace.
 
 A new request after a lost creation acknowledgement returns
 `namespace_exists`, unless it explicitly allows an existing namespace.
 Within the original attempt, an exact manifest read-back after an unknown
 transport outcome confirms a fork because its source pin is unique. For a
-plain create or recreate, matching bytes answer `namespace_exists`, or the
+plain create, matching bytes answer `namespace_exists`, or the
 existing summary when the caller allows an existing namespace, because they
 do not prove which caller created the namespace.
 
@@ -1548,7 +1531,6 @@ namespace returns `410` with `namespace_deleted`.
 ```json
 {
   "namespace_id": "demo",
-  "generation": 1,
   "access": {"kind": "unrestricted"},
   "created_at_ms": 1752623000000,
   "created_by": "usr_8f3c",
@@ -1562,7 +1544,6 @@ The `Namespace` object has exactly these fields:
 | Field | Meaning |
 | --- | --- |
 | `namespace_id` | Durable namespace id. |
-| `generation` | Generation of the namespace id. The first creation is 1, and each recreation increments it. |
 | `access` | Access mode: `{"kind": "unrestricted"}` or `{"kind": "acl", "principal_scope": "..."}`. |
 | `created_at_ms` | Time the namespace was created, in Unix milliseconds. |
 | `created_by` | Actor that created or forked the namespace, as supplied by the application. |
@@ -1598,7 +1579,6 @@ namespace state plus storage details used by maintenance:
 | Field | Meaning |
 | --- | --- |
 | `namespace_id` | Durable namespace id. |
-| `generation` | Generation of the namespace id. The first creation is 1, and each recreation increments it. |
 | `created_at_ms` | Time the namespace was created, in Unix milliseconds. |
 | `created_by` | Actor that created or forked the namespace, as supplied by the application. |
 | `fork_basis` | Present only for a fork. Contains `source_namespace_id` and the captured `source_head_seq`. |
@@ -1612,7 +1592,6 @@ namespace state plus storage details used by maintenance:
 ```json
 {
   "namespace_id": "demo",
-  "generation": 1,
   "created_at_ms": 1752623000000,
   "created_by": "usr_8f3c",
   "head_seq": 418,
@@ -1626,40 +1605,20 @@ namespace state plus storage details used by maintenance:
 
 #### Namespace statistics
 
-The embedded `load_namespace_statistics` and `load_checkpoint_statistics`
-loaders return `NamespaceStatistics` through one manifest's folded head.
-Newer WAL commits are excluded. The observation includes `generation`, the
-manifest reference, creation time, lifecycle status, folded WAL number,
-activity counters, referenced inode and metadata totals, and any fork basis.
-Counters start at zero in each generation, so comparisons hold within one
-generation of the same namespace. Activity counters are integers from zero
-through 9007199254740991. Their definitions and the footprint calculations are
-in [format section 7.4](format.md#74-statistics).
+The embedded `load_namespace_statistics` and `load_checkpoint_statistics` loaders return `NamespaceStatistics` through one manifest’s folded head. Newer WAL commits are excluded. The observation includes the manifest reference, creation time, lifecycle status, folded WAL number, activity counters, referenced inode and metadata totals, and any fork basis. Counters start at zero and comparisons hold within the same namespace. Activity counters are integers from zero through 9007199254740991. Their definitions and the footprint calculations are in [format section 7.4](format.md#74-statistics).
 
 ### 6.3 `DELETE /v0/namespaces/{ns}`
 
 In an ACL namespace this operation requires an administrator subject; a request
 with no subject headers acts as the token holder.
 
-Deletion is a fenced manifest publication that ends the current generation ([format: namespace deletion](format.md#94-deleting-a-namespace)). It linearizes at the manifest put: commits acknowledged before it
-stay committed; reads, commits, forks from the id, status, and another deletion fail with
-`namespace_deleted` (410) while the tombstone is current. A create or a fork into the id
-publishes the next generation, whose sequences and inode ids start over for a plain
-create and begin at the captured source sequence for a fork. A client that holds
-cursors, inode ids, or expected sequences from the earlier generation must compare
-`generation` on the namespace object before reusing them, as it would after a table
-is dropped and recreated under one name.
+Deletion is a fenced manifest publication ([format: namespace deletion](format.md#94-deleting-a-namespace)). It linearizes at the manifest put: commits acknowledged before it stay committed. Reads, commits, forks from the id, status, another deletion, and create or fork into the id fail with `namespace_deleted` (410). The tombstone remains the current manifest after content reclamation.
 
 Checkpoint listing and user-checkpoint deletion are explicit exceptions. They
 remain available because permanent user pins must stay discoverable and
 releasable after deletion. Releasing a fork-owned checkpoint remains rejected.
 
-Deletion is immediate logical deletion followed by asynchronous, conditional
-reclamation. Deletion itself reclaims nothing. Dependent forks, retained
-checkpoints, grace windows, and maintenance not running can all delay
-reclamation. Continued writes through already-issued capabilities can also
-leave objects for later passes. A maintenance run with `kind` set to `gc` ages out unneeded WAL,
-metadata, and pins. GC derives `reclaim_after_ms` from the current tombstone's deletion stamp and the retirement grace. After recreation, retired generation records preserve prior tombstones for the same checks. Once a generation's deadline passes and the complete pin listing contains no pin in its manifest range, the pass reclaims its owned content and source pin. It deletes the retired generation record last, only when no upload session of that generation remains. It publishes no retirement manifest. A pass can reclaim multiple generations independently. The current manifest survives, and other owners' objects and generations that are not eligible remain.
+Deletion is immediate logical deletion followed by asynchronous, conditional reclamation. Deletion itself reclaims nothing. Dependent forks, retained checkpoints, grace windows, and maintenance not running can all delay reclamation. Continued writes through already-issued capabilities can also leave objects for later passes. A maintenance run with `kind` set to `gc` ages out unneeded WAL, metadata, and pins. GC derives `reclaim_after_ms` from the current tombstone’s deletion stamp and the retirement grace. Once that deadline passes and the complete pin listing contains no pin on the namespace, the pass reclaims its owned content and source pin. It publishes no retirement manifest. The tombstone, hint, and its segments remain.
 
 Run GC repeatedly to catch late writes and keep the provider's incomplete
 multipart-upload lifecycle rule. Deleting an object key does not erase
@@ -1707,7 +1666,6 @@ the durable naming rules ([format: field conventions](format.md#121-field-conven
   "content_ref": {
     "kind": "blob_v1",
     "owner_namespace_id": "demo",
-    "owner_generation": 1,
     "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
     "size_bytes": 19482,
     "checksum": { "algorithm": "sha256", "value": "42d..." }
@@ -1818,7 +1776,6 @@ An unrecognized cursor version is also rejected as `invalid_request`.
       "content_ref": {
         "kind": "blob_v1",
         "owner_namespace_id": "demo",
-        "owner_generation": 1,
         "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
         "size_bytes": 19482,
         "checksum": { "algorithm": "sha256", "value": "42d..." }
@@ -1922,7 +1879,6 @@ not readable through that snapshot.
       "content_ref": {
         "kind": "blob_v1",
         "owner_namespace_id": "demo",
-        "owner_generation": 1,
         "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
         "size_bytes": 19482,
         "checksum": { "algorithm": "sha256", "value": "42d..." }
@@ -1989,7 +1945,7 @@ create a directory and write into it:
   "message": "import the January report",
   "content_tokens": [
     {
-      "content_ref": { "kind": "blob_v1", "owner_namespace_id": "demo", "owner_generation": 1, "content_id": "con_9f2a...", "size_bytes": 1234, "checksum": { "algorithm": "sha256", "value": "..." } },
+      "content_ref": { "kind": "blob_v1", "owner_namespace_id": "demo", "content_id": "con_9f2a...", "size_bytes": 1234, "checksum": { "algorithm": "sha256", "value": "..." } },
       "token": "opaque-server-token"
     }
   ],
@@ -1998,7 +1954,7 @@ create a directory and write into it:
     {
       "kind": "put_file",
       "path": "/reports/2026/january.pdf",
-      "content_ref": { "kind": "blob_v1", "owner_namespace_id": "demo", "owner_generation": 1, "content_id": "con_9f2a...", "size_bytes": 1234, "checksum": { "algorithm": "sha256", "value": "..." } },
+      "content_ref": { "kind": "blob_v1", "owner_namespace_id": "demo", "content_id": "con_9f2a...", "size_bytes": 1234, "checksum": { "algorithm": "sha256", "value": "..." } },
       "behavior": "no_replace"
     },
     {
@@ -2156,7 +2112,7 @@ Representative response:
       "parent_inode_id": "ino_12",
       "display_name": "january.pdf",
       "revision_no": 1,
-      "content_ref": { "kind": "blob_v1", "owner_namespace_id": "demo", "owner_generation": 1, "content_id": "con_9f2a...", "size_bytes": 1234, "checksum": { "algorithm": "sha256", "value": "..." } }
+      "content_ref": { "kind": "blob_v1", "owner_namespace_id": "demo", "content_id": "con_9f2a...", "size_bytes": 1234, "checksum": { "algorithm": "sha256", "value": "..." } }
     }
   ]
 }
@@ -2383,7 +2339,6 @@ right it adds or removes from any principal's direct grant.
 Preconditions require `read` on the inode they name, or the existing parent for
 path absence; a namespace-head precondition needs no inode right.
 
-
 The not-found-versus-forbidden rule also applies to reads: a subject with no
 right on the target receives `path_not_found` or `inode_not_found`; a subject
 with some right but without a required right receives `forbidden`.
@@ -2484,11 +2439,6 @@ session and nothing else. Completing a service-proxied upload fails if no
 content was staged. Publication never downloads an arbitrary external ref to
 rescue a missing proof.
 
-A session belongs to the namespace generation in which it opened. Every later
-operation checks that generation against the current namespace head. A session
-from another generation answers `upload_not_found`, just like a session that
-does not exist.
-
 A session is `open`, then `completed` or `aborted`, and both of those are
 final ([format: upload sessions](format.md#51-upload-sessions)). What that means at the API:
 
@@ -2500,7 +2450,7 @@ final ([format: upload sessions](format.md#51-upload-sessions)). What that means
 
   ```json
   { "namespace_id": "demo", "upload_id": "upl_...", "mode": "direct_multipart", "status": "open", "expires_at_ms": 1730000000000, "checksum_algorithm": "crc64nvme", "part_size_bytes": 8388608 }
-  { "namespace_id": "demo", "upload_id": "upl_...", "mode": "direct_put", "status": "completed", "completed_at_ms": 1730000001000, "content_ref": { "kind": "blob_v1", "owner_namespace_id": "demo", "owner_generation": 1, "content_id": "con_...", "size_bytes": 1234, "checksum": { "algorithm": "sha256", "value": "<64 hex>" } }, "content_token": { "content_ref": { "kind": "blob_v1", "owner_namespace_id": "demo", "owner_generation": 1, "content_id": "con_...", "size_bytes": 1234, "checksum": { "algorithm": "sha256", "value": "<64 hex>" } }, "token": "<opaque>" } }
+  { "namespace_id": "demo", "upload_id": "upl_...", "mode": "direct_put", "status": "completed", "completed_at_ms": 1730000001000, "content_ref": { "kind": "blob_v1", "owner_namespace_id": "demo", "content_id": "con_...", "size_bytes": 1234, "checksum": { "algorithm": "sha256", "value": "<64 hex>" } }, "content_token": { "content_ref": { "kind": "blob_v1", "owner_namespace_id": "demo", "content_id": "con_...", "size_bytes": 1234, "checksum": { "algorithm": "sha256", "value": "<64 hex>" } }, "token": "<opaque>" } }
   { "namespace_id": "demo", "upload_id": "upl_...", "mode": "service_proxied", "status": "aborted", "aborted_at_ms": 1730000002000 }
   ```
 
@@ -2620,7 +2570,6 @@ Representative content-upload response:
   "content_ref": {
     "kind": "blob_v1",
     "owner_namespace_id": "demo",
-    "owner_generation": 1,
     "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
     "size_bytes": 20591,
     "checksum": { "algorithm": "sha256", "value": "7ab..." }
@@ -2646,7 +2595,6 @@ Representative complete-upload response:
   "content_ref": {
     "kind": "blob_v1",
     "owner_namespace_id": "demo",
-    "owner_generation": 1,
     "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
     "size_bytes": 20591,
     "checksum": { "algorithm": "sha256", "value": "7ab..." }
@@ -2655,7 +2603,6 @@ Representative complete-upload response:
     "content_ref": {
       "kind": "blob_v1",
       "owner_namespace_id": "demo",
-      "owner_generation": 1,
       "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
       "size_bytes": 20591,
       "checksum": { "algorithm": "sha256", "value": "7ab..." }
@@ -2702,7 +2649,6 @@ checks the arriving bytes against:
   "content_ref": {
     "kind": "blob_v1",
     "owner_namespace_id": "demo",
-    "owner_generation": 1,
     "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
     "size_bytes": 314572800,
     "checksum": { "algorithm": "sha256", "value": "42d..." }
@@ -2728,7 +2674,6 @@ The request has no body and its response does not include a path:
   "content_ref": {
     "kind": "blob_v1",
     "owner_namespace_id": "demo",
-    "owner_generation": 1,
     "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
     "size_bytes": 314572800,
     "checksum": { "algorithm": "sha256", "value": "42d..." }
@@ -2808,7 +2753,6 @@ more than three events. The events stay in request order.
           "content_ref": {
             "kind": "blob_v1",
             "owner_namespace_id": "demo",
-            "owner_generation": 1,
             "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
             "size_bytes": 20591,
             "checksum": { "algorithm": "sha256", "value": "7ab..." }
@@ -2855,7 +2799,6 @@ includes its first revision and content reference:
   "content_ref": {
     "kind": "blob_v1",
     "owner_namespace_id": "demo",
-    "owner_generation": 1,
     "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
     "size_bytes": 20591,
     "checksum": { "algorithm": "sha256", "value": "7ab..." }
@@ -2878,13 +2821,6 @@ If `limit` truncates the page before the namespace head, the response includes
 resumes with `after_seq={next_after_seq}`.
 
 `after_seq` may equal the current namespace head, which returns an empty page.
-Sequences start over when a deleted namespace id is recreated. A cursor from an
-earlier generation is refused when it is below the retention floor or above the
-head. A cursor within that range is accepted. A consumer that can span a
-recreation compares `generation` on the namespace object and
-rebootstraps when it changes.
-A value above the head is invalid: accepting an unpublished sequence would let
-a consumer silently skip commits as the namespace catches up.
 
 ### 6.12 `POST /forks`
 
@@ -2906,7 +2842,6 @@ Representative response:
 ```json
 {
   "namespace_id": "demo-branch",
-  "generation": 1,
   "created_at_ms": 1752625000000,
   "created_by": "usr_8f3c",
   "fork_basis": {
@@ -2941,15 +2876,9 @@ source-owned immutable metadata segments stay available for as long as the
 target may still read them. It verifies the checkpoint, then installs the target namespace with a conditional manifest write. The manifest records the source checkpoint for the target's lifetime.
 
 The response contains the new namespace's initial state. Its head sequence and
-retention floor equal the captured basis sequence, for a fresh id and for a
-deleted id alike. The target's first data commit is one sequence above that head.
+retention floor equal the captured basis sequence. The target's first data commit is one sequence above that head.
 
-If the target ID is active, the server returns `namespace_exists` before writing a source pin. If it is
-deleted, the fork recreates the id as its next generation with the source
-runs.
-If the target advances beyond the selected lifetime during installation, the server returns `stale_head`.
-If the source checkpoint cannot be verified, the server returns
-`checkpoint_unavailable` and no target namespace is installed.
+If the target ID is active, the server returns `namespace_exists` before writing a source pin. If it is deleted, the server returns `namespace_deleted` before writing a source pin. If the source checkpoint cannot be verified, the server returns `checkpoint_unavailable` and no target namespace is installed.
 
 ### 6.13 `GET /grep`
 
@@ -3025,8 +2954,7 @@ hidden from the checkpoint backfill, and the change event names only that
 root. With `allow_stale`, the query serves indexed-only results and reports
 `tail_scanned: false`. The worker starts a fresh checkpoint backfill
 before advancing its watermark past the undelete, so a later exact query
-includes the restored subtree. A changed namespace generation also rebuilds
-the index from a fresh checkpoint.
+includes the restored subtree.
 
 The `path_prefix` value is a complete absolute path, not a partial textual
 segment prefix. The server resolves it using the name-key folding rule
@@ -3078,8 +3006,7 @@ A conforming server must:
    numbered WAL objects;
 3. validate that referenced content is already durable before publish;
 4. preserve `(namespace_id, inode_id)` as canonical identity;
-5. resolve content through the reference's owner namespace, owner generation,
-   and content ID;
+5. resolve content through the reference's owner namespace and content ID;
 6. implement tombstone-first delete;
 7. serve replay from the highest numbered verified manifest found through
    `hint.json`, plus the numbered WAL objects after the folded boundary, replayed

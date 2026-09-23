@@ -103,9 +103,6 @@ fn maintenance_gc_reclaims_a_deleted_namespace_instead_of_refusing() {
     let metadata = harness.run(&["--json", "maintenance", "metadata"]);
     assert_failure(&metadata);
     assert_eq!(json_error(&metadata)["code"], "namespace_deleted");
-    let recreate = harness.run(&["--json", "namespace", "create", "demo"]);
-    assert_success(&recreate);
-    assert_eq!(json_data(&recreate)["generation"], 2);
 }
 
 #[test]

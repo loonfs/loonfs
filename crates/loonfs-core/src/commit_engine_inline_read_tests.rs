@@ -225,11 +225,11 @@ async fn published_projection_reads_without_replay_and_counts_inline_bytes() {
     assert_eq!(
         state
             .tail
-            .inline_content(&value.content_ref().content_id)
+            .inline_content(value.content_ref())
             .expect("bytes")
             .as_ptr(),
         cloned
-            .inline_content(&value.content_ref().content_id)
+            .inline_content(value.content_ref())
             .expect("cloned bytes")
             .as_ptr()
     );
@@ -338,7 +338,6 @@ async fn foreign_references_resolve_to_objects_and_object_downloads_do_not_write
     let engine = NamespaceEngine::reader(&store, publisher.namespace_id.clone());
     let foreign = ContentRef::blob_v1(
         NamespaceId::parse("foreign").expect("owner"),
-        loonfs_api::NamespaceGeneration(1),
         value.content_ref().content_id.clone(),
         b"foreign",
     );

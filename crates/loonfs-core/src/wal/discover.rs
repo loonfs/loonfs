@@ -102,7 +102,7 @@ pub(super) fn corrupt(object_key: &str, error: impl std::fmt::Display) -> Contro
 
 /// Probes the next WAL number and extends the cached tail with returned segments.
 /// Returns false when the next segment has another writer epoch, which requires
-/// full discovery. Writer acquisition and recreation both raise the epoch, so a
+/// full discovery. Writer acquisition raises the epoch, so a
 /// segment at the cached epoch must continue the cached head.
 pub async fn probe_namespace_wal<S: ObjectStore + ?Sized>(
     store: &S,

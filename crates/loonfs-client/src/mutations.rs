@@ -461,7 +461,6 @@ mod tests {
     fn test_content_ref(bytes: &[u8]) -> ContentRef {
         ContentRef::blob_v1(
             loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
-            loonfs_api::NamespaceGeneration(1),
             ContentId::generate(),
             bytes,
         )
@@ -737,7 +736,6 @@ mod tests {
             created_by: loonfs_test_support::test_actor(),
             fork_basis: None,
             namespace_id: namespace_id.clone(),
-            generation: loonfs_api::NamespaceGeneration(1),
             head_seq: ChangeSeq(3),
             retention_floor_seq: ChangeSeq(1),
             current_manifest_no: None,
@@ -799,7 +797,6 @@ mod tests {
             created_by: loonfs_test_support::test_actor(),
             fork_basis: None,
             namespace_id: namespace_id.clone(),
-            generation: loonfs_api::NamespaceGeneration(1),
             head_seq: ChangeSeq(0),
             retention_floor_seq: ChangeSeq(0),
         };

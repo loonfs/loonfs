@@ -5,9 +5,7 @@ use crate::control_object::ControlObjectLoadError;
 use crate::error::{CoreError, Result};
 use crate::namespace::control::load_namespace_read_state;
 use futures::StreamExt;
-use loonfs_api::{
-    Checkpoint, NamespaceCursor, NamespaceGeneration, NamespaceId, Page, PageCursor, PageRequest,
-};
+use loonfs_api::{Checkpoint, NamespaceCursor, NamespaceId, Page, PageCursor, PageRequest};
 use loonfs_objectstore::keys::checkpoint_prefix;
 use loonfs_objectstore::ObjectStore;
 use serde::{Deserialize, Serialize};
@@ -16,7 +14,6 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CheckpointPageCursor {
     namespace_id: NamespaceId,
-    namespace_generation: NamespaceGeneration,
     last_key: String,
 }
 
@@ -29,10 +26,6 @@ impl NamespaceCursor for CheckpointPageCursor {
         &self.namespace_id
     }
 
-    fn namespace_generation(&self) -> NamespaceGeneration {
-        self.namespace_generation
-    }
-
     fn last_key(&self) -> Option<&str> {
         Some(&self.last_key)
     }
@@ -43,26 +36,17 @@ impl NamespaceCursor for CheckpointPageCursor {
 }
 
 impl CheckpointPageCursor {
-    fn after(
-        namespace_id: &NamespaceId,
-        namespace_generation: NamespaceGeneration,
-        last_key: String,
-    ) -> Self {
+    fn after(namespace_id: &NamespaceId, last_key: String) -> Self {
         Self {
             namespace_id: namespace_id.clone(),
-            namespace_generation,
             last_key,
         }
     }
 
-    fn validate_for(
-        &self,
-        namespace_id: &NamespaceId,
-        namespace_generation: NamespaceGeneration,
-    ) -> Result<()> {
-        if &self.namespace_id != namespace_id || self.namespace_generation != namespace_generation {
+    fn validate_for(&self, namespace_id: &NamespaceId) -> Result<()> {
+        if &self.namespace_id != namespace_id {
             return Err(CoreError::InvalidCursor(
-                "cursor belongs to a different namespace or generation".to_owned(),
+                "cursor belongs to a different namespace".to_owned(),
             ));
         }
         if !self.last_key.starts_with(&checkpoint_prefix(namespace_id)) {
@@ -79,24 +63,21 @@ pub(crate) async fn list_checkpoints_page<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     request: PageRequest<CheckpointPageCursor>,
 ) -> Result<Page<Checkpoint, CheckpointPageCursor>> {
-    let head = load_namespace_read_state(store, namespace_id)
+    load_namespace_read_state(store, namespace_id)
         .await
         .map_err(CoreError::ControlObjectLoad)?;
 
     if let Some(cursor) = &request.cursor {
-        cursor.validate_for(namespace_id, head.generation)?;
+        cursor.validate_for(namespace_id)?;
     }
 
     let prefix = checkpoint_prefix(namespace_id);
-    let generation_start = format!("{prefix}pin_{:020}", head.generation_first_manifest_no.0);
     let start_after = request
         .cursor
         .as_ref()
-        .map_or(generation_start.clone(), |cursor| {
-            cursor.last_key.clone().max(generation_start)
-        });
+        .map(|cursor| cursor.last_key.as_str());
     let keys = store
-        .list_prefix_from_stream(&prefix, Some(&start_after))
+        .list_prefix_from_stream(&prefix, start_after)
         .peekable();
     futures::pin_mut!(keys);
     let mut checkpoints = Vec::with_capacity(request.limit.as_usize());
@@ -135,7 +116,6 @@ pub(crate) async fn list_checkpoints_page<S: ObjectStore + ?Sized>(
     let next_cursor = has_more.then(|| {
         CheckpointPageCursor::after(
             namespace_id,
-            head.generation,
             last_inspected_key.expect("a full page should inspect at least one key"),
         )
     });
@@ -159,19 +139,14 @@ mod cursor_tests {
                 "format_version": 1,
                 "kind": "checkpoint_inventory",
                 "namespace_id": "demo",
-                "namespace_generation": 1,
                 "last_key": "namespaces/demo/pins/pin_00000000000000000001-0000000000000001.json",
                 "future_field": {"ignored": true}
             }))
             .expect("encode cursor"),
         );
 
-        let cursor = decode_namespace_cursor::<CheckpointPageCursor>(
-            &token,
-            &namespace_id,
-            NamespaceGeneration(1),
-        )
-        .expect("decode cursor with additive field");
+        let cursor = decode_namespace_cursor::<CheckpointPageCursor>(&token, &namespace_id)
+            .expect("decode cursor with additive field");
         assert_eq!(
             cursor.last_key(),
             Some("namespaces/demo/pins/pin_00000000000000000001-0000000000000001.json")
@@ -189,11 +164,6 @@ mod cursor_tests {
         };
         let token = encode_cursor(&directory).expect("encode directory cursor");
 
-        assert!(decode_namespace_cursor::<CheckpointPageCursor>(
-            &token,
-            &namespace_id,
-            NamespaceGeneration(1)
-        )
-        .is_err());
+        assert!(decode_namespace_cursor::<CheckpointPageCursor>(&token, &namespace_id).is_err());
     }
 }

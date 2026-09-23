@@ -16,12 +16,7 @@ pub(super) async fn store_file_bytes_before_metadata_publish<S: ObjectStore + ?S
 ) -> Result<PreparedContent> {
     parse_mutation_path(absolute_path)?;
     let catalog = load_namespace_catalog_entry(store, namespace_id).await?;
-    let stored = store_bytes_as_content_for_owner(
-        store,
-        catalog.namespace_id().clone(),
-        catalog.generation(),
-        bytes,
-    )
-    .await?;
+    let stored =
+        store_bytes_as_content_for_owner(store, catalog.namespace_id().clone(), bytes).await?;
     Ok(prepare_stored_content(&catalog, stored))
 }

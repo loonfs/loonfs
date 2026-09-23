@@ -4,9 +4,7 @@ use crate::error::{CoreError, Result};
 use crate::namespace::read_anchor::{load_head_and_retention_floor, load_read_anchor};
 use crate::namespace::state::NamespaceReadState;
 use loonfs_api::wire::control::ForkBasis;
-use loonfs_api::{
-    ActorId, ChangeSeq, ManifestNo, Namespace, NamespaceForkBasis, NamespaceGeneration, NamespaceId,
-};
+use loonfs_api::{ActorId, ChangeSeq, ManifestNo, Namespace, NamespaceForkBasis, NamespaceId};
 use loonfs_objectstore::ObjectStore;
 
 /// Whether a namespace carries visible commits its basis manifest does not
@@ -56,7 +54,6 @@ pub async fn load_namespace_wal_tail_usage<S: ObjectStore + ?Sized>(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NamespaceStorageDiagnostics {
     pub namespace_id: NamespaceId,
-    pub generation: NamespaceGeneration,
     pub created_at_ms: u64,
     pub created_by: ActorId,
     pub fork_basis: Option<NamespaceForkBasis>,
@@ -77,7 +74,6 @@ impl NamespaceStorageDiagnostics {
             created_at_ms: head.created_at_ms,
             created_by: head.created_by,
             fork_basis: fork_basis(head.fork_basis),
-            generation: head.generation,
             namespace_id: head.namespace_id,
             head_seq: head.seq,
             retention_floor_seq,
@@ -135,7 +131,6 @@ pub async fn load_namespace<S: ObjectStore + ?Sized>(
         created_at_ms: head.created_at_ms,
         created_by: head.created_by,
         fork_basis: fork_basis(head.fork_basis),
-        generation: head.generation,
         namespace_id: head.namespace_id,
         head_seq: head.seq,
         retention_floor_seq,

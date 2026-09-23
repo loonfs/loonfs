@@ -2,7 +2,7 @@
 
 | Term | Meaning |
 | --- | --- |
-| **Namespace** | A directory tree with its own ordered metadata history, manifests, WAL, and retention policy. Forks can share stored objects across namespaces. |
+| **Namespace** | A directory tree with its own ordered metadata history, manifests, WAL, and retention policy. Its id names one lifetime. Forks can share stored objects across namespaces. |
 | **Head** | The current logical position and state derived from the current manifest and later WAL objects; not a separate durable object. |
 | **Sequence (`seq`)** | A namespace-local position assigned to one committed mutation request. |
 | **Commit** | One successfully published mutation request whose operations share a sequence. |
@@ -22,7 +22,7 @@
 | **Name key** | The normalized and case-folded value used for sibling-name comparison and lookup. |
 | **Revision** | One committed content state of a file, ordered by a revision number scoped to that inode. |
 | **Content object** | The complete bytes of one uploaded file, stored immutably under `namespaces/{owner_namespace_id}/content/{content_id}`. |
-| **Content reference** | A `blob_v1` record containing the original owner namespace, owner generation, content ID, complete size, and checksum. |
+| **Content reference** | A `blob_v1` record containing the original owner namespace, content ID, complete size, and checksum. |
 | **Upload session** | A durable record for one upload, with a fixed identity and mode and an open, completed, or aborted status. Completion alone does not commit a file. |
 | **Metadata segment** | An immutable, sorted set of rows in one metadata family, stored in independently readable blocks. |
 | **Run** | The metadata segments produced together, identified by a manifest-allocated run number. |

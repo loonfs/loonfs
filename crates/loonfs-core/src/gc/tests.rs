@@ -47,7 +47,6 @@ use loonfs_test_support::stores::{
 };
 use tempfile::tempdir;
 
-mod generations;
 mod many_pins;
 mod retirement;
 
@@ -76,8 +75,8 @@ async fn checkpoint_exists<S: ObjectStore + ?Sized>(
 
 /// Derives "now" from durable object ages so the tests never touch a
 /// wall clock: `offset_ms` past the newest object under the namespace.
-async fn now_after_newest_object(
-    store: &LocalFsStore,
+async fn now_after_newest_object<S: ObjectStore>(
+    store: &S,
     namespace_id: &NamespaceId,
     offset_ms: u64,
 ) -> u64 {
@@ -225,7 +224,6 @@ async fn write_upload_session(store: &LocalFsStore, namespace_id: &NamespaceId) 
         .expect("valid upload id");
     let state = loonfs_api::wire::control::UploadSessionPayload {
         namespace_id: namespace_id.clone(),
-        owner_generation: loonfs_api::NamespaceGeneration(1),
 
         upload_id: upload_id.clone(),
         content_id: loonfs_api::ContentId::generate(),
@@ -291,7 +289,10 @@ async fn read_upload_session<S: ObjectStore + ?Sized>(
 #[tokio::test]
 async fn deleted_namespace_keeps_its_tombstone_and_segments() {
     let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let store = RecordingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyPredicate::any(),
+    );
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let setup = context(1_000);
     bootstrap_namespace(
@@ -304,8 +305,14 @@ async fn deleted_namespace_keeps_its_tombstone_and_segments() {
     )
     .await
     .expect("bootstrap");
-    write_test_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
-    write_test_file(&store, &namespace_id, "/docs/two.txt", "gc-two", &setup).await;
+    let mut content_keys = publish_owned_content(&store, &namespace_id, 2).await;
+    content_keys.sort();
+    let unreferenced_key =
+        loonfs_objectstore::keys::content_blob(&namespace_id, &loonfs_api::ContentId::generate());
+    store
+        .put_if_absent(&unreferenced_key, Bytes::from_static(b"unreferenced"))
+        .await
+        .expect("unreferenced object");
     create_checkpoint(&store, &namespace_id, &setup)
         .await
         .expect("user pin");
@@ -328,10 +335,10 @@ async fn deleted_namespace_keeps_its_tombstone_and_segments() {
         .expect("gc pass");
     assert!(report.deleted.wal_segments >= 1);
     assert_eq!(report.deleted.metadata_segments, 0);
-    // Deletion also folds its acquired writer fence before the tombstone.
-    assert_eq!(report.deleted.manifests, 5);
+    assert!(report.deleted.manifests > 0);
     assert_eq!(report.deleted_checkpoints_by_owner.expired, 1);
     let reaped = context(aged.now_ms + UNREFERENCED_SEGMENT_MIN_AGE_MS);
+    store.reset();
     let report = gc_namespace(&store, &namespace_id, &config(), &reaped)
         .await
         .expect("gc pass after segment grace");
@@ -341,6 +348,36 @@ async fn deleted_namespace_keeps_its_tombstone_and_segments() {
     );
     assert_eq!(report.deleted.metadata_segments, 0);
     assert!(report.deleted.manifests >= 1);
+    assert_eq!(
+        report.deleted.retired_content_objects,
+        content_keys.len() as u64
+    );
+    let content_prefix = format!(
+        "{}content/",
+        loonfs_objectstore::keys::namespace_prefix(&namespace_id)
+    );
+    let mut deleted_content = store
+        .take()
+        .into_iter()
+        .filter_map(|operation| match operation {
+            loonfs_test_support::stores::RecordedOperation::Delete { key, .. }
+                if key.starts_with(&content_prefix) =>
+            {
+                Some(key)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    deleted_content.sort();
+    assert_eq!(deleted_content, content_keys);
+    for key in &content_keys {
+        assert!(store.head(key).await.expect("reclaimed content").is_none());
+    }
+    assert!(store
+        .head(&unreferenced_key)
+        .await
+        .expect("unreferenced object")
+        .is_some());
 
     for prefix in [
         wal_segment_prefix(&namespace_id),
@@ -385,13 +422,20 @@ async fn deleted_namespace_keeps_its_tombstone_and_segments() {
         .await
         .expect("hint")
         .is_some());
-    // Idempotent, and never degraded by its own reclamation.
     let again = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
     let report = gc_namespace(&store, &namespace_id, &config(), &again)
         .await
         .expect("second gc pass");
     assert_eq!(report.deleted.wal_segments, 0);
     assert_eq!(report.deleted.manifests, 0);
+    assert_eq!(report.deleted.metadata_segments, 0);
+    assert_eq!(report.deleted.content_objects, 0);
+    assert_eq!(report.deleted.upload_sessions, 0);
+    assert_eq!(
+        report.deleted.retired_content_objects,
+        content_keys.len() as u64
+    );
+    assert_eq!(report.deleted_checkpoints_by_owner, Default::default());
     assert_eq!(
         store
             .list_prefix(&metadata_manifest_prefix(&namespace_id))
@@ -399,17 +443,6 @@ async fn deleted_namespace_keeps_its_tombstone_and_segments() {
             .expect("manifests"),
         vec![current.object_key]
     );
-    let recreated = bootstrap_namespace(
-        &store,
-        &namespace_id,
-        &setup,
-        &loonfs_test_support::test_actor(),
-        &loonfs_api::NamespaceAccess::Unrestricted {},
-        false,
-    )
-    .await
-    .expect("recreate collected namespace");
-    assert_eq!(recreated.generation, loonfs_api::NamespaceGeneration(2));
 }
 
 #[tokio::test]
@@ -456,17 +489,20 @@ async fn fork_protected_bases_survive_source_deletion_until_the_target_dies() {
         store.head(&basis_key).await.expect("head basis").is_some(),
         "fork basis must survive while the clone lives"
     );
+    assert!(report.deleted.wal_segments > 0);
     let clone_view = load_current_metadata_view(&store, &clone)
         .await
         .expect("load clone view");
-    clone_view
-        .resolve_path(
+    let bytes = clone_view
+        .get_file_bytes(
+            &store,
             "/docs/shared.txt",
-            AttributeInclusion::Omit,
+            None,
             &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
         )
         .await
-        .expect("clone reads through the deleted source");
+        .expect("clone reads after source collection");
+    assert_eq!(bytes.bytes, b"body\n");
 
     delete_namespace(&store, &clone, DeleteNamespaceOptions::default(), &setup)
         .await
@@ -1940,26 +1976,6 @@ async fn a_corrupt_fork_target_manifest_fails_the_pass_and_an_unreadable_hint_re
     assert!(checkpoint_exists(store.inner(), &source, &fork_record.pin_id).await);
 
     store.clear();
-    let current = crate::namespace::control::load_current_manifest(store.inner(), &clone)
-        .await
-        .expect("target manifest");
-    let manifest_key = current.object_key;
-    let mut payload = current.envelope.into_payload();
-    let basis = payload.fork_basis.as_mut().expect("fork basis");
-    basis.manifest.manifest_no = ManifestNo(basis.manifest.manifest_no.0 + 1);
-    let bytes = loonfs_api::wire::manifest::encode_namespace_manifest_json(payload)
-        .expect("manifest")
-        .into_bytes();
-    store
-        .put_overwrite(&manifest_key, Bytes::from(bytes))
-        .await
-        .expect("write drifted manifest");
-    let error = gc_namespace(&store, &source, &config(), &aged)
-        .await
-        .expect_err("a target naming this record with another manifest is corruption");
-    assert_eq!(error.code(), crate::error::ErrorCode::NamespaceCorrupt);
-    assert!(error.message().contains(fork_record.pin_id.as_str()));
-
     store
         .put_overwrite(&hint(&clone), Bytes::from_static(b"not json"))
         .await
@@ -2074,7 +2090,6 @@ async fn a_fork_retry_keeps_young_pins_and_reclaims_the_abandoned_one_after_grac
         &source,
         PinOwner::Fork {
             target_namespace_id: clone.clone(),
-            target_generation: loonfs_api::NamespaceGeneration(1),
         },
         &setup,
     )
@@ -2854,49 +2869,6 @@ async fn retired_owner_calls_restart_retry_deletes_and_collect_late_writes() {
 }
 
 #[tokio::test]
-async fn retired_owner_head_recheck_fails_without_writes() {
-    let directory = tempdir().expect("directory");
-    let namespace_id = NamespaceId::parse("owner-head-recheck").expect("namespace");
-    let inner = LocalFsStore::new(directory.path()).expect("store");
-    let (deadline, keys) = retired_content_namespace(&inner, &namespace_id).await;
-    let store = RecordingStore::new(
-        BlockingStore::new(
-            FailStore::new(
-                inner,
-                KeyPredicate::manifest(&namespace_id),
-                OperationClass::Read,
-                InjectedError::Transport("head recheck failed".to_owned()),
-            ),
-            KeyPredicate::exact(loonfs_objectstore::keys::upload_session_prefix(
-                &namespace_id,
-            )),
-            OperationClass::List,
-        ),
-        KeyPredicate::any(),
-    );
-    store.inner().block_next();
-    let config = config();
-    let (result, ()) = tokio::join!(
-        gc_namespace(&store, &namespace_id, &config, &deadline),
-        async {
-            store.inner().wait_until_blocked().await;
-            store.inner().inner().fail_next(1);
-            store.inner().release();
-        }
-    );
-    assert_eq!(
-        result.expect_err("head recheck fails").code(),
-        crate::error::ErrorCode::ServerError
-    );
-    assert_eq!(store.counts().deletes, 0);
-    assert_eq!(store.counts().puts, 0);
-    assert_eq!(store.counts().compare_and_swaps, 0);
-    for key in keys {
-        assert!(store.head(&key).await.expect("owned content").is_some());
-    }
-}
-
-#[tokio::test]
 async fn expiry_and_creation_grace_delete_pins_without_a_released_state() {
     let directory = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("pin-grace").expect("namespace");
@@ -2929,7 +2901,6 @@ async fn expiry_and_creation_grace_delete_pins_without_a_released_state() {
         },
         PinOwner::Fork {
             target_namespace_id: target.clone(),
-            target_generation: loonfs_api::NamespaceGeneration(1),
         },
     ] {
         pins.push(
@@ -3143,4 +3114,43 @@ async fn fork_pin_grace_skips_targets_and_aged_pins_read_only_manifest_discovery
             .len(),
         5
     );
+}
+
+#[tokio::test]
+async fn create_on_a_deleted_id_fails_before_and_after_content_reclamation() {
+    let directory = tempdir().expect("directory");
+    let store = RecordingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::any(),
+    );
+    let namespace_id = NamespaceId::parse("terminal").expect("namespace");
+    let (deadline, keys) = retired_content_namespace(&store, &namespace_id).await;
+    for reclaimed in [false, true] {
+        for allow_existing in [false, true] {
+            store.reset();
+            let error = bootstrap_namespace(
+                &store,
+                &namespace_id,
+                &deadline,
+                &loonfs_test_support::test_actor(),
+                &loonfs_api::NamespaceAccess::unrestricted(),
+                allow_existing,
+            )
+            .await
+            .expect_err("deleted id");
+            assert_eq!(error.code(), loonfs_api::ErrorCode::NamespaceDeleted);
+            assert_eq!(store.counts().puts, 0);
+            assert_eq!(store.counts().compare_and_swaps, 0);
+            assert_eq!(store.counts().deletes, 0);
+        }
+        for key in &keys {
+            assert_eq!(store.head(key).await.expect("content").is_none(), reclaimed);
+        }
+        if !reclaimed {
+            let report = gc_namespace(&store, &namespace_id, &config(), &deadline)
+                .await
+                .expect("reclaim content");
+            assert_eq!(report.deleted.retired_content_objects, keys.len() as u64);
+        }
+    }
 }

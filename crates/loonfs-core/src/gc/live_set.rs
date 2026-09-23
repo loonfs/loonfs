@@ -8,7 +8,7 @@ use crate::namespace::read_anchor::NamespaceReadAnchor;
 use crate::wal::{object_is_required, required_from};
 use futures::StreamExt;
 use loonfs_api::wire::manifest::NamespaceManifestPayload;
-use loonfs_api::{ManifestNo, NamespaceGeneration, NamespaceId, PinId, WalNo};
+use loonfs_api::{ManifestNo, NamespaceId, WalNo};
 use loonfs_objectstore::keys::{
     checkpoint_prefix, metadata_manifest_object, metadata_segment_object_key,
 };
@@ -16,34 +16,18 @@ use loonfs_objectstore::ObjectStore;
 use std::collections::BTreeSet;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum GenerationState {
-    Current,
-    /// Deleted and inside its retirement grace.
-    Waiting {
-        deadline_ms: u64,
-    },
-    /// Past its grace, but a pin in its manifest range still holds it.
-    Held,
+pub(super) enum RetirementState {
+    Active,
+    Retained { until_ms: Option<u64> },
     Eligible,
-    Reclaimed,
-}
-
-pub(super) struct RetiredGeneration {
-    pub(super) key: String,
-    pub(super) reference: loonfs_api::wire::control::ManifestRef,
-    pub(super) tombstone: Option<NamespaceManifestPayload>,
 }
 
 pub(super) struct LiveSet {
-    pub(super) owner_generation: NamespaceGeneration,
-    pub(super) generation_first_manifest_no: ManifestNo,
     pub(super) namespace_deleted: bool,
     pub(super) current_tombstone: Option<NamespaceManifestPayload>,
-    pub(super) retired_generations: Vec<RetiredGeneration>,
     pub(super) discovery_start_manifest_no: ManifestNo,
     pub(super) objects: BTreeSet<String>,
-    listed_pins: BTreeSet<PinId>,
-    unrecognized_pin: bool,
+    has_pins: bool,
     grace_window_ms: u64,
     now_ms: u64,
     required_wal_from: Option<WalNo>,
@@ -59,15 +43,11 @@ impl LiveSet {
     ) -> Result<Self> {
         let head = anchor.manifest.envelope.payload();
         let mut live = Self {
-            owner_generation: head.generation,
-            generation_first_manifest_no: head.generation_first_manifest_no,
             namespace_deleted: head.status.is_deleted(),
             current_tombstone: head.status.is_deleted().then(|| head.clone()),
-            retired_generations: Vec::new(),
             discovery_start_manifest_no: anchor.manifest.discovery_start_manifest_no,
             objects: BTreeSet::from([anchor.manifest.object_key.clone()]),
-            listed_pins: BTreeSet::new(),
-            unrecognized_pin: false,
+            has_pins: false,
             grace_window_ms: grace_window_ms.max(NAMESPACE_RETIREMENT_GRACE_MS),
             now_ms,
             required_wal_from: required_from(&anchor.read_state),
@@ -89,8 +69,8 @@ impl LiveSet {
             .transpose()
             .map_err(|error| CoreError::store(&prefix, &error))?
         {
+            live.has_pins = true;
             if !super::families::CandidateFamily::Checkpoints.recognizes(&key) {
-                live.unrecognized_pin = true;
                 continue;
             }
             let (_, pin_id) = checkpoint_key_ids(&key).map_err(CoreError::ControlObjectLoad)?;
@@ -102,9 +82,7 @@ impl LiveSet {
                 &mut manifests,
             )
             .await?;
-            live.listed_pins.insert(pin_id);
         }
-        live.load_retired_generations(store, namespace_id).await?;
         Ok(live)
     }
 
@@ -148,58 +126,9 @@ impl LiveSet {
         );
     }
 
-    async fn load_retired_generations<S: ObjectStore + ?Sized>(
-        &mut self,
-        store: &S,
-        namespace_id: &NamespaceId,
-    ) -> Result<()> {
-        let prefix = loonfs_objectstore::keys::retired_generation_prefix(namespace_id);
-        let mut listing = store.list_prefix_stream(&prefix);
-        while let Some(key) = listing
-            .next()
-            .await
-            .transpose()
-            .map_err(|error| CoreError::store(&prefix, &error))?
-        {
-            let Some(generation) = loonfs_objectstore::layout::retired_generation_of(&key) else {
-                continue;
-            };
-            let Some(record) =
-                crate::namespace::retired::load_retired_generation(store, namespace_id, generation)
-                    .await?
-            else {
-                continue;
-            };
-            let tombstone =
-                crate::namespace::retired::load_retired_tombstone(store, &record).await?;
-            if let Some(tombstone) = &tombstone {
-                self.protect_manifest(
-                    metadata_manifest_object(namespace_id, &record.tombstone.manifest_no),
-                    tombstone,
-                );
-            }
-            self.retired_generations.push(RetiredGeneration {
-                key,
-                reference: record.tombstone,
-                tombstone,
-            });
-        }
-        self.retired_generations
-            .sort_by(|left, right| left.key.cmp(&right.key));
-        Ok(())
-    }
-
     pub(super) fn protects_wal(&self, key: &str) -> bool {
         self.required_wal_from
             .is_some_and(|floor| object_is_required(key, floor))
-    }
-
-    pub(super) fn tombstones(&self) -> impl Iterator<Item = &NamespaceManifestPayload> {
-        self.current_tombstone.iter().chain(
-            self.retired_generations
-                .iter()
-                .filter_map(|record| record.tombstone.as_ref()),
-        )
     }
 
     pub(super) fn deadline(&self, tombstone: &NamespaceManifestPayload) -> u64 {
@@ -210,27 +139,19 @@ impl LiveSet {
             .saturating_add(self.grace_window_ms)
     }
 
-    pub(super) fn generation_state(&self, generation: NamespaceGeneration) -> GenerationState {
-        if let Some(tombstone) = self
-            .tombstones()
-            .find(|tombstone| tombstone.generation == generation)
-        {
-            let deadline_ms = self.deadline(tombstone);
-            let pinned = self.listed_pins.iter().any(|id| {
-                id.manifest_no() >= tombstone.generation_first_manifest_no
-                    && id.manifest_no() <= tombstone.manifest_no
-            });
-            if self.now_ms < deadline_ms {
-                GenerationState::Waiting { deadline_ms }
-            } else if pinned || self.unrecognized_pin {
-                GenerationState::Held
-            } else {
-                GenerationState::Eligible
+    pub(super) fn retirement_state(&self) -> RetirementState {
+        let Some(tombstone) = &self.current_tombstone else {
+            return RetirementState::Active;
+        };
+        let deadline_ms = self.deadline(tombstone);
+        if self.now_ms < deadline_ms {
+            RetirementState::Retained {
+                until_ms: Some(deadline_ms),
             }
-        } else if generation < self.owner_generation {
-            GenerationState::Reclaimed
+        } else if self.has_pins {
+            RetirementState::Retained { until_ms: None }
         } else {
-            GenerationState::Current
+            RetirementState::Eligible
         }
     }
 }

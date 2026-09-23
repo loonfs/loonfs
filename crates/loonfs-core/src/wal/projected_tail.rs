@@ -45,9 +45,10 @@ impl ProjectedWalTail {
         Ok(())
     }
 
-    pub(crate) fn inline_content(&self, content_id: &ContentId) -> Option<&Bytes> {
+    pub(crate) fn inline_content(&self, content_ref: &ContentRef) -> Option<&Bytes> {
         self.inline_content
-            .get(content_id)
+            .get(&content_ref.content_id)
+            .filter(|value| &value.content_ref == content_ref)
             .map(|value| &value.bytes)
     }
 

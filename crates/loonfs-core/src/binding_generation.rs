@@ -2,7 +2,7 @@
 
 use loonfs_api::{
     decode_token, encode_token, BindingGeneration as BindingGenerationToken, ChangeSeq,
-    NamespaceGeneration, NamespaceId, OpaqueToken,
+    NamespaceId, OpaqueToken,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -20,12 +20,10 @@ impl BindingGeneration {
     pub(crate) fn encode(
         &self,
         namespace_id: &NamespaceId,
-        namespace_generation: NamespaceGeneration,
     ) -> Result<BindingGenerationToken, serde_json::Error> {
         let encoded = encode_token(
             &BindingGenerationEnvelope {
                 namespace_id: namespace_id.clone(),
-                namespace_generation,
                 generation: *self,
             },
             BINDING_GENERATION_FORMAT_VERSION,
@@ -37,14 +35,11 @@ impl BindingGeneration {
     pub(crate) fn decode(
         value: &BindingGenerationToken,
         expected_namespace_id: &NamespaceId,
-        expected_namespace_generation: NamespaceGeneration,
     ) -> Result<Self, InvalidBindingGeneration> {
         let envelope: BindingGenerationEnvelope =
             decode_token(value.as_str(), BINDING_GENERATION_FORMAT_VERSION)
                 .map_err(|_| InvalidBindingGeneration)?;
-        if envelope.namespace_id != *expected_namespace_id
-            || envelope.namespace_generation != expected_namespace_generation
-        {
+        if envelope.namespace_id != *expected_namespace_id {
             return Err(InvalidBindingGeneration);
         }
         Ok(envelope.generation)
@@ -54,7 +49,6 @@ impl BindingGeneration {
 #[derive(Serialize, Deserialize)]
 struct BindingGenerationEnvelope {
     namespace_id: NamespaceId,
-    namespace_generation: NamespaceGeneration,
     #[serde(flatten)]
     generation: BindingGeneration,
 }
@@ -64,5 +58,5 @@ impl OpaqueToken for BindingGenerationEnvelope {
 }
 
 #[derive(Debug, Error)]
-#[error("binding generation is malformed or belongs to another namespace or generation")]
+#[error("binding generation is malformed or belongs to another namespace")]
 pub(crate) struct InvalidBindingGeneration;

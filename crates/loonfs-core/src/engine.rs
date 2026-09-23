@@ -132,16 +132,16 @@ pub struct NamespaceEngine<S, M> {
 }
 
 impl<S: ObjectStore, M> NamespaceEngine<S, M> {
-    /// Checks whether the commit receipt exists in the supplied read view.
-    /// Searches both the WAL and metadata segments without acquiring a writer epoch.
-    pub async fn has_retained_commit_receipt(
+    /// Searches the supplied WAL and metadata view without acquiring a writer epoch.
+    pub async fn find_commit_receipt(
         &self,
         context: &RuntimeReadContext,
         commit_id: &CommitId,
-    ) -> Result<bool> {
+    ) -> Result<Option<crate::metadata::CommitReceiptRecord>> {
         self.load_read_view(context)
             .await?
-            .has_retained_commit_receipt(commit_id)
+            .metadata_view()
+            .find_commit_receipt(commit_id)
             .await
     }
 
@@ -432,7 +432,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         .await
     }
 
-    /// Deletes the current namespace generation by publishing a tombstone manifest.
+    /// Deletes the current namespace by publishing a tombstone manifest.
     /// Earlier committed changes remain durable. Later operations return `namespace_deleted`.
     pub async fn delete_namespace(
         &self,

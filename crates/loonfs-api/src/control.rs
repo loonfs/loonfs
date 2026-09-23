@@ -1,11 +1,11 @@
 //! Durable control-object shapes: the discovery hint,
-//! pins, retired generations, upload sessions, and their envelopes (format spec,
+//! pins, upload sessions, and their envelopes (format spec,
 //! "Control objects").
 
 use crate::envelope::EnvelopeCodecError;
 use crate::{
-    ChangeSeq, ChecksumAlgorithm, CommitId, ContentId, ContentRef, ManifestNo, NamespaceGeneration,
-    NamespaceId, PinId, SubjectId, UploadId,
+    ChangeSeq, ChecksumAlgorithm, CommitId, ContentId, ContentRef, ManifestNo, NamespaceId, PinId,
+    SubjectId, UploadId,
 };
 use crate::{WriterEpoch, WriterId};
 use serde::de::DeserializeOwned;
@@ -24,18 +24,11 @@ pub enum ControlObjectKind {
     Pin,
     /// Tracks staged content through upload completion or cleanup.
     UploadSession,
-    /// Keeps a tombstone addressable until its generation is reclaimed.
-    RetiredGeneration,
 }
 
 impl ControlObjectKind {
     /// Lists every registered control-object family in stable registry order.
-    pub const ALL: [Self; 4] = [
-        Self::Hint,
-        Self::Pin,
-        Self::UploadSession,
-        Self::RetiredGeneration,
-    ];
+    pub const ALL: [Self; 3] = [Self::Hint, Self::Pin, Self::UploadSession];
 
     /// Durable format version for this control object kind.
     ///
@@ -48,7 +41,6 @@ impl ControlObjectKind {
             Self::Hint => 1,
             Self::Pin => 1,
             Self::UploadSession => 1,
-            Self::RetiredGeneration => 1,
         }
     }
 
@@ -58,7 +50,6 @@ impl ControlObjectKind {
             Self::Hint => "hint",
             Self::Pin => "pin",
             Self::UploadSession => "upload_session",
-            Self::RetiredGeneration => "retired_generation",
         }
     }
 
@@ -99,20 +90,6 @@ pub struct ManifestRef {
     pub payload_checksum: String,
 }
 
-/// Keeps a deleted generation addressable independently of its manifest number.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RetiredGenerationPayload {
-    /// Namespace whose generation ended.
-    pub namespace_id: NamespaceId,
-    /// Selects the retired lifetime of this namespace id.
-    pub generation: NamespaceGeneration,
-    /// Verifies the manifest that ended this generation.
-    pub tombstone: ManifestRef,
-    /// Time of the recreation attempt that wrote this record.
-    pub created_at_ms: u64,
-}
-
 /// Durable owner and expiry policy of a pin.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -131,8 +108,6 @@ pub enum PinOwner {
     Fork {
         /// Fork namespace whose continued existence keeps the source basis pinned.
         target_namespace_id: NamespaceId,
-        /// Target lifetime selected before this pin was written.
-        target_generation: NamespaceGeneration,
     },
     /// An application-created read view with a required expiry.
     Snapshot {
@@ -219,7 +194,7 @@ pub enum NamespaceStatus {
     /// The braces make serde reject a stray field; a unit variant would
     /// silently accept and discard one.
     Active {},
-    /// The current generation has ended.
+    /// The namespace has been deleted.
     Deleted {
         /// Unix-millisecond call clock of the deletion.
         deleted_at_ms: u64,
@@ -227,11 +202,11 @@ pub enum NamespaceStatus {
 }
 
 impl NamespaceStatus {
-    /// Returns whether the current namespace generation is deleted.
+    /// Returns whether the current namespace is deleted.
     pub const fn is_deleted(&self) -> bool {
         matches!(self, Self::Deleted { .. })
     }
-    /// Returns the deletion stamp for a deleted generation.
+    /// Returns the deletion stamp for a deleted namespace.
     pub const fn deleted_at_ms(&self) -> Option<u64> {
         match self {
             Self::Deleted { deleted_at_ms, .. } => Some(*deleted_at_ms),
@@ -427,8 +402,6 @@ impl std::fmt::Display for UploadSessionRecordStatus {
 pub struct UploadSessionPayload {
     /// Namespace authorized to consume the staged content.
     pub namespace_id: NamespaceId,
-    /// Generation of the namespace when the session opened; the content key and every reference the session mints carry it.
-    pub owner_generation: NamespaceGeneration,
     /// Durable session identity used by staging and completion requests.
     pub upload_id: UploadId,
     /// Content object this session writes, allocated when the session began.
@@ -452,12 +425,6 @@ pub struct UploadSessionPayload {
 
 impl UploadSessionPayload {
     fn validate(&self) -> Result<(), String> {
-        if self.owner_generation.0 == 0 {
-            return Err(format!(
-                "upload session `{}` has a zero owner generation",
-                self.upload_id
-            ));
-        }
         if !matches!(self.status, UploadSessionRecordStatus::Open { .. })
             && self.mode.content_ref().is_some()
         {
@@ -484,16 +451,12 @@ impl UploadSessionPayload {
                     self.upload_id, self.content_id, content_ref.content_id
                 ));
             }
-            if content_ref.owner_namespace_id != self.namespace_id
-                || content_ref.owner_generation != self.owner_generation
-            {
+            if content_ref.owner_namespace_id != self.namespace_id {
                 return Err(format!(
-                    "upload session `{}` belongs to namespace `{}` generation `{}` but holds a reference owned by namespace `{}` generation `{}`",
+                    "upload session `{}` belongs to namespace `{}` but holds a reference owned by namespace `{}`",
                     self.upload_id,
                     self.namespace_id,
-                    self.owner_generation,
                     content_ref.owner_namespace_id,
-                    content_ref.owner_generation
                 ));
             }
         }
@@ -518,7 +481,6 @@ impl UploadSessionPayload {
 #[serde(deny_unknown_fields)]
 struct StrictUploadSessionPayload {
     namespace_id: NamespaceId,
-    owner_generation: NamespaceGeneration,
     upload_id: UploadId,
     content_id: ContentId,
     created_at_ms: u64,
@@ -629,7 +591,6 @@ impl<'de> Deserialize<'de> for UploadSessionPayload {
         let record = StrictUploadSessionPayload::deserialize(deserializer)?;
         let session = Self {
             namespace_id: record.namespace_id,
-            owner_generation: record.owner_generation,
             upload_id: record.upload_id,
             content_id: record.content_id,
             created_at_ms: record.created_at_ms,
@@ -696,7 +657,6 @@ mod tests {
         let content_ref = ContentRef {
             kind: ContentRefKind::BlobV1,
             owner_namespace_id: crate::NamespaceId::parse("demo").expect("namespace id"),
-            owner_generation: crate::NamespaceGeneration(1),
             content_id: ContentId::parse("con_0123456789abcdef0123456789abcdef")
                 .expect("content id"),
             size_bytes: 5,
@@ -706,7 +666,6 @@ mod tests {
         staged.size_bytes += 1;
         let session = UploadSessionPayload {
             namespace_id: NamespaceId::parse("demo").expect("namespace id"),
-            owner_generation: crate::NamespaceGeneration(1),
             upload_id: UploadId::parse("upl_0123456789abcdef0123456789abcdef").expect("upload id"),
             content_id: content_ref.content_id.clone(),
             created_at_ms: 1_000,
@@ -735,7 +694,6 @@ mod tests {
         let content_ref = ContentRef {
             kind: ContentRefKind::BlobV1,
             owner_namespace_id: crate::NamespaceId::parse("demo").expect("namespace id"),
-            owner_generation: crate::NamespaceGeneration(1),
             content_id: ContentId::parse("con_0123456789abcdef0123456789abcdef")
                 .expect("content id"),
             size_bytes: 5,
@@ -772,7 +730,6 @@ mod tests {
             ] {
                 let session = UploadSessionPayload {
                     namespace_id: NamespaceId::parse("demo").expect("namespace id"),
-                    owner_generation: crate::NamespaceGeneration(1),
                     upload_id: UploadId::parse("upl_0123456789abcdef0123456789abcdef")
                         .expect("upload id"),
                     content_id: content_ref.content_id.clone(),

@@ -103,8 +103,7 @@ fn gc_conclusion(gc: &GcResponse) -> MaintenanceConclusion {
     }
 }
 
-// Retirement repeats its deletes on every pass over a tombstone that is never
-// recreated, and the store's delete is idempotent, so that count is not progress.
+// Retirement repeats idempotent deletes on every pass, so its count is not progress.
 fn reclaimed_anything(gc: &GcResponse) -> bool {
     gc.deleted.wal_segments > 0
         || gc.deleted.metadata_segments > 0
@@ -114,7 +113,6 @@ fn reclaimed_anything(gc: &GcResponse) -> bool {
         || gc.deleted_checkpoints_by_owner.fork > 0
         || gc.deleted_checkpoints_by_owner.expired > 0
         || gc.deleted_checkpoints_by_owner.snapshot > 0
-        || gc.deleted.retired_generation_records > 0
 }
 
 #[cfg(test)]
@@ -134,7 +132,7 @@ mod tests {
         let mut report = GcResponse::empty(NamespaceId::parse("demo").expect("namespace"));
         report.deleted.retired_content_objects = 3;
         assert_eq!(gc_conclusion(&report), MaintenanceConclusion::Idle);
-        report.deleted.retired_generation_records = 1;
+        report.deleted_checkpoints_by_owner.fork = 1;
         assert_eq!(gc_conclusion(&report), MaintenanceConclusion::Progressed);
     }
 }

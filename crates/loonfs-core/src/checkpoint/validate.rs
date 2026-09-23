@@ -65,23 +65,6 @@ pub(super) fn validate_manifest_materialization_ranges(
     object_key: &str,
     payload: &NamespaceManifestPayload,
 ) -> Result<(), ManifestLoadError> {
-    if payload.generation.0 == 0
-        || payload.generation_first_manifest_no.0 == 0
-        || payload.generation_first_manifest_no > payload.manifest_no
-    {
-        return Err(ManifestLoadError::RunManifestMismatch {
-            object_key: object_key.to_owned(),
-            message: "namespace generation fields are outside the manifest range".to_owned(),
-        });
-    }
-    if payload.manifest_no == ManifestNo(1)
-        && (payload.generation.0 != 1 || payload.generation_first_manifest_no != ManifestNo(1))
-    {
-        return Err(ManifestLoadError::RunManifestMismatch {
-            object_key: object_key.to_owned(),
-            message: "manifest 1 must begin namespace generation 1".to_owned(),
-        });
-    }
     if payload.retention_floor_seq > payload.head_seq {
         return Err(ManifestLoadError::RunManifestMismatch {
             object_key: object_key.to_owned(),

@@ -508,7 +508,6 @@ mod tests {
                             revision_no: RevisionNo(index as u64 + 1),
                             content_ref: ContentRef::blob_v1(
                                 namespace_id.clone(),
-                                crate::NamespaceGeneration(1),
                                 content_id.clone(),
                                 &bytes,
                             ),

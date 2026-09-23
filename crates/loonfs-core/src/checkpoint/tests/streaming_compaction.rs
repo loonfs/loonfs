@@ -3298,7 +3298,7 @@ async fn a_new_compactor_epoch_an_expired_job_and_a_deletion_each_prevent_public
         0,
     )
     .await
-    .expect_err("a tombstone ends its generation");
+    .expect_err("a tombstone ends the namespace");
     assert_eq!(error.code(), loonfs_api::ErrorCode::NamespaceDeleted);
 }
 

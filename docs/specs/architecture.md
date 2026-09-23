@@ -53,7 +53,7 @@ later numbered WAL → committed changes ──┘            │
                                        path → inode → revision → content
 ```
 
-A path is resolved through directory bindings. A file revision contains the original owner namespace, owner generation, content ID, size, and checksum. The owner namespace, generation, and content ID determine its object key. Inherited content can therefore be read without fetching its owner's manifest or walking the fork ancestry.
+A path is resolved through directory bindings. A file revision contains the original owner namespace, content ID, size, and checksum. The owner namespace and content ID determine its object key. Inherited content can therefore be read without fetching its owner's manifest or walking the fork ancestry.
 
 Directory listings use committed metadata for names and file sizes. They do not download every file. Content reads verify the complete size and checksum. Missing or corrupt required recovery objects fail the read; an available earlier file set is not a substitute.
 

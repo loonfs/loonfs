@@ -3,9 +3,8 @@
 //! Forks and snapshots have separate lifecycle rules and cannot be deleted
 //! through this operation.
 
-use super::record::{checkpoint_is_visible, delete_checkpoint_record, load_checkpoint_record};
+use super::record::{delete_checkpoint_record, load_checkpoint_record};
 use crate::error::{CoreError, Result};
-use crate::namespace::control::load_namespace_read_state;
 use loonfs_api::wire::control::PinOwner;
 use loonfs_api::{DeleteCheckpointResponse, NamespaceId, PinId};
 use loonfs_objectstore::ObjectStore;
@@ -70,12 +69,6 @@ pub(super) async fn delete_owned_checkpoint<S: ObjectStore + ?Sized>(
     checkpoint_id: &PinId,
     expected: CheckpointOwnerKind,
 ) -> Result<()> {
-    let head = load_namespace_read_state(store, namespace_id)
-        .await
-        .map_err(CoreError::ControlObjectLoad)?;
-    if !checkpoint_is_visible(&head, checkpoint_id) {
-        return Err(not_found(checkpoint_id, expected));
-    }
     let Some(loaded) = load_checkpoint_record(store, namespace_id, checkpoint_id).await? else {
         return Err(not_found(checkpoint_id, expected));
     };

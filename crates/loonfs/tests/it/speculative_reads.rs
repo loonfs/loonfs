@@ -175,14 +175,7 @@ async fn buffered_inline_reads_request_no_content_object_on_either_branch() {
         Bytes::from(vec![42; 65 * 1024]),
     ]
     .into_iter()
-    .map(|bytes| {
-        InlineContent::new(
-            namespace_id.clone(),
-            loonfs_api::NamespaceGeneration(1),
-            ContentId::generate(),
-            bytes,
-        )
-    })
+    .map(|bytes| InlineContent::new(namespace_id.clone(), ContentId::generate(), bytes))
     .collect();
     let candidate = CommitCandidate::with_inline_content(
         CommitRequest {
