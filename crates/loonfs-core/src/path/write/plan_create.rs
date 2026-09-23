@@ -61,8 +61,8 @@ pub(super) async fn plan_undelete<S: ObjectStore + ?Sized>(
     view: &PublishPathPlanningView<'_, '_, '_, S>,
 ) -> Result<CompiledFilesystemOperation> {
     let active = view.view.active_subtree_tombstone(inode_id).await?;
-    let deleted_direntry = match active.map(|record| record.action) {
-        Some(TombstoneRowAction::Set { deleted_direntry }) => deleted_direntry,
+    let deleted_binding = match active.map(|record| record.action) {
+        Some(TombstoneRowAction::Set { deleted_binding }) => deleted_binding,
         _ => {
             let authorization_target = view
                 .view
@@ -78,7 +78,7 @@ pub(super) async fn plan_undelete<S: ObjectStore + ?Sized>(
             return Err(CommitValidationError::UndeleteTargetNotDeleted { inode_id }.into());
         }
     };
-    let saved_parent = deleted_direntry.parent_inode_id;
+    let saved_parent = deleted_binding.parent_inode_id;
     view.authorize(
         saved_parent,
         AccessRights::from_iter([AccessRight::Remove]),
@@ -113,7 +113,7 @@ pub(super) async fn plan_undelete<S: ObjectStore + ?Sized>(
                 Absence::Inode,
             )
             .await?;
-            (saved_parent, deleted_direntry.display_name)
+            (saved_parent, deleted_binding.display_name)
         }
     };
     Ok(CompiledFilesystemOperation::new(vec![CommitOp::Undelete {

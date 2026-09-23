@@ -9,8 +9,8 @@ use crate::commit::CommitOp;
 use crate::error::{CoreError, Result};
 use crate::path::mutation_path::{ensure_mutation_path, final_component};
 use loonfs_api::{
-    AbsolutePath, AccessRight, AccessRights, AttributeKey, AttributeRevisionNo, AttributeValue,
-    Attributes, InodeId,
+    AbsolutePath, AccessRight, AccessRights, AttributeKey, AttributeValue, Attributes,
+    AttributesRevisionNo, InodeId,
 };
 use loonfs_objectstore::ObjectStore;
 use std::collections::{BTreeMap, BTreeSet};
@@ -20,7 +20,7 @@ pub(super) async fn plan_update_attributes<S: ObjectStore + ?Sized>(
     set: &BTreeMap<AttributeKey, AttributeValue>,
     remove: &[AttributeKey],
     expected_inode_id: Option<InodeId>,
-    expected_attributes_revision_no: Option<AttributeRevisionNo>,
+    expected_attributes_revision_no: Option<AttributesRevisionNo>,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
 ) -> Result<CompiledFilesystemOperation> {
     ensure_mutation_path(absolute_path)?;

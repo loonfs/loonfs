@@ -32,7 +32,7 @@ use crate::uploads::{SourceIdentity, UploadJournal};
 use loonfs_api::v0::UploadSessionStatus;
 use loonfs_api::SnapshotId;
 use loonfs_api::{
-    AbsolutePath, ActorId, AttributeKey, AttributeRevisionNo, AttributeValue, ChangeSeq, Commit,
+    AbsolutePath, ActorId, AttributeKey, AttributeValue, AttributesRevisionNo, ChangeSeq, Commit,
     CommitId, DeleteDirectoryBehavior, DestinationBehavior, InodeKind, ListPathEntriesResponse,
     NamespaceId, RevisionNo, Subject,
 };
@@ -307,7 +307,7 @@ fn update_attributes_options(
                 parse_public_ordinal_arg(
                     "--expected-attributes-revision",
                     value,
-                    AttributeRevisionNo::parse,
+                    AttributesRevisionNo::parse,
                 )
             })
             .transpose()?,

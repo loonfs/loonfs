@@ -1,7 +1,7 @@
 //! Per-operation options shared by the embedded runtime and HTTP client.
 
 use crate::{
-    AccessGrants, AccessRevisionNo, ActorId, AttributeKey, AttributeRevisionNo, AttributeValue,
+    AccessGrants, AccessRevisionNo, ActorId, AttributeKey, AttributeValue, AttributesRevisionNo,
     CommitId, CommitPrecondition, DeleteDirectoryBehavior, DestinationBehavior, InodeId,
     RevisionNo,
 };
@@ -107,7 +107,7 @@ pub struct UpdateAttributesOptions {
     /// The inode that the path must still resolve to before the update.
     pub expected_inode_id: Option<InodeId>,
     /// With an inode precondition, the attribute revision that must still be current.
-    pub expected_attributes_revision_no: Option<AttributeRevisionNo>,
+    pub expected_attributes_revision_no: Option<AttributesRevisionNo>,
 }
 
 impl UpdateAttributesOptions {

@@ -16,7 +16,7 @@ use super::error::ManifestLoadError;
 use super::stored_block_cache::StoredMetadataBlockKind;
 use loonfs_api::wire::manifest::{
     AccessRevisionRecord, ActiveDeletionRecord, ActiveDeletionRowAction, AttributesRevisionRecord,
-    CommitReceiptRecord, ContentPublicationRecord, DeletedDirentry, DirentryBindRecord,
+    CommitReceiptRecord, ContentPublicationRecord, DeletedBinding, DirentryBindRecord,
     DirentryUnbindRecord, InodeRecord, MetadataRow, MetadataSegmentRef, RevisionRecord,
     SubtreeTombstoneRecord, TombstoneRowAction,
 };
@@ -316,8 +316,8 @@ fn actor_bytes(actor: &ActorId) -> usize {
     actor.as_str().len()
 }
 
-fn direntry_bytes(direntry: &DeletedDirentry) -> usize {
-    direntry.name_key.as_str().len() + direntry.display_name.as_str().len()
+fn binding_bytes(binding: &DeletedBinding) -> usize {
+    binding.name_key.as_str().len() + binding.display_name.as_str().len()
 }
 
 fn content_ref_bytes(content_ref: &loonfs_api::ContentRef) -> usize {
@@ -344,7 +344,7 @@ impl DecodedRowWeight for MetadataRow {
 
 impl DecodedRowWeight for InodeRecord {
     fn decoded_weight(&self) -> usize {
-        ALLOCATED_ROW_OVERHEAD + self.commit_id.as_str().len() + actor_bytes(&self.created_by)
+        ALLOCATED_ROW_OVERHEAD + self.commit_id.as_str().len() + actor_bytes(&self.committed_by)
     }
 }
 
@@ -372,12 +372,12 @@ impl DecodedRowWeight for RevisionRecord {
 impl DecodedRowWeight for SubtreeTombstoneRecord {
     fn decoded_weight(&self) -> usize {
         let action_bytes = match &self.action {
-            TombstoneRowAction::Set { deleted_direntry } => direntry_bytes(deleted_direntry),
+            TombstoneRowAction::Set { deleted_binding } => binding_bytes(deleted_binding),
             TombstoneRowAction::Revoke { .. } => 0,
         };
         ALLOCATED_ROW_OVERHEAD
             + self.commit_id.as_str().len()
-            + actor_bytes(&self.deleted_by)
+            + actor_bytes(&self.committed_by)
             + action_bytes
     }
 }
@@ -387,11 +387,9 @@ impl DecodedRowWeight for ActiveDeletionRecord {
         match &self.action {
             ActiveDeletionRowAction::Listed {
                 deleted_by,
-                deleted_direntry,
+                deleted_binding,
                 ..
-            } => {
-                ALLOCATED_ROW_OVERHEAD + actor_bytes(deleted_by) + direntry_bytes(deleted_direntry)
-            }
+            } => ALLOCATED_ROW_OVERHEAD + actor_bytes(deleted_by) + binding_bytes(deleted_binding),
             ActiveDeletionRowAction::Removed { .. } => FIXED_ROW_OVERHEAD,
         }
     }
@@ -433,8 +431,8 @@ impl DecodedRowWeight for WalCommitPayload {
                         content_ref_bytes(content_ref)
                     }
                     WalDelta::TombstoneSubtree {
-                        deleted_direntry, ..
-                    } => direntry_bytes(deleted_direntry),
+                        deleted_binding, ..
+                    } => binding_bytes(deleted_binding),
                     WalDelta::AppendAttributesRevision { attributes, .. } => {
                         attributes.logical_bytes()
                     }
@@ -457,7 +455,7 @@ impl DecodedRowWeight for AttributesRevisionRecord {
     fn decoded_weight(&self) -> usize {
         ALLOCATED_ROW_OVERHEAD
             + self.commit_id.as_str().len()
-            + actor_bytes(&self.updated_by)
+            + actor_bytes(&self.committed_by)
             + self.attributes.logical_bytes()
     }
 }
@@ -466,7 +464,7 @@ impl DecodedRowWeight for AccessRevisionRecord {
     fn decoded_weight(&self) -> usize {
         ALLOCATED_ROW_OVERHEAD
             + self.commit_id.as_str().len()
-            + actor_bytes(&self.updated_by)
+            + actor_bytes(&self.committed_by)
             + self.grants.logical_bytes()
     }
 }

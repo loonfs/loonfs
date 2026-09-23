@@ -6,7 +6,7 @@ use super::view::PublishValidationView;
 use crate::error::CoreError;
 use crate::metadata::{BindingIdentity, InodeRecord, RevisionRecord, SubtreeTombstoneRecord};
 use loonfs_api::{
-    next_public_ordinal, AccessGrants, AccessRevisionNo, ActorId, AttributeRevisionNo, Attributes,
+    next_public_ordinal, AccessGrants, AccessRevisionNo, ActorId, Attributes, AttributesRevisionNo,
     ChangeSeq, CommitId, ContentRef, DisplayName, InodeId, InodeKind, NameKey, RevisionNo,
 };
 use loonfs_objectstore::ObjectStore;
@@ -459,7 +459,7 @@ async fn validate_update_attributes<S: ObjectStore + ?Sized>(
     numbering: &mut CommitNumbering,
     op_index: u32,
     inode_id: InodeId,
-    base_attributes_revision_no: AttributeRevisionNo,
+    base_attributes_revision_no: AttributesRevisionNo,
     attributes: &Attributes,
 ) -> Result<ValidatedOp, CoreError> {
     validate_attributes_target_visible(view, inode_id).await?;
@@ -523,10 +523,10 @@ fn next_revision_no(
 
 fn next_attributes_revision_no(
     inode_id: InodeId,
-    base_attributes_revision_no: AttributeRevisionNo,
-) -> Result<AttributeRevisionNo, CommitValidationError> {
+    base_attributes_revision_no: AttributesRevisionNo,
+) -> Result<AttributesRevisionNo, CommitValidationError> {
     next_public_ordinal(base_attributes_revision_no.0)
-        .map(AttributeRevisionNo)
+        .map(AttributesRevisionNo)
         .ok_or(CommitValidationError::UpdateAttributesRevisionOverflow {
             inode_id,
             base_attributes_revision_no,
@@ -585,7 +585,7 @@ async fn validate_attributes_target_visible<S: ObjectStore + ?Sized>(
 async fn validate_inode_attributes_revision_is<S: ObjectStore + ?Sized>(
     view: &PublishValidationView<'_, S>,
     inode_id: InodeId,
-    expected: AttributeRevisionNo,
+    expected: AttributesRevisionNo,
 ) -> Result<Attributes, CoreError> {
     let (actual, attributes) = view.view().attributes_at_visible_seq(inode_id).await?;
     if actual != expected {
@@ -841,15 +841,15 @@ mod ordinal_tests {
     #[test]
     fn attribute_revision_advancement_accepts_the_maximum_and_rejects_the_next_value() {
         assert_eq!(
-            next_attributes_revision_no(InodeId(2), AttributeRevisionNo(MAX_PUBLIC_INTEGER - 1),)
+            next_attributes_revision_no(InodeId(2), AttributesRevisionNo(MAX_PUBLIC_INTEGER - 1),)
                 .expect("advance to public maximum"),
-            AttributeRevisionNo(MAX_PUBLIC_INTEGER)
+            AttributesRevisionNo(MAX_PUBLIC_INTEGER)
         );
         assert!(matches!(
-            next_attributes_revision_no(InodeId(2), AttributeRevisionNo(MAX_PUBLIC_INTEGER),),
+            next_attributes_revision_no(InodeId(2), AttributesRevisionNo(MAX_PUBLIC_INTEGER),),
             Err(CommitValidationError::UpdateAttributesRevisionOverflow {
                 inode_id: InodeId(2),
-                base_attributes_revision_no: AttributeRevisionNo(MAX_PUBLIC_INTEGER),
+                base_attributes_revision_no: AttributesRevisionNo(MAX_PUBLIC_INTEGER),
             })
         ));
     }

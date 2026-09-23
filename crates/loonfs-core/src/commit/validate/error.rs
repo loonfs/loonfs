@@ -2,7 +2,7 @@
 //! validation.
 
 use loonfs_api::{
-    AccessRevisionNo, AttributeRevisionNo, ChangeSeq, ErrorCode, ErrorDetails, InodeId, InodeKind,
+    AccessRevisionNo, AttributesRevisionNo, ChangeSeq, ErrorCode, ErrorDetails, InodeId, InodeKind,
     NameKey, RevisionNo,
 };
 use serde::{Deserialize, Serialize};
@@ -152,8 +152,8 @@ pub enum CommitValidationError {
     )]
     UpdateAttributesBaseRevisionMismatch {
         inode_id: InodeId,
-        expected: AttributeRevisionNo,
-        actual: Option<AttributeRevisionNo>,
+        expected: AttributesRevisionNo,
+        actual: Option<AttributesRevisionNo>,
         precondition_index: Option<u32>,
     },
     #[error(
@@ -161,7 +161,7 @@ pub enum CommitValidationError {
     )]
     UpdateAttributesRevisionOverflow {
         inode_id: InodeId,
-        base_attributes_revision_no: AttributeRevisionNo,
+        base_attributes_revision_no: AttributesRevisionNo,
     },
     #[error(
         "access base revision mismatch for inode `{inode_id}`: {}", revision_mismatch(.expected, .actual)

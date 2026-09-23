@@ -69,9 +69,7 @@ where
             Some(binding) => binding.parent_inode_id,
             None => match reads.find_active_subtree_tombstone(current).await? {
                 Some(tombstone) => match tombstone.action {
-                    TombstoneRowAction::Set { deleted_direntry } => {
-                        deleted_direntry.parent_inode_id
-                    }
+                    TombstoneRowAction::Set { deleted_binding } => deleted_binding.parent_inode_id,
                     _ => break,
                 },
                 None => break,
@@ -123,7 +121,7 @@ mod tests {
         DirentryBindRecord, InodeRecord, MetadataState, MetadataStateBuilder,
         SubtreeTombstoneRecord,
     };
-    use loonfs_api::wire::manifest::{DeletedDirentry, TombstoneGeneration};
+    use loonfs_api::wire::manifest::{DeletedBinding, TombstoneGeneration};
     use loonfs_api::{
         AccessGrants, AccessRevisionNo, ActorId, ChangeSeq, CommitId, DisplayName, InodeKind,
         NameKey, PrincipalId,
@@ -160,10 +158,10 @@ mod tests {
                 } else {
                     InodeKind::Directory
                 },
-                created_seq: ChangeSeq(1),
+                committed_seq: ChangeSeq(1),
                 commit_id: commit_id.clone(),
-                created_by: ActorId::loonfs(),
-                created_at_ms: 1_000,
+                committed_by: ActorId::loonfs(),
+                committed_at_ms: 1_000,
             });
         }
         for (parent, child, name) in [
@@ -193,14 +191,14 @@ mod tests {
             },
             commit_id: commit_id.clone(),
             action: TombstoneRowAction::Set {
-                deleted_direntry: DeletedDirentry {
+                deleted_binding: DeletedBinding {
                     parent_inode_id: InodeId(5),
                     name_key: NameKey::for_display_name(&display_name),
                     display_name,
                 },
             },
-            deleted_at_ms: 1_003,
-            deleted_by: ActorId::loonfs(),
+            committed_at_ms: 1_003,
+            committed_by: ActorId::loonfs(),
         });
         for (inode, boundary, grants) in [
             (
@@ -219,8 +217,8 @@ mod tests {
                 committed_seq: ChangeSeq(2),
                 commit_id: commit_id.clone(),
                 delta_index: 0,
-                updated_by: ActorId::loonfs(),
-                updated_at_ms: 1_002,
+                committed_by: ActorId::loonfs(),
+                committed_at_ms: 1_002,
                 boundary,
                 grants,
             });
@@ -288,10 +286,10 @@ mod tests {
             builder.push_inode(InodeRecord {
                 inode_id,
                 inode_kind: InodeKind::Directory,
-                created_seq: ChangeSeq(1),
+                committed_seq: ChangeSeq(1),
                 commit_id: commit_id.clone(),
-                created_by: ActorId::loonfs(),
-                created_at_ms: 1_000,
+                committed_by: ActorId::loonfs(),
+                committed_at_ms: 1_000,
             });
         }
         for (parent_inode_id, child_inode_id, name) in [

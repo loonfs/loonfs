@@ -2,7 +2,7 @@
 
 use super::{CommitPlan, ResolvedBinding, ValidatedOp};
 use crate::storage::inline_content::InlineContent;
-use loonfs_api::wire::manifest::DeletedDirentry;
+use loonfs_api::wire::manifest::DeletedBinding;
 use loonfs_api::wire::wal::WalDelta;
 use loonfs_api::{InodeKind, RevisionNo};
 
@@ -170,7 +170,7 @@ pub(super) fn materialize_validated_op(op: &ValidatedOp) -> Vec<MaterializedComm
                 WalDelta::TombstoneSubtree {
                     delta_index: *tombstone_delta_index,
                     root_inode_id: *inode_id,
-                    deleted_direntry: deleted_direntry(source_binding),
+                    deleted_binding: deleted_binding(source_binding),
                 },
             );
         }
@@ -211,7 +211,7 @@ pub(super) fn materialize_validated_op(op: &ValidatedOp) -> Vec<MaterializedComm
                 WalDelta::TombstoneSubtree {
                     delta_index: *tombstone_delta_index,
                     root_inode_id: *root_inode_id,
-                    deleted_direntry: deleted_direntry(source_binding),
+                    deleted_binding: deleted_binding(source_binding),
                 },
             );
         }
@@ -295,8 +295,8 @@ pub(super) fn materialize_validated_op(op: &ValidatedOp) -> Vec<MaterializedComm
 /// The binding a delete retires, as the tombstone records it: the same
 /// three fields the unbind delta carries, minus the ones that identify the
 /// exact bind generation being retired.
-fn deleted_direntry(binding: &ResolvedBinding) -> DeletedDirentry {
-    DeletedDirentry {
+fn deleted_binding(binding: &ResolvedBinding) -> DeletedBinding {
+    DeletedBinding {
         parent_inode_id: binding.parent_inode_id,
         name_key: binding.name_key.clone(),
         display_name: binding.display_name.clone(),

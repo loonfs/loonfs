@@ -85,7 +85,7 @@ impl MetadataState {
     ) -> Option<InodeRecord> {
         self.inodes
             .iter()
-            .find(|inode| inode.inode_id == inode_id && inode.created_seq <= base_seq)
+            .find(|inode| inode.inode_id == inode_id && inode.committed_seq <= base_seq)
             .cloned()
     }
 

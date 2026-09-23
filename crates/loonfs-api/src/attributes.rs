@@ -217,7 +217,7 @@ numeric_id! {
     ///
     /// It starts at zero and increases when the map changes; clients can guard
     /// updates but cannot query earlier maps.
-    AttributeRevisionNo,
+    AttributesRevisionNo,
     public_ordinal,
     schema_description = "Revision number for an inode's attributes. It starts at 0 and increases whenever the attribute map changes."
 }
@@ -225,7 +225,7 @@ numeric_id! {
 #[cfg(test)]
 mod tests {
     use super::{
-        AttributeKey, AttributeRevisionNo, AttributeValue, Attributes, AttributesError,
+        AttributeKey, AttributeValue, Attributes, AttributesError, AttributesRevisionNo,
         MAX_ATTRIBUTES_TOTAL_BYTES, MAX_ATTRIBUTE_ENTRIES, MAX_ATTRIBUTE_KEY_BYTES,
         MAX_ATTRIBUTE_VALUE_BYTES,
     };
@@ -504,7 +504,7 @@ mod tests {
 
     #[test]
     fn attribute_revision_no_serializes_like_a_revision_no() {
-        let revision = AttributeRevisionNo(7);
+        let revision = AttributesRevisionNo(7);
 
         assert_eq!(
             serde_json::to_string(&revision).expect("serialize attribute revision"),
@@ -515,10 +515,10 @@ mod tests {
             "7"
         );
         assert_eq!(
-            serde_json::from_str::<AttributeRevisionNo>("7").expect("deserialize"),
+            serde_json::from_str::<AttributesRevisionNo>("7").expect("deserialize"),
             revision
         );
-        assert_eq!(AttributeRevisionNo::from(7), revision);
+        assert_eq!(AttributesRevisionNo::from(7), revision);
         assert_eq!(revision.to_string(), "7");
     }
 }

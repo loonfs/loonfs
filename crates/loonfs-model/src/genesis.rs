@@ -10,10 +10,10 @@ pub fn bootstrap_metadata_state(created_at_ms: u64) -> MetadataState {
         inodes: vec![InodeRecord {
             inode_id: ROOT_INODE_ID,
             inode_kind: InodeKind::Directory,
-            created_seq: ChangeSeq(0),
+            committed_seq: ChangeSeq(0),
             commit_id: loonfs_api::wire::control::genesis_commit_id(),
-            created_by: ActorId::loonfs(),
-            created_at_ms,
+            committed_by: ActorId::loonfs(),
+            committed_at_ms: created_at_ms,
         }],
         ..MetadataState::default()
     }

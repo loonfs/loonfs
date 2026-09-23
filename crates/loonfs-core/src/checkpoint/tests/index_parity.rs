@@ -9,9 +9,9 @@ enum PreCommitIdMetadataRow {
     Inode {
         inode_id: InodeId,
         inode_kind: loonfs_api::InodeKind,
-        created_seq: ChangeSeq,
-        created_by: loonfs_api::ActorId,
-        created_at_ms: u64,
+        committed_seq: ChangeSeq,
+        committed_by: loonfs_api::ActorId,
+        committed_at_ms: u64,
     },
 }
 
@@ -735,9 +735,9 @@ async fn manifest_load_names_the_segment_codec_for_a_pre_commit_id_row() {
             &PreCommitIdMetadataRow::Inode {
                 inode_id: loonfs_api::ROOT_INODE_ID,
                 inode_kind: loonfs_api::InodeKind::Directory,
-                created_seq: ChangeSeq(0),
-                created_by: loonfs_api::ActorId::loonfs(),
-                created_at_ms: context.now_ms,
+                committed_seq: ChangeSeq(0),
+                committed_by: loonfs_api::ActorId::loonfs(),
+                committed_at_ms: context.now_ms,
             },
         )
         .expect("encode pre-change row");

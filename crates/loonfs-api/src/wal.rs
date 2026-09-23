@@ -3,9 +3,9 @@
 
 use crate::digest::sha256_digest;
 use crate::envelope::{self, EnvelopeCodecError, EnvelopeProbe};
-use crate::manifest::{DeletedDirentry, TombstoneGeneration};
+use crate::manifest::{DeletedBinding, TombstoneGeneration};
 use crate::{
-    AccessGrants, AccessRevisionNo, AttributeRevisionNo, Attributes, ChangeSeq, CommitFingerprint,
+    AccessGrants, AccessRevisionNo, Attributes, AttributesRevisionNo, ChangeSeq, CommitFingerprint,
     CommitId, ContentId, ContentRef, DisplayName, InodeId, InodeKind, NameKey, NamespaceId,
     RevisionNo, WalNo, WriterEpoch,
 };
@@ -152,7 +152,7 @@ pub enum WalDelta {
         root_inode_id: InodeId,
         /// The binding the delete removed, carried so the deleted name
         /// survives on the immortal tombstone row after unbind rows age out.
-        deleted_direntry: DeletedDirentry,
+        deleted_binding: DeletedBinding,
     },
     /// Revokes exactly one subtree tombstone — the one recorded at `target`
     /// — making the subtree eligible for visibility again once re-bound. An
@@ -179,7 +179,7 @@ pub enum WalDelta {
         inode_id: InodeId,
         /// Monotonic per-inode attribute revision, exactly one past the
         /// revision the update was validated against.
-        attributes_revision_no: AttributeRevisionNo,
+        attributes_revision_no: AttributesRevisionNo,
         /// The inode's complete attribute map after this update.
         attributes: Attributes,
     },

@@ -5,7 +5,7 @@ use super::CommitFingerprint;
 
 use loonfs_api::wire::manifest::TombstoneGeneration;
 use loonfs_api::{
-    AccessGrants, AccessRevisionNo, ActorId, AttributeRevisionNo, Attributes, ChangeSeq, CommitId,
+    AccessGrants, AccessRevisionNo, ActorId, Attributes, AttributesRevisionNo, ChangeSeq, CommitId,
     ContentRef, DisplayName, InodeId, NameKey, NamespaceId, RevisionNo, WriterEpoch,
 };
 
@@ -158,7 +158,7 @@ pub(crate) enum ValidatedOp {
     UpdateAttributes {
         op_index: u32,
         inode_id: InodeId,
-        attributes_revision_no: AttributeRevisionNo,
+        attributes_revision_no: AttributesRevisionNo,
         attributes: Attributes,
         attributes_delta_index: u32,
     },

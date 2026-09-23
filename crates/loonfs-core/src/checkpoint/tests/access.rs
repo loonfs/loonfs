@@ -17,8 +17,8 @@ fn access_record(
         committed_seq: ChangeSeq(seq),
         commit_id: CommitId::parse(format!("c_access_{seq}")).expect("commit id"),
         delta_index: 0,
-        updated_by: loonfs_api::ActorId::loonfs(),
-        updated_at_ms: 1_000 + seq,
+        committed_by: loonfs_api::ActorId::loonfs(),
+        committed_at_ms: 1_000 + seq,
         boundary,
         grants: AccessGrants::new(BTreeMap::from([(
             PrincipalId::parse("prn_ada").expect("principal id"),

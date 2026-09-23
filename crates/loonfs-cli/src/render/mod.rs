@@ -374,7 +374,7 @@ mod tests {
     fn stat_with_attribute(value: AttributeValue) -> CommandOutput {
         let mut entry = path_entry("/docs", Some("docs"));
         entry.attributes = Some(AttributesProjection {
-            attributes_revision_no: loonfs_api::AttributeRevisionNo(1),
+            attributes_revision_no: loonfs_api::AttributesRevisionNo(1),
             attributes_updated_by: Some(loonfs_api::ActorId::loonfs()),
             attributes_updated_at_ms: Some(1_752_624_000_000),
             attributes: loonfs_api::Attributes::new(std::collections::BTreeMap::from([(

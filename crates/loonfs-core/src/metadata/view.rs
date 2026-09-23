@@ -20,7 +20,7 @@ use loonfs_api::wire::manifest::lookup_keys;
 use loonfs_api::wire::sst_blocks::string_prefix_upper_bound;
 use loonfs_api::wire::wal::WalCommitPayload;
 use loonfs_api::{
-    AbsolutePath, AccessRevisionNo, AttributeRevisionNo, Attributes, ChangeSeq, CommitId, InodeId,
+    AbsolutePath, AccessRevisionNo, Attributes, AttributesRevisionNo, ChangeSeq, CommitId, InodeId,
     InodeKind, NameKey, RevisionNo,
 };
 #[cfg(test)]
@@ -82,7 +82,7 @@ pub(crate) struct MetadataView<'a, 'store, S: ObjectStore + ?Sized> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AttributesProjection {
-    pub(crate) revision_no: AttributeRevisionNo,
+    pub(crate) revision_no: AttributesRevisionNo,
     pub(crate) attributes: Attributes,
     pub(crate) updated_by: Option<loonfs_api::ActorId>,
     pub(crate) updated_at_ms: Option<u64>,
@@ -495,12 +495,12 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     pub(crate) async fn attributes_at_visible_seq(
         &self,
         inode_id: InodeId,
-    ) -> Result<(AttributeRevisionNo, Attributes), CoreError> {
+    ) -> Result<(AttributesRevisionNo, Attributes), CoreError> {
         Ok(self
             .latest_attributes_revision(inode_id)
             .await?
             .map(|record| (record.attributes_revision_no, record.attributes))
-            .unwrap_or_else(|| (AttributeRevisionNo(0), Attributes::default())))
+            .unwrap_or_else(|| (AttributesRevisionNo(0), Attributes::default())))
     }
 
     /// Returns the inode's attributes with the actor and timestamp from the
@@ -515,11 +515,11 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
             .map(|record| AttributesProjection {
                 revision_no: record.attributes_revision_no,
                 attributes: record.attributes,
-                updated_by: Some(record.updated_by),
-                updated_at_ms: Some(record.updated_at_ms),
+                updated_by: Some(record.committed_by),
+                updated_at_ms: Some(record.committed_at_ms),
             })
             .unwrap_or_else(|| AttributesProjection {
-                revision_no: AttributeRevisionNo(0),
+                revision_no: AttributesRevisionNo(0),
                 attributes: Attributes::default(),
                 updated_by: None,
                 updated_at_ms: None,
@@ -1030,7 +1030,7 @@ impl<S: ObjectStore + ?Sized> MetadataVisibilityReads for MetadataViewReads<'_, 
 
 fn attributes_order_key(
     record: &AttributesRevisionRecord,
-) -> (AttributeRevisionNo, ChangeSeq, u32) {
+) -> (AttributesRevisionNo, ChangeSeq, u32) {
     (
         record.attributes_revision_no,
         record.committed_seq,

@@ -128,7 +128,7 @@ Tombstone events are ordered by `(seq, delta_index)`. A `set` event starts a del
 
 An undelete request identifies the deletion by inode and committed deletion sequence. Validation must confirm the currently active deletion. A request for a deletion that is no longer active returns `not_deleted`; it must not cancel a later deletion. A deletion created earlier in the same uncommitted request cannot yet be addressed by its committed deletion sequence. Only the root of a deletion can be undeleted independently; descendants hidden by that root do not each have a separate deletion to revoke.
 
-A `set` stores the removed binding in `deleted_direntry`, with `parent_inode_id`, `name_key`, and `display_name`. This information remains available after old bind and unbind rows are compacted. An undelete restores that parent and name unless the request supplies a different destination. A `revoke` stores its target generation and must not contain a deleted binding.
+A `set` stores the removed binding in `deleted_binding`, with `parent_inode_id`, `name_key`, and `display_name`. This information remains available after old bind and unbind rows are compacted. An undelete restores that parent and name unless the request supplies a different destination. A `revoke` stores its target generation and must not contain a deleted binding.
 
 The derived `active_deletions` family supports listing recoverable deletions in deletion-sequence order. A `set` produces a `listed` row. A revoke produces a `removed` row for the same `(deletion_seq, root_inode_id)`. Removal rows sort before listed rows, so a scan can suppress cancelled entries. Tombstone events remain authoritative.
 
@@ -148,13 +148,12 @@ Attribute revision numbers support optimistic concurrency. The API does not expo
 
 Commits also record a timestamp and optional message. An actor is a required, application-supplied opaque identifier recorded with a logical commit. LoonFS preserves it without authenticating it or resolving profile information. The application supplies a stable identifier with the identity scope it needs. An actor is attribution, not an authorization decision.
 
+Every row that records an event copies the commit's actor and timestamp as `committed_by` and `committed_at_ms`, beside the `committed_seq` and `commit_id` of that commit. The API projects them under the names the API specification defines, such as `created_by` for an inode's creating commit and `attributes_updated_by` for its newest attribute revision.
+
 | Metadata | Actor and timestamp fields |
 | --- | --- |
-| Inode creation | `created_by`, `created_at_ms` |
-| File revision | `committed_by`, `committed_at_ms` |
-| Tombstone event and listed active deletion | `deleted_by`, `deleted_at_ms` |
-| Attribute revision | `updated_by`, `updated_at_ms` |
-| Access revision | `updated_by`, `updated_at_ms` |
+| Inode, file revision, tombstone event, attribute revision, access revision, commit | `committed_by`, `committed_at_ms` |
+| Listed active deletion | `deleted_by`, `deleted_at_ms` |
 | Bind and unbind | Neither actor nor timestamp |
 
 The root inode in a newly created namespace is attributed to the actor id `loonfs`. A fork inherits the root inode from its source basis; the target manifest's creation time is the creation time of the namespace, not a rewrite of inherited inode timestamps.
@@ -1222,12 +1221,12 @@ Each commit contains `seq`, `commit_id`, `committed_by`, `semantic_commit_finger
 | `bind_direntry` | `delta_index`, `parent_inode_id`, `name_key`, `display_name`, `child_inode_id` |
 | `unbind_direntry` | `delta_index`, `parent_inode_id`, `name_key`, `display_name`, `child_inode_id`, `bind_seq`, `bind_delta_index` |
 | `append_file_revision` | `delta_index`, `inode_id`, `revision_no`, `content_ref` |
-| `tombstone_subtree` | `delta_index`, `root_inode_id`, `deleted_direntry` |
+| `tombstone_subtree` | `delta_index`, `root_inode_id`, `deleted_binding` |
 | `revoke_subtree_tombstone` | `delta_index`, `root_inode_id`, `target` |
 | `append_attributes_revision` | `delta_index`, `inode_id`, `attributes_revision_no`, `attributes` |
 | `append_access_revision` | `delta_index`, `inode_id`, `access_revision_no`, `boundary`, `grants` |
 
-A delta's own commit sequence is implicit in its containing commit. A tombstone target is `{seq, delta_index}`. A deleted directory entry is `{parent_inode_id, name_key, display_name}`. Attribute and access deltas contain the complete resulting state, including an empty map after a clear.
+A delta's own commit sequence is implicit in its containing commit. A tombstone target is `{seq, delta_index}`. A deleted binding is `{parent_inode_id, name_key, display_name}`. Attribute and access deltas contain the complete resulting state, including an empty map after a clear.
 
 `inline_content` is a list of `{content_id, bytes}`, where `bytes` is a CBOR byte string; the field is omitted when empty and defaults to an empty list when absent. This field is part of the version 1 format, and the reference it accompanies is an ordinary `blob_v1` reference.
 
@@ -1249,23 +1248,23 @@ Rows are kind-tagged CBOR objects in the data blocks. The row-kind schema and th
 
 | Row kind | Fields after `kind` |
 | --- | --- |
-| `inode` | `inode_id`, `inode_kind`, `created_seq`, `commit_id`, `created_by`, `created_at_ms` |
+| `inode` | `inode_id`, `inode_kind`, `committed_seq`, `commit_id`, `committed_by`, `committed_at_ms` |
 | `direntry_bind` | `parent_inode_id`, `name_key`, `display_name`, `child_inode_id`, `bind_seq`, `bind_delta_index` |
 | `direntry_unbind` | The bind fields, followed by `unbind_seq`, `unbind_delta_index` |
-| `file_revision` | `inode_id`, `revision_no`, `committed_seq`, `commit_id`, `committed_at_ms`, `committed_by`, `delta_index`, `content_ref` |
-| `tombstone` | `root_inode_id`, `generation`, `commit_id`, `action`, `deleted_at_ms`, `deleted_by` |
+| `file_revision` | `inode_id`, `revision_no`, `committed_seq`, `commit_id`, `committed_by`, `committed_at_ms`, `delta_index`, `content_ref` |
+| `tombstone` | `root_inode_id`, `generation`, `commit_id`, `action`, `committed_by`, `committed_at_ms` |
 | `active_deletion` | `root_inode_id`, `deletion_seq`, `action` |
 | `commit_receipt` | `commit_id`, `committed_seq`, `semantic_commit_fingerprint` |
 | `commit` | `seq`, `commit_id`, `committed_by`, `semantic_commit_fingerprint`, `committed_at_ms`, `message?`, `deltas` |
 | `content_publication` | `content_id`, `committed_seq`, `delta_index` |
-| `attributes_revision` | `inode_id`, `attributes_revision_no`, `committed_seq`, `commit_id`, `delta_index`, `updated_by`, `updated_at_ms`, `attributes` |
-| `access_revision` | `inode_id`, `access_revision_no`, `committed_seq`, `commit_id`, `delta_index`, `updated_by`, `updated_at_ms`, `boundary`, `grants` |
+| `attributes_revision` | `inode_id`, `attributes_revision_no`, `committed_seq`, `commit_id`, `delta_index`, `committed_by`, `committed_at_ms`, `attributes` |
+| `access_revision` | `inode_id`, `access_revision_no`, `committed_seq`, `commit_id`, `delta_index`, `committed_by`, `committed_at_ms`, `boundary`, `grants` |
 
 A `commit` row is the WAL commit record of A.5 without its inline content. The `inline_content` field is omitted, and a row that carries one is invalid.
 
-For a tombstone, `generation` is `{seq, delta_index}`. A set action is `{"kind":"set","deleted_direntry":...}`. A revoke action is `{"kind":"revoke","target":...}`. The event actor and timestamp describe that event, including when the action is a revoke, despite the field names `deleted_by` and `deleted_at_ms`.
+For a tombstone, `generation` is `{seq, delta_index}`. A set action is `{"kind":"set","deleted_binding":...}`. A revoke action is `{"kind":"revoke","target":...}`.
 
-An active-deletion `listed` action contains `inode_kind`, `deleted_at_ms`, `deleted_by`, and `deleted_direntry`. A `removed` action contains `revocation_seq`. These are nested action fields, not additional top-level fields on every active-deletion row. The `inode_kind` is copied from the deleted root inode. A `listed` action without it fails decoding.
+An active-deletion `listed` action contains `inode_kind`, `deleted_at_ms`, `deleted_by`, and `deleted_binding`. A `removed` action contains `revocation_seq`. These are nested action fields, not additional top-level fields on every active-deletion row. The `inode_kind` is copied from the deleted root inode. A `listed` action without it fails decoding.
 
 The fixed row-key prefixes are followed by hyphen-separated components. Unsigned 64-bit components use 20 decimal digits and unsigned 32-bit components use 10, with leading zeroes. Variable names and commit IDs are the lowercase hexadecimal encoding of their UTF-8 bytes. Content-publication keys use the content ID directly. This avoids interpreting a name's own punctuation as a component delimiter.
 

@@ -349,7 +349,7 @@ impl BindingRetention {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use loonfs_api::{AccessRevisionNo, AttributeRevisionNo, DisplayName, InodeId, NameKey};
+    use loonfs_api::{AccessRevisionNo, AttributesRevisionNo, DisplayName, InodeId, NameKey};
 
     fn floor() -> ChangeSeq {
         ChangeSeq(100)
@@ -370,20 +370,20 @@ mod tests {
                 committed_seq: ChangeSeq(committed_seq),
                 commit_id,
                 delta_index: 0,
-                updated_by: loonfs_api::ActorId::loonfs(),
-                updated_at_ms: 1_000 + committed_seq,
+                committed_by: loonfs_api::ActorId::loonfs(),
+                committed_at_ms: 1_000 + committed_seq,
                 boundary: false,
                 grants: Default::default(),
             })
         } else {
             MetadataRow::AttributesRevision(crate::metadata::AttributesRevisionRecord {
                 inode_id: InodeId(inode),
-                attributes_revision_no: AttributeRevisionNo(revision),
+                attributes_revision_no: AttributesRevisionNo(revision),
                 committed_seq: ChangeSeq(committed_seq),
                 commit_id,
                 delta_index: 0,
-                updated_by: loonfs_api::ActorId::loonfs(),
-                updated_at_ms: 1_000 + committed_seq,
+                committed_by: loonfs_api::ActorId::loonfs(),
+                committed_at_ms: 1_000 + committed_seq,
                 attributes: Default::default(),
             })
         }
@@ -478,7 +478,7 @@ mod tests {
                 inode_kind: loonfs_api::InodeKind::Directory,
                 deleted_at_ms: 1_000,
                 deleted_by: loonfs_api::ActorId::loonfs(),
-                deleted_direntry: loonfs_api::wire::manifest::DeletedDirentry {
+                deleted_binding: loonfs_api::wire::manifest::DeletedBinding {
                     parent_inode_id: InodeId(1),
                     name_key: loonfs_api::NameKey::parse("deleted").expect("valid name key"),
                     display_name: loonfs_api::DisplayName::parse("deleted")

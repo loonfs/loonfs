@@ -3,9 +3,10 @@
 use super::ContentToken;
 use crate::SnapshotId;
 use crate::{
-    AbsolutePath, AccessGrants, AccessRevisionNo, ActorId, AttributeKey, AttributeRevisionNo,
-    AttributeValue, BindingGeneration, ChangeSeq, CheckpointId, CommitId, ContentRef, DisplayName,
-    InodeId, ManifestNo, NamespaceGeneration, NamespaceId, RevisionNo, WriterEpoch, WriterId,
+    AbsolutePath, AccessGrants, AccessRevisionNo, ActorId, AttributeKey, AttributeValue,
+    AttributesRevisionNo, BindingGeneration, ChangeSeq, CheckpointId, CommitId, ContentRef,
+    DisplayName, InodeId, ManifestNo, NamespaceGeneration, NamespaceId, RevisionNo, WriterEpoch,
+    WriterId,
 };
 use crate::{NamespaceAccess, PrincipalId, PrincipalScope};
 use serde::{Deserialize, Serialize};
@@ -125,11 +126,11 @@ pub struct ErrorDetails {
     /// Attribute revision the request expected to be current.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
-    pub expected_attributes_revision_no: Option<AttributeRevisionNo>,
+    pub expected_attributes_revision_no: Option<AttributesRevisionNo>,
     /// Attribute revision that is actually current for the inode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
-    pub actual_attributes_revision_no: Option<AttributeRevisionNo>,
+    pub actual_attributes_revision_no: Option<AttributesRevisionNo>,
     /// Access revision the request expected to be current.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
@@ -424,7 +425,7 @@ impl DestinationPrecondition {
 /// Rejects an attribute revision precondition without an inode precondition.
 pub fn validate_attributes_precondition(
     expected_inode_id: Option<InodeId>,
-    expected_attributes_revision_no: Option<AttributeRevisionNo>,
+    expected_attributes_revision_no: Option<AttributesRevisionNo>,
 ) -> Result<(), DestinationPreconditionError> {
     validate_revision_precondition(
         expected_inode_id,
@@ -708,7 +709,7 @@ pub enum FilesystemOperation {
         /// With an inode precondition, the attribute revision that must still be current.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[cfg_attr(feature = "openapi", schema(nullable = false))]
-        expected_attributes_revision_no: Option<AttributeRevisionNo>,
+        expected_attributes_revision_no: Option<AttributesRevisionNo>,
     },
     /// Replace the access row of the inode one path resolves to. The root
     /// path is a valid target.
@@ -802,7 +803,7 @@ pub enum CommitPrecondition {
         #[serde(with = "crate::public_inode_id")]
         inode_id: InodeId,
         /// Attribute revision observed by the caller.
-        expected_attributes_revision_no: AttributeRevisionNo,
+        expected_attributes_revision_no: AttributesRevisionNo,
     },
     /// Requires a visible inode with the access revision the caller read.
     #[cfg_attr(
@@ -1822,7 +1823,7 @@ mod tests {
             )]),
             remove: vec![attribute_key("draft")],
             expected_inode_id: Some(InodeId(7)),
-            expected_attributes_revision_no: Some(AttributeRevisionNo(3)),
+            expected_attributes_revision_no: Some(AttributesRevisionNo(3)),
         };
         assert_eq!(
             serde_json::to_value(&update_attributes).expect("update attributes op json"),

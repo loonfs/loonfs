@@ -508,7 +508,7 @@ async fn rights_gate_operations_and_absence_hides_the_inode() {
                 )]),
                 remove: Vec::new(),
                 expected_inode_id: Some(wrong_inode),
-                expected_attributes_revision_no: Some(loonfs_api::AttributeRevisionNo(0)),
+                expected_attributes_revision_no: Some(loonfs_api::AttributesRevisionNo(0)),
             },
             Some(ErrorCode::PathNotFound),
         ),

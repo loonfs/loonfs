@@ -174,7 +174,7 @@ impl MetadataIndexes {
     }
 
     pub(super) fn record_inode(&mut self, record: &InodeRecord) {
-        self.indexed_seq = self.indexed_seq.max(record.created_seq);
+        self.indexed_seq = self.indexed_seq.max(record.committed_seq);
         self.inode_by_id.insert(record.inode_id, record.clone());
     }
 

@@ -215,14 +215,14 @@ fn event_from_op_deltas(
         // DeleteFile / DeleteSubtree: retire the binding, hide the subtree.
         [WalDelta::UnbindDirentry { child_inode_id, .. }, WalDelta::TombstoneSubtree {
             root_inode_id,
-            deleted_direntry,
+            deleted_binding,
             ..
         }] if child_inode_id == root_inode_id => FilesystemChange::Deleted {
             inode_id: *root_inode_id,
             deleted_binding: loonfs_api::v0::DirectoryBinding {
-                parent_inode_id: deleted_direntry.parent_inode_id,
-                name_key: deleted_direntry.name_key.clone(),
-                display_name: deleted_direntry.display_name.clone(),
+                parent_inode_id: deleted_binding.parent_inode_id,
+                name_key: deleted_binding.name_key.clone(),
+                display_name: deleted_binding.display_name.clone(),
             },
         },
         // Undelete: revoke the exact deletion generation, re-bind the root.
@@ -301,7 +301,7 @@ mod tests {
     use loonfs_api::v0::FilesystemChange;
     use loonfs_api::wire::wal::WalDelta;
     use loonfs_api::{
-        AttributeKey, AttributeRevisionNo, AttributeValue, Attributes, ChangeSeq, EffectiveLimit,
+        AttributeKey, AttributeValue, Attributes, AttributesRevisionNo, ChangeSeq, EffectiveLimit,
         InodeId, NamespaceId,
     };
     use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -325,7 +325,7 @@ mod tests {
         WalDelta::AppendAttributesRevision {
             delta_index,
             inode_id: InodeId(7),
-            attributes_revision_no: AttributeRevisionNo(3),
+            attributes_revision_no: AttributesRevisionNo(3),
             attributes: attributes(),
         }
     }
@@ -390,7 +390,7 @@ mod tests {
                 .expect("map the operation"),
             FilesystemChange::AttributesChanged {
                 inode_id: InodeId(7),
-                attributes_revision_no: AttributeRevisionNo(3),
+                attributes_revision_no: AttributesRevisionNo(3),
                 attributes: attributes(),
             }
         );

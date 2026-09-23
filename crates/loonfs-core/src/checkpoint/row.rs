@@ -109,7 +109,7 @@ pub(super) fn manifest_rows_for_family_after_seq(
 
 pub(super) fn manifest_row_commit_seq(row: &MetadataRow) -> ChangeSeq {
     match row {
-        MetadataRow::Inode(record) => record.created_seq,
+        MetadataRow::Inode(record) => record.committed_seq,
         MetadataRow::DirentryBind(record) => record.bind_seq,
         MetadataRow::DirentryUnbind(record) => record.unbind_seq,
         MetadataRow::FileRevision(record) => record.committed_seq,

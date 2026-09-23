@@ -84,7 +84,7 @@ effective(subject, inode):
 
 The walk is the one every read already performs to find a covering subtree tombstone. It is bounded by the path depth limit. For a listing, the directory's effective rights are computed once and each child inherits them in constant time; only a child whose own row is a boundary differs.
 
-A deleted item's own row and boundary are evaluated first. Only then does the walk follow the parent saved in the tombstone's `deleted_direntry` into that parent's current ancestry. The tombstone repairs one missing edge; it never replaces or bypasses the item's row. A descendant inside a deleted subtree walks normal ancestry up to the detached deletion root and substitutes the saved edge there. Deletion itself needs no descendant scan.
+A deleted item's own row and boundary are evaluated first. Only then does the walk follow the parent saved in the tombstone's `deleted_binding` into that parent's current ancestry. The tombstone repairs one missing edge; it never replaces or bypasses the item's row. A descendant inside a deleted subtree walks normal ancestry up to the detached deletion root and substitutes the saved edge there. Deletion itself needs no descendant scan.
 
 ## Names, paths, and hidden items
 
@@ -231,8 +231,8 @@ An inode that has direct grants or a boundary has one row in the by-inode family
   "committed_seq": 118,
   "commit_id": "cmt_...",
   "delta_index": 0,
-  "updated_by": "usr_8f3c",
-  "updated_at_ms": 1789776000000,
+  "committed_by": "usr_8f3c",
+  "committed_at_ms": 1789776000000,
   "boundary": false,
   "grants": {
     "prn_550e8400": ["read", "history", "write"],

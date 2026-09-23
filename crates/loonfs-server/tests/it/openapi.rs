@@ -1554,7 +1554,7 @@ fn openapi_caps_public_ordinals_and_uses_string_inode_ids() {
     for name in [
         "RevisionNo",
         "ChangeSeq",
-        "AttributeRevisionNo",
+        "AttributesRevisionNo",
         "ManifestNo",
         "RunNo",
         "WriterEpoch",

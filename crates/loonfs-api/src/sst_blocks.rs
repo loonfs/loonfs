@@ -800,11 +800,11 @@ mod tests {
         let row = MetadataRow::Inode(crate::manifest::InodeRecord {
             inode_id: InodeId(inode_id),
             inode_kind: InodeKind::File,
-            created_seq: ChangeSeq(inode_id),
+            committed_seq: ChangeSeq(inode_id),
             commit_id: crate::CommitId::parse(format!("c_row_{inode_id}"))
                 .expect("valid commit id"),
-            created_by: crate::ActorId::loonfs(),
-            created_at_ms: inode_id,
+            committed_by: crate::ActorId::loonfs(),
+            committed_at_ms: inode_id,
         });
         let key = row.row_key();
         (key.clone(), key, row)

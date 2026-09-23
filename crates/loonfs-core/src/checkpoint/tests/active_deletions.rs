@@ -13,7 +13,7 @@ use crate::path::read::load_current_metadata_view;
 use crate::{NamespaceEngine, RuntimeReadContext};
 use loonfs_api::v0::DirectoryBinding;
 use loonfs_api::wire::manifest::{
-    ActiveDeletionRowAction, DeletedDirentry, InodeRecord, TombstoneGeneration,
+    ActiveDeletionRowAction, DeletedBinding, InodeRecord, TombstoneGeneration,
 };
 use loonfs_api::{AttributeInclusion, InodeKind};
 use loonfs_api::{DisplayName, Page, PageRequest, TrashEntry, TrashPageCursor};
@@ -31,10 +31,10 @@ fn tombstone_set(root_inode_id: InodeId, seq: u64, name: &str) -> SubtreeTombsto
         root_inode_id,
         generation: generation(seq),
         commit_id: CommitId::parse(format!("c_tombstone_{seq}")).expect("commit id"),
-        deleted_at_ms: 1_000 + seq,
-        deleted_by: loonfs_api::ActorId::loonfs(),
+        committed_at_ms: 1_000 + seq,
+        committed_by: loonfs_api::ActorId::loonfs(),
         action: TombstoneRowAction::Set {
-            deleted_direntry: DeletedDirentry {
+            deleted_binding: DeletedBinding {
                 parent_inode_id: InodeId(1),
                 name_key: NameKey::parse(name).expect("name key"),
                 display_name: DisplayName::parse(name).expect("display name"),
@@ -48,8 +48,8 @@ fn tombstone_revoke(root_inode_id: InodeId, seq: u64, target_seq: u64) -> Subtre
         root_inode_id,
         generation: generation(seq),
         commit_id: CommitId::parse(format!("c_tombstone_{seq}")).expect("commit id"),
-        deleted_at_ms: 1_000 + seq,
-        deleted_by: loonfs_api::ActorId::loonfs(),
+        committed_at_ms: 1_000 + seq,
+        committed_by: loonfs_api::ActorId::loonfs(),
         action: TombstoneRowAction::Revoke {
             target: generation(target_seq),
         },
@@ -66,10 +66,10 @@ fn state_from_tombstones(tombstones: Vec<SubtreeTombstoneRecord>) -> MetadataSta
         builder.push_inode(InodeRecord {
             inode_id,
             inode_kind: InodeKind::File,
-            created_seq: ChangeSeq(0),
+            committed_seq: ChangeSeq(0),
             commit_id: CommitId::parse("c_initial").expect("commit id"),
-            created_by: loonfs_api::ActorId::loonfs(),
-            created_at_ms: 1_000,
+            committed_by: loonfs_api::ActorId::loonfs(),
+            committed_at_ms: 1_000,
         });
     }
     for tombstone in tombstones {
@@ -349,8 +349,8 @@ fn trash_by_walking_every_tombstone(state: &MetadataState, head_seq: ChangeSeq) 
         .into_iter()
         .filter_map(|(root_inode_id, records)| {
             let active = active_tombstone_from_records(records, head_seq)?;
-            let deleted_direntry = match active.action {
-                TombstoneRowAction::Set { deleted_direntry } => deleted_direntry,
+            let deleted_binding = match active.action {
+                TombstoneRowAction::Set { deleted_binding } => deleted_binding,
                 TombstoneRowAction::Revoke { .. } => {
                     panic!("the active tombstone is a set by construction")
                 }
@@ -362,12 +362,12 @@ fn trash_by_walking_every_tombstone(state: &MetadataState, head_seq: ChangeSeq) 
                     .expect("deletion root")
                     .inode_kind,
                 deletion_seq: active.generation.seq,
-                deleted_at_ms: active.deleted_at_ms,
-                deleted_by: active.deleted_by,
+                deleted_at_ms: active.committed_at_ms,
+                deleted_by: active.committed_by,
                 deleted_binding: DirectoryBinding {
-                    parent_inode_id: deleted_direntry.parent_inode_id,
-                    name_key: deleted_direntry.name_key,
-                    display_name: deleted_direntry.display_name,
+                    parent_inode_id: deleted_binding.parent_inode_id,
+                    name_key: deleted_binding.name_key,
+                    display_name: deleted_binding.display_name,
                 },
             })
         })

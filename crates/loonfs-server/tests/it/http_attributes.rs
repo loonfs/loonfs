@@ -6,7 +6,7 @@
 
 use crate::common::http_split_support::*;
 use crate::common::{collect_path_entries, start_server};
-use loonfs_api::AttributeRevisionNo;
+use loonfs_api::AttributesRevisionNo;
 use loonfs_client::{
     ListPathEntriesOptions, NamespacePath, PutFileOptions, StatPathOptions, UpdateAttributesOptions,
 };
@@ -235,7 +235,7 @@ async fn the_client_round_trips_the_read_options() {
         stat.attributes
             .as_ref()
             .map(|projection| projection.attributes_revision_no),
-        Some(AttributeRevisionNo(1))
+        Some(AttributesRevisionNo(1))
     );
 
     let without = harness

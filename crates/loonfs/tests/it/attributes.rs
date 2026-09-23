@@ -7,7 +7,7 @@
 use crate::common::*;
 use loonfs::publish::{parse_mutation_path, CommitRequest, FilesystemOperation};
 use loonfs::{
-    AttributeRevisionNo, CommitId, CreateNamespaceOptions, ListPathEntriesOptions, PageRequest,
+    AttributesRevisionNo, CommitId, CreateNamespaceOptions, ListPathEntriesOptions, PageRequest,
     PutFileOptions, StatPathOptions, UpdateAttributesOptions,
 };
 use loonfs_api::semantic_commit_fingerprint;
@@ -99,7 +99,7 @@ fn maximum_small_attribute_updates_reopen_after_one_wal_publication() {
     let projection = entry.attributes.expect("attributes");
     assert_eq!(
         projection.attributes_revision_no,
-        AttributeRevisionNo(1 + loonfs::publish::MAX_COMMIT_OPERATIONS as u64)
+        AttributesRevisionNo(1 + loonfs::publish::MAX_COMMIT_OPERATIONS as u64)
     );
     assert_eq!(
         projection.attributes.get(&attribute_key("x")),
@@ -241,7 +241,7 @@ fn a_write_is_visible_to_the_next_stat() {
             .attributes
             .as_ref()
             .map(|projection| projection.attributes_revision_no),
-        Some(AttributeRevisionNo(1))
+        Some(AttributesRevisionNo(1))
     );
     assert_eq!(
         entry
@@ -273,7 +273,7 @@ fn a_write_is_visible_to_the_next_stat() {
                 projection.attributes.len(),
             )
         }),
-        Some((AttributeRevisionNo(2), 0))
+        Some((AttributesRevisionNo(2), 0))
     );
 }
 
@@ -344,7 +344,7 @@ fn read_options_project_grouped_attributes_or_none() {
         let projection = entry.attributes.as_ref().expect("projected attributes");
         match entry.path.as_str() {
             "/docs/report.txt" => {
-                assert_eq!(projection.attributes_revision_no, AttributeRevisionNo(1));
+                assert_eq!(projection.attributes_revision_no, AttributesRevisionNo(1));
                 assert_eq!(
                     projection.attributes.get(&attribute_key("owner")).cloned(),
                     Some(attribute_text("platform"))
@@ -353,7 +353,7 @@ fn read_options_project_grouped_attributes_or_none() {
             // An inode nobody annotated projects the cleared state, not an
             // absent one.
             _ => {
-                assert_eq!(projection.attributes_revision_no, AttributeRevisionNo(0));
+                assert_eq!(projection.attributes_revision_no, AttributesRevisionNo(0));
                 assert_eq!(projection.attributes.len(), 0);
             }
         }

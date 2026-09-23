@@ -73,10 +73,10 @@ impl MetadataState {
                 self.push_inode_record(InodeRecord {
                     inode_id: *inode_id,
                     inode_kind: *inode_kind,
-                    created_seq: committed_seq,
+                    committed_seq,
                     commit_id: commit_id.clone(),
-                    created_by: actor.clone(),
-                    created_at_ms: committed_at_ms,
+                    committed_by: actor.clone(),
+                    committed_at_ms,
                 });
             }
             WalDelta::BindDirentry {
@@ -142,7 +142,7 @@ impl MetadataState {
             WalDelta::TombstoneSubtree {
                 delta_index,
                 root_inode_id,
-                deleted_direntry,
+                deleted_binding,
             } => {
                 self.push_subtree_tombstone_record(SubtreeTombstoneRecord {
                     root_inode_id: *root_inode_id,
@@ -151,10 +151,10 @@ impl MetadataState {
                         delta_index: *delta_index,
                     },
                     commit_id: commit_id.clone(),
-                    deleted_at_ms: committed_at_ms,
-                    deleted_by: actor.clone(),
+                    committed_at_ms,
+                    committed_by: actor.clone(),
                     action: TombstoneRowAction::Set {
-                        deleted_direntry: deleted_direntry.clone(),
+                        deleted_binding: deleted_binding.clone(),
                     },
                 });
             }
@@ -170,8 +170,8 @@ impl MetadataState {
                         delta_index: *delta_index,
                     },
                     commit_id: commit_id.clone(),
-                    deleted_at_ms: committed_at_ms,
-                    deleted_by: actor.clone(),
+                    committed_at_ms,
+                    committed_by: actor.clone(),
                     action: TombstoneRowAction::Revoke { target: *target },
                 });
             }
@@ -187,8 +187,8 @@ impl MetadataState {
                     committed_seq,
                     commit_id: commit_id.clone(),
                     delta_index: *delta_index,
-                    updated_by: actor.clone(),
-                    updated_at_ms: committed_at_ms,
+                    committed_by: actor.clone(),
+                    committed_at_ms,
                     attributes: attributes.clone(),
                 });
             }
@@ -205,8 +205,8 @@ impl MetadataState {
                     committed_seq,
                     commit_id: commit_id.clone(),
                     delta_index: *delta_index,
-                    updated_by: actor.clone(),
-                    updated_at_ms: committed_at_ms,
+                    committed_by: actor.clone(),
+                    committed_at_ms,
                     boundary: *boundary,
                     grants: grants.clone(),
                 });

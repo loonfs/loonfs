@@ -43,7 +43,7 @@ const TOMBSTONE_BYTES: usize = delta_bytes(
     &[
         ("root_inode_id", INTEGER_BYTES),
         (
-            "deleted_direntry",
+            "deleted_binding",
             map_bytes(&[
                 ("parent_inode_id", INTEGER_BYTES),
                 ("name_key", 0),

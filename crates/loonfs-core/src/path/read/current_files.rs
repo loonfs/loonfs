@@ -119,8 +119,8 @@ pub(crate) async fn resolve_visible_inode<S: ObjectStore + ?Sized>(
         absolute_path: current_path.to_string(),
         inode_id,
         inode_kind: inode.inode_kind,
-        created_by: inode.created_by,
-        created_at_ms: inode.created_at_ms,
+        created_by: inode.committed_by,
+        created_at_ms: inode.committed_at_ms,
         parent_inode_id: current_binding
             .as_ref()
             .map(|binding| binding.parent_inode_id),

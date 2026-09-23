@@ -3,7 +3,7 @@
 
 use super::*;
 use crate::metadata::{AttributesRevisionRecord, MetadataStateBuilder, MetadataView};
-use loonfs_api::{AttributeKey, AttributeRevisionNo, AttributeValue, Attributes};
+use loonfs_api::{AttributeKey, AttributeValue, Attributes, AttributesRevisionNo};
 use std::collections::BTreeMap;
 
 fn attributes(entries: &[(&str, &str)]) -> Attributes {
@@ -29,12 +29,12 @@ fn attributes_record(
 ) -> AttributesRevisionRecord {
     AttributesRevisionRecord {
         inode_id,
-        attributes_revision_no: AttributeRevisionNo(revision),
+        attributes_revision_no: AttributesRevisionNo(revision),
         committed_seq: ChangeSeq(seq),
         commit_id: CommitId::parse(format!("c_attributes_{seq}")).expect("commit id"),
         delta_index: 0,
-        updated_by: loonfs_api::ActorId::loonfs(),
-        updated_at_ms: 1_000 + seq,
+        committed_by: loonfs_api::ActorId::loonfs(),
+        committed_at_ms: 1_000 + seq,
         attributes: attributes(entries),
     }
 }
@@ -117,12 +117,12 @@ fn the_fold_keeps_a_latest_empty_revision() {
         attributes_record(InodeId(7), 1, 3, &[("owner", "ada")]),
         AttributesRevisionRecord {
             inode_id: InodeId(7),
-            attributes_revision_no: AttributeRevisionNo(2),
+            attributes_revision_no: AttributesRevisionNo(2),
             committed_seq: ChangeSeq(4),
             commit_id: CommitId::parse("c_attributes_4").expect("commit id"),
             delta_index: 0,
-            updated_by: loonfs_api::ActorId::loonfs(),
-            updated_at_ms: 1_004,
+            committed_by: loonfs_api::ActorId::loonfs(),
+            committed_at_ms: 1_004,
             attributes: Attributes::default(),
         },
     ]);
@@ -142,7 +142,7 @@ fn the_fold_keeps_a_latest_empty_revision() {
         matches!(
             kept.as_slice(),
             [MetadataRow::AttributesRevision (crate::metadata::AttributesRevisionRecord {
-                attributes_revision_no: AttributeRevisionNo(2),
+                attributes_revision_no: AttributesRevisionNo(2),
                 attributes,
                 ..
             })] if attributes.is_empty()
@@ -255,7 +255,7 @@ async fn a_published_segment_answers_at_the_sequence_the_read_asks_for() {
             .attributes_at_visible_seq(InodeId(7))
             .await
             .expect("read attributes");
-        assert_eq!(revision, AttributeRevisionNo(expected_revision));
+        assert_eq!(revision, AttributesRevisionNo(expected_revision));
         assert_eq!(
             map,
             attributes(&[("owner", expected_owner)]),
@@ -270,14 +270,14 @@ async fn a_published_segment_answers_at_the_sequence_the_read_asks_for() {
         view.attributes_at_visible_seq(InodeId(7))
             .await
             .expect("read attributes"),
-        (AttributeRevisionNo(0), Attributes::default())
+        (AttributesRevisionNo(0), Attributes::default())
     );
     let view = MetadataView::over_manifest_segments(&verified, ChangeSeq(9));
     assert_eq!(
         view.attributes_at_visible_seq(InodeId(8))
             .await
             .expect("read attributes"),
-        (AttributeRevisionNo(0), Attributes::default())
+        (AttributesRevisionNo(0), Attributes::default())
     );
 }
 
