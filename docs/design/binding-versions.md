@@ -1,88 +1,103 @@
 # Versioned directory bindings
 
-**Status: proposed.**
+Status: proposed.
 
-A directory binding is stored today as events: a bind row that names its generation, and later an unbind row that names the exact generation it retires. The reader reconstructs the state of a name by joining the two, and the compactor decides what to keep by pairing them. This note stores the state of a name instead. Each parent-and-name slot, and each child, is a versioned key whose newest version at the read sequence is the answer. Retention becomes the rule attributes and access rows already use, with ordinary tombstone handling.
+A directory binding associates a name with an inode. Today, LoonFS stores a bind record and a separate unbind record when that binding is removed. Reads and compaction have to match the two to determine whether the binding still exists.
 
-## The problem
+This proposal stores each change as a versioned value: the name is either bound to a child or unbound. Readers select the latest version visible at their sequence. Compaction uses the same retention rule as attributes and access rows, with one addition for unbound values.
 
-The `bindings` group has three families: `direntry_binds` by parent and name, `direntry_child_binds` by child, and `direntry_unbinds`. Every question about a name is a join across them:
+## Why change it
 
-- Resolving one path component finds the latest bind under the name, asks the unbind family whether that generation was retired, then asks the child index whether the child's latest binding is this one and whether that was retired (`active_child_binding` in `metadata/visibility.rs`).
-- A directory listing pages binds by name and joins a range scan over unbinds for the same names before it can drop retired entries (`direntry_unbinds_for_parent_name_range` in `metadata/view.rs`).
-- A base rebuild holds each bind until the unbinds of its generation arrive, checks a slot invariant across generations, and applies a separate survival rule (`BindingRetention` in `checkpoint/compaction_retention.rs`, `checkpoint/frozen_floor.rs`).
-- The child index cannot be grouped with the unbinds that retire it, so the compactor either collects every unbind of the input in memory first or point-reads the unbind family for each reverse row, out of a cache it keeps for that purpose (`reverse_bind_survives` in `checkpoint/streaming_compaction.rs`).
+Bindings currently occupy three metadata families: `direntry_binds`, ordered by parent and name; `direntry_child_binds`, ordered by child; and `direntry_unbinds`.
 
-A compactor that looks things up in its own input is the sign that the row model is not merge-shaped. SlateDB's compaction is a k-way merge over versioned keys: the newest version wins, and retention keeps the newest version at or below the horizon and everything above it. LoonFS uses that rule for attributes and access rows. Bindings are the one family that does not.
+This adds work to both reads and compaction:
 
-## The row
+- A path lookup finds a bind, checks whether it was unbound, and checks the child's binding in the reverse index.
+- A directory listing scans binds and unbinds for the same range of names, then matches them to exclude removed entries.
+- Compaction pairs binds with unbinds to decide what to retain. For the child index, it either collects the unbinds in memory or reads them individually from its own input.
 
-One record, `direntry_binding`, written under two keys:
+Reads and compaction can then use versions from one index at a time. The separate unbind family and the lookups needed to join it are removed.
+
+## Stored records
+
+A slot is a name within a parent directory, identified by `(parent_inode_id, name_key)`. Each change produces one `direntry_binding` record, stored in both the slot index and the child index.
 
 | Field | Meaning |
 | --- | --- |
-| `parent_inode_id`, `name_key` | The slot. |
-| `child_inode_id` | The child the event bound or unbound. |
-| `generation` | `{seq, delta_index}` of the event, as the tombstone row spells it. |
+| `parent_inode_id`, `name_key` | The slot being changed. |
+| `child_inode_id` | The child being bound or unbound. |
+| `generation` | The event's `{seq, delta_index}`. An unbound version identifies the unbind event. |
 | `state` | `{"kind":"bound","display_name":...}` or `{"kind":"unbound"}`. |
+
+Both indexes contain the same records in different orders:
 
 | Family | Row key |
 | --- | --- |
 | `direntry_binds` | `direntry-bind-{parent_inode_id:020}-{name_key_hex}-{u64::MAX - seq:020}-{u32::MAX - delta_index:010}` |
 | `direntry_child_binds` | `direntry-child-bind-{child_inode_id:020}-{u64::MAX - seq:020}-{u32::MAX - delta_index:010}` |
 
-The filter keys are unchanged: `direntry-bind-{parent}-{name}` and `direntry-child-bind-{child}`. Keys within a slot or a child sort newest first, like attributes. The `direntry_unbinds` family, its record, and its key grammar are removed. The `bindings` group has two families, and both hold the same records in different orders, which is what the format already says of them.
+Versions sort newest first within each slot or child. The filter keys remain `direntry-bind-{parent}-{name}` and `direntry-child-bind-{child}`. The `direntry_unbinds` family, record, and key format are removed.
 
-A bind delta writes a bound version in both orders. An unbind delta writes an unbound version in both orders, naming the same parent, name, and child the delta names. The row does not record which generation an unbind retired. Commit validation already guarantees an unbind lands only against the slot's current binding, so the newest version of the slot is the retired one by construction. The WAL deltas keep their fields; only their materialization changes.
+A bind writes a bound version to both indexes. An unbind writes an unbound version with the same parent, name, and child as its WAL delta. Commit validation already requires an unbind to refer to the current binding, so the stored row does not need to repeat which generation it removed. The WAL delta retains that information.
 
-## Reading
+## Reads
 
-The state of a slot at sequence `N` is its newest version at or below `N`. Bound means the child is bound there; unbound or no version means the name is free. The current parent of a child is the child's newest version at or below `N`, read the same way. Several events on one slot inside one commit sort by delta index, so the last one in the commit wins.
+At sequence `N`, a slot's value is its newest version at or below `N`. A bound version identifies the child at that name. An unbound version, or no version, means the name is available. Looking up a child's parent follows the same rule in the child index. Within a commit, the delta index determines the order, so the last change to a slot or child wins.
 
-Path resolution reads one prefix per component. The three-leg check goes away: if a slot's newest version binds child `C`, then `C`'s newest version names that slot, because any later event on `C` would have unbound it from the slot and become the slot's newest version instead. The invariant is the one the writer already keeps, that a slot holds one child and a child has one parent, and the digest check between the two orders keeps guarding it.
+Path resolution needs one lookup in the slot index for each component. Commit validation enforces one child per slot and one parent per child. Moving a child requires unbinding it from its previous slot, so the two indexes agree at every read sequence.
 
-A listing scans the parent's prefix once. Names arrive in order with each name's versions newest first; the reader takes the first version at or below `N` per name and emits it when bound. That is the binding lookup only. A listing still checks each entry's inode, its covering tombstone, and the caller's rights, as it does today.
+A directory listing scans the parent's binding prefix in name order, selects the newest visible version of each name, and includes bound entries. It still checks the inode, any covering deletion tombstone, and the caller's permissions. Snapshots and checkpoints use the same lookup rules through their pinned manifests at their captured sequences.
 
-A snapshot or checkpoint reads the same rows through its pinned manifest at its captured sequence.
+## Retention
 
-## Retention and compaction
+The existing `WholeState` rule retains all versions above the retention floor and the newest version at or below it. Bindings use that rule with one addition: if the newest version at or below the floor is unbound, remove it too.
 
-The rule is `WholeState`, as for attributes and access rows, with one addition. For each slot and each child, a bottom-anchored rebuild keeps every version above the floor and the newest version at or below it. When that newest version is unbound, the rebuild removes it as well: every older version it could hide is in the rebuild's input, because runs partition the sequence axis and the window includes the oldest run. A rebuild above the base keeps every row, as today.
+This removal is safe only during a rebuild that includes the oldest run. Runs cover separate sequence ranges, so that rebuild contains every older version the unbound row could hide. Removing them together preserves the state at every retained sequence, including any later changes above the floor. A compaction that excludes the oldest run keeps every row.
 
-Attributes keep a cleared map at the floor and bindings drop an unbound state at the floor. The families differ because an attribute revision number is a per-inode counter that the next update validates against, so the cleared row must stay to hold the count. A binding generation is the sequence of its own event. Nothing counts from an unbound version, and a slot with no version reads exactly as one whose newest version is unbound.
+Attributes retain a cleared map at the floor because its revision number is needed to validate the next update. Binding generations use the event's sequence and delta index. A later bind does not depend on the unbound row, so that row can be removed.
 
-The two orders keep the same records after a rebuild. Above the floor both keep every event. At or below it, a bound version survives in the forward order when no later event at or below the floor touched its slot, and in the child order when no later event at or below the floor touched its child. Those conditions coincide: an event that touches a child's binding unbinds it from the slot it occupies, and an event that touches an occupied slot unbinds its child. So the same bound versions survive in both orders, and unbound versions are removed from both. Per-run row counts stay equal and the digest comparison stays true.
+### A move from `/a` to `/b`
 
-The move of inode 7 from `/a` to `/b` with the floor past the move illustrates the rule. Forward: `/a` has an unbound newest version, removed with the bind it hid; `/b` keeps its bound version. Child: 7 keeps its bound version for `/b`; the unbound version from `/a` was older and is removed. One row in each order.
+Suppose inode 7 is bound at `/a`, then moved to `/b` at sequence 20. The move unbinds `/a` and binds `/b`. With the retention floor at 20, a rebuild retains:
 
-Subtree deletion unbinds the root and records a tombstone; descendants keep their bound versions under the deleted directory and stay hidden by the covering-tombstone walk, which follows current parent bindings upward and reaches the root's tombstone. Undelete binds the root again from the tombstone's saved name. A name reused after an unbind is a newer bound version on the same slot. A fork's base rebuild merges inherited and own runs under the same rule; inherited rows keep their owners.
+| Index entry | Latest state at the floor | Rebuild result |
+| --- | --- | --- |
+| Slot `/a` | Unbound | Remove the unbound version and the older bind. |
+| Slot `/b` | Bound to inode 7 | Keep the bound version. |
+| Child 7 | Bound at `/b` | Keep that version and remove its earlier versions. |
 
-## What stays the same
+Each index retains one record: inode 7 bound at `/b`. Keeping the unbound version for `/a` would leave two records in the slot index and one in the child index.
 
-The WAL delta kinds and fields, the semantic fingerprint, and the change feed's events do not change. `binding_generation` on the wire is the generation of the slot's newest bound version, which is the same `(seq, delta_index)` it is today, so `expected_binding_generation` preconditions and the feed's `moved`, `directory_created`, `file_created`, and `undeleted` events are unchanged. Tombstones, active deletions, inodes, revisions, and the other families are untouched.
+Above the floor, both indexes retain every event. At the floor, a bound version is current in both indexes or neither: replacing a slot's child requires an unbind, and moving a child requires unbinding its old slot. Removing unbound versions at or below the floor therefore leaves the same records in both indexes. The existing row-count and digest checks continue to verify that agreement.
 
-## Costs
+## Deletes, forks, and API behavior
 
-- An unbind writes two rows instead of one. A base rebuild removes more rows than today, since it drops unbound versions and everything they hide.
-- Materialization, the in-memory tail indexes, the visibility rules, the view, the manifest index, both compaction drivers, and their tests change together. This is a rewrite of the path the reads hit most.
-- The format changes in sections 1.3, 4.3, 7.1, 10.3, and Appendix A.6, and the bind, child-bind, and mixed-family block fixtures regenerate. There is no compatibility path.
+Subtree deletion still unbinds the deleted directory and records a tombstone. Descendants remain bound beneath it and are hidden by the existing covering-tombstone check. Undelete binds the directory again using the tombstone's saved name. Reusing a name writes a newer bound version to that slot.
 
-## Alternatives considered
+A fork's base rebuild applies the same retention rule to inherited and local runs. Inherited rows keep their owners.
 
-**Keep the event rows and fix only the compactor.** Collecting every unbind of the input before the reverse pass removes the point reads, and the compactor already does this for merges that fit one step. It leaves the three-leg lookup, the listing join, the generation pairing, and the slot invariant check in place.
+WAL deltas, semantic fingerprints, and change-feed events remain unchanged. The API's `binding_generation` is still the bound event's `(seq, delta_index)`, so `expected_binding_generation` accepts or rejects the same requests as before. Other metadata families are unchanged.
 
-**Pure `WholeState` with the unbound version kept.** Simplest to state, but it keeps a row for every name ever abandoned, and it breaks parity: after the move above, the forward order keeps two rows and the child order one. The tombstone rule is what restores both.
+## Implementation and tradeoffs
 
-**Store the retired generation on the unbound version.** It would let a reader verify which bind an unbind retired. Validation already established that at commit time, and the row would tie the durable shape to the exact-generation vocabulary the API keeps only for preconditions.
+An unbind writes two rows instead of one. A base rebuild can later remove the unbound versions and the history they hide.
 
-**One order only.** Dropping the child index would make parent lookup, the tombstone walk, and moves by inode scan every slot. Two orders of one record is the right shape; the change is what the record is.
+The implementation must update WAL materialization, tail and manifest indexes, reads, and both compaction paths together. This affects every path lookup and directory listing. The storage format changes in sections 1.3, 4.3, 7.1, 10.3, and Appendix A.6; the bind, child-bind, and mixed-family block fixtures must be regenerated. No compatibility path is proposed.
+
+## Alternatives
+
+| Alternative | Why it is not proposed |
+| --- | --- |
+| Collect unbinds before compacting the child index | Removes point reads during compaction, but leaves the joins in path lookups, listings, and retention. |
+| Keep the unbound version at the floor | Retains abandoned names and leaves different records in the two indexes, as the move example shows. |
+| Store the retired generation on each unbound version | Repeats information already checked during commit validation. Reads need only the latest state. |
+| Remove the child index | Parent lookups, deletion checks, and moves by inode would require scanning slots. |
 
 ## Verification
 
-- Resolving and listing at sequences before, between, and after a bind, an unbind, and a rebind of one name return the state at each sequence, on the live view and through a pinned manifest.
-- Several changes to one slot in one commit resolve to the last one in delta order.
-- A base rebuild past a move removes the unbound version and the bind it hid, keeps the rebind, and leaves both orders with the same records; the parity and digest checks pass on the output.
-- A rebuild above the base keeps every row.
-- A listing page reads one binding family and no unbind rows; the request-counting store shows no second family read for names.
-- Subtree delete, undelete, and a fork's base rebuild over inherited runs produce the state each did before.
-- A precondition with an expected binding generation accepts the current version and rejects a stale one exactly as today.
+- Check path lookups and listings before and after binding, unbinding, and reusing a name, including reads through pinned manifests.
+- Check that several changes to one slot or child within a commit resolve to the last delta.
+- Rebuild through the retention floor after a move. Verify that both indexes retain the same records and pass the row-count and digest checks.
+- Verify that compaction above the base retains every row.
+- Confirm that a listing reads one binding family, with no separate unbind scan.
+- Check subtree deletion, undelete, fork rebuilds over inherited runs, and binding-generation preconditions against their current behavior.
