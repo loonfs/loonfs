@@ -10,7 +10,7 @@ Two things make a delete-and-recreate expensive in a naive design: cleaning up b
 
 - Manifests, WAL objects, and pins are numbered immutable objects created with put-if-absent. A number names one object forever. If a new generation restarted at number 1, a cached reader or a fork basis could not tell the first generation's manifest 3 from the second's.
 - A fork basis names one manifest by owner, number, and checksum, and a pin under the owner protects it. Resolving the basis is one read. It does not pass through the owner's history and does not depend on how many generations the owner has had since.
-- Readers cache by manifest number, WAL number, and sequence, and revalidate by probing forward. Monotone counters keep every cached entry either valid or detectably stale.
+- Readers and writers cache by manifest number and WAL number, and revalidate by probing forward. Monotone object numbers keep every cached entry either valid or detectably stale. Sequences and inode ids are logical values inside those objects and belong to one generation.
 
 A generation boundary is therefore a lifecycle transition on the existing manifest chain, not a new address space. Recreation publishes the next manifest number, exactly as deletion, writer acquisition, and floor advancement do.
 
@@ -20,8 +20,8 @@ A generation boundary is therefore a lifecycle transition on the existing manife
 | --- | --- |
 | `manifest_no` | Continues. |
 | `last_folded_wal_no` | Copied from the tombstone, which records the WAL tip at deletion, so no earlier WAL object replays into the new tree. |
-| `head_seq`, `base_seq`, `retention_floor_seq` | Become the tombstone's `head_seq` plus one. Recreation consumes one sequence. |
-| `next_inode_id`, `next_run_no` | Continue. Every inode id other than the root is allocated once per namespace id. |
+| `head_seq`, `base_seq`, `retention_floor_seq` | Zero. Every generation starts its own sequence space. |
+| `next_inode_id`, `next_run_no` | Restart at 2 and 0. Inode ids are unique within a generation. |
 | `writer_epoch`, `compactor_epoch` | Increment. Sessions and compactors that captured the previous generation are fenced. |
 | `generation` | Increments. A newly created namespace is generation 1. |
 | `generation_first_manifest_no` | Becomes the new manifest's own number. |
@@ -33,7 +33,7 @@ A generation boundary is therefore a lifecycle transition on the existing manife
 
 The successor rule allows these fields to change only when `generation` increments, and allows `generation` to increment only from a deleted manifest to an active one whose `generation_first_manifest_no` equals its own number. Within a generation the identity fields are immutable and a deleted manifest has no active successor, as today. An empty active manifest describes a generation's genesis: equal head, base, and floor sequences, the genesis commit id, and no runs. Its allocators are not constrained, because they continue from the previous generation. Its root inode and any root access grants are synthesized at the generation's first sequence with the generation's creation time.
 
-Consuming a sequence is what makes the boundary visible to every consumer that resumes by sequence. The change feed already answers `rebootstrap_required` for a cursor below the retention floor, and the grep index already rebuilds on that answer. A cursor left at the tombstone's final sequence is below the new floor, so no consumer can apply the new generation's commits on top of a tree from the old one.
+Sequences and inode ids repeat across generations, as row ids do when a database drops and recreates a table under one name. A change-feed cursor or an inode reference taken in an earlier generation is not distinguishable by its value. The feed refuses a cursor above the current head, but once the new generation passes that sequence the cursor is accepted and the consumer applies new events to an old tree. A consumer that can span a recreation compares `generation` on the namespace object and rebootstraps when it changes. The same holds for `expected_head_seq` and inode-addressed preconditions; `expected_generation` is the guard that makes them exact. The server-side grep index records the generation it indexed and rebuilds on a change.
 
 ## Recreating a namespace
 
@@ -117,7 +117,7 @@ A cross-namespace import that reads content from a deleted owner resolves the co
 - **Writer sessions.** The recreated manifest carries the next writer epoch. The session that published the deletion sees `writer_fenced` on its next publication and is terminal, as any fenced session is. A server that cached an engine for the id recovers exactly as it does when another server takes over a namespace.
 - **Commit retries.** Commit receipts are metadata rows and do not cross the boundary. A retry of a commit id from an earlier generation executes as a new commit in the current one. Any name-addressed system has this property. A caller that must not write into a recreated namespace passes `expected_generation` as a request-level precondition, which fails when the generation differs.
 - **Namespace object.** `generation` is present on the namespace object, the create response, and diagnostics. A fork's `fork_basis` also reports `source_generation`.
-- **Root inode.** Inode 1 is the root in every generation. Every other inode id is allocated once per namespace id because the allocator continues.
+- **Inode ids.** Inode 1 is the root and allocation starts again at 2 in every generation. An inode id identifies an item within one generation.
 
 ## Cost under churn
 

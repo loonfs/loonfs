@@ -13,8 +13,8 @@ use crate::path::read::load_current_metadata_view;
 use crate::wal::tests::publish;
 use loonfs_api::wire::control::CheckpointOwner;
 use loonfs_api::{
-    AttributeInclusion, CheckpointId, ErrorCode, ManifestNo, NamespaceGeneration, NamespaceId,
-    WalNo, WriterId,
+    AttributeInclusion, ChangeSeq, CheckpointId, ErrorCode, ManifestNo, NamespaceGeneration,
+    NamespaceId, WalNo, WriterId,
 };
 use loonfs_objectstore::{
     keys::{content_store, hint, metadata_manifest_object, wal_segment_prefix},
@@ -52,7 +52,6 @@ fn an_acl_namespace_begins_with_the_root_grants_as_its_root_access_row() {
             principal_scope: PrincipalScope::parse("org_test").expect("principal scope"),
             root_grants: root_grants.clone(),
         },
-        ChangeSeq(0),
     );
     assert_eq!(
         state.access_revisions(),
@@ -68,7 +67,7 @@ fn an_acl_namespace_begins_with_the_root_grants_as_its_root_access_row() {
             grants: root_grants,
         }]
     );
-    let state = bootstrap_metadata_state(1_000, &NamespaceAccess::Unrestricted {}, ChangeSeq(0));
+    let state = bootstrap_metadata_state(1_000, &NamespaceAccess::Unrestricted {});
     assert!(state.access_revisions().is_empty());
 }
 
@@ -450,11 +449,15 @@ async fn recreating_a_deleted_namespace_publishes_an_empty_next_generation() {
     );
     assert_eq!(payload.generation, NamespaceGeneration(2));
     assert_eq!(payload.generation_first_manifest_no, payload.manifest_no);
-    let genesis_seq = tombstone.head_seq.successor().expect("next sequence");
-    assert_eq!(payload.head_seq, genesis_seq);
-    assert_eq!(payload.base_seq, genesis_seq);
-    assert_eq!(payload.retention_floor_seq, genesis_seq);
-    assert!(payload.next_inode_id >= tombstone.next_inode_id);
+    assert!(tombstone.head_seq > ChangeSeq(0));
+    assert_eq!(payload.head_seq, ChangeSeq(0));
+    assert_eq!(payload.base_seq, ChangeSeq(0));
+    assert_eq!(payload.retention_floor_seq, ChangeSeq(0));
+    assert_eq!(
+        payload.next_inode_id,
+        loonfs_api::FIRST_ALLOCATABLE_INODE_ID
+    );
+    assert_eq!(payload.next_run_no, loonfs_api::RunNo(0));
     assert!(payload.writer_epoch > tombstone.writer_epoch);
     assert_ne!(payload.content_store_id, tombstone.content_store_id);
     assert!(payload.runs.is_empty());
@@ -495,14 +498,8 @@ async fn recreating_a_deleted_namespace_publishes_an_empty_next_generation() {
         loonfs_test_support::ids::page_limit(10),
     )
     .await
-    .expect_err("old generation cursor");
-    assert!(matches!(
-        error,
-        crate::error::CoreError::RebootstrapRequired {
-            after_seq,
-            retention_floor_seq,
-        } if after_seq == tombstone.head_seq && retention_floor_seq == genesis_seq
-    ));
+    .expect_err("a cursor above the new generation's head");
+    assert!(matches!(error, crate::error::CoreError::InvalidCursor(_)));
 }
 
 #[tokio::test]

@@ -259,10 +259,6 @@ async fn recreate_namespace<S: ObjectStore + ?Sized>(
             .generation
             .successor()
             .map_err(|error| CoreError::Internal(format!("namespace generation {error}")))?;
-        let genesis_seq = tombstone
-            .head_seq
-            .successor()
-            .map_err(|error| CoreError::Internal(format!("change sequence {error}")))?;
         let writer_epoch = tombstone
             .writer_epoch
             .successor()
@@ -281,12 +277,7 @@ async fn recreate_namespace<S: ObjectStore + ?Sized>(
         payload.manifest_no = manifest_no;
         payload.generation = generation;
         payload.generation_first_manifest_no = manifest_no;
-        payload.head_seq = genesis_seq;
-        payload.base_seq = genesis_seq;
-        payload.retention_floor_seq = genesis_seq;
         payload.last_folded_wal_no = tombstone.last_folded_wal_no;
-        payload.next_inode_id = tombstone.next_inode_id;
-        payload.next_run_no = tombstone.next_run_no;
         payload.writer_epoch = writer_epoch;
         payload.compactor_epoch = compactor_epoch;
 
@@ -311,14 +302,13 @@ async fn recreate_namespace<S: ObjectStore + ?Sized>(
 pub(crate) fn bootstrap_metadata_state(
     created_at_ms: u64,
     access: &NamespaceAccess,
-    genesis_seq: ChangeSeq,
 ) -> MetadataState {
     let access_revisions = match access {
         NamespaceAccess::Acl { root_grants, .. } if !root_grants.is_empty() => {
             vec![AccessRevisionRecord {
                 inode_id: ROOT_INODE_ID,
                 access_revision_no: AccessRevisionNo(0),
-                committed_seq: genesis_seq,
+                committed_seq: ChangeSeq(0),
                 commit_id: loonfs_api::wire::control::genesis_commit_id(),
                 delta_index: 0,
                 updated_by: ActorId::loonfs(),
@@ -333,7 +323,7 @@ pub(crate) fn bootstrap_metadata_state(
         vec![InodeRecord {
             inode_id: ROOT_INODE_ID,
             inode_kind: InodeKind::Directory,
-            created_seq: genesis_seq,
+            created_seq: ChangeSeq(0),
             commit_id: loonfs_api::wire::control::genesis_commit_id(),
             created_by: loonfs_api::ActorId::loonfs(),
             created_at_ms,

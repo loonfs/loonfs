@@ -15,6 +15,7 @@ use loonfs_objectstore::ObjectStore;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CurrentManifest {
     pub manifest: ManifestRef,
+    pub generation: loonfs_api::NamespaceGeneration,
     pub retention_floor_seq: loonfs_api::ChangeSeq,
     pub last_folded_wal_no: loonfs_api::WalNo,
     pub compactor_epoch: u64,
@@ -169,8 +170,10 @@ pub(crate) async fn load_current_manifest_if_present<S: ObjectStore + ?Sized>(
                 })?;
             let before = previous.envelope.payload();
             let after = manifest.envelope.payload();
-            if before.head_seq > after.head_seq
-                || before.retention_floor_seq > after.retention_floor_seq
+            let same_generation = before.generation == after.generation;
+            if (same_generation
+                && (before.head_seq > after.head_seq
+                    || before.retention_floor_seq > after.retention_floor_seq))
                 || before.last_folded_wal_no > after.last_folded_wal_no
                 || before.writer_epoch > after.writer_epoch
                 || !before.preserves_activity(after)
@@ -226,6 +229,7 @@ pub(crate) async fn load_discovered_manifest<S: ObjectStore + ?Sized>(
                 manifest_head_seq: envelope.payload().head_seq,
                 manifest_payload_checksum: envelope.payload_checksum().to_owned(),
             },
+            generation: envelope.payload().generation,
             retention_floor_seq: envelope.payload().retention_floor_seq,
             last_folded_wal_no: envelope.payload().last_folded_wal_no,
             compactor_epoch: envelope.payload().compactor_epoch,

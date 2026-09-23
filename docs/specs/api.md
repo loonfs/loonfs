@@ -1648,7 +1648,10 @@ with no subject headers acts as the token holder.
 Deletion is a fenced manifest publication that ends the current generation ([format: namespace deletion](format.md#94-deleting-a-namespace)). It linearizes at the manifest put: commits acknowledged before it
 stay committed; reads, commits, forks, status, and another deletion fail with
 `namespace_deleted` (410) while the tombstone is current. Creating the id
-publishes the next generation.
+publishes the next generation, whose sequences and inode ids start over. A
+client that holds cursors, inode ids, or expected sequences from the earlier
+generation must compare `generation` on the namespace object before reusing
+them, as it would after a table is dropped and recreated under one name.
 
 Checkpoint listing and user-checkpoint deletion are explicit exceptions. They
 remain available because permanent user pins must stay discoverable and
@@ -2863,6 +2866,10 @@ If `limit` truncates the page before the namespace head, the response includes
 resumes with `after_seq={next_after_seq}`.
 
 `after_seq` may equal the current namespace head, which returns an empty page.
+Sequences start over when a deleted namespace id is recreated. A cursor from an
+earlier generation is refused only while it is above the new head; a consumer
+that can span a recreation compares `generation` on the namespace object and
+rebootstraps when it changes.
 A value above the head is invalid: accepting an unpublished sequence would let
 a consumer silently skip commits as the namespace catches up.
 
