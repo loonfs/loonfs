@@ -1,17 +1,16 @@
 //! Publishes the first manifest of every namespace generation.
 
-use super::control::{load_current_manifest_if_present, LoadedManifest};
+use super::control::load_current_manifest_if_present;
 use crate::checkpoint::publish::{encode_manifest, publish_manifest, ManifestPublicationOutcome};
-use crate::checkpoint::record::write_checkpoint_record_if_absent;
 use crate::error::{CoreError, Result};
 use crate::time::MonotonicTimer;
 use bytes::Bytes;
 use loonfs_api::wire::control::{
-    encode_control_state, ControlObjectKind, HintPayload, PinOwner, PinPayload,
+    encode_control_state, ControlObjectKind, HintPayload, RetiredGenerationPayload,
 };
 use loonfs_api::wire::manifest::NamespaceManifestPayload;
-use loonfs_api::{ManifestNo, PinId, WalNo};
-use loonfs_objectstore::keys::hint;
+use loonfs_api::{ManifestNo, NamespaceGeneration, WalNo};
+use loonfs_objectstore::keys::{hint, retired_generation_record};
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 use serde::Serialize;
 
@@ -21,12 +20,10 @@ pub(super) enum GenerationPublication {
     Exists,
 }
 
-/// Publishes `start` as the first manifest of a new generation of its id:
-/// manifest 1 for an unused id, or the successor of the id's tombstone. An
-/// active current manifest answers `Exists`.
 pub(super) async fn publish_generation<S: ObjectStore + ?Sized>(
     store: &S,
     start: &NamespaceManifestPayload,
+    expected_generation: Option<NamespaceGeneration>,
     timer: &dyn MonotonicTimer,
     started_ms: u64,
 ) -> Result<GenerationPublication> {
@@ -35,6 +32,18 @@ pub(super) async fn publish_generation<S: ObjectStore + ?Sized>(
         let current = load_current_manifest_if_present(store, namespace_id)
             .await
             .map_err(CoreError::ControlObjectLoad)?;
+        if expected_generation.is_some_and(|expected| {
+            current.as_ref().is_some_and(|current| {
+                let payload = current.envelope.payload();
+                if payload.status.is_deleted() {
+                    payload.generation.successor().ok() != Some(expected)
+                } else {
+                    payload.generation > expected
+                }
+            })
+        }) {
+            return Err(crate::commit::WalPublishError::StaleHead.into());
+        }
         let mut payload = start.clone();
         match &current {
             Some(current) if !current.envelope.payload().status.is_deleted() => {
@@ -47,7 +56,19 @@ pub(super) async fn publish_generation<S: ObjectStore + ?Sized>(
                     started_ms,
                     namespace_id,
                 )?;
-                write_retired_pin(store, tombstone, payload.created_at_ms).await?;
+                let retired = RetiredGenerationPayload {
+                    namespace_id: namespace_id.clone(),
+                    generation: tombstone.state.generation,
+                    tombstone: tombstone.state.manifest.clone(),
+                    created_at_ms: payload.created_at_ms,
+                };
+                put_control_if_absent(
+                    store,
+                    retired_generation_record(namespace_id, retired.generation),
+                    ControlObjectKind::RetiredGeneration,
+                    &retired,
+                )
+                .await?;
             }
             None => {
                 let first = HintPayload {
@@ -76,8 +97,6 @@ pub(super) async fn publish_generation<S: ObjectStore + ?Sized>(
     }
 }
 
-/// Carries the counters that outlive a generation from its tombstone into the
-/// first manifest of the next one.
 fn continue_counters(
     tombstone: &NamespaceManifestPayload,
     payload: &mut NamespaceManifestPayload,
@@ -103,25 +122,6 @@ fn continue_counters(
     Ok(())
 }
 
-async fn write_retired_pin<S: ObjectStore + ?Sized>(
-    store: &S,
-    current: &LoadedManifest,
-    created_at_ms: u64,
-) -> Result<()> {
-    let tombstone = current.envelope.payload();
-    let retired = PinPayload {
-        namespace_id: tombstone.namespace_id.clone(),
-        pin_id: PinId::retired(&tombstone.namespace_id, tombstone.manifest_no),
-        head_seq: tombstone.head_seq,
-        payload_checksum: current.state.manifest.payload_checksum.clone(),
-        created_at_ms,
-        owner: PinOwner::Retired {},
-    };
-    write_checkpoint_record_if_absent(store, &retired).await
-}
-
-/// Writes a control object that concurrent attempts write identically, so an
-/// existing object is success.
 async fn put_control_if_absent<S: ObjectStore + ?Sized, T: Serialize>(
     store: &S,
     object_key: String,

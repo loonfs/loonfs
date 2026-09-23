@@ -69,7 +69,8 @@ pub(crate) async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
         actor_id.clone(),
         access.clone(),
     );
-    if publish_generation(store, &start, &timer, started_ms).await? == GenerationPublication::Exists
+    if publish_generation(store, &start, None, &timer, started_ms).await?
+        == GenerationPublication::Exists
         && !allow_existing
     {
         return Err(BootstrapNamespaceError::NamespaceAlreadyExists {

@@ -114,9 +114,7 @@ pub(crate) async fn list_checkpoints_page<S: ObjectStore + ?Sized>(
             Err(error) => return Err(CoreError::ControlObjectLoad(error)),
         };
         let record = loaded.state;
-        if let Some(checkpoint) = super::checkpoint_summary(record) {
-            checkpoints.push(checkpoint);
-        }
+        checkpoints.push(super::checkpoint_summary(record));
     }
     let has_more = if checkpoints.len() == request.limit.as_usize() {
         match keys.as_mut().peek().await {

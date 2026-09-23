@@ -717,7 +717,7 @@ mod tests {
         pass.deleted.content_objects = 1;
         pass.deleted.retired_content_objects = 7;
         pass.deleted_checkpoints_by_owner.fork = 2;
-        pass.deleted_checkpoints_by_owner.retired = 1;
+        pass.deleted.retired_generation_records = 1;
         for _ in 0..4 {
             pass.retain(RetainedReason::WithinGraceWindow);
         }
@@ -730,7 +730,10 @@ mod tests {
             "{summary}"
         );
         assert!(summary.contains("2 fork checkpoints"), "{summary}");
-        assert!(summary.contains("1 retired checkpoints"), "{summary}");
+        assert!(
+            summary.contains("1 retired generation records"),
+            "{summary}"
+        );
         assert!(
             !summary.contains("namespace generation can be reclaimed"),
             "{summary}"

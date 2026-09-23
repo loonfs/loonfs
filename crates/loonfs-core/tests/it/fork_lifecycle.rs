@@ -1419,6 +1419,15 @@ async fn creation_and_fork_install_hint_and_manifest_in_order() {
         ]
     );
 
+    store.reset();
+    let error = fork_namespace(&store, &source, &target, &context)
+        .await
+        .expect_err("target exists");
+    assert_eq!(error.code(), ErrorCode::NamespaceExists);
+    assert_eq!(store.counts().puts, 0);
+    assert_eq!(store.counts().compare_and_swaps, 0);
+    assert_eq!(store.counts().deletes, 0);
+
     for allow_existing in [false, true] {
         store.reset();
         let result = if allow_existing {

@@ -230,7 +230,10 @@ fn gc_deleted_counts(report: &GcResponse) -> [(&'static str, u64); 10] {
         ("fork checkpoints", checkpoints.fork),
         ("expired checkpoints", checkpoints.expired),
         ("snapshot checkpoints", checkpoints.snapshot),
-        ("retired checkpoints", checkpoints.retired),
+        (
+            "retired generation records",
+            deleted.retired_generation_records,
+        ),
         ("upload sessions", deleted.upload_sessions),
         ("content objects", deleted.content_objects),
         ("retired content objects", deleted.retired_content_objects),

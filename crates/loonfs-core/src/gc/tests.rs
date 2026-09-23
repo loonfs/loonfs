@@ -2074,6 +2074,7 @@ async fn a_fork_retry_keeps_young_pins_and_reclaims_the_abandoned_one_after_grac
         &source,
         PinOwner::Fork {
             target_namespace_id: clone.clone(),
+            target_generation: loonfs_api::NamespaceGeneration(1),
         },
         &setup,
     )
@@ -2928,6 +2929,7 @@ async fn expiry_and_creation_grace_delete_pins_without_a_released_state() {
         },
         PinOwner::Fork {
             target_namespace_id: target.clone(),
+            target_generation: loonfs_api::NamespaceGeneration(1),
         },
     ] {
         pins.push(

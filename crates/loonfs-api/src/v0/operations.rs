@@ -1155,6 +1155,8 @@ pub struct DeletedObjectCounts {
     pub content_objects: u64,
     /// Successful deletion attempts under a retired namespace owner prefix.
     pub retired_content_objects: u64,
+    /// Records deleted after reclamation or after their tombstone was collected.
+    pub retired_generation_records: u64,
 }
 
 impl DeletedObjectCounts {
@@ -1167,6 +1169,7 @@ impl DeletedObjectCounts {
             upload_sessions,
             content_objects,
             retired_content_objects,
+            retired_generation_records,
         } = other;
         self.wal_segments += wal_segments;
         self.metadata_segments += metadata_segments;
@@ -1174,6 +1177,7 @@ impl DeletedObjectCounts {
         self.upload_sessions += upload_sessions;
         self.content_objects += content_objects;
         self.retired_content_objects += retired_content_objects;
+        self.retired_generation_records += retired_generation_records;
     }
 }
 
@@ -1187,8 +1191,6 @@ pub struct DeletedCheckpointsByOwner {
     pub expired: u64,
     /// Snapshot-owned records deleted after expiry or namespace deletion.
     pub snapshot: u64,
-    /// Retired records deleted after their generations are reclaimed.
-    pub retired: u64,
 }
 
 impl DeletedCheckpointsByOwner {
@@ -1198,12 +1200,10 @@ impl DeletedCheckpointsByOwner {
             fork,
             expired,
             snapshot,
-            retired,
         } = other;
         self.fork += fork;
         self.expired += expired;
         self.snapshot += snapshot;
-        self.retired += retired;
     }
 }
 
@@ -2407,6 +2407,11 @@ mod tests {
         let gc_json = serde_json::to_value(gc).expect("serialize gc response");
         assert!(gc_json.get("next_reclamation_at_ms").is_none());
         assert!(gc_json.get("reclaim_after_ms").is_none());
+        assert_eq!(gc_json["deleted"]["retired_generation_records"], 0);
+        assert_eq!(
+            gc_json["deleted_checkpoints_by_owner"],
+            serde_json::json!({"fork": 0, "expired": 0, "snapshot": 0})
+        );
         let gc: GcResponse =
             serde_json::from_value(gc_json).expect("decode gc response without optional fields");
         assert_eq!(gc.next_reclamation_at_ms, None);
