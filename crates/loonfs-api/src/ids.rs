@@ -463,7 +463,7 @@ fn is_allowed_id_tail_char(ch: char) -> bool {
 string_id! {
     /// Durable id for one namespace.
     ///
-    /// A namespace id names successive filesystem generations. This id is not a display name.
+    /// A namespace id names one lifetime. This id is not a display name.
     /// Its serialized form is 1 to 128
     /// lowercase ASCII letters, digits, dots, underscores, or hyphens, starting
     /// with a letter or digit; the `loonfs-` prefix is reserved for system use.
@@ -731,13 +731,6 @@ numeric_id! {
     ManifestNo,
     public_ordinal,
     schema_description = "Monotonic manifest counter for one namespace. It can increase when metadata changes, even if no namespace commit is written."
-}
-
-numeric_id! {
-    /// Which generation of its id a namespace is.
-    NamespaceGeneration,
-    public_ordinal,
-    schema_description = "Which generation of its id a namespace is. A newly created namespace is generation 1; each recreation after a deletion increments it."
 }
 
 numeric_id! {

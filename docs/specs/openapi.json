@@ -735,10 +735,6 @@
             "$ref": "#/components/schemas/ContentRefKind",
             "description": "Content strategy used by the referenced object."
           },
-          "owner_generation": {
-            "$ref": "#/components/schemas/NamespaceGeneration",
-            "description": "Generation of the owner namespace that wrote the bytes."
-          },
           "owner_namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
             "description": "Namespace that originally wrote the bytes."
@@ -753,7 +749,6 @@
         "required": [
           "kind",
           "owner_namespace_id",
-          "owner_generation",
           "content_id",
           "size_bytes",
           "checksum"
@@ -1130,12 +1125,6 @@
             "minimum": 0,
             "type": "integer"
           },
-          "retired_generation_records": {
-            "description": "Records deleted after reclamation or after their tombstone was collected.",
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          },
           "upload_sessions": {
             "description": "Upload-session control objects deleted after the reap window.",
             "format": "int64",
@@ -1155,8 +1144,7 @@
           "manifests",
           "upload_sessions",
           "content_objects",
-          "retired_content_objects",
-          "retired_generation_records"
+          "retired_content_objects"
         ],
         "type": "object"
       },
@@ -2992,10 +2980,6 @@
             "$ref": "#/components/schemas/NamespaceForkBasis",
             "description": "Present only for a fork: the source it was forked from."
           },
-          "generation": {
-            "$ref": "#/components/schemas/NamespaceGeneration",
-            "description": "Which generation of its id this namespace is. Recreating a deleted id increments it."
-          },
           "head_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
             "description": "Current visible namespace sequence."
@@ -3012,7 +2996,6 @@
         "required": [
           "access",
           "namespace_id",
-          "generation",
           "created_at_ms",
           "created_by",
           "head_seq",
@@ -3152,10 +3135,6 @@
             "$ref": "#/components/schemas/NamespaceForkBasis",
             "description": "Present only for a fork: the source it was forked from."
           },
-          "generation": {
-            "$ref": "#/components/schemas/NamespaceGeneration",
-            "description": "Which generation of its id this namespace is. Recreating a deleted id increments it."
-          },
           "head_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
             "description": "Current visible namespace sequence."
@@ -3189,7 +3168,6 @@
         },
         "required": [
           "namespace_id",
-          "generation",
           "created_at_ms",
           "created_by",
           "head_seq",
@@ -3218,15 +3196,8 @@
         ],
         "type": "object"
       },
-      "NamespaceGeneration": {
-        "description": "Which generation of its id a namespace is. A newly created namespace is generation 1; each recreation after a deletion increments it.",
-        "format": "int64",
-        "maximum": 9007199254740991,
-        "minimum": 0,
-        "type": "integer"
-      },
       "NamespaceId": {
-        "description": "Durable id for one namespace.\n\nA namespace id names successive filesystem generations. This id is not a display name.\nIts serialized form is 1 to 128\nlowercase ASCII letters, digits, dots, underscores, or hyphens, starting\nwith a letter or digit; the `loonfs-` prefix is reserved for system use.",
+        "description": "Durable id for one namespace.\n\nA namespace id names one lifetime. This id is not a display name.\nIts serialized form is 1 to 128\nlowercase ASCII letters, digits, dots, underscores, or hyphens, starting\nwith a letter or digit; the `loonfs-` prefix is reserved for system use.",
         "example": "demo",
         "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$",
         "type": "string"

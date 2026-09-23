@@ -15,27 +15,14 @@ use loonfs_objectstore::ObjectStore;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CurrentManifest {
     pub manifest: ManifestRef,
-    pub generation: loonfs_api::NamespaceGeneration,
     pub retention_floor_seq: loonfs_api::ChangeSeq,
     pub folded_wal_no: loonfs_api::WalNo,
     pub compactor_epoch: u64,
 }
 
 impl CurrentManifest {
-    /// Orders manifests by history. Sequences start over in each generation,
-    /// so a later generation sorts after every manifest of an earlier one.
-    pub(crate) fn position(
-        &self,
-    ) -> (
-        loonfs_api::NamespaceGeneration,
-        loonfs_api::ChangeSeq,
-        loonfs_api::ManifestNo,
-    ) {
-        (
-            self.generation,
-            self.manifest.head_seq,
-            self.manifest.manifest_no,
-        )
+    pub(crate) fn position(&self) -> (loonfs_api::ChangeSeq, loonfs_api::ManifestNo) {
+        (self.manifest.head_seq, self.manifest.manifest_no)
     }
 }
 
@@ -232,7 +219,6 @@ pub(crate) async fn load_discovered_manifest<S: ObjectStore + ?Sized>(
                 head_seq: envelope.payload().head_seq,
                 payload_checksum: envelope.payload_checksum().to_owned(),
             },
-            generation: envelope.payload().generation,
             retention_floor_seq: envelope.payload().retention_floor_seq,
             folded_wal_no: envelope.payload().folded_wal_no,
             compactor_epoch: envelope.payload().compactor_epoch,

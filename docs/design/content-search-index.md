@@ -100,7 +100,7 @@ If the checkpoint or necessary change history becomes unavailable, the worker ab
 
 ### Incremental builds
 
-An active worker resumes the change feed from its sequence/event cursor. It indexes the eligible revisions published by those events and advances the cursor in the same numbered manifest publication that publishes their segment references. A changed namespace generation rebuilds the index from a fresh checkpoint.
+An active worker resumes the change feed from its sequence/event cursor. It indexes the eligible revisions published by those events and advances the cursor in the same numbered manifest publication that publishes their segment references.
 
 Moves, deletes, and undeletes do not publish new content revisions in those events, so they do not require new postings. Their effect on visibility and paths is evaluated against metadata during queries. Operations that append a new revision are processed as revision events even when the underlying bytes were already stored.
 
@@ -112,7 +112,7 @@ The index does not prevent the namespace's retention floor from advancing. If in
 
 `GrepWorker` runs through the existing maintenance runner as a separate job from core metadata maintenance. Each invocation builds one bounded batch, or performs one reorganization step when there is no remaining build work for that invocation. The runner handles duplicate scheduling hints, concurrency, backoff, and periodic checks. A failure for one namespace does not require delaying unrelated namespaces.
 
-The periodic probe discovers the current grep manifest. For an active index at a commit boundary, it also checks the namespace head for another commit or a changed generation. Enabling the index schedules initial work; publications and queries that observe index lag can schedule more work.
+The periodic probe discovers the current grep manifest. For an active index at a commit boundary, it also checks the namespace head for another commit. Enabling the index schedules initial work; publications and queries that observe index lag can schedule more work.
 
 A query-only server does not register the maintenance job and rejects index mutations. No grep operation enumerates all namespaces to discover work.
 

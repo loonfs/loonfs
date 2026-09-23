@@ -540,12 +540,10 @@ pub(super) async fn create_commit(
         mut operations,
     } = request;
     let inline_content = super::commit_content::prepare_inline_content(
-        &state.writer,
         &namespace_id,
         &mut operations,
         state.config.inline_content.inline_content_threshold_bytes,
     )
-    .await
     .map_err(|error| error.with_commit_id(&commit_id))?;
     // Failed and uncertain outcomes echo the idempotency key the caller can
     // resubmit under (API spec, "Commit responses and safe retry").

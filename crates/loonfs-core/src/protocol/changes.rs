@@ -7,7 +7,7 @@ use crate::metadata::MetadataView;
 use crate::path::read::LoadedMetadataView;
 use loonfs_api::v0::{Commit, FilesystemChange, ListChangesResponse};
 use loonfs_api::wire::wal::{WalCommitDelta, WalCommitPayload, WalDelta};
-use loonfs_api::{ChangeSeq, EffectiveLimit, NamespaceGeneration, NamespaceId};
+use loonfs_api::{ChangeSeq, EffectiveLimit, NamespaceId};
 use loonfs_objectstore::ObjectStore;
 
 pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(
@@ -18,7 +18,6 @@ pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(
     let head = view.head();
     let retention_floor_seq = view.retention_floor_seq();
     let namespace_id = &head.namespace_id;
-    let namespace_generation = head.generation;
     crate::namespace::control::ensure_namespace_live(head)?;
 
     if after_seq < retention_floor_seq {
@@ -49,7 +48,7 @@ pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(
         .await?;
     let changes = records
         .iter()
-        .map(|record| committed_change_from_wal_record(namespace_id, namespace_generation, record))
+        .map(|record| committed_change_from_wal_record(namespace_id, record))
         .collect::<Result<Vec<_>>>()?;
     let (through_seq, next_after_seq) = if changes.len() == limit.as_usize() {
         let committed_seq = changes
@@ -76,20 +75,18 @@ pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(
 pub(super) async fn find_committed_change_at<S: ObjectStore + ?Sized>(
     view: &MetadataView<'_, '_, S>,
     namespace_id: &NamespaceId,
-    namespace_generation: NamespaceGeneration,
     committed_seq: ChangeSeq,
 ) -> Result<Option<Commit>> {
     view.commit_at_seq(committed_seq)
         .await?
         .as_ref()
-        .map(|record| committed_change_from_wal_record(namespace_id, namespace_generation, record))
+        .map(|record| committed_change_from_wal_record(namespace_id, record))
         .transpose()
 }
 
 /// Converts one WAL commit record into the shared API change shape.
 pub(super) fn committed_change_from_wal_record(
     namespace_id: &NamespaceId,
-    namespace_generation: NamespaceGeneration,
     record: &WalCommitPayload,
 ) -> Result<Commit> {
     Ok(Commit {
@@ -99,12 +96,7 @@ pub(super) fn committed_change_from_wal_record(
         committed_by: record.committed_by.clone(),
         committed_at_ms: record.committed_at_ms,
         message: record.message.clone(),
-        events: events_from_wal_deltas(
-            namespace_id,
-            namespace_generation,
-            record.seq,
-            &record.deltas,
-        )?,
+        events: events_from_wal_deltas(namespace_id, record.seq, &record.deltas)?,
     })
 }
 
@@ -127,7 +119,6 @@ pub(super) fn committed_change_from_wal_record(
 /// commit.
 pub(crate) fn events_from_wal_deltas(
     namespace_id: &NamespaceId,
-    namespace_generation: NamespaceGeneration,
     committed_seq: ChangeSeq,
     deltas: &[WalCommitDelta],
 ) -> Result<Vec<FilesystemChange>> {
@@ -136,19 +127,13 @@ pub(crate) fn events_from_wal_deltas(
     for deltas in loonfs_api::wire::wal::semantic_operation_groups(deltas) {
         group.clear();
         group.extend(deltas.iter().map(|delta| &delta.delta));
-        events.push(event_from_op_deltas(
-            namespace_id,
-            namespace_generation,
-            committed_seq,
-            &group,
-        )?);
+        events.push(event_from_op_deltas(namespace_id, committed_seq, &group)?);
     }
     Ok(events)
 }
 
 fn event_from_op_deltas(
     namespace_id: &NamespaceId,
-    namespace_generation: NamespaceGeneration,
     committed_seq: ChangeSeq,
     deltas: &[&WalDelta],
 ) -> Result<FilesystemChange> {
@@ -168,12 +153,7 @@ fn event_from_op_deltas(
             inode_id: *inode_id,
             parent_inode_id: *parent_inode_id,
             display_name: display_name.clone(),
-            binding_generation: binding_generation(
-                namespace_id,
-                namespace_generation,
-                committed_seq,
-                *delta_index,
-            )?,
+            binding_generation: binding_generation(namespace_id, committed_seq, *delta_index)?,
         },
         // CreateFile (and copy-file): allocate + bind + first revision.
         [WalDelta::CreateInode {
@@ -196,12 +176,7 @@ fn event_from_op_deltas(
                 inode_id: *inode_id,
                 parent_inode_id: *parent_inode_id,
                 display_name: display_name.clone(),
-                binding_generation: binding_generation(
-                    namespace_id,
-                    namespace_generation,
-                    committed_seq,
-                    *delta_index,
-                )?,
+                binding_generation: binding_generation(namespace_id, committed_seq, *delta_index)?,
                 revision_no: *revision_no,
                 content_ref: content_ref.clone(),
             }
@@ -235,12 +210,7 @@ fn event_from_op_deltas(
             source_display_name: from_name.clone(),
             destination_parent_inode_id: *destination_parent_inode_id,
             destination_display_name: to_name.clone(),
-            binding_generation: binding_generation(
-                namespace_id,
-                namespace_generation,
-                committed_seq,
-                *delta_index,
-            )?,
+            binding_generation: binding_generation(namespace_id, committed_seq, *delta_index)?,
         },
         // DeleteFile / DeleteSubtree: retire the binding, hide the subtree.
         [WalDelta::UnbindDirentry { child_inode_id, .. }, WalDelta::TombstoneSubtree {
@@ -266,12 +236,7 @@ fn event_from_op_deltas(
             inode_id: *root_inode_id,
             parent_inode_id: *parent_inode_id,
             display_name: display_name.clone(),
-            binding_generation: binding_generation(
-                namespace_id,
-                namespace_generation,
-                committed_seq,
-                *delta_index,
-            )?,
+            binding_generation: binding_generation(namespace_id, committed_seq, *delta_index)?,
         },
         // UpdateAttributes, including the copy that carries a source's
         // attributes onto the inode it just created. The delta already holds
@@ -311,7 +276,6 @@ fn event_from_op_deltas(
 
 fn binding_generation(
     namespace_id: &NamespaceId,
-    namespace_generation: NamespaceGeneration,
     bind_seq: ChangeSeq,
     bind_delta_index: u32,
 ) -> Result<loonfs_api::BindingGeneration> {
@@ -319,7 +283,7 @@ fn binding_generation(
         bind_seq,
         bind_delta_index,
     }
-    .encode(namespace_id, namespace_generation)
+    .encode(namespace_id)
     .map_err(|error| CoreError::Internal(format!("failed to encode a binding generation: {error}")))
 }
 
@@ -338,7 +302,7 @@ mod tests {
     use loonfs_api::wire::wal::WalDelta;
     use loonfs_api::{
         AttributeKey, AttributeValue, Attributes, AttributesRevisionNo, ChangeSeq, EffectiveLimit,
-        InodeId, NamespaceGeneration, NamespaceId,
+        InodeId, NamespaceId,
     };
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use std::num::NonZeroU32;
@@ -422,13 +386,8 @@ mod tests {
         let delta = append_attributes(0);
 
         assert_eq!(
-            event_from_op_deltas(
-                &namespace_id(),
-                NamespaceGeneration(1),
-                ChangeSeq(7),
-                &[&delta]
-            )
-            .expect("map the operation"),
+            event_from_op_deltas(&namespace_id(), ChangeSeq(7), &[&delta])
+                .expect("map the operation"),
             FilesystemChange::AttributesChanged {
                 inode_id: InodeId(7),
                 attributes_revision_no: AttributesRevisionNo(3),
@@ -442,13 +401,8 @@ mod tests {
         let first = append_attributes(0);
         let second = append_attributes(1);
 
-        let error = event_from_op_deltas(
-            &namespace_id(),
-            NamespaceGeneration(1),
-            ChangeSeq(7),
-            &[&first, &second],
-        )
-        .expect_err("two attribute deltas are not one operation");
+        let error = event_from_op_deltas(&namespace_id(), ChangeSeq(7), &[&first, &second])
+            .expect_err("two attribute deltas are not one operation");
         assert!(error.to_string().contains("drifted"), "{error}");
     }
 }

@@ -1,6 +1,6 @@
 //! Garbage collection for upload sessions and their content.
 
-use super::live_set::{GenerationState, LiveSet};
+use super::live_set::{LiveSet, RetirementState};
 use crate::context::MutationContext;
 use crate::control_update::{try_update_upload_session, CasAttempt, UploadSessionUpdate};
 use crate::error::{CoreError, Result};
@@ -105,39 +105,15 @@ pub(super) async fn sweep_upload_session<S: ObjectStore + ?Sized>(
     state: &UploadSessionPayload,
     view: &PublicationView<'_, '_, S>,
 ) -> Result<UploadSessionSweep> {
-    if state.owner_generation > sweep.live.owner_generation {
-        return Ok(retain_undated());
-    }
-    let generation_state = sweep.live.generation_state(state.owner_generation);
-    match generation_state {
-        GenerationState::Waiting { deadline_ms } => return Ok(retain_until(deadline_ms)),
-        GenerationState::Held => return Ok(retain_undated()),
-        GenerationState::Reclaimed => {
-            if matches!(
-                state.status,
-                UploadSessionRecordStatus::Open { .. } | UploadSessionRecordStatus::Aborted { .. }
-            ) && !AbandonedUpload::of(state)
-                .release_provider(sweep.store)
-                .await
-            {
-                return Ok(retain_undated());
-            }
-            if !delete_unpublished_content_object(
-                sweep.store,
-                &state.namespace_id,
-                &state.content_id,
-            )
-            .await
-            {
-                return Ok(retain_undated());
-            }
-            return Ok(UploadSessionSweep::Delete {
-                reclaimed_content: false,
-            });
+    match sweep.live.retirement_state() {
+        RetirementState::Retained { until_ms } => {
+            return Ok(UploadSessionSweep::Retain {
+                reclaimable_at_ms: until_ms,
+            })
         }
-        GenerationState::Current | GenerationState::Eligible => {}
+        RetirementState::Active | RetirementState::Eligible => {}
     }
-    let retired_content = generation_state == GenerationState::Eligible;
+    let retired_content = sweep.live.retirement_state() == RetirementState::Eligible;
     match &state.status {
         UploadSessionRecordStatus::Open { expires_at_ms, .. } => {
             abort_expired_session(sweep, state, *expires_at_ms).await

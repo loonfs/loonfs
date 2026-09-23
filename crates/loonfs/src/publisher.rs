@@ -422,22 +422,6 @@ impl PublisherRegistry {
         .await
     }
 
-    /// Invalidates the namespace's rebuildable WAL-tail projection without
-    /// changing its writer epoch or fencing state.
-    ///
-    /// If an operation currently holds the engine, invalidation is skipped. That
-    /// operation validates the live head and reports its retained projection when
-    /// it completes.
-    /// The generation of the namespace head its publisher last published
-    /// against, when a publisher exists and nothing holds its engine.
-    pub(crate) fn cached_generation(
-        &self,
-        namespace_id: &NamespaceId,
-    ) -> Option<loonfs_api::NamespaceGeneration> {
-        let state = self.shared.lock_state();
-        state.publishers.get(namespace_id)?.cached_generation()
-    }
-
     pub(crate) fn invalidate_projection(&self, namespace_id: &NamespaceId) {
         let totals = {
             let mut state = self.shared.lock_state();
@@ -1106,14 +1090,6 @@ impl NamespacePublisher {
         queued_candidates(&self.lock_state())
     }
 
-    /// Drops the engine's tail projection, reporting whether it took the
-    /// engine to do so. A `false` return means a publication or delete holds
-    /// the engine, and that unit's own settlement reports what it retains.
-    fn cached_generation(&self) -> Option<loonfs_api::NamespaceGeneration> {
-        let slot = self.engine.try_lock().ok()?;
-        slot.engine.as_ref()?.cached_generation()
-    }
-
     fn invalidate_projection(&self) -> bool {
         let Ok(mut slot) = self.engine.try_lock() else {
             return false;
@@ -1547,11 +1523,6 @@ impl NamespacePublisher {
     fn engine_for<'slot>(&self, slot: &'slot mut EngineSlot) -> &'slot mut NamespaceCommitEngine {
         slot.engine.get_or_insert_with(|| {
             NamespaceCommitEngine::new(self.namespace_id.clone())
-                .manifest_revalidation_interval_ms(
-                    self.read_core
-                        .runtime_cache_config()
-                        .manifest_revalidation_interval_ms,
-                )
                 .segment_cache(self.read_core.metadata_segment_cache())
                 .writer_session(Arc::clone(&slot.session))
         })

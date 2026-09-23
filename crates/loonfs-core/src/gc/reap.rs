@@ -38,14 +38,12 @@ pub(super) async fn sweep_checkpoint_record<S: ObjectStore + ?Sized>(
         PinOwner::Snapshot { .. } => CheckpointSweep::DeleteSnapshot,
         PinOwner::Fork {
             target_namespace_id,
-            target_generation,
         } => {
             return Ok(
                 match classify_fork_checkpoint(
                     store,
                     &record,
                     target_namespace_id,
-                    *target_generation,
                     grace_window_ms,
                     context,
                 )
@@ -66,8 +64,8 @@ pub(super) async fn sweep_checkpoint_record<S: ObjectStore + ?Sized>(
         .owner
         .expires_at_ms()
         .map(|expiry| expiry.saturating_add(grace_window_ms));
-    let ages_out_at_ms = (live.namespace_deleted
-        || record.pin_id.manifest_no() < live.generation_first_manifest_no)
+    let ages_out_at_ms = live
+        .namespace_deleted
         .then(|| record.created_at_ms.saturating_add(grace_window_ms));
     let reclaimable_at_ms = expires_at_ms.into_iter().chain(ages_out_at_ms).min();
     Ok(match reclaimable_at_ms {

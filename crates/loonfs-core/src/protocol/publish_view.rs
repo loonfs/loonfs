@@ -53,7 +53,6 @@ impl<S: ObjectStore + ?Sized> PublishMetadataView<'_, S> {
         super::changes::find_committed_change_at(
             &self.metadata_view(),
             &self.head.namespace_id,
-            self.head.generation,
             committed_seq,
         )
         .await
@@ -108,22 +107,6 @@ impl PublishTailProjection {
         self.key == *key && self.within_limits(options)
     }
 
-    pub(crate) async fn manifest_is_current<S: ObjectStore + ?Sized>(
-        &self,
-        store: &S,
-    ) -> Result<bool> {
-        let Ok(next) = self.basis().manifest_no().successor() else {
-            return Ok(true);
-        };
-        let key =
-            loonfs_objectstore::keys::metadata_manifest_object(&self.head.namespace_id, &next);
-        Ok(store
-            .head(&key)
-            .await
-            .map_err(|error| CoreError::store(&key, &error))?
-            .is_none())
-    }
-
     pub(crate) fn weight(&self) -> PublishTailWeight {
         PublishTailWeight {
             rows: self.tail_state.rows.row_count(),
@@ -172,6 +155,7 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
     };
     let retention_floor_seq = loaded.retention_floor_seq;
     let head = loaded.head;
+    ensure_writer_not_fenced(&head, &acquired_writer)?;
     if head.status.is_deleted() {
         return Err(CoreError::MetadataProjection(
             MetadataProjectionLoadError::NamespaceDeleted {
@@ -179,7 +163,6 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
             },
         ));
     }
-    ensure_writer_not_fenced(&head, &acquired_writer)?;
     let loaded_basis = load_basis_metadata_segments(store, segment_cache, &loaded.basis).await?;
     let key = PublishProjectionKey {
         namespace_id: namespace_id.clone(),

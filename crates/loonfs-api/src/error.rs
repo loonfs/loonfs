@@ -22,7 +22,7 @@ pub enum ErrorKind {
     NotFound,
     /// The route does not accept this HTTP method.
     MethodNotAllowed,
-    /// The target's current generation is deleted and cannot serve this operation.
+    /// The target namespace is deleted and cannot serve this operation.
     Gone,
     /// The create target already exists and requires another ID unless the request is idempotent.
     AlreadyExists,

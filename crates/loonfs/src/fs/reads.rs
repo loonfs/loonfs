@@ -13,8 +13,8 @@ use crate::{
     SharedObjectStore, StatPathOptions,
 };
 use loonfs_api::{
-    AbsolutePath, DirectoryPageCursor, EffectiveLimit, FileRevisionsPageCursor,
-    NamespaceGeneration, PageCursor, PageRequest, PaginationPolicy, TrashPageCursor,
+    AbsolutePath, DirectoryPageCursor, EffectiveLimit, FileRevisionsPageCursor, PageCursor,
+    PageRequest, PaginationPolicy, TrashPageCursor,
 };
 use loonfs_core::{NamespaceReaderEngine, RuntimeReadContext};
 use tracing::Instrument;
@@ -94,11 +94,6 @@ impl FsReadSnapshot {
     /// Returns the head sequence this snapshot is pinned to.
     pub fn head_seq(&self) -> ChangeSeq {
         self.context.head.seq
-    }
-
-    /// Identifies the namespace lifetime shared by this snapshot's reads.
-    pub fn generation(&self) -> NamespaceGeneration {
-        self.context.head.generation
     }
 
     /// Reads the ordered change feed through this snapshot's captured head.
@@ -853,14 +848,10 @@ impl FsReader {
     ) -> Result<CheckpointFilesPage> {
         self.core.record_trace_context(&tracing::Span::current());
         let (engine, read_context) = self.core.pinned_read(namespace_id).await?;
-        let result = engine
+        engine
             .list_checkpoint_files_page(checkpoint_id, request, &read_context)
             .await
-            .map_err(crate::RuntimeError::from);
-        if super::is_stale_head(&result) {
-            self.core.invalidate_namespace_read_cache(namespace_id);
-        }
-        result
+            .map_err(crate::RuntimeError::from)
     }
 
     /// Resolves the current state of each inode ID.

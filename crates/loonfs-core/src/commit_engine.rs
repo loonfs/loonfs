@@ -149,18 +149,10 @@ impl CommitCandidate {
 
     /// Lists inline values in the order their operations first name them.
     pub fn ordered_inline_content(&self, namespace_id: &NamespaceId) -> Result<Vec<InlineContent>> {
-        let Some(namespace_generation) = self
-            .inline_content
-            .first()
-            .map(|value| value.content_ref().owner_generation)
-        else {
-            return Ok(Vec::new());
-        };
         crate::protocol::validate_inline_content_references(
             &self.request,
             &self.inline_content,
             namespace_id,
-            namespace_generation,
         )?;
         let mut values: std::collections::HashMap<_, _> = self
             .inline_content
@@ -522,8 +514,6 @@ pub struct NamespaceCommitEngine {
     namespace_id: NamespaceId,
     publish_tail_projection: Option<PublishTailProjection>,
     projection_loaded_ms: Option<u64>,
-    manifest_checked_ms: Option<u64>,
-    manifest_revalidation_interval_ms: u64,
     /// This session's epoch and fencing for the namespace; see
     /// [`WriterSessionState`].
     session: SharedWriterSessionState,
@@ -540,8 +530,6 @@ impl NamespaceCommitEngine {
             namespace_id,
             publish_tail_projection: None,
             projection_loaded_ms: None,
-            manifest_checked_ms: None,
-            manifest_revalidation_interval_ms: 1_000,
             session: SharedWriterSessionState::default(),
             timer: Arc::new(StdMonotonicTimer::default()),
             segment_cache: None,
@@ -569,11 +557,6 @@ impl NamespaceCommitEngine {
         self
     }
 
-    pub fn manifest_revalidation_interval_ms(mut self, interval_ms: u64) -> Self {
-        self.manifest_revalidation_interval_ms = interval_ms;
-        self
-    }
-
     pub fn segment_cache(mut self, segment_cache: Arc<MetadataSegmentCache>) -> Self {
         self.segment_cache = Some(segment_cache);
         self
@@ -584,46 +567,10 @@ impl NamespaceCommitEngine {
     pub fn invalidate_projection(&mut self) {
         self.publish_tail_projection = None;
         self.projection_loaded_ms = None;
-        self.manifest_checked_ms = None;
     }
 
-    /// The generation of the head this engine last published against, without
-    /// touching the store.
-    pub fn cached_generation(&self) -> Option<loonfs_api::NamespaceGeneration> {
-        self.publish_tail_projection
-            .as_ref()
-            .map(|projection| projection.head.generation)
-    }
-
-    /// Returns the retained tail projection's memory weight, or `None` when no
-    /// projection is cached. Runtimes can sum this value across namespace engines
-    /// to enforce a global cache limit.
-    pub fn retained_tail_weight(&self) -> Option<PublishTailWeight> {
-        self.publish_tail_projection
-            .as_ref()
-            .map(PublishTailProjection::weight)
-    }
-
-    async fn revalidate_projection<S: ObjectStore + ?Sized>(&mut self, store: &S) -> Result<()> {
-        let Some(projection) = self.publish_tail_projection.as_ref() else {
-            return Ok(());
-        };
-        let now_ms = self.timer.monotonic_now_ms();
-        if self.manifest_checked_ms.is_some_and(|checked_ms| {
-            now_ms.saturating_sub(checked_ms) < self.manifest_revalidation_interval_ms
-        }) {
-            return Ok(());
-        }
-        if projection.manifest_is_current(store).await? {
-            self.manifest_checked_ms = Some(now_ms);
-        } else {
-            self.invalidate_projection();
-        }
-        Ok(())
-    }
-
-    /// Whether the retained tail contains a receipt, without a store request.
-    fn retains_commit_receipt(&self, commit_id: &CommitId) -> bool {
+    /// Checks the cached WAL tail without store reads or writer acquisition.
+    pub fn retains_commit_receipt(&self, commit_id: &CommitId) -> bool {
         self.publish_tail_projection
             .as_ref()
             .is_some_and(|projection| {
@@ -635,19 +582,13 @@ impl NamespaceCommitEngine {
             })
     }
 
-    /// Whether the retained tail contains a receipt. A retained receipt is
-    /// answered only after the manifest passes its revalidation, so a
-    /// recreated namespace cannot replay an earlier generation's commit.
-    pub async fn has_retained_commit_receipt<S: ObjectStore + ?Sized>(
-        &mut self,
-        store: &S,
-        commit_id: &CommitId,
-    ) -> Result<bool> {
-        if !self.retains_commit_receipt(commit_id) {
-            return Ok(false);
-        }
-        self.revalidate_projection(store).await?;
-        Ok(self.retains_commit_receipt(commit_id))
+    /// Returns the retained tail projection's memory weight, or `None` when no
+    /// projection is cached. Runtimes can sum this value across namespace engines
+    /// to enforce a global cache limit.
+    pub fn retained_tail_weight(&self) -> Option<PublishTailWeight> {
+        self.publish_tail_projection
+            .as_ref()
+            .map(PublishTailProjection::weight)
     }
 
     /// The retained projection as a fold input, or `None` when the engine
@@ -797,30 +738,15 @@ impl NamespaceCommitEngine {
         {
             self.invalidate_projection();
         }
-        // A fresh publish is fenced by its WAL put; only a replay answered
-        // from a retained receipt needs the manifest revalidated first.
-        let revalidated = if candidates
-            .iter()
-            .any(|candidate| self.retains_commit_receipt(candidate.commit_id()))
-        {
-            self.revalidate_projection(store).await
-        } else {
-            Ok(())
-        };
-        let loaded = match revalidated {
-            Ok(()) => {
-                load_publish_metadata_view(
-                    store,
-                    self.segment_cache.as_deref(),
-                    &self.namespace_id,
-                    acquired_writer,
-                    self.publish_tail_projection.as_ref(),
-                    tail_options,
-                )
-                .await
-            }
-            Err(error) => Err(error),
-        };
+        let loaded = load_publish_metadata_view(
+            store,
+            self.segment_cache.as_deref(),
+            &self.namespace_id,
+            acquired_writer,
+            self.publish_tail_projection.as_ref(),
+            tail_options,
+        )
+        .await;
         let projection_loaded_ms = self.projection_loaded_ms.unwrap_or(attempt_started_ms);
         let (publish_view, projection) = match loaded {
             Ok(value) => value,
@@ -853,11 +779,6 @@ impl NamespaceCommitEngine {
         )
         .await;
         self.projection_loaded_ms = Some(projection_loaded_ms);
-        // A cold load read the current manifest, so the successor probe waits
-        // a full interval before its first request.
-        if self.manifest_checked_ms.is_none() {
-            self.manifest_checked_ms = Some(projection_loaded_ms);
-        }
         let (wal_tail_segments, wal_tail_inline_bytes, resulting_read_state) =
             self.update_publish_tail_projection(projection, published.effect, tail_options);
         NamespaceCommitEnginePublishResult {
@@ -971,8 +892,8 @@ mod content_tests;
 mod inline_tests;
 
 #[cfg(test)]
-#[path = "commit_engine_generation_tests.rs"]
-mod generation_tests;
+#[path = "commit_engine_deletion_tests.rs"]
+mod deletion_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1035,7 +956,6 @@ mod tests {
             NamespaceId::parse("demo").expect("namespace"),
             ContentRef::blob_v1(
                 loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
-                loonfs_api::NamespaceGeneration(1),
                 ContentId::generate(),
                 b"proof",
             ),
@@ -1118,7 +1038,6 @@ mod tests {
 
         let content_ref = ContentRef::blob_v1(
             loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
-            loonfs_api::NamespaceGeneration(1),
             ContentId::generate(),
             b"proof",
         );

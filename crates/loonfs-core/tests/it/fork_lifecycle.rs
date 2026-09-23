@@ -1195,7 +1195,7 @@ async fn a_create_losing_to_a_foreign_head_reports_the_id_as_taken() {
 }
 
 #[tokio::test]
-async fn namespace_delete_blocks_reads_writes_and_forks_but_creation_recreates() {
+async fn namespace_delete_blocks_reads_writes_and_forks() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
@@ -1272,14 +1272,6 @@ async fn namespace_delete_blocks_reads_writes_and_forks_but_creation_recreates()
         fork.expect_err("fork of deleted source").code(),
         ErrorCode::NamespaceDeleted
     );
-    let recreated = bootstrap_namespace(&store, &namespace_id, &context)
-        .await
-        .expect("recreate namespace");
-    assert_eq!(recreated.generation, loonfs_api::NamespaceGeneration(2));
-    let adopted = bootstrap_namespace_allowing_existing(&store, &namespace_id, &context)
-        .await
-        .expect("adopt recreated namespace");
-    assert_eq!(adopted.generation, recreated.generation);
 }
 
 #[tokio::test]
@@ -1440,55 +1432,6 @@ async fn creation_and_fork_install_hint_and_manifest_in_order() {
         } else {
             assert_eq!(
                 result.expect_err("source exists").code(),
-                ErrorCode::NamespaceExists
-            );
-        }
-        let counts = store.counts();
-        assert_eq!(
-            (counts.puts, counts.compare_and_swaps, counts.deletes),
-            (0, 0, 0)
-        );
-    }
-}
-
-#[tokio::test]
-async fn bootstrap_of_a_deleted_namespace_recreates_it_once() {
-    let directory = tempdir().expect("tempdir");
-    let store = RecordingStore::new(
-        LocalFsStore::new(directory.path()).expect("store"),
-        KeyPredicate::any(),
-    );
-    let namespace_id = namespace_id("demo");
-    let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id, &context)
-        .await
-        .expect("bootstrap");
-    namespace_engine(&store, &namespace_id, &context)
-        .delete_namespace(loonfs_core::DeleteNamespaceOptions::default())
-        .await
-        .expect("delete");
-    store.reset();
-    let recreated = bootstrap_namespace(&store, &namespace_id, &context)
-        .await
-        .expect("recreate namespace");
-    assert_eq!(recreated.generation, loonfs_api::NamespaceGeneration(2));
-    assert!(store.counts().puts > 0);
-
-    for allow_existing in [false, true] {
-        store.reset();
-        let result = if allow_existing {
-            bootstrap_namespace_allowing_existing(&store, &namespace_id, &context).await
-        } else {
-            bootstrap_namespace(&store, &namespace_id, &context).await
-        };
-        if allow_existing {
-            assert_eq!(
-                result.expect("allow existing").generation,
-                recreated.generation
-            );
-        } else {
-            assert_eq!(
-                result.expect_err("active id").code(),
                 ErrorCode::NamespaceExists
             );
         }

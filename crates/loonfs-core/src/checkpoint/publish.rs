@@ -49,12 +49,10 @@ pub(crate) async fn publish_manifest<S: ObjectStore + ?Sized>(
     timer: &dyn MonotonicTimer,
     started_ms: u64,
 ) -> Result<ManifestPublicationOutcome> {
-    let plain_generation_start = manifest.envelope().payload().manifest_no
-        == manifest.envelope().payload().generation_first_manifest_no
+    let plain_create = manifest.envelope().payload().manifest_no == loonfs_api::ManifestNo(1)
         && manifest.envelope().payload().fork_basis.is_none();
     let candidate = CurrentManifest {
         manifest: manifest_ref_for(namespace_id, manifest.envelope()),
-        generation: manifest.envelope().payload().generation,
         retention_floor_seq: manifest.envelope().payload().retention_floor_seq,
         folded_wal_no: manifest.envelope().payload().folded_wal_no,
         compactor_epoch: manifest.envelope().payload().compactor_epoch,
@@ -63,9 +61,8 @@ pub(crate) async fn publish_manifest<S: ObjectStore + ?Sized>(
         .await
         .map_err(CoreError::ControlObjectLoad)?;
     if let Some(current) = &current {
-        // A tombstone ends its generation; work that raced the deletion stops here.
+        // A tombstone ends its namespace; work that raced the deletion stops here.
         if current.envelope.payload().status.is_deleted()
-            && current.state.generation == candidate.generation
             && current.state.manifest != candidate.manifest
         {
             return Err(CoreError::NamespaceDeleted {
@@ -81,7 +78,7 @@ pub(crate) async fn publish_manifest<S: ObjectStore + ?Sized>(
             &current.state,
             &candidate,
             expected_predecessor,
-            plain_generation_start,
+            plain_create,
         ) {
             ManifestPublicationOutcome::Installable => {}
             outcome => return Ok(outcome),
@@ -98,7 +95,7 @@ pub(crate) async fn publish_manifest<S: ObjectStore + ?Sized>(
             .ensure_successor(payload)
             .map_err(|error| error.to_string()),
         None if payload.manifest_no == ManifestNo(1) => payload
-            .ensure_generation_start()
+            .ensure_first_manifest()
             .map_err(|error| error.to_string()),
         None => Err("has no predecessor".to_owned()),
     };
@@ -121,7 +118,7 @@ pub(crate) async fn publish_manifest<S: ObjectStore + ?Sized>(
                 namespace_id,
                 &candidate,
                 expected_predecessor,
-                plain_generation_start,
+                plain_create,
             )
             .await?
         }
@@ -143,7 +140,7 @@ pub(crate) async fn publish_manifest<S: ObjectStore + ?Sized>(
                             &landed.state,
                             &candidate,
                             expected_predecessor,
-                            plain_generation_start,
+                            plain_create,
                         ),
                         None => {
                             classify_current_manifest(
@@ -151,7 +148,7 @@ pub(crate) async fn publish_manifest<S: ObjectStore + ?Sized>(
                                 namespace_id,
                                 &candidate,
                                 expected_predecessor,
-                                plain_generation_start,
+                                plain_create,
                             )
                             .await?
                         }
@@ -190,11 +187,11 @@ fn classify_current(
     current: &CurrentManifest,
     candidate: &CurrentManifest,
     expected_predecessor: Option<ManifestNo>,
-    plain_generation_start: bool,
+    plain_create: bool,
 ) -> ManifestPublicationOutcome {
     if current.manifest == candidate.manifest {
         // Plain creates can have identical payloads; fork source pins are unique.
-        if plain_generation_start {
+        if plain_create {
             ManifestPublicationOutcome::CoveredByCurrent(current.clone())
         } else {
             ManifestPublicationOutcome::Published(current.clone())
@@ -217,18 +214,13 @@ async fn classify_current_manifest<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     candidate: &CurrentManifest,
     expected_predecessor: Option<ManifestNo>,
-    plain_generation_start: bool,
+    plain_create: bool,
 ) -> Result<ManifestPublicationOutcome> {
     Ok(load_current_manifest_if_present(store, namespace_id)
         .await
         .map_err(CoreError::ControlObjectLoad)?
         .map_or(ManifestPublicationOutcome::Installable, |loaded| {
-            classify_current(
-                &loaded.state,
-                candidate,
-                expected_predecessor,
-                plain_generation_start,
-            )
+            classify_current(&loaded.state, candidate, expected_predecessor, plain_create)
         }))
 }
 

@@ -66,7 +66,6 @@ fn request(id: &str, who: &str, operation: FilesystemOperation) -> CommitRequest
 fn inline(id: &str, who: &str, bytes: &'static [u8]) -> CommitCandidate {
     let value = InlineContent::new(
         namespace(),
-        loonfs_api::NamespaceGeneration(1),
         ContentId::generate(),
         Bytes::from_static(bytes),
     );

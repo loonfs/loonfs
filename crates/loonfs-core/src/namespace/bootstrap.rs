@@ -1,6 +1,6 @@
-//! Creates namespaces, including a deleted id's next generation.
+//! Creates namespaces.
 
-use super::generation::{publish_generation, GenerationPublication};
+use super::install::{publish_namespace, NamespacePublication};
 use crate::context::MutationContext;
 use crate::error::CoreError;
 use crate::metadata::{AccessRevisionRecord, InodeRecord, MetadataState};
@@ -69,8 +69,7 @@ pub(crate) async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
         actor_id.clone(),
         access.clone(),
     );
-    if publish_generation(store, &start, None, &timer, started_ms).await?
-        == GenerationPublication::Exists
+    if publish_namespace(store, &start, &timer, started_ms).await? == NamespacePublication::Exists
         && !allow_existing
     {
         return Err(BootstrapNamespaceError::NamespaceAlreadyExists {

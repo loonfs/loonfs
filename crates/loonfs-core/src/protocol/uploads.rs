@@ -43,7 +43,7 @@ use loonfs_api::wire::control::{
 };
 use loonfs_api::{
     Checksum, ChecksumAlgorithm, ContentId, ContentRef, ContentRefKind, NamespaceAccess,
-    NamespaceGeneration, NamespaceId, Subject, SubjectId, UploadId,
+    NamespaceId, Subject, SubjectId, UploadId,
 };
 use loonfs_objectstore::keys::{content_blob, upload_session};
 use loonfs_objectstore::{
@@ -252,7 +252,6 @@ pub(crate) async fn direct_multipart_part_targets<S: ObjectStore + ?Sized>(
         )));
     }
     let session = load_upload_session_state(store, namespace_id, upload_id).await?;
-    ensure_session_generation(&session, catalog.generation(), upload_id)?;
     ensure_session_subject(&session, subject)?;
     if let Some(error) = terminal_session_error(&session.status, upload_id.clone()) {
         return Err(error);
@@ -305,7 +304,6 @@ fn multipart_session_upload(session: &UploadSessionPayload) -> Result<(&str, Che
 ///
 fn claimed_content_ref(
     owner_namespace_id: NamespaceId,
-    owner_generation: NamespaceGeneration,
     content_id: ContentId,
     claim: &UploadContentClaim,
     required_algorithm: ChecksumAlgorithm,
@@ -313,7 +311,6 @@ fn claimed_content_ref(
     let content_ref = ContentRef {
         kind: ContentRefKind::BlobV1,
         owner_namespace_id,
-        owner_generation,
         content_id,
         size_bytes: claim.size_bytes,
         checksum: validate_upload_checksum(&claim.checksum, required_algorithm)?.clone(),
@@ -441,7 +438,6 @@ async fn create_upload_session_with_state<S: ObjectStore + ?Sized>(
     let upload_id = UploadId::generate();
     let state = UploadSessionPayload {
         namespace_id: catalog.namespace_id().clone(),
-        owner_generation: catalog.generation(),
         upload_id: upload_id.clone(),
         content_id: session.content_id,
         created_at_ms: context.now_ms,
@@ -510,19 +506,6 @@ async fn ensure_upload_namespace_available<S: ObjectStore + ?Sized>(
     Ok(VerifiedNamespaceCatalogEntry::from_head(&head))
 }
 
-fn ensure_session_generation(
-    session: &UploadSessionPayload,
-    current_generation: NamespaceGeneration,
-    upload_id: &UploadId,
-) -> Result<()> {
-    if session.owner_generation != current_generation {
-        return Err(CoreError::UploadNotFound {
-            upload_id: upload_id.clone(),
-        });
-    }
-    Ok(())
-}
-
 /// Converts a terminal upload status into the error returned by an operation
 /// that requires an open session.
 fn terminal_session_error(
@@ -563,13 +546,11 @@ enum StagingSlot {
 async fn claim_staging_slot<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    owner_generation: NamespaceGeneration,
     upload_id: &UploadId,
 ) -> Result<StagingSlot> {
     update_upload_session(store, namespace_id, upload_id, |mut state| {
         let upload_id = upload_id.to_owned();
         async move {
-            ensure_session_generation(&state, owner_generation, &upload_id)?;
             if let Some(error) = terminal_session_error(&state.status, upload_id.clone()) {
                 return Err(error);
             }
@@ -605,11 +586,9 @@ async fn claim_staging_slot<S: ObjectStore + ?Sized>(
 async fn release_staging_claim<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    owner_generation: NamespaceGeneration,
     upload_id: &UploadId,
 ) {
     let released = update_upload_session(store, namespace_id, upload_id, |mut state| async move {
-        ensure_session_generation(&state, owner_generation, upload_id)?;
         if !matches!(state.status, UploadSessionRecordStatus::Open { .. }) {
             return Ok(UploadSessionUpdate::Noop(()));
         }
@@ -644,7 +623,6 @@ async fn read_open_proxied_session<S: ObjectStore + ?Sized>(
     subject: Option<&Subject>,
 ) -> Result<UploadSessionPayload> {
     let session = load_upload_session_state(store, catalog.namespace_id(), upload_id).await?;
-    ensure_session_generation(&session, catalog.generation(), upload_id)?;
     ensure_session_subject(&session, subject)?;
     if let Some(error) = terminal_session_error(&session.status, upload_id.clone()) {
         return Err(error);
@@ -715,19 +693,17 @@ pub(crate) async fn upload_proxied_content<S: ObjectStore + ?Sized>(
 
     // The claim is what makes the write exclusive, so it is taken before any
     // byte is written and released by the same swap that records the result.
-    match claim_staging_slot(store, namespace_id, catalog.generation(), upload_id).await? {
+    match claim_staging_slot(store, namespace_id, upload_id).await? {
         StagingSlot::AlreadyStaged(staged) => {
             let content_ref = match payload {
                 ProxiedPayload::Bytes(bytes) => ContentRef::blob_v1(
                     loaded.namespace_id.clone(),
-                    loaded.owner_generation,
                     loaded.content_id.clone(),
                     bytes,
                 ),
                 ProxiedPayload::Stream(body) => {
                     identify_streamed_payload(
                         loaded.namespace_id.clone(),
-                        loaded.owner_generation,
                         loaded.content_id.clone(),
                         body,
                     )
@@ -751,7 +727,6 @@ pub(crate) async fn upload_proxied_content<S: ObjectStore + ?Sized>(
         ProxiedPayload::Bytes(bytes) => stage_bytes_under_content_id(
             store,
             loaded.namespace_id.clone(),
-            loaded.owner_generation,
             loaded.content_id.clone(),
             bytes,
         )
@@ -760,7 +735,6 @@ pub(crate) async fn upload_proxied_content<S: ObjectStore + ?Sized>(
         ProxiedPayload::Stream(body) => stage_streamed_under_content_id(
             store,
             loaded.namespace_id.clone(),
-            loaded.owner_generation,
             loaded.content_id.clone(),
             body,
             StreamedPayloadKind::Request,
@@ -771,20 +745,12 @@ pub(crate) async fn upload_proxied_content<S: ObjectStore + ?Sized>(
     let (content_ref, already_present) = match staged {
         Ok(staged) => staged,
         Err(error) => {
-            release_staging_claim(store, namespace_id, catalog.generation(), upload_id).await;
+            release_staging_claim(store, namespace_id, upload_id).await;
             return Err(error);
         }
     };
 
-    record_staged_content(
-        store,
-        namespace_id,
-        catalog.generation(),
-        upload_id,
-        content_ref,
-        already_present,
-    )
-    .await
+    record_staged_content(store, namespace_id, upload_id, content_ref, already_present).await
 }
 
 /// Records a staging result and releases its claim in the same
@@ -797,7 +763,6 @@ pub(crate) async fn upload_proxied_content<S: ObjectStore + ?Sized>(
 async fn record_staged_content<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    owner_generation: NamespaceGeneration,
     upload_id: &UploadId,
     content_ref: ContentRef,
     already_present: bool,
@@ -806,7 +771,6 @@ async fn record_staged_content<S: ObjectStore + ?Sized>(
         let upload_id = upload_id.to_owned();
         let content_ref = content_ref.clone();
         async move {
-            ensure_session_generation(&state, owner_generation, &upload_id)?;
             if let Some(error) = terminal_session_error(&state.status, upload_id.clone()) {
                 return Err(error);
             }
@@ -883,7 +847,6 @@ where
     authorize_upload_subject(namespace_id, catalog.access(), subject)?;
     let now_ms = context.now_ms;
     let loaded = load_upload_session_state(store, namespace_id, upload_id).await?;
-    ensure_session_generation(&loaded, catalog.generation(), upload_id)?;
     ensure_session_subject(&loaded, subject)?;
     // An aborted session answers the same absence its physical deletion
     // will, before anything about the request's shape is examined.
@@ -968,9 +931,7 @@ async fn freeze_completed_session_from_initial<S: ObjectStore + ?Sized>(
             let namespace_id = catalog.namespace_id().clone();
             let upload_id = upload_id.to_owned();
             let verified = verified.clone();
-            let owner_generation = catalog.generation();
             async move {
-                ensure_session_generation(&state, owner_generation, &upload_id)?;
                 if let Some(completed) = replay_terminal_completion(
                     &state.status,
                     &namespace_id,
@@ -1028,7 +989,6 @@ pub(crate) async fn stage_owned_bytes<S: ObjectStore + ?Sized>(
     let stored = stage_bytes_under_content_id(
         store,
         catalog.namespace_id().clone(),
-        catalog.generation(),
         session.content_id,
         bytes,
     )
@@ -1060,7 +1020,6 @@ pub(crate) async fn stage_owned_stream<S: ObjectStore + ?Sized>(
     let staged = stage_streamed_under_content_id(
         store,
         catalog.namespace_id().clone(),
-        catalog.generation(),
         session.content_id,
         body,
         payload_kind,
@@ -1165,13 +1124,11 @@ pub(crate) async fn abort_upload<S: ObjectStore + ?Sized>(
     let namespace_id = catalog.namespace_id();
     authorize_upload_subject(namespace_id, catalog.access(), subject)?;
     let now_ms = context.now_ms;
-    let current_generation = catalog.generation();
     let (response, abandoned) =
         update_upload_session(store, namespace_id, upload_id, |mut state| {
             let namespace_id = namespace_id.clone();
             let upload_id = upload_id.to_owned();
             async move {
-                ensure_session_generation(&state, current_generation, &upload_id)?;
                 ensure_session_subject(&state, subject)?;
                 let mode = upload_mode(&state.mode);
                 let abandoned = AbandonedUpload::of(&state);
@@ -1292,7 +1249,6 @@ pub(crate) async fn get_upload_status<S: ObjectStore + ?Sized>(
     let catalog = ensure_upload_namespace_available(store, namespace_id).await?;
     authorize_upload_subject(namespace_id, catalog.access(), subject)?;
     let loaded = load_upload_session_state(store, namespace_id, upload_id).await?;
-    ensure_session_generation(&loaded, catalog.generation(), upload_id)?;
     ensure_session_subject(&loaded, subject)?;
     let receipt = match &loaded.status {
         UploadSessionRecordStatus::Completed {
@@ -1531,7 +1487,6 @@ fn completion_plan<'a>(
         ) => Ok(CompletionPlan::DirectPut {
             requested: claimed_content_ref(
                 session.namespace_id.clone(),
-                session.owner_generation,
                 session.content_id.clone(),
                 content,
                 *checksum_algorithm,
@@ -1547,7 +1502,6 @@ fn completion_plan<'a>(
         ) => Ok(CompletionPlan::DirectMultipart {
             requested: claimed_content_ref(
                 session.namespace_id.clone(),
-                session.owner_generation,
                 session.content_id.clone(),
                 content,
                 *checksum_algorithm,
@@ -1878,7 +1832,6 @@ mod tests {
     fn multipart_validation_uses_the_algorithm_frozen_in_the_session() {
         let session = UploadSessionPayload {
             namespace_id: NamespaceId::parse("demo").expect("namespace id"),
-            owner_generation: NamespaceGeneration(1),
             upload_id: UploadId::parse("upl_00000000000000000000000000000001").expect("upload id"),
             content_id: ContentId::parse("con_00000000000000000000000000000001")
                 .expect("content id"),
@@ -1903,7 +1856,6 @@ mod tests {
         };
         let content_ref = claimed_content_ref(
             session.namespace_id.clone(),
-            session.owner_generation,
             session.content_id.clone(),
             &content,
             required_algorithm,
@@ -1943,7 +1895,6 @@ mod tests {
         };
         assert!(claimed_content_ref(
             session.namespace_id.clone(),
-            session.owner_generation,
             session.content_id,
             &wrong_content,
             required_algorithm

@@ -38,7 +38,6 @@ class Endpoint:
         self.claim = dict(
             kind="blob_v1",
             owner_namespace_id="demo",
-            owner_generation=1,
             content_id="con_test",
             size_bytes=len(content),
             checksum=dict(algorithm="sha256", value="0" * 64),

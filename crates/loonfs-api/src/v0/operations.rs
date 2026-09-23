@@ -4,7 +4,7 @@ use super::ContentToken;
 use crate::{
     AbsolutePath, AccessGrants, AccessRevisionNo, ActorId, AttributeKey, AttributeValue,
     AttributesRevisionNo, BindingGeneration, ChangeSeq, CommitId, ContentRef, DisplayName, InodeId,
-    ManifestNo, NamespaceGeneration, NamespaceId, PinId, RevisionNo, WriterEpoch, WriterId,
+    ManifestNo, NamespaceId, PinId, RevisionNo, WriterEpoch, WriterId,
 };
 use crate::{NamespaceAccess, PrincipalId, PrincipalScope};
 use serde::{Deserialize, Serialize};
@@ -197,8 +197,6 @@ pub struct Namespace {
     pub access: NamespaceAccessMode,
     /// Namespace ID.
     pub namespace_id: NamespaceId,
-    /// Which generation of its id this namespace is. Recreating a deleted id increments it.
-    pub generation: NamespaceGeneration,
     /// Time the namespace was created, in Unix milliseconds.
     pub created_at_ms: u64,
     /// Actor that created the namespace, as supplied by the application.
@@ -256,8 +254,6 @@ pub struct NamespaceForkBasis {
 pub struct NamespaceDiagnostics {
     /// Namespace ID.
     pub namespace_id: NamespaceId,
-    /// Which generation of its id this namespace is. Recreating a deleted id increments it.
-    pub generation: NamespaceGeneration,
     /// Time the namespace was created, in Unix milliseconds.
     pub created_at_ms: u64,
     /// Actor that created the namespace, as supplied by the application.
@@ -1155,8 +1151,6 @@ pub struct DeletedObjectCounts {
     pub content_objects: u64,
     /// Successful deletion attempts under a retired namespace owner prefix.
     pub retired_content_objects: u64,
-    /// Records deleted after reclamation or after their tombstone was collected.
-    pub retired_generation_records: u64,
 }
 
 impl DeletedObjectCounts {
@@ -1169,7 +1163,6 @@ impl DeletedObjectCounts {
             upload_sessions,
             content_objects,
             retired_content_objects,
-            retired_generation_records,
         } = other;
         self.wal_segments += wal_segments;
         self.metadata_segments += metadata_segments;
@@ -1177,7 +1170,6 @@ impl DeletedObjectCounts {
         self.upload_sessions += upload_sessions;
         self.content_objects += content_objects;
         self.retired_content_objects += retired_content_objects;
-        self.retired_generation_records += retired_generation_records;
     }
 }
 
@@ -1597,7 +1589,6 @@ mod tests {
     fn file_revision_provenance_fields_are_pinned_on_the_wire() {
         let content_ref = ContentRef::blob_v1(
             crate::NamespaceId::parse("demo").expect("namespace id"),
-            crate::NamespaceGeneration(1),
             crate::ContentId::generate(),
             b"hello",
         );
@@ -1635,7 +1626,6 @@ mod tests {
     fn sample_content_ref() -> ContentRef {
         ContentRef::blob_v1(
             crate::NamespaceId::parse("demo").expect("namespace id"),
-            crate::NamespaceGeneration(1),
             ContentId::parse("con_0123456789abcdef0123456789abcdef").expect("valid content id"),
             b"hello",
         )
@@ -1646,7 +1636,6 @@ mod tests {
         let namespace = Namespace {
             access: NamespaceAccessMode::Unrestricted {},
             namespace_id: NamespaceId::parse("demo").expect("namespace id"),
-            generation: crate::NamespaceGeneration(2),
             created_at_ms: 1_000,
             created_by: crate::ActorId::parse("test").expect("actor"),
             fork_basis: None,
@@ -1657,7 +1646,6 @@ mod tests {
             serde_json::to_value(namespace).expect("serialize namespace"),
             serde_json::json!({
                 "namespace_id": "demo",
-                "generation": 2,
                 "access": {"kind": "unrestricted"},
                 "created_at_ms": 1000,
                 "created_by": "test",
@@ -1671,7 +1659,6 @@ mod tests {
     fn namespace_diagnostics_wire_shape_keeps_storage_fields() {
         let diagnostics = NamespaceDiagnostics {
             namespace_id: NamespaceId::parse("demo").expect("namespace id"),
-            generation: crate::NamespaceGeneration(2),
             created_at_ms: 1_000,
             created_by: crate::ActorId::parse("test").expect("actor"),
             fork_basis: None,
@@ -1686,7 +1673,6 @@ mod tests {
             serde_json::to_value(diagnostics).expect("serialize namespace diagnostics"),
             serde_json::json!({
                 "namespace_id": "demo",
-                "generation": 2,
                 "created_at_ms": 1000,
                 "created_by": "test",
                 "head_seq": 11,
@@ -1908,7 +1894,6 @@ mod tests {
             "content_ref": {
                 "kind": "blob_v1",
                 "owner_namespace_id": "demo",
-                "owner_generation": 1,
                 "content_id": "con_0123456789abcdef0123456789abcdef",
                 "size_bytes": 1,
                 "checksum": {
@@ -2005,7 +1990,6 @@ mod tests {
     fn filesystem_operation_paths_keep_the_plain_string_wire_shape() {
         let content_ref = ContentRef::blob_v1(
             crate::NamespaceId::parse("demo").expect("namespace id"),
-            crate::NamespaceGeneration(1),
             ContentId::generate(),
             b"hello",
         );
@@ -2081,7 +2065,7 @@ mod tests {
             serde_json::json!({
                 "kind": "put_file",
                 "path": "relative",
-                "content_ref": ContentRef::blob_v1(crate::NamespaceId::parse("demo").expect("namespace id"), crate::NamespaceGeneration(1), ContentId::generate(), b"hello")
+                "content_ref": ContentRef::blob_v1(crate::NamespaceId::parse("demo").expect("namespace id"), ContentId::generate(), b"hello")
             }),
             serde_json::json!({"kind": "delete_path", "path": "relative"}),
             serde_json::json!({
@@ -2407,7 +2391,6 @@ mod tests {
         let gc_json = serde_json::to_value(gc).expect("serialize gc response");
         assert!(gc_json.get("next_reclamation_at_ms").is_none());
         assert!(gc_json.get("reclaim_after_ms").is_none());
-        assert_eq!(gc_json["deleted"]["retired_generation_records"], 0);
         assert_eq!(
             gc_json["deleted_checkpoints_by_owner"],
             serde_json::json!({"fork": 0, "expired": 0, "snapshot": 0})

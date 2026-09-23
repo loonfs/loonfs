@@ -104,7 +104,6 @@ fn assert_row_categories_equal(overlay: &MetadataState, replayed: &MetadataState
 fn content_ref(seed: u8) -> ContentRef {
     ContentRef::blob_v1(
         loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
-        loonfs_api::NamespaceGeneration(1),
         ContentId::generate(),
         &[seed; 12],
     )

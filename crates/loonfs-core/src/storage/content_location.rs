@@ -6,7 +6,7 @@ use super::content::{
 };
 use crate::error::CoreError;
 use bytes::Bytes;
-use loonfs_api::{ContentRef, NamespaceGeneration, NamespaceId};
+use loonfs_api::{ContentRef, NamespaceId};
 use loonfs_objectstore::ObjectStore;
 
 /// Identifies where a published reference's bytes are read from.
@@ -21,16 +21,12 @@ pub enum ContentLocation {
 impl ContentLocation {
     pub(crate) fn resolve(
         namespace_id: &NamespaceId,
-        generation: NamespaceGeneration,
         tail: Option<&crate::wal::ProjectedWalTail>,
         content_ref: &ContentRef,
     ) -> Result<Self, DurableContentValidationError> {
         let object_key = content_object_key_for_ref(content_ref)?;
-        if content_ref.owner_namespace_id == *namespace_id
-            && content_ref.owner_generation == generation
-        {
-            if let Some(bytes) = tail.and_then(|tail| tail.inline_content(&content_ref.content_id))
-            {
+        if content_ref.owner_namespace_id == *namespace_id {
+            if let Some(bytes) = tail.and_then(|tail| tail.inline_content(content_ref)) {
                 return Ok(Self::Tail {
                     bytes: bytes.clone(),
                     object_key,
@@ -54,18 +50,6 @@ impl ContentLocation {
         match self {
             Self::Object { object_key } => Ok(object_key),
             Self::Tail { bytes, object_key } => {
-                let current = crate::namespace::control::load_current_manifest(
-                    store,
-                    &content_ref.owner_namespace_id,
-                )
-                .await?;
-                if current.state.generation != content_ref.owner_generation {
-                    return Err(DurableContentValidationError::MissingContentGeneration {
-                        owner_namespace_id: content_ref.owner_namespace_id.clone(),
-                        owner_generation: content_ref.owner_generation,
-                    }
-                    .into());
-                }
                 validate_loaded_content_bytes(object_key.clone(), content_ref, &bytes)?;
                 if let Some(stored) = store
                     .get(&object_key, None)
@@ -112,45 +96,5 @@ impl ContentLocation {
                 Ok(bytes)
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::wal::ProjectedWalTail;
-    use loonfs_test_support::ids::content_ref;
-
-    #[test]
-    fn resident_content_requires_the_reading_namespace_and_generation() {
-        let bytes = Bytes::from_static(b"resident bytes");
-        let reference = content_ref(&bytes);
-        let mut tail = ProjectedWalTail::default();
-        tail.insert_inline_content(reference.clone(), bytes.clone());
-        let resolve = |namespace_id: &NamespaceId, generation| {
-            ContentLocation::resolve(namespace_id, generation, Some(&tail), &reference)
-                .expect("content location")
-        };
-        let object_key = content_object_key_for_ref(&reference).expect("content object key");
-        assert_eq!(
-            resolve(&reference.owner_namespace_id, reference.owner_generation),
-            ContentLocation::Tail {
-                bytes,
-                object_key: object_key.clone(),
-            }
-        );
-        assert_eq!(
-            resolve(&reference.owner_namespace_id, NamespaceGeneration(2)),
-            ContentLocation::Object {
-                object_key: object_key.clone(),
-            }
-        );
-        assert_eq!(
-            resolve(
-                &NamespaceId::parse("another-reader").expect("namespace"),
-                reference.owner_generation,
-            ),
-            ContentLocation::Object { object_key }
-        );
     }
 }

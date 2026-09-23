@@ -1,7 +1,7 @@
 //! Runtime caches for control-object reads and WAL-tail projections.
 //! WAL probes observe commits; interval checks observe manifest changes.
 
-use crate::fs::{is_stale_head, should_invalidate_after_result, ReadCore};
+use crate::fs::{should_invalidate_after_result, ReadCore};
 use crate::metrics::RuntimeInstruments;
 use crate::trace::phase_span;
 use crate::{Commit, CoreError, NamespaceId, PinId, Recency, RuntimeCacheConfig};
@@ -424,11 +424,7 @@ impl ReadCore {
             checkpoint_id,
         )
         .await
-        .map_err(RuntimeError::from);
-        if is_stale_head(&pinned) {
-            self.invalidate_namespace_read_cache(namespace_id);
-        }
-        let pinned = pinned?;
+        .map_err(RuntimeError::from)?;
         Ok(self.pinned_read_at_basis(namespace_id, pinned, &live))
     }
 
@@ -451,11 +447,7 @@ impl ReadCore {
             now_ms,
         )
         .await
-        .map_err(RuntimeError::from);
-        if is_stale_head(&pinned) {
-            self.invalidate_namespace_read_cache(namespace_id);
-        }
-        let pinned = pinned?;
+        .map_err(RuntimeError::from)?;
         Ok(self.pinned_read_at_basis(namespace_id, pinned, &live))
     }
 

@@ -7,7 +7,6 @@ use crate::control_object::{
 use crate::control_update::create_control_object_under_generated_id;
 use crate::error::{CoreError, Result};
 use crate::namespace::control::load_current_manifest;
-use crate::namespace::state::NamespaceReadState;
 use bytes::Bytes;
 use loonfs_api::wire::control::{encode_control_state, ControlObjectKind, PinPayload};
 use loonfs_api::{NamespaceId, PinId};
@@ -34,10 +33,6 @@ pub(crate) async fn write_checkpoint_record<S: ObjectStore + ?Sized>(
     let object_key = checkpoint_record(&record.namespace_id, &record.pin_id);
     create_control_object_under_generated_id(store, &object_key, encoded).await?;
     Ok(())
-}
-
-pub(crate) fn checkpoint_is_visible(head: &NamespaceReadState, checkpoint_id: &PinId) -> bool {
-    checkpoint_id.manifest_no() >= head.generation_first_manifest_no
 }
 
 pub(crate) type LoadedCheckpointRecord = LoadedControl<PinPayload>;

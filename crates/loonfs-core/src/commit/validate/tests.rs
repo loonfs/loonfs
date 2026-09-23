@@ -195,8 +195,6 @@ fn validation_context(
         access: loonfs_api::NamespaceAccess::Unrestricted {},
         fork_basis: None,
         namespace_id: namespace_id.clone(),
-        generation: loonfs_api::NamespaceGeneration(1),
-        generation_first_manifest_no: loonfs_api::ManifestNo(1),
         seq,
         head_commit_id: CommitId::parse("c_00000000000000000000000000000000").expect("commit id"),
         writer_epoch: WriterEpoch(1),

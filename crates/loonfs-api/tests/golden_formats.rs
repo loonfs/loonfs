@@ -20,8 +20,8 @@
 
 use loonfs_api::wire::control::{
     decode_control_object, ControlObjectEnvelope, ControlObjectKind, ForkBasis, HintPayload,
-    ManifestRef, NamespaceStatus, PinOwner, PinPayload, ProxiedStaging, RetiredGenerationPayload,
-    UploadSessionMode, UploadSessionPayload, UploadSessionRecordStatus, WriterBlock,
+    ManifestRef, NamespaceStatus, PinOwner, PinPayload, ProxiedStaging, UploadSessionMode,
+    UploadSessionPayload, UploadSessionRecordStatus, WriterBlock,
 };
 use loonfs_api::wire::envelope::EnvelopeCodecError;
 use loonfs_api::wire::manifest::{
@@ -127,7 +127,6 @@ fn content_id(value: &str) -> ContentId {
 fn sample_content_ref() -> ContentRef {
     ContentRef::blob_v1(
         loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
-        loonfs_api::NamespaceGeneration(1),
         content_id("con_0123456789abcdef0123456789abcdef"),
         b"golden bytes",
     )
@@ -141,7 +140,6 @@ fn sample_crc_content_ref() -> ContentRef {
     ContentRef {
         kind: ContentRefKind::BlobV1,
         owner_namespace_id: loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
-        owner_generation: loonfs_api::NamespaceGeneration(1),
         content_id: content_id("con_fedcba9876543210fedcba9876543210"),
         size_bytes: 11_534_336,
         checksum: Checksum {
@@ -159,7 +157,6 @@ fn content_ref_matches_golden_bytes_for_every_checksum_algorithm() {
         ContentRef {
             kind: ContentRefKind::BlobV1,
             owner_namespace_id: loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
-            owner_generation: loonfs_api::NamespaceGeneration(1),
             content_id: content_id("con_00112233445566778899aabbccddeeff"),
             size_bytes: 4_096,
             checksum: Checksum {
@@ -352,7 +349,6 @@ fn sample_wal_inline_content_payload() -> WalSegmentPayload {
     ];
     let empty_content_ref = ContentRef::blob_v1(
         namespace_id(),
-        loonfs_api::NamespaceGeneration(1),
         payload.records[0].inline_content[1].content_id.clone(),
         b"",
     );
@@ -394,8 +390,6 @@ fn sample_manifest_payload() -> NamespaceManifestPayload {
         compactor_epoch: 0,
         namespace_id: namespace_id(),
         manifest_no: ManifestNo(2),
-        generation: loonfs_api::NamespaceGeneration(1),
-        generation_first_manifest_no: ManifestNo(1),
 
         head_seq: ChangeSeq(2),
         head_commit_id: commit_id(),
@@ -640,12 +634,7 @@ fn manifest_status_reading_is_fail_closed_on_unknown_statuses() {
 
 #[test]
 fn manifest_without_required_fields_is_rejected() {
-    for field in [
-        "status",
-        "created_by",
-        "generation",
-        "generation_first_manifest_no",
-    ] {
+    for field in ["status", "created_by"] {
         let mut document = serde_json::to_value(sample_manifest_payload())
             .expect("encode active manifest as a document");
         document
@@ -714,18 +703,7 @@ fn control_objects_match_golden_bytes() {
             created_at_ms: 3_000,
             owner: PinOwner::Fork {
                 target_namespace_id: NamespaceId::parse("clone").expect("valid namespace id"),
-                target_generation: loonfs_api::NamespaceGeneration(1),
             },
-        },
-    );
-    check_control_golden(
-        "control_retired_generation.v1.json",
-        ControlObjectKind::RetiredGeneration,
-        RetiredGenerationPayload {
-            namespace_id: namespace_id(),
-            generation: loonfs_api::NamespaceGeneration(1),
-            tombstone: sample_manifest_ref(5),
-            created_at_ms: 3_000,
         },
     );
     check_control_golden(
@@ -748,7 +726,6 @@ fn control_objects_match_golden_bytes() {
         ControlObjectKind::UploadSession,
         UploadSessionPayload {
             namespace_id: namespace_id(),
-            owner_generation: loonfs_api::NamespaceGeneration(1),
             upload_id: UploadId::parse("upl_0123456789abcdef0123456789abcdef")
                 .expect("valid upload id"),
             content_id: content_id("con_0123456789abcdef0123456789abcdef"),
@@ -768,7 +745,6 @@ fn control_objects_match_golden_bytes() {
         ControlObjectKind::UploadSession,
         UploadSessionPayload {
             namespace_id: namespace_id(),
-            owner_generation: loonfs_api::NamespaceGeneration(1),
             upload_id: UploadId::parse("upl_abcdef0123456789abcdef0123456789")
                 .expect("valid upload id"),
             content_id: content_id("con_0123456789abcdef0123456789abcdef"),
@@ -791,7 +767,6 @@ fn control_objects_match_golden_bytes() {
         ControlObjectKind::UploadSession,
         UploadSessionPayload {
             namespace_id: namespace_id(),
-            owner_generation: loonfs_api::NamespaceGeneration(1),
             upload_id: UploadId::parse("upl_22222222222222222222222222222222")
                 .expect("valid upload id"),
             content_id: content_id("con_22222222222222222222222222222222"),
@@ -814,7 +789,6 @@ fn control_objects_match_golden_bytes() {
         ControlObjectKind::UploadSession,
         UploadSessionPayload {
             namespace_id: namespace_id(),
-            owner_generation: loonfs_api::NamespaceGeneration(1),
             upload_id: UploadId::parse("upl_33333333333333333333333333333333")
                 .expect("valid upload id"),
             content_id: content_id("con_0123456789abcdef0123456789abcdef"),
@@ -833,7 +807,6 @@ fn control_objects_match_golden_bytes() {
         ControlObjectKind::UploadSession,
         UploadSessionPayload {
             namespace_id: namespace_id(),
-            owner_generation: loonfs_api::NamespaceGeneration(1),
             upload_id: UploadId::parse("upl_33333333333333333333333333333333")
                 .expect("valid upload id"),
             content_id: content_id("con_0123456789abcdef0123456789abcdef"),
@@ -852,7 +825,6 @@ fn control_objects_match_golden_bytes() {
         ControlObjectKind::UploadSession,
         UploadSessionPayload {
             namespace_id: namespace_id(),
-            owner_generation: loonfs_api::NamespaceGeneration(1),
             upload_id: UploadId::parse("upl_44444444444444444444444444444444")
                 .expect("valid upload id"),
             content_id: content_id("con_44444444444444444444444444444444"),
@@ -871,7 +843,6 @@ fn control_objects_match_golden_bytes() {
         ControlObjectKind::UploadSession,
         UploadSessionPayload {
             namespace_id: namespace_id(),
-            owner_generation: loonfs_api::NamespaceGeneration(1),
             upload_id: UploadId::parse("upl_11111111111111111111111111111111")
                 .expect("valid upload id"),
             content_id: content_id("con_11111111111111111111111111111111"),
@@ -892,7 +863,6 @@ fn every_durable_status_is_a_kind_tagged_object() {
     let fixtures = [
         "manifest.v1.json",
         "manifest.deleted.v1.json",
-        "manifest.retired.v1.json",
         "control_upload_session.v1.json",
     ];
     for fixture in fixtures {
@@ -1261,7 +1231,6 @@ fn control_object_decoders_reject_wrong_format_version_without_fallback() {
             ControlObjectKind::UploadSession,
             serde_json::to_value(UploadSessionPayload {
                 namespace_id: namespace_id(),
-                owner_generation: loonfs_api::NamespaceGeneration(1),
                 upload_id: UploadId::parse("upl_11111111111111111111111111111111")
                     .expect("valid upload id"),
                 content_id: content_id("con_11111111111111111111111111111111"),
@@ -2715,7 +2684,6 @@ fn every_metadata_row_rejects_unknown_fields() {
 fn sample_content_publication_row() -> MetadataRow {
     MetadataRow::ContentPublication(loonfs_api::wire::manifest::ContentPublicationRecord {
         owner_namespace_id: sample_content_ref().owner_namespace_id,
-        owner_generation: sample_content_ref().owner_generation,
         content_id: sample_content_ref().content_id,
         committed_seq: ChangeSeq(2),
         delta_index: 3,
@@ -2821,7 +2789,6 @@ fn inline_commit_wire_bytes_match_golden() {
         ids.insert(id.clone());
         *content_ref = Some(ContentRef::blob_v1(
             namespace.clone(),
-            loonfs_api::NamespaceGeneration(1),
             id,
             &inline_content.take().expect("inline bytes"),
         ));
@@ -2947,13 +2914,8 @@ fn name_folding_matches_the_fixed_unicode_corpus() {
 
 #[test]
 fn namespace_manifest_lifecycle_variants_match_golden_bytes() {
-    let mut retired = sample_deleted_manifest();
-    retired.status = NamespaceStatus::Deleted {
-        deleted_at_ms: 1_500_000,
-    };
     for (name, payload) in [
         ("manifest.deleted.v1.json", sample_deleted_manifest()),
-        ("manifest.retired.v1.json", retired),
         ("manifest.fork.v1.json", sample_fork_manifest()),
         ("manifest.acl.v1.json", sample_acl_manifest()),
     ] {

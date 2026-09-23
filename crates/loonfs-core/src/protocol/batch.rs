@@ -217,12 +217,9 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
     };
     for (candidate, slot) in candidates.iter().zip(&slots) {
         if matches!(slot, BatchOutcomeSlot::Accepted) {
-            if let Err(error) = validate_candidate_content_references(
-                candidate,
-                namespace_id,
-                view.head.generation,
-                publication_now_ms,
-            ) {
+            if let Err(error) =
+                validate_candidate_content_references(candidate, namespace_id, publication_now_ms)
+            {
                 return abort_batch(slots, &error);
             }
         }
@@ -257,11 +254,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
                 .next()
                 .expect("accepted slot count should match WAL record count");
             *slot = BatchOutcomeSlot::Settled {
-                outcome: committed_change_from_wal_record(
-                    namespace_id,
-                    view.head.generation,
-                    record,
-                ),
+                outcome: committed_change_from_wal_record(namespace_id, record),
                 depends_on_batch: false,
             };
         }

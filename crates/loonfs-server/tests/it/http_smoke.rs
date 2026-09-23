@@ -26,7 +26,7 @@ use loonfs_test_support::ids::namespace_id;
 use tempfile::tempdir;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn delete_namespace_blocks_operations_until_create_starts_the_next_generation() {
+async fn delete_namespace_blocks_operations() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(
         temp_dir.path().join("store"),
@@ -126,16 +126,6 @@ async fn delete_namespace_blocks_operations_until_create_starts_the_next_generat
         }
         other => panic!("expected namespace_deleted, got {other:?}"),
     }
-    let recreated = harness
-        .client
-        .create_namespace(
-            &namespace,
-            &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
-        )
-        .await
-        .expect("recreate namespace");
-    assert_eq!(recreated.generation, loonfs_api::NamespaceGeneration(2));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -307,11 +307,10 @@ fn materialized_snapshot_from_state(
     state: Arc<GrepManifestState>,
     reads: &PinnedNamespaceReads<'_>,
 ) -> Result<MaterializedGrepIndexSnapshot> {
-    if state.generation() != reads.generation()
-        || state
-            .status()
-            .active_watermark()
-            .is_some_and(|resume| resume.built_through_seq() > reads.head_seq())
+    if state
+        .status()
+        .active_watermark()
+        .is_some_and(|resume| resume.built_through_seq() > reads.head_seq())
     {
         return Err(GrepError::NotEnabled);
     }

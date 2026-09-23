@@ -26,9 +26,9 @@ use crate::wal::ProjectedWalTail;
 use loonfs_api::v0::DirectoryBinding;
 use loonfs_api::{
     AbsolutePath, AccessRight, AccessRights, AttributeInclusion, AttributesProjection, ChangeSeq,
-    CommitId, ContentRef, DirectoryPageCursor, DisplayName, FileBytes, FileRevision,
-    FileRevisionsPageCursor, InodeId, InodeKind, ManifestNo, NamespaceId, Page, PageRequest,
-    PathEntry, PathEntryKind, RevisionNo, TrashEntry, TrashPageCursor,
+    ContentRef, DirectoryPageCursor, DisplayName, FileBytes, FileRevision, FileRevisionsPageCursor,
+    InodeId, InodeKind, ManifestNo, NamespaceId, Page, PageRequest, PathEntry, PathEntryKind,
+    RevisionNo, TrashEntry, TrashPageCursor,
 };
 use loonfs_objectstore::ObjectStore;
 use std::collections::HashMap;
@@ -161,14 +161,6 @@ pub(crate) struct LoadedMetadataView<'a, S: ObjectStore + ?Sized> {
 }
 
 impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
-    pub(crate) async fn has_retained_commit_receipt(&self, commit_id: &CommitId) -> Result<bool> {
-        Ok(self
-            .metadata_view()
-            .find_commit_receipt(commit_id)
-            .await?
-            .is_some())
-    }
-
     pub(crate) fn head(&self) -> &NamespaceReadState {
         &self.head
     }
@@ -378,7 +370,6 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
     ) -> Result<ContentLocation> {
         Ok(ContentLocation::resolve(
             &self.namespace_id,
-            self.head.generation,
             Some(&self.wal_tail),
             content_ref,
         )?)
@@ -1034,7 +1025,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             .transpose()?;
         let binding_generation = resolved
             .binding_generation
-            .map(|generation| generation.encode(&self.namespace_id, self.head.generation))
+            .map(|generation| generation.encode(&self.namespace_id))
             .transpose()
             .map_err(|error| {
                 CoreError::Internal(format!(

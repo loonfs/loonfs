@@ -123,7 +123,6 @@ pub(crate) fn sample_active_manifest(
     };
     GrepManifestState::new(
         namespace_id("docs"),
-        loonfs_api::NamespaceGeneration(1),
         loonfs_api::ManifestNo(1),
         GrepIndexStatus::Active {
             built_through_seq,
@@ -148,7 +147,6 @@ pub(crate) fn sample_active_manifest(
 pub(crate) fn sample_backfilling_manifest() -> GrepManifestState {
     GrepManifestState::new(
         namespace_id("docs"),
-        loonfs_api::NamespaceGeneration(1),
         loonfs_api::ManifestNo(1),
         GrepIndexStatus::Backfilling {
             target_seq: ChangeSeq(7),
@@ -170,7 +168,6 @@ pub(crate) fn sample_backfilling_manifest() -> GrepManifestState {
 pub(crate) fn sample_disabled_manifest() -> GrepManifestState {
     GrepManifestState::new(
         namespace_id("docs"),
-        loonfs_api::NamespaceGeneration(1),
         loonfs_api::ManifestNo(1),
         GrepIndexStatus::Disabled {},
         GrepIndexState {

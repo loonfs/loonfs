@@ -1,9 +1,7 @@
-//! Fork installation copies pinned source runs into a new target generation.
+//! Fork installation copies pinned source runs into a new namespace.
 
-use super::generation::{publish_generation, GenerationPublication};
-use crate::checkpoint::record::{
-    checkpoint_is_visible, delete_checkpoint_record, write_checkpoint_record,
-};
+use super::install::{publish_namespace, NamespacePublication};
+use crate::checkpoint::record::{delete_checkpoint_record, write_checkpoint_record};
 use crate::checkpoint::{
     classify_live_snapshot, create_checkpoint, load_checkpoint_record,
     load_namespace_manifest_envelope,
@@ -15,7 +13,7 @@ use crate::limits::PIN_VERIFY_BUDGET_MS;
 use crate::time::{MonotonicTimer, StdMonotonicTimer};
 use loonfs_api::wire::control::{ForkBasis, NamespaceStatus, PinOwner, PinPayload};
 use loonfs_api::wire::manifest::NamespaceManifestPayload;
-use loonfs_api::{ManifestNo, Namespace, NamespaceGeneration, NamespaceId, PinId, WriterEpoch};
+use loonfs_api::{ManifestNo, Namespace, NamespaceId, PinId, WriterEpoch};
 use loonfs_objectstore::ObjectStore;
 
 pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
@@ -29,22 +27,19 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
     let timer = StdMonotonicTimer::default();
     let started_ms = timer.monotonic_now_ms();
     let target = super::control::load_current_manifest_if_present(store, new_namespace_id).await?;
-    let target_generation = match target {
-        None => NamespaceGeneration(1),
-        Some(target) if target.envelope.payload().status.is_deleted() => target
-            .state
-            .generation
-            .successor()
-            .map_err(|error| CoreError::Internal(format!("namespace generation {error}")))?,
-        Some(_) => {
-            return Err(CoreError::NamespaceExists {
+    if let Some(target) = target {
+        return Err(if target.envelope.payload().status.is_deleted() {
+            CoreError::NamespaceDeleted {
                 namespace_id: new_namespace_id.clone(),
-            })
-        }
-    };
+            }
+        } else {
+            CoreError::NamespaceExists {
+                namespace_id: new_namespace_id.clone(),
+            }
+        });
+    }
     let owner = PinOwner::Fork {
         target_namespace_id: new_namespace_id.clone(),
-        target_generation,
     };
     let source_record = if let Some(snapshot_id) = snapshot_id {
         create_snapshot_fork_checkpoint(store, source_namespace_id, snapshot_id, owner, context)
@@ -85,8 +80,6 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
         created_by: actor_id.clone(),
         fork_basis: Some(fork_basis),
         manifest_no: ManifestNo(1),
-        generation: target_generation,
-        generation_first_manifest_no: ManifestNo(1),
         retention_floor_seq: fork_seq,
         folded_wal_no: loonfs_api::WalNo(0),
         writer_epoch: WriterEpoch(0),
@@ -96,15 +89,8 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
         activity: Default::default(),
         ..source_manifest.payload().clone()
     };
-    if publish_generation(
-        store,
-        &manifest,
-        Some(target_generation),
-        &timer,
-        started_ms,
-    )
-    .await?
-        == GenerationPublication::Exists
+    if publish_namespace(store, &manifest, &timer, started_ms).await?
+        == NamespacePublication::Exists
     {
         return Err(CoreError::NamespaceExists {
             namespace_id: new_namespace_id.clone(),
@@ -127,11 +113,6 @@ async fn create_snapshot_fork_checkpoint<S: ObjectStore + ?Sized>(
             .await
             .map_err(CoreError::ControlObjectLoad)?;
     crate::namespace::control::ensure_namespace_live(&source_head)?;
-    if !checkpoint_is_visible(&source_head, snapshot_id) {
-        return Err(CoreError::SnapshotNotFound {
-            snapshot_id: snapshot_id.clone(),
-        });
-    }
     let snapshot = classify_live_snapshot(
         load_checkpoint_record(store, source_namespace_id, snapshot_id)
             .await?

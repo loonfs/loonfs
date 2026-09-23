@@ -14,7 +14,7 @@ use crate::path::write::{CommitRequest, FilesystemOperation, PublishPlanningSess
 use crate::storage::content_admission::PreparedContent;
 use crate::storage::inline_content::InlineContent;
 use loonfs_api::v0::Commit;
-use loonfs_api::{CommitId, ContentId, NamespaceGeneration, NamespaceId};
+use loonfs_api::{CommitId, ContentId, NamespaceId};
 use loonfs_objectstore::ObjectStore;
 use std::collections::{HashMap, HashSet};
 
@@ -127,12 +127,9 @@ pub(super) async fn prepare_candidate_request<S: ObjectStore + ?Sized>(
     if let Err(error) = candidate.validate_request_limits() {
         return CandidateAdmission::independent(Err(error));
     }
-    if let Err(error) = validate_candidate_content_references(
-        candidate,
-        namespace_id,
-        view.head.generation,
-        committed_at_ms,
-    ) {
+    if let Err(error) =
+        validate_candidate_content_references(candidate, namespace_id, committed_at_ms)
+    {
         return CandidateAdmission::independent(Err(error));
     }
     let mut allocation = session.begin_candidate();
@@ -160,7 +157,6 @@ pub(super) async fn prepare_candidate_request<S: ObjectStore + ?Sized>(
 pub(super) fn validate_candidate_content_references(
     candidate: &CommitCandidate,
     namespace_id: &NamespaceId,
-    namespace_generation: NamespaceGeneration,
     now_ms: u64,
 ) -> Result<()> {
     match candidate.content_preparation() {
@@ -169,7 +165,6 @@ pub(super) fn validate_candidate_content_references(
             admissions,
             candidate.inline_content(),
             namespace_id,
-            namespace_generation,
             now_ms,
         ),
         ContentPreparation::Rejected(error) => Err(error.clone().into()),
@@ -230,7 +225,6 @@ pub(crate) fn validate_inline_content_references<'a>(
     request: &CommitRequest,
     inline_content: &'a [InlineContent],
     namespace_id: &NamespaceId,
-    namespace_generation: NamespaceGeneration,
 ) -> Result<HashMap<&'a ContentId, &'a loonfs_api::ContentRef>> {
     let references: HashSet<_> = request
         .operations
@@ -254,11 +248,9 @@ pub(crate) fn validate_inline_content_references<'a>(
                 "inline content `{content_id}` appears more than once"
             )));
         }
-        if reference.owner_namespace_id != *namespace_id
-            || reference.owner_generation != namespace_generation
-        {
+        if reference.owner_namespace_id != *namespace_id {
             return Err(CoreError::InvalidCommitRequest(format!(
-                "inline content `{content_id}` is not owned by the committing namespace generation"
+                "inline content `{content_id}` is not owned by the committing namespace"
             )));
         }
     }
@@ -282,15 +274,10 @@ fn validate_commit_content_references(
     admissions: &[PreparedContent],
     inline_content: &[InlineContent],
     namespace_id: &NamespaceId,
-    namespace_generation: NamespaceGeneration,
     now_ms: u64,
 ) -> Result<()> {
-    let inline_by_content_id = validate_inline_content_references(
-        request,
-        inline_content,
-        namespace_id,
-        namespace_generation,
-    )?;
+    let inline_by_content_id =
+        validate_inline_content_references(request, inline_content, namespace_id)?;
     let mut admissions_by_content_id: HashMap<&ContentId, Vec<&PreparedContent>> =
         HashMap::with_capacity(admissions.len());
     for admission in admissions {
@@ -307,14 +294,6 @@ fn validate_commit_content_references(
         let content_id = &content_ref.content_id;
         if inline_by_content_id.contains_key(content_id) {
             continue;
-        }
-        if content_ref.owner_namespace_id == *namespace_id
-            && content_ref.owner_generation != namespace_generation
-        {
-            return Err(ContentPreparationError::ContentNotPrepared {
-                content_id: content_ref.content_id.clone(),
-            }
-            .into());
         }
         let admitted = admissions_by_content_id
             .get(&content_ref.content_id)

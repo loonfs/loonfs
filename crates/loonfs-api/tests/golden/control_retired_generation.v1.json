@@ -1,1 +1,0 @@
-{"kind":"retired_generation","format_version":1,"payload_checksum":"sha256:f6ac8025a9a094ec8ff999fc53db1a14a6df8c3bdabe442e57acf9e6c0cf40a9","payload":{"namespace_id":"demo","generation":1,"tombstone":{"owner_namespace_id":"demo","manifest_no":5,"head_seq":5,"payload_checksum":"sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"},"created_at_ms":3000}}

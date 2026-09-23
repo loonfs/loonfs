@@ -93,20 +93,20 @@ impl PublisherRegistry {
             return Ok(());
         }
         {
-            let mut slot = publisher.engine.lock().await;
-            if let Some(engine) = slot.engine.as_mut() {
-                if engine
-                    .has_retained_commit_receipt(self.read_core.store(), candidate.commit_id())
-                    .await?
-                {
-                    return Ok(());
-                }
+            let slot = publisher.engine.lock().await;
+            if slot
+                .engine
+                .as_ref()
+                .is_some_and(|engine| engine.retains_commit_receipt(candidate.commit_id()))
+            {
+                return Ok(());
             }
         }
         let (reader, context) = self.read_core.pinned_read(namespace_id).await?;
         if reader
-            .has_retained_commit_receipt(&context, candidate.commit_id())
+            .find_commit_receipt(&context, candidate.commit_id())
             .await?
+            .is_some()
         {
             return Ok(());
         }
