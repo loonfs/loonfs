@@ -21,6 +21,24 @@ pub struct CurrentManifest {
     pub compactor_epoch: u64,
 }
 
+impl CurrentManifest {
+    /// Orders manifests by history. Sequences start over in each generation,
+    /// so a later generation sorts after every manifest of an earlier one.
+    pub(crate) fn position(
+        &self,
+    ) -> (
+        loonfs_api::NamespaceGeneration,
+        loonfs_api::ChangeSeq,
+        loonfs_api::ManifestNo,
+    ) {
+        (
+            self.generation,
+            self.manifest.head_seq,
+            self.manifest.manifest_no,
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoadedManifest {
     pub object_key: String,
@@ -163,26 +181,11 @@ pub(crate) async fn load_current_manifest_if_present<S: ObjectStore + ?Sized>(
             previous
                 .envelope
                 .payload()
-                .ensure_successor_identity(manifest.envelope.payload())
+                .ensure_successor(manifest.envelope.payload())
                 .map_err(|error| ControlObjectLoadError::Codec {
                     object_key: manifest.object_key.clone(),
                     message: error.to_string(),
                 })?;
-            let before = previous.envelope.payload();
-            let after = manifest.envelope.payload();
-            let same_generation = before.generation == after.generation;
-            if (same_generation
-                && (before.head_seq > after.head_seq
-                    || before.retention_floor_seq > after.retention_floor_seq))
-                || before.folded_wal_no > after.folded_wal_no
-                || before.writer_epoch > after.writer_epoch
-                || !before.preserves_activity(after)
-            {
-                return Err(ControlObjectLoadError::Codec {
-                    object_key: manifest.object_key,
-                    message: "manifest lowers a predecessor counter".to_owned(),
-                });
-            }
         }
         current = Some(manifest);
         manifest_no = next;

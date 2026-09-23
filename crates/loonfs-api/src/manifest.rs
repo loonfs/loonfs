@@ -1220,24 +1220,24 @@ pub struct NamespaceManifestPayload {
     pub runs: Vec<MetadataRunRef>,
 }
 
-/// A successor manifest changed identity outside a legal generation boundary.
+/// A manifest breaks a rule of the namespace's manifest chain.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ManifestIdentityDrift {
-    /// Which field the successor changed.
+pub struct ManifestChainError {
+    /// Which field breaks the rule.
     pub field: String,
 }
 
-impl fmt::Display for ManifestIdentityDrift {
+impl fmt::Display for ManifestChainError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
-            "successor manifest changes the namespace's immutable `{}`",
+            "manifest `{}` does not follow the namespace's manifest chain",
             self.field
         )
     }
 }
 
-impl std::error::Error for ManifestIdentityDrift {}
+impl std::error::Error for ManifestChainError {}
 
 impl NamespaceManifestPayload {
     /// Constructs manifest 1 with the root inode reserved.
@@ -1274,109 +1274,143 @@ impl NamespaceManifestPayload {
         }
     }
 
-    /// Whether a successor preserves folded activity or advances it with the head.
-    pub fn preserves_activity(&self, successor: &Self) -> bool {
-        if successor.generation != self.generation {
-            return successor.activity == ManifestActivity::default();
+    /// Checks the first manifest of a generation: it starts the generation
+    /// exactly as a create or a fork does.
+    pub fn ensure_generation_start(&self) -> Result<(), ManifestChainError> {
+        let invalid = |field: &str| {
+            Err(ManifestChainError {
+                field: field.to_owned(),
+            })
+        };
+        if self.generation_first_manifest_no != self.manifest_no {
+            return invalid("generation_first_manifest_no");
         }
-        successor.activity.content_bytes >= self.activity.content_bytes
-            && successor.activity.file_revisions >= self.activity.file_revisions
-            && successor.activity.mutations >= self.activity.mutations
-            && (successor.head_seq > self.head_seq || successor.activity == self.activity)
+        if self.status.is_deleted() {
+            return invalid("status");
+        }
+        if self.writer.is_some() {
+            return invalid("writer");
+        }
+        if self.activity != ManifestActivity::default() {
+            return invalid("activity");
+        }
+        match &self.fork_basis {
+            Some(basis) => {
+                if basis.manifest.head_seq != self.head_seq
+                    || self.retention_floor_seq != self.head_seq
+                {
+                    return invalid("head_seq");
+                }
+            }
+            None => {
+                if !self.runs.is_empty() {
+                    return invalid("runs");
+                }
+                if self.head_seq != ChangeSeq(0)
+                    || self.base_seq != ChangeSeq(0)
+                    || self.retention_floor_seq != ChangeSeq(0)
+                {
+                    return invalid("head_seq");
+                }
+                if self.head_commit_id != crate::control::genesis_commit_id() {
+                    return invalid("head_commit_id");
+                }
+                if self.next_inode_id != crate::FIRST_ALLOCATABLE_INODE_ID {
+                    return invalid("next_inode_id");
+                }
+                if self.next_run_no != RunNo(0) {
+                    return invalid("next_run_no");
+                }
+            }
+        }
+        Ok(())
     }
 
-    /// Rejects identity drift except at a legal generation boundary.
-    pub fn ensure_successor_identity(
-        &self,
-        successor: &NamespaceManifestPayload,
-    ) -> Result<(), ManifestIdentityDrift> {
-        let drift = |field: &str| {
-            Err(ManifestIdentityDrift {
+    /// Checks that `successor` may be published as the next manifest after
+    /// this one. Within a generation, identity is fixed and every counter
+    /// only moves forward. A tombstone is the last manifest of its
+    /// generation; the next generation continues the object counters and
+    /// starts as a create or fork does.
+    pub fn ensure_successor(&self, successor: &Self) -> Result<(), ManifestChainError> {
+        let invalid = |field: &str| {
+            Err(ManifestChainError {
                 field: field.to_owned(),
             })
         };
         if successor.namespace_id != self.namespace_id {
-            return drift("namespace_id");
+            return invalid("namespace_id");
         }
-        if successor.generation == self.generation {
-            if successor.generation_first_manifest_no != self.generation_first_manifest_no {
-                return drift("generation_first_manifest_no");
+        if self.manifest_no.successor().ok() != Some(successor.manifest_no) {
+            return invalid("manifest_no");
+        }
+        if successor.folded_wal_no < self.folded_wal_no {
+            return invalid("folded_wal_no");
+        }
+        if successor.writer_epoch < self.writer_epoch {
+            return invalid("writer_epoch");
+        }
+        if successor.compactor_epoch < self.compactor_epoch {
+            return invalid("compactor_epoch");
+        }
+        if successor.generation != self.generation {
+            if self.generation.successor().ok() != Some(successor.generation) {
+                return invalid("generation");
             }
-            if successor.content_store_id != self.content_store_id {
-                return drift("content_store_id");
+            if !self.status.is_deleted() {
+                return invalid("status");
             }
-            if successor.created_at_ms != self.created_at_ms {
-                return drift("created_at_ms");
+            if successor.folded_wal_no != self.folded_wal_no {
+                return invalid("folded_wal_no");
             }
-            if successor.created_by != self.created_by {
-                return drift("created_by");
+            if self.writer_epoch.successor().ok() != Some(successor.writer_epoch) {
+                return invalid("writer_epoch");
             }
-            if successor.access != self.access {
-                return drift("access");
+            if self.compactor_epoch.checked_add(1) != Some(successor.compactor_epoch) {
+                return invalid("compactor_epoch");
             }
-            if successor.fork_basis != self.fork_basis {
-                return drift("fork_basis");
-            }
-            if self.status.is_deleted() && !successor.status.is_deleted() {
-                return drift("status");
-            }
-            if self.status.is_deleted()
-                && self.status.deleted_at_ms() != successor.status.deleted_at_ms()
-            {
-                return drift("deleted_at_ms");
-            }
-            return Ok(());
+            return successor.ensure_generation_start();
         }
-        if self.generation.successor().ok() != Some(successor.generation) {
-            return drift("generation");
+        if successor.head_seq < self.head_seq {
+            return invalid("head_seq");
         }
-        if !self.status.is_deleted() || successor.status.is_deleted() {
-            return drift("status");
+        if successor.retention_floor_seq < self.retention_floor_seq {
+            return invalid("retention_floor_seq");
         }
-        if successor.generation_first_manifest_no != successor.manifest_no {
-            return drift("generation_first_manifest_no");
+        if successor.next_inode_id < self.next_inode_id {
+            return invalid("next_inode_id");
         }
-        let is_fork = successor.fork_basis.is_some();
-        if !is_fork && successor.content_store_id == self.content_store_id {
-            return drift("content_store_id");
+        if successor.next_run_no < self.next_run_no {
+            return invalid("next_run_no");
         }
-        if !is_fork && !successor.runs.is_empty() {
-            return drift("runs");
+        if successor.generation_first_manifest_no != self.generation_first_manifest_no {
+            return invalid("generation_first_manifest_no");
         }
-        if successor.writer.is_some() {
-            return drift("writer");
+        if successor.content_store_id != self.content_store_id {
+            return invalid("content_store_id");
         }
-        if !is_fork && successor.head_commit_id != crate::control::genesis_commit_id() {
-            return drift("head_commit_id");
+        if successor.created_at_ms != self.created_at_ms {
+            return invalid("created_at_ms");
         }
-        if (!is_fork
-            && (successor.head_seq != ChangeSeq(0)
-                || successor.base_seq != ChangeSeq(0)
-                || successor.retention_floor_seq != ChangeSeq(0)))
-            || (is_fork
-                && (successor.retention_floor_seq != successor.head_seq
-                    || successor.base_seq > successor.head_seq
-                    || successor
-                        .fork_basis
-                        .as_ref()
-                        .is_some_and(|basis| basis.manifest.head_seq != successor.head_seq)))
+        if successor.created_by != self.created_by {
+            return invalid("created_by");
+        }
+        if successor.access != self.access {
+            return invalid("access");
+        }
+        if successor.fork_basis != self.fork_basis {
+            return invalid("fork_basis");
+        }
+        if self.status.is_deleted() {
+            return invalid("status");
+        }
+        // Activity only grows, and only when the head folds new commits.
+        let (before, after) = (&self.activity, &successor.activity);
+        if after.content_bytes < before.content_bytes
+            || after.file_revisions < before.file_revisions
+            || after.mutations < before.mutations
+            || (successor.head_seq == self.head_seq && after != before)
         {
-            return drift("head_seq");
-        }
-        if successor.folded_wal_no != self.folded_wal_no {
-            return drift("folded_wal_no");
-        }
-        if !is_fork && successor.next_inode_id != crate::FIRST_ALLOCATABLE_INODE_ID {
-            return drift("next_inode_id");
-        }
-        if !is_fork && successor.next_run_no != RunNo(0) {
-            return drift("next_run_no");
-        }
-        if self.writer_epoch.successor().ok() != Some(successor.writer_epoch) {
-            return drift("writer_epoch");
-        }
-        if self.compactor_epoch.checked_add(1) != Some(successor.compactor_epoch) {
-            return drift("compactor_epoch");
+            return invalid("activity");
         }
         Ok(())
     }
@@ -1451,13 +1485,24 @@ mod tests {
             crate::ActorId::parse("test").expect("actor"),
             super::NamespaceAccess::unrestricted(),
         );
-        assert!(initial.preserves_activity(&initial));
         assert_eq!(maximum.checked_add(Default::default()), Some(maximum));
         let mut successor = initial.clone();
+        successor.manifest_no = ManifestNo(2);
+        initial
+            .ensure_successor(&successor)
+            .expect("unchanged activity");
         successor.activity = maximum;
-        assert!(!initial.preserves_activity(&successor));
+        assert_eq!(
+            initial
+                .ensure_successor(&successor)
+                .expect_err("activity without a head advance")
+                .field,
+            "activity"
+        );
         successor.head_seq = ChangeSeq(1);
-        assert!(initial.preserves_activity(&successor));
+        initial
+            .ensure_successor(&successor)
+            .expect("folded activity");
         let (envelope, encoded) = encode_namespace_manifest_json(successor.clone())
             .expect("encode")
             .into_parts();
@@ -1477,8 +1522,9 @@ mod tests {
             payload["activity"][field] = (crate::MAX_PUBLIC_INTEGER - 1).into();
             let mut regression: NamespaceManifestPayload =
                 serde_json::from_value(payload.clone()).expect("regression");
+            regression.manifest_no = ManifestNo(3);
             regression.head_seq = ChangeSeq(2);
-            assert!(!successor.preserves_activity(&regression));
+            assert!(successor.ensure_successor(&regression).is_err());
             assert_eq!(regression.activity.checked_add(increment), Some(maximum));
 
             payload["activity"][field] = (crate::MAX_PUBLIC_INTEGER + 1).into();
@@ -1507,6 +1553,8 @@ mod tests {
             crate::ActorId::parse("test").expect("actor"),
             super::NamespaceAccess::Unrestricted {},
         );
+        let mut next = initial.clone();
+        next.manifest_no = ManifestNo(2);
         for (field, change) in [
             ("namespace_id", 0),
             ("content_store_id", 1),
@@ -1514,7 +1562,7 @@ mod tests {
             ("fork_basis", 3),
             ("access", 4),
         ] {
-            let mut successor = initial.clone();
+            let mut successor = next.clone();
             match change {
                 0 => successor.namespace_id = NamespaceId::parse("changed").expect("namespace"),
                 1 => {
@@ -1547,18 +1595,26 @@ mod tests {
             }
             assert_eq!(
                 initial
-                    .ensure_successor_identity(&successor)
+                    .ensure_successor(&successor)
                     .expect_err("identity drift")
                     .field,
                 field
             );
         }
-        let mut deleted = initial.clone();
+        let mut deleted = next.clone();
         deleted.status = crate::control::NamespaceStatus::Deleted {
             deleted_at_ms: 1_500,
         };
-        initial.ensure_successor_identity(&deleted).expect("delete");
-        assert!(deleted.ensure_successor_identity(&initial).is_err());
+        initial.ensure_successor(&deleted).expect("delete");
+        let mut after_tombstone = deleted.clone();
+        after_tombstone.manifest_no = ManifestNo(3);
+        assert_eq!(
+            deleted
+                .ensure_successor(&after_tombstone)
+                .expect_err("a tombstone ends its generation")
+                .field,
+            "status"
+        );
     }
 
     #[test]
@@ -1602,46 +1658,38 @@ mod tests {
         recreated.generation_first_manifest_no = ManifestNo(2);
         recreated.writer_epoch = WriterEpoch(1);
         recreated.compactor_epoch = 1;
-        deleted
-            .ensure_successor_identity(&recreated)
-            .expect("deleted generation boundary");
-        let mut continued_head = recreated.clone();
-        continued_head.head_seq = ChangeSeq(1);
-        continued_head.base_seq = ChangeSeq(1);
-        continued_head.retention_floor_seq = ChangeSeq(1);
-        assert_eq!(
-            deleted
-                .ensure_successor_identity(&continued_head)
-                .expect_err("a generation starts its own sequence space")
-                .field,
-            "head_seq"
-        );
+        deleted.head_seq = ChangeSeq(4);
         deleted.activity = super::ManifestActivity {
             mutations: super::ActivityCounter::parse(7).expect("counter"),
             ..Default::default()
         };
-        assert!(deleted.preserves_activity(&recreated));
-        recreated.activity = deleted.activity;
-        assert!(!deleted.preserves_activity(&recreated));
-        recreated.activity = Default::default();
-
+        deleted
+            .ensure_successor(&recreated)
+            .expect("deleted generation boundary");
+        let mut continued_head = recreated.clone();
+        continued_head.head_seq = ChangeSeq(5);
+        continued_head.base_seq = ChangeSeq(5);
+        continued_head.retention_floor_seq = ChangeSeq(5);
+        let mut continued_activity = recreated.clone();
+        continued_activity.activity = deleted.activity;
         let mut active = deleted.clone();
         active.status = crate::control::NamespaceStatus::Active {};
-        assert_eq!(
-            active
-                .ensure_successor_identity(&recreated)
-                .expect_err("active predecessor")
-                .field,
-            "status"
-        );
-        recreated.generation = crate::NamespaceGeneration(3);
-        assert_eq!(
-            deleted
-                .ensure_successor_identity(&recreated)
-                .expect_err("skipped generation")
-                .field,
-            "generation"
-        );
+        let mut skipped = recreated.clone();
+        skipped.generation = crate::NamespaceGeneration(3);
+        for (predecessor, successor, field) in [
+            (&deleted, &continued_head, "head_seq"),
+            (&deleted, &continued_activity, "activity"),
+            (&active, &recreated, "status"),
+            (&deleted, &skipped, "generation"),
+        ] {
+            assert_eq!(
+                predecessor
+                    .ensure_successor(successor)
+                    .expect_err("illegal generation boundary")
+                    .field,
+                field
+            );
+        }
     }
 
     #[test]

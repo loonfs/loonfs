@@ -59,6 +59,7 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
             let anchor = load_read_anchor(store, namespace_id)
                 .await
                 .map_err(CoreError::ControlObjectLoad)?;
+            crate::namespace::control::ensure_namespace_live(&anchor.read_state)?;
             let current = anchor.manifest;
             let target = current.envelope.payload().head_seq;
             if current.state.retention_floor_seq >= target {
