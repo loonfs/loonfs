@@ -18,7 +18,12 @@ use std::collections::{BTreeMap, BTreeSet};
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum GenerationState {
     Current,
-    Pending { deadline_ms: u64 },
+    /// Deleted and inside its retirement grace.
+    Waiting {
+        deadline_ms: u64,
+    },
+    /// Past its grace, but a pin in its manifest range still holds it.
+    Held,
     Eligible,
     Reclaimed,
 }
@@ -199,8 +204,10 @@ impl LiveSet {
                     && id.manifest_no() >= tombstone.generation_first_manifest_no
                     && id.manifest_no() <= tombstone.manifest_no
             });
-            if self.now_ms < deadline_ms || pinned || self.unrecognized_pin {
-                GenerationState::Pending { deadline_ms }
+            if self.now_ms < deadline_ms {
+                GenerationState::Waiting { deadline_ms }
+            } else if pinned || self.unrecognized_pin {
+                GenerationState::Held
             } else {
                 GenerationState::Eligible
             }

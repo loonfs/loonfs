@@ -927,7 +927,7 @@ A failed required-root read stops collection. An uncertain fork-target read reta
 
 ### 11.6 Upload-session cleanup
 
-Uploads are collected through their session records. The active current generation's published-content prefix is not enumerated. Pending and reclaimed generation rules take precedence over the session status rules.
+Uploads are collected through their session records. The active current generation's published-content prefix is not enumerated. Waiting, held, and reclaimed generation rules take precedence over the session status rules.
 
 | Session and namespace | Action |
 | --- | --- |
@@ -936,9 +936,9 @@ Uploads are collected through their session records. The active current generati
 | Aborted session | Retry content and provider cleanup; remove the record after abort time plus `T`. |
 | Completed session in an active namespace, before content grace | Retain. |
 | Completed session in an active namespace, after content grace | Check publication evidence. Keep published content; delete unreferenced content. Remove the session after successful cleanup or a confirmed publication. |
-| Current-generation session in a deleted namespace, generation pending | Retain; report the generation's derived deadline. |
+| Session in a deleted generation inside its retirement grace | Retain; report the generation's derived deadline. |
+| Session in a deleted generation that pins hold after its grace | Retain; report no time. |
 | Completed session in an eligible current deleted generation | Delete content, then the record; no publication lookup or additional completion grace is required. |
-| Prior-generation session, generation pending | Retain; report that generation's derived deadline. |
 | Prior-generation session, generation eligible | Use the retired namespace rules with the session's generation and content-store ID. Open and aborted sessions keep their expiry, abort grace, and provider cleanup rules. Completed sessions delete content, then the record. |
 | Prior-generation session, generation reclaimed | Its content prefix is already gone. For open and aborted sessions, run provider cleanup with the session's generation and content-store ID. Then delete the record. |
 
