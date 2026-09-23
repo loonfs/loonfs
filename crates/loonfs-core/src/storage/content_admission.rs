@@ -1,8 +1,8 @@
 //! Content preparation proofs and short-lived tokens used by producers.
 //!
 //! A token can be created only from a durable, completed upload session. It
-//! proves that the named content was verified before publication. Namespace,
-//! content reference, and token expiry are preserved when converting it to
+//! proves that the named content was verified before publication. The
+//! content reference and token expiry are preserved when converting it to
 //! [`PreparedContent`] and checked again when a publish batch admits the
 //! proof.
 
@@ -24,19 +24,13 @@ const TOKEN_VERSION: &str = "vct2";
 /// from an in-memory expectation or an unverified provider response.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompletedUploadReceipt {
-    namespace_id: NamespaceId,
     content_ref: ContentRef,
     completed_at_ms: u64,
 }
 
 impl CompletedUploadReceipt {
-    pub(crate) fn for_completed_session(
-        namespace_id: NamespaceId,
-        content_ref: ContentRef,
-        completed_at_ms: u64,
-    ) -> Self {
+    pub(crate) fn for_completed_session(content_ref: ContentRef, completed_at_ms: u64) -> Self {
         Self {
-            namespace_id,
             content_ref,
             completed_at_ms,
         }
@@ -58,7 +52,6 @@ pub struct PreparedContent {
 enum PreparedContentKind {
     Inline(InlineContent),
     Staged {
-        namespace_id: NamespaceId,
         content_ref: ContentRef,
         expires_at_ms: u64,
     },
@@ -91,11 +84,8 @@ impl PreparedContent {
     pub(crate) fn estimated_payload_bytes(&self) -> usize {
         match &self.kind {
             PreparedContentKind::Inline(value) => value.bytes().len(),
-            PreparedContentKind::Staged {
-                namespace_id,
-                content_ref,
-                ..
-            } => namespace_id
+            PreparedContentKind::Staged { content_ref, .. } => content_ref
+                .owner_namespace_id
                 .as_str()
                 .len()
                 .saturating_add(content_ref.content_id.as_str().len())
@@ -119,44 +109,26 @@ impl PreparedContent {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn for_durable_content_write(
-        namespace_id: NamespaceId,
-        content_ref: ContentRef,
-    ) -> Self {
-        Self::for_completed_upload(namespace_id, content_ref, u64::MAX)
+    pub(crate) fn for_durable_content_write(content_ref: ContentRef) -> Self {
+        Self::for_completed_upload(content_ref, u64::MAX)
     }
 
-    pub(crate) fn for_completed_upload(
-        namespace_id: NamespaceId,
-        content_ref: ContentRef,
-        expires_at_ms: u64,
-    ) -> Self {
+    pub(crate) fn for_completed_upload(content_ref: ContentRef, expires_at_ms: u64) -> Self {
         Self {
             kind: PreparedContentKind::Staged {
-                namespace_id,
                 content_ref,
                 expires_at_ms,
             },
         }
     }
 
-    pub(crate) fn admits(
-        &self,
-        namespace_id: &NamespaceId,
-        content_ref: &ContentRef,
-        now_ms: u64,
-    ) -> bool {
+    pub(crate) fn admits(&self, content_ref: &ContentRef, now_ms: u64) -> bool {
         match &self.kind {
             PreparedContentKind::Inline(_) => false,
             PreparedContentKind::Staged {
-                namespace_id: expected_namespace_id,
                 content_ref: expected_content_ref,
                 expires_at_ms,
-            } => {
-                expected_namespace_id == namespace_id
-                    && expected_content_ref == content_ref
-                    && now_ms <= *expires_at_ms
-            }
+            } => expected_content_ref == content_ref && now_ms <= *expires_at_ms,
         }
     }
 
@@ -170,9 +142,9 @@ impl PreparedContent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ContentTokenPayload {
     version: String,
-    namespace_id: NamespaceId,
     content_ref: ContentRef,
     expires_at_ms: u64,
 }
@@ -217,7 +189,6 @@ pub fn mint_content_token(
         .ok_or(ContentTokenError::TimeOverflow)?;
     let payload = ContentTokenPayload {
         version: TOKEN_VERSION.to_owned(),
-        namespace_id: receipt.namespace_id.clone(),
         content_ref: receipt.content_ref.clone(),
         expires_at_ms,
     };
@@ -263,7 +234,7 @@ pub fn verify_content_token(
     }
     let payload: ContentTokenPayload = serde_json::from_value(payload)
         .map_err(|error| ContentTokenError::Codec(error.to_string()))?;
-    if payload.namespace_id != *catalog.namespace_id() {
+    if payload.content_ref.owner_namespace_id != *catalog.namespace_id() {
         return Err(ContentTokenError::NamespaceMismatch);
     }
     if payload.content_ref != token.content_ref {
@@ -274,7 +245,6 @@ pub fn verify_content_token(
     }
 
     Ok(PreparedContent::for_completed_upload(
-        payload.namespace_id,
         payload.content_ref,
         payload.expires_at_ms,
     ))
@@ -313,12 +283,8 @@ mod tests {
         ))
     }
 
-    fn receipt(namespace_id: &NamespaceId, content_ref: &ContentRef) -> CompletedUploadReceipt {
-        CompletedUploadReceipt::for_completed_session(
-            namespace_id.clone(),
-            content_ref.clone(),
-            1_000,
-        )
+    fn receipt(content_ref: &ContentRef) -> CompletedUploadReceipt {
+        CompletedUploadReceipt::for_completed_session(content_ref.clone(), 1_000)
     }
 
     #[test]
@@ -330,38 +296,18 @@ mod tests {
             ContentId::generate(),
             b"hello",
         );
-        let token =
-            mint_content_token("secret", &receipt(&namespace, &content), 1_000).expect("mint");
+        let token = mint_content_token("secret", &receipt(&content), 1_000).expect("mint");
         let catalog = catalog_entry(namespace);
 
         let prepared =
             verify_content_token("secret", &catalog, &token, 1_000).expect("verify token");
 
         assert_eq!(prepared.content_ref(), &content);
-        assert!(prepared.admits(catalog.namespace_id(), &content, 1_000,));
+        assert!(prepared.admits(&content, 1_000));
     }
 
     #[test]
-    fn prepared_admission_remains_bound_to_its_namespace() {
-        let namespace = NamespaceId::parse("source").expect("namespace");
-        let other_namespace = NamespaceId::parse("target").expect("namespace");
-        let content = ContentRef::blob_v1(
-            namespace.clone(),
-            NamespaceGeneration(1),
-            ContentId::generate(),
-            b"hello",
-        );
-        let token =
-            mint_content_token("secret", &receipt(&namespace, &content), 1_000).expect("mint");
-        let catalog = catalog_entry(namespace);
-        let admission =
-            verify_content_token("secret", &catalog, &token, 1_000).expect("verify token");
-
-        assert!(!admission.admits(&other_namespace, &content, 1_000,));
-    }
-
-    #[test]
-    fn token_encoding_signs_the_owner_and_rejects_the_previous_version() {
+    fn token_encoding_signs_the_reference_and_rejects_the_previous_shape() {
         let namespace = NamespaceId::parse("demo").expect("namespace");
         let content = ContentRef::blob_v1(
             namespace.clone(),
@@ -369,8 +315,7 @@ mod tests {
             ContentId::parse("con_0123456789abcdef0123456789abcdef").expect("content id"),
             b"hello",
         );
-        let token =
-            mint_content_token("secret", &receipt(&namespace, &content), 1_000).expect("mint");
+        let token = mint_content_token("secret", &receipt(&content), 1_000).expect("mint");
         let (payload_part, _) = token.token.split_once('.').expect("signed token");
         let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(payload_part)
@@ -378,24 +323,20 @@ mod tests {
 
         assert_eq!(
             payload,
-            br#"{"version":"vct2","namespace_id":"demo","content_ref":{"kind":"blob_v1","owner_namespace_id":"demo","owner_generation":1,"content_id":"con_0123456789abcdef0123456789abcdef","size_bytes":5,"checksum":{"algorithm":"sha256","value":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"}},"expires_at_ms":3601000}"#
+            br#"{"version":"vct2","content_ref":{"kind":"blob_v1","owner_namespace_id":"demo","owner_generation":1,"content_id":"con_0123456789abcdef0123456789abcdef","size_bytes":5,"checksum":{"algorithm":"sha256","value":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"}},"expires_at_ms":3601000}"#
         );
         let mut old_payload: serde_json::Value = serde_json::from_slice(&payload).expect("payload");
-        old_payload["version"] = serde_json::json!("vct1");
-        old_payload["content_ref"]
-            .as_object_mut()
-            .expect("reference")
-            .remove("owner_generation");
+        old_payload["namespace_id"] = serde_json::json!("demo");
         let payload_part =
             super::base64_url(&serde_json::to_vec(&old_payload).expect("old payload"));
         let signature = loonfs_objectstore::crypto::hmac_sha256(b"secret", payload_part.as_bytes());
         let mut old_token = token;
         old_token.token = format!("{payload_part}.{}", super::base64_url(&signature));
         let catalog = catalog_entry(namespace);
-        assert_eq!(
+        assert!(matches!(
             verify_content_token("secret", &catalog, &old_token, 1_000),
-            Err(ContentTokenError::Malformed)
-        );
+            Err(ContentTokenError::Codec(_))
+        ));
     }
 
     #[test]
@@ -408,8 +349,7 @@ mod tests {
             b"hello",
         );
         let issued_at_ms = 1_000;
-        let token = mint_content_token("secret", &receipt(&namespace, &content), issued_at_ms)
-            .expect("mint");
+        let token = mint_content_token("secret", &receipt(&content), issued_at_ms).expect("mint");
         let catalog = catalog_entry(namespace);
         let prepared = verify_content_token(
             "secret",
@@ -419,16 +359,8 @@ mod tests {
         )
         .expect("verify token before expiry");
 
-        assert!(prepared.admits(
-            catalog.namespace_id(),
-            &content,
-            issued_at_ms + CONTENT_RECEIPT_TTL_MS,
-        ));
-        assert!(!prepared.admits(
-            catalog.namespace_id(),
-            &content,
-            issued_at_ms + CONTENT_RECEIPT_TTL_MS + 1,
-        ));
+        assert!(prepared.admits(&content, issued_at_ms + CONTENT_RECEIPT_TTL_MS,));
+        assert!(!prepared.admits(&content, issued_at_ms + CONTENT_RECEIPT_TTL_MS + 1,));
     }
 
     #[test]
@@ -448,8 +380,7 @@ mod tests {
             b"other",
         );
         let issued_at_ms = 1_000;
-        let token = mint_content_token("secret", &receipt(&namespace, &content), issued_at_ms)
-            .expect("mint");
+        let token = mint_content_token("secret", &receipt(&content), issued_at_ms).expect("mint");
         let catalog = catalog_entry(namespace.clone());
         let other_catalog = catalog_entry(other_namespace);
 

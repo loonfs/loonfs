@@ -219,10 +219,7 @@ async fn inline_retry_identity_uses_bytes_and_distinguishes_staged_content() {
     let staged = store_bytes_as_content(&store, &engine.namespace_id, b"hello")
         .await
         .expect("stage");
-    let proof = PreparedContent::for_durable_content_write(
-        engine.namespace_id.clone(),
-        staged.content_ref().clone(),
-    );
+    let proof = PreparedContent::for_durable_content_write(staged.content_ref().clone());
     let inline = InlineContent::new(
         engine.namespace_id.clone(),
         loonfs_api::NamespaceGeneration(1),
@@ -292,7 +289,6 @@ async fn invalid_inline_candidates_write_nothing() {
         .push(put("/staged", staged.content_ref()));
     mismatched.content =
         ContentPreparation::Ready(vec![PreparedContent::for_durable_content_write(
-            engine.namespace_id.clone(),
             staged.content_ref().clone(),
         )]);
     let mut wrong_checksum = mismatched.clone();
@@ -303,10 +299,32 @@ async fn invalid_inline_candidates_write_nothing() {
     {
         content_ref.checksum = loonfs_api::Checksum::crc32c(b"inline bytes");
     }
+    let stale = candidate(
+        "stale",
+        vec![InlineContent::new(
+            engine.namespace_id.clone(),
+            loonfs_api::NamespaceGeneration(2),
+            ContentId::generate(),
+            Bytes::from_static(b"value"),
+        )],
+    );
+    let foreign_staged = CommitCandidate::prepared(
+        foreign.request.clone(),
+        vec![PreparedContent::for_durable_content_write(
+            foreign.inline_content[0].content_ref().clone(),
+        )],
+    );
+    for candidate in [foreign, stale, foreign_staged] {
+        store.reset();
+        let error = publish(&mut engine, &store, &context, candidate)
+            .await
+            .expect_err("wrong owner");
+        assert_eq!(error.code(), loonfs_api::ErrorCode::ContentNotPrepared);
+        assert_no_writes(&store);
+    }
     for candidate in [
         unreferenced,
         duplicate,
-        foreign,
         oversized,
         excessive_total,
         mismatched,

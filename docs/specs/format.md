@@ -353,14 +353,14 @@ File bytes can be stored in a content object or included directly in a WAL commi
 
 | Condition | Where to read |
 | --- | --- |
-| The reference belongs to the namespace being read, and its content ID is present in the projected WAL tail | Use the inline bytes already in that projection. |
-| Otherwise | Read the content object using the reference's owner namespace, owner generation, and content ID. |
+| The projected WAL tail holds the exact requested content reference | Use the inline bytes already in that projection. |
+| Otherwise | Read the content object using the reference's owner namespace and content ID. |
 
 Content inherited through a fork is always read from a content object. WAL replay loads inline bytes along with the metadata, so reading them from the resulting projection needs no separate content request.
 
 Every content read must validate the reference's kind and checksum algorithm, then verify the complete byte length and checksum. These checks apply to both sources. WAL replay verifies the record envelope but does not recompute each file's checksum. A HEAD request can check an object's existence and size, but the content read must still verify the bytes. A missing required object or a failed validation must fail the read.
 
-Before materializing inline bytes for a direct download, verify that the current manifest has the view's generation. An earlier generation returns missing content. This check also applies to retained in-memory views. Reclaiming a WAL object does not remove bytes already held in a read view's projection. If that projection must be rebuilt and the required WAL objects are gone, the read must fail. Finding a content object is insufficient because the missing WAL is also required to reconstruct the view's metadata.
+Reclaiming a WAL object does not remove bytes already held in a read view's projection. If that projection must be rebuilt and the required WAL objects are gone, the read must fail. Finding a content object is insufficient because the missing WAL is also required to reconstruct the view's metadata.
 
 For a streamed read, the full-file checksum is verified only after the complete stream has been processed. The transport must report a verification failure even if some bytes have already reached the client. For provider-direct downloads, the client receives bytes directly from object storage; the [API specification][api-spec] defines its verification responsibilities.
 
@@ -434,7 +434,7 @@ Provider-specific checksum headers, completion APIs, and response encodings belo
 
 Content is admitted only with evidence that the named bytes were verified in a completed upload. The evidence is bound to the namespace and the complete content reference. A match on the content ID alone is not enough.
 
-An inline reference owned by the committing namespace must name its current generation. Otherwise the commit is invalid because the inline content is not owned by that namespace generation. A staged reference owned by the committing namespace must also name its current generation; otherwise it is `content_not_prepared`. A reference owned by another namespace is not checked against the committing namespace's generation. These checks still apply when a token or receipt otherwise admits the reference.
+A content ID is published and written by exactly one generation of its owner. Check ownership at three boundaries only. A commit's newly published references must belong to the committing namespace's current generation, or it returns `content_not_prepared`. A loaded upload session must belong to the namespace's current generation, or it returns `upload_not_found`. Before a download writes resident bytes to a missing object, the owner's current generation must match the reference, or it returns `namespace_corrupt` for missing content. An existing object needs no generation check. These rules also apply to retained in-memory views.
 
 The evidence expires. A completed session can produce evidence only during `COMPLETED_UPLOAD_RECEIPT_WINDOW_MS` after its original completion time. A status read or cached response does not restart that window, and nothing is issued at or after its end. A signed token lasts `CONTENT_RECEIPT_TTL_MS` from issuance. Evidence prepared in process without a token expires no later than the last token its session could have issued.
 
@@ -774,7 +774,7 @@ An inode-preserving rename is namespace-local. Across namespaces, a move is a de
 
 A fork can retain references through its source pin; other imports write verified bytes under a fresh destination-owned identity. Reusing another owner's identity would require an additional durable source-side retention protocol.
 
-An import checks the owner's current view for authorization, including imports within that namespace. Resident inline bytes are used only when the reference's owner and generation match the reading namespace and generation. Otherwise the import reads the object key derived from the reference, including references from earlier generations. A reclaimed generation's object is missing and returns the same error as any missing content object. No retired-record or tombstone lookup is needed. The import verifies the bytes and stages them under a fresh identity owned by the destination's current generation. Forks pin manifests, so inherited content is always materialized. Inherited references retain their owner and owner generation.
+An import checks the owner's current view for authorization, including imports within that namespace. The import resolves bytes as specified in section 4.5, including references from earlier generations. A reclaimed generation's object is missing and returns the same error as any missing content object. No retired-record or tombstone lookup is needed. The import verifies the bytes and stages them under a fresh identity owned by the destination's current generation. Forks pin manifests, so inherited content is always materialized. Inherited references retain their owner and owner generation.
 
 A subject importing a bare reference must be an administrator of its owner namespace. An unrestricted owner and a request with no subject need no administrator grant. Authorization always uses the owner's current head, including after recreation. A deleted owner uses the access state in its surviving head.
 

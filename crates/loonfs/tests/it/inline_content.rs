@@ -156,6 +156,16 @@ async fn reader_downloads_materialize_tail_content_by_path_and_inode() {
             )
             .await
             .expect("recreate");
+        recording.reset();
+        assert_eq!(
+            pinned
+                .create_download("/file")
+                .await
+                .expect("existing old content")
+                .object_key,
+            object_key
+        );
+        assert_eq!(recording.count(OperationClass::Put), 0);
         store
             .delete(&object_key)
             .await
@@ -168,7 +178,7 @@ async fn reader_downloads_materialize_tail_content_by_path_and_inode() {
         assert!(matches!(
             error,
             loonfs::RuntimeError::Core(loonfs_core::Error::DurableContent(
-                loonfs_core::content::DurableContentValidationError::MissingContentGeneration { .. }
+                loonfs_core::content::DurableContentValidationError::MissingContentObject { .. }
             ))
         ));
         assert_eq!(recording.count(OperationClass::Put), 0);

@@ -542,7 +542,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         Ok(FileContentStream::open(
             self.store.clone(),
             view.resolve_content_location(&content_ref)?,
-            entry,
+            Some(entry),
             content_ref,
             chunk_bytes,
             start_offset,
@@ -567,7 +567,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             .authorized_revision_for_inode(inode_id, revision_no, &access)
             .await?
             .content_ref;
-        Ok(FileContentStream::open_inner(
+        Ok(FileContentStream::open(
             self.store.clone(),
             view.resolve_content_location(&content_ref)?,
             None,
@@ -1032,8 +1032,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     {
         let catalog = self.own_catalog(catalog)?;
         let context = self.mutation_context()?;
-        let (_object_key, body) =
-            open_content_import_reader(self.store.clone(), content_ref).await?;
+        let body = open_content_import_reader(self.store.clone(), content_ref).await?;
         crate::protocol::stage_owned_stream(
             &self.store,
             catalog,

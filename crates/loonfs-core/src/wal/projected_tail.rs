@@ -45,10 +45,8 @@ impl ProjectedWalTail {
         Ok(())
     }
 
-    pub(crate) fn inline_content(&self, content_id: &ContentId) -> Option<&Bytes> {
-        self.inline_content
-            .get(content_id)
-            .map(|value| &value.bytes)
+    pub(crate) fn inline_content(&self, content_id: &ContentId) -> Option<&ProjectedInlineContent> {
+        self.inline_content.get(content_id)
     }
 
     pub(crate) fn inline_values(&self) -> impl Iterator<Item = &ProjectedInlineContent> {

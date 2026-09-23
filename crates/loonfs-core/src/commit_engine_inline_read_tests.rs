@@ -227,10 +227,12 @@ async fn published_projection_reads_without_replay_and_counts_inline_bytes() {
             .tail
             .inline_content(&value.content_ref().content_id)
             .expect("bytes")
+            .bytes
             .as_ptr(),
         cloned
             .inline_content(&value.content_ref().content_id)
             .expect("cloned bytes")
+            .bytes
             .as_ptr()
     );
     context.tail_cache.insert(cache_key(&context), state.tail);
@@ -389,7 +391,6 @@ async fn foreign_references_resolve_to_objects_and_object_downloads_do_not_write
             put("/object", stored.content_ref()),
         ),
         vec![PreparedContent::for_durable_content_write(
-            publisher.namespace_id.clone(),
             stored.content_ref().clone(),
         )],
     );
@@ -443,7 +444,8 @@ async fn direct_downloads_materialize_once_and_do_not_write_after_a_flush() {
             .inode_id;
         let key = content_blob(&publisher.namespace_id, &value.content_ref().content_id);
         store.reset();
-        for _ in 0..2 {
+        for attempt in 0..2 {
+            let previous_requests = store.snapshot().len();
             let target = engine
                 .direct_download_target("/download-0", None, &context)
                 .await
@@ -455,6 +457,15 @@ async fn direct_downloads_materialize_once_and_do_not_write_after_a_flush() {
             assert_eq!(target.object_key, key);
             assert_eq!(inode_target.object_key, key);
             assert_eq!(store.counts().puts, usize::from(!fold_first));
+            if attempt == 1 && !fold_first {
+                let requests = store.snapshot();
+                let repeated = &requests[previous_requests..];
+                assert_eq!(repeated.len(), 2, "one content GET per repeat download");
+                assert!(repeated.iter().all(|request| matches!(
+                    request,
+                    RecordedOperation::Get { key: actual_key, range: None, .. } if actual_key == &key
+                )));
+            }
         }
         let writes: Vec<_> = store
             .snapshot()

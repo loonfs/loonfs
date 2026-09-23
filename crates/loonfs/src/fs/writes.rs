@@ -412,9 +412,7 @@ impl FsWriter {
             .await?;
         owner.require_administrator(&context).await?;
         // Forks pin manifests, so inherited content from a deleted owner is already an object.
-        if content_ref.owner_generation == context.head.generation
-            && !context.head.status.is_deleted()
-        {
+        if !context.head.status.is_deleted() {
             if let loonfs_core::content::ContentLocation::Tail { bytes, .. } = owner
                 .resolve_content_location(&content_ref, &context)
                 .await?

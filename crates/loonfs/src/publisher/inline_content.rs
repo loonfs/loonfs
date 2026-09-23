@@ -19,7 +19,7 @@ impl PublisherRegistry {
         candidate: CommitCandidate,
         publisher: &NamespacePublisher,
     ) -> Result<InlineCandidatePlan> {
-        let values = candidate.ordered_inline_content(namespace_id)?;
+        let values = candidate.ordered_inline_content()?;
         let mut remaining = publisher.inline_content.inline_content_segment_budget_bytes;
         let segment_inline_values = values
             .iter()

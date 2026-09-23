@@ -312,9 +312,6 @@ pub enum ContentRefValidationError {
     /// The checksum is not in the algorithm's canonical form.
     #[error("invalid content ref checksum: {0}")]
     InvalidChecksum(ChecksumValidationError),
-    /// The owner generation is zero; generations start at one.
-    #[error("content ref owner generation must be positive")]
-    ZeroOwnerGeneration,
 }
 
 /// A reference to one immutable content object.
@@ -391,9 +388,6 @@ impl ContentRef {
         self.checksum
             .validate()
             .map_err(ContentRefValidationError::InvalidChecksum)?;
-        if self.owner_generation.0 == 0 {
-            return Err(ContentRefValidationError::ZeroOwnerGeneration);
-        }
         Ok(())
     }
 }

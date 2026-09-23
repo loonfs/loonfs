@@ -229,8 +229,6 @@ async fn commit_response_from_commit_receipt<S: ObjectStore + ?Sized>(
 pub(crate) fn validate_inline_content_references<'a>(
     request: &CommitRequest,
     inline_content: &'a [InlineContent],
-    namespace_id: &NamespaceId,
-    namespace_generation: NamespaceGeneration,
 ) -> Result<HashMap<&'a ContentId, &'a loonfs_api::ContentRef>> {
     let references: HashSet<_> = request
         .operations
@@ -252,13 +250,6 @@ pub(crate) fn validate_inline_content_references<'a>(
         {
             return Err(CoreError::InvalidCommitRequest(format!(
                 "inline content `{content_id}` appears more than once"
-            )));
-        }
-        if reference.owner_namespace_id != *namespace_id
-            || reference.owner_generation != namespace_generation
-        {
-            return Err(CoreError::InvalidCommitRequest(format!(
-                "inline content `{content_id}` is not owned by the committing namespace generation"
             )));
         }
     }
@@ -285,12 +276,7 @@ fn validate_commit_content_references(
     namespace_generation: NamespaceGeneration,
     now_ms: u64,
 ) -> Result<()> {
-    let inline_by_content_id = validate_inline_content_references(
-        request,
-        inline_content,
-        namespace_id,
-        namespace_generation,
-    )?;
+    let inline_by_content_id = validate_inline_content_references(request, inline_content)?;
     let mut admissions_by_content_id: HashMap<&ContentId, Vec<&PreparedContent>> =
         HashMap::with_capacity(admissions.len());
     for admission in admissions {
@@ -305,23 +291,23 @@ fn validate_commit_content_references(
         .filter_map(FilesystemOperation::content_ref)
     {
         let content_id = &content_ref.content_id;
-        if inline_by_content_id.contains_key(content_id) {
-            continue;
-        }
-        if content_ref.owner_namespace_id == *namespace_id
-            && content_ref.owner_generation != namespace_generation
+        if content_ref.owner_namespace_id != *namespace_id
+            || content_ref.owner_generation != namespace_generation
         {
             return Err(ContentPreparationError::ContentNotPrepared {
                 content_id: content_ref.content_id.clone(),
             }
             .into());
         }
+        if inline_by_content_id.contains_key(content_id) {
+            continue;
+        }
         let admitted = admissions_by_content_id
             .get(&content_ref.content_id)
             .is_some_and(|candidates| {
                 candidates
                     .iter()
-                    .any(|admission| admission.admits(namespace_id, content_ref, now_ms))
+                    .any(|admission| admission.admits(content_ref, now_ms))
             });
         if !admitted {
             return Err(ContentPreparationError::ContentNotPrepared {

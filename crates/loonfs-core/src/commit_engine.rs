@@ -148,20 +148,11 @@ impl CommitCandidate {
     }
 
     /// Lists inline values in the order their operations first name them.
-    pub fn ordered_inline_content(&self, namespace_id: &NamespaceId) -> Result<Vec<InlineContent>> {
-        let Some(namespace_generation) = self
-            .inline_content
-            .first()
-            .map(|value| value.content_ref().owner_generation)
-        else {
+    pub fn ordered_inline_content(&self) -> Result<Vec<InlineContent>> {
+        if self.inline_content.is_empty() {
             return Ok(Vec::new());
-        };
-        crate::protocol::validate_inline_content_references(
-            &self.request,
-            &self.inline_content,
-            namespace_id,
-            namespace_generation,
-        )?;
+        }
+        crate::protocol::validate_inline_content_references(&self.request, &self.inline_content)?;
         let mut values: std::collections::HashMap<_, _> = self
             .inline_content
             .iter()
@@ -1031,15 +1022,12 @@ mod tests {
                 .expect("weight")
                 >= empty_annotation + 4096
         );
-        let proof = PreparedContent::for_durable_content_write(
-            NamespaceId::parse("demo").expect("namespace"),
-            ContentRef::blob_v1(
-                loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
-                loonfs_api::NamespaceGeneration(1),
-                ContentId::generate(),
-                b"proof",
-            ),
-        );
+        let proof = PreparedContent::for_durable_content_write(ContentRef::blob_v1(
+            loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
+            loonfs_api::NamespaceGeneration(1),
+            ContentId::generate(),
+            b"proof",
+        ));
         let prepared = CommitCandidate::prepared(request.clone(), vec![proof; 100]);
         assert!(
             prepared.estimated_retained_bytes().expect("weight")
@@ -1122,8 +1110,7 @@ mod tests {
             ContentId::generate(),
             b"proof",
         );
-        let prepared =
-            PreparedContent::for_durable_content_write(namespace_id.clone(), content_ref);
+        let prepared = PreparedContent::for_durable_content_write(content_ref);
         let oversized_proofs = CommitCandidate::prepared(
             create_dir_request("too-many-proofs", "docs"),
             vec![prepared; crate::limits::MAX_COMMIT_CONTENT_TOKENS + 1],

@@ -376,12 +376,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         &self,
         content_ref: &ContentRef,
     ) -> Result<ContentLocation> {
-        Ok(ContentLocation::resolve(
-            &self.namespace_id,
-            self.head.generation,
-            Some(&self.wal_tail),
-            content_ref,
-        )?)
+        Ok(ContentLocation::resolve(&self.wal_tail, content_ref)?)
     }
 
     pub(crate) async fn direct_download_target(

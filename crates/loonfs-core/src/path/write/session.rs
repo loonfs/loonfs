@@ -158,10 +158,7 @@ mod tests {
         absolute_path: &str,
         content_ref: loonfs_api::ContentRef,
     ) -> CommitCandidate {
-        let admission = PreparedContent::for_durable_content_write(
-            NamespaceId::parse("demo").expect("namespace id"),
-            content_ref.clone(),
-        );
+        let admission = PreparedContent::for_durable_content_write(content_ref.clone());
         CommitCandidate::prepared(
             CommitRequest::single(
                 CommitId::parse(commit_id).expect("valid commit id"),

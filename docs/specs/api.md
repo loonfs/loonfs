@@ -3078,8 +3078,7 @@ A conforming server must:
    numbered WAL objects;
 3. validate that referenced content is already durable before publish;
 4. preserve `(namespace_id, inode_id)` as canonical identity;
-5. resolve content through the reference's owner namespace, owner generation,
-   and content ID;
+5. resolve content objects through the reference's owner namespace and content ID;
 6. implement tombstone-first delete;
 7. serve replay from the highest numbered verified manifest found through
    `hint.json`, plus the numbered WAL objects after the folded boundary, replayed

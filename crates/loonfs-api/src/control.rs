@@ -427,7 +427,7 @@ impl std::fmt::Display for UploadSessionRecordStatus {
 pub struct UploadSessionPayload {
     /// Namespace authorized to consume the staged content.
     pub namespace_id: NamespaceId,
-    /// Generation of the namespace when the session opened; the content key and every reference the session mints carry it.
+    /// Generation of the namespace when the session opened.
     pub owner_generation: NamespaceGeneration,
     /// Durable session identity used by staging and completion requests.
     pub upload_id: UploadId,
@@ -452,12 +452,6 @@ pub struct UploadSessionPayload {
 
 impl UploadSessionPayload {
     fn validate(&self) -> Result<(), String> {
-        if self.owner_generation.0 == 0 {
-            return Err(format!(
-                "upload session `{}` has a zero owner generation",
-                self.upload_id
-            ));
-        }
         if !matches!(self.status, UploadSessionRecordStatus::Open { .. })
             && self.mode.content_ref().is_some()
         {
