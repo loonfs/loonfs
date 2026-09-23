@@ -1160,7 +1160,7 @@ fn embedded_profile_namespace_fork_reads_shared_content_and_diverges() {
             "access": {"kind": "unrestricted"},
             "created_at_ms": json_data(&fork)["created_at_ms"],
             "created_by": "loonfs-cli",
-            "fork_basis": {"source_namespace_id": "demo", "source_generation": 1, "source_head_seq": 1},
+            "fork_basis": {"source_namespace_id": "demo", "source_head_seq": 1},
             "generation": 1,
             "head_seq": 1,
             "retention_floor_seq": 1

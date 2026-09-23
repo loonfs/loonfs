@@ -3209,10 +3209,6 @@
       "NamespaceForkBasis": {
         "description": "The source a forked namespace started from.",
         "properties": {
-          "source_generation": {
-            "$ref": "#/components/schemas/NamespaceGeneration",
-            "description": "The source generation captured at fork time."
-          },
           "source_head_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
             "description": "Source sequence the fork captured."
@@ -3224,7 +3220,6 @@
         },
         "required": [
           "source_namespace_id",
-          "source_generation",
           "source_head_seq"
         ],
         "type": "object"

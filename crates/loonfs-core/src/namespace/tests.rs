@@ -639,7 +639,6 @@ async fn assert_fork_recreation(source_commits: u64, target_commits: u64) {
     assert_eq!(basis.manifest.manifest_head_seq, source.head_seq);
     let reported_basis = fork.fork_basis.expect("reported fork basis");
     assert_eq!(reported_basis.source_namespace_id, source_id);
-    assert_eq!(reported_basis.source_generation, source.generation);
     let retired = load_checkpoint_record(
         &store,
         &target_id,

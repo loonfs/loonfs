@@ -1556,7 +1556,7 @@ The `Namespace` object has exactly these fields:
 | `access` | Access mode: `{"kind": "unrestricted"}` or `{"kind": "acl", "principal_scope": "..."}`. |
 | `created_at_ms` | Time the namespace was created, in Unix milliseconds. |
 | `created_by` | Actor that created or forked the namespace, as supplied by the application. |
-| `fork_basis` | Present only for a fork. Contains `source_namespace_id`, the captured `source_generation`, and `source_head_seq`. |
+| `fork_basis` | Present only for a fork. Contains `source_namespace_id` and the captured `source_head_seq`. |
 | `head_seq` | Current visible namespace sequence. |
 | `retention_floor_seq` | Oldest sequence still promised for incremental replay. |
 
@@ -1591,7 +1591,7 @@ namespace state plus storage details used by maintenance:
 | `generation` | Generation of the namespace id. The first creation is 1, and each recreation increments it. |
 | `created_at_ms` | Time the namespace was created, in Unix milliseconds. |
 | `created_by` | Actor that created or forked the namespace, as supplied by the application. |
-| `fork_basis` | Present only for a fork. Contains `source_namespace_id`, the captured `source_generation`, and `source_head_seq`. |
+| `fork_basis` | Present only for a fork. Contains `source_namespace_id` and the captured `source_head_seq`. |
 | `head_seq` | Current visible namespace sequence. |
 | `retention_floor_seq` | Oldest sequence still promised for incremental replay. |
 | `current_manifest_no` | Current manifest number, present from namespace creation. |
@@ -2881,7 +2881,6 @@ Representative response:
   "created_by": "usr_8f3c",
   "fork_basis": {
     "source_namespace_id": "demo",
-    "source_generation": 1,
     "source_head_seq": 418
   },
   "head_seq": 418,
@@ -2894,7 +2893,6 @@ The `fork_basis` object identifies the captured source:
 | Field | Meaning |
 | --- | --- |
 | `source_namespace_id` | Namespace the fork captured. |
-| `source_generation` | Generation of the pinned source manifest at fork time. |
 | `source_head_seq` | Captured source sequence. |
 
 The optional `snapshot_id` request field selects a live user snapshot of the

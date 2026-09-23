@@ -118,7 +118,7 @@ A cross-namespace import that reads content from a deleted owner resolves the co
 
 - **Writer sessions.** The recreated manifest carries the next writer epoch. The session that published the deletion sees `writer_fenced` on its next publication and is terminal, as any fenced session is. A server that cached an engine for the id recovers exactly as it does when another server takes over a namespace.
 - **Commit retries.** Commit receipts are metadata rows and do not cross the boundary. A retry of a commit id from an earlier generation executes as a new commit in the current one. Any name-addressed system has this property. A caller that must not write into a recreated namespace passes `expected_generation` as a request-level precondition, which fails when the generation differs.
-- **Namespace object.** `generation` is present on the namespace object, the create response, and diagnostics. A fork's `fork_basis` also reports `source_generation`.
+- **Namespace object.** `generation` is present on the namespace object, the create response, and diagnostics.
 - **Inode ids.** Inode 1 is the root and allocation starts again at 2 in every generation. An inode id identifies an item within one generation.
 
 ## Cost under churn

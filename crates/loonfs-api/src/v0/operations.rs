@@ -247,8 +247,6 @@ impl From<&NamespaceAccess> for NamespaceAccessMode {
 pub struct NamespaceForkBasis {
     /// Namespace the fork was taken from.
     pub source_namespace_id: NamespaceId,
-    /// The source generation captured at fork time.
-    pub source_generation: NamespaceGeneration,
     /// Source sequence the fork captured.
     pub source_head_seq: ChangeSeq,
 }

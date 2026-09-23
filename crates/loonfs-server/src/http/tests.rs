@@ -826,7 +826,6 @@ async fn http_create_and_fork_recreate_deleted_namespaces() {
         fork_namespace.fork_basis,
         Some(loonfs_api::NamespaceForkBasis {
             source_namespace_id: source_id,
-            source_generation: loonfs_api::NamespaceGeneration(1),
             source_head_seq: loonfs_api::ChangeSeq(0),
         })
     );
