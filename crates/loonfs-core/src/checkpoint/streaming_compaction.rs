@@ -465,6 +465,7 @@ pub(super) async fn finalize_metadata_compaction<S: ObjectStore + ?Sized>(
         let Some(current_manifest) = load_current_manifest_if_present(store, namespace_id)
             .await
             .map_err(CoreError::ControlObjectLoad)?
+            .filter(|loaded| !loaded.envelope.payload().status.is_deleted())
             .map(|loaded| loaded.state)
         else {
             return Ok(MetadataCompactionJobOutcome::Abandoned);

@@ -60,6 +60,15 @@ pub(crate) async fn publish_manifest<S: ObjectStore + ?Sized>(
         .await
         .map_err(CoreError::ControlObjectLoad)?;
     if let Some(current) = &current {
+        // A tombstone ends its generation; work that raced the deletion stops here.
+        if current.envelope.payload().status.is_deleted()
+            && current.state.generation == candidate.generation
+            && current.state.manifest != candidate.manifest
+        {
+            return Err(CoreError::NamespaceDeleted {
+                namespace_id: namespace_id.clone(),
+            });
+        }
         if manifest.envelope().payload().writer_epoch < current.envelope.payload().writer_epoch {
             return Ok(ManifestPublicationOutcome::PredecessorChanged(
                 current.state.clone(),
