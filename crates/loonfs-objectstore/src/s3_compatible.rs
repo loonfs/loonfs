@@ -198,6 +198,7 @@ fn new(config: S3CompatibleConfig) -> Result<(ProviderObjectStore, DirectTransfe
         .with_http_connector(io_runtime.connector())
         .with_client_options(crate::provider_object_store::provider_client_options())
         .with_retry(crate::provider_object_store::provider_retry_config())
+        .with_disable_bulk_delete(true)
         .with_bucket_name(config.bucket)
         .with_region(config.region)
         .with_credentials(Arc::new(ObjectStoreAwsCredentialProvider::new(
