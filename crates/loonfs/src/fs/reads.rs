@@ -85,6 +85,23 @@ impl FsReadSnapshot {
         self.context.head.seq
     }
 
+    /// Shared read options may name the snapshot this reader pinned; naming
+    /// any other snapshot would silently read the wrong one.
+    fn require_pinned_snapshot(&self, requested: Option<&PinId>) -> Result<()> {
+        let Some(requested) = requested else {
+            return Ok(());
+        };
+        if Some(requested) != self.snapshot_id.as_ref() {
+            return Err(RuntimeError::InvalidRequest {
+                message: format!(
+                    "snapshot_id `{requested}` names a different snapshot than this pinned reader"
+                ),
+                param: "snapshot_id",
+            });
+        }
+        Ok(())
+    }
+
     /// Reads the ordered change feed through this snapshot's captured head.
     pub async fn list_changes(
         &self,
@@ -113,6 +130,7 @@ impl FsReadSnapshot {
         absolute_path: &str,
         options: StatPathOptions,
     ) -> Result<PathEntry> {
+        self.require_pinned_snapshot(options.snapshot_id.as_ref())?;
         Ok(self
             .engine
             .resolve_path(absolute_path, options, &self.context)
@@ -126,6 +144,7 @@ impl FsReadSnapshot {
         request: PageRequest<DirectoryPageCursor>,
         options: ListPathEntriesOptions,
     ) -> Result<ListPathEntriesResponse> {
+        self.require_pinned_snapshot(options.snapshot_id.as_ref())?;
         validate_pinned_directory_cursor(
             request.cursor.as_ref(),
             self.head_seq(),
@@ -157,6 +176,7 @@ impl FsReadSnapshot {
         inode_id: InodeId,
         options: StatPathOptions,
     ) -> Result<PathEntry> {
+        self.require_pinned_snapshot(options.snapshot_id.as_ref())?;
         Ok(self
             .engine
             .stat_inode(inode_id, options, &self.context)
@@ -170,6 +190,7 @@ impl FsReadSnapshot {
         request: PageRequest<DirectoryPageCursor>,
         options: ListInodeChildrenOptions,
     ) -> Result<ListInodeChildrenResponse> {
+        self.require_pinned_snapshot(options.snapshot_id.as_ref())?;
         validate_pinned_directory_cursor(
             request.cursor.as_ref(),
             self.head_seq(),
