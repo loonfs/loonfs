@@ -76,6 +76,11 @@ pub fn upload_session(namespace_id: &NamespaceId, upload_id: &UploadId) -> Strin
     format!("namespaces/{namespace_id}/uploads/{upload_id}.json")
 }
 
+/// Builds the listing prefix containing every content object one namespace owns.
+pub fn content_prefix(owner_namespace_id: &NamespaceId) -> String {
+    format!("namespaces/{owner_namespace_id}/content/")
+}
+
 /// Builds the immutable content-object key for one content identity.
 pub fn content_blob(owner_namespace_id: &NamespaceId, content_id: &ContentId) -> String {
     format!("namespaces/{owner_namespace_id}/content/{content_id}")

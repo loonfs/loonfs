@@ -1,11 +1,12 @@
 //! Namespace lifecycle: create, fork, and delete.
 
-use super::core::{should_invalidate_after_result, ReadCore, WriterIdentity};
-use crate::FsWriter;
+use super::core::{should_invalidate_after_result, ReadCore, WriterBits};
+use crate::maintenance::namespace_reclaim_at_ms;
 use crate::{
     CreateNamespaceOptions, DeleteNamespaceOptions, DeleteNamespaceResponse, ForkNamespaceOptions,
     Namespace, NamespaceId,
 };
+use crate::{FsWriter, MaintenanceHint, MaintenanceJobId};
 use crate::{Result, RuntimeError};
 
 impl FsWriter {
@@ -146,13 +147,14 @@ impl FsWriter {
 /// must go through [`FsWriter::delete_namespace`] so the barrier holds.
 pub(crate) async fn delete_namespace_with_engine(
     core: &ReadCore,
-    actor: &WriterIdentity,
+    writer: &WriterBits,
     namespace_id: &NamespaceId,
     engine: &mut loonfs_core::publish::NamespaceCommitEngine,
     options: DeleteNamespaceOptions,
 ) -> Result<DeleteNamespaceResponse> {
+    let context = writer.identity.mutation_context()?;
     let result = engine
-        .delete_namespace(core.store(), options, &actor.mutation_context()?)
+        .delete_namespace(core.store(), options, &context)
         .await
         .map_err(RuntimeError::from);
     if result.is_ok() {
@@ -160,6 +162,14 @@ pub(crate) async fn delete_namespace_with_engine(
         // a failed delete (a fenced deleter, say) leaves the namespace
         // live, and its cached reads valid.
         core.invalidate_namespace_read_cache(namespace_id);
+        writer.send_maintenance_hint(
+            namespace_id,
+            MaintenanceHint::DueAt {
+                namespace_id: namespace_id.clone(),
+                job: MaintenanceJobId::GC,
+                not_before_ms: namespace_reclaim_at_ms(context.now_ms),
+            },
+        );
     }
     result
 }

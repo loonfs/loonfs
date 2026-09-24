@@ -422,6 +422,12 @@ impl PublisherRegistry {
         .await
     }
 
+    /// Invalidates the namespace's rebuildable WAL-tail projection without
+    /// changing its writer epoch or fencing state.
+    ///
+    /// If an operation currently holds the engine, invalidation is skipped. That
+    /// operation validates the live head and reports its retained projection when
+    /// it completes.
     pub(crate) fn invalidate_projection(&self, namespace_id: &NamespaceId) {
         let totals = {
             let mut state = self.shared.lock_state();
@@ -1090,6 +1096,9 @@ impl NamespacePublisher {
         queued_candidates(&self.lock_state())
     }
 
+    /// Drops the engine's tail projection, reporting whether it took the
+    /// engine to do so. A `false` return means a publication or delete holds
+    /// the engine, and that unit's own settlement reports what it retains.
     fn invalidate_projection(&self) -> bool {
         let Ok(mut slot) = self.engine.try_lock() else {
             return false;
@@ -1717,7 +1726,7 @@ impl NamespacePublisher {
         let engine = self.engine_for(&mut slot);
         crate::fs::delete_namespace_with_engine(
             &self.read_core,
-            &writer.identity,
+            &writer,
             &self.namespace_id,
             engine,
             options,

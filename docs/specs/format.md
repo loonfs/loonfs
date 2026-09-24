@@ -173,7 +173,7 @@ Each namespace records an access mode in its manifest, fixed at creation: `unres
 
 ### 2.1 Storage layout
 
-Content objects live beside their owner's metadata. A fork reads inherited content at the source owner's key. Retirement deletes the exact objects that the tombstone's publication rows and upload sessions name.
+Content objects live beside their owner's metadata. A fork reads inherited content at the source owner's key. Retirement lists and deletes the namespace's content prefix after upload-session cleanup.
 
 ```text
 namespaces/{namespace_id}/
@@ -714,6 +714,8 @@ A losing manifest-1 put reads the winner and verifies its namespace identity. Ac
 
 A confirmed precondition failure is a conflict. A put with an unknown transport outcome confirms its own success only when a fork's first manifest reads back exactly: its source pin is unique to that attempt. Every other manifest, including a plain create under section 9.1, a compactor claim, a writer acquisition, or a tombstone, can be rebuilt byte for byte by another publisher, so an exact read-back counts as the current manifest and the attempt retries from it. An explicit `allow_existing` retry can instead return an existing active namespace.
 
+On `namespace_exists` or `namespace_deleted`, a fork installer reloads the target and deletes its source pin unless the target’s fork basis names it. A matching pin ID with a different manifest reference is corruption under section 11.7.
+
 Abandoned attempts can leave a hint or fork pin. A leftover hint does not install a namespace. An unused fork pin is collected after its installation grace under section 11.7.
 
 ### 9.4 Deleting a namespace
@@ -722,7 +724,7 @@ Deletion uses the acquired writer epoch. After admitted commits finish, it folds
 
 An ordinary operation that observes deletion returns `namespace_deleted`. A cached reader can still use its active view until the next manifest revalidation is due. Deletion does not immediately remove content.
 
-The tombstone protects every segment in its runs. It protects no current WAL. The tombstone, hint, and rooted segments remain after content reclamation. A separate purge operation is outside this specification.
+The tombstone protects its runs like any current manifest, so the final metadata stays readable and an import from a deleted owner is authorized against it. Every WAL object of a deleted namespace is folded, so none is required. Pins still protect their referenced manifests and segments. The tombstone, hint, and rooted runs remain after content reclamation. A separate purge operation is outside this specification.
 
 ### 9.5 Retirement
 
@@ -829,7 +831,7 @@ Collection removes objects that no retained view needs, after the applicable age
 
 ### 11.1 One complete pass
 
-A call discovers the namespace's current manifest, lists all pin keys and the `retired/` prefix, and builds an in-memory set of protected manifests and segments. Invalid or unreadable root manifests stop the call before sweeping. An absent namespace has nothing for core GC to collect.
+A call discovers the namespace's current manifest, lists all pin keys, and builds an in-memory set of protected manifests and segments. Invalid or unreadable root manifests stop the call before sweeping. An absent namespace has nothing for core GC to collect.
 
 The call then lists each candidate family from the beginning to completion. It stores no durable run, phase, reference table, or cursor. The complete pin listing used to establish roots is separate from the later pin sweep that decides which records can be deleted.
 
@@ -840,14 +842,14 @@ Every age decision uses the call's fixed `now_ms`. A later call reads fresh root
 | Evidence captured for the pass | Objects protected |
 | --- | --- |
 | Current active namespace manifest | The manifest and every segment in its runs. |
-| Current deleted manifest | The tombstone and every segment in its runs. |
+| Current deleted manifest | The tombstone only. |
 | Every recognized pin key in the complete listing | The numbered manifest in its ID and every segment in that manifest. |
 | Hint's observed manifest number | All manifest numbers at or above it, so discovery can probe forward. Intermediate numbers do not protect additional runs. |
 | Current active manifest's folded boundary | Every WAL number above `folded_wal_no`. |
 
 Pin bodies are not needed to identify these roots: the manifest number is part of the pin key. Bodies are read later for owner and expiry decisions. A pin naming a missing manifest is corruption. Each listed pin protects its files for the whole pass, even if that pass deletes the pin.
 
-Tombstone segments remain roots because retirement reads their publication rows to find exact content keys on every pass.
+Segments in a tombstone are collectible by the ordinary age rule once no pin protects them. Retirement does not read them.
 
 A retention floor may pass a pinned manifest's head sequence. That does not remove its protection. Reads through the pin use the pinned file set directly.
 
@@ -863,9 +865,9 @@ Being unreferenced makes an object a candidate; it does not make it immediately 
 | Metadata segment | No root lists it, and its provider age is strictly greater than 24 hours. |
 | Pin record | Owner-specific rules in section 11.7. |
 | Upload session and its content | Status-specific rules in section 11.6. |
-| An eligible tombstone’s owned content | Deadline and pin checks in section 9.5 pass, followed by the evidence and owner checks in section 11.8. |
+| An eligible tombstone’s owned content | Deadline and pin checks in section 9.5 pass, followed by the prefix sweep in section 11.8. |
 
-The hint and current manifest are never swept. Unrecognized keys are retained by core GC. On an age-gated candidate, a missing provider timestamp or one in the future cannot establish sufficient age. If a manifest's successor is absent, that absence does not itself prevent deleting the predecessor.
+The hint and current manifest are never swept. Unrecognized keys outside an eligible tombstone’s content prefix are retained by core GC. On an age-gated candidate, a missing provider timestamp or one in the future cannot establish sufficient age. If a manifest's successor is absent, that absence does not itself prevent deleting the predecessor.
 
 For example, a collector observing hint 8 and current manifest 10 keeps manifests 8–10 for discovery. It keeps the segments in manifest 10 and any pinned manifests. It does not keep every segment mentioned only by 8 or 9. Such a segment still needs to exceed the segment minimum age before deletion.
 
@@ -893,7 +895,7 @@ A failed required-root read stops collection. An uncertain fork-target read reta
 
 ### 11.6 Upload-session cleanup
 
-Uploads are collected through their session records. Content prefixes are never enumerated. A tombstone’s retirement state takes precedence over the session status rules.
+Uploads are collected through their session records. Retirement separately lists the deleted namespace’s content prefix. A tombstone’s retirement state takes precedence over the session status rules.
 
 | Session and namespace | Action |
 | --- | --- |
@@ -943,8 +945,11 @@ For a fork pin naming target `T`:
 | --- | --- |
 | Inside the creation grace | Retain. |
 | Target’s current fork basis names this pin with the same manifest reference | Retain, including when the target is deleted. |
-| Target absent or its fork basis does not name this pin with the same manifest reference | Delete the abandoned installation’s pin. |
+| Target absent or its fork basis does not name this pin | Delete the abandoned installation’s pin. |
+| Target’s current fork basis names this pin with a different manifest reference | Fail with `namespace_corrupt`. |
 | Target store read fails | Retain the pin. |
+
+A target basis that names the pin with a different manifest reference is corruption, not evidence that the pin can be reclaimed.
 
 The source discovers the target’s current manifest through its hint. It reads no target WAL and performs no listing. Reclamation releases the source pin named by the target’s tombstone.
 
@@ -954,11 +959,12 @@ Any listed pin, including an unrecognized key, prevents reclamation for the whol
 
 After session cleanup, reclaim the eligible tombstone using the deadline and complete pin listing captured for the pass, as specified in section 9.5.
 
-1. Open only segments in the tombstone’s runs whose `owner_namespace_id` equals its namespace. Inherited segments cannot hold its publication rows because folds and compaction write owned segments and imports mint destination-owned identities.
-2. Page through the whole `content_publications` family in those segments. For each row owned by the tombstone’s namespace, delete the exact `namespaces/{owner_namespace_id}/content/{content_id}` key. Skip inherited rows. Count successful deletion attempts in `deleted.retired_content_objects`, including absent keys. Do not list content or apply an additional age check. A segment read failure or deletion failure ends the call before releasing the source pin.
-3. Delete the source pin named by the tombstone’s fork basis, if any. Count it only if it was present.
+1. List `namespaces/{namespace_id}/content/` and delete every listed key with bounded concurrency. Count listed keys whose deletion succeeds in `deleted.retired_content_objects`. Apply no additional age check. A listing or deletion failure ends the call before releasing the source pin.
+2. Delete the source pin named by the tombstone’s fork basis, if any. Count it only if it was present.
 
-Content and source-pin cleanup are idempotent. Later passes read the same publication rows and repeat the same exact deletes. The tombstone, hint, and its metadata segments stay rooted. Repeated retirement deletes do not count as maintenance progress. No progress record or journal is stored.
+The prefix contains only this namespace’s lifetime. Inherited fork content remains under the source namespace’s prefix. Imports copy bytes under the destination namespace’s ID. A deleted namespace refuses upload capabilities and completion, and the retirement grace exceeds the lifetime of issued presigned URLs.
+
+Content and source-pin cleanup are idempotent. With no new objects, a later content sweep makes one empty LIST and no DELETE, and reports zero reclaimed objects. The tombstone and hint remain. Its segments need no retirement protection. Deleting listed content counts as maintenance progress. No progress record or journal is stored.
 
 ## 12. Encodings, versions, and extensions
 
@@ -1204,7 +1210,7 @@ Rows are kind-tagged CBOR objects in the data blocks. The row-kind schema and th
 | `active_deletion` | `root_inode_id`, `deletion_seq`, `action` |
 | `commit_receipt` | `commit_id`, `committed_seq`, `semantic_commit_fingerprint` |
 | `commit` | `seq`, `commit_id`, `committed_by`, `semantic_commit_fingerprint`, `committed_at_ms`, `message?`, `deltas` |
-| `content_publication` | `owner_namespace_id`, `content_id`, `committed_seq`, `delta_index` |
+| `content_publication` | `content_id`, `committed_seq`, `delta_index` |
 | `attributes_revision` | `inode_id`, `attributes_revision_no`, `committed_seq`, `commit_id`, `delta_index`, `committed_by`, `committed_at_ms`, `attributes` |
 | `access_revision` | `inode_id`, `access_revision_no`, `committed_seq`, `commit_id`, `delta_index`, `committed_by`, `committed_at_ms`, `boundary`, `grants` |
 
@@ -1252,7 +1258,7 @@ Bloom filters use the following keys, which are not always full row keys:
 | `attributes` | `attribute-{inode_id:020}` |
 | `access` | `access-{inode_id:020}` |
 
-Every delta that appends a file revision also produces a content-publication row with the reference's original owner namespace. Repeated references to the same content within one commit share one row with the first publishing delta index. These rows survive every base rebuild, regardless of retention floor.
+Every delta that appends a file revision also produces a content-publication row for its content ID. Repeated references to the same content within one commit share one row with the first publishing delta index. These rows survive every base rebuild, regardless of retention floor.
 
 The family groups are fixed:
 

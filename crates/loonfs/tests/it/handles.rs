@@ -1034,3 +1034,58 @@ fn maintenance_checkpoint_and_retention_are_explicit_one_shot_calls() {
         assert_eq!(retention.retention_floor_seq, checkpoint.captured_seq);
     });
 }
+
+#[tokio::test]
+async fn namespace_deletion_schedules_gc_at_its_retirement_deadline() {
+    use loonfs::{MaintenanceHint, MaintenanceJobId};
+    use loonfs_core::limits::{GC_SAFETY_MARGIN_MS, NAMESPACE_RETIREMENT_GRACE_MS};
+    use std::sync::Mutex;
+
+    let directory = tempdir().expect("directory");
+    let store = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
+    let hints = Arc::new(Mutex::new(Vec::new()));
+    let observed = hints.clone();
+    let writer = FsWriter::builder_with_store(store.clone())
+        .writer_id("delete-hint")
+        .maintenance_hint_observer(move |hint| observed.lock().expect("hints").push(hint))
+        .build()
+        .await
+        .expect("writer");
+    let namespace_id = namespace_id("delete-hint");
+    writer
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("namespace");
+    hints.lock().expect("hints").clear();
+    writer
+        .delete_namespace(&namespace_id, Default::default())
+        .await
+        .expect("delete");
+    let state = loonfs_core::control::load_namespace_read_state(store.as_ref(), &namespace_id)
+        .await
+        .expect("tombstone");
+    let expected = state.status.deleted_at_ms().expect("deletion stamp")
+        + loonfs::GcConfig::default()
+            .grace_window_ms
+            .max(NAMESPACE_RETIREMENT_GRACE_MS)
+        + GC_SAFETY_MARGIN_MS;
+    assert!(
+        matches!(hints.lock().expect("hints").as_slice(), [MaintenanceHint::DueAt {
+        namespace_id: actual_namespace, job: MaintenanceJobId::GC, not_before_ms,
+    }] if actual_namespace == &namespace_id && *not_before_ms == expected)
+    );
+    hints.lock().expect("hints").clear();
+    assert_eq!(
+        writer
+            .delete_namespace(&namespace_id, Default::default())
+            .await
+            .expect_err("already deleted")
+            .code(),
+        ErrorCode::NamespaceDeleted
+    );
+    assert!(hints.lock().expect("hints").is_empty());
+    writer.shutdown().await.expect("shutdown");
+}

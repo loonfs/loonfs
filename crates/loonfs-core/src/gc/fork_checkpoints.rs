@@ -3,7 +3,7 @@
 use crate::context::MutationContext;
 use crate::control_object::ControlObjectLoadError;
 use crate::error::{CoreError, Result};
-use crate::namespace::control::load_current_manifest_if_present;
+use crate::namespace::fork::target_retains_checkpoint;
 use loonfs_api::wire::control::{ForkBasis, PinPayload};
 use loonfs_api::NamespaceId;
 use loonfs_objectstore::ObjectStore;
@@ -51,18 +51,4 @@ pub(super) async fn fork_checkpoint_is_retained<S: ObjectStore + ?Sized>(
         }
         result => result,
     }
-}
-
-async fn target_retains_checkpoint<S: ObjectStore + ?Sized>(
-    store: &S,
-    record: &PinPayload,
-    target_namespace_id: &NamespaceId,
-) -> Result<bool> {
-    let Some(target) = load_current_manifest_if_present(store, target_namespace_id).await? else {
-        return Ok(false);
-    };
-    let basis = target.envelope.payload().fork_basis.as_ref();
-    Ok(basis.is_some_and(|basis| {
-        basis.source_pin_id == record.pin_id && basis.manifest == record.manifest()
-    }))
 }

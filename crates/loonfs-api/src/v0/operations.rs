@@ -1153,7 +1153,7 @@ pub struct DeletedObjectCounts {
     pub upload_sessions: u64,
     /// Content reclaimed through completed upload sessions.
     pub content_objects: u64,
-    /// Successful deletion attempts under a retired namespace owner prefix.
+    /// Listed content objects deleted from a retired namespace.
     pub retired_content_objects: u64,
 }
 

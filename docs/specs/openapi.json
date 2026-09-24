@@ -1120,7 +1120,7 @@
             "type": "integer"
           },
           "retired_content_objects": {
-            "description": "Successful deletion attempts under a retired namespace owner prefix.",
+            "description": "Listed content objects deleted from a retired namespace.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
