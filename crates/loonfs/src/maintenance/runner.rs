@@ -579,7 +579,15 @@ impl RunnerInner {
             }
             false
         });
-        state.tasks.push(self.runtime.spawn(future));
+        let (send, receive) = tokio::sync::oneshot::channel::<_>();
+        state.tasks.push(self.runtime.spawn(async move {
+            if let Ok(future) = receive.await {
+                future.await;
+            }
+        }));
+        // Tokio may drop a refused spawn inline; release the lock before transferring its permit.
+        drop(state);
+        let _ = send.send(future);
     }
 }
 

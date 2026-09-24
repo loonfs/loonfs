@@ -566,6 +566,10 @@ impl CoreError {
     /// can match the typed variants directly instead.
     pub fn details(&self) -> Option<ErrorDetails> {
         match self {
+            CoreError::NamespaceDeleted { namespace_id } => Some(ErrorDetails {
+                namespace_id: Some(namespace_id.clone()),
+                ..ErrorDetails::default()
+            }),
             CoreError::Forbidden { inode_id } => Some(ErrorDetails {
                 inode_id: Some(*inode_id),
                 ..ErrorDetails::default()

@@ -95,9 +95,8 @@ impl GrepService {
     async fn load_index_snapshot<S: ObjectStore + ?Sized>(
         &self,
         store: &S,
-        reads: &PinnedNamespaceReads<'_>,
+        namespace_id: &NamespaceId,
     ) -> Result<MaterializedGrepIndexSnapshot> {
-        let namespace_id = reads.namespace_id();
         let cached = self
             .current_manifests
             .lock()
@@ -121,7 +120,7 @@ impl GrepService {
                 Err(_) => false,
             };
             if !successor_present {
-                return materialized_snapshot_from_state(state, reads);
+                return materialized_snapshot_from_state(state);
             }
         }
         let current = load_current_grep_manifest(store, namespace_id)
@@ -156,16 +155,22 @@ impl GrepService {
         {
             *entry = Arc::downgrade(&state);
         }
-        materialized_snapshot_from_state(state, reads)
+        materialized_snapshot_from_state(state)
     }
 
     async fn plan_query<'a, S: ObjectStore>(
         &self,
         request: &GrepRequest,
-        reads: &NamespaceReads<'a>,
+        namespace_reads: &NamespaceReads<'a>,
         store: &S,
     ) -> Result<QueryPlan<'a>> {
-        let reads = reads.pin().await?;
+        let mut reads = namespace_reads.pin().await?;
+        let snapshot = self
+            .load_index_snapshot(store, reads.namespace_id())
+            .await?;
+        if snapshot.resume.built_through_seq() > reads.head_seq() {
+            reads = namespace_reads.pin().await?;
+        }
         let head_seq = reads.head_seq();
         let fingerprint = request.fingerprint();
         let resume = match &request.cursor {
@@ -190,7 +195,6 @@ impl GrepService {
             }
             None => None,
         };
-        let snapshot = self.load_index_snapshot(store, &reads).await?;
         let pattern = regex::bytes::RegexBuilder::new(&request.pattern)
             .case_insensitive(request.case_insensitive)
             .multi_line(true)
@@ -305,15 +309,7 @@ impl GrepService {
 
 fn materialized_snapshot_from_state(
     state: Arc<GrepManifestState>,
-    reads: &PinnedNamespaceReads<'_>,
 ) -> Result<MaterializedGrepIndexSnapshot> {
-    if state
-        .status()
-        .active_watermark()
-        .is_some_and(|resume| resume.built_through_seq() > reads.head_seq())
-    {
-        return Err(GrepError::NotEnabled);
-    }
     // Queries require an active index and its watermark. Disabled and
     // backfilling indexes return their corresponding errors.
     let resume = match state.status() {

@@ -418,7 +418,17 @@ impl FsWriter {
                 return Ok(engine.stage_owned_bytes(&catalog, &bytes).await?);
             }
         }
-        Ok(engine.import_content_ref(&catalog, &content_ref).await?)
+        match engine.import_content_ref(&catalog, &content_ref).await {
+            Err(crate::CoreError::DurableContent(
+                loonfs_core::content::DurableContentValidationError::MissingContentObject {
+                    ..
+                },
+            )) if context.head.status.is_deleted() => Err(crate::CoreError::NamespaceDeleted {
+                namespace_id: content_ref.owner_namespace_id,
+            }
+            .into()),
+            result => Ok(result?),
+        }
     }
 
     /// Verifies an authorized content token for this namespace.

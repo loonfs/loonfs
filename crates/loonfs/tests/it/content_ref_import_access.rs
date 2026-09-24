@@ -270,6 +270,48 @@ async fn bare_reference_import_accepts_service_administrator_and_unrestricted_au
 }
 
 #[tokio::test]
+async fn reclaimed_deleted_owner_import_reports_the_owner_without_writes() {
+    let (_directory, recording, writer) = open_writer().await;
+    let source = namespace_id("reclaimed-source");
+    let destination = namespace_id("destination");
+    create_namespace(&writer, &source, acl("administrator")).await;
+    create_namespace(&writer, &destination, NamespaceAccess::unrestricted()).await;
+    let content_ref = publish_inline(&writer, &source).await;
+    writer
+        .delete_namespace(&source, DeleteNamespaceOptions::default())
+        .await
+        .expect("delete owner");
+    let report = loonfs_core::gc_namespace(
+        recording.as_ref(),
+        &source,
+        &loonfs_core::GcConfig {
+            grace_window_ms: loonfs_core::limits::GC_MIN_GRACE_WINDOW_MS,
+        },
+        &loonfs_core::MutationContext {
+            writer_id: loonfs_api::WriterId::parse("collector").expect("writer id"),
+            now_ms: loonfs::current_time_ms().expect("clock")
+                + loonfs_core::limits::NAMESPACE_RETIREMENT_GRACE_MS
+                + 1,
+        },
+    )
+    .await
+    .expect("collect retired content");
+    assert_eq!(report.deleted.retired_content_objects, 1);
+
+    recording.reset();
+    let error = writer
+        .as_subject(subject("administrator"))
+        .prepare_content_ref(&destination, content_ref)
+        .await
+        .expect_err("reclaimed owner");
+    assert_eq!(error.code(), ErrorCode::NamespaceDeleted);
+    assert_eq!(error.details().expect("details").namespace_id, Some(source));
+    assert_eq!(recording.count(OperationClass::Put), 0);
+    assert_eq!(recording.count(OperationClass::CompareAndSwap), 0);
+    assert_eq!(recording.count(OperationClass::Delete), 0);
+}
+
+#[tokio::test]
 async fn deleted_owner_import_uses_updated_access_state_in_the_surviving_head() {
     let (_directory, recording, writer) = open_writer().await;
     let source = namespace_id("source");

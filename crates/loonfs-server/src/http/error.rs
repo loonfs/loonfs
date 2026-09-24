@@ -204,6 +204,32 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn deleted_namespace_responses_identify_the_failed_namespace() {
+        let source = NamespaceId::parse("source").expect("source id");
+        let target = NamespaceId::parse("target").expect("target id");
+        for namespace_id in [&source, &target] {
+            let response = ApiResponseError::runtime_for_namespace(
+                &source,
+                loonfs::CoreError::NamespaceDeleted {
+                    namespace_id: namespace_id.clone(),
+                }
+                .into(),
+            )
+            .into_response();
+            assert_eq!(response.status(), StatusCode::GONE);
+            let bytes = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .expect("body");
+            let error: ApiError = serde_json::from_slice(&bytes).expect("error");
+            assert_eq!(error.code, ErrorCode::NamespaceDeleted.as_str());
+            assert_eq!(
+                error.details.expect("details").namespace_id.as_ref(),
+                Some(namespace_id)
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn composed_errors_reuse_status_retry_and_preserve_caller_envelope() {
         for code in ErrorCode::ALL {
             let mut body = ApiResponseError::new(code, "public message").body;

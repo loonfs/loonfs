@@ -786,6 +786,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pin_deletes_send_once_after_transport_failure() {
+        let mut client = deadline_client();
+        client.timer = Arc::new(StdMonotonicTimer::default());
+        let namespace_id = loonfs_api::NamespaceId::parse("demo").expect("namespace id");
+        let pin_id =
+            loonfs_api::PinId::parse("pin_00000000000000000001-0000000000000001").expect("pin id");
+        for snapshot in [true, false] {
+            let transport = test_transport::failures(2);
+            if snapshot {
+                client
+                    .delete_snapshot(&namespace_id, &pin_id)
+                    .await
+                    .expect_err("transport failure");
+            } else {
+                client
+                    .delete_checkpoint(&namespace_id, &pin_id)
+                    .await
+                    .expect_err("transport failure");
+            }
+            assert_eq!(transport.attempts(), 1);
+        }
+    }
+
+    #[tokio::test]
     async fn transport_retries_stop_when_the_operation_deadline_is_spent() {
         let client = deadline_client();
         let transport = test_transport::failures(1);

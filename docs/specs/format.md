@@ -486,6 +486,7 @@ The publication procedure is:
 2. Refuse new commits with `maintenance_required` when the unfolded WAL reaches its write-stop threshold. Fence objects count toward that threshold.
 3. Assign contiguous sequences to accepted requests and construct one object at `tip + 1`, including the resulting `next_inode_id`.
 4. Check the publication budget and content-admission evidence immediately before the put-if-absent.
+   If a candidate's evidence has expired, return its own error for that candidate and `stale_head` for the other accepted candidates so they can be planned again. Write no WAL for that batch.
 5. On success, update the local read state and acknowledge the requests. Raise the hint first if a raise is due; a failed hint update does not fail the commits.
 
 The publication budget is measured from observing the tip used to plan the batch until initiating its numbered put. A cached tip has the same time limit. An expired attempt reloads and re-plans before writing. Appendix C records the bound.
@@ -1582,6 +1583,8 @@ A `grep_manifest` version-1 payload contains `namespace_id`, `manifest_no`, `sta
 `index_stored_bytes` is the sum of `index_block.offset + index_block.stored_bytes` for its referenced segments, using checked arithmetic. This calculation needs no segment reads. Report it with the grep manifest number and full indexing status, including any partial-commit position. Confirmed absence means zero referenced index bytes; a read failure remains an error.
 
 Discovery loads the hinted manifest and probes successive numbers until not-found. A missing hint or missing manifest 1 means grep is not enabled. A missing higher hinted manifest is corruption. Queries validate a cached manifest with a HEAD of its successor on every query; a present successor reloads discovery. Decoded manifests can be cached by namespace and number.
+
+An index watermark ahead of a reader's pinned head does not disable the index. The query pins the head again once before using that index.
 
 A step writes segments first, then publishes the next manifest with put-if-absent. A losing publisher reloads durable state and re-plans against current inputs. A successful publisher raises the hint with CAS, taking the greater number. A failed hint raise does not undo publication.
 

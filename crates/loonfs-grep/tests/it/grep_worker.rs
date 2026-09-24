@@ -137,6 +137,74 @@ fn normalize_namespace(mut response: GrepResponse, namespace_id: &NamespaceId) -
 }
 
 #[tokio::test]
+async fn an_index_built_past_a_stale_pin_stays_enabled_and_refreshes_queries() {
+    let directory = tempdir().expect("directory");
+    let base: SharedObjectStore = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
+    let namespace_id = NamespaceId::parse("index-ahead").expect("namespace id");
+    let writer = FsWriter::builder_with_store(base.clone())
+        .writer_id("index-ahead-writer")
+        .min_publish_interval_ms(0)
+        .build()
+        .await
+        .expect("writer");
+    writer
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("namespace");
+    let host = GrepHost::new(&base, "index-ahead").await;
+    host.enable_grep_index(&namespace_id).await.expect("enable");
+    let blocking = Arc::new(BlockingStore::new(
+        base.clone(),
+        KeyPredicate::exact(hint_key(&namespace_id)),
+        OperationClass::GetWithMetadata,
+    ));
+    let query_store: SharedObjectStore = blocking.clone();
+    let query_host = GrepHost::new(&query_store, "stale-reader").await;
+
+    for query in [false, true] {
+        blocking.block_next();
+        let read = async {
+            if query {
+                let response = query_host
+                    .grep(&namespace_id, &request("needle"), default_page_limit())
+                    .await
+                    .expect("query refreshes its pin");
+                assert_eq!(response.head_seq, response.built_through_seq);
+                assert_eq!(response.matches.len(), 2);
+            } else {
+                let index = query_host
+                    .worker
+                    .get_grep_index(&namespace_id)
+                    .await
+                    .expect("index");
+                assert!(index.lifecycle.is_built_through(ChangeSeq(1)));
+            }
+        };
+        let build = async {
+            blocking.wait_until_blocked().await;
+            let path = if query { "/second" } else { "/first" };
+            let committed = writer
+                .put_file_bytes(
+                    &namespace_id,
+                    path,
+                    b"needle\n",
+                    PutFileOptions::new(loonfs_test_support::test_actor()),
+                )
+                .await
+                .expect("commit after the read pins its head");
+            host.catch_up_grep_index(&namespace_id, committed.committed_seq)
+                .await
+                .expect("build past the pin");
+            blocking.release();
+        };
+        tokio::join!(read, build);
+    }
+}
+
+#[tokio::test]
 async fn grep_query_keeps_its_pinned_head_when_a_matching_file_commits_mid_query() {
     let temp_dir = tempdir().expect("tempdir");
     let base = Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));

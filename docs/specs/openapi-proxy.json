@@ -972,6 +972,10 @@
             "minimum": 0,
             "type": "integer"
           },
+          "namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "The deleted namespace that caused the operation to fail."
+          },
           "operation_index": {
             "description": "The index of the failed operation in the request.",
             "format": "int32",
@@ -4318,11 +4322,14 @@
           "namespaces"
         ],
         "x-fern-request-name": "DeleteSnapshotRequest",
+        "x-fern-retries": {
+          "disabled": true
+        },
         "x-fern-sdk-group-name": [
           "snapshots"
         ],
         "x-fern-sdk-method-name": "delete",
-        "x-loonfs-retry": "idempotent"
+        "x-loonfs-retry": "not_idempotent"
       }
     },
     "/v0/namespace-aliases/{namespace_alias}/snapshots/{snapshot_id}/extend": {
