@@ -833,19 +833,13 @@ impl FsMaintenance {
     /// Shared implementation for metadata maintenance and [`Self::flush_wal`].
     async fn run_wal_flush(&self, namespace_id: &NamespaceId) -> Result<FlushWalResponse> {
         async {
-            let folded_inline = match &self.publisher {
-                Some(publisher) => publisher.inline_tail_estimate(namespace_id).await,
-                None => None,
-            };
             let result = self
                 .engine(namespace_id)
                 .flush_wal()
                 .await
                 .map_err(RuntimeError::from);
             if let (Ok(_), Some(publisher)) = (&result, &self.publisher) {
-                publisher
-                    .record_fold_outcome(namespace_id, folded_inline)
-                    .await;
+                publisher.record_fold_outcome(namespace_id).await;
             }
             self.finish_namespace_mutation(namespace_id, result)
                 .inspect_err(|error| tracing::debug!(%error))
