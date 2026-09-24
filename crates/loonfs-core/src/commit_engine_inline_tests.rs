@@ -426,3 +426,6 @@ mod fold_tests;
 
 #[path = "commit_engine_inline_gc_tests.rs"]
 mod gc_tests;
+
+#[path = "commit_engine_inline_retry_gc_tests.rs"]
+mod retry_gc_tests;
