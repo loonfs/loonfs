@@ -7,6 +7,7 @@ use crate::{
     Result, RuntimeCacheConfig, RuntimeCacheStats, RuntimeError, SharedObjectStore, StoreConfig,
     TraceMode, TraceStoreKind,
 };
+use loonfs_api::CompactorEpoch;
 use std::sync::Arc;
 
 /// Maintenance handle: namespace diagnostics, operator checkpoints, WAL flush,
@@ -19,7 +20,7 @@ pub struct FsMaintenance {
     pub(crate) publisher: Option<crate::publisher::PublisherRegistry>,
     pub(crate) actor: WriterIdentity,
     pub(crate) compactor_epochs:
-        Arc<tokio::sync::Mutex<std::collections::BTreeMap<crate::NamespaceId, u64>>>,
+        Arc<tokio::sync::Mutex<std::collections::BTreeMap<crate::NamespaceId, CompactorEpoch>>>,
     /// A narrowed per-step row budget for the tests that need a family group
     /// whose base run no bounded step can fold. See
     /// [`Self::starve_reorganization_row_budget`].

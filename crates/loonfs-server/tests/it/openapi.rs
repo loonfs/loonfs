@@ -275,7 +275,7 @@ const ALWAYS_SERIALIZED_RESPONSE_FIELDS: &[(&str, &str)] = &[
     ("RunMaintenanceResponseGc", "deleted_checkpoints_by_owner"),
     ("RunMaintenanceResponseGc", "retained"),
     ("GrepMatch", "line_truncated"),
-    ("DeletedCheckpointsByOwner", "expired"),
+    ("DeletedCheckpointsByOwner", "user"),
 ];
 
 #[test]

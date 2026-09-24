@@ -136,16 +136,16 @@ pub(super) fn grep_index_state_summary(state: &GrepIndexLifecycle) -> String {
     match state {
         GrepIndexLifecycle::Disabled => "disabled".to_owned(),
         GrepIndexLifecycle::Backfilling {
-            target_seq,
+            captured_seq,
             cursor_inode_id,
             ..
         } => match cursor_inode_id {
             Some(inode_id) => format!(
                 "backfilling toward seq {}, walked through inode {}",
-                target_seq.0,
+                captured_seq.0,
                 public_inode_id(*inode_id)
             ),
-            None => format!("backfilling toward seq {}, not yet started", target_seq.0),
+            None => format!("backfilling toward seq {}, not yet started", captured_seq.0),
         },
         GrepIndexLifecycle::Active {
             built_through_seq,
@@ -228,7 +228,7 @@ fn gc_deleted_counts(report: &GcResponse) -> [(&'static str, u64); 9] {
         ("metadata segments", deleted.metadata_segments),
         ("manifests", deleted.manifests),
         ("fork checkpoints", checkpoints.fork),
-        ("expired checkpoints", checkpoints.expired),
+        ("user checkpoints", checkpoints.user),
         ("snapshot checkpoints", checkpoints.snapshot),
         ("upload sessions", deleted.upload_sessions),
         ("content objects", deleted.content_objects),
@@ -253,7 +253,7 @@ pub(super) fn gc_summary(report: &GcResponse) -> String {
         report.retained.total()
     );
     push_top_retention_reason(&mut summary, report);
-    if let Some(deadline) = report.reclaim_after_ms {
+    if let Some(deadline) = report.reclaimable_at_ms {
         summary.push_str(&format!(
             "\nnamespace can be reclaimed at or after {} after pin cleanup; only fork pins can hold it beyond this deadline",
             format_utc_ms(deadline)

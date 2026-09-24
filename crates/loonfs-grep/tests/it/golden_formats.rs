@@ -149,7 +149,7 @@ pub(crate) fn sample_backfilling_manifest() -> GrepManifestState {
         namespace_id("docs"),
         loonfs_api::ManifestNo(1),
         GrepIndexStatus::Backfilling {
-            target_seq: ChangeSeq(7),
+            captured_seq: ChangeSeq(7),
             cursor_inode_id: Some(InodeId(7)),
             checkpoint_id: PinId::parse("pin_00000000000000000001-0000000000000009")
                 .expect("valid checkpoint id"),

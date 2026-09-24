@@ -23,7 +23,7 @@ async fn deleted_namespace_uses_its_deletion_clock_without_publishing_a_manifest
     )
     .await
     .expect("before deadline");
-    assert_eq!(waiting.reclaim_after_ms, Some(1_000 + GRACE_MS));
+    assert_eq!(waiting.reclaimable_at_ms, Some(1_000 + GRACE_MS));
     assert_eq!(waiting.next_reclamation_at_ms, Some(deadline.now_ms));
     assert_eq!(waiting.deleted.retired_content_objects, 0);
     let reclaimed = gc_namespace(&store, &namespace_id, &config(), &deadline)
@@ -212,7 +212,7 @@ async fn open_direct_upload_outlives_retirement_and_still_gets_provider_cleanup(
     let report = gc_namespace(&store, &namespace_id, &config, &context(clock.now_ms()))
         .await
         .expect("retire");
-    let deadline = report.reclaim_after_ms.expect("deadline");
+    let deadline = report.reclaimable_at_ms.expect("deadline");
     assert_eq!(deadline, clock.now_ms() + NAMESPACE_RETIREMENT_GRACE_MS);
     assert!(deadline > expires_at_ms);
     clock.advance_ms(deadline - clock.now_ms() - 1);

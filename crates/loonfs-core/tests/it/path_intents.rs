@@ -2537,14 +2537,14 @@ async fn move_by_inode_precondition_matrix_checks_the_destination_state() {
     let destination_two = resolve_path(&store, &namespace_id, "/docs/destination-two.txt")
         .await
         .expect("resolve second destination");
-    let binding_generation = source
-        .binding_generation
+    let binding_version = source
+        .binding_version
         .clone()
-        .expect("named source has a binding generation");
-    let binding_generation_two = source_two
-        .binding_generation
+        .expect("named source has a binding version");
+    let binding_version_two = source_two
+        .binding_version
         .clone()
-        .expect("second source has a binding generation");
+        .expect("second source has a binding version");
 
     let error = submit_operation(
         &store,
@@ -2552,7 +2552,7 @@ async fn move_by_inode_precondition_matrix_checks_the_destination_state() {
         test_commit_id(Some("inode-move-wrong-destination")),
         FilesystemOperation::MoveByInode {
             inode_id: source.inode_id,
-            expected_binding_generation: binding_generation.clone(),
+            expected_binding_version: binding_version.clone(),
             destination_parent_inode_id: docs.inode_id,
             destination_display_name: loonfs_api::DisplayName::parse("destination.txt")
                 .expect("display name"),
@@ -2574,7 +2574,7 @@ async fn move_by_inode_precondition_matrix_checks_the_destination_state() {
         test_commit_id(Some("inode-move-revision-only-destination")),
         FilesystemOperation::MoveByInode {
             inode_id: source.inode_id,
-            expected_binding_generation: binding_generation.clone(),
+            expected_binding_version: binding_version.clone(),
             destination_parent_inode_id: docs.inode_id,
             destination_display_name: loonfs_api::DisplayName::parse("destination.txt")
                 .expect("display name"),
@@ -2596,7 +2596,7 @@ async fn move_by_inode_precondition_matrix_checks_the_destination_state() {
         test_commit_id(Some("inode-move-no-replace-destination-precondition")),
         FilesystemOperation::MoveByInode {
             inode_id: source.inode_id,
-            expected_binding_generation: binding_generation.clone(),
+            expected_binding_version: binding_version.clone(),
             destination_parent_inode_id: docs.inode_id,
             destination_display_name: loonfs_api::DisplayName::parse("destination.txt")
                 .expect("display name"),
@@ -2632,7 +2632,7 @@ async fn move_by_inode_precondition_matrix_checks_the_destination_state() {
         test_commit_id(Some("inode-move-inode-only-destination-precondition")),
         FilesystemOperation::MoveByInode {
             inode_id: source.inode_id,
-            expected_binding_generation: binding_generation,
+            expected_binding_version: binding_version,
             destination_parent_inode_id: docs.inode_id,
             destination_display_name: loonfs_api::DisplayName::parse("destination.txt")
                 .expect("display name"),
@@ -2652,7 +2652,7 @@ async fn move_by_inode_precondition_matrix_checks_the_destination_state() {
         test_commit_id(Some("inode-move-inode-revision-destination-precondition")),
         FilesystemOperation::MoveByInode {
             inode_id: source_two.inode_id,
-            expected_binding_generation: binding_generation_two,
+            expected_binding_version: binding_version_two,
             destination_parent_inode_id: docs.inode_id,
             destination_display_name: loonfs_api::DisplayName::parse("destination-two.txt")
                 .expect("display name"),

@@ -131,7 +131,7 @@ pub enum GrepBuildOutcome {
         segments_written: u64,
     },
     BackfillRestarted {
-        target_seq: ChangeSeq,
+        captured_seq: ChangeSeq,
     },
     Superseded,
 }
@@ -333,13 +333,13 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         reads.head().await?;
         let unit = match current.manifest_state().status() {
             GrepIndexStatus::Backfilling {
-                target_seq,
+                captured_seq,
                 cursor_inode_id,
                 checkpoint_id,
             } => match collect_backfill_unit(
                 &reads,
                 checkpoint_id,
-                *target_seq,
+                *captured_seq,
                 *cursor_inode_id,
                 policy,
             )
@@ -482,7 +482,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                         .await?;
                 }
                 Ok(GrepBuildOutcome::BackfillRestarted {
-                    target_seq: checkpoint.captured_seq,
+                    captured_seq: checkpoint.captured_seq,
                 })
             }
             Err(GrepError::PublicationConflict { .. }) => {
@@ -535,25 +535,25 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         let (status, completed_checkpoint_id, built_through_seq) = match progress {
             CollectedProgress::Backfill {
                 checkpoint_id,
-                target_seq,
+                captured_seq,
                 next_cursor,
             } => match next_cursor {
                 Some(after_inode_id) => (
                     GrepIndexStatus::Backfilling {
-                        target_seq,
+                        captured_seq,
                         cursor_inode_id: Some(after_inode_id),
                         checkpoint_id,
                     },
                     None,
-                    target_seq,
+                    captured_seq,
                 ),
                 None => (
                     GrepIndexStatus::Active {
-                        built_through_seq: target_seq,
+                        built_through_seq: captured_seq,
                         next_event_index: 0,
                     },
                     Some(checkpoint_id),
-                    target_seq,
+                    captured_seq,
                 ),
             },
             CollectedProgress::Incremental {
@@ -602,7 +602,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
 fn backfilling_manifest(
     namespace_id: &NamespaceId,
     manifest_no: ManifestNo,
-    target_seq: ChangeSeq,
+    captured_seq: ChangeSeq,
     checkpoint_id: PinId,
     next_run_no: RunNo,
 ) -> Result<GrepManifestState> {
@@ -610,7 +610,7 @@ fn backfilling_manifest(
         namespace_id.clone(),
         manifest_no,
         GrepIndexStatus::Backfilling {
-            target_seq,
+            captured_seq,
             cursor_inode_id: None,
             checkpoint_id,
         },
@@ -696,7 +696,7 @@ struct IndexingStats {
 enum CollectedProgress {
     Backfill {
         checkpoint_id: PinId,
-        target_seq: ChangeSeq,
+        captured_seq: ChangeSeq,
         next_cursor: Option<InodeId>,
     },
     Incremental {
@@ -717,7 +717,7 @@ enum CollectedProgress {
 async fn collect_backfill_unit(
     reads: &NamespaceReads<'_>,
     checkpoint_id: &PinId,
-    target_seq: ChangeSeq,
+    captured_seq: ChangeSeq,
     cursor: Option<InodeId>,
     policy: GramIndexBuildPolicy,
 ) -> Result<CollectedIndexUnit> {
@@ -732,11 +732,11 @@ async fn collect_backfill_unit(
         let page = reads
             .list_checkpoint_files_page(checkpoint_id, cursor, files_remaining)
             .await?;
-        if page.checkpoint_seq != target_seq {
+        if page.checkpoint_seq != captured_seq {
             return Err(GrepError::CorruptIndex {
                 message: format!(
                     "checkpoint `{checkpoint_id}` pins sequence `{}` but the grep manifest is \
-                 backfilling sequence `{target_seq}`",
+                 backfilling sequence `{captured_seq}`",
                     page.checkpoint_seq
                 ),
             });
@@ -781,7 +781,7 @@ async fn collect_backfill_unit(
         stats,
         progress: CollectedProgress::Backfill {
             checkpoint_id: checkpoint_id.clone(),
-            target_seq,
+            captured_seq,
             next_cursor,
         },
     })

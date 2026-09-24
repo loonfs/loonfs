@@ -128,7 +128,7 @@ pub enum CommitValidationError {
     #[error(
         "undelete of inode `{inode_id}` targets the deletion at seq `{requested_seq}`, but the active deletion is at seq `{active_seq}`"
     )]
-    UndeleteGenerationMismatch {
+    UndeleteSequenceMismatch {
         inode_id: InodeId,
         requested_seq: ChangeSeq,
         active_seq: ChangeSeq,
@@ -203,7 +203,7 @@ impl CommitValidationError {
             Self::InodeMissing { .. } => ErrorCode::PathNotFound,
             Self::UndeleteTargetNotDeleted { .. }
             | Self::UndeleteTargetsCurrentCommit { .. }
-            | Self::UndeleteGenerationMismatch { .. } => ErrorCode::NotDeleted,
+            | Self::UndeleteSequenceMismatch { .. } => ErrorCode::NotDeleted,
             Self::RenameWouldCycleDirectory { .. } => ErrorCode::WouldCycle,
             Self::RestoreRevisionOverflow { .. }
             | Self::ReplaceFileRevisionOverflow { .. }
@@ -253,7 +253,7 @@ impl CommitValidationError {
                 expected_deletion_seq: Some(*requested_seq),
                 ..ErrorDetails::default()
             }),
-            Self::UndeleteGenerationMismatch {
+            Self::UndeleteSequenceMismatch {
                 inode_id,
                 requested_seq,
                 active_seq,

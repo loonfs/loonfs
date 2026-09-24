@@ -1,6 +1,6 @@
 use crate::common::commit_split_support::*;
 use loonfs_api::{
-    AbsolutePath, BindingGeneration, ContentRef, DeleteDirectoryBehavior, DestinationBehavior,
+    AbsolutePath, BindingVersion, ContentRef, DeleteDirectoryBehavior, DestinationBehavior,
     DisplayName, InodeId, NamespaceId, RevisionNo, ROOT_INODE_ID,
 };
 use loonfs_core::content::store_bytes_as_content;
@@ -17,15 +17,15 @@ async fn read_entry<S: loonfs_objectstore::ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     absolute_path: &str,
-) -> (InodeId, BindingGeneration) {
+) -> (InodeId, BindingVersion) {
     let entry = resolve_path(store, namespace_id, absolute_path)
         .await
         .expect("resolve path");
     (
         entry.inode_id,
         entry
-            .binding_generation
-            .expect("named entry has a binding generation"),
+            .binding_version
+            .expect("named entry has a binding version"),
     )
 }
 
@@ -52,7 +52,7 @@ async fn rebind_report<S: loonfs_objectstore::ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     context: &loonfs_core::MutationContext,
-) -> (InodeId, BindingGeneration, BindingGeneration) {
+) -> (InodeId, BindingVersion, BindingVersion) {
     write_file_bytes(
         store,
         namespace_id,
@@ -63,7 +63,7 @@ async fn rebind_report<S: loonfs_objectstore::ObjectStore + ?Sized>(
     )
     .await
     .expect("put file");
-    let (inode_id, stale_generation) = read_entry(store, namespace_id, "/docs/report.txt").await;
+    let (inode_id, stale_version) = read_entry(store, namespace_id, "/docs/report.txt").await;
     submit_operation(
         store,
         namespace_id,
@@ -81,8 +81,8 @@ async fn rebind_report<S: loonfs_objectstore::ObjectStore + ?Sized>(
     )
     .await
     .expect("rename file");
-    let (_, current_generation) = read_entry(store, namespace_id, "/docs/renamed.txt").await;
-    (inode_id, stale_generation, current_generation)
+    let (_, current_version) = read_entry(store, namespace_id, "/docs/renamed.txt").await;
+    (inode_id, stale_version, current_version)
 }
 
 #[tokio::test]
@@ -262,9 +262,9 @@ async fn revision_write_requires_the_current_revision_and_survives_a_move() {
 }
 
 #[tokio::test]
-async fn move_requires_the_current_binding_generation() {
+async fn move_requires_the_current_binding_version() {
     let (_temp_dir, store, namespace_id, context) = namespace_with_docs().await;
-    let (report_inode_id, stale_generation, fresh_generation) =
+    let (report_inode_id, stale_version, fresh_version) =
         rebind_report(&store, &namespace_id, &context).await;
 
     let error = submit_operation(
@@ -273,7 +273,7 @@ async fn move_requires_the_current_binding_generation() {
         test_commit_id(Some("move-stale")),
         FilesystemOperation::MoveByInode {
             inode_id: report_inode_id,
-            expected_binding_generation: stale_generation.clone(),
+            expected_binding_version: stale_version.clone(),
             destination_parent_inode_id: ROOT_INODE_ID,
             destination_display_name: display_name("moved.txt"),
             precondition: loonfs_api::DestinationPrecondition {
@@ -285,26 +285,23 @@ async fn move_requires_the_current_binding_generation() {
         &context,
     )
     .await
-    .expect_err("stale binding generation must fail");
-    assert_eq!(error.code(), ErrorCode::BindingGenerationMismatch);
+    .expect_err("stale binding version must fail");
+    assert_eq!(error.code(), ErrorCode::BindingVersionMismatch);
     let details = error.details().expect("operation details");
     assert_eq!(details.operation_index, Some(0));
     assert_eq!(details.precondition_index, None);
     assert_eq!(details.inode_id, Some(report_inode_id));
     assert_eq!(
-        details.expected_binding_generation,
-        Some(stale_generation.clone())
+        details.expected_binding_version,
+        Some(stale_version.clone())
     );
-    assert_eq!(
-        details.actual_binding_generation,
-        Some(fresh_generation.clone())
-    );
+    assert_eq!(details.actual_binding_version, Some(fresh_version.clone()));
 
     for (path, inode_id, actual) in [
         (
             "/docs/renamed.txt",
             report_inode_id,
-            Some(fresh_generation.clone()),
+            Some(fresh_version.clone()),
         ),
         ("/", ROOT_INODE_ID, None),
     ] {
@@ -323,22 +320,22 @@ async fn move_requires_the_current_binding_generation() {
             .preconditions(vec![loonfs_api::CommitPrecondition::PathBinding {
                 path: AbsolutePath::parse(path).expect("path"),
                 expected_inode_id: inode_id,
-                expected_binding_generation: Some(stale_generation.clone()),
+                expected_binding_version: Some(stale_version.clone()),
             }]),
             &context,
         )
         .await
         .expect_err("binding precondition must fail");
-        assert_eq!(error.code(), ErrorCode::BindingGenerationMismatch);
+        assert_eq!(error.code(), ErrorCode::BindingVersionMismatch);
         let details = error.details().expect("precondition details");
         assert_eq!(details.precondition_index, Some(0));
         assert_eq!(details.operation_index, None);
         assert_eq!(details.inode_id, Some(inode_id));
         assert_eq!(
-            details.expected_binding_generation,
-            Some(stale_generation.clone())
+            details.expected_binding_version,
+            Some(stale_version.clone())
         );
-        assert_eq!(details.actual_binding_generation, actual);
+        assert_eq!(details.actual_binding_version, actual);
     }
 
     submit_operation(
@@ -347,7 +344,7 @@ async fn move_requires_the_current_binding_generation() {
         test_commit_id(Some("move-fresh")),
         FilesystemOperation::MoveByInode {
             inode_id: report_inode_id,
-            expected_binding_generation: fresh_generation,
+            expected_binding_version: fresh_version,
             destination_parent_inode_id: ROOT_INODE_ID,
             destination_display_name: display_name("moved.txt"),
             precondition: loonfs_api::DestinationPrecondition {
@@ -359,16 +356,16 @@ async fn move_requires_the_current_binding_generation() {
         &context,
     )
     .await
-    .expect("current binding generation must move file");
+    .expect("current binding version must move file");
 
     let (moved_inode_id, _) = read_entry(&store, &namespace_id, "/moved.txt").await;
     assert_eq!(moved_inode_id, report_inode_id);
 }
 
 #[tokio::test]
-async fn delete_requires_the_current_binding_generation() {
+async fn delete_requires_the_current_binding_version() {
     let (_temp_dir, store, namespace_id, context) = namespace_with_docs().await;
-    let (report_inode_id, stale_generation, fresh_generation) =
+    let (report_inode_id, stale_version, fresh_version) =
         rebind_report(&store, &namespace_id, &context).await;
 
     let error = submit_operation(
@@ -377,14 +374,14 @@ async fn delete_requires_the_current_binding_generation() {
         test_commit_id(Some("delete-stale")),
         FilesystemOperation::DeleteByInode {
             inode_id: report_inode_id,
-            expected_binding_generation: stale_generation,
+            expected_binding_version: stale_version,
             behavior: DeleteDirectoryBehavior::NonRecursive,
         },
         &context,
     )
     .await
-    .expect_err("stale binding generation must fail");
-    assert_eq!(error.code(), ErrorCode::BindingGenerationMismatch);
+    .expect_err("stale binding version must fail");
+    assert_eq!(error.code(), ErrorCode::BindingVersionMismatch);
 
     submit_operation(
         &store,
@@ -392,13 +389,13 @@ async fn delete_requires_the_current_binding_generation() {
         test_commit_id(Some("delete-fresh")),
         FilesystemOperation::DeleteByInode {
             inode_id: report_inode_id,
-            expected_binding_generation: fresh_generation,
+            expected_binding_version: fresh_version,
             behavior: DeleteDirectoryBehavior::NonRecursive,
         },
         &context,
     )
     .await
-    .expect("current binding generation must delete file");
+    .expect("current binding version must delete file");
 
     assert_eq!(
         resolve_path(&store, &namespace_id, "/docs/renamed.txt")
@@ -422,7 +419,7 @@ async fn earlier_move_makes_a_later_precondition_stale_and_rolls_back_the_commit
     )
     .await
     .expect("put file");
-    let (report_inode_id, binding_generation) =
+    let (report_inode_id, binding_version) =
         read_entry(&store, &namespace_id, "/docs/report.txt").await;
 
     let error = submit_commit(
@@ -430,14 +427,14 @@ async fn earlier_move_makes_a_later_precondition_stale_and_rolls_back_the_commit
         &namespace_id,
         CommitRequest {
             preconditions: Vec::new(),
-            commit_id: test_commit_id(Some("move-then-delete-with-old-generation")),
+            commit_id: test_commit_id(Some("move-then-delete-with-old-version")),
             actor_id: loonfs_test_support::test_actor(),
             subject: None,
             message: None,
             operations: vec![
                 FilesystemOperation::MoveByInode {
                     inode_id: report_inode_id,
-                    expected_binding_generation: binding_generation.clone(),
+                    expected_binding_version: binding_version.clone(),
                     destination_parent_inode_id: ROOT_INODE_ID,
                     destination_display_name: display_name("moved.txt"),
                     precondition: loonfs_api::DestinationPrecondition {
@@ -448,7 +445,7 @@ async fn earlier_move_makes_a_later_precondition_stale_and_rolls_back_the_commit
                 },
                 FilesystemOperation::DeleteByInode {
                     inode_id: report_inode_id,
-                    expected_binding_generation: binding_generation,
+                    expected_binding_version: binding_version,
                     behavior: DeleteDirectoryBehavior::NonRecursive,
                 },
             ],
@@ -456,9 +453,9 @@ async fn earlier_move_makes_a_later_precondition_stale_and_rolls_back_the_commit
         &context,
     )
     .await
-    .expect_err("the move must make the old generation stale");
+    .expect_err("the move must make the old version stale");
 
-    assert_eq!(error.code(), ErrorCode::BindingGenerationMismatch);
+    assert_eq!(error.code(), ErrorCode::BindingVersionMismatch);
     assert_eq!(
         read_entry(&store, &namespace_id, "/docs/report.txt")
             .await
@@ -487,7 +484,7 @@ async fn content_write_preserves_the_precondition_for_a_later_move() {
     )
     .await
     .expect("put file");
-    let (report_inode_id, binding_generation) =
+    let (report_inode_id, binding_version) =
         read_entry(&store, &namespace_id, "/docs/report.txt").await;
 
     submit_commit(
@@ -495,7 +492,7 @@ async fn content_write_preserves_the_precondition_for_a_later_move() {
         &namespace_id,
         CommitRequest {
             preconditions: Vec::new(),
-            commit_id: test_commit_id(Some("write-then-move-with-same-generation")),
+            commit_id: test_commit_id(Some("write-then-move-with-same-version")),
             actor_id: loonfs_test_support::test_actor(),
             subject: None,
             message: None,
@@ -510,7 +507,7 @@ async fn content_write_preserves_the_precondition_for_a_later_move() {
                 .await,
                 FilesystemOperation::MoveByInode {
                     inode_id: report_inode_id,
-                    expected_binding_generation: binding_generation.clone(),
+                    expected_binding_version: binding_version.clone(),
                     destination_parent_inode_id: ROOT_INODE_ID,
                     destination_display_name: display_name("moved.txt"),
                     precondition: loonfs_api::DestinationPrecondition {
@@ -533,15 +530,15 @@ async fn content_write_preserves_the_precondition_for_a_later_move() {
             .bytes,
         b"second"
     );
-    let (moved_inode_id, moved_generation) = read_entry(&store, &namespace_id, "/moved.txt").await;
+    let (moved_inode_id, moved_version) = read_entry(&store, &namespace_id, "/moved.txt").await;
     assert_eq!(moved_inode_id, report_inode_id);
-    assert_ne!(moved_generation, binding_generation);
+    assert_ne!(moved_version, binding_version);
 }
 
 #[tokio::test]
 async fn foreign_and_root_binding_preconditions_are_invalid() {
     let (_temp_dir, store, namespace_id, context) = namespace_with_docs().await;
-    let (docs_inode_id, local_generation) = read_entry(&store, &namespace_id, "/docs").await;
+    let (docs_inode_id, local_version) = read_entry(&store, &namespace_id, "/docs").await;
 
     let other_namespace_id = NamespaceId::parse("other").expect("valid namespace id");
     bootstrap_namespace(&store, &other_namespace_id, &context)
@@ -556,7 +553,7 @@ async fn foreign_and_root_binding_preconditions_are_invalid() {
     )
     .await
     .expect("create directory in other namespace");
-    let (_, foreign_generation) = read_entry(&store, &other_namespace_id, "/docs").await;
+    let (_, foreign_version) = read_entry(&store, &other_namespace_id, "/docs").await;
 
     let error = submit_operation(
         &store,
@@ -564,7 +561,7 @@ async fn foreign_and_root_binding_preconditions_are_invalid() {
         test_commit_id(None),
         FilesystemOperation::DeleteByInode {
             inode_id: docs_inode_id,
-            expected_binding_generation: foreign_generation,
+            expected_binding_version: foreign_version,
             behavior: DeleteDirectoryBehavior::NonRecursive,
         },
         &context,
@@ -579,7 +576,7 @@ async fn foreign_and_root_binding_preconditions_are_invalid() {
         test_commit_id(Some("delete-root")),
         FilesystemOperation::DeleteByInode {
             inode_id: ROOT_INODE_ID,
-            expected_binding_generation: local_generation,
+            expected_binding_version: local_version,
             behavior: DeleteDirectoryBehavior::Recursive,
         },
         &context,

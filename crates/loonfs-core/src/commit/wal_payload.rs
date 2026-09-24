@@ -8,7 +8,7 @@ pub(crate) fn wal_payload_from_materialized_commit(
 ) -> WalCommitPayload {
     let prepared = &commit.commit;
     WalCommitPayload {
-        seq: prepared.assigned_seq,
+        committed_seq: prepared.assigned_seq,
         commit_id: prepared.commit_id.clone(),
         committed_by: prepared.actor_id.clone(),
         semantic_commit_fingerprint: prepared.semantic_identity.clone(),
@@ -70,7 +70,7 @@ mod tests {
 
         let payload = wal_payload_from_materialized_commit(&materialized);
 
-        assert_eq!(payload.seq, ChangeSeq(1));
+        assert_eq!(payload.committed_seq, ChangeSeq(1));
         assert_eq!(payload.committed_at_ms, 4_200);
         assert_eq!(payload.deltas.len(), 2);
 

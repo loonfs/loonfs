@@ -11,9 +11,8 @@ use crate::namespace::state::NamespaceReadState;
 use crate::namespace::writer_epoch::ensure_writer_not_fenced;
 use crate::wal::load_replayed_wal_tail;
 use crate::wal::ProjectedWalTail;
-use loonfs_api::v0::Commit;
 use loonfs_api::wire::control::AcquiredWriter;
-use loonfs_api::{ChangeSeq, CommitId, NamespaceId};
+use loonfs_api::{CommitId, NamespaceId};
 use loonfs_objectstore::ObjectStore;
 use std::sync::Arc;
 
@@ -43,19 +42,6 @@ impl<S: ObjectStore + ?Sized> PublishMetadataView<'_, S> {
         commit_id: &CommitId,
     ) -> Result<Option<CommitReceiptRecord>> {
         self.metadata_view().find_commit_receipt(commit_id).await
-    }
-
-    /// Reads the retained change for a commit receipt.
-    pub(super) async fn find_committed_change_at(
-        &self,
-        committed_seq: ChangeSeq,
-    ) -> Result<Option<Commit>> {
-        super::changes::find_committed_change_at(
-            &self.metadata_view(),
-            &self.head.namespace_id,
-            committed_seq,
-        )
-        .await
     }
 }
 

@@ -148,7 +148,7 @@ pub(crate) enum ValidatedOp {
         parent_inode_id: InodeId,
         display_name: DisplayName,
         name_key: NameKey,
-        /// The exact deletion generation validation resolved and pinned:
+        /// The exact deletion position validation resolved and pinned:
         /// the active tombstone's own event coordinates.
         target: DeltaPosition,
         revoke_tombstone_delta_index: u32,

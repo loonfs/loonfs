@@ -27,6 +27,7 @@ use loonfs_api::wire::manifest::{
     MetadataRunRef, MetadataSegmentRef, NamespaceManifestEnvelope, NamespaceManifestPayload,
     RunTier,
 };
+use loonfs_api::CompactorEpoch;
 use loonfs_api::{ChangeSeq, ManifestNo, NamespaceId, RunNo};
 use loonfs_objectstore::ObjectStore;
 use std::collections::BTreeSet;
@@ -98,7 +99,7 @@ pub enum MetadataReorganizeOutcome {
 pub(crate) async fn reorganize_metadata_step<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    compactor_epoch: u64,
+    compactor_epoch: CompactorEpoch,
     policy: MetadataLsmPolicy,
     compaction_policy: MetadataCompactionPolicy,
 ) -> Result<MetadataReorganizeOutcome> {
@@ -117,7 +118,7 @@ pub(crate) async fn reorganize_metadata_step<S: ObjectStore + ?Sized>(
 pub(super) async fn reorganize_metadata_step_with_deadline<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    compactor_epoch: u64,
+    compactor_epoch: CompactorEpoch,
     policy: MetadataLsmPolicy,
     compaction_policy: MetadataCompactionPolicy,
     deadline: &Deadline,

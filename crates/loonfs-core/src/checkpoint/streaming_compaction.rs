@@ -30,6 +30,7 @@ use crate::limits::METADATA_COMPACTION_BUDGET_MS;
 use crate::namespace::control::load_current_manifest_if_present;
 use crate::time::{Deadline, StdMonotonicTimer};
 use loonfs_api::wire::manifest::{MetadataRowFamily, MetadataSegmentRef};
+use loonfs_api::CompactorEpoch;
 use loonfs_api::{ChangeSeq, ManifestNo, MetadataCompactionId, NamespaceId, RunNo};
 use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::ObjectStore;
@@ -284,7 +285,7 @@ pub enum MetadataCompactionJobOutcome {
 pub(crate) async fn run_metadata_compaction_job<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    compactor_epoch: u64,
+    compactor_epoch: CompactorEpoch,
     spec: &MetadataCompactionSpec,
     policy: MetadataLsmPolicy,
     cancellation: &MetadataCompactionCancellation,
@@ -382,7 +383,7 @@ fn log_metadata_compaction_outcome(
 }
 
 pub(super) struct CompactionPublication {
-    pub(super) compactor_epoch: u64,
+    pub(super) compactor_epoch: CompactorEpoch,
     pub(super) compaction: Deadline,
     pub(super) publication: Deadline,
 }

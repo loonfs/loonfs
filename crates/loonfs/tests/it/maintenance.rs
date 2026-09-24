@@ -621,7 +621,10 @@ async fn fenced_compaction_blocks_until_a_new_request_claims_and_publishes() {
             loonfs_core::control::load_namespace_current_manifest(store.as_ref(), &namespace_id)
                 .await
                 .expect("manifest before fencing");
-        assert_eq!(before.state.compactor_epoch(), 2);
+        assert_eq!(
+            before.state.compactor_epoch(),
+            loonfs_api::CompactorEpoch(2)
+        );
 
         if run_job {
             let job = MetadataCompactionJob::new(first.maintenance.clone());
@@ -662,7 +665,10 @@ async fn fenced_compaction_blocks_until_a_new_request_claims_and_publishes() {
             loonfs_core::control::load_namespace_current_manifest(store.as_ref(), &namespace_id)
                 .await
                 .expect("manifest after publication");
-        assert_eq!(published.state.compactor_epoch(), 3);
+        assert_eq!(
+            published.state.compactor_epoch(),
+            loonfs_api::CompactorEpoch(3)
+        );
         assert!(published.state.manifest().manifest_no > before.state.manifest().manifest_no);
     }
 }

@@ -132,11 +132,11 @@ Two separate uploads of identical bytes create two objects. There is no cross-up
 
 Deleting an item removes its current binding and records a subtree tombstone. A tombstone at a directory hides that directory and its descendants without requiring a separate tombstone for every descendant.
 
-Tombstone events are ordered by `(seq, delta_index)`. A `set` event starts a deletion. A `revoke` event identifies the exact `set` generation it cancels. At a given sequence, the latest event for the deletion root determines whether the tombstone is active. A later `set` is a new deletion, even if an earlier deletion of the same inode was revoked.
+Tombstone rows carry their own position as `committed_seq` and `delta_index`. Events are ordered by that pair. A `set` event starts a deletion. A `revoke` event identifies the exact `set` position it cancels as a `DeltaPosition` value `{seq, delta_index}`. At a given sequence, the latest event for the deletion root determines whether the tombstone is active. A later `set` is a new deletion, even if an earlier deletion of the same inode was revoked.
 
 An undelete request identifies the deletion by inode and committed deletion sequence. Validation must confirm the currently active deletion. A request for a deletion that is no longer active returns `not_deleted`; it must not cancel a later deletion. A deletion created earlier in the same uncommitted request cannot yet be addressed by its committed deletion sequence. Only the root of a deletion can be undeleted independently; descendants hidden by that root do not each have a separate deletion to revoke.
 
-A `set` stores the removed binding in `deleted_binding`, with `parent_inode_id`, `name_key`, and `display_name`. This information remains available after old binding versions are compacted. An undelete restores that parent and name unless the request supplies a different destination. A `revoke` stores its target generation and must not contain a deleted binding.
+A `set` stores the removed binding in `deleted_binding`, with `parent_inode_id`, `name_key`, and `display_name`. This information remains available after old binding versions are compacted. An undelete restores that parent and name unless the request supplies a different destination. A `revoke` stores its target position and must not contain a deleted binding.
 
 The derived `active_deletions` family supports listing recoverable deletions in deletion-sequence order. A `set` produces a `listed` row. A revoke produces a `removed` row for the same `(deletion_seq, root_inode_id)`. Removal rows sort before listed rows, so a scan can suppress cancelled entries. Tombstone events remain authoritative.
 
@@ -391,7 +391,7 @@ Reading speculative bytes does not by itself establish freshness or change reten
 
 Every uploaded content object is associated with an upload session before it becomes eligible for metadata publication. The content ID is allocated when the session is created, before the file bytes are read. New content belongs to the session's namespace under section 1.5.
 
-An upload session contains `namespace_id`, `upload_id`, `content_id`, `created_at_ms`, optional `subject_id`, a tagged `mode`, and a tagged `status`.
+An upload session contains `namespace_id`, `upload_id`, `content_id`, optional `subject_id`, a tagged `mode`, and a tagged `status`.
 
 | Status | Stored fields | Meaning |
 | --- | --- | --- |
@@ -475,7 +475,7 @@ Operations in one request are evaluated in order. Later operations can observe t
 
 The writer must check that a content reference has a supported kind, a correctly encoded checksum, and applicable evidence that the object is durable with the stated size and checksum. Content validation precedes metadata preconditions. Previously established content can be reused only through the namespace's validated state or the admission paths described in section 5.5.
 
-Metadata preconditions include namespace head sequence, name-slot availability, exact binding generations, file and attribute revisions, ancestor visibility, and directory emptiness. The internal exact-binding check is:
+Metadata preconditions include namespace head sequence, name-slot availability, exact binding versions, file and attribute revisions, ancestor visibility, and directory emptiness. The internal exact-binding check is:
 
 ```text
 binding_is(parent_inode_id, name_key, child_inode_id, bind_seq, bind_delta_index)
@@ -483,7 +483,7 @@ binding_is(parent_inode_id, name_key, child_inode_id, bind_seq, bind_delta_index
 
 Checking the inode ID alone is not equivalent. An item may have been moved away and rebound under the same name since the caller observed it.
 
-Caller-supplied `expected_*` preconditions add specific checks. Omitting an optional precondition disables that check; it does not disable the operation's normal structural validation. Where a revision precondition accompanies an optional inode precondition, the revision precondition requires the matching inode precondition. Inode-addressed revision writes require `expected_revision_no`, and inode-addressed moves and deletes require `expected_binding_generation`.
+Caller-supplied `expected_*` preconditions add specific checks. Omitting an optional precondition disables that check; it does not disable the operation's normal structural validation. Where a revision precondition accompanies an optional inode precondition, the revision precondition requires the matching inode precondition. Inode-addressed revision writes require `expected_revision_no`, and inode-addressed moves and deletes require `expected_binding_version`.
 
 A rejected request receives no sequence number and creates no WAL record. Passing validation is tentative acceptance, not success.
 
@@ -531,9 +531,9 @@ Suppose request A creates `/reports` and request B also tries to create `/report
 
 ### 6.5 Commit identity and retries
 
-Every WAL commit and commit receipt stores a `semantic_commit_fingerprint`. It represents the logical request: `namespace_id`, `actor_id`, ordered operations with their inline preconditions, request-level preconditions, and optional message. It excludes publication details such as the writer epoch and timestamp. Appendix B specifies the exact canonical bytes.
+Every WAL commit and `commit` row stores a `semantic_commit_fingerprint`. It represents the logical request: `namespace_id`, `actor_id`, ordered operations with their inline preconditions, request-level preconditions, and optional message. It excludes publication details such as the writer epoch and timestamp. Appendix B specifies the exact canonical bytes.
 
-The materialized file set also stores each retained commit's record in the `commits` family, keyed by sequence. A replay rebuilds its response from that row.
+The materialized file set also stores each retained commit's record in the `commits` family, keyed by sequence. A receipt stores only `commit_id` and `committed_seq`. Commit-id reuse resolution reads the commit row at that sequence and compares its fingerprint. A replay rebuilds its response from that row. The `commits` and `commit_receipts` families share one family group and one floor rule, so the commit row remains whenever its receipt does.
 
 While the receipt is retained, an equal fingerprint under the same `commit_id` identifies a replay of the original commit. A different fingerprint returns `commit_id_reuse_conflict`. A replay does not execute the mutation again or reevaluate its original preconditions against current state.
 
@@ -1125,7 +1125,7 @@ The following tables list the durable payload fields. Their transition rules are
 | Fork basis | `manifest`, `source_pin_id` |
 | Manifest reference | `owner_namespace_id`, `manifest_no`, `head_seq`, `payload_checksum` |
 | Pin record | `namespace_id`, `pin_id`, `head_seq`, `payload_checksum`, `created_at_ms`, `owner` |
-| Upload session | `namespace_id`, `upload_id`, `content_id`, `created_at_ms`, optional `subject_id`, `mode`, `status` |
+| Upload session | `namespace_id`, `upload_id`, `content_id`, optional `subject_id`, `mode`, `status` |
 
 Namespace status is `{"kind":"active"}` or `{"kind":"deleted"}` with required `deleted_at_ms` only on the deleted variant. Missing status is invalid. The genesis commit ID is `c_00000000000000000000000000000000`.
 
@@ -1144,7 +1144,7 @@ A namespace manifest contains:
 | `writer?` | Diagnostic writer block. |
 | `folded_wal_no` | Highest local WAL number incorporated into the file set. |
 | `manifest_no` | Positive number matching the object key. |
-| `compactor_epoch` | Current compaction authority. |
+| `compactor_epoch` | Current compaction authority, a `CompactorEpoch` integer. |
 | `head_seq` | Materialized head sequence; on deletion, the final namespace sequence. |
 | `activity` | Required cumulative activity counters defined in section 7.4. |
 | `writer_epoch` | Current writer authority. |
@@ -1177,7 +1177,7 @@ A WAL segment's payload contains `namespace_id`, `wal_no`, `writer_epoch`, `head
 
 For a data segment, `prior_head_seq` is derived with checked subtraction from the first record sequence. `records` covers the sequences after it through `head_seq` contiguously. A first sequence of zero is invalid. The WAL number must match the key, and the allocation high-water mark must agree with replay. A fence has an empty record list and an unchanged head and allocator. Its derived `prior_head_seq` equals `head_seq`. Fences participate in WAL numbering and epoch validation but produce no logical changes.
 
-Each commit contains `seq`, `commit_id`, `committed_by`, `semantic_commit_fingerprint`, `committed_at_ms`, optional `message`, `deltas`, and optional `inline_content`. A delta wrapper contains `semantic_operation_index` and `delta`. The latter is a kind-tagged object with these fields:
+Each commit contains `committed_seq`, `commit_id`, `committed_by`, `semantic_commit_fingerprint`, `committed_at_ms`, optional `message`, `deltas`, and optional `inline_content`. A delta wrapper contains `semantic_operation_index` and `delta`. The latter is a kind-tagged object with these fields:
 
 | Delta kind | Fields after `kind` |
 | --- | --- |
@@ -1215,10 +1215,10 @@ Rows are kind-tagged CBOR objects in the data blocks. The row-kind schema and th
 | `inode` | `inode_id`, `inode_kind`, `committed_seq`, `commit_id`, `committed_by`, `committed_at_ms` |
 | `direntry_binding` | `parent_inode_id`, `name_key`, `child_inode_id`, `committed_seq`, `delta_index`, `state` |
 | `file_revision` | `inode_id`, `revision_no`, `committed_seq`, `commit_id`, `committed_by`, `committed_at_ms`, `delta_index`, `content_ref` |
-| `tombstone` | `root_inode_id`, `generation`, `commit_id`, `action`, `committed_by`, `committed_at_ms` |
+| `tombstone` | `root_inode_id`, `committed_seq`, `delta_index`, `commit_id`, `action`, `committed_by`, `committed_at_ms` |
 | `active_deletion` | `root_inode_id`, `deletion_seq`, `action` |
-| `commit_receipt` | `commit_id`, `committed_seq`, `semantic_commit_fingerprint` |
-| `commit` | `seq`, `commit_id`, `committed_by`, `semantic_commit_fingerprint`, `committed_at_ms`, `message?`, `deltas` |
+| `commit_receipt` | `commit_id`, `committed_seq` |
+| `commit` | `committed_seq`, `commit_id`, `committed_by`, `semantic_commit_fingerprint`, `committed_at_ms`, `message?`, `deltas` |
 | `content_publication` | `content_id`, `committed_seq`, `delta_index` |
 | `attributes_revision` | `inode_id`, `attributes_revision_no`, `committed_seq`, `commit_id`, `delta_index`, `committed_by`, `committed_at_ms`, `attributes` |
 | `access_revision` | `inode_id`, `access_revision_no`, `committed_seq`, `commit_id`, `delta_index`, `committed_by`, `committed_at_ms`, `boundary`, `grants` |
@@ -1227,7 +1227,7 @@ A `commit` row is the WAL commit record of A.5 without its inline content. The `
 
 For a directory binding, `state` is `{"kind":"bound","display_name":...}` or `{"kind":"unbound"}`. Both indexes contain that complete row.
 
-For a tombstone, `generation` is `{seq, delta_index}`. A set action is `{"kind":"set","deleted_binding":...}`. A revoke action is `{"kind":"revoke","target":...}`.
+A tombstone stores its own position in the flat fields `committed_seq` and `delta_index`. A revoke target is a `DeltaPosition` value `{seq, delta_index}`. A set action is `{"kind":"set","deleted_binding":...}`. A revoke action is `{"kind":"revoke","target":...}`.
 
 An active-deletion `listed` action contains `inode_kind`, `deleted_at_ms`, `deleted_by`, and `deleted_binding`. A `removed` action contains `revocation_seq`. These are nested action fields, not additional top-level fields on every active-deletion row. The `inode_kind` is copied from the deleted root inode. A `listed` action without it fails decoding.
 
@@ -1241,10 +1241,10 @@ In the following grammar, `u64::MAX - x` and `u32::MAX - x` mean subtraction bef
 | `direntry_binds` | `direntry-bind-{parent_inode_id:020}-{name_key_hex}-{committed_seq:020}-{delta_index:010}` |
 | `direntry_child_binds` | `direntry-child-bind-{child_inode_id:020}-{committed_seq:020}-{delta_index:010}-{parent_inode_id:020}-{name_key_hex}` |
 | `revisions` | `revision-{inode_id:020}-{u64::MAX - revision_no:020}-{u64::MAX - committed_seq:020}-{u32::MAX - delta_index:010}` |
-| `tombstones` | `tombstone-{root_inode_id:020}-{generation.seq:020}-{generation.delta_index:010}` |
+| `tombstones` | `tombstone-{root_inode_id:020}-{committed_seq:020}-{delta_index:010}` |
 | `active_deletions` | `active-deletion-{deletion_seq:020}-{root_inode_id:020}-{sort_rank:010}` |
 | `commit_receipts` | `commit-receipt-{commit_id_hex}-{committed_seq:020}` |
-| `commits` | `commit-{seq:020}` |
+| `commits` | `commit-{committed_seq:020}` |
 | `content_publications` | `content-publication-{content_id}-{committed_seq:020}` |
 | `attributes` | `attribute-{inode_id:020}-{u64::MAX - attributes_revision_no:020}-{u64::MAX - committed_seq:020}-{u32::MAX - delta_index:010}` |
 | `access` | `access-{inode_id:020}-{u64::MAX - access_revision_no:020}-{u64::MAX - committed_seq:020}-{u32::MAX - delta_index:010}` |
@@ -1412,8 +1412,8 @@ Every operation begins with `kind`, followed by the fields in the order below. E
 | `put_file` | `path`, `behavior`, `content_ref`, `expected_inode_id`, `expected_revision_no` |
 | `create_file_by_inode` | `parent_inode_id`, `display_name`, `content_ref` |
 | `put_file_revision_by_inode` | `inode_id`, `content_ref`, `expected_revision_no` |
-| `move_by_inode` | `inode_id`, `expected_binding_generation`, `destination_parent_inode_id`, `destination_display_name`, `behavior`, `expected_destination_inode_id`, `expected_destination_revision_no` |
-| `delete_by_inode` | `inode_id`, `expected_binding_generation`, `behavior` |
+| `move_by_inode` | `inode_id`, `expected_binding_version`, `destination_parent_inode_id`, `destination_display_name`, `behavior`, `expected_destination_inode_id`, `expected_destination_revision_no` |
+| `delete_by_inode` | `inode_id`, `expected_binding_version`, `behavior` |
 | `delete_path` | `path`, `behavior`, `expected_inode_id` |
 | `move_path` | `source_path`, `destination_path`, `behavior`, `expected_destination_inode_id`, `expected_destination_revision_no` |
 | `copy_path` | `source_path`, `destination_path`, `behavior`, `expected_destination_inode_id`, `expected_destination_revision_no` |
@@ -1422,7 +1422,7 @@ Every operation begins with `kind`, followed by the fields in the order below. E
 | `update_attributes` | `path`, `set`, `remove`, `expected_inode_id`, `expected_attributes_revision_no` |
 | `update_access` | `path`, `boundary`, `grants`, `expected_inode_id`, `expected_access_revision_no` |
 
-Paths use their validated canonical absolute form. Display-name fields contain one validated component. Inode IDs in these operation shapes use their numeric storage representation, not public `ino_` strings. Sequence and revision numbers are JSON integers. Binding generations retain their opaque string representation.
+Paths use their validated canonical absolute form. Display-name fields contain one validated component. Inode IDs in these operation shapes use their numeric storage representation, not public `ino_` strings. Sequence and revision numbers are JSON integers. Binding versions retain their opaque string representation.
 
 Attribute `set` keys are sorted by lexicographic UTF-8 byte order. The `remove` list is sorted and deduplicated. Operation order is not sorted or otherwise changed.
 
@@ -1456,12 +1456,12 @@ The precondition list appears after `message` and retains caller order without s
 | `file_revision` | `inode_id`, `expected_revision_no` |
 | `attributes_revision` | `inode_id`, `expected_attributes_revision_no` |
 | `access_revision` | `inode_id`, `expected_access_revision_no` |
-| `path_binding` | `path`, `expected_inode_id`, `expected_binding_generation` |
+| `path_binding` | `path`, `expected_inode_id`, `expected_binding_version` |
 | `path_absence` | `path` |
 
 Precondition inode IDs use their numeric storage representation, not public `ino_` strings. Every listed field is written. Optional fields are `null` when absent.
 
-Precondition sequence and revision values are JSON integers. Paths use validated absolute spelling, and binding generations remain opaque strings. Preconditions affect request identity and validation; they add no separate WAL field or replay delta.
+Precondition sequence and revision values are JSON integers. Paths use validated absolute spelling, and binding versions remain opaque strings. Preconditions affect request identity and validation; they add no separate WAL field or replay delta.
 
 ### B.4 Strings, integers, and example bytes
 
@@ -1481,7 +1481,7 @@ v1:sha256:a64ec097a98f4c881c3770868ad31e77efd8ec9fedb6101672de2091311666ba
 
 A one-operation convenience call and a one-element commit request use the same canonical input. The wire request can omit defaults that the canonical operation writes explicitly; its raw request JSON is not the fingerprint preimage.
 
-The complete shared vectors are in [commit_fingerprints_v1.json][fingerprint-vectors]. They cover every operation, every precondition variant, path bindings with and without generations, path absence, an empty precondition list, and operations with and without inline preconditions. Encoders must preserve those exact bytes and digests.
+The complete shared vectors are in [commit_fingerprints_v1.json][fingerprint-vectors]. They cover every operation, every precondition variant, path bindings with and without binding versions, path absence, an empty precondition list, and operations with and without inline preconditions. Encoders must preserve those exact bytes and digests.
 
 ## Appendix C. Timing and size reference
 
@@ -1613,11 +1613,11 @@ The manifest's `status` contains the position fields defined for that lifecycle 
 
 | Kind | Status fields |
 | --- | --- |
-| `backfilling` | `target_seq`, `checkpoint_id`, optional `cursor_inode_id` |
+| `backfilling` | `captured_seq`, `checkpoint_id`, optional `cursor_inode_id` |
 | `active` | `built_through_seq`, `next_event_index` |
 | `disabled` | No additional status fields |
 
-Backfill's `target_seq` is the pinned checkpoint's sequence. Its cursor resumes strictly after the last inode ID. An active index's `next_event_index` is zero at a commit boundary. A disabled index contains no segments and no reorganization work.
+Backfill's `captured_seq` is the pinned checkpoint's sequence. Its cursor resumes strictly after the last inode ID. An active index's `next_event_index` is zero at a commit boundary. A disabled index contains no segments and no reorganization work.
 
 The nested `index` contains `next_run_no` and optional `reorganize`. Reorganization contains `snapshot_segment_ids`, `output_segment_ids`, `row_key_cursor`, `output_level`, and `run_no`. Its cursor is inclusive. Input and output segment IDs must be unique, disjoint, and present in the manifest's segment list. Each output must have the recorded level and run number. The extension can rebuild its state from a fresh core checkpoint.
 

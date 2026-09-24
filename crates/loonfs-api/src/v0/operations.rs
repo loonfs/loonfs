@@ -3,7 +3,7 @@
 use super::ContentToken;
 use crate::{
     AbsolutePath, AccessGrants, AccessRevisionNo, ActorId, AttributeKey, AttributeValue,
-    AttributesRevisionNo, BindingGeneration, ChangeSeq, CommitId, ContentRef, DisplayName, InodeId,
+    AttributesRevisionNo, BindingVersion, ChangeSeq, CommitId, ContentRef, DisplayName, InodeId,
     ManifestNo, NamespaceId, PinId, RevisionNo, WriterEpoch, WriterId,
 };
 use crate::{NamespaceAccess, PrincipalId, PrincipalScope};
@@ -76,7 +76,7 @@ pub struct ErrorDetails {
     /// The writer ID recorded for the current epoch, when available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
-    pub active_writer: Option<WriterId>,
+    pub active_writer_id: Option<WriterId>,
     /// The Unix-millisecond time when the current writer acquired its epoch, when available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
@@ -112,11 +112,11 @@ pub struct ErrorDetails {
     /// Opaque binding token supplied by the request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
-    pub expected_binding_generation: Option<BindingGeneration>,
+    pub expected_binding_version: Option<BindingVersion>,
     /// Current binding token; absent for the root, which has no binding.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
-    pub actual_binding_generation: Option<BindingGeneration>,
+    pub actual_binding_version: Option<BindingVersion>,
     /// Revision the request expected to be current.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
@@ -149,11 +149,11 @@ pub struct ErrorDetails {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub retention_floor_seq: Option<ChangeSeq>,
-    /// Deletion generation the undelete expected to be active.
+    /// Deletion sequence the undelete expected to be active.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub expected_deletion_seq: Option<ChangeSeq>,
-    /// Deletion generation actually active for the inode.
+    /// Deletion sequence actually active for the inode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub actual_deletion_seq: Option<ChangeSeq>,
@@ -612,8 +612,8 @@ pub enum FilesystemOperation {
         /// Inode to delete.
         #[serde(with = "crate::public_inode_id")]
         inode_id: InodeId,
-        /// Binding generation required for the delete.
-        expected_binding_generation: BindingGeneration,
+        /// Binding version required for the delete.
+        expected_binding_version: BindingVersion,
         /// Whether a non-empty directory may be tombstoned recursively.
         #[serde(default)]
         behavior: DeleteDirectoryBehavior,
@@ -635,8 +635,8 @@ pub enum FilesystemOperation {
         /// Inode to move.
         #[serde(with = "crate::public_inode_id")]
         inode_id: InodeId,
-        /// Binding generation required for the move.
-        expected_binding_generation: BindingGeneration,
+        /// Binding version required for the move.
+        expected_binding_version: BindingVersion,
         /// Destination directory.
         #[serde(with = "crate::public_inode_id")]
         destination_parent_inode_id: InodeId,
@@ -663,7 +663,7 @@ pub enum FilesystemOperation {
         /// Deleted inode to make reachable again.
         #[serde(with = "crate::public_inode_id")]
         inode_id: InodeId,
-        /// Observed deletion sequence, which prevents cancelling a newer tombstone generation.
+        /// Observed deletion sequence, which prevents cancelling a newer tombstone sequence.
         deletion_seq: ChangeSeq,
         /// The restore destination, or `None` to use the recorded binding.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -789,7 +789,7 @@ pub enum CommitPrecondition {
         /// Detects moves away and back.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[cfg_attr(feature = "openapi", schema(nullable = false))]
-        expected_binding_generation: Option<BindingGeneration>,
+        expected_binding_version: Option<BindingVersion>,
     },
     /// Requires a visible inode with the attribute revision the caller read.
     #[cfg_attr(
@@ -1182,25 +1182,25 @@ impl DeletedObjectCounts {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct DeletedCheckpointsByOwner {
-    /// Fork-owned records deleted because their target namespaces are gone.
-    pub fork: u64,
     /// User-owned records deleted after expiry or namespace deletion.
-    pub expired: u64,
+    pub user: u64,
     /// Snapshot-owned records deleted after expiry or namespace deletion.
     pub snapshot: u64,
+    /// Fork-owned records deleted because their target namespaces are gone.
+    pub fork: u64,
 }
 
 impl DeletedCheckpointsByOwner {
     /// Adds counts from another pass.
     pub fn add(&mut self, other: &Self) {
         let Self {
-            fork,
-            expired,
+            user,
             snapshot,
+            fork,
         } = other;
-        self.fork += fork;
-        self.expired += expired;
+        self.user += user;
         self.snapshot += snapshot;
+        self.fork += fork;
     }
 }
 
@@ -1223,7 +1223,7 @@ pub struct GcResponse {
     /// The current tombstone's deletion time plus the configured retirement grace.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
-    pub reclaim_after_ms: Option<u64>,
+    pub reclaimable_at_ms: Option<u64>,
 }
 
 impl GcResponse {
@@ -1235,7 +1235,7 @@ impl GcResponse {
             deleted_checkpoints_by_owner: DeletedCheckpointsByOwner::default(),
             retained: RetainedCandidates::default(),
             next_reclamation_at_ms: None,
-            reclaim_after_ms: None,
+            reclaimable_at_ms: None,
         }
     }
 
@@ -1975,7 +1975,7 @@ mod tests {
         let move_by_inode: FilesystemOperation = serde_json::from_value(serde_json::json!({
             "kind": "move_by_inode",
             "inode_id": "ino_7",
-            "expected_binding_generation": "aaaa",
+            "expected_binding_version": "aaaa",
             "destination_parent_inode_id": "ino_1",
             "destination_display_name": "b.txt"
         }))
@@ -1984,8 +1984,7 @@ mod tests {
             move_by_inode,
             FilesystemOperation::MoveByInode {
                 inode_id: InodeId(7),
-                expected_binding_generation: BindingGeneration::parse("aaaa")
-                    .expect("binding generation"),
+                expected_binding_version: BindingVersion::parse("aaaa").expect("binding version"),
                 destination_parent_inode_id: InodeId(1),
                 destination_display_name: DisplayName::parse("b.txt").expect("display name"),
                 precondition: DestinationPrecondition::default(),
@@ -2365,21 +2364,21 @@ mod tests {
         let gc = GcResponse::empty(NamespaceId::parse("demo").expect("namespace id"));
         let gc_json = serde_json::to_value(gc).expect("serialize gc response");
         assert!(gc_json.get("next_reclamation_at_ms").is_none());
-        assert!(gc_json.get("reclaim_after_ms").is_none());
+        assert!(gc_json.get("reclaimable_at_ms").is_none());
         assert_eq!(
             gc_json["deleted_checkpoints_by_owner"],
-            serde_json::json!({"fork": 0, "expired": 0, "snapshot": 0})
+            serde_json::json!({"user": 0, "snapshot": 0, "fork": 0})
         );
         let gc: GcResponse =
             serde_json::from_value(gc_json).expect("decode gc response without optional fields");
         assert_eq!(gc.next_reclamation_at_ms, None);
-        assert_eq!(gc.reclaim_after_ms, None);
+        assert_eq!(gc.reclaimable_at_ms, None);
         let retired = GcResponse {
-            reclaim_after_ms: Some(2_000_000),
+            reclaimable_at_ms: Some(2_000_000),
             ..gc
         };
         let json = serde_json::to_value(&retired).expect("encode retirement");
-        assert_eq!(json["reclaim_after_ms"], 2_000_000);
+        assert_eq!(json["reclaimable_at_ms"], 2_000_000);
         assert_eq!(
             serde_json::from_value::<GcResponse>(json).expect("decode retirement"),
             retired

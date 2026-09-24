@@ -170,7 +170,7 @@ mod tests {
             StepBudget::default(),
             || async {
                 Ok(GrepIndexLifecycle::Backfilling {
-                    target_seq: ChangeSeq(3),
+                    captured_seq: ChangeSeq(3),
                     cursor_inode_id: None,
                     checkpoint_id: loonfs_api::PinId::parse(
                         "pin_00000000000000000001-0123456789abcdef",

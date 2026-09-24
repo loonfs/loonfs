@@ -52,7 +52,7 @@ fn edited_document(
 fn every_status_round_trips_carrying_only_its_own_position() {
     for (state, absent_field) in [
         (sample_backfilling_manifest(), "built_through_seq"),
-        (sample_active_manifest(ChangeSeq(11), 0), "target_seq"),
+        (sample_active_manifest(ChangeSeq(11), 0), "captured_seq"),
         (sample_disabled_manifest(), "built_through_seq"),
     ] {
         let encoded = encode_grep_manifest(state.clone())

@@ -35,7 +35,7 @@ pub async fn gc_namespace<S: ObjectStore + ?Sized>(
         context,
     )
     .await?;
-    report.reclaim_after_ms = live
+    report.reclaimable_at_ms = live
         .current_tombstone
         .as_ref()
         .map(|tombstone| live.deadline(tombstone));

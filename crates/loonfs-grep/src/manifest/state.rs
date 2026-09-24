@@ -25,7 +25,7 @@ pub enum GrepIndexStatus {
     Backfilling {
         /// Namespace sequence the pinned checkpoint captured. The walk ends
         /// at exactly this state however far the namespace has moved since.
-        target_seq: ChangeSeq,
+        captured_seq: ChangeSeq,
         /// Inode the next backfill step resumes strictly after; absent means
         /// the start. Checkpoint file enumeration is ordered by ascending
         /// inode id, so one id is the whole resume position.
@@ -76,11 +76,11 @@ impl From<&GrepIndexStatus> for loonfs_api::v0::GrepIndexLifecycle {
         match status {
             GrepIndexStatus::Disabled {} => Self::Disabled,
             GrepIndexStatus::Backfilling {
-                target_seq,
+                captured_seq,
                 cursor_inode_id,
                 checkpoint_id,
             } => Self::Backfilling {
-                target_seq: *target_seq,
+                captured_seq: *captured_seq,
                 cursor_inode_id: *cursor_inode_id,
                 checkpoint_id: checkpoint_id.clone(),
             },

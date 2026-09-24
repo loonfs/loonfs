@@ -65,8 +65,8 @@ validation_error!(
     "invalid writer_id {value:?}: {reason}"
 );
 validation_error!(
-    BindingGenerationValidationError,
-    "invalid binding_generation {value:?}: {reason}"
+    BindingVersionValidationError,
+    "invalid binding_version {value:?}: {reason}"
 );
 
 // ---------------------------------------------------------------------------
@@ -492,15 +492,15 @@ string_id! {
 }
 
 string_id! {
-    /// Opaque token identifying one parent and name binding generation.
-    BindingGeneration,
-    error = BindingGenerationValidationError,
+    /// Opaque token identifying one parent and name binding version.
+    BindingVersion,
+    error = BindingVersionValidationError,
     validate = |value: &str| {
         if value.is_empty() {
-            return Err(BindingGenerationValidationError::new(value, "must not be empty"));
+            return Err(BindingVersionValidationError::new(value, "must not be empty"));
         }
         if !value.bytes().all(is_lower_hex_byte) {
-            return Err(BindingGenerationValidationError::new(
+            return Err(BindingVersionValidationError::new(
                 value,
                 "must contain only lowercase hex characters",
             ));
@@ -751,6 +751,11 @@ numeric_id! {
     schema_description = "Counter used to reject writes from an older writer."
 }
 
+numeric_id! {
+    /// Counter used to reject publications from an older compactor.
+    CompactorEpoch
+}
+
 // ---------------------------------------------------------------------------
 // Filesystem item kind
 // ---------------------------------------------------------------------------
@@ -789,9 +794,9 @@ impl fmt::Display for InodeKind {
 #[cfg(test)]
 mod tests {
     use super::{
-        next_public_ordinal, BindingGeneration, ChangeSeq, CommitId, ContentId, InodeId,
-        ManifestNo, MetadataSegmentId, NameKey, NamespaceId, PinId, RevisionNo, RunNo, UploadId,
-        WalNo, WriterEpoch, WriterId, MAX_PUBLIC_INTEGER,
+        next_public_ordinal, BindingVersion, ChangeSeq, CommitId, ContentId, InodeId, ManifestNo,
+        MetadataSegmentId, NameKey, NamespaceId, PinId, RevisionNo, RunNo, UploadId, WalNo,
+        WriterEpoch, WriterId, MAX_PUBLIC_INTEGER,
     };
     use crate::AttributesRevisionNo;
     use std::collections::BTreeSet;
@@ -843,6 +848,11 @@ mod tests {
         assert_range!(RunNo);
         assert_range!(WriterEpoch);
 
+        assert_eq!(
+            serde_json::from_str::<crate::CompactorEpoch>(&u64::MAX.to_string())
+                .expect("compactor epochs retain the full u64 range"),
+            crate::CompactorEpoch(u64::MAX)
+        );
         assert_eq!(
             serde_json::from_str::<InodeId>(&(MAX_PUBLIC_INTEGER + 1).to_string())
                 .expect("inode ids retain the full u64 range"),
@@ -896,17 +906,14 @@ mod tests {
     }
 
     #[test]
-    fn binding_generation_requires_nonempty_lowercase_hex() {
+    fn binding_version_requires_nonempty_lowercase_hex() {
         for value in ["", "abcg", "ABC", "01-23"] {
-            assert!(
-                BindingGeneration::parse(value).is_err(),
-                "accepted {value:?}"
-            );
+            assert!(BindingVersion::parse(value).is_err(), "accepted {value:?}");
         }
         for value in ["0", "0123456789abcdef"] {
             assert_eq!(
-                BindingGeneration::parse(value)
-                    .expect("valid binding generation")
+                BindingVersion::parse(value)
+                    .expect("valid binding version")
                     .as_str(),
                 value
             );

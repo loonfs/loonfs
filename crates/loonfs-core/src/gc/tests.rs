@@ -225,7 +225,6 @@ async fn write_upload_session(store: &LocalFsStore, namespace_id: &NamespaceId) 
 
         upload_id: upload_id.clone(),
         content_id: loonfs_api::ContentId::generate(),
-        created_at_ms: 1_000,
         subject_id: None,
         mode: UploadSessionMode::ServiceProxied {
             staging: ProxiedStaging::Idle,
@@ -328,7 +327,7 @@ async fn deleted_namespace_keeps_its_tombstone_and_segments() {
     assert!(report.deleted.wal_segments >= 1);
     assert_eq!(report.deleted.metadata_segments, 0);
     assert!(report.deleted.manifests > 0);
-    assert_eq!(report.deleted_checkpoints_by_owner.expired, 1);
+    assert_eq!(report.deleted_checkpoints_by_owner.user, 1);
     let reaped = context(aged.now_ms + UNREFERENCED_SEGMENT_MIN_AGE_MS);
     store.reset();
     let report = gc_namespace(&store, &namespace_id, &config(), &reaped)
@@ -486,7 +485,7 @@ async fn fork_protected_bases_survive_source_deletion_until_the_target_dies() {
     let retired = gc_namespace(&store, &clone, &config(), &aged)
         .await
         .expect("retire clone");
-    let deadline = retired.reclaim_after_ms.expect("clone retired");
+    let deadline = retired.reclaimable_at_ms.expect("clone retired");
 
     let aged = context(deadline);
     gc_namespace(&store, &clone, &config(), &aged)
@@ -1470,7 +1469,7 @@ async fn gc_reclaims_manifests_superseded_by_wal_flushes() {
         let report = crate::checkpoint::reorganize_metadata_step(
             &store,
             &namespace_id,
-            0,
+            loonfs_api::CompactorEpoch(0),
             fold_policy,
             MetadataCompactionPolicy::default(),
         )
@@ -1707,7 +1706,7 @@ async fn retired_targets_release_their_source_pins_and_retry_failed_deletes() {
     let retired = gc_namespace(&store, &clone, &config(), &aged)
         .await
         .expect("retire materialized target");
-    let deadline = retired.reclaim_after_ms.expect("target retired");
+    let deadline = retired.reclaimable_at_ms.expect("target retired");
     let waiting = gc_namespace(&store, &source, &config(), &context(deadline - 1))
         .await
         .expect("wait for grace");
@@ -1852,10 +1851,7 @@ async fn gc_never_releases_a_fork_record_while_its_target_lives() {
             .await
             .expect("gc pass with a live target");
         assert_eq!(report.deleted_checkpoints_by_owner.fork, 0, "at {now_ms}");
-        assert_eq!(
-            report.deleted_checkpoints_by_owner.expired, 0,
-            "at {now_ms}"
-        );
+        assert_eq!(report.deleted_checkpoints_by_owner.user, 0, "at {now_ms}");
         assert!(
             checkpoint_exists(&store, &source, &fork_record.pin_id).await,
             "a live target keeps its pin at {now_ms}"
@@ -2213,7 +2209,7 @@ async fn retired_content_namespace<S: ObjectStore>(
     let report = gc_namespace(store, namespace_id, &config(), &setup)
         .await
         .expect("retire");
-    (context(report.reclaim_after_ms.expect("deadline")), keys)
+    (context(report.reclaimable_at_ms.expect("deadline")), keys)
 }
 
 async fn publish_owned_content<S: ObjectStore>(
@@ -2283,7 +2279,7 @@ async fn completed_upload_waits_for_namespace_retirement_then_reclaims() {
             &store,
             &namespace_id,
             &config(),
-            &context(report.reclaim_after_ms.expect("retired")),
+            &context(report.reclaimable_at_ms.expect("retired")),
         )
         .await
         .expect("retired run");
@@ -2599,7 +2595,7 @@ async fn expiry_and_creation_grace_delete_pins_without_a_released_state() {
     let expired = gc_namespace(&store, &namespace_id, &config(), &context(2_000 + GRACE_MS))
         .await
         .expect("expiry grace");
-    assert_eq!(expired.deleted_checkpoints_by_owner.expired, 1);
+    assert_eq!(expired.deleted_checkpoints_by_owner.user, 1);
     assert_eq!(expired.deleted_checkpoints_by_owner.snapshot, 1);
     assert!(checkpoint_exists(&store, &namespace_id, &pins[0].checkpoint_id).await);
     assert!(!checkpoint_exists(&store, &namespace_id, &pins[1].checkpoint_id).await);
@@ -2622,11 +2618,11 @@ async fn expiry_and_creation_grace_delete_pins_without_a_released_state() {
     assert_eq!(
         retired.deleted_checkpoints_by_owner,
         loonfs_api::DeletedCheckpointsByOwner {
-            expired: 2,
+            user: 2,
             ..Default::default()
         }
     );
-    assert_eq!(retired.reclaim_after_ms, Some(deleted_at + GRACE_MS));
+    assert_eq!(retired.reclaimable_at_ms, Some(deleted_at + GRACE_MS));
 }
 
 #[tokio::test]

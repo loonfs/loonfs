@@ -857,7 +857,7 @@ struct NamespacePublisherState {
     /// barrier's admission order deterministic.
     worker: Option<WorkerHandle>,
     fold: Option<FoldHandle>,
-    next_fold_generation: u64,
+    next_fold_id: u64,
     /// The last reserved WAL put. `None` is a cold namespace: it publishes
     /// immediately.
     last_publish: Option<Observation>,
@@ -869,7 +869,7 @@ struct WorkerHandle {
 }
 
 struct FoldHandle {
-    generation: u64,
+    fold_id: u64,
     task: JoinHandle<()>,
     liveness: watch::Receiver<bool>,
 }
@@ -1013,7 +1013,7 @@ impl NamespacePublisher {
                 admission: PublisherAdmissionState::Open,
                 worker: None,
                 fold: None,
-                next_fold_generation: 0,
+                next_fold_id: 0,
                 last_publish: None,
             })),
             engine: Arc::new(AsyncMutex::new(EngineSlot {
@@ -1545,8 +1545,8 @@ impl NamespacePublisher {
         {
             return None;
         }
-        let generation = state.next_fold_generation;
-        state.next_fold_generation = state.next_fold_generation.wrapping_add(1);
+        let fold_id = state.next_fold_id;
+        state.next_fold_id = state.next_fold_id.wrapping_add(1);
         let (start, started) = oneshot::channel();
         let (exit, liveness) = watch::channel(false);
         let publisher = self.clone();
@@ -1564,7 +1564,7 @@ impl NamespacePublisher {
             }
         });
         state.fold = Some(FoldHandle {
-            generation,
+            fold_id,
             task,
             liveness,
         });
@@ -1759,14 +1759,12 @@ impl NamespacePublisher {
     }
 
     async fn wait_for_fold(&self) -> Result<(), RuntimeError> {
-        let fold = self.lock_state().fold.as_ref().map(|fold| {
-            (
-                fold.generation,
-                fold.liveness.clone(),
-                fold.task.is_finished(),
-            )
-        });
-        let Some((generation, mut liveness, finished)) = fold else {
+        let fold = self
+            .lock_state()
+            .fold
+            .as_ref()
+            .map(|fold| (fold.fold_id, fold.liveness.clone(), fold.task.is_finished()));
+        let Some((fold_id, mut liveness, finished)) = fold else {
             return Ok(());
         };
         if !finished {
@@ -1781,7 +1779,7 @@ impl NamespacePublisher {
             if state
                 .fold
                 .as_ref()
-                .is_some_and(|fold| fold.generation == generation)
+                .is_some_and(|fold| fold.fold_id == fold_id)
             {
                 state.fold.take().map(|fold| fold.task)
             } else {

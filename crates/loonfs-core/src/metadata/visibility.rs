@@ -339,7 +339,7 @@ where
             created_at_ms: root.committed_at_ms,
             parent_inode_id: None,
             display_name: String::new(),
-            binding_generation: None,
+            binding_version: None,
         });
     }
 
@@ -347,7 +347,7 @@ where
     let mut current_absolute_path = "/".to_owned();
     let mut current_parent_inode_id = None;
     let mut current_display_name = String::new();
-    let mut current_binding_generation = None;
+    let mut current_binding_version = None;
 
     for component in absolute_path.components() {
         let current_inode = reads
@@ -383,7 +383,7 @@ where
         current_absolute_path =
             join_display_path(&current_absolute_path, bound_display_name.as_str());
         current_display_name = bound_display_name.to_string();
-        current_binding_generation = Some(direntry.position());
+        current_binding_version = Some(direntry.position());
     }
 
     let inode = reads
@@ -400,7 +400,7 @@ where
         created_at_ms: inode.committed_at_ms,
         parent_inode_id: current_parent_inode_id,
         display_name: current_display_name,
-        binding_generation: current_binding_generation,
+        binding_version: current_binding_version,
     })
 }
 

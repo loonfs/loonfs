@@ -108,7 +108,10 @@ async fn snapshot_fork_keeps_its_view_after_source_compaction_collection_and_sna
     let mut compacted = false;
     for _ in 0..16 {
         let report = engine
-            .reorganize_metadata(loonfs_core::MetadataCompactionPolicy::CompactImmediately, 0)
+            .reorganize_metadata(
+                loonfs_core::MetadataCompactionPolicy::CompactImmediately,
+                loonfs_api::CompactorEpoch(0),
+            )
             .await
             .expect("compact source");
         match report {
@@ -735,7 +738,10 @@ async fn fork_namespace_reads_inherited_content_and_isolates_metadata() {
     let mut revisions_compacted = false;
     for _ in 0..16 {
         let report = engine
-            .reorganize_metadata(loonfs_core::MetadataCompactionPolicy::CompactImmediately, 0)
+            .reorganize_metadata(
+                loonfs_core::MetadataCompactionPolicy::CompactImmediately,
+                loonfs_api::CompactorEpoch(0),
+            )
             .await
             .expect("compact clone");
         match report {
@@ -822,7 +828,10 @@ async fn nested_fork_survives_ancestor_and_parent_delete_and_collection() {
     let mut compacted = false;
     for _ in 0..16 {
         match engine
-            .reorganize_metadata(loonfs_core::MetadataCompactionPolicy::CompactImmediately, 0)
+            .reorganize_metadata(
+                loonfs_core::MetadataCompactionPolicy::CompactImmediately,
+                loonfs_api::CompactorEpoch(0),
+            )
             .await
             .expect("compact descendant")
         {
@@ -866,7 +875,7 @@ async fn nested_fork_survives_ancestor_and_parent_delete_and_collection() {
     let parent_waiting = loonfs_core::gc_namespace(&store, &parent, &config, &aged)
         .await
         .expect("parent waits");
-    assert_eq!(parent_waiting.reclaim_after_ms, Some(parent_deadline));
+    assert_eq!(parent_waiting.reclaimable_at_ms, Some(parent_deadline));
     let ancestor_waiting = loonfs_core::gc_namespace(&store, &ancestor, &config, &aged)
         .await
         .expect("ancestor waits");
@@ -885,7 +894,7 @@ async fn nested_fork_survives_ancestor_and_parent_delete_and_collection() {
         .await
         .expect("retire descendant");
     let descendant_deadline = retired
-        .reclaim_after_ms
+        .reclaimable_at_ms
         .expect("descendant retired despite compaction");
     assert_eq!(retired.deleted.content_objects, 0);
     let waiting = loonfs_core::gc_namespace(&store, &parent, &config, &aged)
@@ -900,12 +909,12 @@ async fn nested_fork_survives_ancestor_and_parent_delete_and_collection() {
         .await
         .expect("parent releases its source pin");
     assert_eq!(released.deleted_checkpoints_by_owner.fork, 1);
-    assert_eq!(released.reclaim_after_ms, Some(parent_deadline));
+    assert_eq!(released.reclaimable_at_ms, Some(parent_deadline));
     let released = loonfs_core::gc_namespace(&store, &ancestor, &config, &aged)
         .await
         .expect("collect ancestor after parent releases its pin");
     assert_eq!(released.deleted_checkpoints_by_owner.fork, 0);
-    assert!(released.reclaim_after_ms.is_some());
+    assert!(released.reclaimable_at_ms.is_some());
 }
 
 #[tokio::test]
@@ -1555,7 +1564,7 @@ async fn retired_leaf_content_is_reclaimed_while_live_workspaces_keep_their_cont
         let report = loonfs_core::gc_namespace(&store, &source, &config, &aged)
             .await
             .expect("collect deleted source");
-        assert_eq!(report.reclaim_after_ms, Some(source_deadline));
+        assert_eq!(report.reclaimable_at_ms, Some(source_deadline));
         assert_eq!(report.deleted.retired_content_objects, 0);
         assert!(store
             .head(&source_key)

@@ -107,7 +107,7 @@ either way.
 
 | Field | Meaning |
 | --- | --- |
-| `protocol_version` | The protocol generation, currently `v0`. |
+| `protocol_version` | The protocol version, `v0`. |
 | `api_groups` | The advertised API groups. Each entry is `group/version`. |
 | `features` | Named features and whether this deployment supports them. An absent key means unsupported. |
 | `limits` | Advisory numeric limits clients may use to pre-validate requests. May be empty. |
@@ -201,7 +201,7 @@ Every error response is a JSON body:
   "details": {
     "fenced_writer_epoch": 3,
     "active_writer_epoch": 4,
-    "active_writer": "server-b",
+    "active_writer_id": "server-b",
     "active_acquired_at_ms": 1739459200000
   }
 }
@@ -246,18 +246,18 @@ The codes that populate it:
 | Code | Detail fields |
 | --- | --- |
 | `namespace_deleted` | `namespace_id` identifies the deleted namespace, including a fork's source or target |
-| `writer_fenced` | `fenced_writer_epoch`, `active_writer_epoch`, plus `active_writer` and `active_acquired_at_ms` when the current manifest records a writer block. Writer ids are process labels, so two runs on one machine can share one; the acquisition stamp is what tells them apart |
+| `writer_fenced` | `fenced_writer_epoch`, `active_writer_epoch`, plus `active_writer_id` and `active_acquired_at_ms` when the current manifest records a writer block. Writer ids are process labels, so two runs on one machine can share one; the acquisition stamp is what tells them apart |
 | `writer_capacity_exceeded` | `max_writer_sessions` |
 | `path_conflict` | `expected_inode_id`, `actual_inode_id` (absent when unbound); `precondition_index` for a failed request precondition |
 | `stale_revision` | `inode_id`, `expected_revision_no`, `actual_revision_no` (absent when the inode has no current revision or is not visible); `precondition_index` for a failed request precondition |
 | `stale_attributes` | `inode_id`, `expected_attributes_revision_no` (absent when the caller stated no expectation), `actual_attributes_revision_no` (absent when the inode is not visible); `precondition_index` for a failed request precondition |
 | `stale_access` | `inode_id`, `expected_access_revision_no` (absent when the caller stated no expectation), `actual_access_revision_no` (absent when the inode is not visible); `precondition_index` for a failed request precondition |
-| `binding_generation_mismatch` | `inode_id`, `expected_binding_generation` (the request's token as supplied), `actual_binding_generation` (the current binding's token, absent for the root); `precondition_index` for a failed request precondition. Clients must not parse or order the tokens |
-| `commit_id_reuse_conflict` | `commit_id`, plus `committed_seq` and `committed_fingerprint` when the conflict was decided against a durable commit receipt — the sequence that `commit_id` already landed at, and the semantic identity of what landed there (section 5.1). Both come from the receipt, so both are present or neither is; both are absent when nothing has committed under the id yet and two live requests are claiming it at once |
+| `binding_version_mismatch` | `inode_id`, `expected_binding_version` (the request's token as supplied), `actual_binding_version` (the current binding's token, absent for the root); `precondition_index` for a failed request precondition. Clients must not parse or order the tokens |
+| `commit_id_reuse_conflict` | `commit_id`, plus `committed_seq` and `committed_fingerprint` when the conflict was decided against a durable commit receipt — the sequence that `commit_id` already landed at, and the semantic identity of what landed there (section 5.1). The sequence comes from the receipt and the fingerprint from its retained commit row, so both are present or neither is; both are absent when nothing has committed under the id yet and two live requests are claiming it at once |
 | `rebootstrap_required` | `after_seq`, `retention_floor_seq` |
 | `stale_head` | `expected_head_seq`, `actual_head_seq` for a caller-supplied head precondition; `precondition_index` identifies a failed request precondition. |
 | `forbidden` | `inode_id` |
-| `not_deleted` | `inode_id`, plus `expected_deletion_seq` and `actual_deletion_seq` when a live deletion exists at a different generation |
+| `not_deleted` | `inode_id`, plus `expected_deletion_seq` and `actual_deletion_seq` when a live deletion exists at a different sequence |
 | any failed commit | `commit_id` — the idempotency key the request committed under, echoed so failed and uncertain outcomes carry the caller's reconciliation handle (section 5.2) |
 | any failed operation | `operation_index` — the zero-based position of the operation that stopped the request, 0 for a one-operation request (section 5.1) |
 
@@ -296,7 +296,7 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | `stale_attributes` | 409 | The inode's attribute revision moved while the update was being decided. Two things raise it: a caller-supplied expected attribute revision that is no longer current, and the revision precondition every attribute update carries even when the caller states no expectation. Re-read the attributes and retry. |
 | `stale_access` | 409 | The inode's access revision moved while the update was being decided. Re-read the access row and retry. |
 | `namespace_unrestricted` | 409 | The namespace's access mode is unrestricted, so it holds no access rows. |
-| `binding_generation_mismatch` | 409 | The binding generation supplied for an inode move or delete is no longer current. Re-read the entry before retrying. |
+| `binding_version_mismatch` | 409 | The binding version supplied for an inode move or delete is not the entry's current version. Re-read the entry before retrying. |
 | `not_deleted` | 409 | The undelete target is not the root of a live deletion; nothing to recover. |
 | `writer_fenced` | 409 | The writer epoch was superseded by another session. |
 | `would_cycle` | 409 | The rename would create a directory cycle. |
@@ -517,9 +517,9 @@ and is not an endpoint name in the move and copy family. `local` and
 
 Commit bodies reject unknown fields so a misspelled precondition cannot be ignored. For example, dropping a letter from `expected_revision_no` returns `invalid_request` instead of applying a write without that precondition.
 
-Every named entry includes a `binding_generation`, an opaque token identifying its current parent/name binding. Creating, moving, or undeleting an entry produces a new token; content and attribute writes do not. Clients must not parse or order these tokens. A token is valid only for the namespace that issued it.
+Every named entry includes a `binding_version`, an opaque token identifying its current parent/name binding. Creating, moving, or undeleting an entry produces a new token; content and attribute writes do not. Clients must not parse or order these tokens. A token is valid only for the namespace that issued it.
 
-Inode-addressed moves and deletes require the token as `expected_binding_generation`. A valid token that no longer matches returns `binding_generation_mismatch`; a malformed token or one from another namespace returns `invalid_request`. The precondition is part of the commit's identity and is evaluated after any earlier operations in the same request.
+Inode-addressed moves and deletes require the token as `expected_binding_version`. A valid token that no longer matches returns `binding_version_mismatch`; a malformed token or one from another namespace returns `invalid_request`. The precondition is part of the commit's identity and is evaluated after any earlier operations in the same request.
 
 The server validates each request against authoritative namespace state and
 may reject it immediately. A tentatively accepted request becomes one
@@ -564,12 +564,12 @@ Failure returns `stale_revision`; `actual_revision_no` is absent when the inode 
 `path_binding` requires an absolute `path` and `expected_inode_id`.
 A missing or null `expected_inode_id` is a decode error.
 The path must resolve to that inode. A different inode or an unbound path returns `path_conflict` with `expected_inode_id` and `actual_inode_id`; the latter is absent when unbound.
-Without a generation, returning to the same inode satisfies the precondition again.
-Optional `expected_binding_generation` also detects moves away and back.
-A generation mismatch returns `binding_generation_mismatch`.
-Binding the root to `ino_1` passes without a generation. The root has no binding generation, so supplying one returns `binding_generation_mismatch`.
+Without a binding version, returning to the same inode satisfies the precondition again.
+Optional `expected_binding_version` also detects moves away and back.
+A binding version mismatch returns `binding_version_mismatch`.
+Binding the root to `ino_1` passes without a binding version. The root has no binding version, so supplying one returns `binding_version_mismatch`.
 
-`path_absence` requires only an absolute `path` and rejects inode or generation fields.
+`path_absence` requires only an absolute `path` and rejects inode or binding version fields.
 It passes when no visible entry resolves at the full path, including when an ancestor is missing or an intermediate component is not a directory.
 A bound path returns `path_conflict` with `actual_inode_id` set and `expected_inode_id` absent.
 Absence of `/` fails with actual inode `ino_1`.
@@ -583,12 +583,12 @@ equals `expected_access_revision_no`. Any access update invalidates it.
 Failure returns `stale_access`; `actual_access_revision_no` is absent when
 the inode is not visible.
 
-Receipt resolution comes first: an identical landed request returns its receipt even when its precondition is now stale.
+Receipt resolution comes first: an identical landed request returns its original commit even when its precondition is now stale.
 Reusing that commit ID with different preconditions returns `commit_id_reuse_conflict`.
 Preconditions run in order before operations; the first failure returns its kind's error with zero-based `precondition_index`.
 A failed precondition reserves no sequence or inode and leaves the planning view unchanged.
 A retry after a lost numbered WAL put evaluates preconditions again against the new basis.
-Preconditions are admission conditions, stored only through the fingerprint in WAL records and receipts, and never evaluated during replay.
+Preconditions are admission conditions, stored only through the fingerprint in WAL records and commit rows, and never evaluated during replay.
 
 ### Actor attribution
 
@@ -961,7 +961,7 @@ The status, enable, and disable routes all return one flat grep index object:
 | `status` | Carries | Means |
 | --- | --- | --- |
 | `disabled` | — | No index is maintained here. Also the answer for a namespace that never enabled one. |
-| `backfilling` | `target_seq`, `cursor_inode_id`, `checkpoint_id` | The initial walk over a pinned checkpoint is running. `target_seq` is the namespace sequence that checkpoint captured; reaching it completes the backfill. Nothing is searchable yet, and no watermark exists to report. |
+| `backfilling` | `captured_seq`, `cursor_inode_id`, `checkpoint_id` | The initial walk over a pinned checkpoint is running. `captured_seq` is the namespace sequence that checkpoint captured; reaching it completes the backfill. Nothing is searchable yet, and no watermark exists to report. |
 | `active` | `built_through_seq`, `next_event_index` | The index follows the change feed. Commits at or below `built_through_seq` are searchable, except that a non-zero `next_event_index` leaves the rest of that one commit unindexed. |
 
 For example:
@@ -971,11 +971,11 @@ For example:
 ```
 
 ```json
-{"namespace_id":"demo","status":"backfilling","target_seq":12,"cursor_inode_id":"ino_4","checkpoint_id":"pin_00000000000000000009-0000000000000009","next_run_no":1,"reorganize_pending":false}
+{"namespace_id":"demo","status":"backfilling","captured_seq":12,"cursor_inode_id":"ino_4","checkpoint_id":"pin_00000000000000000009-0000000000000009","next_run_no":1,"reorganize_pending":false}
 ```
 
 A backfill therefore never reports a `built_through_seq`, and an active index
-never reports a `target_seq`. `next_run_no` is the run number the index
+never reports a `captured_seq`. `next_run_no` is the run number the index
 allocates next, while `reorganize_pending` reports whether a partitioned
 segment reorganization is in progress. A client waiting for the index to catch up
 captures one sequence before it starts waiting and stops there, rather than
@@ -1155,13 +1155,13 @@ Routes under `/v0/maintenance/` belong to the `maintenance/v0` API group. `GET /
 
 A GC response includes `next_reclamation_at_ms` when a deleted namespace is inside its retirement grace, a retained user or snapshot pin has a future deletion time, or an upload session has a future cleanup time. It is the earliest of those future times examined by the pass. Fork pins carry no cleanup time. Upload cleanup times include lease plus grace, abort grace, and completed-content grace. Candidates that age out by provider timestamps carry no time here. Absence does not mean that nothing remains to collect.
 
-`reclaim_after_ms` is the deadline defined in [format section 9.5](format.md#95-retirement) when the current manifest is deleted, including when pins still block reclamation. It is absent for an active namespace.
+`reclaimable_at_ms` is the deadline defined in [format section 9.5](format.md#95-retirement) when the current manifest is deleted, including when pins still block reclamation. It is absent for an active namespace.
 
 Every call reads the current manifest and uses one fixed clock. It keeps its live set in memory and writes no collection progress. Every family lists from the beginning and sweeps to the end. Collection roots follow [format section 11.2](format.md#112-reference-roots). Manifest read failures fail the call before sweeping.
 
 A GC response groups related counts. `deleted` contains `wal_segments`,
 `metadata_segments`, `manifests`, `upload_sessions`, `content_objects`,
-and `retired_content_objects`. `deleted_checkpoints_by_owner` contains `fork`, `expired`, and `snapshot` counts for pins deleted in the pass.
+and `retired_content_objects`. `deleted_checkpoints_by_owner` contains `user`, `snapshot`, and `fork` counts for pins deleted in the pass.
 Their sum is the total number of pins deleted. Each deletion
 is counted once. A target's deletion of its source pin contributes to `fork`
 when the pin was present before deletion. Repeating that deletion on an
@@ -1700,7 +1700,7 @@ the durable naming rules ([format: field conventions](format.md#121-field-conven
   "head_seq": 418,
   "parent_inode_id": "ino_7",
   "display_name": "report.txt",
-  "binding_generation": "opaque-token",
+  "binding_version": "opaque-token",
   "revision_no": 7,
   "revision_committed_by": "render-worker",
   "size_bytes": 19482,
@@ -1739,7 +1739,7 @@ attributes written reads as `{}` at revision 0 with no updater or update time.
 A read that did not include attributes omits all four siblings, so an absent
 projection never means "no attributes".
 
-The namespace root is nameless, so its entry omits `parent_inode_id`, `display_name`, and `binding_generation`. Every other entry includes a validated `display_name` and a `binding_generation` for its current parent/name binding (section 5.1). The empty string is not a valid name for the root or any named path component.
+The namespace root is nameless, so its entry omits `parent_inode_id`, `display_name`, and `binding_version`. Every other entry includes a validated `display_name` and a `binding_version` for its current parent/name binding (section 5.1). The empty string is not a valid name for the root or any named path component.
 
 The inode route accepts `snapshot_id` and returns the same entry shape, including
 the `path` at the selected sequence.
@@ -2106,7 +2106,7 @@ Five operations use inode IDs instead of paths. They let clients act on an entry
 
 `put_file_revision_by_inode` appends a revision to a file wherever it is currently located. It requires `expected_revision_no` and returns `stale_revision` when the file has changed.
 
-`move_by_inode` and `delete_by_inode` require `expected_binding_generation` (section 5.1). Their destination, replacement, and recursive-delete behavior matches `move_path` and `delete_path`. The namespace root cannot be moved or deleted.
+`move_by_inode` and `delete_by_inode` require `expected_binding_version` (section 5.1). Their destination, replacement, and recursive-delete behavior matches `move_path` and `delete_path`. The namespace root cannot be moved or deleted.
 
 `Loonfs-Actor: usr_8f3c`
 
@@ -2122,7 +2122,7 @@ Five operations use inode IDs instead of paths. They let clients act on an entry
     {
       "kind": "move_by_inode",
       "inode_id": "ino_42",
-      "expected_binding_generation": "opaque-token",
+      "expected_binding_version": "opaque-token",
       "destination_parent_inode_id": "ino_12",
       "destination_display_name": "january.pdf",
       "behavior": "replace"
@@ -2217,7 +2217,7 @@ directories were renamed after the delete. The in-place parent and name obey
 the same rules a path would: the parent must not be deleted, and the name must
 be free, each answering its usual code otherwise.
 
-Only the root of a deletion can be undeleted, and `deletion_seq` must match the active deletion generation. A mismatch returns `not_deleted` with the expected and actual generations, preventing a stale recovery request from cancelling a later deletion.
+Only the root of a deletion can be undeleted, and `deletion_seq` must match the active deletion sequence. A mismatch returns `not_deleted` with the expected and actual sequences, preventing a stale recovery request from cancelling a later deletion.
 
 and `update_attributes`, which writes and removes attributes on the inode a
 path resolves to:
@@ -2808,12 +2808,12 @@ Event kinds:
 
 | Kind | Meaning | Fields |
 | --- | --- | --- |
-| `directory_created` | A directory was created. | `inode_id`, `parent_inode_id`, `display_name`, `binding_generation`. |
-| `file_created` | A file was created with its first revision. | `inode_id`, `parent_inode_id`, `display_name`, `binding_generation`, `revision_no`, `content_ref`. |
+| `directory_created` | A directory was created. | `inode_id`, `parent_inode_id`, `display_name`, `binding_version`. |
+| `file_created` | A file was created with its first revision. | `inode_id`, `parent_inode_id`, `display_name`, `binding_version`, `revision_no`, `content_ref`. |
 | `content_changed` | A file received a new current revision — a replacing put or a revision restore (one durable fact for both). | `inode_id`, `revision_no`, `content_ref`. |
-| `moved` | An entry moved to a new parent directory or name. | `inode_id`, `source_parent_inode_id`, `source_display_name`, `destination_parent_inode_id`, `destination_display_name`, `binding_generation`. |
+| `moved` | An entry moved to a new parent directory or name. | `inode_id`, `source_parent_inode_id`, `source_display_name`, `destination_parent_inode_id`, `destination_display_name`, `binding_version`. |
 | `deleted` | A file or directory subtree was deleted. Use the enclosing `committed_seq` as `deletion_seq` when restoring it. | `inode_id`, plus `deleted_binding` containing `parent_inode_id`, `name_key`, and `display_name`. |
-| `undeleted` | A deleted inode was recovered and re-bound. | `inode_id`, `parent_inode_id`, `display_name`, `binding_generation`. |
+| `undeleted` | A deleted inode was recovered and re-bound. | `inode_id`, `parent_inode_id`, `display_name`, `binding_version`. |
 | `attributes_changed` | An inode's attributes changed. `attributes` is the complete flat string map after the update, so a consumer projects it without reading anything back; an empty map is the cleared state. | `inode_id`, `attributes_revision_no`, `attributes`. |
 | `access_changed` | An inode's access row was replaced. `grants` is the complete direct grant map after the update. | `inode_id`, `access_revision_no`, `boundary`, `grants`. |
 
@@ -2826,7 +2826,7 @@ includes its first revision and content reference:
   "inode_id": "ino_42",
   "parent_inode_id": "ino_1",
   "display_name": "docs",
-  "binding_generation": "opaque-token"
+  "binding_version": "opaque-token"
 }
 
 {
@@ -2834,7 +2834,7 @@ includes its first revision and content reference:
   "inode_id": "ino_43",
   "parent_inode_id": "ino_1",
   "display_name": "report.txt",
-  "binding_generation": "opaque-token",
+  "binding_version": "opaque-token",
   "revision_no": 1,
   "content_ref": {
     "kind": "blob_v1",
@@ -2854,7 +2854,7 @@ and unknown fields.
 In a `moved` event, the source fields describe the removed binding and the
 destination fields describe the new binding.
 
-`directory_created`, `file_created`, `moved`, and `undeleted` include the `binding_generation` they created. It matches later reads of the same binding. Other events do not create bindings and omit the field.
+`directory_created`, `file_created`, `moved`, and `undeleted` include the `binding_version` they created. It matches later reads of the same binding. Other events do not create bindings and omit the field.
 
 If `limit` truncates the page before the namespace head, the response includes
 `next_after_seq` set to the last returned change's `committed_seq`. The client

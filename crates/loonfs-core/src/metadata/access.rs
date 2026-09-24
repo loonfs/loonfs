@@ -121,7 +121,7 @@ mod tests {
         DirentryBindingRecord, InodeRecord, MetadataState, MetadataStateBuilder,
         SubtreeTombstoneRecord,
     };
-    use loonfs_api::wire::manifest::{DeletedBinding, DeltaPosition};
+    use loonfs_api::wire::manifest::DeletedBinding;
     use loonfs_api::{
         AccessGrants, AccessRevisionNo, ActorId, ChangeSeq, CommitId, DisplayName, InodeKind,
         NameKey, PrincipalId,
@@ -185,10 +185,8 @@ mod tests {
         let display_name = DisplayName::parse("old").expect("display name");
         builder.push_subtree_tombstone(SubtreeTombstoneRecord {
             root_inode_id: InodeId(6),
-            generation: DeltaPosition {
-                seq: ChangeSeq(3),
-                delta_index: 0,
-            },
+            committed_seq: ChangeSeq(3),
+            delta_index: 0,
             commit_id: commit_id.clone(),
             action: TombstoneRowAction::Set {
                 deleted_binding: DeletedBinding {

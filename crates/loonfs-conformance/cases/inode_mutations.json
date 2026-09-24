@@ -1,6 +1,6 @@
 {
   "name": "inode_mutations",
-  "intent": "Checks inode-addressed creates and revisions, and the binding generation guarding an inode-addressed move and delete.",
+  "intent": "Checks inode-addressed creates and revisions, and the binding version guarding an inode-addressed move and delete.",
   "request": {
     "namespace_id": "conf-inode-mutations",
     "directory": "/tree",
@@ -13,7 +13,7 @@
     "moved_file_name": "moved-file",
     "content_utf8": "inode mutations",
     "revised_content_utf8": "inode mutations, revised",
-    "malformed_binding_generation": "not-a-binding-generation"
+    "malformed_binding_version": "not-a-binding-version"
   },
   "expected": {
     "entry_names": [
@@ -25,11 +25,11 @@
     "revised_revision_no": 2,
     "moved_committed_seq": 8,
     "deleted_committed_seq": 9,
-    "stale_binding_generation": {
+    "stale_binding_version": {
       "status": 409,
-      "code": "binding_generation_mismatch"
+      "code": "binding_version_mismatch"
     },
-    "malformed_binding_generation": {
+    "malformed_binding_version": {
       "status": 400,
       "code": "invalid_request"
     }

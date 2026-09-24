@@ -6,6 +6,7 @@ use crate::control::{ForkBasis, NamespaceStatus, WriterBlock};
 use crate::envelope::EnvelopeCodecError;
 use crate::sst_blocks::BlockHandle;
 use crate::wal::WalCommitPayload;
+use crate::CompactorEpoch;
 use crate::{
     AccessGrants, AccessRevisionNo, ActorId, Attributes, AttributesRevisionNo, ChangeSeq, CommitId,
     ContentId, ContentRef, DisplayName, InodeId, InodeKind, ManifestNo, MetadataSegmentId, NameKey,
@@ -351,8 +352,10 @@ pub struct RevisionRecord {
 pub struct SubtreeTombstoneRecord {
     /// Inode whose rooted subtree the event governs.
     pub root_inode_id: InodeId,
-    /// Position of the event in namespace history.
-    pub generation: DeltaPosition,
+    /// Namespace sequence that published the event.
+    pub committed_seq: ChangeSeq,
+    /// Position within the owning commit.
+    pub delta_index: u32,
     /// Commit ID associated with this row.
     pub commit_id: CommitId,
     /// What this event did.
@@ -361,6 +364,16 @@ pub struct SubtreeTombstoneRecord {
     pub committed_by: crate::ActorId,
     /// Wall-clock stamp of the commit that recorded this event.
     pub committed_at_ms: u64,
+}
+
+impl SubtreeTombstoneRecord {
+    /// Identifies this event when another event refers to it.
+    pub fn position(&self) -> DeltaPosition {
+        DeltaPosition {
+            seq: self.committed_seq,
+            delta_index: self.delta_index,
+        }
+    }
 }
 
 /// One current-state row for a recoverable deletion.
@@ -406,8 +419,6 @@ pub struct CommitReceiptRecord {
     pub commit_id: CommitId,
     /// Namespace sequence assigned to the accepted commit.
     pub committed_seq: ChangeSeq,
-    /// Digest used to distinguish a safe retry from conflicting ID reuse.
-    pub semantic_commit_fingerprint: crate::CommitFingerprint,
 }
 
 /// One inode's complete attribute map at one revision.
@@ -636,9 +647,11 @@ impl MetadataRow {
                 record.committed_seq,
                 record.delta_index,
             ),
-            Self::Tombstone(record) => {
-                lookup_keys::tombstone_row_key(record.root_inode_id, record.generation)
-            }
+            Self::Tombstone(record) => lookup_keys::tombstone_row_key(
+                record.root_inode_id,
+                record.committed_seq,
+                record.delta_index,
+            ),
             Self::ActiveDeletion(record) => lookup_keys::active_deletion_row_key(
                 record.deletion_seq,
                 record.root_inode_id,
@@ -647,7 +660,7 @@ impl MetadataRow {
             Self::CommitReceipt(record) => {
                 lookup_keys::commit_receipt_row_key(record.commit_id.as_str(), record.committed_seq)
             }
-            Self::Commit(record) => lookup_keys::commit_row_key(record.seq),
+            Self::Commit(record) => lookup_keys::commit_row_key(record.committed_seq),
             Self::ContentPublication(record) => {
                 lookup_keys::content_publication_row_key(&record.content_id, record.committed_seq)
             }
@@ -718,7 +731,7 @@ pub fn hex_encode_row_key_component(value: &str) -> String {
 ///
 /// See [metadata rows and row keys](../../../docs/specs/format.md#a6-metadata-rows-and-row-keys).
 pub mod lookup_keys {
-    use super::{hex_encode_row_key_component, DeltaPosition};
+    use super::hex_encode_row_key_component;
     use crate::{
         AccessRevisionNo, AttributesRevisionNo, ChangeSeq, ContentId, InodeId, RevisionNo,
     };
@@ -833,26 +846,30 @@ pub mod lookup_keys {
     /// Builds a row key for one tombstone event.
     ///
     /// The action is stored in the value, so delete and revoke rows for one
-    /// generation share a key.
-    pub(super) fn tombstone_row_key(root_inode_id: InodeId, generation: DeltaPosition) -> String {
+    /// position share a key.
+    pub(super) fn tombstone_row_key(
+        root_inode_id: InodeId,
+        committed_seq: ChangeSeq,
+        delta_index: u32,
+    ) -> String {
         format!(
             "{}{:020}-{:010}",
             tombstone_prefix(root_inode_id),
-            generation.seq.0,
-            generation.delta_index
+            committed_seq.0,
+            delta_index
         )
     }
 
     /// Prefix for active-deletion row keys.
     pub const ACTIVE_DELETION_ROW_PREFIX: &str = "active-deletion-";
 
-    /// Rank of an undelete's removal marker within one deletion generation.
+    /// Rank of an undelete's removal marker within one deletion position.
     /// It is the lowest rank on purpose: an ascending scan sees the removal
     /// before the row it removes, so a page never lists a deletion whose
     /// marker was going to arrive one page later.
     pub(super) const ACTIVE_DELETION_RANK_REMOVED: u32 = 0;
 
-    /// Rank of the listed row within one deletion generation, and the highest
+    /// Rank of the listed row within one deletion position, and the highest
     /// rank the family defines.
     pub(super) const ACTIVE_DELETION_RANK_LISTED: u32 = 1;
 
@@ -868,7 +885,7 @@ pub mod lookup_keys {
         )
     }
 
-    /// Builds a trash scan bound after one deletion generation.
+    /// Builds a trash scan bound after one deletion position.
     pub fn active_deletion_key_after(deletion_seq: ChangeSeq, root_inode_id: InodeId) -> String {
         after_row_key(&active_deletion_row_key(
             deletion_seq,
@@ -1122,7 +1139,7 @@ pub struct NamespaceManifestPayload {
     /// Stops a stale streaming compactor at its next check when a newer runtime claims it.
     /// Streaming compaction rebuilds a whole family group and publishes once at the end.
     /// Grep publishes each bounded step, so a lost race costs only one step.
-    pub compactor_epoch: u64,
+    pub compactor_epoch: CompactorEpoch,
     /// Materialized head sequence, or the final namespace sequence on deletion.
     pub head_seq: ChangeSeq,
     /// Activity committed in this namespace through `head_seq`.
@@ -1185,7 +1202,7 @@ impl NamespaceManifestPayload {
             status: NamespaceStatus::Active {},
             writer: None,
             manifest_no: ManifestNo(1),
-            compactor_epoch: 0,
+            compactor_epoch: CompactorEpoch(0),
             head_seq: ChangeSeq(0),
             activity: ManifestActivity::default(),
             writer_epoch: WriterEpoch(0),
@@ -1341,6 +1358,7 @@ mod tests {
         decode_namespace_manifest_json, encode_namespace_manifest_json, BlockHandle,
         MetadataRowFamily, MetadataRunRef, MetadataSegmentRef, NamespaceManifestPayload, RunTier,
     };
+    use crate::CompactorEpoch;
     use crate::{
         ChangeSeq, CommitId, InodeId, ManifestNo, MetadataSegmentId, NameKey, NamespaceId, RunNo,
         WriterEpoch,
@@ -1545,7 +1563,7 @@ mod tests {
             status: crate::control::NamespaceStatus::Active {},
             writer: None,
             folded_wal_no: crate::WalNo(0),
-            compactor_epoch: 0,
+            compactor_epoch: CompactorEpoch(0),
             namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
             manifest_no: ManifestNo(10),
 
@@ -1588,7 +1606,7 @@ mod tests {
             status: crate::control::NamespaceStatus::Active {},
             writer: None,
             folded_wal_no: crate::WalNo(0),
-            compactor_epoch: 0,
+            compactor_epoch: CompactorEpoch(0),
             namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
             manifest_no: ManifestNo(12),
 
@@ -1820,10 +1838,8 @@ mod tests {
                 MetadataRowFamily::Tombstones,
                 super::MetadataRow::Tombstone(super::SubtreeTombstoneRecord {
                     root_inode_id: InodeId(42),
-                    generation: super::DeltaPosition {
-                        seq: ChangeSeq(12),
-                        delta_index: 0,
-                    },
+                    committed_seq: ChangeSeq(12),
+                    delta_index: 0,
                     commit_id: row_commit_id(),
                     action: super::TombstoneRowAction::Set {
                         deleted_binding: deleted_binding(),
@@ -1848,8 +1864,6 @@ mod tests {
                     commit_id: CommitId::parse("c_00000000000000000000000000000001")
                         .expect("commit id"),
                     committed_seq: ChangeSeq(12),
-                    semantic_commit_fingerprint: serde_json::from_str(r#""sha256:unused""#)
-                        .expect("fingerprint"),
                 }),
             ),
             (
@@ -1918,10 +1932,8 @@ mod tests {
                     MetadataRowFamily::Tombstones,
                     super::MetadataRow::Tombstone(super::SubtreeTombstoneRecord {
                         root_inode_id: InodeId(42),
-                        generation: super::DeltaPosition {
-                            seq: ChangeSeq(12),
-                            delta_index: 3,
-                        },
+                        committed_seq: ChangeSeq(12),
+                        delta_index: 3,
                         commit_id: row_commit_id(),
                         action: super::TombstoneRowAction::Set {
                             deleted_binding: deleted_binding(),

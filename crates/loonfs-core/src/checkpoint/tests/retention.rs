@@ -30,7 +30,7 @@ fn run_segment_object_keys(manifest: &NamespaceManifestEnvelope) -> Vec<String> 
         .collect()
 }
 
-// Independent uploads have different content ids and receipt fingerprints.
+// Independent uploads have different content ids and commit fingerprints.
 fn metadata_states_equivalent_ignoring_content_identity(
     left: &MetadataState,
     right: &MetadataState,
@@ -66,16 +66,6 @@ fn metadata_states_equivalent_ignoring_content_identity(
                                 .expect("placeholder content id"),
                                 ..content_ref
                             },
-                        }),
-                        MetadataRow::CommitReceipt(crate::metadata::CommitReceiptRecord {
-                            commit_id,
-                            semantic_commit_fingerprint: _,
-                            committed_seq,
-                        }) => MetadataRow::CommitReceipt(crate::metadata::CommitReceiptRecord {
-                            commit_id,
-                            committed_seq,
-                            semantic_commit_fingerprint: serde_json::from_str(r#""<normalized>""#)
-                                .expect("fingerprint"),
                         }),
                         MetadataRow::Commit(mut record) => {
                             record.semantic_commit_fingerprint =
@@ -1092,7 +1082,7 @@ async fn checkpoints_append_past_the_threshold_and_reorganization_drains() {
         let report = super::reorganize_metadata_step(
             &store,
             &namespace_id,
-            0,
+            loonfs_api::CompactorEpoch(0),
             policy,
             MetadataCompactionPolicy::default(),
         )
@@ -1176,7 +1166,7 @@ async fn reorganization_step_honors_run_row_and_decoded_byte_budgets() {
     let blocked = super::reorganize_metadata_step(
         &store,
         &namespace_id,
-        0,
+        loonfs_api::CompactorEpoch(0),
         tiny_byte_policy,
         MetadataCompactionPolicy::default(),
     )
@@ -1207,7 +1197,7 @@ async fn reorganization_step_honors_run_row_and_decoded_byte_budgets() {
     let published = super::reorganize_metadata_step(
         &store,
         &namespace_id,
-        0,
+        loonfs_api::CompactorEpoch(0),
         policy,
         MetadataCompactionPolicy::default(),
     )
@@ -1278,7 +1268,7 @@ async fn bounded_reorganization_converges_to_unbounded_shape_and_preserves_inter
     let first = super::reorganize_metadata_step(
         &bounded_store,
         &namespace_id,
-        0,
+        loonfs_api::CompactorEpoch(0),
         bounded_policy,
         MetadataCompactionPolicy::default(),
     )
@@ -1358,7 +1348,7 @@ async fn bounded_reorganization_converges_to_unbounded_shape_and_preserves_inter
     let below_trigger = super::reorganize_metadata_step(
         &bounded_store,
         &namespace_id,
-        0,
+        loonfs_api::CompactorEpoch(0),
         bounded_policy,
         MetadataCompactionPolicy::default(),
     )
@@ -1606,7 +1596,7 @@ async fn reorganization_resumes_from_the_manifest_after_interruption() {
     let first_report = super::reorganize_metadata_step(
         &store,
         &namespace_id,
-        0,
+        loonfs_api::CompactorEpoch(0),
         policy,
         MetadataCompactionPolicy::default(),
     )
@@ -1629,7 +1619,7 @@ async fn reorganization_resumes_from_the_manifest_after_interruption() {
         let report = super::reorganize_metadata_step(
             &store,
             &namespace_id,
-            0,
+            loonfs_api::CompactorEpoch(0),
             policy,
             MetadataCompactionPolicy::default(),
         )
@@ -1784,7 +1774,7 @@ async fn over_budget_reorganization_aborts_without_publishing() {
     let error = super::reorganize::reorganize_metadata_step_with_deadline(
         &store,
         &namespace_id,
-        0,
+        loonfs_api::CompactorEpoch(0),
         fold_everything,
         MetadataCompactionPolicy::default(),
         &overrun,
@@ -1805,7 +1795,7 @@ async fn over_budget_reorganization_aborts_without_publishing() {
     let report = super::reorganize::reorganize_metadata_step(
         &store,
         &namespace_id,
-        0,
+        loonfs_api::CompactorEpoch(0),
         fold_everything,
         MetadataCompactionPolicy::default(),
     )
@@ -2281,7 +2271,7 @@ async fn a_run_in_the_middle_over_the_budget_stops_the_window() {
     let report = super::reorganize_metadata_step(
         &store,
         &namespace_id,
-        0,
+        loonfs_api::CompactorEpoch(0),
         policy,
         MetadataCompactionPolicy::default(),
     )
@@ -2362,7 +2352,7 @@ async fn repeated_churn_under_small_budgets_leaves_one_base_run_per_group() {
             let report = super::reorganize_metadata_step(
                 &store,
                 &namespace_id,
-                0,
+                loonfs_api::CompactorEpoch(0),
                 policy,
                 MetadataCompactionPolicy::default(),
             )

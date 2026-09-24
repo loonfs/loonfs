@@ -60,7 +60,7 @@ pub(crate) fn ensure_writer_not_fenced(
     Err(CoreError::WriterFenced(WriterFence {
         fenced_epoch: acquired_writer.writer_epoch,
         active_epoch: head.writer_epoch,
-        active_writer: head.writer.as_ref().map(|writer| writer.writer_id.clone()),
+        active_writer_id: head.writer.as_ref().map(|writer| writer.writer_id.clone()),
         active_acquired_at_ms: head.writer.as_ref().map(|writer| writer.acquired_at_ms),
     }))
 }

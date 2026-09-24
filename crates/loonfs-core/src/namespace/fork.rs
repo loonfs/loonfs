@@ -77,7 +77,7 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
         folded_wal_no: loonfs_api::WalNo(0),
         writer_epoch: WriterEpoch(0),
         writer: None,
-        compactor_epoch: 0,
+        compactor_epoch: loonfs_api::CompactorEpoch(0),
         status: NamespaceStatus::Active {},
         activity: Default::default(),
         ..source_manifest.payload().clone()

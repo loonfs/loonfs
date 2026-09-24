@@ -1160,7 +1160,7 @@ type inodeMutationsRequest struct {
 	MovedFileName              string         `json:"moved_file_name"`
 	ContentUTF8                string         `json:"content_utf8"`
 	RevisedContentUTF8         string         `json:"revised_content_utf8"`
-	MalformedBindingGeneration string         `json:"malformed_binding_generation"`
+	MalformedBindingVersion string         `json:"malformed_binding_version"`
 }
 
 type inodeMutationsExpected struct {
@@ -1168,8 +1168,8 @@ type inodeMutationsExpected struct {
 	RevisedRevisionNo          int64               `json:"revised_revision_no"`
 	MovedCommittedSeq          int64               `json:"moved_committed_seq"`
 	DeletedCommittedSeq        int64               `json:"deleted_committed_seq"`
-	StaleBindingGeneration     errorStatusExpected `json:"stale_binding_generation"`
-	MalformedBindingGeneration errorStatusExpected `json:"malformed_binding_generation"`
+	StaleBindingVersion     errorStatusExpected `json:"stale_binding_version"`
+	MalformedBindingVersion errorStatusExpected `json:"malformed_binding_version"`
 }
 
 func runInodeMutations(t *testing.T, h *harness, testCase conformanceCase) {
@@ -1233,20 +1233,20 @@ func runInodeMutations(t *testing.T, h *harness, testCase conformanceCase) {
 
 	listing := listPathEntries(t, h.client, request.NamespaceID, request.Directory)
 	names := make([]string, 0, len(listing))
-	generations := make(map[string]struct{}, len(listing))
+	versions := make(map[string]struct{}, len(listing))
 	for _, entry := range listing {
 		identity := identityOf(entry)
 		names = append(names, identity.displayName)
-		if identity.bindingGeneration == "" {
-			t.Fatalf("listed entry %q has no binding_generation", identity.displayName)
+		if identity.bindingVersion == "" {
+			t.Fatalf("listed entry %q has no binding_version", identity.displayName)
 		}
-		generations[identity.bindingGeneration] = struct{}{}
+		versions[identity.bindingVersion] = struct{}{}
 	}
 	if !equalStrings(names, expected.EntryNames) {
 		t.Fatalf("listed names = %v, want %v", names, expected.EntryNames)
 	}
-	if len(generations) != len(listing) {
-		t.Errorf("listing reported %d distinct binding generations, want %d", len(generations), len(listing))
+	if len(versions) != len(listing) {
+		t.Errorf("listing reported %d distinct binding versions, want %d", len(versions), len(listing))
 	}
 	entryNamed := func(name string) *loonfs.PathEntry {
 		for _, entry := range listing {
@@ -1296,7 +1296,7 @@ func runInodeMutations(t *testing.T, h *harness, testCase conformanceCase) {
 	if !bytes.Equal(readback.Content, []byte(request.RevisedContentUTF8)) {
 		t.Error("inode-addressed revision readback did not match the revised payload")
 	}
-	staleGeneration := optionalString(revised.BindingGeneration)
+	staleVersion := optionalString(revised.BindingVersion)
 
 	noReplace := loonfs.DestinationBehaviorNoReplace
 	applyCommit(t, h.client, &loonfs.CommitRequest{
@@ -1312,7 +1312,7 @@ func runInodeMutations(t *testing.T, h *harness, testCase conformanceCase) {
 			},
 		},
 	}, request.ActorID)
-	moveByInode := func(commitID string, generation string) *loonfs.CommitRequest {
+	moveByInode := func(commitID string, version string) *loonfs.CommitRequest {
 		return &loonfs.CommitRequest{
 			NamespaceID: request.NamespaceID,
 			CommitID:    loonfs.CommitID(commitID),
@@ -1321,7 +1321,7 @@ func runInodeMutations(t *testing.T, h *harness, testCase conformanceCase) {
 					MoveByInode: &loonfs.FilesystemOperationMoveByInode{
 						Behavior:                  &noReplace,
 						InodeID:                   inodeFile.InodeID,
-						ExpectedBindingGeneration: generation,
+						ExpectedBindingVersion: version,
 						DestinationParentInodeID:  identityOf(inodeDirectory).inodeID,
 						DestinationDisplayName:    request.MovedFileName,
 					},
@@ -1332,42 +1332,42 @@ func runInodeMutations(t *testing.T, h *harness, testCase conformanceCase) {
 
 	_, err := h.client.Commits.Create(
 		context.Background(),
-		moveByInode("conf-inode-mutations-stale-move", staleGeneration),
+		moveByInode("conf-inode-mutations-stale-move", staleVersion),
 		option.WithHTTPHeader(http.Header{"Loonfs-Actor": []string{string(request.ActorID)}}),
 	)
 	var conflict *loonfs.ConflictError
 	if !errors.As(err, &conflict) {
 		t.Fatalf("expected ConflictError, found %T: %v", err, err)
 	}
-	if conflict.StatusCode != expected.StaleBindingGeneration.Status {
-		t.Errorf("stale move status = %d, want %d", conflict.StatusCode, expected.StaleBindingGeneration.Status)
+	if conflict.StatusCode != expected.StaleBindingVersion.Status {
+		t.Errorf("stale move status = %d, want %d", conflict.StatusCode, expected.StaleBindingVersion.Status)
 	}
-	if conflict.Body == nil || conflict.Body.Code != expected.StaleBindingGeneration.Code {
-		t.Errorf("stale move body = %#v, want code %q", conflict.Body, expected.StaleBindingGeneration.Code)
+	if conflict.Body == nil || conflict.Body.Code != expected.StaleBindingVersion.Code {
+		t.Errorf("stale move body = %#v, want code %q", conflict.Body, expected.StaleBindingVersion.Code)
 	}
 	_, err = h.client.Commits.Create(
 		context.Background(),
-		moveByInode("conf-inode-mutations-malformed-move", request.MalformedBindingGeneration),
+		moveByInode("conf-inode-mutations-malformed-move", request.MalformedBindingVersion),
 		option.WithHTTPHeader(http.Header{"Loonfs-Actor": []string{string(request.ActorID)}}),
 	)
 	var badRequest *loonfs.BadRequestError
 	if !errors.As(err, &badRequest) {
 		t.Fatalf("expected BadRequestError, found %T: %v", err, err)
 	}
-	if badRequest.StatusCode != expected.MalformedBindingGeneration.Status {
-		t.Errorf("malformed move status = %d, want %d", badRequest.StatusCode, expected.MalformedBindingGeneration.Status)
+	if badRequest.StatusCode != expected.MalformedBindingVersion.Status {
+		t.Errorf("malformed move status = %d, want %d", badRequest.StatusCode, expected.MalformedBindingVersion.Status)
 	}
-	if badRequest.Body == nil || badRequest.Body.Code != expected.MalformedBindingGeneration.Code {
-		t.Errorf("malformed move body = %#v, want code %q", badRequest.Body, expected.MalformedBindingGeneration.Code)
+	if badRequest.Body == nil || badRequest.Body.Code != expected.MalformedBindingVersion.Code {
+		t.Errorf("malformed move body = %#v, want code %q", badRequest.Body, expected.MalformedBindingVersion.Code)
 	}
 
-	freshGeneration := identityOf(statPath(
+	freshVersion := identityOf(statPath(
 		t,
 		h.client,
 		request.NamespaceID,
 		childPath(request.RenamedFileName),
-	)).bindingGeneration
-	moved := applyCommit(t, h.client, moveByInode("conf-inode-mutations-move", freshGeneration), request.ActorID)
+	)).bindingVersion
+	moved := applyCommit(t, h.client, moveByInode("conf-inode-mutations-move", freshVersion), request.ActorID)
 	if int64(moved.CommittedSeq) != expected.MovedCommittedSeq {
 		t.Errorf("move committed_seq = %d, want %d", moved.CommittedSeq, expected.MovedCommittedSeq)
 	}
@@ -1380,8 +1380,8 @@ func runInodeMutations(t *testing.T, h *harness, testCase conformanceCase) {
 	if movedEntry.inodeID != inodeFile.InodeID {
 		t.Errorf("moved inode_id = %q, want %q", movedEntry.inodeID, inodeFile.InodeID)
 	}
-	if movedEntry.bindingGeneration == freshGeneration {
-		t.Error("move did not mint a new binding generation")
+	if movedEntry.bindingVersion == freshVersion {
+		t.Error("move did not mint a new binding version")
 	}
 
 	limit := 1
@@ -1397,11 +1397,11 @@ func runInodeMutations(t *testing.T, h *harness, testCase conformanceCase) {
 		t.Fatalf("expected one moved event, found %#v", feed.Changes)
 	}
 	movedEvent := feed.Changes[0].Events[0].Moved
-	if movedEvent.BindingGeneration != movedEntry.bindingGeneration {
+	if movedEvent.BindingVersion != movedEntry.bindingVersion {
 		t.Errorf(
-			"moved event binding_generation = %q, want %q",
-			movedEvent.BindingGeneration,
-			movedEntry.bindingGeneration,
+			"moved event binding_version = %q, want %q",
+			movedEvent.BindingVersion,
+			movedEntry.bindingVersion,
 		)
 	}
 
@@ -1414,7 +1414,7 @@ func runInodeMutations(t *testing.T, h *harness, testCase conformanceCase) {
 				DeleteByInode: &loonfs.FilesystemOperationDeleteByInode{
 					Behavior:                  &nonRecursive,
 					InodeID:                   inodeFile.InodeID,
-					ExpectedBindingGeneration: movedEntry.bindingGeneration,
+					ExpectedBindingVersion: movedEntry.bindingVersion,
 				},
 			},
 		},
@@ -2775,7 +2775,7 @@ type pathEntryIdentity struct {
 	path              string
 	inodeID           string
 	displayName       string
-	bindingGeneration string
+	bindingVersion string
 }
 
 func identityOf(entry *loonfs.PathEntry) pathEntryIdentity {
@@ -2787,7 +2787,7 @@ func identityOf(entry *loonfs.PathEntry) pathEntryIdentity {
 			path:              string(entry.Dir.Path),
 			inodeID:           string(entry.Dir.InodeID),
 			displayName:       optionalString(entry.Dir.DisplayName),
-			bindingGeneration: optionalString(entry.Dir.BindingGeneration),
+			bindingVersion: optionalString(entry.Dir.BindingVersion),
 		}
 	}
 	if entry.File != nil {
@@ -2795,14 +2795,14 @@ func identityOf(entry *loonfs.PathEntry) pathEntryIdentity {
 			path:              string(entry.File.Path),
 			inodeID:           string(entry.File.InodeID),
 			displayName:       optionalString(entry.File.DisplayName),
-			bindingGeneration: optionalString(entry.File.BindingGeneration),
+			bindingVersion: optionalString(entry.File.BindingVersion),
 		}
 	}
 	return pathEntryIdentity{}
 }
 
 // optionalString returns an empty string for an absent value, which is what
-// the root entry reports for its display name and its binding generation.
+// the root entry reports for its display name and its binding version.
 func optionalString(value *string) string {
 	if value == nil {
 		return ""

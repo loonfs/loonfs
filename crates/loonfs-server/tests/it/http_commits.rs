@@ -45,8 +45,8 @@ fn change_identity(change: &Commit) -> (ChangeSeq, String, Option<String>, Strin
             content_ref["content_id"] = serde_json::Value::from("<normalized>");
             content_ref["owner_namespace_id"] = serde_json::Value::from("<normalized>");
         }
-        if let Some(binding_generation) = event.get_mut("binding_generation") {
-            *binding_generation = serde_json::Value::from("<normalized>");
+        if let Some(binding_version) = event.get_mut("binding_version") {
+            *binding_version = serde_json::Value::from("<normalized>");
         }
     }
     (
@@ -649,12 +649,12 @@ async fn a_put_revision_without_an_inode_identifies_the_revision_field() {
 }
 
 #[tokio::test]
-async fn a_foreign_binding_precondition_identifies_the_generation_field() {
+async fn a_foreign_binding_precondition_identifies_the_version_field() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(
         temp_dir.path().join("store"),
-        "http-generation-field",
-        "http-generation-field",
+        "http-version-field",
+        "http-version-field",
     ))
     .await;
     let namespace = namespace_id("demo");
@@ -699,7 +699,7 @@ async fn a_foreign_binding_precondition_identifies_the_generation_field() {
         .create_commit(
             &namespace,
             &CommitRequest::single(
-                commit_id("foreign-generation"),
+                commit_id("foreign-version"),
                 None,
                 FilesystemOperation::CreateDirectory {
                     path: absolute("/unwritten"),
@@ -709,14 +709,12 @@ async fn a_foreign_binding_precondition_identifies_the_generation_field() {
             .preconditions(vec![loonfs_api::CommitPrecondition::PathBinding {
                 path: absolute(REPORTS_DIR),
                 expected_inode_id: current.inode_id,
-                expected_binding_generation: Some(
-                    foreign.binding_generation.expect("named binding"),
-                ),
+                expected_binding_version: Some(foreign.binding_version.expect("named binding")),
             }]),
             &loonfs_test_support::test_actor(),
         )
         .await
-        .expect_err("generation belongs to another namespace");
+        .expect_err("version belongs to another namespace");
     match error {
         ClientError::Api {
             status,
@@ -729,7 +727,7 @@ async fn a_foreign_binding_precondition_identifies_the_generation_field() {
             assert_eq!(code, ErrorCode::InvalidRequest.as_str());
             assert_eq!(
                 param.as_deref(),
-                Some("/preconditions/0/expected_binding_generation")
+                Some("/preconditions/0/expected_binding_version")
             );
             let details = details.expect("precondition details");
             assert_eq!(details.precondition_index, Some(0));

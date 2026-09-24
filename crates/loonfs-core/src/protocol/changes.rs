@@ -2,7 +2,6 @@
 //! commit's durable WAL deltas mapped to semantic filesystem events.
 
 use crate::error::{CoreError, Result};
-use crate::metadata::MetadataView;
 use crate::path::read::LoadedMetadataView;
 use loonfs_api::v0::{Commit, FilesystemChange, ListChangesResponse};
 use loonfs_api::wire::manifest::DeltaPosition;
@@ -72,18 +71,6 @@ pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(
     })
 }
 
-pub(super) async fn find_committed_change_at<S: ObjectStore + ?Sized>(
-    view: &MetadataView<'_, '_, S>,
-    namespace_id: &NamespaceId,
-    committed_seq: ChangeSeq,
-) -> Result<Option<Commit>> {
-    view.commit_at_seq(committed_seq)
-        .await?
-        .as_ref()
-        .map(|record| committed_change_from_wal_record(namespace_id, record))
-        .transpose()
-}
-
 /// Converts one WAL commit record into the shared API change shape.
 pub(super) fn committed_change_from_wal_record(
     namespace_id: &NamespaceId,
@@ -91,12 +78,12 @@ pub(super) fn committed_change_from_wal_record(
 ) -> Result<Commit> {
     Ok(Commit {
         namespace_id: namespace_id.clone(),
-        committed_seq: record.seq,
+        committed_seq: record.committed_seq,
         commit_id: record.commit_id.clone(),
         committed_by: record.committed_by.clone(),
         committed_at_ms: record.committed_at_ms,
         message: record.message.clone(),
-        events: events_from_wal_deltas(namespace_id, record.seq, &record.deltas)?,
+        events: events_from_wal_deltas(namespace_id, record.committed_seq, &record.deltas)?,
     })
 }
 
@@ -153,7 +140,7 @@ fn event_from_op_deltas(
             inode_id: *inode_id,
             parent_inode_id: *parent_inode_id,
             display_name: display_name.clone(),
-            binding_generation: binding_generation(namespace_id, committed_seq, *delta_index),
+            binding_version: binding_version(namespace_id, committed_seq, *delta_index),
         },
         // CreateFile (and copy-file): allocate + bind + first revision.
         [WalDelta::CreateInode {
@@ -176,7 +163,7 @@ fn event_from_op_deltas(
                 inode_id: *inode_id,
                 parent_inode_id: *parent_inode_id,
                 display_name: display_name.clone(),
-                binding_generation: binding_generation(namespace_id, committed_seq, *delta_index),
+                binding_version: binding_version(namespace_id, committed_seq, *delta_index),
                 revision_no: *revision_no,
                 content_ref: content_ref.clone(),
             }
@@ -210,7 +197,7 @@ fn event_from_op_deltas(
             source_display_name: from_name.clone(),
             destination_parent_inode_id: *destination_parent_inode_id,
             destination_display_name: to_name.clone(),
-            binding_generation: binding_generation(namespace_id, committed_seq, *delta_index),
+            binding_version: binding_version(namespace_id, committed_seq, *delta_index),
         },
         // DeleteFile / DeleteSubtree: retire the binding, hide the subtree.
         [WalDelta::UnbindDirentry { child_inode_id, .. }, WalDelta::TombstoneSubtree {
@@ -225,7 +212,7 @@ fn event_from_op_deltas(
                 display_name: deleted_binding.display_name.clone(),
             },
         },
-        // Undelete: revoke the exact deletion generation, re-bind the root.
+        // Undelete: revoke the exact deletion position, re-bind the root.
         [WalDelta::RevokeSubtreeTombstone { root_inode_id, .. }, WalDelta::BindDirentry {
             delta_index,
             parent_inode_id,
@@ -236,7 +223,7 @@ fn event_from_op_deltas(
             inode_id: *root_inode_id,
             parent_inode_id: *parent_inode_id,
             display_name: display_name.clone(),
-            binding_generation: binding_generation(namespace_id, committed_seq, *delta_index),
+            binding_version: binding_version(namespace_id, committed_seq, *delta_index),
         },
         // UpdateAttributes, including the copy that carries a source's
         // attributes onto the inode it just created. The delta already holds
@@ -274,12 +261,12 @@ fn event_from_op_deltas(
     })
 }
 
-fn binding_generation(
+fn binding_version(
     namespace_id: &NamespaceId,
     committed_seq: ChangeSeq,
     delta_index: u32,
-) -> loonfs_api::BindingGeneration {
-    crate::binding_generation::encode(
+) -> loonfs_api::BindingVersion {
+    crate::binding_version::encode(
         DeltaPosition {
             seq: committed_seq,
             delta_index,

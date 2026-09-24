@@ -558,7 +558,7 @@ async fn inline_checksum_failures_match_object_validation() {
     let mut corrupt_ref = value.content_ref().clone();
     corrupt_ref.content_id = ContentId::generate();
     let record = &mut payload.records[0];
-    record.seq = payload.head_seq;
+    record.committed_seq = payload.head_seq;
     record.commit_id = CommitId::parse("corrupt").expect("commit");
     record
         .deltas

@@ -514,7 +514,7 @@ async fn run_maintenance_index_enable(
         (true, _) | (_, GrepIndexLifecycle::Disabled) => None,
         // A backfill already names the namespace sequence its checkpoint
         // captured, and reaching it is what completes the backfill.
-        (_, GrepIndexLifecycle::Backfilling { target_seq, .. }) => Some(*target_seq),
+        (_, GrepIndexLifecycle::Backfilling { captured_seq, .. }) => Some(*captured_seq),
         // An active index is asked to catch up to where the namespace is
         // now: one read, before any stepping, so an index that is already
         // there returns without doing anything.

@@ -34,6 +34,7 @@ use loonfs_api::v0::{
     Commit, ListChangesResponse, UploadMode, UploadPartChecksumClaim, UploadSession,
 };
 use loonfs_api::wire::control::PinOwner;
+use loonfs_api::CompactorEpoch;
 use loonfs_api::EffectiveLimit;
 use loonfs_api::{
     AdvanceRetentionResponse, ChangeSeq, Checkpoint, ChecksumAlgorithm, CommitId, ContentRef,
@@ -1229,7 +1230,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     }
 
     /// Claims the namespace compactor epoch for a maintenance runtime.
-    pub async fn claim_compactor(&self) -> Result<u64> {
+    pub async fn claim_compactor(&self) -> Result<CompactorEpoch> {
         crate::checkpoint::claim_compactor(&self.store, &self.namespace_id).await
     }
 
@@ -1237,7 +1238,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     pub async fn reorganize_metadata(
         &self,
         compaction_policy: crate::checkpoint::MetadataCompactionPolicy,
-        compactor_epoch: u64,
+        compactor_epoch: CompactorEpoch,
     ) -> Result<crate::checkpoint::MetadataReorganizeOutcome> {
         crate::checkpoint::reorganize_metadata_step(
             &self.store,
@@ -1253,7 +1254,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     pub async fn run_metadata_compaction(
         &self,
         spec: &crate::checkpoint::MetadataCompactionSpec,
-        compactor_epoch: u64,
+        compactor_epoch: CompactorEpoch,
         cancellation: &crate::checkpoint::MetadataCompactionCancellation,
     ) -> Result<crate::checkpoint::MetadataCompactionJobOutcome> {
         crate::checkpoint::run_metadata_compaction_job(

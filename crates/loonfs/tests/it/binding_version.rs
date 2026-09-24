@@ -8,9 +8,9 @@ use loonfs_test_support::ids::namespace_id;
 use tempfile::tempdir;
 
 #[test]
-fn binding_generation_changes_on_move_but_not_content_update() {
+fn binding_version_changes_on_move_but_not_content_update() {
     let temp_dir = tempdir().expect("tempdir");
-    let fs = runtime(temp_dir.path(), "binding-generation-test");
+    let fs = runtime(temp_dir.path(), "binding-version-test");
     let namespace_id = namespace_id("demo");
     fs.create_namespace_blocking(
         &namespace_id,
@@ -28,12 +28,12 @@ fn binding_generation_changes_on_move_but_not_content_update() {
     let created = fs
         .stat_path_blocking(&namespace_id, "/docs/report.txt")
         .expect("stat the created file")
-        .binding_generation
-        .expect("a named entry carries its binding generation");
+        .binding_version
+        .expect("a named entry carries its binding version");
     assert_eq!(
         fs.stat_path_blocking(&namespace_id, "/")
             .expect("stat the root")
-            .binding_generation,
+            .binding_version,
         None,
         "the nameless root has no binding"
     );
@@ -51,7 +51,7 @@ fn binding_generation_changes_on_move_but_not_content_update() {
     assert_eq!(
         fs.stat_path_blocking(&namespace_id, "/docs/report.txt")
             .expect("stat the rewritten file")
-            .binding_generation,
+            .binding_version,
         Some(created.clone()),
         "new content does not rebind the name"
     );
@@ -68,17 +68,17 @@ fn binding_generation_changes_on_move_but_not_content_update() {
     let renamed = fs
         .stat_path_blocking(&namespace_id, "/docs/final.txt")
         .expect("stat the moved file")
-        .binding_generation
-        .expect("a named entry carries its binding generation");
-    assert_ne!(renamed, created, "a move creates a new binding generation");
+        .binding_version
+        .expect("a named entry carries its binding version");
+    assert_ne!(renamed, created, "a move creates a new binding version");
     assert_eq!(
         fs.list_path_blocking(&namespace_id, "/docs")
             .expect("list the parent directory")
             .first()
             .expect("the moved file is the directory's only child")
-            .binding_generation,
+            .binding_version,
         Some(renamed.clone()),
-        "a listing reports the generation the stat reports"
+        "a listing reports the version the stat reports"
     );
 
     let changes = fs
@@ -91,10 +91,10 @@ fn binding_generation_changes_on_move_but_not_content_update() {
         .events;
     match events.as_slice() {
         [FilesystemChange::Moved {
-            binding_generation, ..
+            binding_version, ..
         }] => assert_eq!(
-            *binding_generation, renamed,
-            "the event reports the generation the read reports"
+            *binding_version, renamed,
+            "the event reports the version the read reports"
         ),
         other => panic!("expected one moved event, got {other:?}"),
     }

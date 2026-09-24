@@ -1106,7 +1106,7 @@ mod tests {
             head_seq: loonfs_api::ChangeSeq(1),
             parent_inode_id: None,
             display_name: None,
-            binding_generation: None,
+            binding_version: None,
             attributes: None,
         }
     }

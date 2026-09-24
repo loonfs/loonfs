@@ -333,7 +333,7 @@ async fn drain_reorganization<S: ObjectStore + ?Sized>(
         let outcome = super::reorganize_metadata_step(
             store,
             namespace_id,
-            0,
+            loonfs_api::CompactorEpoch(0),
             policy,
             MetadataCompactionPolicy::default(),
         )
@@ -371,7 +371,7 @@ async fn run_planned_compaction<S: ObjectStore + ?Sized>(
     run_metadata_compaction_job(
         store,
         namespace_id,
-        0,
+        loonfs_api::CompactorEpoch(0),
         spec,
         policy,
         &MetadataCompactionCancellation::default(),
@@ -456,7 +456,7 @@ pub(crate) async fn plan_a_family_group_compaction<S: ObjectStore + ?Sized>(
     let report = reorganize_metadata_step(
         store,
         namespace_id,
-        0,
+        loonfs_api::CompactorEpoch(0),
         policy,
         MetadataCompactionPolicy::default(),
     )
@@ -855,7 +855,7 @@ pub(crate) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
         status: head.status,
         writer: head.writer.clone(),
         folded_wal_no: head.wal_no,
-        compactor_epoch: 0,
+        compactor_epoch: loonfs_api::CompactorEpoch(0),
         namespace_id: namespace_id.clone(),
         manifest_no,
 
@@ -919,7 +919,7 @@ pub(super) async fn publish_manifest_with_segments<S: ObjectStore + ?Sized>(
         status: loonfs_api::wire::control::NamespaceStatus::Active {},
         writer: None,
         folded_wal_no: loonfs_api::WalNo(0),
-        compactor_epoch: 0,
+        compactor_epoch: loonfs_api::CompactorEpoch(0),
         namespace_id: namespace_id.clone(),
         manifest_no,
 

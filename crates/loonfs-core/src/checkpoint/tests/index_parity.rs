@@ -348,11 +348,11 @@ async fn a_base_rebuild_drops_what_the_floor_covers_and_keeps_what_it_does_not()
     assert!(!commits.is_empty());
     assert!(commits.iter().all(|row| matches!(
         row,
-        MetadataRow::Commit(record) if record.seq >= floor
+        MetadataRow::Commit(record) if record.committed_seq >= floor
     )));
     assert!(commits.iter().any(|row| matches!(
         row,
-        MetadataRow::Commit(record) if record.seq == floor
+        MetadataRow::Commit(record) if record.committed_seq == floor
     )));
     assert_eq!(commits.len(), receipts.len());
 

@@ -154,7 +154,7 @@ impl MetadataIndexes {
     }
 
     pub(super) fn record_tombstone(&mut self, record: &SubtreeTombstoneRecord) {
-        self.indexed_seq = self.indexed_seq.max(record.generation.seq);
+        self.indexed_seq = self.indexed_seq.max(record.committed_seq);
         replace_if_newer(
             &mut self.tombstone_by_root,
             record.root_inode_id,
@@ -217,7 +217,7 @@ where
 }
 
 fn tombstone_order_key(record: &SubtreeTombstoneRecord) -> (ChangeSeq, u32) {
-    (record.generation.seq, record.generation.delta_index)
+    (record.committed_seq, record.delta_index)
 }
 
 #[cfg(test)]

@@ -440,7 +440,6 @@ async fn create_upload_session_with_state<S: ObjectStore + ?Sized>(
         namespace_id: catalog.namespace_id().clone(),
         upload_id: upload_id.clone(),
         content_id: session.content_id,
-        created_at_ms: context.now_ms,
         subject_id,
         mode: session.mode,
         status: UploadSessionRecordStatus::Open {
@@ -1828,7 +1827,6 @@ mod tests {
             upload_id: UploadId::parse("upl_00000000000000000000000000000001").expect("upload id"),
             content_id: ContentId::parse("con_00000000000000000000000000000001")
                 .expect("content id"),
-            created_at_ms: 1,
             subject_id: None,
             mode: UploadSessionMode::DirectMultipart {
                 provider_upload_id: "provider-upload".to_owned(),

@@ -2,8 +2,8 @@
 
 use super::DirectoryBinding;
 use crate::{
-    AbsolutePath, ActorId, Attributes, AttributesRevisionNo, BindingGeneration, ChangeSeq,
-    ContentRef, DisplayName, InodeId, InodeKind, NamespaceId, RevisionNo,
+    AbsolutePath, ActorId, Attributes, AttributesRevisionNo, BindingVersion, ChangeSeq, ContentRef,
+    DisplayName, InodeId, InodeKind, NamespaceId, RevisionNo,
 };
 use serde::{Deserialize, Serialize};
 
@@ -44,7 +44,7 @@ pub struct PathEntry {
     /// The opaque ID for the current parent and name binding, or `None` for the namespace root.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
-    pub binding_generation: Option<BindingGeneration>,
+    pub binding_version: Option<BindingVersion>,
     /// The inode's attribute projection, when requested.
     #[serde(flatten, default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
@@ -250,8 +250,8 @@ mod tests {
     use super::*;
     use crate::NameKey;
 
-    fn binding_generation() -> crate::BindingGeneration {
-        crate::BindingGeneration::parse("abcdef").expect("binding generation")
+    fn binding_version() -> crate::BindingVersion {
+        crate::BindingVersion::parse("abcdef").expect("binding version")
     }
 
     fn entry(
@@ -269,7 +269,7 @@ mod tests {
             head_seq: ChangeSeq(3),
             parent_inode_id,
             display_name: display_name.map(|name| DisplayName::parse(name).expect("display name")),
-            binding_generation: parent_inode_id.map(|_| binding_generation()),
+            binding_version: parent_inode_id.map(|_| binding_version()),
             attributes: None,
         }
     }
@@ -289,7 +289,7 @@ mod tests {
                 "head_seq": 3,
                 "parent_inode_id": "ino_1",
                 "display_name": "docs",
-                "binding_generation": binding_generation()
+                "binding_version": binding_version()
             })
         );
 
@@ -316,7 +316,7 @@ mod tests {
                     "head_seq": 3,
                     "parent_inode_id": "ino_1",
                     "display_name": "docs",
-                    "binding_generation": binding_generation()
+                    "binding_version": binding_version()
                 }]
             })
         );
@@ -355,7 +355,7 @@ mod tests {
                 "head_seq": 3,
                 "parent_inode_id": "ino_1",
                 "display_name": "report.txt",
-                "binding_generation": binding_generation()
+                "binding_version": binding_version()
             })
         );
     }
@@ -365,22 +365,19 @@ mod tests {
         let root_json = serde_json::to_value(entry("/", None, None)).expect("serialize root");
         assert!(root_json.get("parent_inode_id").is_none());
         assert!(root_json.get("display_name").is_none());
-        assert!(root_json.get("binding_generation").is_none());
+        assert!(root_json.get("binding_version").is_none());
 
         let decoded: PathEntry =
             serde_json::from_value(root_json).expect("decode root without optional fields");
         assert_eq!(decoded.parent_inode_id, None);
         assert_eq!(decoded.display_name, None);
-        assert_eq!(decoded.binding_generation, None);
+        assert_eq!(decoded.binding_version, None);
 
         let named_json = serde_json::to_value(entry("/docs", Some(InodeId(1)), Some("docs")))
             .expect("serialize named entry");
         assert_eq!(named_json["parent_inode_id"], "ino_1");
         assert_eq!(named_json["display_name"], "docs");
-        assert_eq!(
-            named_json["binding_generation"],
-            binding_generation().as_str()
-        );
+        assert_eq!(named_json["binding_version"], binding_version().as_str());
     }
 
     #[test]

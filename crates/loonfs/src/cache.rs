@@ -36,7 +36,7 @@ pub(crate) struct CachedNamespaceAnchor {
     pub(crate) basis: MetadataBasis,
     last_control_check: Option<Observation>,
     validation: Arc<NamespaceValidation>,
-    validated_generation: u64,
+    completed_validation_no: u64,
 }
 
 #[derive(Debug, Default)]
@@ -240,7 +240,7 @@ impl ReadCore {
             .get(namespace_id)
             .map(|(head, _)| Arc::clone(&head.validation))
             .unwrap_or_default();
-        let observed_generation = validation.started.load(Ordering::SeqCst);
+        let observed_validation_no = validation.started.load(Ordering::SeqCst);
         let _validation = validation
             .lock
             .lock()
@@ -251,7 +251,7 @@ impl ReadCore {
             let mut cache = self.inner.control_cache();
             let reusable = cache.namespaces.get(namespace_id).is_some_and(|(head, _)| {
                 Arc::ptr_eq(&head.validation, &validation)
-                    && head.validated_generation > observed_generation
+                    && head.completed_validation_no > observed_validation_no
             });
             if reusable {
                 // A successful remote validation STARTED after this read
@@ -266,8 +266,8 @@ impl ReadCore {
             }
         }
         // Saturate instead of wrapping: at exhaustion reads simply stop
-        // sharing, since no later generation can exceed the observed one.
-        let generation = validation
+        // sharing, since no later validation number can exceed the observed one.
+        let validation_no = validation
             .started
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_add(1))
             .map(|previous| previous + 1)
@@ -278,7 +278,7 @@ impl ReadCore {
             .await
             .map(|mut head| {
                 head.validation = Arc::clone(&validation);
-                head.validated_generation = generation;
+                head.completed_validation_no = validation_no;
                 head
             });
         match &result {
@@ -447,7 +447,7 @@ impl ReadCore {
             basis: pinned.basis,
             last_control_check: None,
             validation: Arc::default(),
-            validated_generation: 0,
+            completed_validation_no: 0,
         });
         (
             self.reader_engine(namespace_id)
@@ -511,7 +511,7 @@ impl ReadCore {
                 basis: state.basis,
                 last_control_check,
                 validation,
-                validated_generation: 0,
+                completed_validation_no: 0,
             },
             max_cached_namespaces,
         );
@@ -550,6 +550,6 @@ fn cached_anchor(
         head: anchor.read_state,
         last_control_check,
         validation: Arc::default(),
-        validated_generation: 0,
+        completed_validation_no: 0,
     }
 }

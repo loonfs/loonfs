@@ -187,17 +187,7 @@ async fn resolve_commit_id_reuse<S: ObjectStore + ?Sized>(
 ) -> Result<Option<CandidateAdmission>> {
     if let Some(existing) = view.find_commit_receipt(commit_id).await? {
         return Ok(Some(CandidateAdmission::independent(
-            if existing.semantic_commit_fingerprint != *semantic_identity {
-                Err(CoreError::CommitIdReuseConflict {
-                    commit_id: commit_id.to_string(),
-                    committed_seq: Some(existing.committed_seq),
-                    committed_fingerprint: Some(
-                        existing.semantic_commit_fingerprint.as_str().to_owned(),
-                    ),
-                })
-            } else {
-                commit_response_from_commit_receipt(view, &existing).await
-            },
+            commit_response_from_commit_receipt(view, &existing, semantic_identity).await,
         )));
     }
     Ok(dedup.admit(index, commit_id, semantic_identity))
@@ -207,9 +197,16 @@ async fn resolve_commit_id_reuse<S: ObjectStore + ?Sized>(
 async fn commit_response_from_commit_receipt<S: ObjectStore + ?Sized>(
     view: &PublishMetadataView<'_, S>,
     record: &CommitReceiptRecord,
+    semantic_identity: &CommitFingerprint,
 ) -> Result<Commit> {
-    let change = match view.find_committed_change_at(record.committed_seq).await {
-        Ok(Some(change)) => change,
+    // Commits and receipts share a family group and floor rule, so the commit
+    // remains while its receipt does.
+    let commit = match view
+        .metadata_view()
+        .commit_at_seq(record.committed_seq)
+        .await
+    {
+        Ok(Some(commit)) => commit,
         Ok(None) => {
             return Err(CoreError::Internal(format!(
             "commit receipt for `{}` names sequence `{}`, where the change feed reports no commit",
@@ -218,13 +215,20 @@ async fn commit_response_from_commit_receipt<S: ObjectStore + ?Sized>(
         }
         Err(error) => return Err(error),
     };
-    if change.commit_id != record.commit_id {
+    if commit.commit_id != record.commit_id {
         return Err(CoreError::Internal(format!(
             "commit receipt for `{}` names sequence `{}`, where the change feed reports commit `{}`",
-            record.commit_id, record.committed_seq, change.commit_id
+            record.commit_id, record.committed_seq, commit.commit_id
         )));
     }
-    Ok(change)
+    if commit.semantic_commit_fingerprint != *semantic_identity {
+        return Err(CoreError::CommitIdReuseConflict {
+            commit_id: record.commit_id.to_string(),
+            committed_seq: Some(record.committed_seq),
+            committed_fingerprint: Some(commit.semantic_commit_fingerprint.as_str().to_owned()),
+        });
+    }
+    super::changes::committed_change_from_wal_record(&view.head.namespace_id, &commit)
 }
 
 pub(crate) fn validate_inline_content_references<'a>(

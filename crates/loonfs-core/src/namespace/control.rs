@@ -6,6 +6,7 @@ use crate::control_object::{
 use crate::error::CoreError;
 use crate::namespace::state::NamespaceReadState;
 use loonfs_api::wire::control::{ControlObjectKind, HintPayload, ManifestRef};
+use loonfs_api::CompactorEpoch;
 use loonfs_api::NamespaceId;
 use loonfs_objectstore::keys::hint;
 use loonfs_objectstore::ObjectStore;
@@ -31,7 +32,7 @@ impl CurrentManifest {
         self.envelope.payload().folded_wal_no
     }
 
-    pub fn compactor_epoch(&self) -> u64 {
+    pub fn compactor_epoch(&self) -> CompactorEpoch {
         self.envelope.payload().compactor_epoch
     }
 }

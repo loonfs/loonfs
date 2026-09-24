@@ -78,7 +78,7 @@ pub(crate) fn replay_wal_records(
             current_tail
                 .insert_inline_content(content_ref.clone(), Bytes::copy_from_slice(&value.bytes));
         }
-        current_head.seq = record.seq;
+        current_head.seq = record.committed_seq;
         current_head.next_inode_id =
             replay_next_inode_id_from_commit_deltas(current_head.next_inode_id, &record.deltas);
         current_tail.apply_commit(record)?;
@@ -104,8 +104,17 @@ pub(crate) fn validate_wal_segment_for_replay(
         .successor()
         .map_err(|_| WalSegmentError::SeqOverflow)?;
 
-    if envelope.payload().records.first().map(|record| record.seq) != Some(expected_first_seq)
-        || envelope.payload().records.last().map(|record| record.seq)
+    if envelope
+        .payload()
+        .records
+        .first()
+        .map(|record| record.committed_seq)
+        != Some(expected_first_seq)
+        || envelope
+            .payload()
+            .records
+            .last()
+            .map(|record| record.committed_seq)
             != Some(envelope.payload().head_seq)
     {
         return Err(WalSegmentError::SegmentSummaryMismatch);
@@ -116,10 +125,10 @@ pub(crate) fn validate_wal_segment_for_replay(
             .checked_add(offset as u64)
             .map(ChangeSeq)
             .ok_or(WalSegmentError::SeqOverflow)?;
-        if record.seq != expected {
+        if record.committed_seq != expected {
             return Err(WalSegmentError::NonContiguousSeq {
                 expected,
-                actual: record.seq,
+                actual: record.committed_seq,
             });
         }
     }

@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use thiserror::Error;
 
-/// The protocol generation this build speaks.
+/// The protocol version this build speaks.
 pub const PROTOCOL_VERSION: &str = "v0";
 
 /// The mandatory filesystem API group.
@@ -144,7 +144,7 @@ limit_keys! {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct CapabilityDocument {
-    /// The protocol generation, currently `v0`.
+    /// The protocol version, `v0`.
     pub protocol_version: String,
     /// The advertised `group/version` API groups, each with every required operation implemented.
     pub api_groups: Vec<String>,

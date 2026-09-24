@@ -19,7 +19,7 @@ use loonfs_api::{AttributeInclusion, InodeKind};
 use loonfs_api::{DisplayName, Page, PageRequest, TrashEntry, TrashPageCursor};
 use std::sync::Arc;
 
-fn generation(seq: u64) -> DeltaPosition {
+fn position(seq: u64) -> DeltaPosition {
     DeltaPosition {
         seq: ChangeSeq(seq),
         delta_index: 0,
@@ -29,7 +29,8 @@ fn generation(seq: u64) -> DeltaPosition {
 fn tombstone_set(root_inode_id: InodeId, seq: u64, name: &str) -> SubtreeTombstoneRecord {
     SubtreeTombstoneRecord {
         root_inode_id,
-        generation: generation(seq),
+        committed_seq: ChangeSeq(seq),
+        delta_index: 0,
         commit_id: CommitId::parse(format!("c_tombstone_{seq}")).expect("commit id"),
         committed_at_ms: 1_000 + seq,
         committed_by: loonfs_api::ActorId::loonfs(),
@@ -46,12 +47,13 @@ fn tombstone_set(root_inode_id: InodeId, seq: u64, name: &str) -> SubtreeTombsto
 fn tombstone_revoke(root_inode_id: InodeId, seq: u64, target_seq: u64) -> SubtreeTombstoneRecord {
     SubtreeTombstoneRecord {
         root_inode_id,
-        generation: generation(seq),
+        committed_seq: ChangeSeq(seq),
+        delta_index: 0,
         commit_id: CommitId::parse(format!("c_tombstone_{seq}")).expect("commit id"),
         committed_at_ms: 1_000 + seq,
         committed_by: loonfs_api::ActorId::loonfs(),
         action: TombstoneRowAction::Revoke {
-            target: generation(target_seq),
+            target: position(target_seq),
         },
     }
 }
@@ -110,7 +112,7 @@ fn a_delete_adds_a_row_an_undelete_removes_it_and_a_redelete_adds_a_new_one() {
             "active-deletion-00000000000000000005-00000000000000000007-0000000001".to_owned(),
             "listed"
         )],
-        "a delete adds exactly one listed row, keyed by its own generation"
+        "a delete adds exactly one listed row, keyed by its own position"
     );
 
     let undeleted = state_from_tombstones(vec![
@@ -362,7 +364,7 @@ fn trash_by_walking_every_tombstone(state: &MetadataState, head_seq: ChangeSeq) 
                     .inode_at_seq(root_inode_id, head_seq)
                     .expect("deletion root")
                     .inode_kind,
-                deletion_seq: active.generation.seq,
+                deletion_seq: active.committed_seq,
                 deleted_at_ms: active.committed_at_ms,
                 deleted_by: active.committed_by,
                 deleted_binding: DirectoryBinding {
@@ -379,7 +381,7 @@ fn trash_by_walking_every_tombstone(state: &MetadataState, head_seq: ChangeSeq) 
 /// deletion first where the old walk ordered them by root inode, so order is
 /// normalized away and pinned separately by
 /// `the_listing_is_ordered_oldest_deletion_first`.
-fn sorted_by_generation(mut entries: Vec<TrashEntry>) -> Vec<TrashEntry> {
+fn sorted_by_position(mut entries: Vec<TrashEntry>) -> Vec<TrashEntry> {
     entries.sort_by_key(|entry| (entry.deletion_seq, entry.inode_id));
     entries
 }
@@ -392,10 +394,10 @@ async fn assert_listing_matches_the_old_walk<S: ObjectStore + ?Sized>(
     let (head, state) = load_checkpoint_projection_metadata_state(store, namespace_id)
         .await
         .expect("load projection");
-    let expected = sorted_by_generation(trash_by_walking_every_tombstone(&state, head.seq));
+    let expected = sorted_by_position(trash_by_walking_every_tombstone(&state, head.seq));
     // A limit of 2 forces the page machinery — cursors, removal markers
     // straddling page boundaries — on every step.
-    let listed = sorted_by_generation(trash_entries(store, namespace_id, 2).await);
+    let listed = sorted_by_position(trash_entries(store, namespace_id, 2).await);
     assert_eq!(
         listed, expected,
         "step {step}: the family-backed listing must equal the old walk"
@@ -588,7 +590,7 @@ async fn the_listing_is_ordered_oldest_deletion_first() {
 }
 
 #[tokio::test]
-async fn trash_pages_resume_after_the_generation_the_cursor_names() {
+async fn trash_pages_resume_after_the_position_the_cursor_names() {
     let temp = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp.path()).expect("create local-fs store");
     let namespace_id = NamespaceId::parse("trash-paging").expect("namespace id");
@@ -632,7 +634,7 @@ async fn trash_pages_resume_after_the_generation_the_cursor_names() {
     assert_eq!(
         (cursor.last_deletion_seq, cursor.last_root_inode_id),
         (first.items[1].deletion_seq, first.items[1].inode_id),
-        "the cursor names the generation the page ended on"
+        "the cursor names the position the page ended on"
     );
 
     let encoded = loonfs_api::encode_cursor(&cursor).expect("encode cursor");

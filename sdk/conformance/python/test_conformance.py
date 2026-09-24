@@ -279,7 +279,7 @@ class InodeMutationsRequest:
     moved_file_name: str
     content_utf8: str
     revised_content_utf8: str
-    malformed_binding_generation: str
+    malformed_binding_version: str
 
 
 @pydantic.dataclasses.dataclass(config=pydantic.ConfigDict(extra="forbid", strict=True), frozen=True)
@@ -288,8 +288,8 @@ class InodeMutationsExpected:
     revised_revision_no: int
     moved_committed_seq: int
     deleted_committed_seq: int
-    stale_binding_generation: ErrorStatusExpected
-    malformed_binding_generation: ErrorStatusExpected
+    stale_binding_version: ErrorStatusExpected
+    malformed_binding_version: ErrorStatusExpected
 
 
 @pydantic.dataclasses.dataclass(config=pydantic.ConfigDict(extra="forbid", strict=True), frozen=True)
@@ -1034,9 +1034,9 @@ def test_inode_mutations(cases: dict[str, ConformanceCase], harness: Harness) ->
         namespace_id, path=request.directory
     ).entries
     assert _listed_names(entries) == expected.entry_names
-    generations = {entry.binding_generation for entry in entries}
-    assert None not in generations, "listed entry has no binding_generation"
-    assert len(generations) == len(entries)
+    versions = {entry.binding_version for entry in entries}
+    assert None not in versions, "listed entry has no binding_version"
+    assert len(versions) == len(entries)
 
     def entry_named(name: str) -> PathEntry:
         return next(entry for entry in entries if entry.display_name == name)
@@ -1086,7 +1086,7 @@ def test_inode_mutations(cases: dict[str, ConformanceCase], harness: Harness) ->
         ),
     )
 
-    def move_by_inode(commit_id: str, generation: str) -> Any:
+    def move_by_inode(commit_id: str, version: str) -> Any:
         return _apply(
             client,
             namespace_id,
@@ -1094,36 +1094,36 @@ def test_inode_mutations(cases: dict[str, ConformanceCase], harness: Harness) ->
             request.actor_id,
             FilesystemOperation_MoveByInode(
                 inode_id=inode_file.inode_id,
-                expected_binding_generation=generation,
+                expected_binding_version=version,
                 destination_parent_inode_id=entry_named(request.inode_directory_name).inode_id,
                 destination_display_name=request.moved_file_name,
             ),
         )
 
     with pytest.raises(ConflictError) as stale:
-        move_by_inode("conf-inode-mutations-stale-move", revised.binding_generation)
-    assert stale.value.status_code == expected.stale_binding_generation.status
-    assert stale.value.body.code == expected.stale_binding_generation.code
+        move_by_inode("conf-inode-mutations-stale-move", revised.binding_version)
+    assert stale.value.status_code == expected.stale_binding_version.status
+    assert stale.value.body.code == expected.stale_binding_version.code
 
     with pytest.raises(BadRequestError) as malformed:
         move_by_inode(
             "conf-inode-mutations-malformed-move",
-            request.malformed_binding_generation,
+            request.malformed_binding_version,
         )
-    assert malformed.value.status_code == expected.malformed_binding_generation.status
-    assert malformed.value.body.code == expected.malformed_binding_generation.code
+    assert malformed.value.status_code == expected.malformed_binding_version.status
+    assert malformed.value.body.code == expected.malformed_binding_version.code
 
-    fresh_generation = client.files.retrieve(
+    fresh_version = client.files.retrieve(
         namespace_id, path=child_path(request.renamed_file_name)
-    ).binding_generation
-    moved = move_by_inode("conf-inode-mutations-move", fresh_generation)
+    ).binding_version
+    moved = move_by_inode("conf-inode-mutations-move", fresh_version)
     assert moved.committed_seq == expected.moved_committed_seq
     moved_entry = client.files.retrieve(
         namespace_id,
         path=f"{child_path(request.inode_directory_name)}/{request.moved_file_name}",
     )
     assert moved_entry.inode_id == inode_file.inode_id
-    assert moved_entry.binding_generation != fresh_generation
+    assert moved_entry.binding_version != fresh_version
 
     feed = client.changes.list(
         namespace_id, after_seq=expected.moved_committed_seq - 1, limit=1
@@ -1133,7 +1133,7 @@ def test_inode_mutations(cases: dict[str, ConformanceCase], harness: Harness) ->
     assert events is not None
     assert len(events) == 1
     assert events[0].kind == "moved"
-    assert events[0].binding_generation == moved_entry.binding_generation
+    assert events[0].binding_version == moved_entry.binding_version
 
     deleted = _apply(
         client,
@@ -1142,7 +1142,7 @@ def test_inode_mutations(cases: dict[str, ConformanceCase], harness: Harness) ->
         request.actor_id,
         FilesystemOperation_DeleteByInode(
             inode_id=inode_file.inode_id,
-            expected_binding_generation=moved_entry.binding_generation,
+            expected_binding_version=moved_entry.binding_version,
         ),
     )
     assert deleted.committed_seq == expected.deleted_committed_seq

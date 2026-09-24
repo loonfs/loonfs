@@ -332,7 +332,7 @@ mod tests {
             head_seq: ChangeSeq(3),
             parent_inode_id: display_name.map(|_| InodeId(1)),
             display_name: display_name.map(|name| DisplayName::parse(name).expect("display name")),
-            binding_generation: None,
+            binding_version: None,
             attributes: None,
         }
     }
@@ -731,7 +731,7 @@ mod tests {
         assert!(summary.contains("2 fork checkpoints"), "{summary}");
         assert!(!summary.contains("namespace can be reclaimed"), "{summary}");
 
-        pass.reclaim_after_ms = Some(1_700_000_000_000);
+        pass.reclaimable_at_ms = Some(1_700_000_000_000);
         for next in [
             Some(1_699_999_999_000),
             Some(1_700_000_000_000),
@@ -753,7 +753,7 @@ mod tests {
         );
         assert!(!empty.contains("namespace is retired"), "{empty}");
         assert!(
-            empty.contains("0 fork checkpoints, 0 expired checkpoints, 0 snapshot checkpoints"),
+            empty.contains("0 fork checkpoints, 0 user checkpoints, 0 snapshot checkpoints"),
             "{empty}"
         );
     }

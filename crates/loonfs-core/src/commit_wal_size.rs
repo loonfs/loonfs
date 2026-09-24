@@ -154,7 +154,7 @@ pub(crate) fn estimated_wal_record_bytes(
     inline_content: &[InlineContent],
 ) -> usize {
     let fixed_bytes = map_bytes(&[
-        ("seq", INTEGER_BYTES),
+        ("committed_seq", INTEGER_BYTES),
         ("commit_id", string_bytes(request.commit_id.as_str().len())),
         (
             "committed_by",

@@ -86,7 +86,7 @@ pub(crate) fn commit_from_manifest_row(row: MetadataRow) -> Result<WalCommitPayl
         MetadataRow::Commit(record) if record.inline_content.is_empty() => Ok(record),
         MetadataRow::Commit(record) => Err(CoreError::NamespaceCorrupt(format!(
             "commit row at sequence `{}` carries inline content",
-            record.seq
+            record.committed_seq
         ))),
         other => Err(foreign_row("commit", &other)),
     }
@@ -113,7 +113,7 @@ pub(crate) fn access_revision_from_manifest_row(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use loonfs_api::wire::manifest::{DeltaPosition, TombstoneRowAction};
+    use loonfs_api::wire::manifest::TombstoneRowAction;
     use loonfs_api::{ChangeSeq, CommitId, InodeId};
 
     fn foreign() -> MetadataRow {
@@ -145,10 +145,8 @@ mod tests {
         assert!(attributes_revision_from_manifest_row(foreign()).is_err());
         let tombstone = MetadataRow::Tombstone(SubtreeTombstoneRecord {
             root_inode_id: InodeId(1),
-            generation: DeltaPosition {
-                seq: ChangeSeq(1),
-                delta_index: 0,
-            },
+            committed_seq: ChangeSeq(1),
+            delta_index: 0,
             commit_id: CommitId::parse("c_foreign_tombstone").expect("commit id"),
             action: TombstoneRowAction::Set {
                 deleted_binding: loonfs_api::wire::manifest::DeletedBinding {

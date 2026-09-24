@@ -244,7 +244,7 @@ pub(super) async fn revisions_for_inode_page_desc<S: ObjectStore + ?Sized>(
 
 /// One key-ordered page of the derived active-deletion family, with each
 /// row's stored key. The trash listing's whole durable read: the family is
-/// keyed by deletion generation, so a page is a range scan whose cost follows
+/// keyed by deletion position, so a page is a range scan whose cost follows
 /// the page, not the namespace's deletion history.
 pub(super) async fn active_deletions_page<S: ObjectStore + ?Sized>(
     segments: &VerifiedMetadataSegments<'_, S>,

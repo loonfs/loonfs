@@ -243,7 +243,7 @@ mod tests {
         );
         assert_eq!(
             build_conclusion(&GrepBuildOutcome::BackfillRestarted {
-                target_seq: ChangeSeq(9)
+                captured_seq: ChangeSeq(9)
             }),
             MaintenanceConclusion::Progressed,
             "a restarted backfill discarded a dead projection and published a fresh basis"

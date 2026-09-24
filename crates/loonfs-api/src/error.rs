@@ -135,7 +135,7 @@ error_codes! {
     StaleAttributes => "stale_attributes",
     StaleAccess => "stale_access",
     NamespaceUnrestricted => "namespace_unrestricted",
-    BindingGenerationMismatch => "binding_generation_mismatch",
+    BindingVersionMismatch => "binding_version_mismatch",
     NotDeleted => "not_deleted",
     WriterFenced => "writer_fenced",
     WouldCycle => "would_cycle",
@@ -220,7 +220,7 @@ impl ErrorCode {
             | ErrorCode::StaleAccess
             // The namespace's access mode is unrestricted, so it holds no access rows.
             | ErrorCode::NamespaceUnrestricted
-            | ErrorCode::BindingGenerationMismatch
+            | ErrorCode::BindingVersionMismatch
             // Undelete's target is not the root of a live deletion: a
             // state conflict, resolved by re-reading namespace state.
             | ErrorCode::NotDeleted
@@ -270,7 +270,7 @@ impl ErrorCode {
             | ErrorCode::StaleAttributes
             | ErrorCode::StaleAccess
             | ErrorCode::NamespaceUnrestricted
-            | ErrorCode::BindingGenerationMismatch
+            | ErrorCode::BindingVersionMismatch
             | ErrorCode::NotDeleted
             | ErrorCode::WriterFenced
             | ErrorCode::WouldCycle
