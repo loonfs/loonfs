@@ -376,7 +376,7 @@ async fn inline_tail_replay_matches_publication_and_materializes_before_metadata
             None,
             &engine.namespace_id,
             input,
-            &StdMonotonicTimer::default(),
+            &crate::time::Deadline::start(Arc::new(StdMonotonicTimer::default())),
         )
         .await
         .expect("flush inline content");

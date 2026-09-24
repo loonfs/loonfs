@@ -3,6 +3,7 @@
 #![allow(clippy::panic)]
 
 use bytes::Bytes;
+use loonfs::Deadline;
 use loonfs_api::{ChangeSeq, ManifestNo, NamespaceId, RunNo};
 use loonfs_grep::keyspace::{grep_prefix, hint_key, manifest_key, manifests_prefix};
 use loonfs_grep::manifest::{
@@ -12,12 +13,14 @@ use loonfs_grep::manifest::{
 };
 use loonfs_grep::GrepError;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
-use loonfs_objectstore::timing::{MonotonicTimer, StdMonotonicTimer};
+use loonfs_objectstore::timing::StdMonotonicTimer;
 use loonfs_objectstore::{ObjectStore, PutMode};
+use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{
     FailStore, InjectedError, KeyPredicate, OperationClass, RecordedOperation, RecordingStore,
 };
+use std::sync::Arc;
 
 #[tokio::test]
 async fn publications_race_one_number_and_the_loser_replans_at_the_next() {
@@ -27,14 +30,12 @@ async fn publications_race_one_number_and_the_loser_replans_at_the_next() {
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::prefix(grep_prefix(&namespace_id)),
     );
-    let timer = StdMonotonicTimer::default();
-    let started_ms = timer.monotonic_now_ms();
+    let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
     let first = publish_grep_manifest(
         &store,
         None,
         &state(namespace_id.clone(), ManifestNo(1), RunNo(0)),
-        &timer,
-        started_ms,
+        &deadline,
     )
     .await
     .expect("enable");
@@ -62,8 +63,8 @@ async fn publications_race_one_number_and_the_loser_replans_at_the_next() {
 
     let candidate = state(namespace_id.clone(), ManifestNo(2), RunNo(1));
     let (left, right) = tokio::join!(
-        publish_grep_manifest(&store, Some(&first), &candidate, &timer, started_ms),
-        publish_grep_manifest(&store, Some(&first), &candidate, &timer, started_ms),
+        publish_grep_manifest(&store, Some(&first), &candidate, &deadline),
+        publish_grep_manifest(&store, Some(&first), &candidate, &deadline),
     );
     let outcomes = [left, right];
     assert_eq!(outcomes.iter().filter(|result| result.is_ok()).count(), 1);
@@ -88,7 +89,7 @@ async fn publications_race_one_number_and_the_loser_replans_at_the_next() {
         current.manifest_no().successor().expect("successor"),
         RunNo(current.manifest_state().index().next_run_no.0 + 1),
     );
-    let published = publish_grep_manifest(&store, Some(&current), &replanned, &timer, started_ms)
+    let published = publish_grep_manifest(&store, Some(&current), &replanned, &deadline)
         .await
         .expect("replanned publication");
     assert_eq!(published.manifest_no(), ManifestNo(3));
@@ -101,16 +102,9 @@ async fn publications_race_one_number_and_the_loser_replans_at_the_next() {
             .len(),
         3
     );
-    let raised = raise_grep_hint(
-        &store,
-        &namespace_id,
-        ManifestNo(2),
-        first.hint,
-        &timer,
-        started_ms,
-    )
-    .await
-    .expect("stale hint raise");
+    let raised = raise_grep_hint(&store, &namespace_id, ManifestNo(2), first.hint, &deadline)
+        .await
+        .expect("stale hint raise");
     assert_eq!(raised.state.manifest_no, ManifestNo(3));
 }
 
@@ -186,19 +180,17 @@ async fn a_failed_hint_raise_leaves_a_discoverable_publication_and_invalid_candi
     );
     failing.fail_all();
     let store = RecordingStore::new(failing, KeyPredicate::any());
-    let timer = StdMonotonicTimer::default();
-    let started_ms = timer.monotonic_now_ms();
+    let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
     let first = publish_grep_manifest(
         &store,
         None,
         &state(namespace_id.clone(), ManifestNo(1), RunNo(0)),
-        &timer,
-        started_ms,
+        &deadline,
     )
     .await
     .expect("enable");
     let next = state(namespace_id.clone(), ManifestNo(2), RunNo(1));
-    publish_grep_manifest(&store, Some(&first), &next, &timer, started_ms)
+    publish_grep_manifest(&store, Some(&first), &next, &deadline)
         .await
         .expect("publication survives hint failure");
     let loaded = load_current_grep_manifest(&store, &namespace_id)
@@ -209,7 +201,7 @@ async fn a_failed_hint_raise_leaves_a_discoverable_publication_and_invalid_candi
     assert_eq!(loaded.manifest_no(), ManifestNo(2));
     store.reset();
     assert!(
-        publish_grep_manifest(&store, Some(&loaded), &next, &timer, started_ms)
+        publish_grep_manifest(&store, Some(&loaded), &next, &deadline)
             .await
             .is_err()
     );
@@ -219,14 +211,16 @@ async fn a_failed_hint_raise_leaves_a_discoverable_publication_and_invalid_candi
         RunNo(2),
     );
     assert!(
-        publish_grep_manifest(&store, Some(&loaded), &wrong, &timer, started_ms)
+        publish_grep_manifest(&store, Some(&loaded), &wrong, &deadline)
             .await
             .is_err()
     );
-    let expired = FixedTimer(loonfs::METADATA_PUBLICATION_BUDGET_MS + 1);
+    let clock = Arc::new(ManualClock::new(0));
+    let expired = Deadline::start(clock.clone());
+    clock.advance_ms(loonfs::METADATA_PUBLICATION_BUDGET_MS + 1);
     let valid = state(namespace_id, ManifestNo(3), RunNo(2));
     assert!(
-        publish_grep_manifest(&store, Some(&loaded), &valid, &expired, 0)
+        publish_grep_manifest(&store, Some(&loaded), &valid, &expired)
             .await
             .is_err()
     );
@@ -266,13 +260,4 @@ fn state(
         Vec::new(),
     )
     .expect("valid manifest")
-}
-
-#[derive(Debug)]
-struct FixedTimer(u64);
-
-impl MonotonicTimer for FixedTimer {
-    fn monotonic_now_ms(&self) -> u64 {
-        self.0
-    }
 }

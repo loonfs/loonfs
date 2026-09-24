@@ -10,8 +10,7 @@ use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 pub(crate) async fn publish_segment<S: ObjectStore + ?Sized>(
     store: &S,
     wal: &PreparedWalSegment,
-    timer: &dyn crate::time::MonotonicTimer,
-    tip_observed_ms: u64,
+    tip: &crate::time::Observation,
 ) -> crate::error::Result<()> {
     if wal.document_len() > loonfs_api::wire::wal::MAX_WAL_SEGMENT_BYTES {
         return Err(crate::error::CoreError::Internal(format!(
@@ -22,7 +21,7 @@ pub(crate) async fn publish_segment<S: ObjectStore + ?Sized>(
     }
     let payload = wal.envelope().payload();
     let object_key = loonfs_objectstore::keys::wal_segment(&payload.namespace_id, &payload.wal_no);
-    let elapsed_ms = timer.monotonic_now_ms().saturating_sub(tip_observed_ms);
+    let elapsed_ms = tip.age_ms();
     if elapsed_ms > crate::limits::WAL_PUBLISH_BUDGET_MS {
         return Err(WalPublishError::PublishBudgetExceeded {
             elapsed_ms,

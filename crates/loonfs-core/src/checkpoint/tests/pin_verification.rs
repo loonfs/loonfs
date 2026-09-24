@@ -198,8 +198,7 @@ async fn namespace_deletion_during_pin_verification_deletes_the_pin() {
                 Default::default(),
                 writer,
                 &context,
-                &crate::time::StdMonotonicTimer::default(),
-                0,
+                &crate::time::Deadline::start(Arc::new(crate::time::StdMonotonicTimer::default())),
             )
             .await
             .expect("delete namespace during verification");

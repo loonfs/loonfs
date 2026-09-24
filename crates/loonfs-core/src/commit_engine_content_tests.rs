@@ -299,16 +299,10 @@ async fn assert_expired_content_stays_rejected_on_retry(elapsed_ms: u64) {
     let later = CommitCandidate::new(directory_request("later", "later"));
     store.block_next();
     let candidates = vec![primary, alias, later, replay];
-    let batch_started_ms = engine.monotonic_now_ms();
+    let batch = Deadline::start(timer.clone());
     let publish = async {
         let mut result = engine
-            .publish_batch_attempt(
-                &store,
-                &candidates,
-                &publication,
-                &options,
-                batch_started_ms,
-            )
+            .publish_batch_attempt(&store, &candidates, &publication, &options, &batch)
             .await;
         // The first attempt finds the proof expired after loading its view
         // and aborts; the retry owner tries again from the same origin.
@@ -321,13 +315,7 @@ async fn assert_expired_content_stays_rejected_on_retry(elapsed_ms: u64) {
             )
         }) {
             result = engine
-                .publish_batch_attempt(
-                    &store,
-                    &candidates,
-                    &publication,
-                    &options,
-                    batch_started_ms,
-                )
+                .publish_batch_attempt(&store, &candidates, &publication, &options, &batch)
                 .await;
         }
         result

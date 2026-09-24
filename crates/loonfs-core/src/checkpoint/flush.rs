@@ -12,7 +12,6 @@ use crate::control_update::{retry_while_contended, CasAttempt, WriteEvidence};
 use crate::error::CoreError;
 use crate::error::MetadataProjectionLoadError;
 use crate::error::Result;
-use crate::limits::METADATA_PUBLICATION_BUDGET_MS;
 use crate::metadata::{MetadataState, MetadataView};
 use crate::namespace::basis::MetadataBasis;
 use crate::namespace::read_anchor::load_read_anchor;
@@ -20,7 +19,7 @@ use crate::namespace::state::NamespaceReadState;
 use crate::storage::content::{
     content_object_key_for_ref, materialize_content, validate_loaded_content_bytes,
 };
-use crate::time::{MonotonicTimer, StdMonotonicTimer};
+use crate::time::{Deadline, StdMonotonicTimer};
 use crate::wal::load_replayed_wal_tail;
 use crate::wal::ProjectedWalTail;
 use futures::{stream, TryStreamExt};
@@ -63,18 +62,18 @@ pub(crate) async fn flush_wal<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> Result<FlushWalResponse> {
-    let timer = StdMonotonicTimer::default();
-    flush_wal_with_timer(store, namespace_id, &timer).await
+    let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
+    flush_wal_with_deadline(store, namespace_id, &deadline).await
 }
 
-pub(super) async fn flush_wal_with_timer<S: ObjectStore + ?Sized>(
+pub(crate) async fn flush_wal_with_deadline<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    timer: &dyn MonotonicTimer,
+    deadline: &Deadline,
 ) -> Result<FlushWalResponse> {
     retry_while_contended(
         || async move {
-            Result::Ok(match try_flush_wal(store, namespace_id, timer).await? {
+            Result::Ok(match try_flush_wal(store, namespace_id, deadline).await? {
                 TryFlushWal::Settled(basis) => {
                     CasAttempt::Settled(flush_wal_response(namespace_id, *basis))
                 }
@@ -88,17 +87,10 @@ pub(super) async fn flush_wal_with_timer<S: ObjectStore + ?Sized>(
     .await?
 }
 
-/// One flush attempt against one fresh projection.
-///
-/// The metadata publication budget covers this attempt end to end: the
-/// measurement starts before inline content is materialized or any segment
-/// object is written, and it gates both the segment build and the manifest
-/// put-if-absent, so an over-budget attempt aborts with only committed content
-/// objects and unreachable immutable outputs behind it.
 pub(super) async fn try_flush_wal<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    timer: &dyn MonotonicTimer,
+    deadline: &Deadline,
 ) -> Result<TryFlushWal> {
     let projection = load_manifest_projection(store, namespace_id)
         .instrument(tracing::debug_span!(
@@ -106,16 +98,15 @@ pub(super) async fn try_flush_wal<S: ObjectStore + ?Sized>(
             phase = "scan_namespace_state"
         ))
         .await?;
-    try_flush_wal_projection(store, namespace_id, &projection, timer).await
+    try_flush_wal_projection(store, namespace_id, &projection, deadline).await
 }
 
 async fn try_flush_wal_projection<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     projection: &ManifestProjection<'_, S>,
-    timer: &dyn MonotonicTimer,
+    deadline: &Deadline,
 ) -> Result<TryFlushWal> {
-    let publication_started_ms = timer.monotonic_now_ms();
     let head_seq = projection.head.seq;
     let basis_manifest_no = projection.basis.manifest_no();
     let basis_manifest = projection.basis.manifest();
@@ -136,27 +127,26 @@ async fn try_flush_wal_projection<S: ObjectStore + ?Sized>(
     }
 
     materialize_inline_content(store, projection).await?;
-    ensure_metadata_publication_budget(timer, publication_started_ms, namespace_id)?;
+    deadline.ensure_metadata_publication_budget(namespace_id)?;
     let manifest_no = next_manifest_no_after(basis_manifest_no)?;
     let manifest =
         build_namespace_manifest_for_projection(store, namespace_id, projection, manifest_no)
             .await?;
     let manifest = encode_manifest(manifest)?;
     // Written segments may outlive the GC grace if publication exceeds its budget.
-    ensure_metadata_publication_budget(timer, publication_started_ms, namespace_id)?;
-    let (outcome, current) =
-        match publish_manifest(store, manifest, timer, publication_started_ms).await? {
-            ManifestPublicationOutcome::Published(current) => (FlushWalOutcome::Published, current),
-            ManifestPublicationOutcome::CoveredByCurrent(current) => {
-                (FlushWalOutcome::ManifestAdvanced, current)
-            }
-            // A same-sequence reorganization can replace the predecessor without
-            // covering the newer WAL head. That manifest wins, but it has not
-            // satisfied the flush: reload its runs, replay the tail, try again.
-            ManifestPublicationOutcome::PredecessorChanged(_) => {
-                return Ok(TryFlushWal::RaceLost);
-            }
-        };
+    deadline.ensure_metadata_publication_budget(namespace_id)?;
+    let (outcome, current) = match publish_manifest(store, manifest, deadline).await? {
+        ManifestPublicationOutcome::Published(current) => (FlushWalOutcome::Published, current),
+        ManifestPublicationOutcome::CoveredByCurrent(current) => {
+            (FlushWalOutcome::ManifestAdvanced, current)
+        }
+        // A same-sequence reorganization can replace the predecessor without
+        // covering the newer WAL head. That manifest wins, but it has not
+        // satisfied the flush: reload its runs, replay the tail, try again.
+        ManifestPublicationOutcome::PredecessorChanged(_) => {
+            return Ok(TryFlushWal::RaceLost);
+        }
+    };
     Ok(TryFlushWal::Settled(Box::new(FlushedBasis {
         current_manifest_no: current.manifest().manifest_no,
         current_manifest_head_seq: current.manifest().head_seq,
@@ -192,10 +182,10 @@ pub async fn fold_wal_tail<S: ObjectStore + ?Sized>(
     segment_cache: Option<&MetadataSegmentCache>,
     namespace_id: &NamespaceId,
     input: Option<WalFoldInput>,
-    timer: &dyn MonotonicTimer,
+    deadline: &Deadline,
 ) -> Result<FlushWalResponse> {
     let Some(input) = input else {
-        return flush_wal(store, namespace_id).await;
+        return flush_wal_with_deadline(store, namespace_id, deadline).await;
     };
     let loaded_basis = load_basis_metadata_segments(store, segment_cache, &input.basis).await?;
     let manifest_projection = ManifestProjection {
@@ -205,9 +195,9 @@ pub async fn fold_wal_tail<S: ObjectStore + ?Sized>(
         tail_state: input.tail_state,
     };
     // A fold publishes metadata without updating the namespace head.
-    match try_flush_wal_projection(store, namespace_id, &manifest_projection, timer).await? {
+    match try_flush_wal_projection(store, namespace_id, &manifest_projection, deadline).await? {
         TryFlushWal::Settled(basis) => Ok(flush_wal_response(namespace_id, *basis)),
-        TryFlushWal::RaceLost => flush_wal(store, namespace_id).await,
+        TryFlushWal::RaceLost => flush_wal_with_deadline(store, namespace_id, deadline).await,
     }
 }
 
@@ -306,31 +296,6 @@ pub fn next_run_no_after(current: RunNo) -> Result<RunNo> {
     current
         .successor()
         .map_err(|error| CoreError::Internal(format!("run number {error}")))
-}
-
-/// Refuses to initiate a manifest put-if-absent once the publication budget
-/// is spent (format spec, Appendix C).
-pub fn ensure_metadata_publication_budget(
-    timer: &dyn MonotonicTimer,
-    publication_started_ms: u64,
-    namespace_id: &NamespaceId,
-) -> Result<()> {
-    let elapsed_ms = timer
-        .monotonic_now_ms()
-        .saturating_sub(publication_started_ms);
-    if elapsed_ms <= METADATA_PUBLICATION_BUDGET_MS {
-        return Ok(());
-    }
-    tracing::error!(
-        namespace_id = namespace_id.as_str(),
-        elapsed_ms,
-        budget_ms = METADATA_PUBLICATION_BUDGET_MS,
-        "metadata publication overran its budget; aborting before the manifest put-if-absent",
-    );
-    Err(CoreError::MetadataPublicationBudgetExceeded {
-        elapsed_ms,
-        budget_ms: METADATA_PUBLICATION_BUDGET_MS,
-    })
 }
 
 async fn build_namespace_manifest_for_projection<S: ObjectStore + ?Sized>(

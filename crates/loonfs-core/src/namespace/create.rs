@@ -3,7 +3,7 @@
 use super::control::load_current_manifest_if_present;
 use crate::checkpoint::publish::{encode_manifest, publish_manifest, ManifestPublicationOutcome};
 use crate::error::{CoreError, Result};
-use crate::time::MonotonicTimer;
+use crate::time::Deadline;
 use bytes::Bytes;
 use loonfs_api::wire::control::{encode_control_state, ControlObjectKind, HintPayload};
 use loonfs_api::wire::manifest::NamespaceManifestPayload;
@@ -15,8 +15,7 @@ use serde::Serialize;
 pub(super) async fn publish_namespace<S: ObjectStore + ?Sized>(
     store: &S,
     start: &NamespaceManifestPayload,
-    timer: &dyn MonotonicTimer,
-    started_ms: u64,
+    deadline: &Deadline,
 ) -> Result<()> {
     let namespace_id = &start.namespace_id;
     if let Some(current) = load_current_manifest_if_present(store, namespace_id).await? {
@@ -36,7 +35,7 @@ pub(super) async fn publish_namespace<S: ObjectStore + ?Sized>(
     };
     put_control_if_absent(store, hint(namespace_id), ControlObjectKind::Hint, &first).await?;
     let manifest = encode_manifest(start.clone())?;
-    match publish_manifest(store, manifest, timer, started_ms).await? {
+    match publish_manifest(store, manifest, deadline).await? {
         ManifestPublicationOutcome::Published(_) => Ok(()),
         ManifestPublicationOutcome::CoveredByCurrent(_)
         | ManifestPublicationOutcome::PredecessorChanged(_) => {

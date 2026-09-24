@@ -13,6 +13,7 @@ use loonfs_core::control::{
     CheckpointReadBasis, ControlObjectLoadError, MetadataBasis, NamespaceReadAnchor,
     VerifiedNamespaceCatalogEntry,
 };
+use loonfs_core::time::Observation;
 use loonfs_core::{MetadataProjectionLoadError, RuntimeReadContext};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -33,7 +34,7 @@ pub(crate) struct RuntimeControlCache {
 pub(crate) struct CachedNamespaceAnchor {
     pub(crate) head: NamespaceReadState,
     pub(crate) basis: MetadataBasis,
-    last_control_check_ms: u64,
+    last_control_check: Option<Observation>,
     validation: Arc<NamespaceValidation>,
     validated_generation: u64,
 }
@@ -298,22 +299,25 @@ impl ReadCore {
         &self,
         namespace_id: &NamespaceId,
     ) -> std::result::Result<CachedNamespaceAnchor, ControlObjectLoadError> {
-        let now_ms = self.inner.timer.monotonic_now_ms();
         let cached = self
             .inner
             .control_cache()
             .cached_namespace_head(namespace_id);
         if let Some(mut head) = cached {
-            let check_due = now_ms.saturating_sub(head.last_control_check_ms)
-                >= self
-                    .runtime_cache_config()
-                    .manifest_revalidation_interval_ms;
+            let interval_ms = self
+                .runtime_cache_config()
+                .manifest_revalidation_interval_ms;
+            let check_due = head
+                .last_control_check
+                .as_ref()
+                .is_none_or(|checked| checked.age_ms() >= interval_ms);
+            let observed = Observation::now(Arc::clone(&self.inner.timer));
             let matches = !check_due || !manifest_has_successor(self.store(), namespace_id, head.basis.manifest_no())
                 .instrument(tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "validation_manifest_probe"))
                 .await?;
             if matches {
                 if check_due {
-                    head.last_control_check_ms = now_ms;
+                    head.last_control_check = Some(observed);
                 }
                 let mut context = self.runtime_read_context(&head);
                 if loonfs_core::control::probe_namespace_wal(self.store(), &mut context)
@@ -324,10 +328,11 @@ impl ReadCore {
                 }
             }
         }
+        let observed = Observation::now(Arc::clone(&self.inner.timer));
         load_read_anchor(self.store(), namespace_id)
             .instrument(tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "validation_anchor_load"))
             .await
-            .map(|loaded| cached_anchor(loaded, now_ms))
+            .map(|loaded| cached_anchor(loaded, Some(observed)))
     }
 
     /// Loads the read anchor, mapping an absent head to the one answer it
@@ -440,7 +445,7 @@ impl ReadCore {
         let read_context = self.runtime_read_context(&CachedNamespaceAnchor {
             head: pinned.head,
             basis: pinned.basis,
-            last_control_check_ms: 0,
+            last_control_check: None,
             validation: Arc::default(),
             validated_generation: 0,
         });
@@ -486,17 +491,25 @@ impl ReadCore {
         let head_seq = state.head.seq;
         let manifest_no = state.basis.manifest_no();
         let mut cache = self.inner.control_cache();
-        let (last_control_check_ms, validation) = cache
+        let (last_control_check, validation) = cache
             .namespaces
             .get(namespace_id)
-            .map(|(head, _)| (head.last_control_check_ms, Arc::clone(&head.validation)))
+            .map(|(head, _)| {
+                (
+                    head.last_control_check.clone(),
+                    Arc::clone(&head.validation),
+                )
+            })
             .unwrap_or_default();
+        // The publish that seeds this anchor is its first control check.
+        let last_control_check =
+            last_control_check.or_else(|| Some(Observation::now(Arc::clone(&self.inner.timer))));
         cache.insert_namespace_head(
             namespace_id,
             CachedNamespaceAnchor {
                 head: state.head,
                 basis: state.basis,
-                last_control_check_ms,
+                last_control_check,
                 validation,
                 validated_generation: 0,
             },
@@ -528,11 +541,14 @@ impl ReadCore {
     }
 }
 
-fn cached_anchor(anchor: NamespaceReadAnchor, last_control_check_ms: u64) -> CachedNamespaceAnchor {
+fn cached_anchor(
+    anchor: NamespaceReadAnchor,
+    last_control_check: Option<Observation>,
+) -> CachedNamespaceAnchor {
     CachedNamespaceAnchor {
         basis: anchor.basis(),
         head: anchor.read_state,
-        last_control_check_ms,
+        last_control_check,
         validation: Arc::default(),
         validated_generation: 0,
     }

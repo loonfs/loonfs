@@ -1,6 +1,7 @@
 //! Manifest discovery while a lagging hint advances and old manifests are swept.
 
 use super::*;
+use crate::namespace::control::load_current_manifest_with_hint;
 use loonfs_test_support::stores::MetadataMapStore;
 
 async fn discover_during_collection(start: ManifestNo, block_next_manifest: bool) {
@@ -40,12 +41,11 @@ async fn discover_during_collection(start: ManifestNo, block_next_manifest: bool
             .await
             .expect("publish despite failed hint update");
     }
-    let (expected, hint) =
-        crate::namespace::control::load_current_manifest_with_hint(&failed_hint, &namespace_id)
-            .await
-            .expect("current manifest");
+    let (expected, initial_hint) = load_current_manifest_with_hint(&failed_hint, &namespace_id)
+        .await
+        .expect("current manifest");
     assert_eq!(expected.state.manifest().manifest_no, ManifestNo(4));
-    assert_eq!(hint.state.manifest_no, start);
+    assert_eq!(initial_hint.state.manifest_no, start);
     failed_hint.clear();
     let blocked_number = ManifestNo(start.0 + u64::from(block_next_manifest));
     let blocked_key = metadata_manifest_object(&namespace_id, &blocked_number);
@@ -56,7 +56,7 @@ async fn discover_during_collection(start: ManifestNo, block_next_manifest: bool
     );
     blocked.block_next();
     let (discovered, ()) = tokio::join!(
-        crate::namespace::control::load_current_manifest_with_hint(&blocked, &namespace_id),
+        load_current_manifest_with_hint(&blocked, &namespace_id),
         async {
             blocked.wait_until_blocked().await;
             crate::namespace::control::raise_hint(

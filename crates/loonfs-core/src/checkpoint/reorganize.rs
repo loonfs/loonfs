@@ -10,7 +10,7 @@
 
 use super::block_fetch::{load_segment_index_for_reorganization, segment_object_len};
 use super::error::ManifestLoadError;
-use super::flush::{ensure_metadata_publication_budget, next_manifest_no_after, next_run_no_after};
+use super::flush::{next_manifest_no_after, next_run_no_after};
 use super::load::load_manifest_segments;
 use super::publish::{encode_manifest, publish_manifest, ManifestPublicationOutcome};
 use super::runs::{
@@ -21,7 +21,7 @@ use super::scan::VerifiedMetadataSegments;
 use super::streaming_compaction::{merge_group_in_step, MetadataCompactionSpec};
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::namespace::read_anchor::load_read_anchor;
-use crate::time::{MonotonicTimer, StdMonotonicTimer};
+use crate::time::{Deadline, StdMonotonicTimer};
 use loonfs_api::wire::envelope::EncodedEnvelope;
 use loonfs_api::wire::manifest::{
     MetadataRunRef, MetadataSegmentRef, NamespaceManifestEnvelope, NamespaceManifestPayload,
@@ -30,6 +30,7 @@ use loonfs_api::wire::manifest::{
 use loonfs_api::{ChangeSeq, ManifestNo, NamespaceId, RunNo};
 use loonfs_objectstore::ObjectStore;
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 /// Maximum run fan-in for either execution path. Larger groups are merged in
 /// several publications, keeping decoded input blocks independent of history size.
@@ -101,30 +102,26 @@ pub(crate) async fn reorganize_metadata_step<S: ObjectStore + ?Sized>(
     policy: MetadataLsmPolicy,
     compaction_policy: MetadataCompactionPolicy,
 ) -> Result<MetadataReorganizeOutcome> {
-    let timer = StdMonotonicTimer::default();
-    reorganize_metadata_step_with_timer(
+    let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
+    reorganize_metadata_step_with_deadline(
         store,
         namespace_id,
         compactor_epoch,
         policy,
         compaction_policy,
-        &timer,
+        &deadline,
     )
     .await
 }
 
-pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>(
+pub(super) async fn reorganize_metadata_step_with_deadline<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     compactor_epoch: u64,
     policy: MetadataLsmPolicy,
     compaction_policy: MetadataCompactionPolicy,
-    timer: &dyn MonotonicTimer,
+    deadline: &Deadline,
 ) -> Result<MetadataReorganizeOutcome> {
-    // The publication budget covers the whole unit: measurement starts
-    // before any segment object is written and gates the manifest
-    // put-if-absent below.
-    let publication_started_ms = timer.monotonic_now_ms();
     // A streaming compaction keeps the floor read with this manifest.
     let anchor = load_read_anchor(store, namespace_id)
         .await
@@ -208,9 +205,9 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
         floor_seq,
     )?;
 
-    ensure_metadata_publication_budget(timer, publication_started_ms, namespace_id)?;
+    deadline.ensure_metadata_publication_budget(namespace_id)?;
     let manifest_no = manifest.envelope().payload().manifest_no;
-    match publish_manifest(store, manifest, timer, publication_started_ms).await? {
+    match publish_manifest(store, manifest, deadline).await? {
         ManifestPublicationOutcome::Published(_) => Ok(MetadataReorganizeOutcome::UnitPublished {
             group,
             merged_delta_rows: input.merged_delta_rows,

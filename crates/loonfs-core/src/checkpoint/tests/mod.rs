@@ -926,10 +926,9 @@ async fn publish_manifest<S: ObjectStore + ?Sized>(
     store: &S,
     manifest: loonfs_api::wire::envelope::EncodedEnvelope<NamespaceManifestPayload>,
 ) -> Result<ManifestPublicationOutcome, CoreError> {
-    use crate::time::{MonotonicTimer, StdMonotonicTimer};
-    let timer = StdMonotonicTimer::default();
-    let started_ms = timer.monotonic_now_ms();
-    super::publish::publish_manifest(store, manifest, &timer, started_ms).await
+    use crate::time::{Deadline, StdMonotonicTimer};
+    let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
+    super::publish::publish_manifest(store, manifest, &deadline).await
 }
 
 pub(super) async fn publish_manifest_with_segments<S: ObjectStore + ?Sized>(

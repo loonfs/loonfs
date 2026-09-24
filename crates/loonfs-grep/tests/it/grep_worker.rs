@@ -454,8 +454,10 @@ async fn exhausted_run_numbers_fail_as_server_errors_without_writing_the_manifes
         current_state.segments().to_vec(),
     )
     .expect("valid manifest at the public maximum");
-    let timer = loonfs_objectstore::timing::StdMonotonicTimer::default();
-    let maximum = publish_grep_manifest(&*store, Some(&current), &maximum_state, &timer, 0)
+    let deadline = loonfs::Deadline::start(Arc::new(
+        loonfs_objectstore::timing::StdMonotonicTimer::default(),
+    ));
+    let maximum = publish_grep_manifest(&*store, Some(&current), &maximum_state, &deadline)
         .await
         .expect("install manifest at the public maximum");
 
@@ -1649,8 +1651,7 @@ async fn a_backfill_checkpoint_mismatch_is_corruption_without_writes() {
         &*store,
         Some(&current),
         &next,
-        &loonfs_test_support::clock::ManualClock::new(0),
-        0,
+        &loonfs::Deadline::start(Arc::new(loonfs_test_support::clock::ManualClock::new(0))),
     )
     .await
     .expect("mismatched manifest");

@@ -5,7 +5,7 @@ use crate::error::{CoreError, Result};
 use crate::namespace::read_anchor::load_read_anchor;
 use crate::namespace::writer_epoch::ensure_writer_not_fenced;
 use crate::options::DeleteNamespaceOptions;
-use crate::time::MonotonicTimer;
+use crate::time::Deadline;
 use loonfs_api::wire::control::{AcquiredWriter, NamespaceStatus};
 use loonfs_api::{DeleteNamespaceResponse, NamespaceId};
 use loonfs_objectstore::ObjectStore;
@@ -21,8 +21,7 @@ pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
     options: DeleteNamespaceOptions,
     acquired_writer: AcquiredWriter,
     context: &crate::context::MutationContext,
-    timer: &dyn MonotonicTimer,
-    started_ms: u64,
+    deadline: &Deadline,
 ) -> Result<DeleteNamespaceResponse> {
     loop {
         let anchor = load_read_anchor(store, namespace_id).await?;
@@ -38,7 +37,7 @@ pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
                 });
             }
         }
-        let result = update_manifest(store, namespace_id, timer, started_ms, |mut payload| {
+        let result = update_manifest(store, namespace_id, deadline, |mut payload| {
             let acquired_writer = &acquired_writer;
             async move {
                 let current = super::state::NamespaceReadState::from(&payload);
@@ -73,7 +72,7 @@ pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
         if let DeleteManifest::Deleted(response) = result {
             return Ok(response);
         }
-        crate::checkpoint::ensure_metadata_publication_budget(timer, started_ms, namespace_id)?;
-        crate::checkpoint::flush_wal(store, namespace_id).await?;
+        deadline.ensure_metadata_publication_budget(namespace_id)?;
+        crate::checkpoint::flush_wal_with_deadline(store, namespace_id, deadline).await?;
     }
 }

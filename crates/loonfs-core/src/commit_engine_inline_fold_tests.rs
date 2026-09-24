@@ -95,7 +95,7 @@ async fn failed_manifest_and_over_budget_retries_keep_materialized_content() {
             None,
             &engine.namespace_id,
             Some(input.clone()),
-            &StdMonotonicTimer::default()
+            &crate::time::Deadline::start(Arc::new(StdMonotonicTimer::default()))
         )
         .await,
         Err(CoreError::Store {
@@ -126,14 +126,14 @@ async fn failed_manifest_and_over_budget_retries_keep_materialized_content() {
     }
     failing.clear();
     store.reset();
-    let timer = SteppingTimer(AtomicU64::new(0));
+    let timer = Arc::new(SteppingTimer(AtomicU64::new(0)));
     assert!(matches!(
         fold_wal_tail(
             &store,
             None,
             &engine.namespace_id,
             Some(input.clone()),
-            &timer
+            &crate::time::Deadline::start(timer.clone())
         )
         .await,
         Err(CoreError::MetadataPublicationBudgetExceeded { .. })
@@ -155,7 +155,7 @@ async fn failed_manifest_and_over_budget_retries_keep_materialized_content() {
         None,
         &engine.namespace_id,
         Some(input),
-        &StdMonotonicTimer::default(),
+        &crate::time::Deadline::start(Arc::new(StdMonotonicTimer::default())),
     )
     .await
     .expect("retry");
@@ -193,13 +193,14 @@ async fn competing_engines_materialize_identical_objects_and_publish_one_manifes
     );
     blocked.block_next();
     store.reset();
-    let first_timer = StdMonotonicTimer::default();
+    let first_timer = Arc::new(StdMonotonicTimer::default());
+    let deadline = crate::time::Deadline::start(first_timer);
     let first_flush = fold_wal_tail(
         &blocked,
         None,
         &first.namespace_id,
         Some(first_input),
-        &first_timer,
+        &deadline,
     );
     let second_flush = async {
         blocked.wait_until_blocked().await;
@@ -208,7 +209,7 @@ async fn competing_engines_materialize_identical_objects_and_publish_one_manifes
             None,
             &second.namespace_id,
             Some(second_input),
-            &StdMonotonicTimer::default(),
+            &crate::time::Deadline::start(Arc::new(StdMonotonicTimer::default())),
         )
         .await;
         blocked.release();

@@ -82,13 +82,14 @@ async fn gc_keeps_inline_wal_until_fold_publication_then_reads_use_objects() {
         OperationClass::Put,
     );
     blocked.block_next();
-    let timer = StdMonotonicTimer::default();
+    let timer = Arc::new(StdMonotonicTimer::default());
+    let deadline = crate::time::Deadline::start(timer.clone());
     let fold = fold_wal_tail(
         &blocked,
         None,
         namespace_id,
         engine.wal_fold_input(),
-        &timer,
+        &deadline,
     );
     let collect_during_fold = async {
         blocked.wait_until_blocked().await;
@@ -139,8 +140,9 @@ async fn losing_fold_keeps_objects_after_the_winners_wal_is_collected() {
         OperationClass::Put,
     );
     blocked.block_next();
-    let timer = StdMonotonicTimer::default();
-    let loser = fold_wal_tail(&blocked, None, namespace_id, Some(input.clone()), &timer);
+    let timer = Arc::new(StdMonotonicTimer::default());
+    let deadline = crate::time::Deadline::start(timer.clone());
+    let loser = fold_wal_tail(&blocked, None, namespace_id, Some(input.clone()), &deadline);
     let winner = async {
         blocked.wait_until_blocked().await;
         let folded = fold_wal_tail(
@@ -148,7 +150,7 @@ async fn losing_fold_keeps_objects_after_the_winners_wal_is_collected() {
             None,
             namespace_id,
             Some(input),
-            &StdMonotonicTimer::default(),
+            &crate::time::Deadline::start(Arc::new(StdMonotonicTimer::default())),
         )
         .await
         .expect("winning fold");

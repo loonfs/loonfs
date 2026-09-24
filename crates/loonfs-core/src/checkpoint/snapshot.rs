@@ -8,11 +8,12 @@ use crate::context::MutationContext;
 use crate::control_update::{retry_while_contended, CasAttempt, WriteEvidence};
 use crate::error::{CoreError, Result};
 use crate::namespace::state::NamespaceReadState;
-use crate::time::MonotonicTimer;
+use crate::time::{Deadline, MonotonicTimer};
 use loonfs_api::wire::control::PinOwner;
 use loonfs_api::{Checkpoint, DeleteSnapshotResponse, NamespaceId, PinId};
 use loonfs_objectstore::keys::checkpoint_record;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
+use std::sync::Arc;
 
 /// Resolves the read basis a live snapshot lease pins.
 pub async fn load_snapshot_read_basis<S: ObjectStore + ?Sized>(
@@ -37,14 +38,14 @@ pub(crate) async fn extend_snapshot_expiry<S: ObjectStore + ?Sized>(
     requested_expires_at_ms: u64,
     max_lifetime_ms: u64,
     context: &MutationContext,
-    timer: &dyn MonotonicTimer,
+    timer: Arc<dyn MonotonicTimer>,
 ) -> Result<Checkpoint> {
-    let started_ms = timer.monotonic_now_ms();
+    let deadline = Deadline::start(timer);
     let object_key = checkpoint_record(namespace_id, checkpoint_id);
     retry_while_contended(
         || async {
             let loaded = load_checkpoint_record(store, namespace_id, checkpoint_id).await?;
-            let elapsed_ms = timer.monotonic_now_ms().saturating_sub(started_ms);
+            let elapsed_ms = deadline.elapsed_ms();
             let now_ms = context
                 .now_ms
                 .checked_add(elapsed_ms)
