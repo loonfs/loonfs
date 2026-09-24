@@ -1,7 +1,7 @@
 //! Encodes opaque API tokens for binding positions.
 
 use loonfs_api::wire::manifest::DeltaPosition;
-use loonfs_api::{decode_token, encode_token, BindingVersion, ChangeSeq, NamespaceId, OpaqueToken};
+use loonfs_api::{decode_token, encode_token, BindingVersion, NamespaceId, OpaqueToken};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -11,8 +11,7 @@ pub(crate) fn encode(position: DeltaPosition, namespace_id: &NamespaceId) -> Bin
     let encoded = encode_token(
         &BindingVersionEnvelope {
             namespace_id: namespace_id.clone(),
-            bind_seq: position.seq,
-            bind_delta_index: position.delta_index,
+            position,
         },
         BINDING_VERSION_FORMAT_VERSION,
     )
@@ -30,17 +29,13 @@ pub(crate) fn decode(
     if envelope.namespace_id != *expected_namespace_id {
         return Err(InvalidBindingVersion);
     }
-    Ok(DeltaPosition {
-        seq: envelope.bind_seq,
-        delta_index: envelope.bind_delta_index,
-    })
+    Ok(envelope.position)
 }
 
 #[derive(Serialize, Deserialize)]
 struct BindingVersionEnvelope {
     namespace_id: NamespaceId,
-    bind_seq: ChangeSeq,
-    bind_delta_index: u32,
+    position: DeltaPosition,
 }
 
 impl OpaqueToken for BindingVersionEnvelope {

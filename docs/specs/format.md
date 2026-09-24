@@ -478,7 +478,7 @@ The writer must check that a content reference has a supported kind, a correctly
 Metadata preconditions include namespace head sequence, name-slot availability, exact binding versions, file and attribute revisions, ancestor visibility, and directory emptiness. The internal exact-binding check is:
 
 ```text
-binding_is(parent_inode_id, name_key, child_inode_id, bind_seq, bind_delta_index)
+binding_is(parent_inode_id, name_key, child_inode_id, committed_seq, delta_index)
 ```
 
 Checking the inode ID alone is not equivalent. An item may have been moved away and rebound under the same name since the caller observed it.
@@ -1183,14 +1183,14 @@ Each commit contains `committed_seq`, `commit_id`, `committed_by`, `semantic_com
 | --- | --- |
 | `create_inode` | `delta_index`, `inode_id`, `inode_kind` |
 | `bind_direntry` | `delta_index`, `parent_inode_id`, `name_key`, `display_name`, `child_inode_id` |
-| `unbind_direntry` | `delta_index`, `parent_inode_id`, `name_key`, `display_name`, `child_inode_id`, `bind_seq`, `bind_delta_index` |
+| `unbind_direntry` | `delta_index`, `parent_inode_id`, `name_key`, `display_name`, `child_inode_id`, `target` |
 | `append_file_revision` | `delta_index`, `inode_id`, `revision_no`, `content_ref` |
 | `tombstone_subtree` | `delta_index`, `root_inode_id`, `deleted_binding` |
 | `revoke_subtree_tombstone` | `delta_index`, `root_inode_id`, `target` |
 | `append_attributes_revision` | `delta_index`, `inode_id`, `attributes_revision_no`, `attributes` |
 | `append_access_revision` | `delta_index`, `inode_id`, `access_revision_no`, `boundary`, `grants` |
 
-A delta's own commit sequence is implicit in its containing commit. A tombstone target is `{seq, delta_index}`. A deleted binding is `{parent_inode_id, name_key, display_name}`. Attribute and access deltas contain the complete resulting state, including an empty map after a clear.
+A delta's own commit sequence is implicit in its containing commit. An unbind target and a tombstone target are `{seq, delta_index}`, the position of the exact event the delta retires or revokes. A deleted binding is `{parent_inode_id, name_key, display_name}`. Attribute and access deltas contain the complete resulting state, including an empty map after a clear.
 
 `inline_content` is a list of `{content_id, bytes}`, where `bytes` is a CBOR byte string; the field is omitted when empty and defaults to an empty list when absent. This field is part of the version 1 format, and the reference it accompanies is an ordinary `blob_v1` reference.
 

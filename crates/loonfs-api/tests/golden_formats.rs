@@ -261,8 +261,10 @@ fn sample_wal_payload() -> WalSegmentPayload {
                 display_name: loonfs_api::DisplayName::parse("Old.txt")
                     .expect("valid display name"),
                 child_inode_id: InodeId(5),
-                bind_seq: ChangeSeq(1),
-                bind_delta_index: 0,
+                target: loonfs_api::wire::manifest::DeltaPosition {
+                    seq: ChangeSeq(1),
+                    delta_index: 0,
+                },
             },
         },
         WalCommitDelta {
@@ -1680,8 +1682,10 @@ fn wal_delta_wire_tags_match_spec_names() {
                 name_key: NameKey::parse("a").expect("valid name key"),
                 display_name: loonfs_api::DisplayName::parse("a").expect("valid display name"),
                 child_inode_id: InodeId(2),
-                bind_seq: ChangeSeq(1),
-                bind_delta_index: 0,
+                target: loonfs_api::wire::manifest::DeltaPosition {
+                    seq: ChangeSeq(1),
+                    delta_index: 0,
+                },
             }),
             "unbind_direntry",
         ),

@@ -34,8 +34,10 @@ const UNBIND_BYTES: usize = delta_bytes(
         ("name_key", 0),
         ("display_name", 0),
         ("child_inode_id", INTEGER_BYTES),
-        ("bind_seq", INTEGER_BYTES),
-        ("bind_delta_index", INDEX_BYTES),
+        (
+            "target",
+            map_bytes(&[("seq", INTEGER_BYTES), ("delta_index", INDEX_BYTES)]),
+        ),
     ],
 ) + NAMES_BYTES;
 const TOMBSTONE_BYTES: usize = delta_bytes(

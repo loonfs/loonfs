@@ -318,8 +318,7 @@ fn push_unbind_delta(
             name_key: binding.name_key.clone(),
             display_name: binding.display_name.clone(),
             child_inode_id: binding.child_inode_id,
-            bind_seq: binding.position.seq,
-            bind_delta_index: binding.position.delta_index,
+            target: binding.position,
         },
     )
 }

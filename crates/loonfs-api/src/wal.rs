@@ -123,10 +123,8 @@ pub enum WalDelta {
         display_name: DisplayName,
         /// Child identity expected on the targeted binding.
         child_inode_id: InodeId,
-        /// Commit sequence that created the exact binding being removed.
-        bind_seq: ChangeSeq,
-        /// Delta position that disambiguates the binding within `bind_seq`.
-        bind_delta_index: u32,
+        /// The exact bind event this delta retires.
+        target: DeltaPosition,
     },
     /// Publishes the next immutable content revision of a file inode.
     AppendFileRevision {

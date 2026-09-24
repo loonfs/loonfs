@@ -310,8 +310,10 @@ fn maintained_indexes_track_bind_unbind_rename_and_tombstone() {
             name_key: NameKey::parse("docs").expect("valid name key"),
             display_name: loonfs_api::DisplayName::parse("docs").expect("valid display name"),
             child_inode_id: InodeId(2),
-            bind_seq: ChangeSeq(1),
-            bind_delta_index: 0,
+            target: loonfs_api::wire::manifest::DeltaPosition {
+                seq: ChangeSeq(1),
+                delta_index: 0,
+            },
         }],
     );
     assert!(metadata_state
@@ -829,8 +831,10 @@ fn churned_binding_state() -> MetadataState {
                 display_name: loonfs_api::DisplayName::parse("contested")
                     .expect("valid display name"),
                 child_inode_id: InodeId(2),
-                bind_seq: ChangeSeq(1),
-                bind_delta_index: 1,
+                target: loonfs_api::wire::manifest::DeltaPosition {
+                    seq: ChangeSeq(1),
+                    delta_index: 1,
+                },
             },
             WalDelta::BindDirentry {
                 delta_index: 1,
@@ -847,8 +851,10 @@ fn churned_binding_state() -> MetadataState {
                 display_name: loonfs_api::DisplayName::parse("deleted")
                     .expect("valid display name"),
                 child_inode_id: InodeId(4),
-                bind_seq: ChangeSeq(1),
-                bind_delta_index: 3,
+                target: loonfs_api::wire::manifest::DeltaPosition {
+                    seq: ChangeSeq(1),
+                    delta_index: 3,
+                },
             },
         ],
     );
