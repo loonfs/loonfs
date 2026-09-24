@@ -23,7 +23,8 @@ use object_store as provider_store;
 use provider_store::multipart::{MultipartStore, PartId};
 use provider_store::path::Path;
 use provider_store::{
-    GetOptions, GetRange, ObjectMeta, PutOptions, PutPayload, PutResult, UpdateVersion,
+    GetOptions, GetRange, ObjectMeta, ObjectStoreExt, PutOptions, PutPayload, PutResult,
+    UpdateVersion,
 };
 use std::fmt;
 use std::ops::Range;
@@ -1140,7 +1141,8 @@ fn map_provider_error(object_key: &str, err: provider_store::Error) -> ObjectSto
             object_key: object_key.to_owned(),
             message: source.to_string(),
         },
-        provider_store::Error::NotSupported { .. } | provider_store::Error::NotImplemented => {
+        provider_store::Error::NotSupported { .. }
+        | provider_store::Error::NotImplemented { .. } => {
             ObjectStoreError::Unsupported("provider object store operation")
         }
         provider_store::Error::UnknownConfigurationKey { key, store } => {
@@ -1508,7 +1510,9 @@ mod tests {
         ));
     }
 
-    use provider_store::{GetResult, ListResult, MultipartUpload, PutMultipartOptions};
+    use provider_store::{
+        CopyOptions, GetResult, ListResult, MultipartUpload, PutMultipartOptions,
+    };
     use std::collections::{BTreeMap, HashMap, VecDeque};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Mutex;
@@ -1542,12 +1546,12 @@ mod tests {
         inner: InMemory,
         put_script: Mutex<VecDeque<WriteScript>>,
         get_script: Mutex<VecDeque<ReadScript>>,
-        delete_script: Mutex<VecDeque<WriteScript>>,
+        delete_script: Arc<Mutex<VecDeque<WriteScript>>>,
         part_script: Mutex<HashMap<usize, VecDeque<WriteScript>>>,
         complete_script: Mutex<VecDeque<WriteScript>>,
         puts: AtomicUsize,
         gets: AtomicUsize,
-        deletes: AtomicUsize,
+        deletes: Arc<AtomicUsize>,
         multipart_creates: AtomicUsize,
         part_attempts: Mutex<HashMap<usize, usize>>,
         multipart_completes: AtomicUsize,
@@ -1630,25 +1634,37 @@ mod tests {
             }
         }
 
-        async fn delete(&self, location: &Path) -> provider_store::Result<()> {
-            self.deletes.fetch_add(1, Ordering::SeqCst);
-            let script = self
-                .delete_script
-                .lock()
-                .expect("delete script")
-                .pop_front();
-            match script {
-                Some(WriteScript::FailWithoutLanding) => Err(transport_glitch()),
-                Some(WriteScript::LandThenFail) => {
-                    self.inner.delete(location).await?;
-                    Err(transport_glitch())
-                }
-                Some(WriteScript::FailAuth) => Err(auth_rejection(location)),
-                Some(WriteScript::VanishThenFail) => {
-                    panic!("VanishThenFail is a completion script")
-                }
-                None => self.inner.delete(location).await,
-            }
+        fn delete_stream(
+            &self,
+            locations: BoxStream<'static, provider_store::Result<Path>>,
+        ) -> BoxStream<'static, provider_store::Result<Path>> {
+            let inner = self.inner.clone();
+            let deletes = Arc::clone(&self.deletes);
+            let delete_script = Arc::clone(&self.delete_script);
+            locations
+                .then(move |location| {
+                    let inner = inner.clone();
+                    let deletes = Arc::clone(&deletes);
+                    let delete_script = Arc::clone(&delete_script);
+                    async move {
+                        let location = location?;
+                        deletes.fetch_add(1, Ordering::SeqCst);
+                        let script = delete_script.lock().expect("delete script").pop_front();
+                        match script {
+                            Some(WriteScript::FailWithoutLanding) => Err(transport_glitch()),
+                            Some(WriteScript::LandThenFail) => {
+                                inner.delete(&location).await?;
+                                Err(transport_glitch())
+                            }
+                            Some(WriteScript::FailAuth) => Err(auth_rejection(&location)),
+                            Some(WriteScript::VanishThenFail) => {
+                                panic!("VanishThenFail is a completion script")
+                            }
+                            None => inner.delete(&location).await.map(|()| location),
+                        }
+                    }
+                })
+                .boxed()
         }
 
         fn list(
@@ -1665,12 +1681,13 @@ mod tests {
             self.inner.list_with_delimiter(prefix).await
         }
 
-        async fn copy(&self, from: &Path, to: &Path) -> provider_store::Result<()> {
-            self.inner.copy(from, to).await
-        }
-
-        async fn copy_if_not_exists(&self, from: &Path, to: &Path) -> provider_store::Result<()> {
-            self.inner.copy_if_not_exists(from, to).await
+        async fn copy_opts(
+            &self,
+            from: &Path,
+            to: &Path,
+            options: CopyOptions,
+        ) -> provider_store::Result<()> {
+            self.inner.copy_opts(from, to, options).await
         }
     }
 
