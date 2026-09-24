@@ -511,7 +511,8 @@ fn unusable_config(problem: String) -> CliError {
 }
 
 pub(crate) fn load_config_if_exists(path: &Path) -> Result<Option<CliConfig>, CliError> {
-    match fs::metadata(path) {
+    // A broken symlink is a file the user put there, not an absent config.
+    match fs::symlink_metadata(path) {
         Ok(_) => load_config(path).map(Some),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(unusable_config(format!(
@@ -1207,6 +1208,18 @@ secret_access_key = "secret"
                 & 0o777;
             assert_eq!(mode, 0o600);
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_broken_config_symlink_is_not_absence() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::os::unix::fs::symlink(dir.path().join("missing.toml"), &path).expect("symlink");
+
+        assert!(super::load_config_if_exists(&path).is_err());
+        assert!(super::mutate_config(&path, |_| Ok(())).is_err());
+        assert!(!dir.path().join("missing.toml").exists());
     }
 
     #[test]
