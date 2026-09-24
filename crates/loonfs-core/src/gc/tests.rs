@@ -47,6 +47,7 @@ use loonfs_test_support::stores::{
 };
 use tempfile::tempdir;
 
+mod fork_chain;
 mod many_pins;
 mod retirement;
 
