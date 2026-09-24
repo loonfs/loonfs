@@ -22,15 +22,6 @@ pub const FEATURE_NAMESPACES_FORK: &str = "filesystem.namespaces.fork";
 pub const FEATURE_NAMESPACES_DELETE: &str = "filesystem.namespaces.delete";
 /// Gates read-snapshot lifecycle operations.
 pub const FEATURE_SNAPSHOTS: &str = "filesystem.snapshots";
-/// Gates inode attributes: writing them, and projecting them onto reads.
-/// Attributes are part of the filesystem API group, not a composed extension,
-/// so a deployment that serves the filesystem API group serves them.
-pub const FEATURE_ATTRIBUTES: &str = "filesystem.attributes";
-/// Gates listing a directory's children by parent inode ID. Part of the filesystem
-/// API group and implemented by the runtime, so current deployments advertise it;
-/// the key exists so inode-driven sync clients can gate on deployments built
-/// before the route.
-pub const FEATURE_INODES_LIST_CHILDREN: &str = "filesystem.inodes.list_children";
 /// Gates inline bytes on commit operations.
 pub const FEATURE_COMMIT_INLINE_CONTENT: &str = "filesystem.commits.inline_content";
 /// Gates direct upload sessions that are authorized with short-lived presigned URLs.
@@ -168,12 +159,12 @@ pub struct CapabilityDocument {
 /// Violation of the capability document rules.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum CapabilityDocumentError {
-    /// Reports a feature whose dotted group prefix has no advertised API group.
+    /// Reports a malformed feature key.
     #[error(
-        "feature `{feature}` is not parented by an advertised API group \
-         (its first dotted segment must be one of the advertised API group names)"
+        "feature `{feature}` must have at least two non-empty dotted components \
+         and start with an advertised API group name"
     )]
-    UnparentedFeature {
+    MalformedFeature {
         /// Feature key rejected while validating the deployment document.
         feature: String,
     },
@@ -194,9 +185,7 @@ impl CapabilityDocument {
             .copied()
     }
 
-    /// Checks the feature-key rule (API spec, "Capability discovery"): every
-    /// feature key's first dotted segment must be the group name of an
-    /// advertised API group.
+    /// Requires at least two non-empty dotted components, starting with an advertised group name.
     pub fn validate(&self) -> Result<(), CapabilityDocumentError> {
         let advertised_api_groups: Vec<&str> = self
             .api_groups
@@ -204,8 +193,8 @@ impl CapabilityDocument {
             .map(|api_group| api_group_name(api_group))
             .collect();
         for feature in self.features.keys() {
-            if !feature_is_parented(&advertised_api_groups, feature) {
-                return Err(CapabilityDocumentError::UnparentedFeature {
+            if !feature_is_well_formed(&advertised_api_groups, feature) {
+                return Err(CapabilityDocumentError::MalformedFeature {
                     feature: feature.clone(),
                 });
             }
@@ -222,15 +211,17 @@ impl CapabilityDocument {
             .map(|api_group| api_group_name(api_group))
             .collect();
         self.features
-            .retain(|feature, _| feature_is_parented(&advertised_api_groups, feature));
+            .retain(|feature, _| feature_is_well_formed(&advertised_api_groups, feature));
     }
 }
 
-fn feature_is_parented(api_group_names: &[&str], feature: &str) -> bool {
-    match feature.split('.').next() {
-        Some(api_group) if !api_group.is_empty() => api_group_names.contains(&api_group),
-        _ => false,
-    }
+fn feature_is_well_formed(api_group_names: &[&str], feature: &str) -> bool {
+    let Some((api_group, components)) = feature.split_once('.') else {
+        return false;
+    };
+    !api_group.is_empty()
+        && api_group_names.contains(&api_group)
+        && components.split('.').all(|component| !component.is_empty())
 }
 
 /// The group name of a versioned API group: `filesystem/v0` has group `filesystem`.
@@ -267,23 +258,30 @@ mod tests {
     }
 
     #[test]
-    fn feature_keys_must_be_parented_by_an_advertised_api_group() {
-        let mut document = document();
-        document
-            .features
-            .insert("query.index.fulltext".to_owned(), true);
-
-        assert_eq!(
-            document.validate(),
-            Err(CapabilityDocumentError::UnparentedFeature {
-                feature: "query.index.fulltext".to_owned(),
-            })
-        );
-
-        document.retain_well_formed();
-        assert!(document.validate().is_ok());
-        assert!(!document.features.contains_key("query.index.fulltext"));
-        assert!(document.features.contains_key(FEATURE_NAMESPACES_CREATE));
+    fn feature_keys_require_non_empty_components_and_an_advertised_group() {
+        for (feature, valid) in [
+            (FEATURE_NAMESPACES_CREATE, true),
+            ("filesystem.custom_feature", true),
+            ("filesystem", false),
+            ("query.index.fulltext", false),
+            ("filesystem.uploads.", false),
+            ("filesystem..upload", false),
+            (".upload", false),
+        ] {
+            let mut document = document();
+            document.features = BTreeMap::from([(feature.to_owned(), true)]);
+            let expected = if valid {
+                Ok(())
+            } else {
+                Err(CapabilityDocumentError::MalformedFeature {
+                    feature: feature.to_owned(),
+                })
+            };
+            assert_eq!(document.validate(), expected, "{feature}");
+            document.retain_well_formed();
+            assert_eq!(document.features.contains_key(feature), valid, "{feature}");
+            assert!(document.validate().is_ok());
+        }
     }
 
     #[test]
@@ -294,10 +292,12 @@ mod tests {
         let decoded: CapabilityDocument = serde_json::from_str(&encoded).expect("decode");
         assert_eq!(decoded, document);
 
-        for old_field_name in [concat!("pl", "anes"), "profiles"] {
-            let old_field = encoded.replace("\"api_groups\"", &format!("\"{old_field_name}\""));
-            assert!(serde_json::from_str::<CapabilityDocument>(&old_field).is_err());
-        }
+        let mut missing_groups = serde_json::to_value(&document).expect("encode");
+        missing_groups
+            .as_object_mut()
+            .expect("document")
+            .remove("api_groups");
+        assert!(serde_json::from_value::<CapabilityDocument>(missing_groups).is_err());
 
         let future = encoded.replacen('{', "{\"field_from_the_future\":true,", 1);
         let decoded: CapabilityDocument =

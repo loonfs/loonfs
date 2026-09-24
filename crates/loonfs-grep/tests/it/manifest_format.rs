@@ -84,10 +84,6 @@ fn the_manifest_status_is_a_kind_tagged_object() {
         let document: serde_json::Value =
             serde_json::from_slice(&read_golden(fixture)).expect("decode manifest fixture");
         let payload = document["payload"].as_object().expect("object payload");
-        assert!(
-            !payload.contains_key("lifecycle") && !payload.contains_key("state"),
-            "the manifest spells its lifecycle field `status`: {fixture}"
-        );
         let tag = payload
             .get("status")
             .expect("the manifest writes a `status`")

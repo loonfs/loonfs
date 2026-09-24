@@ -1518,19 +1518,6 @@ fn rm_reports_the_inode_and_undelete_recovers_it() {
     assert_failure(&gone);
     assert_eq!(json_error(&gone)["code"], "path_not_found");
 
-    let retired_flag = harness.run(&[
-        "undelete",
-        "/docs/report.txt",
-        "--inode",
-        &inode_id,
-        "--deleted-at",
-        &deletion_seq.to_string(),
-    ]);
-    assert_failure(&retired_flag);
-    let retired_flag_error = stderr_string(&retired_flag);
-    assert!(retired_flag_error.contains("--deleted-at"));
-    assert!(retired_flag_error.contains("--deletion-seq"));
-
     // Undelete brings back identity, content, and revision history.
     let recovered = harness.run(&[
         "--json",

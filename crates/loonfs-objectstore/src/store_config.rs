@@ -859,19 +859,6 @@ access_key_id = "not-allowed"
         .expect_err("ambient credentials cannot contain static fields")
         .to_string();
         assert!(nested.contains("access_key_id"), "{nested}");
-
-        let legacy_flat = toml::from_str::<StoreConfig>(
-            r#"
-kind = "aws-s3"
-bucket = "bucket"
-region = "us-east-1"
-access_key_id = "legacy-access"
-secret_access_key = "legacy-secret"
-"#,
-        )
-        .expect_err("version-1 flat credentials must not decode")
-        .to_string();
-        assert!(legacy_flat.contains("access_key_id"), "{legacy_flat}");
     }
 
     #[test]

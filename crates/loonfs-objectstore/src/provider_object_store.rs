@@ -1482,7 +1482,7 @@ mod tests {
         assert!(matches!(
             store
                 .compare_and_swap(
-                    "namespaces/demo/control/missing-head.json",
+                    "namespaces/missing/hint.json",
                     "missing",
                     Bytes::from_static(b"two")
                 )

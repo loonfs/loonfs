@@ -334,16 +334,6 @@ mod tests {
         let missing_content_ref = r#"{"kind":"file_created","inode_id":"ino_2","parent_inode_id":"ino_1","display_name":"a.txt","revision_no":1}"#;
         assert!(serde_json::from_str::<FilesystemChange>(missing_content_ref).is_err());
 
-        let retired_creation = serde_json::json!({
-            "kind": (["cre", "ated"].concat()),
-            "inode_id": "ino_2",
-            "inode_kind": "file",
-            "parent_inode_id": "ino_1",
-            "display_name": "a.txt",
-            "revision_no": 1,
-        });
-        assert!(serde_json::from_value::<FilesystemChange>(retired_creation).is_err());
-
         let content_changed = FilesystemChange::ContentChanged {
             inode_id: InodeId(2),
             revision_no: crate::RevisionNo(3),

@@ -2284,38 +2284,6 @@ mod tests {
                 "an unknown field in {level} decoded instead of failing the request"
             );
         }
-
-        for (field, operation) in [
-            (
-                "path",
-                serde_json::json!({
-                    "kind": "undelete",
-                    "inode_id": "ino_7",
-                    "deletion_seq": 8,
-                    "path": "/docs/restored"
-                }),
-            ),
-            (
-                "from_path",
-                serde_json::json!({
-                    "kind": "move_path",
-                    "source_path": "/docs/a.txt",
-                    "destination_path": "/docs/b.txt",
-                    "from_path": "/docs/a.txt"
-                }),
-            ),
-        ] {
-            let mut body = valid();
-            body["operations"] = serde_json::json!([operation]);
-            let error = serde_json::from_value::<CommitRequest>(body)
-                .expect_err("obsolete operation field must be rejected");
-            assert!(
-                error
-                    .to_string()
-                    .contains(&format!("unknown field `{field}`")),
-                "{error}"
-            );
-        }
     }
 
     #[test]

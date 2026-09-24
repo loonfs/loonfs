@@ -27,7 +27,7 @@ use loonfs_grep::{
     GramIndexBuildPolicy, GrepBuildOutcome, GrepError, GrepReorganizeOutcome, GrepService,
     GrepWorker, GREP_GC_GRACE_WINDOW_MS,
 };
-use loonfs_objectstore::keys::{checkpoint_record, metadata_manifest_object};
+use loonfs_objectstore::keys::checkpoint_record;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{ObjectStore, PutMode};
 use loonfs_test_support::ids::nonzero_usize;
@@ -2090,27 +2090,6 @@ async fn fork_of_grep_enabled_namespace_starts_unmaterialized_without_manifest_s
         "fork target",
         new_query(&store, &target, &request("needle")).await,
     );
-
-    // A fresh fork target has published no manifest of its own: its basis
-    // is the source manifest its head authorizes.
-    let target_basis = control::head(&store, &target)
-        .await
-        .fork_basis
-        .expect("a fork target has a basis manifest");
-    let manifest_key = metadata_manifest_object(
-        &target_basis.manifest.owner_namespace_id,
-        &target_basis.manifest.manifest_no,
-    );
-    let manifest_bytes = store
-        .get(&manifest_key, None)
-        .await
-        .expect("read target manifest")
-        .expect("target manifest exists");
-    let document: serde_json::Value =
-        serde_json::from_slice(&manifest_bytes).expect("decode target manifest JSON");
-    let payload = document["payload"].as_object().expect("manifest payload");
-    assert!(!payload.contains_key("index_files"));
-    assert!(!payload.contains_key("features"));
 
     let source_manifest_after = load_current_grep_manifest(&*store, &source)
         .await

@@ -539,12 +539,12 @@ mod tests {
             .into_shared();
 
         let error = store
-            .put_overwrite("../head.json", Bytes::from_static(br#"{"ok":true}"#))
+            .put_overwrite("../hint.json", Bytes::from_static(br#"{"ok":true}"#))
             .await
             .expect_err("traversal key should be rejected");
         assert!(matches!(
             error,
-            ObjectStoreError::InvalidKey { object_key, .. } if object_key == "../head.json"
+            ObjectStoreError::InvalidKey { object_key, .. } if object_key == "../hint.json"
         ));
     }
 

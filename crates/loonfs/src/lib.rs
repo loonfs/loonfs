@@ -66,10 +66,10 @@ pub use loonfs_api::{
     NamespaceDiagnostics, NamespaceId, Page, PageRequest, PaginationPolicy, PathEntry,
     PathEntryKind, PinId, ReorganizeStepOutcome, RetainedCandidates, RetainedReason, RevisionNo,
     RunMaintenanceRequest, RunMaintenanceResponse, SnapshotSummary, TrashEntry, UploadId,
-    WalFlushStepOutcome, API_GROUP_FILESYSTEM_V0, API_GROUP_MAINTENANCE_V0, FEATURE_ATTRIBUTES,
-    FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_INODES_LIST_CHILDREN, FEATURE_NAMESPACES_CREATE,
-    FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK, FEATURE_SNAPSHOTS,
-    FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT, PROTOCOL_VERSION,
+    WalFlushStepOutcome, API_GROUP_FILESYSTEM_V0, API_GROUP_MAINTENANCE_V0,
+    FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_NAMESPACES_CREATE, FEATURE_NAMESPACES_DELETE,
+    FEATURE_NAMESPACES_FORK, FEATURE_SNAPSHOTS, FEATURE_UPLOADS_DIRECT_MULTIPART,
+    FEATURE_UPLOADS_DIRECT_PUT, PROTOCOL_VERSION,
 };
 pub use loonfs_core::cache::{
     DecodedBlock, DecodedBlockCache, DecodedBlockCacheConfig, DecodedBlockCacheObserver,

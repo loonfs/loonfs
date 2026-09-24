@@ -12,9 +12,8 @@ use crate::{Result, RuntimeError, SharedObjectStore};
 use loonfs_api::{
     encode_cursor, CapabilityDocument, FileRevision, FileRevisionsPageCursor, Page, PageCursor,
     PaginationPolicy, Subject, WriterId, API_GROUP_FILESYSTEM_V0, API_GROUP_MAINTENANCE_V0,
-    FEATURE_ATTRIBUTES, FEATURE_INODES_LIST_CHILDREN, FEATURE_NAMESPACES_CREATE,
-    FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK, FEATURE_SNAPSHOTS,
-    LIMIT_ACCESS_MAX_PRINCIPALS_PER_REQUEST, LIMIT_COMMIT_MAX_CONTENT_TOKENS,
+    FEATURE_NAMESPACES_CREATE, FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK,
+    FEATURE_SNAPSHOTS, LIMIT_ACCESS_MAX_PRINCIPALS_PER_REQUEST, LIMIT_COMMIT_MAX_CONTENT_TOKENS,
     LIMIT_COMMIT_MAX_EXTERNAL_CONTENT_REFS, LIMIT_COMMIT_MAX_MESSAGE_BYTES,
     LIMIT_COMMIT_MAX_OPERATIONS, LIMIT_COMMIT_MAX_PRECONDITIONS, LIMIT_GC_MIN_GRACE_WINDOW_MS,
     MAX_SUBJECT_PRINCIPALS, PROTOCOL_VERSION,
@@ -249,10 +248,6 @@ impl ReadCore {
                 (FEATURE_NAMESPACES_FORK.to_owned(), true),
                 (FEATURE_NAMESPACES_DELETE.to_owned(), true),
                 (FEATURE_SNAPSHOTS.to_owned(), true),
-                // Attributes are implemented by this crate, so the
-                // answer does not depend on what a serving host composes.
-                (FEATURE_ATTRIBUTES.to_owned(), true),
-                (FEATURE_INODES_LIST_CHILDREN.to_owned(), true),
             ]),
             limits: {
                 let mut limits = PaginationPolicy::default().capability_limits();

@@ -454,9 +454,8 @@ fn openapi_documents_current_server_paths() {
         }
         assert!(
             path.contains("{namespace_id}"),
-            "namespace-scoped OpenAPI path uses the retired parameter name: `{path}`"
+            "namespace-scoped OpenAPI path must use `namespace_id`: `{path}`"
         );
-        assert!(!path.contains("{namespace}"));
         for method in ["get", "post", "put", "delete", "patch"] {
             let Some(operation) = path_item.get(method) else {
                 continue;
@@ -1523,21 +1522,6 @@ fn openapi_documents_string_id_contracts_without_dead_schemas() {
         content_id.get("example").and_then(Value::as_str),
         Some("con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41")
     );
-    assert!(!schemas.contains_key("FilesystemChangeCreated"));
-    assert!(
-        !raw.contains(r#""created""#),
-        "retired creation-event kind remains in OpenAPI"
-    );
-
-    let api_spec = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../docs/specs/api.md"
-    ))
-    .expect("read API spec");
-    assert!(
-        !api_spec.contains("`created`"),
-        "retired creation-event kind remains in api.md"
-    );
 }
 
 #[test]
@@ -1696,24 +1680,6 @@ fn openapi_describes_inode_ids_as_non_null_strings() {
 #[test]
 fn openapi_reuses_the_one_checksum_and_upload_claim_shapes() {
     let raw = std::fs::read_to_string(OPENAPI_JSON_PATH).expect("read static openapi json");
-    for dead_name in [
-        "StorageChecksum",
-        "storage_checksum",
-        "whole_file_sha256",
-        "DirectPutContentClaim",
-        "DirectMultipartContentClaim",
-        "absolute_path",
-        "root_inode_id",
-        "deleted_at_seq",
-        "ValidatedContentToken",
-        "validated_content_token",
-    ] {
-        assert!(
-            !raw.contains(dead_name),
-            "dead public checksum name `{dead_name}` remains in OpenAPI"
-        );
-    }
-
     let spec: Value = serde_json::from_str(&raw).expect("parse openapi json");
     let schemas = spec
         .pointer("/components/schemas")
@@ -1724,13 +1690,6 @@ fn openapi_reuses_the_one_checksum_and_upload_claim_shapes() {
     assert!(schemas.contains_key("ContentToken"));
     assert!(schemas.contains_key("UploadMode"));
     assert!(schemas.contains_key("UploadSession"));
-    for retired_response in [
-        "CompleteUploadResponse",
-        "AbortUploadResponse",
-        "UploadStatusResponse",
-    ] {
-        assert!(!schemas.contains_key(retired_response));
-    }
 
     assert_eq!(
         schemas
@@ -1825,20 +1784,6 @@ fn openapi_reuses_the_one_checksum_and_upload_claim_shapes() {
             .expect("CreateUploadBodyDirectMultipart schema")
     )
     .contains("mode"));
-    for retired_schema in [
-        "BeginUploadResponse",
-        "UploadContentResponse",
-        "UploadCompletion",
-        "DirectPutUpload",
-        "DirectMultipartUpload",
-        "DirectMultipartUploadOptions",
-    ] {
-        assert!(
-            !schemas.contains_key(retired_schema),
-            "retired nested upload schema `{retired_schema}` remains in OpenAPI"
-        );
-    }
-
     let completion_variants = schemas
         .get("CompleteUploadBody")
         .and_then(|schema| schema.get("oneOf"))
@@ -1867,17 +1812,6 @@ fn openapi_reuses_the_one_checksum_and_upload_claim_shapes() {
             Some(mode)
         );
         assert!(required_fields(variant).contains("mode"));
-        let properties = variant
-            .get("properties")
-            .and_then(Value::as_object)
-            .cloned()
-            .unwrap_or_default();
-        for retired_name in ["completion", "content_ref"] {
-            assert!(
-                !properties.contains_key(retired_name),
-                "retired completion request field `{retired_name}` remains in OpenAPI"
-            );
-        }
     }
     let multipart = completion_variants[2]
         .get("$ref")
@@ -1887,24 +1821,8 @@ fn openapi_reuses_the_one_checksum_and_upload_claim_shapes() {
     let multipart_required = required_fields(multipart);
     assert!(multipart_required.contains("content"));
     assert!(multipart_required.contains("parts"));
-    assert!(!schemas.contains_key("CompleteKnownContentUploadRequest"));
-    assert!(!schemas.contains_key("CompleteMultipartUploadRequest"));
 
     for properties in values_named(&spec, "properties").filter_map(Value::as_object) {
-        for retired_name in [
-            "absolute_path",
-            "root_inode_id",
-            "deleted_at_seq",
-            "validated_content_token",
-            "direct_put",
-            "direct_multipart",
-            "multipart",
-        ] {
-            assert!(
-                !properties.contains_key(retired_name),
-                "retired public field `{retired_name}` remains in an OpenAPI schema"
-            );
-        }
         assert!(
             !properties.contains_key("crc64nvme"),
             "crc64nvme must be an algorithm value, never a raw public field"

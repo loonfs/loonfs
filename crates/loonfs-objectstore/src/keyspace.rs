@@ -125,10 +125,7 @@ mod tests {
             Some(hint_key)
         );
         assert_eq!(
-            unscope_listed_key(
-                Some("tenant-a"),
-                "tenant-b/namespaces/ns-1/control/head.json"
-            ),
+            unscope_listed_key(Some("tenant-a"), "tenant-b/namespaces/ns-1/hint.json"),
             None
         );
     }

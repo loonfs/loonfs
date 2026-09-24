@@ -170,15 +170,14 @@ mod tests {
             "namespaces/docs/extensions/grep/hint.json/extra",
             "namespaces/docs/extensions/grep/hint.json.tmp",
             "namespaces/docs/extensions/grep/manifests/",
-            "namespaces/docs/extensions/grep/manifests/not-a-digest.manifest.json",
+            "namespaces/docs/extensions/grep/manifests/not-a-number.json",
             "namespaces/docs/extensions/grep/segments/",
             "namespaces/docs/extensions/grep/segments/idx_00000000000000000000000000000001.sst",
             "namespaces/docs/extensions/grep/segments/not-an-index-id.sst.zst",
             "namespaces/docs/extensions/grep/segments/idx_00000000000000000000000000000001.sst.zst.tmp",
             "namespaces/docs/extensions/grep/segments/idx_00000000000000000000000000000001.sst.zst/extra",
             "namespaces/docs/extensions/grep/other/object",
-            "grep/v1/namespaces/docs/hint.json",
-            "namespaces/docs/metadata/hint.json",
+            "namespaces/docs/hint.json",
         ];
 
         for key in rejected {

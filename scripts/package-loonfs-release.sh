@@ -93,7 +93,35 @@ archive_tmp=$(mktemp "$artifact_dir/.${archive_name}.XXXXXX")
 archive_path="$artifact_dir/$archive_name"
 
 cp "$binary_path" "$stage_dir/loonfs"
-cp "$repo_root/README.md" "$stage_dir/README.md"
+python3 - "$repo_root/README.md" "$stage_dir/README.md" "$version" <<'PY'
+import pathlib
+import re
+import sys
+from urllib.parse import urljoin, urlsplit
+
+source, destination, version = sys.argv[1:]
+base = f"https://github.com/loonfs/loonfs/blob/v{version}/"
+readme = pathlib.Path(source).read_text()
+readme = re.sub(r"<picture\b[^>]*>.*?</picture>", "", readme, flags=re.DOTALL | re.IGNORECASE)
+
+
+def rewrite_link(match):
+    prefix, target = match.groups()
+    if urlsplit(target).scheme or target.startswith("//"):
+        return match.group(0)
+    if target.startswith("#"):
+        target = "README.md" + target
+    return prefix + urljoin(base, target)
+
+
+for pattern in [
+    r"(!?\[[^\]\n]*\]\(\s*<?)([^>\s)]+)",
+    r"(?m)^(\s{0,3}\[[^\]\n]+\]:\s*<?)([^>\s]+)",
+    r'''(\b(?:href|src)\s*=\s*["'])([^"']+)''',
+]:
+    readme = re.sub(pattern, rewrite_link, readme, flags=re.IGNORECASE)
+pathlib.Path(destination).write_text(readme)
+PY
 cp "$repo_root/LICENSE" "$stage_dir/LICENSE"
 printf '%s\n' "$version" > "$stage_dir/VERSION"
 

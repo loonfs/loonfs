@@ -829,23 +829,12 @@ mod completion_body_tests {
 
     #[test]
     fn completion_body_decoder_rejects_unknown_fields_and_trailing_data() {
-        for (body, field) in [
-            (
-                r#"{"mode":"service_proxied","completion":"content_ref"}"#,
-                "completion",
-            ),
-            (
-                r#"{"mode":"service_proxied","content_ref":{}}"#,
-                "content_ref",
-            ),
-        ] {
-            let error = decode_completion_body(UploadMode::ServiceProxied, body.as_bytes())
-                .expect_err("retired completion field");
-            assert!(
-                error.contains(&format!("unknown field `{field}`")),
-                "wrong error for {field}: {error}"
-            );
-        }
+        let error = decode_completion_body(
+            UploadMode::ServiceProxied,
+            br#"{"mode":"service_proxied","unknown_field":true}"#,
+        )
+        .expect_err("unknown completion field");
+        assert!(error.contains("unknown field `unknown_field`"), "{error}");
 
         let error = decode_completion_body(
             UploadMode::ServiceProxied,

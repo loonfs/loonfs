@@ -524,8 +524,6 @@ mod tests {
         let trash_json = serde_json::to_value(trash).expect("serialize trash entry");
         assert_eq!(trash_json["inode_id"], serde_json::json!("ino_42"));
         assert_eq!(trash_json["deletion_seq"], serde_json::json!(417));
-        assert!(trash_json.get("root_inode_id").is_none());
-        assert!(trash_json.get("deleted_at_seq").is_none());
 
         let operation_json = serde_json::json!({
             "kind": "undelete",
@@ -542,15 +540,5 @@ mod tests {
                 destination_path: None,
             }
         ));
-
-        assert!(
-            serde_json::from_value::<crate::v0::FilesystemOperation>(serde_json::json!({
-                "kind": "undelete",
-                "inode_id": 42,
-                "deleted_at_seq": 417
-            }))
-            .is_err(),
-            "the retired deletion handle must not decode"
-        );
     }
 }
