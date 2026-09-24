@@ -1338,6 +1338,15 @@ async fn gc_preserves_unflushed_data_then_the_current_manifest_tombstone() {
         .await
         .expect("current tombstone");
     let mut expected = vec![hint(&namespace_id), current.object_key.clone()];
+    expected.extend(
+        current
+            .envelope
+            .payload()
+            .runs
+            .iter()
+            .flat_map(|run| &run.segments)
+            .map(loonfs_objectstore::keys::metadata_segment_object_key),
+    );
     expected.sort();
     assert_eq!(namespace_keys(&store, &namespace_id).await, expected);
     assert!(store

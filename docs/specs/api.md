@@ -1155,7 +1155,7 @@ that reason, and the fields sum to the total:
 Retention is counted per candidate examined, not per object in the
 namespace, so one object two passes both examine is counted by each.
 
-Current active manifests and pinned manifests protect their metadata segments. A current tombstone protects only itself. An unreferenced object becomes eligible for collection after its
+Current manifests, active or deleted, and pinned manifests protect their metadata segments. An unreferenced object becomes eligible for collection after its
 own provider timestamp is at least `grace_window_ms` old. Metadata segments
 use the separate `UNREFERENCED_SEGMENT_MIN_AGE_MS` age gate and must be
 strictly older than that bound. A live namespace

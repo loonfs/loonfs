@@ -40,6 +40,25 @@ fn administrator_grants(administrator: &str) -> AccessGrants {
     .expect("grants")
 }
 
+/// Runs one collection pass on `namespace_id` at a clock far enough ahead
+/// that every unreferenced segment is past its age gate.
+async fn collect_aged_segments(store: &RecordingStore<LocalFsStore>, namespace_id: &NamespaceId) {
+    let now_ms = loonfs::current_time_ms().expect("wall clock")
+        + 2 * loonfs_core::limits::UNREFERENCED_SEGMENT_MIN_AGE_MS
+        + 2 * loonfs::GcConfig::default().grace_window_ms;
+    loonfs_core::gc_namespace(
+        store,
+        namespace_id,
+        &loonfs::GcConfig::default(),
+        &loonfs_core::MutationContext {
+            writer_id: loonfs_api::WriterId::parse("import-access-gc").expect("writer id"),
+            now_ms,
+        },
+    )
+    .await
+    .expect("garbage collection");
+}
+
 async fn open_writer() -> (
     tempfile::TempDir,
     Arc<RecordingStore<LocalFsStore>>,
@@ -320,6 +339,16 @@ async fn deleted_owner_import_uses_updated_access_state_in_the_surviving_head() 
     create_namespace(&writer, &source, acl("administrator")).await;
     create_namespace(&writer, &destination, NamespaceAccess::unrestricted()).await;
     let content_ref = publish_inline(&writer, &source).await;
+    writer
+        .fork_namespace(
+            &source,
+            &fork,
+            ForkNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("fork");
+    // The replacement lands after the fork, so only the source's final runs
+    // carry it; the fork keeps the administrator it inherited.
     let mut access = UpdateAccessOptions::new(
         loonfs_test_support::test_actor(),
         administrator_grants("replacement"),
@@ -330,21 +359,13 @@ async fn deleted_owner_import_uses_updated_access_state_in_the_surviving_head() 
         .await
         .expect("replace administrator");
     writer
-        .fork_namespace(
-            &source,
-            &fork,
-            ForkNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
-        .await
-        .expect("fork");
-    writer
         .delete_namespace(&source, DeleteNamespaceOptions::default())
         .await
         .expect("delete source");
     assert_eq!(
         writer
             .reader()
-            .as_subject(subject("replacement"))
+            .as_subject(subject("administrator"))
             .pin_namespace(&fork)
             .await
             .expect("pin fork")
@@ -353,16 +374,26 @@ async fn deleted_owner_import_uses_updated_access_state_in_the_surviving_head() 
             .expect("fork published the inherited reference"),
         b"private inline bytes"
     );
+    // Only the tombstone names the runs holding the replacement. A pass past
+    // the age gate must leave them, and a cold runtime must find them.
+    collect_aged_segments(recording.as_ref(), &source).await;
+    let store: SharedObjectStore = recording.clone();
+    let importer = FsWriter::builder_with_store(store)
+        .writer_id("content-ref-import-access-cold")
+        .min_publish_interval_ms(0)
+        .build()
+        .await
+        .expect("cold writer");
 
     recording.reset();
-    let error = writer
+    let error = importer
         .as_subject(subject("administrator"))
         .prepare_content_ref(&destination, content_ref.clone())
         .await
         .expect_err("former administrator is refused");
     assert_forbidden_without_writes(recording.as_ref(), error);
 
-    let prepared = writer
+    let prepared = importer
         .as_subject(subject("replacement"))
         .prepare_content_ref(&destination, content_ref.clone())
         .await

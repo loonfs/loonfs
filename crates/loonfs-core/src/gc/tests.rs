@@ -287,7 +287,7 @@ async fn read_upload_session<S: ObjectStore + ?Sized>(
 }
 
 #[tokio::test]
-async fn deleted_namespace_keeps_its_tombstone_and_collects_unpinned_segments() {
+async fn deleted_namespace_keeps_its_tombstone_and_segments() {
     let temp_dir = tempdir().expect("tempdir");
     let store = RecordingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
@@ -347,7 +347,7 @@ async fn deleted_namespace_keeps_its_tombstone_and_collects_unpinned_segments() 
         report.deleted_checkpoints_by_owner,
         loonfs_api::DeletedCheckpointsByOwner::default()
     );
-    assert!(report.deleted.metadata_segments > 0);
+    assert_eq!(report.deleted.metadata_segments, 0);
     assert!(report.deleted.manifests >= 1);
     assert_eq!(
         report.deleted.retired_content_objects,
@@ -388,11 +388,24 @@ async fn deleted_namespace_keeps_its_tombstone_and_collects_unpinned_segments() 
         .await
         .expect("tombstone");
     assert!(current.envelope.payload().status.is_deleted());
-    assert!(store
-        .list_prefix(&metadata_segment_prefix(&namespace_id))
-        .await
-        .expect("collected segments")
-        .is_empty());
+    let rooted_segments = current
+        .envelope
+        .payload()
+        .runs
+        .iter()
+        .flat_map(|run| &run.segments)
+        .map(loonfs_objectstore::keys::metadata_segment_object_key)
+        .collect::<BTreeSet<_>>();
+    assert!(!rooted_segments.is_empty());
+    assert_eq!(
+        store
+            .list_prefix(&metadata_segment_prefix(&namespace_id))
+            .await
+            .expect("rooted segments")
+            .into_iter()
+            .collect::<BTreeSet<_>>(),
+        rooted_segments
+    );
     assert_eq!(current.envelope.payload().activity, final_activity);
 
     assert!(store

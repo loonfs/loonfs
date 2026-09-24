@@ -724,7 +724,7 @@ Deletion uses the acquired writer epoch. After admitted commits finish, it folds
 
 An ordinary operation that observes deletion returns `namespace_deleted`. A cached reader can still use its active view until the next manifest revalidation is due. Deletion does not immediately remove content.
 
-The tombstone protects only itself. It protects no current WAL or metadata segments. Pins still protect their referenced manifests and segments. The tombstone and hint remain after content reclamation. A separate purge operation is outside this specification.
+The tombstone protects its runs like any current manifest, so the final metadata stays readable and an import from a deleted owner is authorized against it. Every WAL object of a deleted namespace is folded, so none is required. Pins still protect their referenced manifests and segments. The tombstone, hint, and rooted runs remain after content reclamation. A separate purge operation is outside this specification.
 
 ### 9.5 Retirement
 
