@@ -22,8 +22,7 @@ pub use self::queries::{ResolvedVisiblePath, VisiblePathError};
 pub use self::rows::MetadataState;
 pub use loonfs_api::wire::manifest::{
     AccessRevisionRecord, AttributesRevisionRecord, CommitReceiptRecord, ContentPublicationRecord,
-    DirentryBindRecord, DirentryUnbindRecord, InodeRecord, RevisionRecord, SubtreeTombstoneRecord,
-    TombstoneRowAction,
+    DirentryBindingRecord, InodeRecord, RevisionRecord, SubtreeTombstoneRecord, TombstoneRowAction,
 };
 
 pub(crate) use self::durable_cache::DurableVisibilityCache;
@@ -40,7 +39,6 @@ pub(crate) use self::view_session::{
     LeafRevisionPrefetch, MetadataViewSession, VisibleChildEntry,
     METADATA_VIEW_SESSION_COUNTER_FIELDS,
 };
-pub(crate) use self::visibility::{binding_generation, unbind_matches_binding, BindingIdentity};
 pub(crate) use loonfs_api::wire::manifest::ActiveDeletionRecord;
 
 #[cfg(test)]

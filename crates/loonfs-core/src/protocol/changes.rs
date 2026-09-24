@@ -1,11 +1,11 @@
 //! The change feed: committed changes after a sequence number, with each
 //! commit's durable WAL deltas mapped to semantic filesystem events.
 
-use crate::binding_generation::BindingGeneration;
 use crate::error::{CoreError, Result};
 use crate::metadata::MetadataView;
 use crate::path::read::LoadedMetadataView;
 use loonfs_api::v0::{Commit, FilesystemChange, ListChangesResponse};
+use loonfs_api::wire::manifest::DeltaPosition;
 use loonfs_api::wire::wal::{WalCommitDelta, WalCommitPayload, WalDelta};
 use loonfs_api::{ChangeSeq, EffectiveLimit, NamespaceId};
 use loonfs_objectstore::ObjectStore;
@@ -276,14 +276,16 @@ fn event_from_op_deltas(
 
 fn binding_generation(
     namespace_id: &NamespaceId,
-    bind_seq: ChangeSeq,
-    bind_delta_index: u32,
+    committed_seq: ChangeSeq,
+    delta_index: u32,
 ) -> loonfs_api::BindingGeneration {
-    BindingGeneration {
-        bind_seq,
-        bind_delta_index,
-    }
-    .encode(namespace_id)
+    crate::binding_generation::encode(
+        DeltaPosition {
+            seq: committed_seq,
+            delta_index,
+        },
+        namespace_id,
+    )
 }
 
 #[cfg(test)]

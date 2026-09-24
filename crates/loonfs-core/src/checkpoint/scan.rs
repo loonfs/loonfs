@@ -51,6 +51,7 @@ pub(crate) struct VerifiedMetadataSegments<'a, S: ObjectStore + ?Sized> {
     pub(super) block_memo: SessionBlockMemo,
 }
 
+#[cfg(test)]
 impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
     pub(super) fn from_runs(
         store: &'a S,

@@ -74,11 +74,7 @@ fn assert_row_categories_equal(overlay: &MetadataState, replayed: &MetadataState
         replayed.direntry_binds(),
         "direntry bind rows diverged"
     );
-    assert_eq!(
-        overlay.direntry_unbinds(),
-        replayed.direntry_unbinds(),
-        "direntry unbind rows diverged"
-    );
+
     assert_eq!(
         overlay.revisions(),
         replayed.revisions(),
@@ -137,8 +133,10 @@ fn binding(
         name_key: NameKey::parse(name_key).expect("valid name key"),
         display_name: loonfs_api::DisplayName::parse(display_name).expect("valid display name"),
         child_inode_id: InodeId(child),
-        bind_seq: ChangeSeq(bind_seq),
-        bind_delta_index,
+        position: loonfs_api::wire::manifest::DeltaPosition {
+            seq: ChangeSeq(bind_seq),
+            delta_index: bind_delta_index,
+        },
     }
 }
 
@@ -481,14 +479,7 @@ fn overlays_across_commits_match_accumulated_wal_replay() {
         replayed.direntry_binds(),
         "direntry bind rows diverged"
     );
-    assert_eq!(
-        concat(
-            first_overlay.direntry_unbinds(),
-            second_overlay.direntry_unbinds()
-        ),
-        replayed.direntry_unbinds(),
-        "direntry unbind rows diverged"
-    );
+
     assert_eq!(
         concat(first_overlay.revisions(), second_overlay.revisions()),
         replayed.revisions(),

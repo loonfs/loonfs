@@ -7,8 +7,8 @@
 use crate::error::CoreError;
 use crate::metadata::{
     AccessRevisionRecord, ActiveDeletionRecord, AttributesRevisionRecord, CommitReceiptRecord,
-    ContentPublicationRecord, DirentryBindRecord, DirentryUnbindRecord, InodeRecord,
-    RevisionRecord, SubtreeTombstoneRecord,
+    ContentPublicationRecord, DirentryBindingRecord, InodeRecord, RevisionRecord,
+    SubtreeTombstoneRecord,
 };
 use loonfs_api::wire::manifest::MetadataRow;
 use loonfs_api::wire::wal::WalCommitPayload;
@@ -29,21 +29,12 @@ pub(crate) fn inode_from_manifest_row(row: MetadataRow) -> Result<InodeRecord, C
     }
 }
 
-pub(crate) fn direntry_bind_from_manifest_row(
+pub(crate) fn direntry_binding_from_manifest_row(
     row: MetadataRow,
-) -> Result<DirentryBindRecord, CoreError> {
+) -> Result<DirentryBindingRecord, CoreError> {
     match row {
-        MetadataRow::DirentryBind(record) => Ok(record),
-        other => Err(foreign_row("direntry_bind", &other)),
-    }
-}
-
-pub(crate) fn direntry_unbind_from_manifest_row(
-    row: MetadataRow,
-) -> Result<DirentryUnbindRecord, CoreError> {
-    match row {
-        MetadataRow::DirentryUnbind(record) => Ok(record),
-        other => Err(foreign_row("direntry_unbind", &other)),
+        MetadataRow::DirentryBinding(record) => Ok(record),
+        other => Err(foreign_row("direntry_binding", &other)),
     }
 }
 
@@ -122,7 +113,7 @@ pub(crate) fn access_revision_from_manifest_row(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use loonfs_api::wire::manifest::{TombstoneGeneration, TombstoneRowAction};
+    use loonfs_api::wire::manifest::{DeltaPosition, TombstoneRowAction};
     use loonfs_api::{ChangeSeq, CommitId, InodeId};
 
     fn foreign() -> MetadataRow {
@@ -138,24 +129,23 @@ mod tests {
 
     #[test]
     fn wrong_kind_rows_are_namespace_corruption() {
-        let error =
-            direntry_bind_from_manifest_row(foreign()).expect_err("foreign row must be rejected");
+        let error = direntry_binding_from_manifest_row(foreign())
+            .expect_err("foreign row must be rejected");
         assert!(
             matches!(&error, CoreError::NamespaceCorrupt(_)),
             "{error:?}"
         );
         let message = error.to_string();
-        assert!(message.contains("`direntry_bind`"), "{message}");
+        assert!(message.contains("`direntry_binding`"), "{message}");
         assert!(message.contains("inode-00000000000000000007"), "{message}");
 
-        assert!(direntry_unbind_from_manifest_row(foreign()).is_err());
         assert!(revision_from_manifest_row(foreign()).is_err());
         assert!(tombstone_from_manifest_row(foreign()).is_err());
         assert!(commit_receipt_from_manifest_row(foreign()).is_err());
         assert!(attributes_revision_from_manifest_row(foreign()).is_err());
         let tombstone = MetadataRow::Tombstone(SubtreeTombstoneRecord {
             root_inode_id: InodeId(1),
-            generation: TombstoneGeneration {
+            generation: DeltaPosition {
                 seq: ChangeSeq(1),
                 delta_index: 0,
             },

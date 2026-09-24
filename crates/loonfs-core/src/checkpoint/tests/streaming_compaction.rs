@@ -859,20 +859,6 @@ async fn a_background_compaction_and_a_step_contained_merge_reach_the_same_rows(
         }),
         "every output segment is written to the segment directory"
     );
-    // Every reverse row the floor covers costs one point read, and no other
-    // row costs one. That is what bounds the reads a job makes.
-    let reverse_rows_at_or_below_floor = before[&ApiMetadataRowFamily::DirentryChildBinds]
-        .iter()
-        .filter(|row| {
-            matches!(row, MetadataRow::DirentryBind (crate::metadata::DirentryBindRecord { bind_seq, .. }) if *bind_seq <= frozen_floor_seq)
-        })
-        .count() as u64;
-    assert!(
-        reverse_rows_at_or_below_floor > 0,
-        "the seed must leave reverse rows the floor covers"
-    );
-    assert_eq!(result.unbind_probes, reverse_rows_at_or_below_floor);
-
     publish_streaming_compaction(&store, &namespace_id, &spec, &input_keys, &result).await;
     let compacted = group_rows_of_current_manifest(&store, &namespace_id, group).await;
 
@@ -977,7 +963,7 @@ async fn a_compaction_that_drops_nothing_fails_the_oracle() {
     else {
         panic!("nothing cancelled this job");
     };
-    assert_eq!(result.unbind_probes, 0, "a floor of zero covers no row");
+
     publish_streaming_compaction(&store, &namespace_id, &spec, &input_keys, &result).await;
 
     let compacted = group_rows_of_current_manifest(&store, &namespace_id, group).await;
@@ -1021,10 +1007,7 @@ async fn compaction_preserves_every_revision_and_publication_below_the_floor() {
             result.rows_read, result.rows_written,
             "a history rebuild drops nothing"
         );
-        assert_eq!(
-            result.unbind_probes, 0,
-            "history rebuilds do not read unbinds"
-        );
+
         publish_streaming_compaction(&store, &namespace_id, &spec, &input_keys, &result).await;
 
         assert_eq!(
@@ -1159,6 +1142,7 @@ async fn a_repeated_revision_row_key_is_refused() {
 
     let step_error = merge_group_in_step(
         &store,
+        None,
         &namespace_id,
         group,
         &input.runs,
@@ -1321,16 +1305,7 @@ fn classify_reads(reads: &[(String, u64, u64)], descriptors: &[MetadataSegmentRe
     profile
 }
 
-/// A namespace whose reverse-bind index walks the unbind keyspace out of
-/// order.
-///
-/// Files are created round-robin across many parents, so child inode ids
-/// ascend across parents rather than within one. The reverse index is keyed by
-/// child and the unbind family by parent, so reading the reverse index in its
-/// own key order jumps between parents on every row. Every file is then
-/// deleted and the floor advanced past the deletions, which is what makes each
-/// reverse row cost a probe.
-async fn seed_reverse_binds_that_jump_the_unbind_keyspace(
+async fn seed_binding_history(
     store: &LocalFsStore,
     namespace_id: &NamespaceId,
     parents: u64,
@@ -1374,8 +1349,6 @@ async fn seed_reverse_binds_that_jump_the_unbind_keyspace(
             .await
             .expect("checkpoint the deletions");
     }
-    // Small segments, so the unbind family spans many segments and a probe
-    // that jumps parents lands in a different one.
     drain_reorganization(
         store,
         namespace_id,
@@ -1399,24 +1372,12 @@ async fn seed_reverse_binds_that_jump_the_unbind_keyspace(
         .expect("checkpoint the late write");
 }
 
-/// Replaces the bindings families of the namespace's base run with `count`
-/// synthetic generations, each bound and unbound below the retention floor.
-///
-/// The point is the ordering. The reverse index is keyed by child and the
-/// unbind family by parent and name, so a generation's name is scrambled
-/// against its child id: reading the reverse index in its own order walks the
-/// unbind keyspace in a pseudo-random permutation, which is the worst case for
-/// a cache that holds a bounded slice of it. `count` must be a power of two,
-/// which makes the odd multiplier below a bijection.
-///
-/// Going through the write path for a working set this size would take hours,
-/// and the merge only ever sees durable segments, so they are built directly.
 async fn install_synthetic_bindings_base(
     store: &LocalFsStore,
     namespace_id: &NamespaceId,
     count: u64,
     rows_per_segment: NonZeroUsize,
-) -> u64 {
+) {
     assert!(
         count.is_power_of_two(),
         "the scrambling multiplier is only a permutation over a power of two"
@@ -1429,27 +1390,27 @@ async fn install_synthetic_bindings_base(
         // distinct and the name order is scattered against the child order.
         let scrambled = index.wrapping_mul(2_654_435_761) % count;
         let name = format!("g{scrambled:012}");
-        let delta = u32::try_from(index).expect("test generation counts are small");
-        binds.push(MetadataRow::DirentryBind(
-            crate::metadata::DirentryBindRecord {
+        let delta = u32::try_from(index).expect("test row counts fit in u32");
+        binds.push(MetadataRow::DirentryBinding(
+            crate::metadata::DirentryBindingRecord {
                 parent_inode_id: parent,
                 name_key: NameKey::parse(&name).expect("name key"),
-                display_name: loonfs_api::DisplayName::parse(&name).expect("display name"),
+                state: loonfs_api::wire::manifest::DirentryBindingState::Bound {
+                    display_name: loonfs_api::DisplayName::parse(&name).expect("display name"),
+                },
                 child_inode_id: InodeId(100_000 + index),
-                bind_seq: ChangeSeq(1),
-                bind_delta_index: delta,
+                committed_seq: ChangeSeq(1),
+                delta_index: delta,
             },
         ));
-        unbinds.push(MetadataRow::DirentryUnbind(
-            crate::metadata::DirentryUnbindRecord {
+        unbinds.push(MetadataRow::DirentryBinding(
+            crate::metadata::DirentryBindingRecord {
                 parent_inode_id: parent,
                 name_key: NameKey::parse(&name).expect("name key"),
-                display_name: loonfs_api::DisplayName::parse(&name).expect("display name"),
                 child_inode_id: InodeId(100_000 + index),
-                bind_seq: ChangeSeq(1),
-                bind_delta_index: delta,
-                unbind_seq: ChangeSeq(2),
-                unbind_delta_index: delta,
+                committed_seq: ChangeSeq(2),
+                delta_index: delta,
+                state: loonfs_api::wire::manifest::DirentryBindingState::Unbound,
             },
         ));
     }
@@ -1475,9 +1436,14 @@ async fn install_synthetic_bindings_base(
         .expect("the namespace has been folded into a base run");
     let base_run_no = base_run.run_no;
     let mut rows_by_family = BTreeMap::from([
-        (ApiMetadataRowFamily::DirentryBinds, binds.clone()),
-        (ApiMetadataRowFamily::DirentryChildBinds, binds),
-        (ApiMetadataRowFamily::DirentryUnbinds, unbinds),
+        (
+            ApiMetadataRowFamily::DirentryBinds,
+            [binds.clone(), unbinds.clone()].concat(),
+        ),
+        (
+            ApiMetadataRowFamily::DirentryChildBinds,
+            [binds, unbinds].concat(),
+        ),
     ]);
     let run_segments = build_manifest_segments_from_rows(
         store,
@@ -1511,28 +1477,6 @@ async fn install_synthetic_bindings_base(
     base_run
         .segments
         .extend(flatten_manifest_segments(run_segments));
-    // What the probe cache would have to hold to serve every probe without
-    // refetching: the decoded data blocks of the unbind family.
-    let mut unbind_decoded_bytes = 0u64;
-    for descriptor in payload
-        .runs
-        .iter()
-        .flat_map(|run| &run.segments)
-        .filter(|descriptor| descriptor.family == ApiMetadataRowFamily::DirentryUnbinds)
-    {
-        let index = block_fetch::load_segment_index_for_reorganization(
-            store,
-            None,
-            Some(&Default::default()),
-            descriptor,
-        )
-        .await
-        .expect("load a synthetic segment index");
-        unbind_decoded_bytes += index
-            .iter()
-            .map(|entry| u64::from(entry.block.decoded_bytes))
-            .sum::<u64>();
-    }
     super::index_parity::overwrite_manifest(
         store,
         namespace_id,
@@ -1541,7 +1485,6 @@ async fn install_synthetic_bindings_base(
             .into_envelope(),
     )
     .await;
-    unbind_decoded_bytes
 }
 
 #[tokio::test]
@@ -1549,12 +1492,12 @@ async fn a_step_contained_merge_reads_its_window_once() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let inner = LocalFsStore::new(temp_dir.path()).expect("store");
-    seed_reverse_binds_that_jump_the_unbind_keyspace(&inner, &namespace_id, 4, 2).await;
-    let generations = 4_096;
+    seed_binding_history(&inner, &namespace_id, 4, 2).await;
+    let slots = 4_096;
     install_synthetic_bindings_base(
         &inner,
         &namespace_id,
-        generations,
+        slots,
         NonZeroUsize::new(512).expect("nonzero"),
     )
     .await;
@@ -1589,15 +1532,11 @@ async fn a_step_contained_merge_reads_its_window_once() {
         .iter()
         .flat_map(|run| group_run_descriptors(run, group))
         .count();
-    let unbinds_below_floor = descriptors
-        .iter()
-        .filter(|descriptor| descriptor.family == ApiMetadataRowFamily::DirentryUnbinds)
-        .map(|descriptor| descriptor.row_count)
-        .sum::<u64>();
     let _ = store.take_reads();
 
     let merged = merge_group_in_step(
         &store,
+        None,
         &namespace_id,
         group,
         &input.runs,
@@ -1609,14 +1548,6 @@ async fn a_step_contained_merge_reads_its_window_once() {
     .expect("merge the window");
     let profile = classify_reads(&store.take_reads(), &descriptors);
 
-    assert_eq!(
-        merged.unbind_probes, 0,
-        "a step-contained merge resolves the reverse index from what it streamed"
-    );
-    assert_eq!(
-        merged.collected_unbind_generations as u64, unbinds_below_floor,
-        "the collected set holds one identity per below-floor unbind in the window, and no more"
-    );
     // One index read and one span of data reads per segment. Data blocks are
     // fetched two at a time, so a segment costs at most its block count; the
     // bound that matters is that neither follows the row count.
@@ -1632,8 +1563,7 @@ async fn a_step_contained_merge_reads_its_window_once() {
         merged.rows_read
     );
 
-    // The background job keeps the probe, because it has no budget capping
-    // what it would otherwise collect.
+    let _ = store.take_reads();
     let spec = compaction_spec_for_group(&store, &namespace_id, group).await;
     let Ok(job) = run_compaction(
         &store,
@@ -1646,14 +1576,9 @@ async fn a_step_contained_merge_reads_its_window_once() {
     else {
         panic!("nothing cancelled this job");
     };
-    assert_eq!(
-        job.unbind_probes, unbinds_below_floor,
-        "a background compaction probes once per reverse row the floor covers"
-    );
-    assert_eq!(
-        job.collected_unbind_generations, 0,
-        "and collects nothing, so its memory does not follow the group"
-    );
+    let profile = classify_reads(&store.take_reads(), &descriptors);
+    assert!(profile.requests() < job.rows_read as usize / 8);
+    assert!(job.peak_operator_rows <= 1);
 }
 
 // -------------------------------------------------------------------------
@@ -1793,13 +1718,8 @@ async fn a_cancelled_compaction_leaves_orphans_and_the_rerun_lands_where_it_woul
         panic!("nothing cancelled the re-run");
     };
     assert_eq!(
-        (result.rows_read, result.rows_written, result.unbind_probes),
-        (
-            straight_result.rows_read,
-            straight_result.rows_written,
-            straight_result.unbind_probes
-        ),
-        "a re-run must do the same work an uninterrupted job did"
+        (result.rows_read, result.rows_written),
+        (straight_result.rows_read, straight_result.rows_written)
     );
     let referenced: BTreeSet<String> = result
         .output_segments
@@ -1908,9 +1828,6 @@ async fn a_merge_keeps_its_reads_and_its_decoded_blocks_bounded() {
         result.rows_read > (rows_in_group / 2) as u64,
         "this assertion means nothing unless the job read most of the group"
     );
-    // The retention operators hold answers, not rows. The bindings operator
-    // holds one bind row until its generation's unbinds have arrived, and no
-    // other operator holds a row at all.
     assert!(
         result.peak_operator_rows <= 1,
         "a retention operator held {} rows",
@@ -1941,6 +1858,7 @@ async fn a_merge_keeps_its_reads_and_its_decoded_blocks_bounded() {
     drop(segments);
     let merged = merge_group_in_step(
         &store,
+        None,
         &namespace_id,
         group,
         &input.runs,
@@ -1990,22 +1908,9 @@ async fn one_directory_far_past_the_row_budget_streams_a_row_at_a_time() {
     // How many rows the widest directory holds, which is what the peak must
     // not follow.
     let mut rows_per_parent = BTreeMap::<InodeId, usize>::new();
-    for family in [
-        ApiMetadataRowFamily::DirentryBinds,
-        ApiMetadataRowFamily::DirentryUnbinds,
-    ] {
-        for row in &before[&family] {
-            match row {
-                MetadataRow::DirentryBind(crate::metadata::DirentryBindRecord {
-                    parent_inode_id,
-                    ..
-                })
-                | MetadataRow::DirentryUnbind(crate::metadata::DirentryUnbindRecord {
-                    parent_inode_id,
-                    ..
-                }) => *rows_per_parent.entry(*parent_inode_id).or_default() += 1,
-                _ => {}
-            }
+    for row in &before[&ApiMetadataRowFamily::DirentryBinds] {
+        if let MetadataRow::DirentryBinding(binding) = row {
+            *rows_per_parent.entry(binding.parent_inode_id).or_default() += 1;
         }
     }
     let widest = rows_per_parent
@@ -2066,10 +1971,10 @@ fn unbinds_at_or_below(
     rows: &BTreeMap<ApiMetadataRowFamily, Vec<MetadataRow>>,
     floor_seq: ChangeSeq,
 ) -> usize {
-    rows[&ApiMetadataRowFamily::DirentryUnbinds]
+    rows[&ApiMetadataRowFamily::DirentryBinds]
         .iter()
         .filter(|row| {
-            matches!(row, MetadataRow::DirentryUnbind (crate::metadata::DirentryUnbindRecord { unbind_seq, .. }) if *unbind_seq <= floor_seq)
+            matches!(row, MetadataRow::DirentryBinding(binding) if !binding.is_bound() && binding.committed_seq <= floor_seq)
         })
         .count()
 }

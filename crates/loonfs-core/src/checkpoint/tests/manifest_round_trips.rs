@@ -193,7 +193,7 @@ async fn manifest_round_trip_uses_manifest_materialization_for_mixed_namespace()
 }
 
 #[tokio::test]
-async fn manifest_round_trip_preserves_direntry_unbind_rows() {
+async fn manifest_round_trip_preserves_unbound_values() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -225,7 +225,15 @@ async fn manifest_round_trip_preserves_direntry_unbind_rows() {
     let before = load_current_projection(&store, &namespace_id)
         .await
         .expect("materialization before");
-    assert_eq!(before.metadata_state.direntry_unbinds().len(), 1);
+    assert_eq!(
+        before
+            .metadata_state
+            .direntry_binds()
+            .iter()
+            .filter(|binding| !binding.is_bound())
+            .count(),
+        1
+    );
     create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("create checkpoint");
@@ -234,8 +242,8 @@ async fn manifest_round_trip_preserves_direntry_unbind_rows() {
         .expect("materialization after");
 
     assert_eq!(
-        after.metadata_state.direntry_unbinds(),
-        before.metadata_state.direntry_unbinds()
+        after.metadata_state.direntry_binds(),
+        before.metadata_state.direntry_binds()
     );
     assert!(metadata_states_equivalent(
         &before.metadata_state,

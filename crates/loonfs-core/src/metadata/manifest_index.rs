@@ -4,17 +4,15 @@
 use super::row_decode::{
     access_revision_from_manifest_row, active_deletion_from_manifest_row,
     attributes_revision_from_manifest_row, commit_from_manifest_row,
-    commit_receipt_from_manifest_row, direntry_bind_from_manifest_row,
-    direntry_unbind_from_manifest_row, inode_from_manifest_row, revision_from_manifest_row,
-    tombstone_from_manifest_row,
+    commit_receipt_from_manifest_row, direntry_binding_from_manifest_row, inode_from_manifest_row,
+    revision_from_manifest_row, tombstone_from_manifest_row,
 };
 use crate::checkpoint::{ManifestLoadError, Readahead, VerifiedMetadataSegments};
 use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, Result};
 use crate::metadata::{
-    unbind_matches_binding, AccessRevisionRecord, ActiveDeletionRecord, AttributesRevisionRecord,
-    CommitReceiptRecord, DirentryBindRecord, DirentryUnbindRecord, InodeRecord, RevisionRecord,
-    SubtreeTombstoneRecord,
+    AccessRevisionRecord, ActiveDeletionRecord, AttributesRevisionRecord, CommitReceiptRecord,
+    DirentryBindingRecord, InodeRecord, RevisionRecord, SubtreeTombstoneRecord,
 };
 use loonfs_api::wire::manifest::lookup_keys;
 use loonfs_api::wire::manifest::{MetadataRow, MetadataRowFamily};
@@ -74,7 +72,7 @@ pub(super) async fn commits_after_page<S: ObjectStore + ?Sized>(
 
 pub(super) struct ManifestDirentryBindCandidate {
     pub(super) row_key: String,
-    pub(super) record: DirentryBindRecord,
+    pub(super) record: DirentryBindingRecord,
 }
 
 pub(super) async fn direntry_binds_for_parent_name_key_page<S: ObjectStore + ?Sized>(
@@ -106,7 +104,7 @@ pub(super) async fn direntry_binds_for_parent_name_key_page<S: ObjectStore + ?Si
         .into_iter()
         .map(|(row_key, row)| {
             Ok(ManifestDirentryBindCandidate {
-                record: direntry_bind_from_manifest_row(row)?,
+                record: direntry_binding_from_manifest_row(row)?,
                 row_key,
             })
         })
@@ -117,7 +115,7 @@ pub(super) async fn direntry_binds_for_parent_name<S: ObjectStore + ?Sized>(
     segments: &VerifiedMetadataSegments<'_, S>,
     parent_inode_id: InodeId,
     name_key: &NameKey,
-) -> Result<Vec<DirentryBindRecord>> {
+) -> Result<Vec<DirentryBindingRecord>> {
     let filter_probe = lookup_keys::direntry_bind_probe(parent_inode_id, name_key.as_str());
     let prefix = lookup_keys::direntry_bind_prefix(parent_inode_id, name_key.as_str());
     segments
@@ -130,14 +128,14 @@ pub(super) async fn direntry_binds_for_parent_name<S: ObjectStore + ?Sized>(
         .await
         .map_err(manifest_error_to_core)?
         .into_iter()
-        .map(direntry_bind_from_manifest_row)
+        .map(direntry_binding_from_manifest_row)
         .collect()
 }
 
 pub(super) async fn direntry_binds_for_child<S: ObjectStore + ?Sized>(
     segments: &VerifiedMetadataSegments<'_, S>,
     child_inode_id: InodeId,
-) -> Result<Vec<DirentryBindRecord>> {
+) -> Result<Vec<DirentryBindingRecord>> {
     let filter_probe = lookup_keys::direntry_child_probe(child_inode_id);
     let prefix = lookup_keys::direntry_child_prefix(child_inode_id);
     segments
@@ -150,84 +148,8 @@ pub(super) async fn direntry_binds_for_child<S: ObjectStore + ?Sized>(
         .await
         .map_err(manifest_error_to_core)?
         .into_iter()
-        .map(direntry_bind_from_manifest_row)
+        .map(direntry_binding_from_manifest_row)
         .collect()
-}
-
-pub(super) async fn direntry_unbinds_for_binding<S: ObjectStore + ?Sized>(
-    segments: &VerifiedMetadataSegments<'_, S>,
-    direntry: &DirentryBindRecord,
-) -> Result<Vec<DirentryUnbindRecord>> {
-    let filter_probe =
-        lookup_keys::direntry_unbind_probe(direntry.parent_inode_id, direntry.name_key.as_str());
-    let prefix = lookup_keys::direntry_unbind_binding_prefix(
-        direntry.parent_inode_id,
-        direntry.name_key.as_str(),
-        direntry.bind_seq,
-        direntry.bind_delta_index,
-    );
-    let unbinds: Vec<DirentryUnbindRecord> = segments
-        .scan_prefix_for_lookup(
-            MetadataRowFamily::DirentryUnbinds,
-            &prefix,
-            &filter_probe,
-            Readahead::Disabled,
-        )
-        .await
-        .map_err(manifest_error_to_core)?
-        .into_iter()
-        .map(direntry_unbind_from_manifest_row)
-        .collect::<Result<_>>()?;
-    Ok(unbinds
-        .into_iter()
-        .filter(|unbind| unbind_matches_binding(unbind, direntry))
-        .collect())
-}
-
-/// Every unbind row for `parent_inode_id` whose name key falls in
-/// `[first_name_key, last_name_key]`, paged internally to completeness: the
-/// caller treats absence from the result as "no unbind exists" for names in
-/// the range, so a partial scan would be a correctness bug, not a slow path.
-pub(super) async fn direntry_unbinds_for_parent_name_range<S: ObjectStore + ?Sized>(
-    segments: &VerifiedMetadataSegments<'_, S>,
-    parent_inode_id: InodeId,
-    first_name_key: &NameKey,
-    last_name_key: &NameKey,
-) -> Result<Vec<DirentryUnbindRecord>> {
-    const UNBIND_RANGE_SCAN_LIMIT: usize = 512;
-    let mut lower_bound =
-        lookup_keys::direntry_unbind_name_prefix(parent_inode_id, first_name_key.as_str());
-    let last_name_prefix =
-        lookup_keys::direntry_unbind_name_prefix(parent_inode_id, last_name_key.as_str());
-    let upper_bound = string_prefix_upper_bound(&last_name_prefix);
-
-    let mut unbinds = Vec::new();
-    loop {
-        let page = segments
-            .scan_range_page(
-                MetadataRowFamily::DirentryUnbinds,
-                &lower_bound,
-                upper_bound.as_deref(),
-                UNBIND_RANGE_SCAN_LIMIT,
-            )
-            .await
-            .map_err(manifest_error_to_core)?;
-        let page_len = page.len();
-        let last_row_key = page
-            .last()
-            .map(|row| row.row_key_for_family(MetadataRowFamily::DirentryUnbinds));
-        for row in page {
-            unbinds.push(direntry_unbind_from_manifest_row(row)?);
-        }
-        if page_len < UNBIND_RANGE_SCAN_LIMIT {
-            break;
-        }
-        let Some(last_row_key) = last_row_key else {
-            break;
-        };
-        lower_bound = lookup_keys::after_row_key(&last_row_key);
-    }
-    Ok(unbinds)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

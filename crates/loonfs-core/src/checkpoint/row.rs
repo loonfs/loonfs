@@ -30,13 +30,7 @@ pub(super) fn manifest_rows_for_family(
             .direntry_binds()
             .iter()
             .cloned()
-            .map(MetadataRow::DirentryBind)
-            .collect::<Vec<_>>(),
-        MetadataRowFamily::DirentryUnbinds => metadata_state
-            .direntry_unbinds()
-            .iter()
-            .cloned()
-            .map(MetadataRow::DirentryUnbind)
+            .map(MetadataRow::DirentryBinding)
             .collect::<Vec<_>>(),
         MetadataRowFamily::Revisions => metadata_state
             .revisions()
@@ -110,8 +104,7 @@ pub(super) fn manifest_rows_for_family_after_seq(
 pub(super) fn manifest_row_commit_seq(row: &MetadataRow) -> ChangeSeq {
     match row {
         MetadataRow::Inode(record) => record.committed_seq,
-        MetadataRow::DirentryBind(record) => record.bind_seq,
-        MetadataRow::DirentryUnbind(record) => record.unbind_seq,
+        MetadataRow::DirentryBinding(record) => record.committed_seq,
         MetadataRow::FileRevision(record) => record.committed_seq,
         MetadataRow::Tombstone(record) => record.generation.seq,
         // A removal marker belongs to the run of the undelete that produced
@@ -132,8 +125,7 @@ pub(super) fn manifest_row_commit_seq(row: &MetadataRow) -> ChangeSeq {
 pub(super) fn manifest_row_kind(row: &MetadataRow) -> &'static str {
     match row {
         MetadataRow::Inode(_) => "inode",
-        MetadataRow::DirentryBind(_) => "direntry_bind",
-        MetadataRow::DirentryUnbind(_) => "direntry_unbind",
+        MetadataRow::DirentryBinding(_) => "direntry_binding",
         MetadataRow::FileRevision(_) => "file_revision",
         MetadataRow::Tombstone(_) => "tombstone",
         MetadataRow::ActiveDeletion(_) => "active_deletion",

@@ -2,8 +2,7 @@
 //! lookups shared across a publish batch's candidates, plus the cache key
 //! types and the shared-row handle its hits return.
 
-use super::visibility::BindingIdentity;
-use super::{DirentryBindRecord, DirentryUnbindRecord, InodeRecord, SubtreeTombstoneRecord};
+use super::{DirentryBindingRecord, InodeRecord, SubtreeTombstoneRecord};
 use loonfs_api::{InodeId, NameKey};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -24,9 +23,8 @@ pub(crate) struct DurableVisibilityCache {
 #[derive(Debug, Default)]
 pub(super) struct DurableVisibilityCacheInner {
     pub(super) inodes: HashMap<InodeId, Option<InodeRecord>>,
-    pub(super) binds_for_parent_name: HashMap<ParentNameCacheKey, Arc<Vec<DirentryBindRecord>>>,
-    pub(super) binds_for_child: HashMap<InodeId, Arc<Vec<DirentryBindRecord>>>,
-    pub(super) unbinds_for_binding: HashMap<BindingIdentity, Arc<Vec<DirentryUnbindRecord>>>,
+    pub(super) binds_for_parent_name: HashMap<ParentNameCacheKey, Arc<Vec<DirentryBindingRecord>>>,
+    pub(super) binds_for_child: HashMap<InodeId, Arc<Vec<DirentryBindingRecord>>>,
     pub(super) tombstones_for_root: HashMap<InodeId, Arc<Vec<SubtreeTombstoneRecord>>>,
     hits: u64,
     misses: u64,

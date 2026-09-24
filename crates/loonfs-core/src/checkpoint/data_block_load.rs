@@ -16,9 +16,9 @@ use super::error::ManifestLoadError;
 use super::stored_block_cache::StoredMetadataBlockKind;
 use loonfs_api::wire::manifest::{
     AccessRevisionRecord, ActiveDeletionRecord, ActiveDeletionRowAction, AttributesRevisionRecord,
-    CommitReceiptRecord, ContentPublicationRecord, DeletedBinding, DirentryBindRecord,
-    DirentryUnbindRecord, InodeRecord, MetadataRow, MetadataSegmentRef, RevisionRecord,
-    SubtreeTombstoneRecord, TombstoneRowAction,
+    CommitReceiptRecord, ContentPublicationRecord, DeletedBinding, DirentryBindingRecord,
+    InodeRecord, MetadataRow, MetadataSegmentRef, RevisionRecord, SubtreeTombstoneRecord,
+    TombstoneRowAction,
 };
 use loonfs_api::wire::sst_blocks::{decode_data_block, DecodedDataBlock, SegmentIndexEntry};
 use loonfs_api::wire::wal::{WalCommitPayload, WalDelta};
@@ -333,8 +333,7 @@ impl DecodedRowWeight for MetadataRow {
     fn decoded_weight(&self) -> usize {
         match self {
             MetadataRow::Inode(record) => record.decoded_weight(),
-            MetadataRow::DirentryBind(record) => record.decoded_weight(),
-            MetadataRow::DirentryUnbind(record) => record.decoded_weight(),
+            MetadataRow::DirentryBinding(record) => record.decoded_weight(),
             MetadataRow::FileRevision(record) => record.decoded_weight(),
             MetadataRow::Tombstone(record) => record.decoded_weight(),
             MetadataRow::ActiveDeletion(record) => record.decoded_weight(),
@@ -353,15 +352,11 @@ impl DecodedRowWeight for InodeRecord {
     }
 }
 
-impl DecodedRowWeight for DirentryBindRecord {
+impl DecodedRowWeight for DirentryBindingRecord {
     fn decoded_weight(&self) -> usize {
-        ALLOCATED_ROW_OVERHEAD + self.name_key.as_str().len() + self.display_name.as_str().len()
-    }
-}
-
-impl DecodedRowWeight for DirentryUnbindRecord {
-    fn decoded_weight(&self) -> usize {
-        ALLOCATED_ROW_OVERHEAD + self.name_key.as_str().len() + self.display_name.as_str().len()
+        ALLOCATED_ROW_OVERHEAD
+            + self.name_key.as_str().len()
+            + self.display_name().map_or(0, |name| name.as_str().len())
     }
 }
 

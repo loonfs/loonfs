@@ -5,13 +5,11 @@
 //! and scan historical rows below it. Composite visibility decisions live in
 //! [`super::visibility`].
 
-use super::visibility::{
-    self, resolve_in_memory_read, unbind_matches_binding, MetadataVisibilityReads,
-};
+use super::visibility::{self, resolve_in_memory_read, MetadataVisibilityReads};
 use super::{
-    AccessRevisionRecord, DirentryBindRecord, InodeRecord, MetadataState, SubtreeTombstoneRecord,
+    AccessRevisionRecord, DirentryBindingRecord, InodeRecord, MetadataState, SubtreeTombstoneRecord,
 };
-use crate::binding_generation::BindingGeneration;
+use loonfs_api::wire::manifest::DeltaPosition;
 use loonfs_api::{AbsolutePath, ActorId, ChangeSeq, ErrorCode, InodeId, InodeKind, NameKey};
 use serde::{Deserialize, Serialize};
 use std::future::Future;
@@ -26,7 +24,7 @@ pub struct ResolvedVisiblePath {
     pub created_at_ms: u64,
     pub parent_inode_id: Option<InodeId>,
     pub display_name: String,
-    pub binding_generation: Option<BindingGeneration>,
+    pub binding_generation: Option<DeltaPosition>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
@@ -89,18 +87,16 @@ impl MetadataState {
             .cloned()
     }
 
-    /// Latest bind for `(parent, name)` at or before `base_seq`, regardless
-    /// of whether it has since been unbound.
     #[cfg(test)]
     pub(crate) fn bound_child_at_seq(
         &self,
         parent_inode_id: InodeId,
         name_key: &NameKey,
         base_seq: ChangeSeq,
-    ) -> Option<DirentryBindRecord> {
+    ) -> Option<DirentryBindingRecord> {
         read_now(
             self.reads_at_seq(base_seq)
-                .find_latest_bound_child(parent_inode_id, name_key),
+                .find_latest_slot_binding(parent_inode_id, name_key),
         )
     }
 
@@ -109,15 +105,15 @@ impl MetadataState {
         parent_inode_id: InodeId,
         name_key: &NameKey,
         base_seq: ChangeSeq,
-    ) -> Option<DirentryBindRecord> {
+    ) -> Option<DirentryBindingRecord> {
         self.direntry_binds
             .iter()
             .filter(|direntry| {
                 direntry.parent_inode_id == parent_inode_id
                     && direntry.name_key == *name_key
-                    && direntry.bind_seq <= base_seq
+                    && direntry.committed_seq <= base_seq
             })
-            .max_by_key(|direntry| (direntry.bind_seq, direntry.bind_delta_index))
+            .max_by_key(|direntry| direntry.position())
             .cloned()
     }
 
@@ -125,7 +121,7 @@ impl MetadataState {
         &self,
         child_inode_id: InodeId,
         base_seq: ChangeSeq,
-    ) -> Option<DirentryBindRecord> {
+    ) -> Option<DirentryBindingRecord> {
         read_now(
             self.reads_at_seq(base_seq)
                 .current_parent_binding_for_child(child_inode_id),
@@ -180,7 +176,7 @@ impl MetadataState {
         parent_inode_id: InodeId,
         name_key: &NameKey,
         base_seq: ChangeSeq,
-    ) -> Option<DirentryBindRecord> {
+    ) -> Option<DirentryBindingRecord> {
         read_now(visibility::visible_child(
             &mut self.reads_at_seq(base_seq),
             parent_inode_id,
@@ -203,33 +199,14 @@ impl MetadataState {
         &self,
         child_inode_id: InodeId,
         base_seq: ChangeSeq,
-    ) -> Option<DirentryBindRecord> {
+    ) -> Option<DirentryBindingRecord> {
         self.direntry_binds
             .iter()
             .filter(|direntry| {
-                direntry.child_inode_id == child_inode_id && direntry.bind_seq <= base_seq
+                direntry.child_inode_id == child_inode_id && direntry.committed_seq <= base_seq
             })
-            .max_by_key(|direntry| (direntry.bind_seq, direntry.bind_delta_index))
+            .max_by_key(|direntry| direntry.position())
             .cloned()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn is_direntry_unbound_at_seq(
-        &self,
-        direntry: &DirentryBindRecord,
-        base_seq: ChangeSeq,
-    ) -> bool {
-        read_now(self.reads_at_seq(base_seq).is_binding_unbound(direntry))
-    }
-
-    pub(super) fn is_direntry_unbound_at_seq_scan(
-        &self,
-        direntry: &DirentryBindRecord,
-        base_seq: ChangeSeq,
-    ) -> bool {
-        self.direntry_unbinds
-            .iter()
-            .any(|unbind| unbind.unbind_seq <= base_seq && unbind_matches_binding(unbind, direntry))
     }
 
     pub fn would_create_directory_cycle(

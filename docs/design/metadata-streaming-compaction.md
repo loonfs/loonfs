@@ -25,7 +25,7 @@ If an eligible prefix fits the step budgets, the bounded path executes it. Other
 
 A large backlog can require several publications. Explicit compaction performs one window per call, so a caller repeats it while it publishes. Automatic size-tiering reduces repeated base rewrites, but obsolete metadata can remain until enough newer data accumulates.
 
-A merge that starts at the group's oldest run produces a base run and can remove rows under the format's retention rules. A merge that starts above it produces a delta run and keeps every row, because an excluded older run may contain the other half of a binding or removal pair. A lone oldest delta can be promoted to establish a base.
+A merge that starts at the group's oldest run produces a base run and can remove rows under the format's retention rules. A merge that starts above it produces a delta run and keeps every row, because an excluded older run may contain versions hidden by a tombstone in the selected window. A lone oldest delta can be promoted to establish a base.
 
 ## Reading and writing incrementally
 
@@ -33,7 +33,7 @@ The merge reads sorted iterators over the selected runs and produces rows in fam
 
 The output writer closes data blocks near 64 KiB decoded, and segments near 8 MiB decoded or 65,536 rows. A final row can exceed a byte target, and one oversized row is never split. Filters and indexes also consume memory, so these targets are not a fixed-memory guarantee independent of row size.
 
-Both paths bound decoded input buffering, concurrent fetches, cached blocks, and output buffers. Family-specific retention operators hold a fixed number of fields and at most one complete row. One inode's long attribute history, or one name's many binding generations, therefore need not be held in memory as a complete group.
+Both paths bound decoded input buffering, concurrent fetches, cached blocks, and output buffers. Family-specific retention operators hold a fixed number of fields and at most one complete row. One inode's long attribute history, or one name's many binding versions, therefore need not be held in memory as a complete group.
 
 ```text
 selected immutable runs
@@ -50,21 +50,17 @@ sorted iterators -> family retention -> completed segment objects
 
 Output uses fresh IDs under `namespaces/{namespace_id}/segments/`. Published descriptors reference those objects in place. There is no copy from a staging prefix.
 
-## Resolving the child index
+## Binding retention
 
-A child-binding row is ordered by child inode, while the unbind that retires that generation is ordered by parent and name. They do not arrive together in one sorted stream. Both execution paths use the same retention rule, but they gather the required evidence differently.
+The slot and child indexes each contain bound and unbound versions. A rebuild that includes the oldest run groups rows by slot or child and retains all versions above the floor. It also retains the newest value at or below the floor when that value is bound. An unbound value is a tombstone. Only this rebuild can remove it together with the older values it hides. A rebuild above the oldest run keeps every row.
 
-A bounded merge collects below-floor unbound generation identities while it scans the forward binding and unbind rows. The child-index pass consults that set. The selected window's row and byte budgets bound its size, and it avoids an extra object read for each child row.
-
-A streaming job cannot hold a set that grows with an arbitrarily large window. It instead uses Bloom-filtered point lookups against the captured input, with a bounded decoded-block cache. This can cost additional reads, especially when the relevant unbind blocks exceed the cache and child order differs substantially from parent order.
-
-The split keeps each path's resource bound: the ordinary step reads its bounded window without an extra lookup per reverse row, while streaming execution can process a larger window without holding every generation identity.
+Binding keys order positions oldest first. The operator holds at most one floor value until the group ends or a row above the floor arrives. Both execution paths read each index as a sorted stream and apply the same rule independently.
 
 ## Validating a merge
 
 Every metadata row key identifies one logical row. Input keys must be strictly increasing within the merged family stream. A duplicate is rejected even if retention would otherwise remove it, including a duplicate split across segments or runs.
 
-The parent-and-name binding output and the child-binding output must contain equivalent bind rows. The merge compares order-independent digests before publication. This check is separate from duplicate detection: the same duplicate in both families could leave their digests equal.
+The parent-and-name binding output and the child-binding output must contain the same binding rows. The merge compares order-independent digests before publication. This check is separate from duplicate detection: the same duplicate in both families could leave their digests equal.
 
 The published manifest must also pass manifest validation ([format section 7.1](../specs/format.md#71-manifests-runs-and-segments)).
 

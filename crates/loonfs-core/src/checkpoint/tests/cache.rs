@@ -322,8 +322,9 @@ async fn segment_range_page_merges_base_and_delta_in_row_key_order() {
     let display_names = page
         .into_iter()
         .filter_map(|row| match row {
-            MetadataRow::DirentryBind(crate::metadata::DirentryBindRecord {
-                display_name, ..
+            MetadataRow::DirentryBinding(crate::metadata::DirentryBindingRecord {
+                state: loonfs_api::wire::manifest::DirentryBindingState::Bound { display_name },
+                ..
             }) => Some(display_name.as_str().to_owned()),
             _ => None,
         })
@@ -426,7 +427,7 @@ async fn lookup_skips_segments_whose_filter_rules_the_name_out() {
     let docs_inode = docs_binds
         .iter()
         .find_map(|row| match row {
-            MetadataRow::DirentryBind(crate::metadata::DirentryBindRecord {
+            MetadataRow::DirentryBinding(crate::metadata::DirentryBindingRecord {
                 child_inode_id,
                 ..
             }) => Some(*child_inode_id),

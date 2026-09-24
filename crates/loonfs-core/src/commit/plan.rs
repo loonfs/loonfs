@@ -3,7 +3,7 @@
 
 use super::CommitFingerprint;
 
-use loonfs_api::wire::manifest::TombstoneGeneration;
+use loonfs_api::wire::manifest::DeltaPosition;
 use loonfs_api::{
     AccessGrants, AccessRevisionNo, ActorId, Attributes, AttributesRevisionNo, ChangeSeq, CommitId,
     ContentRef, DisplayName, InodeId, NameKey, NamespaceId, RevisionNo, WriterEpoch,
@@ -78,8 +78,7 @@ pub(crate) struct ResolvedBinding {
     pub name_key: NameKey,
     pub display_name: DisplayName,
     pub child_inode_id: InodeId,
-    pub bind_seq: ChangeSeq,
-    pub bind_delta_index: u32,
+    pub position: DeltaPosition,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -151,7 +150,7 @@ pub(crate) enum ValidatedOp {
         name_key: NameKey,
         /// The exact deletion generation validation resolved and pinned:
         /// the active tombstone's own event coordinates.
-        target: TombstoneGeneration,
+        target: DeltaPosition,
         revoke_tombstone_delta_index: u32,
         bind_delta_index: u32,
     },

@@ -2091,7 +2091,7 @@ async fn a_merge_above_the_base_keeps_the_rows_that_shadow_it() {
     assert!(
         group
             .families()
-            .contains(&ApiMetadataRowFamily::DirentryUnbinds),
+            .contains(&ApiMetadataRowFamily::DirentryBinds),
         "this test is about the binding families, got {group:?}"
     );
     let base_rows = group_run_rows(&base_tier(&before.manifest), group.families());
@@ -2174,8 +2174,11 @@ async fn a_merge_above_the_base_keeps_the_rows_that_shadow_it() {
         "a merge above the base must be a pure rewrite"
     );
     assert!(
-        !manifest_rows_for_family(&after.metadata_state, ApiMetadataRowFamily::DirentryUnbinds)
-            .is_empty(),
+        after
+            .metadata_state
+            .direntry_binds()
+            .iter()
+            .any(|binding| !binding.is_bound()),
         "the cancelling row must survive the merge"
     );
     let projection = load_current_projection(&store, &namespace_id)
@@ -2317,7 +2320,7 @@ async fn repeated_churn_under_small_budgets_leaves_one_base_run_per_group() {
         ..MetadataLsmPolicy::default()
     };
 
-    let group = group_containing(ApiMetadataRowFamily::DirentryUnbinds);
+    let group = group_containing(ApiMetadataRowFamily::DirentryBinds);
     let mut compacted_groups = 0usize;
     for cycle in 0..4u64 {
         for file in 0..4u64 {

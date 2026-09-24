@@ -1,14 +1,8 @@
 //! Applies retention rules while rows are streamed in key order.
-//!
-//! Each operator keeps bounded state for its current key group. Reverse bind
-//! rows require point reads because binds and unbinds use different key
-//! prefixes; [`super::streaming_compaction`] handles those reads.
 
-use super::frozen_floor::{bind_survives_frozen_floor, BindingIdentity};
 use crate::error::{CoreError, Result};
 use loonfs_api::wire::manifest::{ActiveDeletionRowAction, MetadataRow, MetadataRowFamily};
 use loonfs_api::{ChangeSeq, InodeId};
-use std::collections::BTreeSet;
 
 /// One row a retention operator kept, and the family it belongs to.
 pub(super) type KeptRow = (MetadataRowFamily, MetadataRow);
@@ -25,11 +19,8 @@ pub(super) enum RetentionRule {
     WholeState,
     /// Retain active deletions and remove completed deletion pairs.
     ActiveDeletions,
-    /// A bind and the unbinds of its own generation, decided together.
-    ForwardBindings,
-    /// Reverse bind rows, each decided by a point read into the snapshot.
-    /// The operator holds nothing; the merge does the reading.
-    ReverseBindProbe,
+    /// Retains slot or child values above the floor and its bound value at the floor.
+    Bindings,
 }
 
 impl RetentionRule {
@@ -41,10 +32,7 @@ impl RetentionRule {
             Self::ActiveDeletions => {
                 RetentionOperator::ActiveDeletions(ActiveDeletionRetention::default())
             }
-            Self::ForwardBindings => RetentionOperator::ForwardBindings(Box::default()),
-            // The merge checks reverse bind rows against its snapshot, so
-            // this operator has no state to maintain.
-            Self::ReverseBindProbe => RetentionOperator::KeepEveryRow,
+            Self::Bindings => RetentionOperator::Bindings(BindingRetention::default()),
         }
     }
 }
@@ -56,7 +44,7 @@ pub(super) enum RetentionOperator {
     CommitHistory,
     WholeState(WholeStateRetention),
     ActiveDeletions(ActiveDeletionRetention),
-    ForwardBindings(Box<BindingRetention>),
+    Bindings(BindingRetention),
 }
 
 impl RetentionOperator {
@@ -73,13 +61,28 @@ impl RetentionOperator {
             Self::CommitHistory => keep_commit_history_row(row, floor_seq),
             Self::WholeState(state) => state.push(family, row, floor_seq)?,
             Self::ActiveDeletions(state) => state.push(row),
-            Self::ForwardBindings(state) => state.push(row, floor_seq),
+            Self::Bindings(state) => state.push(family, row, floor_seq)?,
         };
         Ok(kept.map(|row| (family, row)))
     }
 
+    pub(super) fn take_floor_value_before(
+        &mut self,
+        row: &MetadataRow,
+        floor_seq: ChangeSeq,
+    ) -> Option<KeptRow> {
+        match (self, row) {
+            (Self::Bindings(state), MetadataRow::DirentryBinding(binding))
+                if binding.committed_seq > floor_seq =>
+            {
+                state.close_group()
+            }
+            _ => None,
+        }
+    }
+
     /// Finishes the current key group and returns any retained row.
-    pub(super) fn close_group(&mut self, floor_seq: ChangeSeq) -> Result<Option<KeptRow>> {
+    pub(super) fn close_group(&mut self, _floor_seq: ChangeSeq) -> Result<Option<KeptRow>> {
         match self {
             Self::KeepEveryRow | Self::CommitHistory => Ok(None),
             Self::WholeState(state) => {
@@ -90,9 +93,7 @@ impl RetentionOperator {
                 state.close_group();
                 Ok(None)
             }
-            Self::ForwardBindings(state) => Ok(state
-                .close_group(floor_seq)?
-                .map(|row| (MetadataRowFamily::DirentryBinds, row))),
+            Self::Bindings(state) => Ok(state.close_group()),
         }
     }
 
@@ -103,7 +104,7 @@ impl RetentionOperator {
             | Self::CommitHistory
             | Self::WholeState(_)
             | Self::ActiveDeletions(_) => 0,
-            Self::ForwardBindings(state) => usize::from(state.held_bind.is_some()),
+            Self::Bindings(state) => usize::from(state.at_floor.is_some()),
         }
     }
 }
@@ -228,121 +229,38 @@ impl ActiveDeletionRetention {
     }
 }
 
-/// Processes one binding generation at a time. Each locality group contains
-/// one bind and the unbind rows that can retire it. The bind sorts first and
-/// is retained or removed when the group ends.
-///
-/// The one thing that outlives a generation is the slot invariant below: at
-/// or below the floor only the latest bind in a slot may stand un-retired, and
-/// that is a property of the whole parent-and-name slot rather than of one
-/// generation. It costs one generation identity, not one row per generation.
 #[derive(Debug, Default)]
 pub(super) struct BindingRetention {
-    /// The bind row of the generation being read, held until its unbinds have
-    /// arrived. One row: a generation has one bind.
-    held_bind: Option<MetadataRow>,
-    /// The generations this group's unbinds retired at or below the floor.
-    /// One entry at most — every unbind in the group names the same
-    /// generation — and it is the set both bind families are judged against, so
-    /// bind families reach `bind_survives_frozen_floor` by the same route.
-    unbound_at_floor: BTreeSet<BindingIdentity>,
-    /// The one bind at or below the floor in this slot that nothing retired,
-    /// or `None` while the slot has none. A second one means the first was
-    /// superseded without an unbind.
-    unretired_at_floor: Option<BindingIdentity>,
+    at_floor: Option<KeptRow>,
 }
 
 impl BindingRetention {
-    fn push(&mut self, row: MetadataRow, floor_seq: ChangeSeq) -> Option<MetadataRow> {
-        match &row {
-            MetadataRow::DirentryUnbind(crate::metadata::DirentryUnbindRecord {
-                parent_inode_id,
-                name_key,
-                bind_seq,
-                bind_delta_index,
-                unbind_seq,
-                ..
-            }) => {
-                if *unbind_seq > floor_seq {
-                    return Some(row);
-                }
-                // A spent marker: the floor covers it, so nothing can observe
-                // the binding it retired, and it retires that binding for the
-                // bind row held above.
-                self.unbound_at_floor.insert(BindingIdentity {
-                    parent_inode_id: *parent_inode_id,
-                    name_key: name_key.clone(),
-                    bind_seq: *bind_seq,
-                    bind_delta_index: *bind_delta_index,
-                });
-                None
-            }
-            // A bind above the floor survives whatever retired it later, so
-            // it needs no verdict and is written straight through.
-            MetadataRow::DirentryBind(crate::metadata::DirentryBindRecord { bind_seq, .. })
-                if *bind_seq > floor_seq =>
-            {
-                Some(row)
-            }
-            MetadataRow::DirentryBind(crate::metadata::DirentryBindRecord { .. }) => {
-                self.held_bind = Some(row);
-                None
-            }
-            _ => Some(row),
-        }
-    }
-
-    fn close_group(&mut self, floor_seq: ChangeSeq) -> Result<Option<MetadataRow>> {
-        let unbound_at_floor = std::mem::take(&mut self.unbound_at_floor);
-        let Some(row) = self.held_bind.take() else {
-            return Ok(None);
-        };
-        let MetadataRow::DirentryBind(crate::metadata::DirentryBindRecord {
-            parent_inode_id,
-            name_key,
-            bind_seq,
-            bind_delta_index,
-            ..
-        }) = &row
-        else {
+    fn push(
+        &mut self,
+        family: MetadataRowFamily,
+        row: MetadataRow,
+        floor_seq: ChangeSeq,
+    ) -> Result<Option<MetadataRow>> {
+        let MetadataRow::DirentryBinding(binding) = &row else {
             return Ok(Some(row));
         };
-        let generation = BindingIdentity {
-            parent_inode_id: *parent_inode_id,
-            name_key: name_key.clone(),
-            bind_seq: *bind_seq,
-            bind_delta_index: *bind_delta_index,
-        };
-        self.check_the_slot_invariant(&generation)?;
-        let survives = bind_survives_frozen_floor(&row, floor_seq, &unbound_at_floor);
-        self.unretired_at_floor = survives.then_some(generation);
-        Ok(survives.then_some(row))
+        if binding.committed_seq > floor_seq {
+            return Ok(Some(row));
+        }
+        if binding.is_bound() {
+            if let Some((_, MetadataRow::DirentryBinding(previous))) = &self.at_floor {
+                return Err(CoreError::NamespaceCorrupt(format!(
+                    "binding at seq `{}` delta `{}` is superseded at or below the retention floor without an unbound version",
+                    previous.committed_seq, previous.delta_index
+                )));
+            }
+        }
+        self.at_floor = binding.is_bound().then_some((family, row));
+        Ok(None)
     }
 
-    /// Verifies the writer invariant required for binding cleanup.
-    ///
-    /// Superseding a bind also writes its unbind. Therefore every non-current
-    /// bind at or below the retention floor must have a matching unbind.
-    /// Generations arrive in ascending order, so a second unretired bind in
-    /// the same slot proves that the earlier bind was superseded without an
-    /// unbind. Cleanup is rejected when that occurs.
-    fn check_the_slot_invariant(&mut self, generation: &BindingIdentity) -> Result<()> {
-        let Some(previous) = self.unretired_at_floor.take() else {
-            return Ok(());
-        };
-        if previous.parent_inode_id != generation.parent_inode_id
-            || previous.name_key != generation.name_key
-        {
-            // A different parent-and-name slot: the previous slot's latest
-            // bind was its latest, which is exactly what the invariant
-            // allows.
-            return Ok(());
-        }
-        Err(CoreError::NamespaceCorrupt(format!(
-            "bind at seq `{}` delta {} for parent `{}` is superseded at or below the retention \
-             floor without an unbind; refusing to drop rows",
-            previous.bind_seq, previous.bind_delta_index, previous.parent_inode_id
-        )))
+    fn close_group(&mut self) -> Option<KeptRow> {
+        self.at_floor.take()
     }
 }
 
@@ -390,26 +308,26 @@ mod tests {
     }
 
     fn bind_row(parent: u64, name: &str, bind_seq: u64) -> MetadataRow {
-        MetadataRow::DirentryBind(crate::metadata::DirentryBindRecord {
+        MetadataRow::DirentryBinding(crate::metadata::DirentryBindingRecord {
             parent_inode_id: InodeId(parent),
             name_key: NameKey::parse(name).expect("name key"),
-            display_name: DisplayName::parse(name).expect("display name"),
+            state: loonfs_api::wire::manifest::DirentryBindingState::Bound {
+                display_name: DisplayName::parse(name).expect("display name"),
+            },
             child_inode_id: InodeId(42),
-            bind_seq: ChangeSeq(bind_seq),
-            bind_delta_index: 0,
+            committed_seq: ChangeSeq(bind_seq),
+            delta_index: 0,
         })
     }
 
-    fn unbind_row(parent: u64, name: &str, bind_seq: u64, unbind_seq: u64) -> MetadataRow {
-        MetadataRow::DirentryUnbind(crate::metadata::DirentryUnbindRecord {
+    fn unbind_row(parent: u64, name: &str, unbind_seq: u64) -> MetadataRow {
+        MetadataRow::DirentryBinding(crate::metadata::DirentryBindingRecord {
             parent_inode_id: InodeId(parent),
             name_key: NameKey::parse(name).expect("name key"),
-            display_name: DisplayName::parse(name).expect("display name"),
             child_inode_id: InodeId(42),
-            bind_seq: ChangeSeq(bind_seq),
-            bind_delta_index: 0,
-            unbind_seq: ChangeSeq(unbind_seq),
-            unbind_delta_index: 0,
+            committed_seq: ChangeSeq(unbind_seq),
+            delta_index: 0,
+            state: loonfs_api::wire::manifest::DirentryBindingState::Unbound,
         })
     }
 
@@ -507,25 +425,23 @@ mod tests {
     }
 
     #[test]
-    fn one_name_slot_of_many_generations_holds_at_most_one_row() {
-        let mut operator = RetentionRule::ForwardBindings.operator();
+    fn one_slot_of_many_versions_holds_at_most_one_row() {
+        let mut operator = RetentionRule::Bindings.operator();
         let mut kept = Vec::new();
         let mut peak = 0usize;
-        for generation in 1..=100_000u64 {
-            // Every generation is bound and then unbound below the floor,
-            // which is the shape a repeatedly recreated name leaves.
+        for position in 1..=100_000u64 {
             operator
                 .push(
                     MetadataRowFamily::DirentryBinds,
-                    bind_row(7, "hot.txt", generation),
+                    bind_row(7, "hot.txt", position * 2 - 1),
                     ChangeSeq(200_000),
                 )
                 .expect("push");
             peak = peak.max(operator.held_rows());
             operator
                 .push(
-                    MetadataRowFamily::DirentryUnbinds,
-                    unbind_row(7, "hot.txt", generation, generation + 1),
+                    MetadataRowFamily::DirentryBinds,
+                    unbind_row(7, "hot.txt", position * 2),
                     ChangeSeq(200_000),
                 )
                 .expect("push");
@@ -535,15 +451,12 @@ mod tests {
             }
         }
         assert_eq!(peak, 1, "the operator holds one bind row and no more");
-        assert!(
-            kept.is_empty(),
-            "every generation was unbound below the floor, so every bind goes"
-        );
+        assert!(kept.is_empty(), "every floor value is unbound");
     }
 
     #[test]
     fn a_second_unretired_bind_in_one_slot_is_refused() {
-        let mut operator = RetentionRule::ForwardBindings.operator();
+        let mut operator = RetentionRule::Bindings.operator();
         operator
             .push(
                 MetadataRowFamily::DirentryBinds,
@@ -566,19 +479,13 @@ mod tests {
                 floor(),
             )
             .expect("push");
-        operator.close_group(floor()).expect("close");
 
-        // A second generation in that same slot with nothing retiring the
-        // first is the state the drop rule may not act on.
-        operator
+        let error = operator
             .push(
                 MetadataRowFamily::DirentryBinds,
                 bind_row(7, "b.txt", 12),
                 floor(),
             )
-            .expect("push");
-        let error = operator
-            .close_group(floor())
             .expect_err("a superseded bind with no unbind is refused");
         assert!(
             error.to_string().contains("seq `11`"),

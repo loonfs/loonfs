@@ -1,26 +1,20 @@
 //! At-head indexes over the in-memory metadata rows, maintained
 //! incrementally as deltas apply so head reads skip the row scans.
 
-use super::visibility::{same_binding, unbind_matches_binding, BindingIdentity};
 use super::{
     AccessRevisionRecord, AttributesRevisionRecord, CommitReceiptRecord, ContentPublicationRecord,
-    DirentryBindRecord, DirentryUnbindRecord, InodeRecord, MetadataState, RevisionRecord,
-    SubtreeTombstoneRecord, TombstoneRowAction,
+    DirentryBindingRecord, InodeRecord, MetadataState, RevisionRecord, SubtreeTombstoneRecord,
+    TombstoneRowAction,
 };
 use loonfs_api::{ChangeSeq, CommitId, InodeId, NameKey};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct MetadataIndexes {
     indexed_seq: ChangeSeq,
     inode_by_id: HashMap<InodeId, InodeRecord>,
-    active_child_by_parent_name: HashMap<(InodeId, NameKey), DirentryBindRecord>,
-    /// Latest bind ever recorded per (parent, name), kept even after the
-    /// binding is unbound. Tombstone-ancestry checks need to see dead
-    /// bindings, which the active map deliberately drops.
-    latest_bind_by_parent_name: HashMap<(InodeId, NameKey), DirentryBindRecord>,
-    active_parent_by_child: HashMap<InodeId, DirentryBindRecord>,
-    unbound_binding_keys: HashSet<BindingIdentity>,
+    latest_bind_by_parent_name: HashMap<(InodeId, NameKey), DirentryBindingRecord>,
+    latest_binding_by_child: HashMap<InodeId, DirentryBindingRecord>,
     tombstone_by_root: HashMap<InodeId, SubtreeTombstoneRecord>,
     commit_receipt_by_id: HashMap<CommitId, CommitReceiptRecord>,
     content_publication_by_id: HashMap<loonfs_api::ContentId, ChangeSeq>,
@@ -31,10 +25,8 @@ impl Default for MetadataIndexes {
         Self {
             indexed_seq: ChangeSeq(0),
             inode_by_id: HashMap::new(),
-            active_child_by_parent_name: HashMap::new(),
             latest_bind_by_parent_name: HashMap::new(),
-            active_parent_by_child: HashMap::new(),
-            unbound_binding_keys: HashSet::new(),
+            latest_binding_by_child: HashMap::new(),
             tombstone_by_root: HashMap::new(),
             commit_receipt_by_id: HashMap::new(),
             content_publication_by_id: HashMap::new(),
@@ -50,46 +42,9 @@ impl MetadataIndexes {
             indexes.record_inode(inode);
         }
 
-        let mut latest_by_parent_name = HashMap::<(InodeId, NameKey), DirentryBindRecord>::new();
-        let mut latest_by_child = HashMap::<InodeId, DirentryBindRecord>::new();
-        for bind in &state.direntry_binds {
-            indexes.indexed_seq = indexes.indexed_seq.max(bind.bind_seq);
-            replace_if_newer(
-                &mut latest_by_parent_name,
-                (bind.parent_inode_id, bind.name_key.clone()),
-                bind.clone(),
-                bind_order_key,
-            );
-            replace_if_newer(
-                &mut latest_by_child,
-                bind.child_inode_id,
-                bind.clone(),
-                bind_order_key,
-            );
+        for binding in &state.direntry_binds {
+            indexes.record_binding(binding);
         }
-
-        for unbind in &state.direntry_unbinds {
-            indexes.record_unbind(unbind);
-        }
-
-        for bind in latest_by_parent_name.values() {
-            if indexes.is_unbound(bind) {
-                continue;
-            }
-            let Some(latest_child_bind) = latest_by_child.get(&bind.child_inode_id) else {
-                continue;
-            };
-            if !same_binding(bind, latest_child_bind) {
-                continue;
-            }
-            indexes
-                .active_child_by_parent_name
-                .insert((bind.parent_inode_id, bind.name_key.clone()), bind.clone());
-            indexes
-                .active_parent_by_child
-                .insert(bind.child_inode_id, bind.clone());
-        }
-        indexes.latest_bind_by_parent_name = latest_by_parent_name;
 
         for revision in &state.revisions {
             indexes.record_revision(revision);
@@ -129,17 +84,16 @@ impl MetadataIndexes {
         &self,
         parent_inode_id: InodeId,
         name_key: &NameKey,
-    ) -> Option<DirentryBindRecord> {
-        self.active_child_by_parent_name
-            .get(&(parent_inode_id, name_key.clone()))
-            .cloned()
+    ) -> Option<DirentryBindingRecord> {
+        self.latest_bind(parent_inode_id, name_key)
+            .filter(DirentryBindingRecord::is_bound)
     }
 
     pub(super) fn latest_bind(
         &self,
         parent_inode_id: InodeId,
         name_key: &NameKey,
-    ) -> Option<DirentryBindRecord> {
+    ) -> Option<DirentryBindingRecord> {
         self.latest_bind_by_parent_name
             .get(&(parent_inode_id, name_key.clone()))
             .cloned()
@@ -148,8 +102,11 @@ impl MetadataIndexes {
     pub(super) fn active_parent_for_child(
         &self,
         child_inode_id: InodeId,
-    ) -> Option<DirentryBindRecord> {
-        self.active_parent_by_child.get(&child_inode_id).cloned()
+    ) -> Option<DirentryBindingRecord> {
+        self.latest_binding_by_child
+            .get(&child_inode_id)
+            .filter(|row| row.is_bound())
+            .cloned()
     }
 
     pub(super) fn active_tombstone(
@@ -168,96 +125,25 @@ impl MetadataIndexes {
         self.commit_receipt_by_id.get(commit_id)
     }
 
-    pub(super) fn is_unbound(&self, record: &DirentryBindRecord) -> bool {
-        self.unbound_binding_keys
-            .contains(&BindingIdentity::from(record))
-    }
-
     pub(super) fn record_inode(&mut self, record: &InodeRecord) {
         self.indexed_seq = self.indexed_seq.max(record.committed_seq);
         self.inode_by_id.insert(record.inode_id, record.clone());
     }
 
-    pub(super) fn record_bind(&mut self, record: &DirentryBindRecord) {
-        self.indexed_seq = self.indexed_seq.max(record.bind_seq);
-        // A bind older than the child's active binding is already
-        // superseded: a child has one active parent, so the newer binding
-        // proves this one was replaced. It must mutate nothing at all —
-        // running the name-slot eviction below first would orphan whichever
-        // child currently holds the incoming record's name.
-        if let Some(previous_parent_for_child) =
-            self.active_parent_by_child.get(&record.child_inode_id)
-        {
-            if bind_order_key(record) < bind_order_key(previous_parent_for_child) {
-                return;
-            }
-        }
-        let parent_name_key = (record.parent_inode_id, record.name_key.clone());
-        // An older bind would replace the current binding during cross-name eviction.
-        assert!(
-            self.latest_bind_by_parent_name
-                .get(&parent_name_key)
-                .is_none_or(|existing| bind_order_key(record) >= bind_order_key(existing)),
-            "binds for one (parent, name) must be recorded in append order"
-        );
+    pub(super) fn record_binding(&mut self, record: &DirentryBindingRecord) {
+        self.indexed_seq = self.indexed_seq.max(record.committed_seq);
         replace_if_newer(
             &mut self.latest_bind_by_parent_name,
-            parent_name_key.clone(),
+            (record.parent_inode_id, record.name_key.clone()),
             record.clone(),
-            bind_order_key,
+            DirentryBindingRecord::position,
         );
-
-        if let Some(previous_child_at_name) =
-            self.active_child_by_parent_name.remove(&parent_name_key)
-        {
-            remove_if_same_binding(
-                &mut self.active_parent_by_child,
-                previous_child_at_name.child_inode_id,
-                &previous_child_at_name,
-            );
-        }
-
-        if let Some(previous_parent_for_child) =
-            self.active_parent_by_child.remove(&record.child_inode_id)
-        {
-            remove_if_same_binding(
-                &mut self.active_child_by_parent_name,
-                (
-                    previous_parent_for_child.parent_inode_id,
-                    previous_parent_for_child.name_key.clone(),
-                ),
-                &previous_parent_for_child,
-            );
-        }
-
-        if !self.is_unbound(record) {
-            self.active_child_by_parent_name
-                .insert(parent_name_key, record.clone());
-            self.active_parent_by_child
-                .insert(record.child_inode_id, record.clone());
-        }
-    }
-
-    pub(super) fn record_unbind(&mut self, record: &DirentryUnbindRecord) {
-        self.indexed_seq = self.indexed_seq.max(record.unbind_seq);
-        self.unbound_binding_keys
-            .insert(BindingIdentity::from(record));
-
-        let parent_name_key = (record.parent_inode_id, record.name_key.clone());
-        if self
-            .active_child_by_parent_name
-            .get(&parent_name_key)
-            .is_some_and(|active| unbind_matches_binding(record, active))
-        {
-            self.active_child_by_parent_name.remove(&parent_name_key);
-        }
-        if self
-            .active_parent_by_child
-            .get(&record.child_inode_id)
-            .is_some_and(|active| unbind_matches_binding(record, active))
-        {
-            self.active_parent_by_child.remove(&record.child_inode_id);
-        }
+        replace_if_newer(
+            &mut self.latest_binding_by_child,
+            record.child_inode_id,
+            record.clone(),
+            DirentryBindingRecord::position,
+        );
     }
 
     /// Revisions contribute only the seq watermark: no read consults an
@@ -330,25 +216,6 @@ where
     }
 }
 
-fn remove_if_same_binding<K>(
-    map: &mut HashMap<K, DirentryBindRecord>,
-    key: K,
-    record: &DirentryBindRecord,
-) where
-    K: Eq + std::hash::Hash,
-{
-    if map
-        .get(&key)
-        .is_some_and(|active| same_binding(active, record))
-    {
-        map.remove(&key);
-    }
-}
-
-fn bind_order_key(record: &DirentryBindRecord) -> (ChangeSeq, u32) {
-    (record.bind_seq, record.bind_delta_index)
-}
-
 fn tombstone_order_key(record: &SubtreeTombstoneRecord) -> (ChangeSeq, u32) {
     (record.generation.seq, record.generation.delta_index)
 }
@@ -358,14 +225,16 @@ mod tests {
     use super::*;
     use loonfs_api::{DisplayName, NameKey};
 
-    fn bind(parent: u64, name: &str, child: u64, seq: u64) -> DirentryBindRecord {
-        DirentryBindRecord {
+    fn bind(parent: u64, name: &str, child: u64, seq: u64) -> DirentryBindingRecord {
+        DirentryBindingRecord {
             parent_inode_id: InodeId(parent),
             name_key: NameKey::parse(name).expect("valid name key"),
-            display_name: DisplayName::parse(name).expect("valid display name"),
+            state: loonfs_api::wire::manifest::DirentryBindingState::Bound {
+                display_name: DisplayName::parse(name).expect("valid display name"),
+            },
             child_inode_id: InodeId(child),
-            bind_seq: ChangeSeq(seq),
-            bind_delta_index: 0,
+            committed_seq: ChangeSeq(seq),
+            delta_index: 0,
         }
     }
 
@@ -375,13 +244,17 @@ mod tests {
         let newer = bind(2, "renamed", 7, 30);
         let older = bind(1, "original", 7, 10);
 
-        indexes.record_bind(&newer);
-        indexes.record_bind(&older);
+        let mut unbound = older.clone();
+        unbound.committed_seq = ChangeSeq(20);
+        unbound.state = loonfs_api::wire::manifest::DirentryBindingState::Unbound;
+        indexes.record_binding(&unbound);
+        indexes.record_binding(&newer);
+        indexes.record_binding(&older);
 
         let parent = indexes
             .active_parent_for_child(InodeId(7))
             .expect("the child keeps its newer binding");
-        assert_eq!(parent.bind_seq, ChangeSeq(30));
+        assert_eq!(parent.committed_seq, ChangeSeq(30));
         assert!(indexes
             .active_child(
                 InodeId(2),
@@ -399,18 +272,18 @@ mod tests {
     #[test]
     fn a_stale_bind_does_not_orphan_the_name_slots_current_child() {
         let mut indexes = MetadataIndexes::default();
-        indexes.record_bind(&bind(1, "original", 8, 20));
-        indexes.record_bind(&bind(1, "renamed", 7, 30));
-        indexes.record_bind(&bind(1, "original", 7, 10));
+        indexes.record_binding(&bind(1, "original", 8, 20));
+        indexes.record_binding(&bind(1, "renamed", 7, 30));
+        indexes.record_binding(&bind(1, "original", 7, 10));
 
         let seven = indexes
             .active_parent_for_child(InodeId(7))
             .expect("child 7 keeps its newer binding");
-        assert_eq!(seven.bind_seq, ChangeSeq(30));
+        assert_eq!(seven.committed_seq, ChangeSeq(30));
         let eight = indexes
             .active_parent_for_child(InodeId(8))
             .expect("child 8 keeps its binding");
-        assert_eq!(eight.bind_seq, ChangeSeq(20));
+        assert_eq!(eight.committed_seq, ChangeSeq(20));
         let original = indexes
             .active_child(
                 InodeId(1),

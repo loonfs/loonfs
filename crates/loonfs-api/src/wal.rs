@@ -3,7 +3,7 @@
 
 use crate::digest::sha256_digest;
 use crate::envelope::{self, EnvelopeCodecError, EnvelopeProbe};
-use crate::manifest::{DeletedBinding, TombstoneGeneration};
+use crate::manifest::{DeletedBinding, DeltaPosition};
 use crate::{
     AccessGrants, AccessRevisionNo, Attributes, AttributesRevisionNo, ChangeSeq, CommitFingerprint,
     CommitId, ContentId, ContentRef, DisplayName, InodeId, InodeKind, NameKey, NamespaceId,
@@ -161,7 +161,7 @@ pub enum WalDelta {
         /// Root inode whose selected tombstone is being revoked.
         root_inode_id: InodeId,
         /// The exact tombstone generation this delta compensates.
-        target: TombstoneGeneration,
+        target: DeltaPosition,
     },
     /// Publishes the next attribute revision of one inode, as complete state.
     ///

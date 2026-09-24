@@ -4,7 +4,7 @@ use super::super::{CommitOp, CommitValidationError, ResolvedBinding, ValidatedOp
 use super::error::CommitOperand;
 use super::view::PublishValidationView;
 use crate::error::CoreError;
-use crate::metadata::{BindingIdentity, InodeRecord, RevisionRecord, SubtreeTombstoneRecord};
+use crate::metadata::{InodeRecord, RevisionRecord, SubtreeTombstoneRecord};
 use loonfs_api::{
     next_public_ordinal, AccessGrants, AccessRevisionNo, ActorId, Attributes, AttributesRevisionNo,
     ChangeSeq, CommitId, ContentRef, DisplayName, InodeId, InodeKind, NameKey, RevisionNo,
@@ -721,14 +721,11 @@ async fn validate_source_binding<S: ObjectStore + ?Sized>(
         }
         .into());
     };
-    let expected_identity = BindingIdentity {
-        parent_inode_id: expected.parent_inode_id,
-        name_key: expected.name_key.clone(),
-        child_inode_id: expected.child_inode_id,
-        bind_seq: expected.bind_seq,
-        bind_delta_index: expected.bind_delta_index,
-    };
-    if BindingIdentity::from(&existing) != expected_identity {
+    if existing.parent_inode_id != expected.parent_inode_id
+        || existing.name_key != expected.name_key
+        || existing.child_inode_id != expected.child_inode_id
+        || existing.position() != expected.position
+    {
         return Err(CommitValidationError::BindingPreconditionMismatch {
             target: format!(
                 "name `{}` under parent inode `{}`",
