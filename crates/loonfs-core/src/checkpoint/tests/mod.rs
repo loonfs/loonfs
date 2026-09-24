@@ -12,6 +12,7 @@ mod cas_recovery;
 mod index_parity;
 pub(crate) mod inspection_materialization;
 mod inventory;
+mod manifest_gc_races;
 mod manifest_round_trips;
 mod pin_verification;
 mod retention;

@@ -3102,6 +3102,7 @@ async fn fork_pin_grace_skips_targets_and_aged_pins_read_only_manifest_discovery
         };
         expected.extend([
             hint(target),
+            hint(target), // Recheck discovery after the missing successor.
             metadata_manifest_object(target, &manifest_no),
             metadata_manifest_object(target, &manifest_no.successor().expect("successor")),
         ]);
