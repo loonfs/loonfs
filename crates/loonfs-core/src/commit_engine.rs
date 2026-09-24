@@ -23,7 +23,9 @@ use crate::wal::ProjectedWalTail;
 use loonfs_api::v0::Commit;
 use loonfs_api::wire::control::AcquiredWriter;
 use loonfs_api::wire::wal::{MAX_WAL_INLINE_CONTENT_BYTES, MAX_WAL_SEGMENT_INLINE_CONTENT_BYTES};
-use loonfs_api::{ChangeSeq, CommitId, ContentId, DeleteNamespaceResponse, NamespaceId};
+#[cfg(test)]
+use loonfs_api::ChangeSeq;
+use loonfs_api::{CommitId, ContentId, DeleteNamespaceResponse, NamespaceId};
 use loonfs_objectstore::ObjectStore;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
@@ -468,7 +470,6 @@ pub struct NamespaceCommitEnginePublishResult {
 pub struct WalFoldInput {
     pub head: NamespaceReadState,
     pub basis: MetadataBasis,
-    pub retention_floor_seq: ChangeSeq,
     pub tail_state: Arc<ProjectedWalTail>,
     pub wal_tail_segments: u64,
     pub wal_tail_inline_bytes: usize,
@@ -481,7 +482,6 @@ pub struct ResultingReadState {
     /// Metadata basis used for replay. The published head still references this
     /// basis, so a seeded read cache matches the next store-backed read.
     pub basis: MetadataBasis,
-    pub manifest_head_seq: ChangeSeq,
     pub tail: Arc<ProjectedWalTail>,
 }
 
@@ -600,7 +600,6 @@ impl NamespaceCommitEngine {
             .map(|projection| WalFoldInput {
                 head: projection.head.clone(),
                 basis: projection.basis().clone(),
-                retention_floor_seq: projection.retention_floor_seq,
                 tail_state: Arc::clone(&projection.tail_state),
                 wal_tail_segments: projection.wal_tail_segments,
                 wal_tail_inline_bytes: projection.tail_state.inline_bytes(),
@@ -744,7 +743,6 @@ impl NamespaceCommitEngine {
             &self.namespace_id,
             acquired_writer,
             self.publish_tail_projection.as_ref(),
-            tail_options,
         )
         .await;
         let projection_loaded_ms = self.projection_loaded_ms.unwrap_or(attempt_started_ms);
@@ -836,7 +834,6 @@ impl NamespaceCommitEngine {
                 Some(ResultingReadState {
                     head,
                     basis: projection.basis().clone(),
-                    manifest_head_seq: projection.manifest_head_seq(),
                     tail: Arc::clone(&projection.tail_state),
                 })
             }
@@ -952,14 +949,11 @@ mod tests {
                 .expect("weight")
                 >= empty_annotation + 4096
         );
-        let proof = PreparedContent::for_durable_content_write(
-            NamespaceId::parse("demo").expect("namespace"),
-            ContentRef::blob_v1(
-                loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
-                ContentId::generate(),
-                b"proof",
-            ),
-        );
+        let proof = PreparedContent::for_durable_content_write(ContentRef::blob_v1(
+            loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
+            ContentId::generate(),
+            b"proof",
+        ));
         let prepared = CommitCandidate::prepared(request.clone(), vec![proof; 100]);
         assert!(
             prepared.estimated_retained_bytes().expect("weight")
@@ -1041,8 +1035,7 @@ mod tests {
             ContentId::generate(),
             b"proof",
         );
-        let prepared =
-            PreparedContent::for_durable_content_write(namespace_id.clone(), content_ref);
+        let prepared = PreparedContent::for_durable_content_write(content_ref);
         let oversized_proofs = CommitCandidate::prepared(
             create_dir_request("too-many-proofs", "docs"),
             vec![prepared; crate::limits::MAX_COMMIT_CONTENT_TOKENS + 1],
@@ -1522,6 +1515,7 @@ mod tests {
             &writer,
         )
         .await
+        .map(crate::checkpoint::checkpoint_summary)
         .expect("checkpoint");
 
         // Without a cache, every publish view re-fetches the segment blocks

@@ -2,7 +2,7 @@
 
 use super::fork_checkpoints::delete_source_checkpoint;
 use super::live_set::{LiveSet, RetirementState};
-use crate::checkpoint::load_owned_manifest_segments_for_inspection;
+use crate::checkpoint::load_manifest_segments_for_inspection;
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use loonfs_api::wire::manifest::{
     lookup_keys, MetadataRow, MetadataRowFamily, NamespaceManifestPayload,
@@ -40,8 +40,9 @@ async fn sweep_content<S: ObjectStore + ?Sized>(
     tombstone: &NamespaceManifestPayload,
     report: &mut GcResponse,
 ) -> Result<()> {
-    let segments = load_owned_manifest_segments_for_inspection(
+    let mut segments = load_manifest_segments_for_inspection(
         store,
+        None,
         &tombstone.namespace_id,
         &tombstone.manifest_no,
     )
@@ -49,6 +50,8 @@ async fn sweep_content<S: ObjectStore + ?Sized>(
     .map_err(|error| {
         CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
     })?;
+    segments.retain_owned_segments(&tombstone.namespace_id);
+
     let family = MetadataRowFamily::ContentPublications;
     let mut lower_bound = family.row_key_prefix().to_owned();
     let upper_bound = string_prefix_upper_bound(&lower_bound);

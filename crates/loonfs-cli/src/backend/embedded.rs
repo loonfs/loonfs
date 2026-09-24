@@ -963,9 +963,9 @@ mod tests {
     use crate::config::StoreConfig;
     use crate::resolve::EmbeddedTarget;
     use loonfs::{
-        BootstrapNamespaceError, CoreError, CreateNamespaceOptions, FsWriter,
-        MaintenanceConclusion, MaintenanceJobId, MetadataMaintenanceOptions, PutFileOptions,
-        RuntimeError, SharedObjectStore, StatPathOptions,
+        CoreError, CreateNamespaceOptions, FsWriter, MaintenanceConclusion, MaintenanceJobId,
+        MetadataMaintenanceOptions, PutFileOptions, RuntimeError, SharedObjectStore,
+        StatPathOptions,
     };
     use loonfs_api::{
         ChangeSeq, CreateCheckpointRequest, ErrorCode, InodeId, NamespaceId, RevisionNo,
@@ -1307,17 +1307,6 @@ mod tests {
         )));
 
         assert_eq!(error.code, ErrorCode::InvalidRequest.as_str());
-    }
-
-    #[test]
-    fn map_bootstrap_error_surfaces_registry_codes_verbatim() {
-        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let error = map_runtime_error(RuntimeError::Bootstrap(
-            BootstrapNamespaceError::NamespaceAlreadyExists { namespace_id },
-        ));
-
-        assert_eq!(error.code, ErrorCode::NamespaceExists.as_str());
-        assert!(error.message.contains("already exists"));
     }
 
     #[tokio::test]

@@ -747,7 +747,6 @@ mod tests {
     };
     use crate::commit_engine::ContentPreparationError;
     use crate::control_object::ControlObjectLoadError;
-    use crate::namespace::BootstrapNamespaceError;
     use crate::storage::content_admission::ContentTokenError;
     use loonfs_api::{ChangeSeq, CommitId, InodeId, NamespaceId, RevisionNo, WriterEpoch};
     use loonfs_objectstore::ObjectStoreError;
@@ -1002,7 +1001,7 @@ mod tests {
             assert_eq!(error.code(), ErrorCode::StoragePermissionDenied);
         }
         assert_eq!(
-            BootstrapNamespaceError::Core(CoreError::ControlObjectLoad(denied)).code(),
+            CoreError::ControlObjectLoad(denied).code(),
             ErrorCode::StoragePermissionDenied
         );
     }

@@ -1,19 +1,19 @@
 //! Runtime caches for control-object reads and WAL-tail projections.
 //! WAL probes observe commits; interval checks observe manifest changes.
 
-use crate::fs::{should_invalidate_after_result, ReadCore};
+use crate::fs::ReadCore;
 use crate::metrics::RuntimeInstruments;
 use crate::trace::phase_span;
-use crate::{Commit, CoreError, NamespaceId, PinId, Recency, RuntimeCacheConfig};
+use crate::{CoreError, NamespaceId, PinId, Recency, RuntimeCacheConfig};
 use crate::{Result, RuntimeError};
 use loonfs_core::cache::{MetadataSegmentCacheStats, WalTailProjectionCacheStats};
 use loonfs_core::control::NamespaceReadState;
 use loonfs_core::control::{
-    load_checkpoint_read_basis, load_namespace_read_anchor, load_snapshot_read_basis,
-    CheckpointReadBasis, ControlObjectLoadError, MetadataBasis, VerifiedNamespaceCatalogEntry,
+    load_checkpoint_read_basis, load_read_anchor, load_snapshot_read_basis, manifest_has_successor,
+    CheckpointReadBasis, ControlObjectLoadError, MetadataBasis, NamespaceReadAnchor,
+    VerifiedNamespaceCatalogEntry,
 };
-use loonfs_core::{MetadataProjectionLoadError, RuntimeReadContext, StoreFailureClass};
-use loonfs_objectstore::keys::metadata_manifest_object;
+use loonfs_core::{MetadataProjectionLoadError, RuntimeReadContext};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -308,7 +308,7 @@ impl ReadCore {
                 >= self
                     .runtime_cache_config()
                     .manifest_revalidation_interval_ms;
-            let matches = !check_due || self.manifest_is_current(namespace_id, &head.basis)
+            let matches = !check_due || !manifest_has_successor(self.store(), namespace_id, head.basis.manifest_no())
                 .instrument(tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "validation_manifest_probe"))
                 .await?;
             if matches {
@@ -324,7 +324,7 @@ impl ReadCore {
                 }
             }
         }
-        load_namespace_read_anchor(self.store(), namespace_id)
+        load_read_anchor(self.store(), namespace_id)
             .instrument(tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "validation_anchor_load"))
             .await
             .map(|loaded| cached_anchor(loaded, now_ms))
@@ -343,29 +343,6 @@ impl ReadCore {
                     MetadataProjectionLoadError::LoadHead(error),
                 ))
             })
-    }
-
-    /// The interval check. A deletion, a floor advance, a flush, or a
-    /// compaction each publish a successor to the cached manifest, so its
-    /// absence is what makes the cached anchor still current. Commits are
-    /// observed through the WAL probe instead; the hint is never consulted.
-    async fn manifest_is_current(
-        &self,
-        namespace_id: &NamespaceId,
-        basis: &MetadataBasis,
-    ) -> std::result::Result<bool, ControlObjectLoadError> {
-        let Ok(next) = basis.manifest_no().successor() else {
-            return Ok(true);
-        };
-        let object_key = metadata_manifest_object(namespace_id, &next);
-        let successor = self.store().head(&object_key).await.map_err(|error| {
-            ControlObjectLoadError::Store {
-                object_key: object_key.clone(),
-                message: error.public_message().into_owned(),
-                class: StoreFailureClass::of(&error),
-            }
-        })?;
-        Ok(successor.is_none())
     }
 
     pub(crate) fn control_cache_enabled(&self) -> bool {
@@ -497,18 +474,6 @@ impl ReadCore {
         Ok(VerifiedNamespaceCatalogEntry::from_head(&anchor.head))
     }
 
-    /// Namespace-terminal invalidation: the whole entry is removed, because
-    /// the namespace itself is gone. The publisher that ran the delete is
-    /// evicted with its engine and session by the publication service.
-    pub(crate) fn invalidate_namespace_cache_for_delete(&self, namespace_id: &NamespaceId) {
-        self.inner
-            .control_cache()
-            .invalidate_namespace(namespace_id);
-        self.inner
-            .wal_tail_projection_cache
-            .invalidate_namespace(namespace_id);
-    }
-
     pub(crate) fn seed_namespace_read_cache(
         &self,
         namespace_id: &NamespaceId,
@@ -542,7 +507,6 @@ impl ReadCore {
             loonfs_core::cache::WalTailProjectionCacheKey {
                 namespace_id: namespace_id.clone(),
                 manifest_no,
-                manifest_head_seq: state.manifest_head_seq,
                 head_seq,
             },
             state.tail,
@@ -562,27 +526,12 @@ impl ReadCore {
             .wal_tail_projection_cache
             .invalidate_namespace(namespace_id);
     }
-
-    /// A successful publication or a WAL number conflict can leave read caches
-    /// stale. The publisher revalidates its own view before its next batch.
-    pub(crate) fn invalidate_read_cache_after_batch(
-        &self,
-        namespace_id: &NamespaceId,
-        results: &[Result<Commit>],
-    ) {
-        if results.iter().any(should_invalidate_after_result) {
-            self.invalidate_namespace_read_cache(namespace_id);
-        }
-    }
 }
 
-fn cached_anchor(
-    (head, basis): (NamespaceReadState, MetadataBasis),
-    last_control_check_ms: u64,
-) -> CachedNamespaceAnchor {
+fn cached_anchor(anchor: NamespaceReadAnchor, last_control_check_ms: u64) -> CachedNamespaceAnchor {
     CachedNamespaceAnchor {
-        head,
-        basis,
+        basis: anchor.basis(),
+        head: anchor.read_state,
         last_control_check_ms,
         validation: Arc::default(),
         validated_generation: 0,

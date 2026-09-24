@@ -1,57 +1,15 @@
 //! Creates namespaces.
 
-use super::install::{publish_namespace, NamespacePublication};
+use super::install::publish_namespace;
 use crate::context::MutationContext;
-use crate::error::CoreError;
+use crate::error::{CoreError, Result};
 use crate::metadata::{AccessRevisionRecord, InodeRecord, MetadataState};
 use crate::time::{MonotonicTimer, StdMonotonicTimer};
 use loonfs_api::wire::manifest::{NamespaceAccess, NamespaceManifestPayload};
 use loonfs_api::{
-    AccessRevisionNo, ActorId, ChangeSeq, ErrorCode, InodeKind, Namespace, NamespaceId,
-    ROOT_INODE_ID,
+    AccessRevisionNo, ActorId, ChangeSeq, InodeKind, Namespace, NamespaceId, ROOT_INODE_ID,
 };
 use loonfs_objectstore::ObjectStore;
-use thiserror::Error;
-
-#[derive(Debug, Clone, Error)]
-pub enum BootstrapNamespaceError {
-    #[error("namespace `{namespace_id}` already exists")]
-    NamespaceAlreadyExists { namespace_id: NamespaceId },
-    #[error(transparent)]
-    Core(#[from] CoreError),
-}
-
-impl BootstrapNamespaceError {
-    /// Returns the stable machine-readable reason for this error.
-    ///
-    /// This is the single source of truth for the wire code every surface
-    /// (HTTP server, CLI) reports for a bootstrap failure, mirroring
-    /// [`CoreError::code`](crate::Error::code).
-    pub fn code(&self) -> ErrorCode {
-        match self {
-            BootstrapNamespaceError::NamespaceAlreadyExists { .. } => ErrorCode::NamespaceExists,
-            BootstrapNamespaceError::Core(error) => error.code(),
-        }
-    }
-
-    /// Returns the structured context the code's consumers report beside it,
-    /// mirroring [`CoreError::details`](crate::Error::details): only the
-    /// wrapped core failure carries any.
-    pub fn details(&self) -> Option<loonfs_api::ErrorDetails> {
-        match self {
-            BootstrapNamespaceError::Core(error) => error.details(),
-            BootstrapNamespaceError::NamespaceAlreadyExists { .. } => None,
-        }
-    }
-
-    /// Returns a safe message when bootstrap failed in the object store.
-    pub fn object_store_public_message(&self) -> Option<std::borrow::Cow<'static, str>> {
-        match self {
-            BootstrapNamespaceError::Core(error) => error.object_store_public_message(),
-            _ => None,
-        }
-    }
-}
 
 pub(crate) async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
     store: &S,
@@ -60,7 +18,7 @@ pub(crate) async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
     actor_id: &loonfs_api::ActorId,
     access: &NamespaceAccess,
     allow_existing: bool,
-) -> Result<Namespace, BootstrapNamespaceError> {
+) -> Result<Namespace> {
     let timer = StdMonotonicTimer::default();
     let started_ms = timer.monotonic_now_ms();
     let start = NamespaceManifestPayload::initial(
@@ -69,16 +27,12 @@ pub(crate) async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
         actor_id.clone(),
         access.clone(),
     );
-    if publish_namespace(store, &start, &timer, started_ms).await? == NamespacePublication::Exists
-        && !allow_existing
-    {
-        return Err(BootstrapNamespaceError::NamespaceAlreadyExists {
-            namespace_id: namespace_id.clone(),
-        });
+    match publish_namespace(store, &start, &timer, started_ms).await {
+        Ok(()) => {}
+        Err(CoreError::NamespaceExists { .. }) if allow_existing => {}
+        Err(error) => return Err(error),
     }
-    super::status::load_namespace(store, namespace_id)
-        .await
-        .map_err(Into::into)
+    super::status::load_namespace(store, namespace_id).await
 }
 
 pub(crate) fn bootstrap_metadata_state(

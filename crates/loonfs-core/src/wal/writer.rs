@@ -56,18 +56,13 @@ pub(crate) fn prepare_wal_segment(
         .checked_sub(1)
         .map(ChangeSeq)
         .ok_or(WalSegmentError::SeqOverflow)?;
-    let head_commit_id = payload_records
-        .last()
-        .expect("payload records should be nonempty")
-        .commit_id
-        .clone();
+
     let payload = WalSegmentPayload {
         namespace_id,
         wal_no,
         writer_epoch,
         prior_head_seq,
         head_seq,
-        head_commit_id,
         next_inode_id: records
             .last()
             .expect("records should be nonempty")
@@ -89,7 +84,6 @@ pub(crate) fn prepare_fence_segment(
         writer_epoch,
         prior_head_seq: head.seq,
         head_seq: head.seq,
-        head_commit_id: head.head_commit_id.clone(),
         next_inode_id: head.next_inode_id,
         records: Vec::new(),
     })
@@ -102,7 +96,6 @@ pub(crate) fn resulting_head_after(
     let payload = segment.envelope().payload();
     NamespaceReadState {
         seq: payload.head_seq,
-        head_commit_id: payload.head_commit_id.clone(),
         next_inode_id: payload.next_inode_id,
         wal_no: payload.wal_no,
         ..head.clone()

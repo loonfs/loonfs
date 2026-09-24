@@ -348,7 +348,7 @@ async fn a_created_namespace_reads_manifest_one_before_its_first_flush() {
     let status = loonfs_core::cache::load_namespace_diagnostics(&store, &namespace_id)
         .await
         .expect("status");
-    assert_eq!(status.current_manifest_no, Some(ManifestNo(1)));
+    assert_eq!(status.current_manifest_no, ManifestNo(1));
     assert_eq!(status.retention_floor_seq, ChangeSeq(0));
 
     write_file_bytes(
@@ -398,7 +398,7 @@ async fn a_created_namespace_reads_manifest_one_before_its_first_flush() {
     let status = loonfs_core::cache::load_namespace_diagnostics(&store, &namespace_id)
         .await
         .expect("status after flush");
-    assert_eq!(status.current_manifest_no, Some(ManifestNo(3)));
+    assert_eq!(status.current_manifest_no, ManifestNo(3));
 }
 
 #[tokio::test]
@@ -1467,10 +1467,7 @@ async fn bootstrap_hint_read_failures_write_nothing() {
                 bootstrap_namespace(&store, &namespace_id, &mutation_context()).await
             })
             .expect_err("hint read failed");
-            assert!(matches!(
-                error,
-                loonfs_core::BootstrapNamespaceError::Core(CoreError::ControlObjectLoad(_))
-            ));
+            assert!(matches!(error, CoreError::ControlObjectLoad(_)));
         }
         let counts = store.counts();
         assert_eq!(

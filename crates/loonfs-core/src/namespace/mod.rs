@@ -17,7 +17,6 @@ pub(crate) mod status;
 pub(crate) mod writer_epoch;
 
 pub use basis::MetadataBasis;
-pub use bootstrap::BootstrapNamespaceError;
 
 #[cfg(test)]
 mod tests;

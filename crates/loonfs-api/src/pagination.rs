@@ -1,7 +1,7 @@
 //! Page-size policy, page envelopes, and opaque cursors for paginated endpoints.
 
 use crate::capability::{LIMIT_PAGINATION_DEFAULT, LIMIT_PAGINATION_MAX};
-use crate::{ChangeSeq, InodeId, NameKey, NamespaceId, RevisionNo};
+use crate::{ChangeSeq, InodeId, NameKey, RevisionNo};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -489,52 +489,6 @@ pub fn decode_cursor<C: PageCursor>(value: &str) -> Result<C, PageCursorError> {
     decode_token(value, PAGE_CURSOR_FORMAT_VERSION).map_err(PageCursorError::from)
 }
 
-/// A cursor bound to one namespace keyspace.
-pub trait NamespaceCursor: PageCursor {
-    /// Namespace whose keyspace this cursor walks.
-    fn namespace_id(&self) -> &NamespaceId;
-
-    /// Key the enumeration stopped at, or `None` at the start.
-    fn last_key(&self) -> Option<&str>;
-
-    /// Prefix every key this cursor may name lies under.
-    fn key_prefix(&self) -> String;
-}
-
-/// Decodes a cursor issued for the expected namespace.
-pub fn decode_namespace_cursor<C: NamespaceCursor>(
-    token: &str,
-    expected_namespace_id: &NamespaceId,
-) -> Result<C, NamespaceCursorError> {
-    let cursor: C = decode_cursor(token)?;
-    if cursor.namespace_id() != expected_namespace_id {
-        return Err(NamespaceCursorError::ForeignNamespace);
-    }
-    let prefix = cursor.key_prefix();
-    if cursor
-        .last_key()
-        .is_some_and(|key| !key.starts_with(&prefix))
-    {
-        return Err(NamespaceCursorError::OutsideKeyspace);
-    }
-    Ok(cursor)
-}
-
-/// Why a namespace-bound cursor cannot resume the enumeration replaying it.
-#[derive(Debug, Clone, PartialEq, Eq, Error)]
-#[non_exhaustive]
-pub enum NamespaceCursorError {
-    /// The cursor is unreadable or belongs to another endpoint, job, or version.
-    #[error(transparent)]
-    Malformed(#[from] PageCursorError),
-    /// The cursor belongs to another namespace.
-    #[error("cursor belongs to a different namespace")]
-    ForeignNamespace,
-    /// A cursor naming a key outside the prefix its enumeration walks.
-    #[error("cursor names a key outside the enumeration it resumes")]
-    OutsideKeyspace,
-}
-
 /// Invalid opaque page cursor.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[non_exhaustive]
@@ -779,78 +733,6 @@ mod tests {
                 expected: PAGE_CURSOR_FORMAT_VERSION,
                 actual: PAGE_CURSOR_FORMAT_VERSION + 1,
             })
-        );
-    }
-
-    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-    struct TestNamespaceCursor {
-        namespace_id: NamespaceId,
-        last_key: String,
-    }
-
-    impl PageCursor for TestNamespaceCursor {
-        const KIND: &'static str = "test_namespace";
-    }
-
-    impl NamespaceCursor for TestNamespaceCursor {
-        fn namespace_id(&self) -> &NamespaceId {
-            &self.namespace_id
-        }
-
-        fn last_key(&self) -> Option<&str> {
-            Some(&self.last_key)
-        }
-
-        fn key_prefix(&self) -> String {
-            format!("namespaces/{}/items/", self.namespace_id)
-        }
-    }
-
-    #[test]
-    fn namespace_cursor_accepts_its_namespace_and_keyspace() {
-        let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-        let cursor = TestNamespaceCursor {
-            namespace_id: namespace_id.clone(),
-            last_key: "namespaces/demo/items/item-42".to_owned(),
-        };
-        let encoded = encode_cursor(&cursor).expect("encode cursor");
-
-        assert_eq!(
-            decode_namespace_cursor::<TestNamespaceCursor>(&encoded, &namespace_id,)
-                .expect("decode namespace cursor"),
-            cursor
-        );
-    }
-
-    #[test]
-    fn namespace_cursor_rejects_a_different_namespace() {
-        let cursor = TestNamespaceCursor {
-            namespace_id: NamespaceId::parse("demo").expect("namespace id"),
-            last_key: "namespaces/demo/items/item-42".to_owned(),
-        };
-        let encoded = encode_cursor(&cursor).expect("encode cursor");
-
-        assert_eq!(
-            decode_namespace_cursor::<TestNamespaceCursor>(
-                &encoded,
-                &NamespaceId::parse("other").expect("other namespace id"),
-            ),
-            Err(NamespaceCursorError::ForeignNamespace)
-        );
-    }
-
-    #[test]
-    fn namespace_cursor_rejects_a_key_outside_its_keyspace() {
-        let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-        let cursor = TestNamespaceCursor {
-            namespace_id: namespace_id.clone(),
-            last_key: "namespaces/demo/pins/checkpoint-42".to_owned(),
-        };
-        let encoded = encode_cursor(&cursor).expect("encode cursor");
-
-        assert_eq!(
-            decode_namespace_cursor::<TestNamespaceCursor>(&encoded, &namespace_id,),
-            Err(NamespaceCursorError::OutsideKeyspace)
         );
     }
 }

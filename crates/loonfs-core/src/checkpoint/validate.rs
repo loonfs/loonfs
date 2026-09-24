@@ -85,7 +85,6 @@ pub(super) fn validate_manifest_materialization_ranges(
         if payload.status.is_deleted()
             || (payload.head_seq == ChangeSeq(0)
                 && payload.base_seq == ChangeSeq(0)
-                && payload.head_commit_id == loonfs_api::wire::control::genesis_commit_id()
                 && payload.next_inode_id == loonfs_api::FIRST_ALLOCATABLE_INODE_ID
                 && payload.next_run_no == RunNo(0))
         {

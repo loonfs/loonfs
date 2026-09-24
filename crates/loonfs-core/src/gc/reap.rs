@@ -1,6 +1,6 @@
 //! Age checks and pin deletion decisions.
 
-use super::fork_checkpoints::{classify_fork_checkpoint, ForkCheckpointReachability};
+use super::fork_checkpoints::fork_checkpoint_is_retained;
 use super::live_set::LiveSet;
 use crate::checkpoint::record::load_checkpoint_record_at_key;
 use crate::context::MutationContext;
@@ -40,7 +40,7 @@ pub(super) async fn sweep_checkpoint_record<S: ObjectStore + ?Sized>(
             target_namespace_id,
         } => {
             return Ok(
-                match classify_fork_checkpoint(
+                match fork_checkpoint_is_retained(
                     store,
                     &record,
                     target_namespace_id,
@@ -49,9 +49,9 @@ pub(super) async fn sweep_checkpoint_record<S: ObjectStore + ?Sized>(
                 )
                 .await?
                 {
-                    ForkCheckpointReachability::Reclaimable => CheckpointSweep::DeleteFork,
-                    ForkCheckpointReachability::Retained { reason } => {
-                        tracing::debug!(object_key = key, reason, "retaining fork pin");
+                    false => CheckpointSweep::DeleteFork,
+                    true => {
+                        tracing::debug!(object_key = key, "retaining fork pin");
                         CheckpointSweep::Retain {
                             reclaimable_at_ms: None,
                         }

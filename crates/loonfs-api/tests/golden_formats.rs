@@ -313,7 +313,6 @@ fn sample_wal_payload() -> WalSegmentPayload {
         writer_epoch: WriterEpoch(3),
         prior_head_seq: ChangeSeq(1),
         head_seq: ChangeSeq(2),
-        head_commit_id: commit_id(),
         next_inode_id: InodeId(10),
         records: vec![WalCommitPayload {
             seq: ChangeSeq(2),
@@ -363,7 +362,6 @@ fn sample_wal_inline_content_payload() -> WalSegmentPayload {
     });
     payload.head_seq = ChangeSeq(3);
     payload.records.push(without_inline_content);
-    payload.head_commit_id = payload.records[1].commit_id.clone();
     payload
 }
 
@@ -392,7 +390,6 @@ fn sample_manifest_payload() -> NamespaceManifestPayload {
         manifest_no: ManifestNo(2),
 
         head_seq: ChangeSeq(2),
-        head_commit_id: commit_id(),
         base_seq: ChangeSeq(2),
         writer_epoch: WriterEpoch(3),
         next_inode_id: InodeId(10),

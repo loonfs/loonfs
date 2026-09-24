@@ -126,12 +126,12 @@ impl<'a> WalWalk<'a> {
                 None => Ok(None),
             };
         };
-        validate_wal_segment_for_replay(self.namespace_id, self.seq, &envelope).map_err(
-            |error| WalTailLoadError::Replay {
+        validate_wal_segment_for_replay(self.seq, &envelope).map_err(|error| {
+            WalTailLoadError::Replay {
                 object_key: object_key.clone(),
                 error,
-            },
-        )?;
+            }
+        })?;
         self.wal_no = wal_no;
         self.seq = envelope.payload().head_seq;
         Ok(Some(ValidatedWalSegment::new(object_key, envelope)))
@@ -175,7 +175,6 @@ pub(crate) async fn load_replayed_wal_tail<S: ObjectStore + ?Sized>(
     base_head: &NamespaceReadState,
     current_head: &NamespaceReadState,
     base_metadata_state: &MetadataState,
-    expected_writer_epoch: Option<WriterEpoch>,
 ) -> Result<ReplayedWalTail, MetadataProjectionLoadError> {
     let tail = load_wal_tail(
         store,
@@ -195,7 +194,6 @@ pub(crate) async fn load_replayed_wal_tail<S: ObjectStore + ?Sized>(
         project_validated_wal_tail(
             base_head,
             &super::ProjectedWalTail::from_rows(base_metadata_state.clone()),
-            expected_writer_epoch,
             &tail,
         )?
     };

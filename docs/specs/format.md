@@ -221,7 +221,7 @@ Creation and fork write the hint before manifest 1, nothing deletes a live names
 
 The current manifest is authoritative for the namespace's identity, status, writer epoch, and compactor epoch. Its runs describe materialized metadata through `head_seq`, and `folded_wal_no` identifies the WAL boundary already included in those runs.
 
-Every WAL object records the head sequence, head commit ID, and inode allocation high-water mark after it. A fence advances the WAL number and writer epoch without adding a logical commit, and repeats the head commit ID and allocator it received.
+Every WAL object records the head sequence and inode allocation high-water mark after it. A fence advances the WAL number and writer epoch without adding a logical commit, and preserves the allocator it received.
 
 The counters have different meanings:
 
@@ -321,7 +321,7 @@ This example assumes 12 is the discovered WAL tip. Manifest and WAL discovery mu
 
 After selecting a manifest, discover the WAL tip by probing consecutive numbers. If the hint names a WAL number above `folded_wal_no`, load that object and probe forward from it; otherwise probe from the folded boundary. The first absent successor ends discovery. Replay still requires every WAL number between the folded boundary and the discovered tip, including numbers below the hint.
 
-Each data segment must contain contiguous commits following its `prior_head_seq`. Namespace identity, WAL number, sequence range, head commit ID, allocation state, and writer epoch must validate. Empty fence segments contain no metadata changes. Epochs cannot decrease along the log or exceed the current manifest's epoch. If a WAL object exposes a newer epoch, reload the manifest before deciding that the object is invalid.
+Each data segment must contain contiguous commits following its `prior_head_seq`. Namespace identity, WAL number, sequence range, allocation state, and writer epoch must validate. Empty fence segments contain no metadata changes. Epochs cannot decrease along the log or exceed the current manifest's epoch. If a WAL object exposes a newer epoch, reload the manifest before deciding that the object is invalid.
 
 After WAL discovery, check for a successor to the selected manifest and reload if one appeared. This prevents a concurrent fold or retention advance from making a reclaimed WAL number look unused. Required missing or malformed objects fail the read.
 
@@ -454,7 +454,7 @@ A writer session acquires authority lazily, before its first semantic publicatio
 
 Another session can acquire a higher epoch. Its numbered fence prevents an older writer from extending the log using a previously observed tip: the stale writer's put collides, discovery observes the higher epoch, and the session returns `writer_fenced`. A fenced session does not automatically reacquire authority.
 
-A fence has `head_seq` equal to `prior_head_seq`, preserves `next_inode_id` and `head_commit_id`, and contains no commit records. It advances WAL position without advancing logical history. Concurrent attempts are serialized by conditional creation of the next number.
+A fence has `head_seq` equal to `prior_head_seq`, preserves `next_inode_id`, and contains no commit records. It advances WAL position without advancing logical history. Concurrent attempts are serialized by conditional creation of the next number.
 
 There is no writer lease or writer-expiry timestamp. The `writer_id` and `acquired_at_ms` fields describe the acquisition; the epoch determines authority. An acquisition retried after an uncertain outcome can advance the epoch again. Commit retry identity is separate and uses durable receipts.
 
@@ -565,11 +565,11 @@ This changes the physical representation, not the namespace's visible history. A
 
 ### 7.1 Manifests, runs, and segments
 
-A namespace manifest describes one complete metadata file set through `head_seq`. It includes the head commit ID, inode allocator, folded WAL number, retention floor, and all metadata runs required to reconstruct that state. Its `manifest_no` determines its immutable key; only one publication can succeed at that number.
+A namespace manifest describes one complete metadata file set through `head_seq`. It includes the inode allocator, folded WAL number, retention floor, and all metadata runs required to reconstruct that state. Its `manifest_no` determines its immutable key; only one publication can succeed at that number.
 
 A run is the collection of segments produced together. `run_no` is allocated from the manifest's `next_run_no`, which advances when that run is published. A WAL flush allocates one run number across the families it writes. A compaction allocates a run number for its selected family group.
 
-Each run records `run_seq`, `tier`, and its segment descriptors. A non-empty manifest must have a run at `base_seq` and a run at `head_seq`, and all run sequences lie between them. An empty active manifest has equal head, base, and floor sequences and the genesis commit id. Within one run, each family's segments have dense, zero-based `segment_index` values and strictly separated ascending key ranges. Different runs can overlap because a later run can contain additional rows for the same inode, name slot, or revision history.
+Each run records `run_seq`, `tier`, and its segment descriptors. A non-empty manifest must have a run at `base_seq` and a run at `head_seq`, and all run sequences lie between them. An empty active manifest has equal head, base, and floor sequences. Within one run, each family's segments have dense, zero-based `segment_index` values and strictly separated ascending key ranges. Different runs can overlap because a later run can contain additional rows for the same inode, name slot, or revision history.
 
 The manifest must not contain duplicate run numbers or a run number at or above `next_run_no`. A family's segment ranges must not overlap or descend. Metadata producers must not write the same logical row key twice within one run.
 
@@ -687,7 +687,7 @@ Namespace creation and deletion publish numbered manifests. Retirement is derive
 
 Read existing namespace state before writing new objects. An existing active namespace returns `namespace_exists`, or its current summary with `allow_existing`. Corruption and read errors are not absence. These completed-namespace checks write nothing.
 
-For an absent namespace, build manifest 1 with the namespace's creation time and application-supplied `created_by`, no fork basis, active status, the genesis commit ID, next inode ID 2, and no runs or writer block. Head sequence, base sequence, the retention floor, folded WAL number, next run number, both epochs, and all three activity counters start at zero.
+For an absent namespace, build manifest 1 with the namespace's creation time and application-supplied `created_by`, no fork basis, active status, next inode ID 2, and no runs or writer block. Head sequence, base sequence, the retention floor, folded WAL number, next run number, both epochs, and all three activity counters start at zero.
 
 Write the hint naming manifest 1 and WAL 0, then manifest 1, both with put-if-absent. A hint collision is permitted. The manifest put decides which installation wins. A hint left before that put does not establish namespace existence.
 
@@ -699,7 +699,7 @@ A fork starts independent history from the source's retained metadata:
 
 1. Load the target’s current manifest before writing a source pin. Continue only if the target is absent. Create a verified source pin whose owner names the target namespace, either from the source head or a live snapshot under section 8.2.
 2. Load and verify the pinned manifest.
-3. Copy its run references, base sequence, head commit ID, inode allocator, and next run number into the target manifest. The initial head is the captured source sequence. Preserve every segment's owner.
+3. Copy its run references, base sequence, inode allocator, and next run number into the target manifest. The initial head is the captured source sequence. Preserve every segment's owner.
 4. Set target identity, creation time, and `created_by` from the fork request, immutable `fork_basis`, active status, and no writer block. Activity counters start at zero and the retention floor equals the head. Both epochs and the local folded WAL number start at zero.
 5. Install the target hint naming manifest 1 and WAL 0, then target manifest 1, as section 9.1 describes.
 
@@ -711,7 +711,7 @@ The fixed creation grace on the source pin protects installation. Before initiat
 
 A losing manifest-1 put reads the winner and verifies its namespace identity. Active status means `namespace_exists`. Deleted status follows the lifetime rule in section 1. Invalid bytes or key/payload disagreement are corruption. No loser overwrites the winner.
 
-A confirmed precondition failure is a conflict. A put with an unknown transport outcome can confirm its own success only by reading back the exact proposed manifest, except for a plain create under section 9.1. A fork's unique source pin makes its exact read-back proof of publication. An explicit `allow_existing` retry can instead return an existing active namespace.
+A confirmed precondition failure is a conflict. A put with an unknown transport outcome confirms its own success only when a fork's first manifest reads back exactly: its source pin is unique to that attempt. Every other manifest, including a plain create under section 9.1, a compactor claim, a writer acquisition, or a tombstone, can be rebuilt byte for byte by another publisher, so an exact read-back counts as the current manifest and the attempt retries from it. An explicit `allow_existing` retry can instead return an existing active namespace.
 
 Abandoned attempts can leave a hint or fork pin. A leftover hint does not install a namespace. An unused fork pin is collected after its installation grace under section 11.7.
 
@@ -1128,7 +1128,6 @@ A namespace manifest contains:
 | `manifest_no` | Positive number matching the object key. |
 | `compactor_epoch` | Current compaction authority. |
 | `head_seq` | Materialized head sequence; on deletion, the final namespace sequence. |
-| `head_commit_id` | Commit ID at the recorded head. |
 | `activity` | Required cumulative activity counters defined in section 7.4. |
 | `base_seq` | Oldest run sequence represented by the file set. |
 | `writer_epoch` | Current writer authority. |
@@ -1157,9 +1156,9 @@ The owner and segment ID determine the object key. The descriptor stores no sepa
 
 `MAX_WAL_SEGMENT_BYTES` is 512 MiB (536,870,912 bytes) for the complete decompressed WAL document, including its envelope. Writers keep every segment within this limit through request and batch admission; readers refuse larger documents. A writer composes each batch so the sum of its requests' bounds plus the document overhead stays within the limit. This is a format constraint because every successful publication must remain readable with bounded decompression.
 
-A WAL segment's payload contains `namespace_id`, `wal_no`, `writer_epoch`, `prior_head_seq`, `head_seq`, `head_commit_id`, `next_inode_id`, and `records`.
+A WAL segment's payload contains `namespace_id`, `wal_no`, `writer_epoch`, `prior_head_seq`, `head_seq`, `next_inode_id`, and `records`.
 
-For a data segment, `records` covers the sequences after `prior_head_seq` through `head_seq` contiguously. The WAL number must match the key, and the allocation high-water mark and head commit ID must agree with replay. A fence has an empty record list, `head_seq` equal to `prior_head_seq`, and an unchanged allocator and head commit ID. Fences participate in WAL numbering and epoch validation but produce no logical changes.
+For a data segment, `records` covers the sequences after `prior_head_seq` through `head_seq` contiguously. The WAL number must match the key, and the allocation high-water mark must agree with replay. A fence has an empty record list, `head_seq` equal to `prior_head_seq`, and an unchanged allocator. Fences participate in WAL numbering and epoch validation but produce no logical changes.
 
 Each commit contains `seq`, `commit_id`, `committed_by`, `semantic_commit_fingerprint`, `committed_at_ms`, optional `message`, `deltas`, and optional `inline_content`. A delta wrapper contains `semantic_operation_index` and `delta`. The latter is a kind-tagged object with these fields:
 

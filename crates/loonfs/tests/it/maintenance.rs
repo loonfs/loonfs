@@ -17,7 +17,7 @@ use loonfs_objectstore::keys::{hint, metadata_manifest_object};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::ids::namespace_id;
-use loonfs_test_support::stores::{KeyPredicate, OperationClass, RecordingStore};
+use loonfs_test_support::stores::{BlockingStore, KeyPredicate, OperationClass, RecordingStore};
 use std::sync::Arc;
 use tempfile::tempdir;
 
@@ -615,43 +615,64 @@ fn maintenance_step_counts_segments_not_commits() {
     );
 }
 
-#[test]
-fn maintenance_step_treats_manifest_number_collision_as_benign_race() {
+#[tokio::test]
+async fn maintenance_step_treats_manifest_number_collision_as_benign_race() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
-    let raw_store = Arc::new(RuntimeStoreProbe::new(temp_dir.path(), &namespace_id));
-    let object_store = raw_store.store();
-    let fs = open_runtime(object_store, "step-race-test");
+    let raw_store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
+    let blocked = Arc::new(BlockingStore::new(
+        raw_store.clone(),
+        KeyPredicate::manifest(&namespace_id),
+        OperationClass::Put,
+    ));
+    let fs = open_runtime_async(blocked.clone(), "step-race-test").await;
+    let winner = open_runtime_async(raw_store, "competing-flush").await;
 
-    fs.create_namespace_blocking(
+    fs.create_namespace(
         &namespace_id,
         CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
     )
+    .await
     .expect("create namespace");
-    fs.put_file_bytes_blocking(
+    fs.put_file_bytes(
         &namespace_id,
         "/docs/hello.txt",
         b"hello",
         PutFileOptions::new(loonfs_test_support::test_actor()),
     )
+    .await
     .expect("put file");
 
-    raw_store.fail_manifest_publish();
-    let step = fs
-        .maintenance_run_namespace_blocking(&namespace_id, metadata_request(1))
-        .expect("maintenance pass should not fail on metadata root publish race");
+    blocked.block_next();
+    let (step, ()) = futures::join!(
+        fs.maintenance
+            .run_maintenance(&namespace_id, metadata_request(1)),
+        async {
+            blocked.wait_until_blocked().await;
+            winner
+                .maintenance
+                .flush_wal(&namespace_id)
+                .await
+                .expect("competing flush");
+            blocked.release();
+        }
+    );
+    let step = step.expect("maintenance pass should not fail on metadata root publish race");
 
     assert_eq!(
         upkeep(&step).wal_flush,
-        WalFlushStepOutcome::RetriesExhausted {
-            observed_head_seq: ChangeSeq(1)
+        WalFlushStepOutcome::AlreadyPublished {
+            attempted_seq: ChangeSeq(1),
+            current_manifest_no: ManifestNo(3),
         }
     );
     let status = fs
-        .namespace_diagnostics_blocking(&namespace_id)
+        .maintenance
+        .get_namespace_diagnostics(&namespace_id)
+        .await
         .expect("status after lost race");
-    assert_eq!(status.current_manifest_no, Some(ManifestNo(2)));
-    assert_eq!(status.wal_tail_segments, 2);
+    assert_eq!(status.current_manifest_no, Some(ManifestNo(3)));
+    assert_eq!(status.wal_tail_segments, 0);
 }
 
 #[tokio::test]

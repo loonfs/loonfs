@@ -85,12 +85,12 @@ pub use loonfs_core::limits::{
 pub use loonfs_core::time::current_time_ms;
 pub use loonfs_core::{
     delete_if_aged, ensure_metadata_publication_budget, next_run_no_after, refill_iterators,
-    select_next_iterator, write_segments_in_waves, BootstrapNamespaceError, CheckpointFile,
-    CheckpointFilesPage, CheckpointFilesPageCursor, CheckpointPageCursor, CurrentFileState,
-    DeleteNamespaceOptions, Error as CoreError, ErrorCode, ErrorKind, FileContentStream, GcConfig,
-    GraceAge, MetadataCompactionJobOutcome, MetadataCompactionPolicy, MetadataViewError,
-    SegmentBlockLoader, SegmentRowIterator, StoreFailureClass, WriterFence,
-    CONTENT_READ_CHUNK_BYTES, MAX_RESOLVE_CURRENT_FILES,
+    select_next_iterator, write_segments_in_waves, CheckpointFile, CheckpointFilesPage,
+    CheckpointFilesPageCursor, CheckpointPageCursor, CurrentFileState, DeleteNamespaceOptions,
+    Error as CoreError, ErrorCode, ErrorKind, FileContentStream, GcConfig, GraceAge,
+    MetadataCompactionJobOutcome, MetadataCompactionPolicy, MetadataViewError, SegmentBlockLoader,
+    SegmentRowIterator, StoreFailureClass, WriterFence, CONTENT_READ_CHUNK_BYTES,
+    MAX_RESOLVE_CURRENT_FILES,
 };
 pub use publisher::{NamespaceAdvanceHint, NamespaceAdvanceObserver};
 
@@ -215,9 +215,6 @@ pub enum RuntimeError {
     /// An error surfaced by the underlying `loonfs-core` engine.
     #[error(transparent)]
     Core(#[from] CoreError),
-    /// Bootstrapping a namespace failed.
-    #[error(transparent)]
-    Bootstrap(#[from] BootstrapNamespaceError),
     /// The runtime configuration is invalid.
     #[error("invalid runtime config: {0}")]
     Config(String),
@@ -231,7 +228,6 @@ impl RuntimeError {
     pub fn code(&self) -> ErrorCode {
         match self {
             Self::Core(error) => error.code(),
-            Self::Bootstrap(error) => error.code(),
             Self::Config(_) => ErrorCode::InvalidRequest,
             Self::RuntimeTask(_) => ErrorCode::ServerError,
         }
@@ -246,7 +242,6 @@ impl RuntimeError {
     pub fn details(&self) -> Option<loonfs_api::ErrorDetails> {
         match self {
             Self::Core(error) => error.details(),
-            Self::Bootstrap(error) => error.details(),
             Self::Config(_) | Self::RuntimeTask(_) => None,
         }
     }
@@ -277,7 +272,6 @@ impl RuntimeError {
     pub fn public_message(&self) -> std::borrow::Cow<'static, str> {
         let store_message = match self {
             Self::Core(error) => error.object_store_public_message(),
-            Self::Bootstrap(error) => error.object_store_public_message(),
             Self::Config(_) | Self::RuntimeTask(_) => None,
         };
         if let Some(message) = store_message {
@@ -289,7 +283,6 @@ impl RuntimeError {
                 std::borrow::Cow::Owned(message.clone())
             }
             Self::Core(error) => std::borrow::Cow::Owned(error.to_string()),
-            Self::Bootstrap(error) => std::borrow::Cow::Owned(error.to_string()),
         }
     }
 }

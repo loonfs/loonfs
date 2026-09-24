@@ -768,11 +768,9 @@ async fn publisher_delivery_preserves_bootstrap_namespace_exists_code() {
     let selected_at = publisher.timer.monotonic_now_ms();
     publisher.deliver_batch_results(
         vec![commit_id],
-        vec![Err(RuntimeError::Bootstrap(
-            crate::BootstrapNamespaceError::NamespaceAlreadyExists {
-                namespace_id: namespace_id.clone(),
-            },
-        ))],
+        vec![Err(RuntimeError::Core(crate::CoreError::NamespaceExists {
+            namespace_id: namespace_id.clone(),
+        }))],
         selected_at,
     );
 
@@ -780,7 +778,7 @@ async fn publisher_delivery_preserves_bootstrap_namespace_exists_code() {
         .await
         .expect("publisher should deliver the result")
         .expect_err("bootstrap failure should remain an error");
-    assert!(matches!(error, RuntimeError::Bootstrap(_)));
+    assert!(matches!(error, RuntimeError::Core(_)));
     assert_eq!(error.code(), ErrorCode::NamespaceExists);
 }
 

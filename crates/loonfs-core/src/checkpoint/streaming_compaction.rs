@@ -517,15 +517,7 @@ pub(super) async fn finalize_metadata_compaction<S: ObjectStore + ?Sized>(
         }
         ensure_metadata_publication_budget(timer, publication_started_ms, namespace_id)?;
         let manifest_no = manifest.envelope().payload().manifest_no;
-        let published = publish_manifest(
-            store,
-            namespace_id,
-            manifest,
-            Some(current_manifest.manifest.manifest_no),
-            timer,
-            publication_started_ms,
-        )
-        .await?;
+        let published = publish_manifest(store, manifest, timer, publication_started_ms).await?;
         drop(segments);
         let lost_to = match published {
             ManifestPublicationOutcome::Published(_) => {
@@ -546,7 +538,6 @@ pub(super) async fn finalize_metadata_compaction<S: ObjectStore + ?Sized>(
             }
             ManifestPublicationOutcome::CoveredByCurrent(_) => "covered_by_current",
             ManifestPublicationOutcome::PredecessorChanged(_) => "predecessor_changed",
-            ManifestPublicationOutcome::Installable => "manifest_number_taken",
         };
         tracing::debug!(
             namespace_id = namespace_id.as_str(),

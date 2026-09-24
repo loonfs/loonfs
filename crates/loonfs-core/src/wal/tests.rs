@@ -11,9 +11,7 @@ use crate::namespace::{
 };
 use crate::path::read::load_current_metadata_view;
 use crate::protocol::PublishTailOptions;
-use loonfs_api::wire::wal::{
-    decode_wal_segment_envelope_zstd, encode_wal_segment_envelope_zstd, WalCommitPayload,
-};
+use loonfs_api::wire::wal::{decode_wal_segment_envelope_zstd, encode_wal_segment_envelope_zstd};
 use loonfs_api::{
     AbsolutePath, AttributeInclusion, ChangeSeq, CommitId, ErrorCode, InodeId, ManifestNo,
     NamespaceId, WalNo, WriterEpoch, WriterId,
@@ -58,51 +56,6 @@ async fn readers_reject_invalid_numbers_epochs_sequences_and_allocation_summarie
     )
     .expect("decode");
 
-    let mut data_payload = original.payload().clone();
-    data_payload.head_seq = ChangeSeq(1);
-    data_payload.head_commit_id = CommitId::parse("wrong-data-head").expect("commit");
-    data_payload.records = vec![WalCommitPayload {
-        seq: ChangeSeq(1),
-        commit_id: CommitId::parse("data-record").expect("commit"),
-        committed_by: loonfs_test_support::test_actor(),
-        semantic_commit_fingerprint: serde_json::from_str(r#""v1:sha256:test""#)
-            .expect("fingerprint"),
-        committed_at_ms: 1_000,
-        message: None,
-        deltas: Vec::new(),
-        inline_content: Vec::new(),
-    }];
-    let data = encode_wal_segment_envelope_zstd(data_payload).expect("data segment");
-    assert_eq!(
-        super::replay::validate_wal_segment_for_replay(
-            &namespace_id,
-            ChangeSeq(0),
-            data.envelope(),
-        ),
-        Err(super::WalSegmentError::SegmentSummaryMismatch)
-    );
-
-    let mut fence_payload = original.payload().clone();
-    fence_payload.head_commit_id = CommitId::parse("wrong-fence-head").expect("commit");
-    let fence = encode_wal_segment_envelope_zstd(fence_payload)
-        .expect("fence segment")
-        .into_envelope();
-    let current = load_current_manifest(&store, &namespace_id)
-        .await
-        .expect("manifest");
-    let base_head = crate::namespace::state::NamespaceReadState::from(current.envelope.payload());
-    let tail =
-        super::ValidatedWalTail::new(vec![super::ValidatedWalSegment::new(key.clone(), fence)]);
-    assert_eq!(
-        super::replay::project_validated_wal_tail(
-            &base_head,
-            &super::ProjectedWalTail::default(),
-            Some(WriterEpoch(2)),
-            &tail,
-        ),
-        Err(super::WalSegmentError::SegmentSummaryMismatch)
-    );
-
     for changed in 0..5 {
         let mut payload = original.payload().clone();
         match changed {
@@ -132,7 +85,7 @@ async fn readers_reject_invalid_numbers_epochs_sequences_and_allocation_summarie
 }
 
 #[tokio::test]
-async fn hinted_fences_carry_the_head_commit_without_reading_earlier_wal() {
+async fn hinted_fences_carry_the_head_without_reading_earlier_wal() {
     let directory = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("hinted-fences").expect("namespace");
     let store = RecordingStore::new(
@@ -168,7 +121,7 @@ async fn hinted_fences_carry_the_head_commit_without_reading_earlier_wal() {
     let head = crate::namespace::control::load_namespace_read_state(&store, &namespace_id)
         .await
         .expect("cold discovery");
-    assert_eq!(head.head_commit_id, committed.commit_id);
+    assert_eq!(head.seq, committed.committed_seq);
     assert_eq!(
         store.take_get_keys(),
         vec![
@@ -637,19 +590,23 @@ async fn a_warm_probe_reports_a_broken_chain_at_its_own_epoch_as_corruption() {
     acquire_writer_epoch(&store, &namespace_id, &context(1_000))
         .await
         .expect("fence");
-    let loaded = crate::namespace::read_anchor::load_head_and_metadata_basis(&store, &namespace_id)
+    let loaded = crate::namespace::read_anchor::load_read_anchor(&store, &namespace_id)
         .await
         .expect("warm head");
     let fence = decode_wal_segment_envelope_zstd(
         &store
-            .get(&wal_segment(&namespace_id, &loaded.head.wal_no), None)
+            .get(&wal_segment(&namespace_id, &loaded.read_state.wal_no), None)
             .await
             .expect("get")
             .expect("fence"),
     )
     .expect("decode");
     let mut broken = fence.payload().clone();
-    broken.wal_no = loaded.head.wal_no.successor().expect("next WAL number");
+    broken.wal_no = loaded
+        .read_state
+        .wal_no
+        .successor()
+        .expect("next WAL number");
     broken.prior_head_seq = ChangeSeq(5);
     broken.head_seq = ChangeSeq(5);
     store
@@ -663,8 +620,8 @@ async fn a_warm_probe_reports_a_broken_chain_at_its_own_epoch_as_corruption() {
         .await
         .expect("same-epoch segment");
     let mut warm = crate::RuntimeReadContext {
-        head: loaded.head,
-        basis: loaded.basis,
+        basis: loaded.basis(),
+        head: loaded.read_state,
         segment_cache: std::sync::Arc::new(crate::cache::MetadataSegmentCache::new(
             Default::default(),
         )),

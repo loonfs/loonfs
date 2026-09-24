@@ -74,16 +74,7 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
             payload.manifest_no = next_manifest_no_after(payload.manifest_no)?;
             payload.retention_floor_seq = target;
             let manifest = encode_manifest(payload)?;
-            match publish_manifest(
-                store,
-                namespace_id,
-                manifest,
-                Some(current.state.manifest.manifest_no),
-                &timer,
-                started_ms,
-            )
-            .await?
-            {
+            match publish_manifest(store, manifest, &timer, started_ms).await? {
                 ManifestPublicationOutcome::Published(current) => {
                     Ok(CasAttempt::Settled(current.retention_floor_seq))
                 }

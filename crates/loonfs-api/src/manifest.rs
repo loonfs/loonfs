@@ -1198,8 +1198,6 @@ pub struct NamespaceManifestPayload {
     pub compactor_epoch: u64,
     /// Materialized head sequence, or the final namespace sequence on deletion.
     pub head_seq: ChangeSeq,
-    /// Commit identity used when no newer data segment exists.
-    pub head_commit_id: CommitId,
     /// Activity committed in this namespace through `head_seq`.
     pub activity: ManifestActivity,
     /// Oldest run sequence still represented by `runs`.
@@ -1254,7 +1252,6 @@ impl NamespaceManifestPayload {
             manifest_no: ManifestNo(1),
             compactor_epoch: 0,
             head_seq: ChangeSeq(0),
-            head_commit_id: crate::control::genesis_commit_id(),
             activity: ManifestActivity::default(),
             base_seq: ChangeSeq(0),
             writer_epoch: WriterEpoch(0),
@@ -1302,9 +1299,6 @@ impl NamespaceManifestPayload {
                     || self.retention_floor_seq != ChangeSeq(0)
                 {
                     return invalid("head_seq");
-                }
-                if self.head_commit_id != crate::control::genesis_commit_id() {
-                    return invalid("head_commit_id");
                 }
                 if self.next_inode_id != crate::FIRST_ALLOCATABLE_INODE_ID {
                     return invalid("next_inode_id");
@@ -1625,8 +1619,6 @@ mod tests {
             manifest_no: ManifestNo(10),
 
             head_seq: ChangeSeq(10),
-            head_commit_id: CommitId::parse("c_00000000000000000000000000000001")
-                .expect("commit id"),
             base_seq: ChangeSeq(10),
             writer_epoch: WriterEpoch(2),
             next_inode_id: InodeId(42),
@@ -1671,8 +1663,6 @@ mod tests {
             manifest_no: ManifestNo(12),
 
             head_seq: ChangeSeq(12),
-            head_commit_id: CommitId::parse("c_00000000000000000000000000000002")
-                .expect("commit id"),
             base_seq: ChangeSeq(10),
             writer_epoch: WriterEpoch(2),
             next_inode_id: InodeId(42),

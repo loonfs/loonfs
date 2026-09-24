@@ -12,18 +12,12 @@ use loonfs_objectstore::keys::hint;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 use serde::Serialize;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum NamespacePublication {
-    Published,
-    Exists,
-}
-
 pub(super) async fn publish_namespace<S: ObjectStore + ?Sized>(
     store: &S,
     start: &NamespaceManifestPayload,
     timer: &dyn MonotonicTimer,
     started_ms: u64,
-) -> Result<NamespacePublication> {
+) -> Result<()> {
     let namespace_id = &start.namespace_id;
     if let Some(current) = load_current_manifest_if_present(store, namespace_id).await? {
         if current.envelope.payload().status.is_deleted() {
@@ -31,7 +25,9 @@ pub(super) async fn publish_namespace<S: ObjectStore + ?Sized>(
                 namespace_id: namespace_id.clone(),
             });
         }
-        return Ok(NamespacePublication::Exists);
+        return Err(CoreError::NamespaceExists {
+            namespace_id: namespace_id.clone(),
+        });
     }
     let first = HintPayload {
         namespace_id: namespace_id.clone(),
@@ -40,10 +36,9 @@ pub(super) async fn publish_namespace<S: ObjectStore + ?Sized>(
     };
     put_control_if_absent(store, hint(namespace_id), ControlObjectKind::Hint, &first).await?;
     let manifest = encode_manifest(start.clone())?;
-    match publish_manifest(store, namespace_id, manifest, None, timer, started_ms).await? {
-        ManifestPublicationOutcome::Published(_) => Ok(NamespacePublication::Published),
-        ManifestPublicationOutcome::Installable
-        | ManifestPublicationOutcome::CoveredByCurrent(_)
+    match publish_manifest(store, manifest, timer, started_ms).await? {
+        ManifestPublicationOutcome::Published(_) => Ok(()),
+        ManifestPublicationOutcome::CoveredByCurrent(_)
         | ManifestPublicationOutcome::PredecessorChanged(_) => {
             let current = super::control::load_current_manifest(store, namespace_id).await?;
             if current.envelope.payload().status.is_deleted() {
@@ -51,7 +46,9 @@ pub(super) async fn publish_namespace<S: ObjectStore + ?Sized>(
                     namespace_id: namespace_id.clone(),
                 });
             }
-            Ok(NamespacePublication::Exists)
+            Err(CoreError::NamespaceExists {
+                namespace_id: namespace_id.clone(),
+            })
         }
     }
 }

@@ -564,6 +564,7 @@ async fn each_create_mints_its_own_record_and_carries_its_own_expiry() {
     let first =
         super::create::create_checkpoint(&store, &namespace_id, owner(Some(10_000)), &context)
             .await
+            .map(crate::checkpoint::checkpoint_summary)
             .expect("create checkpoint");
     assert_eq!(first.expires_at_ms, Some(10_000));
 
@@ -574,6 +575,7 @@ async fn each_create_mints_its_own_record_and_carries_its_own_expiry() {
         let next =
             super::create::create_checkpoint(&store, &namespace_id, owner(expiry), &later_context)
                 .await
+                .map(crate::checkpoint::checkpoint_summary)
                 .expect("create checkpoint");
         assert!(
             minted.insert(next.checkpoint_id.clone()),
@@ -633,6 +635,7 @@ async fn an_expired_pin_still_enumerates_its_files_until_deleted() {
         &context,
     )
     .await
+    .map(crate::checkpoint::checkpoint_summary)
     .expect("create checkpoint whose expiry has already passed");
     assert!(
         load_checkpoint_record(&store, &namespace_id, &already_expired.checkpoint_id)
@@ -759,6 +762,7 @@ async fn checkpoint_creation_deletes_its_pin_when_the_floor_passed_its_manifest(
         &context,
     )
     .await
+    .map(crate::checkpoint::checkpoint_summary)
     .expect_err("floor passed pin");
     assert_eq!(error.code(), ErrorCode::CheckpointUnavailable);
     assert!(store
@@ -855,6 +859,7 @@ async fn checkpoint_basis_verification_store_failure_deletes_the_record() {
         &context,
     )
     .await
+    .map(crate::checkpoint::checkpoint_summary)
     .expect_err("verification failed");
     assert_eq!(error.code(), ErrorCode::ServerError);
     assert!(store

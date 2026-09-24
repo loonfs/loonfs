@@ -217,7 +217,7 @@ async fn competing_engines_materialize_identical_objects_and_publish_one_manifes
     let (first_result, second_result) = tokio::join!(first_flush, second_flush);
     let first_result = first_result.expect("first flush");
     let second_result = second_result.expect("second flush");
-    assert_eq!(first_result.outcome, FlushWalOutcome::ManifestAdvanced);
+    assert_eq!(first_result.outcome, FlushWalOutcome::AlreadyCurrent);
     assert_eq!(second_result.outcome, FlushWalOutcome::Published);
     assert_eq!(first_result.manifest_no, second_result.manifest_no);
     let keys = content_puts(&store);

@@ -4,7 +4,7 @@ use super::families::CandidateFamily;
 use super::live_set::{LiveSet, RetirementState};
 use super::reclaim::reclaim_namespace;
 use super::sweep::Sweep;
-use super::uploads::{PublicationView, UploadSweepContext};
+use super::uploads::PublicationView;
 use super::GcConfig;
 use crate::context::MutationContext;
 use crate::control_object::ControlObjectLoadError;
@@ -44,23 +44,17 @@ pub async fn gc_namespace<S: ObjectStore + ?Sized>(
         _ => None,
     };
     let basis = anchor.basis();
-    let view = PublicationView::new(
+    let view = PublicationView::new(store, namespace_id, &anchor, &basis);
+    let mut sweep = Sweep {
         store,
         namespace_id,
-        (!live.namespace_deleted).then_some(&anchor),
-        &basis,
-    );
+        grace_window_ms: config.grace_window_ms,
+        mutation: context,
+        live: &live,
+        view: &view,
+        report: &mut report,
+    };
     for family in CandidateFamily::ALL {
-        let mut sweep = Sweep {
-            store,
-            namespace_id,
-            grace_window_ms: config.grace_window_ms,
-            mutation: context,
-            live: &live,
-            view: &view,
-            upload_sweep: UploadSweepContext::new(store, &live, config.grace_window_ms, context),
-            report: &mut report,
-        };
         let prefix = family.prefix(namespace_id);
         let mut listing = store.list_prefix_stream(&prefix);
         while let Some(key) = listing

@@ -29,7 +29,7 @@ pub(crate) async fn discover_tip<S: ObjectStore + ?Sized>(
         // first position the walk can be contiguous from.
         let (object_key, segment) = load_required_segment(store, namespace_id, start).await?;
         let payload = segment.payload();
-        validate_wal_segment_for_replay(namespace_id, payload.prior_head_seq, &segment)
+        validate_wal_segment_for_replay(payload.prior_head_seq, &segment)
             .map_err(|error| corrupt(&object_key, error))?;
         apply_segment(&mut state, &segment, &object_key)?;
         previous_epoch = payload.writer_epoch;
@@ -71,7 +71,6 @@ pub(super) fn apply_segment(
     state.wal_no = payload.wal_no;
     state.seq = payload.head_seq;
     state.next_inode_id = payload.next_inode_id;
-    state.head_commit_id = payload.head_commit_id.clone();
     Ok(())
 }
 
@@ -112,7 +111,6 @@ pub async fn probe_namespace_wal<S: ObjectStore + ?Sized>(
     let mut cache_key = WalTailProjectionCacheKey {
         namespace_id: state.namespace_id.clone(),
         manifest_no: context.basis.manifest_no(),
-        manifest_head_seq: context.basis.manifest().head_seq,
         head_seq: state.seq,
     };
     let mut projected_tail = None;
@@ -124,7 +122,7 @@ pub async fn probe_namespace_wal<S: ObjectStore + ?Sized>(
         if envelope.payload().writer_epoch != state.writer_epoch {
             return Ok(false);
         }
-        validate_wal_segment_for_replay(&state.namespace_id, state.seq, &envelope)
+        validate_wal_segment_for_replay(state.seq, &envelope)
             .map_err(|error| corrupt(&loaded.object_key, error))?;
         let segment = ValidatedWalSegment::new(loaded.object_key, envelope);
         if state.wal_no == context.head.wal_no {
@@ -135,9 +133,8 @@ pub async fn probe_namespace_wal<S: ObjectStore + ?Sized>(
         if let Some(current) = projected_tail {
             let object_key = segment.object_key().to_owned();
             let tail = ValidatedWalTail::new(vec![segment]);
-            let replayed =
-                project_validated_wal_tail(&before, &current, Some(state.writer_epoch), &tail)
-                    .map_err(|error| corrupt(&object_key, error))?;
+            let replayed = project_validated_wal_tail(&before, &current, &tail)
+                .map_err(|error| corrupt(&object_key, error))?;
             projected_tail = Some(Arc::new(replayed.projected_tail));
         }
     }

@@ -2925,45 +2925,11 @@ async fn a_cancellation_after_the_last_row_publishes_nothing() {
     );
 }
 
-/// Cancels the job when its first manifest put-if-absent fails. Epoch updates
-/// still succeed so cancellation, rather than fencing, stops the job.
-#[derive(Debug)]
-struct CancelAtTheFirstPublicationStore {
-    inner: LocalFsStore,
-    cancellation: MetadataCompactionCancellation,
-    manifests: AtomicUsize,
-}
-
-#[async_trait]
-impl ObjectStore for CancelAtTheFirstPublicationStore {
-    loonfs_test_support::delegate_object_store!(self => self.inner; except put);
-
-    async fn put(
-        &self,
-        key: &str,
-        bytes: Bytes,
-        mode: PutMode,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
-        if loonfs_objectstore::layout::manifest_no_of(key).is_some() {
-            self.manifests.fetch_add(1, Ordering::SeqCst);
-        }
-        if loonfs_objectstore::layout::manifest_no_of(key).is_some()
-            && matches!(mode, PutMode::CreateIfAbsent)
-        {
-            self.cancellation.cancel();
-            return Err(ObjectStoreError::PreconditionFailed {
-                object_key: key.to_owned(),
-            });
-        }
-        self.inner.put(key, bytes, mode).await
-    }
-}
-
 #[tokio::test]
 async fn a_cancelled_finalization_does_not_take_the_races_it_has_left() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
     seed_bindings_workload(&store, &namespace_id).await;
     let spec =
         compaction_spec_for_group(&store, &namespace_id, MetadataFamilyGroup::Bindings).await;
@@ -2980,36 +2946,57 @@ async fn a_cancelled_finalization_does_not_take_the_races_it_has_left() {
     else {
         panic!("nothing cancelled this job while it read");
     };
-    let manifest_before = current_manifest_number(&store, &namespace_id).await;
-
-    let cancelling_store = CancelAtTheFirstPublicationStore {
-        inner: LocalFsStore::new(temp_dir.path()).expect("store"),
-        cancellation: cancellation.clone(),
-        manifests: AtomicUsize::new(0),
-    };
-    let finalization = finalize_streaming_compaction_under(
-        &cancelling_store,
-        &namespace_id,
-        &spec,
-        &input_keys,
-        &result,
-        &cancellation,
-    )
-    .await;
+    let current = load_current_manifest(&store, &namespace_id)
+        .await
+        .expect("current manifest");
+    let mut winner = current.envelope.payload().clone();
+    winner.manifest_no = winner.manifest_no.successor().expect("next manifest");
+    let recorded = Arc::new(RecordingStore::new(
+        store.clone(),
+        KeyPredicate::manifest(&namespace_id),
+    ));
+    let blocked = BlockingStore::new(
+        recorded.clone(),
+        KeyPredicate::manifest(&namespace_id),
+        OperationClass::Put,
+    );
+    blocked.block_next();
+    let (finalization, ()) = futures::join!(
+        finalize_streaming_compaction_under(
+            &blocked,
+            &namespace_id,
+            &spec,
+            &input_keys,
+            &result,
+            &cancellation,
+        ),
+        async {
+            blocked.wait_until_blocked().await;
+            let published =
+                publish_manifest(&store, encode_manifest(winner.clone()).expect("winner"))
+                    .await
+                    .expect("competing publication");
+            assert!(matches!(
+                published,
+                ManifestPublicationOutcome::Published(_)
+            ));
+            cancellation.cancel();
+            blocked.release();
+        }
+    );
 
     assert!(
         matches!(finalization, MetadataCompactionJobOutcome::Cancelled),
         "the cancelled attempt must not be retried, got {finalization:?}"
     );
+    assert_eq!(recorded.counts().create_if_absent_puts, 1);
     assert_eq!(
-        cancelling_store.manifests.load(Ordering::SeqCst),
-        1,
-        "only the attempt that was running when the token was set may build a manifest"
-    );
-    assert_eq!(
-        current_manifest_number(&store, &namespace_id).await,
-        manifest_before,
-        "and nothing may be published"
+        load_current_manifest(&store, &namespace_id)
+            .await
+            .expect("current manifest")
+            .envelope
+            .payload(),
+        &winner,
     );
 }
 
@@ -3291,9 +3278,7 @@ async fn a_new_compactor_epoch_an_expired_job_and_a_deletion_each_prevent_public
     successor.manifest_no = successor.manifest_no.successor().expect("next number");
     let error = super::super::publish::publish_manifest(
         &store,
-        &namespace,
         super::super::publish::encode_manifest(successor).expect("encode"),
-        Some(tombstone.state.manifest.manifest_no),
         &timer,
         0,
     )

@@ -159,7 +159,7 @@ pub(crate) async fn delete_namespace_with_engine(
         // Only a namespace that is actually gone drops its cached state:
         // a failed delete (a fenced deleter, say) leaves the namespace
         // live, and its cached reads valid.
-        core.invalidate_namespace_cache_for_delete(namespace_id);
+        core.invalidate_namespace_read_cache(namespace_id);
     }
     result
 }

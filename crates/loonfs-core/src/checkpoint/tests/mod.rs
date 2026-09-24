@@ -145,6 +145,7 @@ pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
         context,
     )
     .await
+    .map(crate::checkpoint::checkpoint_summary)
 }
 
 pub(crate) fn mutation_context(writer_id: &str, now_ms: u64) -> MutationContext {
@@ -209,7 +210,7 @@ async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     context: &MutationContext,
-) -> Result<loonfs_api::Namespace, crate::namespace::BootstrapNamespaceError> {
+) -> Result<loonfs_api::Namespace, crate::error::CoreError> {
     let summary = crate::namespace::bootstrap::bootstrap_namespace(
         store,
         namespace_id,
@@ -892,7 +893,6 @@ pub(crate) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
         manifest_no,
 
         head_seq,
-        head_commit_id: head.head_commit_id.clone(),
         base_seq,
         writer_epoch: head.writer_epoch,
         next_inode_id: head.next_inode_id,
@@ -930,22 +930,12 @@ pub(crate) async fn write_namespace_manifest<S: ObjectStore + ?Sized>(
 
 async fn publish_manifest<S: ObjectStore + ?Sized>(
     store: &S,
-    namespace_id: &NamespaceId,
     manifest: loonfs_api::wire::envelope::EncodedEnvelope<NamespaceManifestPayload>,
-    expected_predecessor: Option<ManifestNo>,
 ) -> Result<ManifestPublicationOutcome, CoreError> {
     use crate::time::{MonotonicTimer, StdMonotonicTimer};
     let timer = StdMonotonicTimer::default();
     let started_ms = timer.monotonic_now_ms();
-    super::publish::publish_manifest(
-        store,
-        namespace_id,
-        manifest,
-        expected_predecessor,
-        &timer,
-        started_ms,
-    )
-    .await
+    super::publish::publish_manifest(store, manifest, &timer, started_ms).await
 }
 
 pub(super) async fn publish_manifest_with_segments<S: ObjectStore + ?Sized>(
@@ -970,7 +960,6 @@ pub(super) async fn publish_manifest_with_segments<S: ObjectStore + ?Sized>(
         manifest_no,
 
         head_seq,
-        head_commit_id: CommitId::parse("c_00000000000000000000000000000001").expect("commit id"),
         base_seq: head_seq,
         writer_epoch: loonfs_api::WriterEpoch(1),
         next_inode_id: InodeId(64),

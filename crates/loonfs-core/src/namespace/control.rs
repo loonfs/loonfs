@@ -4,8 +4,6 @@ use crate::control_object::{
     expect_namespace, load_control_object, ControlObjectLoadError, LoadedControl,
 };
 use crate::error::CoreError;
-use crate::namespace::basis::MetadataBasis;
-use crate::namespace::read_anchor::load_head_and_metadata_basis;
 use crate::namespace::state::NamespaceReadState;
 use loonfs_api::wire::control::{ControlObjectKind, HintPayload, ManifestRef};
 use loonfs_api::NamespaceId;
@@ -255,15 +253,6 @@ pub async fn load_namespace_current_manifest<S: ObjectStore + ?Sized>(
     expected_namespace_id: &NamespaceId,
 ) -> Result<LoadedManifest, ControlObjectLoadError> {
     load_current_manifest(store, expected_namespace_id).await
-}
-
-/// Loads the head and authorized metadata basis as one consistent read anchor.
-pub async fn load_namespace_read_anchor<S: ObjectStore + ?Sized>(
-    store: &S,
-    expected_namespace_id: &NamespaceId,
-) -> Result<(NamespaceReadState, MetadataBasis), ControlObjectLoadError> {
-    let loaded = load_head_and_metadata_basis(store, expected_namespace_id).await?;
-    Ok((loaded.head, loaded.basis))
 }
 
 /// Raises the discovery start without changing the committed WAL tip.

@@ -196,7 +196,6 @@ fn validation_context(
         fork_basis: None,
         namespace_id: namespace_id.clone(),
         seq,
-        head_commit_id: CommitId::parse("c_00000000000000000000000000000000").expect("commit id"),
         writer_epoch: WriterEpoch(1),
         writer: Some(WriterBlock {
             writer_id: loonfs_api::WriterId::parse("writer-a").expect("writer id"),

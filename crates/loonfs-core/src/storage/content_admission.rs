@@ -24,19 +24,13 @@ const TOKEN_VERSION: &str = "vct2";
 /// from an in-memory expectation or an unverified provider response.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompletedUploadReceipt {
-    namespace_id: NamespaceId,
     content_ref: ContentRef,
     completed_at_ms: u64,
 }
 
 impl CompletedUploadReceipt {
-    pub(crate) fn for_completed_session(
-        namespace_id: NamespaceId,
-        content_ref: ContentRef,
-        completed_at_ms: u64,
-    ) -> Self {
+    pub(crate) fn for_completed_session(content_ref: ContentRef, completed_at_ms: u64) -> Self {
         Self {
-            namespace_id,
             content_ref,
             completed_at_ms,
         }
@@ -58,7 +52,6 @@ pub struct PreparedContent {
 enum PreparedContentKind {
     Inline(InlineContent),
     Staged {
-        namespace_id: NamespaceId,
         content_ref: ContentRef,
         expires_at_ms: u64,
     },
@@ -86,11 +79,8 @@ impl PreparedContent {
     pub(crate) fn estimated_payload_bytes(&self) -> usize {
         match &self.kind {
             PreparedContentKind::Inline(value) => value.bytes().len(),
-            PreparedContentKind::Staged {
-                namespace_id,
-                content_ref,
-                ..
-            } => namespace_id
+            PreparedContentKind::Staged { content_ref, .. } => content_ref
+                .owner_namespace_id
                 .as_str()
                 .len()
                 .saturating_add(content_ref.content_id.as_str().len())
@@ -114,21 +104,13 @@ impl PreparedContent {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn for_durable_content_write(
-        namespace_id: NamespaceId,
-        content_ref: ContentRef,
-    ) -> Self {
-        Self::for_completed_upload(namespace_id, content_ref, u64::MAX)
+    pub(crate) fn for_durable_content_write(content_ref: ContentRef) -> Self {
+        Self::for_completed_upload(content_ref, u64::MAX)
     }
 
-    pub(crate) fn for_completed_upload(
-        namespace_id: NamespaceId,
-        content_ref: ContentRef,
-        expires_at_ms: u64,
-    ) -> Self {
+    pub(crate) fn for_completed_upload(content_ref: ContentRef, expires_at_ms: u64) -> Self {
         Self {
             kind: PreparedContentKind::Staged {
-                namespace_id,
                 content_ref,
                 expires_at_ms,
             },
@@ -144,11 +126,10 @@ impl PreparedContent {
         match &self.kind {
             PreparedContentKind::Inline(_) => false,
             PreparedContentKind::Staged {
-                namespace_id: expected_namespace_id,
                 content_ref: expected_content_ref,
                 expires_at_ms,
             } => {
-                expected_namespace_id == namespace_id
+                &expected_content_ref.owner_namespace_id == namespace_id
                     && expected_content_ref == content_ref
                     && now_ms <= *expires_at_ms
             }
@@ -165,9 +146,9 @@ impl PreparedContent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ContentTokenPayload {
     version: String,
-    namespace_id: NamespaceId,
     content_ref: ContentRef,
     expires_at_ms: u64,
 }
@@ -212,7 +193,6 @@ pub fn mint_content_token(
         .ok_or(ContentTokenError::TimeOverflow)?;
     let payload = ContentTokenPayload {
         version: TOKEN_VERSION.to_owned(),
-        namespace_id: receipt.namespace_id.clone(),
         content_ref: receipt.content_ref.clone(),
         expires_at_ms,
     };
@@ -258,7 +238,7 @@ pub fn verify_content_token(
     }
     let payload: ContentTokenPayload = serde_json::from_value(payload)
         .map_err(|error| ContentTokenError::Codec(error.to_string()))?;
-    if payload.namespace_id != *catalog.namespace_id() {
+    if payload.content_ref.owner_namespace_id != *catalog.namespace_id() {
         return Err(ContentTokenError::NamespaceMismatch);
     }
     if payload.content_ref != token.content_ref {
@@ -269,7 +249,6 @@ pub fn verify_content_token(
     }
 
     Ok(PreparedContent::for_completed_upload(
-        payload.namespace_id,
         payload.content_ref,
         payload.expires_at_ms,
     ))
@@ -308,20 +287,15 @@ mod tests {
         ))
     }
 
-    fn receipt(namespace_id: &NamespaceId, content_ref: &ContentRef) -> CompletedUploadReceipt {
-        CompletedUploadReceipt::for_completed_session(
-            namespace_id.clone(),
-            content_ref.clone(),
-            1_000,
-        )
+    fn receipt(content_ref: &ContentRef) -> CompletedUploadReceipt {
+        CompletedUploadReceipt::for_completed_session(content_ref.clone(), 1_000)
     }
 
     #[test]
     fn minted_content_token_passes_unchanged_into_embedded_verification() {
         let namespace = NamespaceId::parse("demo").expect("namespace");
         let content = ContentRef::blob_v1(namespace.clone(), ContentId::generate(), b"hello");
-        let token =
-            mint_content_token("secret", &receipt(&namespace, &content), 1_000).expect("mint");
+        let token = mint_content_token("secret", &receipt(&content), 1_000).expect("mint");
         let catalog = catalog_entry(namespace);
 
         let prepared =
@@ -336,8 +310,7 @@ mod tests {
         let namespace = NamespaceId::parse("source").expect("namespace");
         let other_namespace = NamespaceId::parse("target").expect("namespace");
         let content = ContentRef::blob_v1(namespace.clone(), ContentId::generate(), b"hello");
-        let token =
-            mint_content_token("secret", &receipt(&namespace, &content), 1_000).expect("mint");
+        let token = mint_content_token("secret", &receipt(&content), 1_000).expect("mint");
         let catalog = catalog_entry(namespace);
         let admission =
             verify_content_token("secret", &catalog, &token, 1_000).expect("verify token");
@@ -353,8 +326,7 @@ mod tests {
             ContentId::parse("con_0123456789abcdef0123456789abcdef").expect("content id"),
             b"hello",
         );
-        let token =
-            mint_content_token("secret", &receipt(&namespace, &content), 1_000).expect("mint");
+        let token = mint_content_token("secret", &receipt(&content), 1_000).expect("mint");
         let (payload_part, _) = token.token.split_once('.').expect("signed token");
         let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(payload_part)
@@ -362,7 +334,7 @@ mod tests {
 
         assert_eq!(
             payload,
-            br#"{"version":"vct2","namespace_id":"demo","content_ref":{"kind":"blob_v1","owner_namespace_id":"demo","content_id":"con_0123456789abcdef0123456789abcdef","size_bytes":5,"checksum":{"algorithm":"sha256","value":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"}},"expires_at_ms":3601000}"#
+            br#"{"version":"vct2","content_ref":{"kind":"blob_v1","owner_namespace_id":"demo","content_id":"con_0123456789abcdef0123456789abcdef","size_bytes":5,"checksum":{"algorithm":"sha256","value":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"}},"expires_at_ms":3601000}"#
         );
         let mut old_payload: serde_json::Value = serde_json::from_slice(&payload).expect("payload");
         old_payload["version"] = serde_json::json!("vct1");
@@ -383,8 +355,7 @@ mod tests {
         let namespace = NamespaceId::parse("demo").expect("namespace");
         let content = ContentRef::blob_v1(namespace.clone(), ContentId::generate(), b"hello");
         let issued_at_ms = 1_000;
-        let token = mint_content_token("secret", &receipt(&namespace, &content), issued_at_ms)
-            .expect("mint");
+        let token = mint_content_token("secret", &receipt(&content), issued_at_ms).expect("mint");
         let catalog = catalog_entry(namespace);
         let prepared = verify_content_token(
             "secret",
@@ -413,8 +384,7 @@ mod tests {
         let content = ContentRef::blob_v1(namespace.clone(), ContentId::generate(), b"hello");
         let other_content = ContentRef::blob_v1(namespace.clone(), ContentId::generate(), b"other");
         let issued_at_ms = 1_000;
-        let token = mint_content_token("secret", &receipt(&namespace, &content), issued_at_ms)
-            .expect("mint");
+        let token = mint_content_token("secret", &receipt(&content), issued_at_ms).expect("mint");
         let catalog = catalog_entry(namespace.clone());
         let other_catalog = catalog_entry(other_namespace);
 

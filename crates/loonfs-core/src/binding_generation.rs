@@ -17,19 +17,17 @@ pub struct BindingGeneration {
 }
 
 impl BindingGeneration {
-    pub(crate) fn encode(
-        &self,
-        namespace_id: &NamespaceId,
-    ) -> Result<BindingGenerationToken, serde_json::Error> {
+    pub(crate) fn encode(&self, namespace_id: &NamespaceId) -> BindingGenerationToken {
         let encoded = encode_token(
             &BindingGenerationEnvelope {
                 namespace_id: namespace_id.clone(),
                 generation: *self,
             },
             BINDING_GENERATION_FORMAT_VERSION,
-        )?;
-        Ok(BindingGenerationToken::parse(encoded)
-            .expect("opaque token encoder should emit lowercase hex"))
+        )
+        .expect("binding generation should contain only serializable fields");
+        BindingGenerationToken::parse(encoded)
+            .expect("opaque token encoder should emit lowercase hex")
     }
 
     pub(crate) fn decode(

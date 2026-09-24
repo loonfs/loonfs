@@ -128,14 +128,7 @@ pub(super) fn check_binding_generation<S: ObjectStore + ?Sized>(
         return Err(CoreError::BindingGenerationMismatch {
             inode_id: resolved.inode_id,
             expected_binding_generation: expected_binding_generation.clone(),
-            actual_binding_generation: Some(current.encode(view.namespace_id).map_err(
-                |error| {
-                    CoreError::Internal(format!(
-                        "failed to encode the binding generation of inode `{}`: {error}",
-                        resolved.inode_id
-                    ))
-                },
-            )?),
+            actual_binding_generation: Some(current.encode(view.namespace_id)),
             precondition_index: None,
         });
     }

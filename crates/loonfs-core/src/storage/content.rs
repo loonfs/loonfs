@@ -15,8 +15,7 @@ use loonfs_api::{
 };
 use loonfs_objectstore::keys::content_blob;
 use loonfs_objectstore::{
-    ByteRange, ByteStream, ImmutableWriteError, MultipartCompletion, MultipartPart, ObjectStore,
-    ObjectStoreError, PutMode,
+    ByteRange, ByteStream, ImmutableWriteError, ObjectStore, ObjectStoreError, PutMode,
 };
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroU64;
@@ -99,10 +98,21 @@ pub(crate) async fn validate_durable_content_reference<S: ObjectStore + ?Sized>(
 pub(crate) async fn open_content_import_reader<S: ObjectStore + 'static>(
     store: S,
     content_ref: &ContentRef,
-) -> Result<(String, ByteStream), DurableContentValidationError> {
-    let source = FileContentStream::open_import(store, content_ref.clone()).await?;
-    let object_key = source.location.object_key().to_owned();
-    let stream_key = object_key.clone();
+) -> Result<ByteStream, DurableContentValidationError> {
+    let object_key = content_object_key_for_ref(content_ref)?;
+    let source = FileContentStream::open_inner(
+        store,
+        ContentLocation::Object {
+            object_key: object_key.clone(),
+        },
+        None,
+        content_ref.clone(),
+        NonZeroU64::new(CONTENT_READ_CHUNK_BYTES)
+            .expect("content read chunk size should be nonzero"),
+        0,
+    )
+    .await?;
+    let stream_key = object_key;
     let body = futures::stream::try_unfold(source, move |mut source| {
         let stream_key = stream_key.clone();
         async move {
@@ -116,17 +126,17 @@ pub(crate) async fn open_content_import_reader<S: ObjectStore + 'static>(
         }
     })
     .boxed();
-    Ok((object_key, body))
+    Ok(body)
 }
 
 /// Prepares content from an acknowledged durable write.
 #[cfg(any(test, feature = "test-support"))]
 pub fn prepare_stored_content(
-    catalog: &VerifiedNamespaceCatalogEntry,
+    _catalog: &VerifiedNamespaceCatalogEntry,
     stored_content: StoredContent,
 ) -> PreparedContent {
     let content_ref = stored_content.content_ref;
-    PreparedContent::for_durable_content_write(catalog.namespace_id().clone(), content_ref)
+    PreparedContent::for_durable_content_write(content_ref)
 }
 
 /// Fully validates an existing durable content reference for publication.
@@ -135,14 +145,11 @@ pub fn prepare_stored_content(
 #[cfg(any(test, feature = "test-support"))]
 pub async fn prepare_existing_content_ref<S: ObjectStore + ?Sized>(
     store: &S,
-    catalog: &VerifiedNamespaceCatalogEntry,
+    _catalog: &VerifiedNamespaceCatalogEntry,
     content_ref: ContentRef,
 ) -> Result<PreparedContent, DurableContentValidationError> {
     validate_durable_content_reference(store, &content_ref).await?;
-    Ok(PreparedContent::for_durable_content_write(
-        catalog.namespace_id().clone(),
-        content_ref,
-    ))
+    Ok(PreparedContent::for_durable_content_write(content_ref))
 }
 
 /// Compares a content reference with the size and checksum stored by the provider.
@@ -180,35 +187,6 @@ pub(crate) async fn verify_durable_content_checksum<S: ObjectStore + ?Sized>(
         });
     }
     Ok(())
-}
-
-pub(crate) async fn create_content_multipart_upload<S: ObjectStore + ?Sized>(
-    store: &S,
-    owner_namespace_id: &NamespaceId,
-    content_id: &ContentId,
-) -> crate::error::Result<String> {
-    let object_key = content_blob(owner_namespace_id, content_id);
-    store
-        .create_multipart_upload(&object_key)
-        .await
-        .map_err(|err| CoreError::store(&object_key, &err))
-}
-
-/// A failed completion is reported as the store failure it was. The
-/// provider may have refused the parts or the response may have been lost,
-/// and the two arrive alike, so this does not guess; the session stays open
-/// and a repeated completion reconciles from whatever the provider holds.
-pub(crate) async fn complete_content_multipart_upload<S: ObjectStore + ?Sized>(
-    store: &S,
-    expected: &ContentRef,
-    provider_upload_id: &str,
-    parts: &[MultipartPart],
-) -> crate::error::Result<MultipartCompletion> {
-    let object_key = content_blob(&expected.owner_namespace_id, &expected.content_id);
-    store
-        .complete_multipart_upload(&object_key, provider_upload_id, parts, &expected.checksum)
-        .await
-        .map_err(|err| CoreError::store(&object_key, &err))
 }
 
 /// Removes the content object an upload session owned but never published.
@@ -302,47 +280,6 @@ pub struct FileContentStream<S> {
 }
 
 impl<S: ObjectStore> FileContentStream<S> {
-    /// Opens a streaming read of the object `content_ref` names.
-    ///
-    /// The object size is validated before content is returned. For resumed
-    /// reads, `start_offset` skips bytes that the caller supplies through
-    /// [`Self::fold_resumed_prefix`].
-    pub(crate) async fn open(
-        store: S,
-        location: ContentLocation,
-        entry: PathEntry,
-        content_ref: ContentRef,
-        chunk_bytes: NonZeroU64,
-        start_offset: u64,
-    ) -> Result<Self, DurableContentValidationError> {
-        Self::open_inner(
-            store,
-            location,
-            Some(entry),
-            content_ref,
-            chunk_bytes,
-            start_offset,
-        )
-        .await
-    }
-
-    async fn open_import(
-        store: S,
-        content_ref: ContentRef,
-    ) -> Result<Self, DurableContentValidationError> {
-        let object_key = content_object_key_for_ref(&content_ref)?;
-        Self::open_inner(
-            store,
-            ContentLocation::Object { object_key },
-            None,
-            content_ref,
-            NonZeroU64::new(CONTENT_READ_CHUNK_BYTES)
-                .expect("content read chunk size should be nonzero"),
-            0,
-        )
-        .await
-    }
-
     pub(crate) async fn open_inner(
         store: S,
         location: ContentLocation,
@@ -686,21 +623,13 @@ pub async fn store_bytes_as_content<S: ObjectStore + ?Sized>(
     bytes: &[u8],
 ) -> Result<StoredContent, CoreError> {
     load_namespace_catalog_entry(store, owner_namespace_id).await?;
-    store_bytes_as_content_for_owner(store, owner_namespace_id.clone(), bytes).await
-}
-
-/// Test fixture for planting durable content without an upload session.
-///
-/// Every call mints a fresh identity. Production staging uses
-/// [`crate::protocol::stage_owned_bytes`] so the object has a durable owner
-/// before it is written and can later become eligible for reclamation.
-#[cfg(any(test, feature = "test-support"))]
-pub(crate) async fn store_bytes_as_content_for_owner<S: ObjectStore + ?Sized>(
-    store: &S,
-    owner_namespace_id: NamespaceId,
-    bytes: &[u8],
-) -> Result<StoredContent, CoreError> {
-    stage_bytes_under_content_id(store, owner_namespace_id, ContentId::generate(), bytes).await
+    stage_bytes_under_content_id(
+        store,
+        owner_namespace_id.clone(),
+        ContentId::generate(),
+        bytes,
+    )
+    .await
 }
 
 /// Result of staging streamed content.
@@ -849,10 +778,10 @@ pub(super) async fn load_required_object<S: ObjectStore + ?Sized>(
 
 #[cfg(test)]
 mod tests {
+    use super::stage_bytes_under_content_id;
     use super::{
-        store_bytes_as_content_for_owner, validate_durable_content_reference,
-        verify_durable_content_checksum, ContentLocation, CoreError, DurableContentValidationError,
-        FileContentStream, NonZeroU64,
+        validate_durable_content_reference, verify_durable_content_checksum, ContentLocation,
+        CoreError, DurableContentValidationError, FileContentStream, NonZeroU64,
     };
     use bytes::Bytes;
     use loonfs_api::{Checksum, ContentId, ContentRef, ContentRefKind, PathEntry};
@@ -1104,16 +1033,18 @@ mod tests {
         let (_temp_dir, store) = test_store();
         let bytes = b"identical payload";
 
-        let first = store_bytes_as_content_for_owner(
+        let first = stage_bytes_under_content_id(
             &store,
             loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
+            ContentId::generate(),
             bytes,
         )
         .await
         .expect("first stage");
-        let second = store_bytes_as_content_for_owner(
+        let second = stage_bytes_under_content_id(
             &store,
             loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
+            ContentId::generate(),
             bytes,
         )
         .await
@@ -1192,12 +1123,12 @@ mod tests {
         content_ref: &ContentRef,
         start_offset: u64,
     ) -> Result<FileContentStream<S>, DurableContentValidationError> {
-        FileContentStream::open(
+        FileContentStream::open_inner(
             store,
             super::ContentLocation::Object {
                 object_key: super::content_object_key_for_ref(content_ref)?,
             },
-            test_entry(),
+            Some(test_entry()),
             content_ref.clone(),
             test_chunk_bytes(),
             start_offset,

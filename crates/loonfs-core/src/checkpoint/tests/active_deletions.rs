@@ -946,12 +946,12 @@ async fn fresh_read_context<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> RuntimeReadContext {
-    let loaded = crate::namespace::read_anchor::load_head_and_metadata_basis(store, namespace_id)
+    let loaded = crate::namespace::read_anchor::load_read_anchor(store, namespace_id)
         .await
         .expect("load read basis");
     RuntimeReadContext {
-        head: loaded.head,
-        basis: loaded.basis,
+        basis: loaded.basis(),
+        head: loaded.read_state,
         segment_cache: Arc::new(MetadataSegmentCache::new(Default::default())),
         tail_cache: Arc::new(crate::checkpoint::WalTailProjectionCache::new(
             crate::checkpoint::WalTailProjectionCacheConfig {

@@ -12,7 +12,7 @@ use crate::error::CoreError;
 use crate::error::Result;
 use crate::time::{MonotonicTimer, StdMonotonicTimer};
 use loonfs_api::wire::control::{PinOwner, PinPayload};
-use loonfs_api::{Checkpoint, NamespaceId, PinId};
+use loonfs_api::{NamespaceId, PinId};
 use loonfs_objectstore::ObjectStore;
 
 pub(crate) use crate::limits::PIN_VERIFY_BUDGET_MS;
@@ -26,7 +26,7 @@ pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     owner: PinOwner,
     context: &MutationContext,
-) -> Result<Checkpoint> {
+) -> Result<PinPayload> {
     validate_checkpoint_owner(&owner)?;
     let timer = &StdMonotonicTimer::default();
     let owner = &owner;
@@ -69,7 +69,7 @@ pub(crate) async fn create_checkpoint_at_basis<S: ObjectStore + ?Sized>(
     owner: PinOwner,
     manifest: loonfs_api::wire::control::ManifestRef,
     context: &MutationContext,
-) -> Result<Checkpoint> {
+) -> Result<PinPayload> {
     validate_checkpoint_owner(&owner)?;
     let timer = StdMonotonicTimer::default();
     let checkpoint_id = PinId::generate(manifest.manifest_no);
@@ -106,7 +106,7 @@ pub(crate) async fn create_checkpoint_at_basis<S: ObjectStore + ?Sized>(
     let within_budget =
         timer.monotonic_now_ms().saturating_sub(verify_started_ms) <= PIN_VERIFY_BUDGET_MS;
     if verification == CheckpointBasisVerification::Verified && within_budget {
-        return Ok(super::checkpoint_summary(record));
+        return Ok(record);
     }
 
     // Overrunning the budget counts as verification failure: the record

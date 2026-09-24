@@ -127,11 +127,10 @@ pub use manifest::{MetadataFamilyGroup, NamespaceAccess};
 pub use name_policy::name_key_for_display_name;
 pub use options::AttributeInclusion;
 pub use pagination::{
-    decode_cursor, decode_namespace_cursor, decode_token, encode_cursor, encode_token,
-    DirectoryPageCursor, EffectiveLimit, FileRevisionsPageCursor, GrepPageCursor, LimitError,
-    NamespaceCursor, NamespaceCursorError, OpaqueToken, OpaqueTokenError, Page, PageCursor,
-    PageCursorError, PageRequest, PagedResponse, Pager, PaginationPolicy, TrashPageCursor,
-    DEFAULT_MAX_PAGE_LIMIT, DEFAULT_PAGE_LIMIT, PAGE_CURSOR_FORMAT_VERSION,
+    decode_cursor, decode_token, encode_cursor, encode_token, DirectoryPageCursor, EffectiveLimit,
+    FileRevisionsPageCursor, GrepPageCursor, LimitError, OpaqueToken, OpaqueTokenError, Page,
+    PageCursor, PageCursorError, PageRequest, PagedResponse, Pager, PaginationPolicy,
+    TrashPageCursor, DEFAULT_MAX_PAGE_LIMIT, DEFAULT_PAGE_LIMIT, PAGE_CURSOR_FORMAT_VERSION,
 };
 pub use path::{
     AbsolutePath, DisplayName, PathComponent, PathError, MAX_DISPLAY_NAME_BYTES, MAX_PATH_BYTES,
