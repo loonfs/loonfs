@@ -517,3 +517,70 @@ async fn fork_into_a_deleted_id_writes_no_source_pin() {
         .expect("source pins")
         .is_empty());
 }
+
+#[tokio::test]
+async fn a_fork_that_loses_target_publication_deletes_its_source_pin() {
+    for deleted in [false, true] {
+        let directory = tempdir().expect("directory");
+        let source = NamespaceId::parse("source").expect("source");
+        let target = NamespaceId::parse("target").expect("target");
+        let pin_prefix = loonfs_objectstore::keys::checkpoint_prefix(&source);
+        let store = BlockingStore::new(
+            LocalFsStore::new(directory.path()).expect("store"),
+            KeyPredicate::prefix(&pin_prefix),
+            OperationClass::PutCreateIfAbsent,
+        );
+        let setup = context();
+        let actor = loonfs_test_support::test_actor();
+        bootstrap_namespace(
+            &store,
+            &source,
+            &setup,
+            &actor,
+            &loonfs_api::NamespaceAccess::unrestricted(),
+            false,
+        )
+        .await
+        .expect("source");
+        store.block_next();
+        let fork = fork_namespace(&store, &source, &target, &actor, None, &setup);
+        let competing_create = async {
+            store.wait_until_blocked().await;
+            bootstrap_namespace(
+                store.inner(),
+                &target,
+                &setup,
+                &actor,
+                &loonfs_api::NamespaceAccess::unrestricted(),
+                false,
+            )
+            .await
+            .expect("competing create");
+            if deleted {
+                crate::commit_engine::delete_namespace(
+                    store.inner(),
+                    &target,
+                    Default::default(),
+                    &setup,
+                )
+                .await
+                .expect("competing delete");
+            }
+            store.release();
+        };
+        let (result, ()) = tokio::join!(fork, competing_create);
+        assert_eq!(
+            result.expect_err("lost fork").code(),
+            if deleted {
+                ErrorCode::NamespaceDeleted
+            } else {
+                ErrorCode::NamespaceExists
+            }
+        );
+        assert!(store
+            .list_prefix(&pin_prefix)
+            .await
+            .expect("source pins")
+            .is_empty());
+    }
+}

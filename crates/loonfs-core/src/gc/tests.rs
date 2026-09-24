@@ -287,7 +287,7 @@ async fn read_upload_session<S: ObjectStore + ?Sized>(
 }
 
 #[tokio::test]
-async fn deleted_namespace_keeps_its_tombstone_and_segments() {
+async fn deleted_namespace_keeps_its_tombstone_and_collects_unpinned_segments() {
     let temp_dir = tempdir().expect("tempdir");
     let store = RecordingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
@@ -306,13 +306,14 @@ async fn deleted_namespace_keeps_its_tombstone_and_segments() {
     .await
     .expect("bootstrap");
     let mut content_keys = publish_owned_content(&store, &namespace_id, 2).await;
-    content_keys.sort();
     let unreferenced_key =
         loonfs_objectstore::keys::content_blob(&namespace_id, &loonfs_api::ContentId::generate());
     store
         .put_if_absent(&unreferenced_key, Bytes::from_static(b"unreferenced"))
         .await
         .expect("unreferenced object");
+    content_keys.push(unreferenced_key);
+    content_keys.sort();
     create_checkpoint(&store, &namespace_id, &setup)
         .await
         .expect("user pin");
@@ -346,7 +347,7 @@ async fn deleted_namespace_keeps_its_tombstone_and_segments() {
         report.deleted_checkpoints_by_owner,
         loonfs_api::DeletedCheckpointsByOwner::default()
     );
-    assert_eq!(report.deleted.metadata_segments, 0);
+    assert!(report.deleted.metadata_segments > 0);
     assert!(report.deleted.manifests >= 1);
     assert_eq!(
         report.deleted.retired_content_objects,
@@ -373,11 +374,6 @@ async fn deleted_namespace_keeps_its_tombstone_and_segments() {
     for key in &content_keys {
         assert!(store.head(key).await.expect("reclaimed content").is_none());
     }
-    assert!(store
-        .head(&unreferenced_key)
-        .await
-        .expect("unreferenced object")
-        .is_some());
 
     for prefix in [
         wal_segment_prefix(&namespace_id),
@@ -392,24 +388,11 @@ async fn deleted_namespace_keeps_its_tombstone_and_segments() {
         .await
         .expect("tombstone");
     assert!(current.envelope.payload().status.is_deleted());
-    let rooted_segments = current
-        .envelope
-        .payload()
-        .runs
-        .iter()
-        .flat_map(|run| &run.segments)
-        .map(loonfs_objectstore::keys::metadata_segment_object_key)
-        .collect::<BTreeSet<_>>();
-    assert!(!rooted_segments.is_empty());
-    assert_eq!(
-        store
-            .list_prefix(&metadata_segment_prefix(&namespace_id))
-            .await
-            .expect("rooted segments")
-            .into_iter()
-            .collect::<BTreeSet<_>>(),
-        rooted_segments
-    );
+    assert!(store
+        .list_prefix(&metadata_segment_prefix(&namespace_id))
+        .await
+        .expect("collected segments")
+        .is_empty());
     assert_eq!(current.envelope.payload().activity, final_activity);
 
     assert!(store
@@ -431,10 +414,7 @@ async fn deleted_namespace_keeps_its_tombstone_and_segments() {
     assert_eq!(report.deleted.metadata_segments, 0);
     assert_eq!(report.deleted.content_objects, 0);
     assert_eq!(report.deleted.upload_sessions, 0);
-    assert_eq!(
-        report.deleted.retired_content_objects,
-        content_keys.len() as u64
-    );
+    assert_eq!(report.deleted.retired_content_objects, 0);
     assert_eq!(report.deleted_checkpoints_by_owner, Default::default());
     assert_eq!(
         store
@@ -2852,10 +2832,17 @@ async fn retired_owner_calls_restart_retry_deletes_and_collect_late_writes() {
         .await
         .is_err());
     assert!(store.head(&keys[0]).await.expect("failed delete").is_some());
+    let remaining = store
+        .list_prefix(&format!("namespaces/{namespace_id}/content/"))
+        .await
+        .expect("remaining content");
     let retried = gc_namespace(&store, &namespace_id, &config(), &deadline)
         .await
         .expect("retry owner sweep");
-    assert_eq!(retried.deleted.retired_content_objects, 3);
+    assert_eq!(
+        retried.deleted.retired_content_objects,
+        remaining.len() as u64
+    );
     store
         .put_if_absent(&keys[0], Bytes::from_static(b"late write"))
         .await
@@ -2863,7 +2850,7 @@ async fn retired_owner_calls_restart_retry_deletes_and_collect_late_writes() {
     let late = gc_namespace(&store, &namespace_id, &config(), &deadline)
         .await
         .expect("collect earlier key");
-    assert_eq!(late.deleted.retired_content_objects, 3);
+    assert_eq!(late.deleted.retired_content_objects, 1);
     assert!(store
         .head(&hint(&namespace_id))
         .await

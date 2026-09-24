@@ -1,5 +1,6 @@
 //! Fork installation copies pinned source runs into a new namespace.
 
+use super::control::load_current_manifest_if_present;
 use super::install::publish_namespace;
 use crate::checkpoint::record::{delete_checkpoint_record, write_checkpoint_record};
 use crate::checkpoint::{
@@ -80,7 +81,16 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
         activity: Default::default(),
         ..source_manifest.payload().clone()
     };
-    publish_namespace(store, &manifest, &timer, started_ms).await?;
+    if let Err(error) = publish_namespace(store, &manifest, &timer, started_ms).await {
+        if matches!(
+            error,
+            CoreError::NamespaceExists { .. } | CoreError::NamespaceDeleted { .. }
+        ) && !target_retains_checkpoint(store, &source_record, new_namespace_id).await?
+        {
+            delete_checkpoint_record(store, source_namespace_id, &source_record.pin_id).await?;
+        }
+        return Err(error);
+    }
     crate::namespace::status::load_namespace(store, new_namespace_id).await
 }
 
@@ -155,4 +165,27 @@ async fn verify_snapshot_fork_basis<S: ObjectStore + ?Sized>(
         now_ms.saturating_add(timer.monotonic_now_ms().saturating_sub(started_ms)),
     )?;
     Ok(())
+}
+
+pub(crate) async fn target_retains_checkpoint<S: ObjectStore + ?Sized>(
+    store: &S,
+    record: &PinPayload,
+    target_namespace_id: &NamespaceId,
+) -> Result<bool> {
+    let Some(target) = load_current_manifest_if_present(store, target_namespace_id).await? else {
+        return Ok(false);
+    };
+    let Some(basis) = target.envelope.payload().fork_basis.as_ref() else {
+        return Ok(false);
+    };
+    if basis.source_pin_id != record.pin_id {
+        return Ok(false);
+    }
+    if basis.manifest != record.manifest() {
+        return Err(CoreError::NamespaceCorrupt(format!(
+            "fork target `{target_namespace_id}` names pin `{}` with a different manifest reference",
+            record.pin_id
+        )));
+    }
+    Ok(true)
 }

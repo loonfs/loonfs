@@ -1338,15 +1338,6 @@ async fn gc_preserves_unflushed_data_then_the_current_manifest_tombstone() {
         .await
         .expect("current tombstone");
     let mut expected = vec![hint(&namespace_id), current.object_key.clone()];
-    expected.extend(
-        current
-            .envelope
-            .payload()
-            .runs
-            .iter()
-            .flat_map(|run| &run.segments)
-            .map(loonfs_objectstore::keys::metadata_segment_object_key),
-    );
     expected.sort();
     assert_eq!(namespace_keys(&store, &namespace_id).await, expected);
     assert!(store
@@ -1619,9 +1610,17 @@ async fn retired_leaf_content_is_reclaimed_while_live_workspaces_keep_their_cont
             .await
             .expect("collect leaf");
         assert_eq!(report.deleted.retired_content_objects, 1);
-        assert!(store.snapshot().iter().all(|operation| !matches!(
-            operation, RecordedOperation::List { prefix, .. } if prefix.contains("/content/")
-        )));
+        let content_lists = store
+            .snapshot()
+            .into_iter()
+            .filter_map(|operation| match operation {
+                RecordedOperation::List { prefix, .. } if prefix.contains("/content/") => {
+                    Some(prefix)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(content_lists, [format!("namespaces/{leaf}/content/")]);
         assert!(store.head(&leaf_key).await.expect("leaf content").is_none());
         for key in [&source_key, &sibling_key] {
             assert!(store.head(key).await.expect("retained content").is_some());

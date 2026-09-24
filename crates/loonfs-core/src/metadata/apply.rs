@@ -123,7 +123,6 @@ impl MetadataState {
             } => {
                 if self.find_content_publication(&content_ref.content_id) != Some(committed_seq) {
                     self.push_content_publication_record(ContentPublicationRecord {
-                        owner_namespace_id: content_ref.owner_namespace_id.clone(),
                         content_id: content_ref.content_id.clone(),
                         committed_seq,
                         delta_index: *delta_index,

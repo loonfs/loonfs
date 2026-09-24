@@ -12,7 +12,9 @@ mod runner;
 mod tests;
 
 pub use gc::GarbageCollectionJob;
-pub(crate) use gc::{completed_upload_reclaim_at_ms, upload_session_reclaim_at_ms};
+pub(crate) use gc::{
+    completed_upload_reclaim_at_ms, namespace_reclaim_at_ms, upload_session_reclaim_at_ms,
+};
 pub use hints::{
     maintenance_hint_relay, MaintenanceHint, MaintenanceHintObserver, MaintenanceHintReceiver,
 };

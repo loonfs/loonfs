@@ -53,14 +53,16 @@ impl LiveSet {
             required_wal_from: required_from(&anchor.read_state),
         };
         let mut manifests = BTreeSet::new();
-        live.load_manifest(
-            store,
-            namespace_id,
-            head.manifest_no,
-            &anchor.manifest.object_key,
-            &mut manifests,
-        )
-        .await?;
+        if !live.namespace_deleted {
+            live.load_manifest(
+                store,
+                namespace_id,
+                head.manifest_no,
+                &anchor.manifest.object_key,
+                &mut manifests,
+            )
+            .await?;
+        }
         let prefix = checkpoint_prefix(namespace_id);
         let mut listing = store.list_prefix_stream(&prefix);
         while let Some(key) = listing
