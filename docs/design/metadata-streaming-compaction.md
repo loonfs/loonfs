@@ -8,7 +8,7 @@ The [storage format](../specs/format.md#10-retention-and-compaction) defines win
 
 ## Selecting a window
 
-Compaction works on family groups ([format Appendix A.6](../specs/format.md#a6-metadata-rows-and-row-keys) lists them). The planner ranks the groups that have delta rows by their delta row count and picks the first group with an eligible window. A group with no delta runs is not selected.
+Compaction works on family groups ([format Appendix A.6](../specs/format.md#a6-metadata-rows-and-row-keys) lists them). The planner ranks the groups that have delta rows by their delta row count and picks the first group with an eligible window. A group whose only run is a base is not selected; it is rewritten when it next receives a delta run.
 
 Within a group, the planner considers the base first and then delta runs from oldest to newest. It selects a contiguous window of at most eight runs and never steps over an unselected run in the middle of that window.
 
