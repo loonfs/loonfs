@@ -58,6 +58,7 @@ async fn overlapping_retirement_retries_lost_delete_ack_and_preserves_a_live_sib
         .await
         .expect("target");
     let target_pin = target_manifest
+        .state
         .envelope
         .payload()
         .fork_basis
@@ -69,6 +70,7 @@ async fn overlapping_retirement_retries_lost_delete_ack_and_preserves_a_live_sib
         .await
         .expect("sibling");
     let sibling_pin = sibling_manifest
+        .state
         .envelope
         .payload()
         .fork_basis

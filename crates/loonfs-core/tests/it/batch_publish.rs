@@ -259,7 +259,7 @@ async fn batch_commit_writes_one_segment_and_expands_change_feed() {
         .expect("read wal")
         .expect("wal exists");
     let segment = decode_wal_segment_envelope_zstd(&wal_bytes).expect("decode segment");
-    assert_eq!(segment.payload().prior_head_seq, ChangeSeq(0));
+    assert_eq!(segment.payload().prior_head_seq(), Some(ChangeSeq(0)));
     assert_eq!(segment.payload().head_seq, ChangeSeq(2));
     assert_eq!(segment.payload().records.len(), 2);
     assert_eq!(segment.payload().records[0].deltas.len(), 2);

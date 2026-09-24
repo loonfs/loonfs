@@ -223,9 +223,8 @@ impl MetadataSegmentRowIterator {
     pub(super) fn metadata(
         family: MetadataRowFamily,
         max_seq: ChangeSeq,
-        mut segments: Vec<MetadataSegmentRef>,
+        segments: Vec<MetadataSegmentRef>,
     ) -> Self {
-        segments.sort_by_key(|descriptor| descriptor.segment_index);
         Self::new(
             family,
             segments

@@ -15,7 +15,7 @@ async fn identical_compactor_claims_report_the_loser_as_covered() {
         let current = load_current_manifest(&store, &namespace_id)
             .await
             .expect("current");
-        let mut payload = current.envelope.payload().clone();
+        let mut payload = current.state.envelope.payload().clone();
         payload.manifest_no = payload.manifest_no.successor().expect("next manifest");
         payload.compactor_epoch += 1;
         let claim = encode_manifest(payload).expect("claim");
@@ -75,8 +75,8 @@ async fn publishers_racing_one_number_load_the_winner_and_retry_when_needed() {
         let current = load_current_manifest(&store, &namespace_id)
             .await
             .expect("current");
-        let predecessor = current.state.manifest.manifest_no;
-        let mut payload = current.envelope.payload().clone();
+        let predecessor = current.state.manifest().manifest_no;
+        let mut payload = current.state.envelope.payload().clone();
         payload.manifest_no = predecessor.successor().expect("next number");
         let first = encode_manifest(payload.clone()).expect("candidate");
         if newer_head {
@@ -84,7 +84,7 @@ async fn publishers_racing_one_number_load_the_winner_and_retry_when_needed() {
                 crate::commit_engine::WriterSessionState::Acquired(
                     loonfs_api::wire::control::AcquiredWriter {
                         writer_id: context.writer_id.clone(),
-                        writer_epoch: current.envelope.payload().writer_epoch,
+                        writer_epoch: current.state.envelope.payload().writer_epoch,
                     },
                 ),
             ));
@@ -238,7 +238,7 @@ async fn a_lagging_hint_probes_forward_and_a_missing_hint_reads_as_absent() {
         assert_eq!(actual.state, expected.state);
         assert_eq!(
             store.counts().gets,
-            (expected.state.manifest.manifest_no.0 - manifest_no.0
+            (expected.state.manifest().manifest_no.0 - manifest_no.0
                 + 1
                 + u64::from(manifest_no.0 > 0)) as usize
         );
@@ -296,10 +296,10 @@ async fn retention_publishes_only_a_number_and_floor_change_and_writers_read_it(
     let after = load_current_manifest(&store, &namespace_id)
         .await
         .expect("current");
-    let mut expected = before.envelope.into_payload();
+    let mut expected = before.state.envelope.payload().clone();
     expected.manifest_no = expected.manifest_no.successor().expect("next");
     expected.retention_floor_seq = expected.head_seq;
-    assert_eq!(after.envelope.payload(), &expected);
+    assert_eq!(after.state.envelope.payload(), &expected);
     assert_eq!(advanced.retention_floor_seq, expected.head_seq);
     let anchor = crate::namespace::read_anchor::load_read_anchor(&store, &namespace_id)
         .await
@@ -332,7 +332,7 @@ async fn manifest_publication_recovers_an_ambiguous_put_and_tolerates_a_failed_h
         let current = load_current_manifest(&store, &namespace_id)
             .await
             .expect("current");
-        let mut payload = current.envelope.into_payload();
+        let mut payload = current.state.envelope.payload().clone();
         payload.manifest_no = payload.manifest_no.successor().expect("next");
         let candidate = encode_manifest(payload).expect("candidate");
         let candidate_manifest_no = candidate.envelope().payload().manifest_no;
@@ -367,7 +367,7 @@ async fn manifest_publication_recovers_an_ambiguous_put_and_tolerates_a_failed_h
                 .await
                 .expect("discover")
                 .state
-                .manifest
+                .manifest()
                 .manifest_no,
             candidate_manifest_no
         );
@@ -531,7 +531,7 @@ async fn read_anchor_reloads_the_head_when_the_manifest_is_ahead() {
         .await
         .expect("read anchor resolves the stale-head race by reloading");
     assert_eq!(projection.head.seq, ChangeSeq(1));
-    assert_eq!(projection.manifest.manifest.head_seq, ChangeSeq(1));
+    assert_eq!(projection.manifest.manifest().head_seq, ChangeSeq(1));
 }
 
 #[tokio::test]
@@ -639,6 +639,6 @@ async fn an_ambiguous_compactor_claim_retries_instead_of_confirming() {
     let current = load_current_manifest(&store, &namespace_id)
         .await
         .expect("current manifest");
-    assert_eq!(current.envelope.payload().manifest_no, ManifestNo(3));
-    assert_eq!(current.envelope.payload().compactor_epoch, 2);
+    assert_eq!(current.state.envelope.payload().manifest_no, ManifestNo(3));
+    assert_eq!(current.state.envelope.payload().compactor_epoch, 2);
 }

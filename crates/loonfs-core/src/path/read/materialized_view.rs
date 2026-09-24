@@ -363,11 +363,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         &self,
         content_ref: &ContentRef,
     ) -> Result<ContentLocation> {
-        Ok(ContentLocation::resolve(
-            &self.namespace_id,
-            Some(&self.wal_tail),
-            content_ref,
-        )?)
+        Ok(ContentLocation::resolve(Some(&self.wal_tail), content_ref)?)
     }
 
     pub(crate) async fn direct_download_target(
@@ -488,7 +484,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         absolute_path: &str,
         request: PageRequest<FileRevisionsPageCursor>,
         access: &ReadAccess<'_, S>,
-    ) -> Result<Page<FileRevision, FileRevisionsPageCursor>> {
+    ) -> Result<(InodeId, Page<FileRevision, FileRevisionsPageCursor>)> {
         let entry = self
             .resolve_path(absolute_path, AttributeInclusion::Omit, access)
             .await?;
@@ -506,8 +502,10 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 Absence::Path(absolute_path),
             )
             .await?;
-        self.list_file_revisions_for_inode_page(entry.inode_id, request, access)
-            .await
+        let page = self
+            .list_file_revisions_for_inode_page(entry.inode_id, request, access)
+            .await?;
+        Ok((entry.inode_id, page))
     }
 
     /// One page of the namespace's recoverable deletions, oldest deletion

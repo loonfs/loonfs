@@ -78,6 +78,6 @@ User checkpoints and snapshots use the same pin representation with different ow
 
 A file deletion records a recoverable subtree tombstone. A namespace deletion publishes terminal deleted status in its next manifest. Neither immediately removes shared content.
 
-After a complete pin sweep retains no dependency, collection can establish a fixed retirement deadline. Later passes can sweep that namespace's owned content after the deadline and release its source pin. The current deleted manifest remains permanently to prevent ID reuse.
+Collection derives the retirement deadline from the deletion stamp and the configured grace. User and snapshot pins become eligible for deletion by that deadline. Only a fork pin can remain required afterward. Once the deadline passes and a complete pin listing is empty, collection lists and deletes the namespace's content prefix and releases its source pin. It stores no retirement deadline and scans no content-publication rows. The deleted manifest and hint remain to prevent ID reuse.
 
 Hosts choose when maintenance runs and which namespaces it covers. The storage protocols determine what each operation can publish or delete. Derived extensions such as grep have separate manifests and collection rules; core collection never sweeps their objects.

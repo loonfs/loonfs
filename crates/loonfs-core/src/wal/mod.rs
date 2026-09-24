@@ -19,7 +19,7 @@ pub use self::projected_tail::ProjectedWalTail;
 pub(crate) use self::publish::publish_segment;
 pub(crate) use self::reader::load_replayed_wal_tail;
 pub(crate) use self::reclaim::{object_is_required, required_from};
-pub(crate) use self::writer::{prepare_fence_segment, prepare_wal_segment, resulting_head_after};
+pub(crate) use self::writer::prepare_segment;
 
 #[cfg(test)]
 pub(crate) mod tests;

@@ -910,23 +910,22 @@ pub(crate) async fn run_filesystem_put(
         ));
     }
 
-    let local_leaf = local_path
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .ok_or_else(|| {
-            context.fail(
-                kind,
-                CliError::invalid_request(format!(
-                    "unable to derive remote target from `{}`",
-                    local_path.display()
-                ))
-                .with_param("local_path"),
-            )
-        })?;
+    let local_leaf = local_path.file_name().ok_or_else(|| {
+        context.fail(
+            kind,
+            CliError::invalid_request(format!(
+                "unable to derive remote target from `{}`",
+                local_path.display()
+            ))
+            .with_param("local_path"),
+        )
+    })?;
+    let local_leaf =
+        super::context::utf8_local_name(local_leaf).map_err(|error| context.fail(kind, error))?;
     let remote_path = match args.remote_path.as_deref() {
         // A trailing slash names the directory the file lands in — the
         // cp/rsync habit — while a plain path is the full destination.
-        Some(path) => destination_user_path("remote_path", "local_path", path, &local_leaf, true),
+        Some(path) => destination_user_path("remote_path", "local_path", path, local_leaf, true),
         None => default_remote_put_path(&local_path),
     }
     .map_err(|error| context.fail(kind, error))?;

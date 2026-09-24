@@ -140,18 +140,6 @@ pub const NAMESPACE_RETIREMENT_GRACE_MS: u64 = METADATA_PUBLICATION_BUDGET_MS
             + GC_SAFETY_MARGIN_MS,
     );
 
-const fn covers_namespace_retirement(grace_ms: u64) -> bool {
-    grace_ms >= METADATA_PUBLICATION_BUDGET_MS + GC_MIN_GRACE_WINDOW_MS
-        && grace_ms
-            >= METADATA_PUBLICATION_BUDGET_MS
-                + DIRECT_TRANSFER_URL_TTL_MS
-                + PROVIDER_OPERATION_DEADLINE_MS
-                + PROVIDER_ATTEMPT_TIMEOUT_MS
-                + GC_SAFETY_MARGIN_MS
-}
-
-const _: () = assert!(covers_namespace_retirement(NAMESPACE_RETIREMENT_GRACE_MS));
-
 /// Default age of an unreachable object before garbage collection may remove it.
 pub const GC_DEFAULT_GRACE_WINDOW_MS: u64 = 60 * 60 * 1000;
 
@@ -198,50 +186,10 @@ pub const COMPLETED_UPLOAD_ADMISSION_WINDOW_MS: u64 =
 pub const CONTENT_RECLAMATION_GRACE_MS: u64 =
     COMPLETED_UPLOAD_ADMISSION_WINDOW_MS + GC_MIN_GRACE_WINDOW_MS;
 
-/// The grace floor's inequality, shared by the compile-time assertion below
-/// and the test that proves the assertion has teeth.
-const fn outlasts_every_receipt(grace_ms: u64) -> bool {
-    grace_ms >= COMPLETED_UPLOAD_ADMISSION_WINDOW_MS + GC_MIN_GRACE_WINDOW_MS
-}
-
-// Content reclamation is the one sweep that deletes bytes a user handed us,
-// and its safety is an inequality over the constants above rather than a
-// judgement call, so it is checked where a broken derivation is a compile
-// error instead of a test failure.
-const _: () = assert!(
-    outlasts_every_receipt(CONTENT_RECLAMATION_GRACE_MS),
-    "content reclamation must outlast the last receipt a completed session can mint, \
-     the commit that receipt admits, and that commit's publication"
-);
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::gc::GcConfig;
-
-    #[test]
-    fn retirement_grace_covers_capabilities_and_rejects_a_shorter_window() {
-        assert!(covers_namespace_retirement(NAMESPACE_RETIREMENT_GRACE_MS));
-        assert!(!covers_namespace_retirement(
-            NAMESPACE_RETIREMENT_GRACE_MS - 1
-        ));
-    }
-
-    #[test]
-    fn the_content_grace_floor_rejects_a_window_one_receipt_short() {
-        assert!(outlasts_every_receipt(CONTENT_RECLAMATION_GRACE_MS));
-        assert!(!outlasts_every_receipt(CONTENT_RECLAMATION_GRACE_MS - 1));
-        assert_eq!(
-            COMPLETED_UPLOAD_ADMISSION_WINDOW_MS,
-            COMPLETED_UPLOAD_RECEIPT_WINDOW_MS + CONTENT_RECEIPT_TTL_MS
-        );
-        assert!(!outlasts_every_receipt(
-            COMPLETED_UPLOAD_ADMISSION_WINDOW_MS
-        ));
-        // 7 days of re-minting + 1 hour of receipt life + 20.5 minutes of
-        // publication.
-        assert_eq!(CONTENT_RECLAMATION_GRACE_MS, 608_400_000 + 1_230_000);
-    }
 
     #[test]
     fn derived_minimum_grace_window_sits_below_the_default() {

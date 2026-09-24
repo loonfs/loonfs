@@ -193,15 +193,8 @@ impl MetadataIndexes {
             }
         }
         let parent_name_key = (record.parent_inode_id, record.name_key.clone());
-        // The active-map installs below require records to arrive in global
-        // seq order: the cross-name eviction removes whatever binding the
-        // child currently holds, so an older bind arriving after a newer one
-        // would replace the newer binding with the older. WAL apply supplies
-        // that order (commits in seq order, deltas in order within a
-        // commit). Manifest projection does not use this path; it rebuilds
-        // the indexes from scratch. The guard above keeps an out-of-order
-        // caller from corrupting the maps.
-        debug_assert!(
+        // An older bind would replace the current binding during cross-name eviction.
+        assert!(
             self.latest_bind_by_parent_name
                 .get(&parent_name_key)
                 .is_none_or(|existing| bind_order_key(record) >= bind_order_key(existing)),

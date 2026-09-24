@@ -389,8 +389,9 @@ async fn deleted_namespace_keeps_its_tombstone_and_segments() {
     let current = crate::namespace::control::load_current_manifest(&store, &namespace_id)
         .await
         .expect("tombstone");
-    assert!(current.envelope.payload().status.is_deleted());
+    assert!(current.state.envelope.payload().status.is_deleted());
     let rooted_segments = current
+        .state
         .envelope
         .payload()
         .runs
@@ -408,7 +409,7 @@ async fn deleted_namespace_keeps_its_tombstone_and_segments() {
             .collect::<BTreeSet<_>>(),
         rooted_segments
     );
-    assert_eq!(current.envelope.payload().activity, final_activity);
+    assert_eq!(current.state.envelope.payload().activity, final_activity);
 
     assert!(store
         .head(&current.object_key)
@@ -1151,6 +1152,7 @@ async fn completed_uploads_use_publication_lookups_without_scanning_segments() {
             crate::namespace::control::load_current_manifest(&store, &namespace_id)
                 .await
                 .expect("manifest")
+                .state
                 .envelope
                 .payload()
                 .runs
@@ -2713,7 +2715,7 @@ async fn gc_keeps_pinned_and_current_numbers_and_preserves_discovery_from_a_lagg
             .expect("list for assertion"),
         vec![
             metadata_manifest_object(&namespace_id, &pinned.manifest_no),
-            metadata_manifest_object(&namespace_id, &current.state.manifest.manifest_no),
+            metadata_manifest_object(&namespace_id, &current.state.manifest().manifest_no),
         ]
     );
     assert_eq!(

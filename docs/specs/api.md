@@ -455,7 +455,7 @@ deadline no later than the expiry of the last token the completed session could
 issue. The deadline is checked when the commit enters a batch and again just
 before the numbered WAL write. Both checks use the request clock plus the time
 elapsed since the publication attempt began. This matches the lifetime of
-remote upload tokens (section 6.3; format spec, "Garbage collection", rule 11)
+remote upload tokens ([upload transport](#69-upload-transport); [upload cleanup](format.md#116-upload-session-cleanup))
 and prevents publication from referring to content that may have been reclaimed.
 Prepared inline bytes have no expiry.
 
@@ -1117,7 +1117,7 @@ request path and never a presigned capability handed to a client.
 
 Routes under `/v0/maintenance/` belong to the `maintenance/v0` API group. `GET /v0/namespaces/{ns}/grep` belongs to `query/v0`. Everything else shown belongs to `filesystem/v0`.
 
-A GC response includes `next_reclamation_at_ms` when a deleted namespace is inside its retirement grace, a retained user or snapshot pin has a future deletion time, or an upload session has a future cleanup time. It is the earliest of those future times examined by the pass. A namespace that a user or snapshot pin holds after its grace is reported at that pin's deletion time. A fork pin carries no time. Upload cleanup times include lease plus grace, abort grace, and completed-content grace. Candidates that age out by provider timestamps carry no time here. Absence does not mean that nothing remains to collect.
+A GC response includes `next_reclamation_at_ms` when a deleted namespace is inside its retirement grace, a retained user or snapshot pin has a future deletion time, or an upload session has a future cleanup time. It is the earliest of those future times examined by the pass. User and snapshot pins become eligible for deletion by the namespace retirement deadline. Only a fork pin can remain required beyond that deadline; it carries no time. Upload cleanup times include lease plus grace, abort grace, and completed-content grace. Candidates that age out by provider timestamps carry no time here. Absence does not mean that nothing remains to collect.
 
 `reclaim_after_ms` is present when the current manifest is deleted. It equals `deleted_at_ms + max(configured_grace, NAMESPACE_RETIREMENT_GRACE_MS)`, including when pins still block reclamation. It is absent for an active namespace. No retirement deadline is stored and collection publishes no manifest.
 
@@ -1168,7 +1168,7 @@ Namespace deletion ends access immediately. Ordinary namespace GC then
 conditionally reclaims the namespace's own content. This is asynchronous
 reclamation, with no fixed completion time or guarantee of physical erasure.
 
-Dependent forks and retained checkpoints delay reclamation. GC derives the deadline from the tombstone’s deletion stamp. At or after that deadline, a complete pin listing must contain no pin on the namespace. A qualifying pass cleans upload sessions, lists and deletes every key under the namespace’s content prefix, and releases its source pin. The tombstone and hint remain. Its segments become collectible once no pin protects them and their age permits collection. Purging the tombstone and hint is outside this API. Every other owner’s prefix remains.
+Dependent forks delay reclamation. GC derives the deadline from the tombstone’s deletion stamp. User and snapshot pins become eligible for deletion by that deadline; only a fork pin can remain required afterward. At or after that deadline, a complete pin listing must contain no pin on the namespace. A qualifying pass cleans upload sessions, lists and deletes every key under the namespace’s content prefix, and releases its source pin. The tombstone and hint remain. Its segments become collectible once no pin protects them and their age permits collection. Purging the tombstone and hint is outside this API. Every other owner’s prefix remains.
 
 Retention is coarse: a deleted ancestor keeps every object it
 published while a live descendant still depends on it. GC does not select
@@ -1187,7 +1187,7 @@ staged content that no retained revision references.
 Run GC repeatedly, including after a pass finds nothing left to delete. An
 already-issued upload capability can write an object after deletion, and a
 late write missed by one listing is found by the next run. Continued late
-writes, grace windows, dependent forks, retained checkpoints, and maintenance
+writes, grace windows, dependent forks, pin cleanup, and maintenance
 not running can all delay complete reclamation. A deleted manifest refuses commits, upload capabilities, and upload completion.
 It does not revoke capabilities already issued. The retirement grace exceeds
 the presigned URL lifetime.
@@ -1490,7 +1490,8 @@ or separate display names. Representative request:
 
 ```json
 {
-  "namespace_id": "demo"
+  "namespace_id": "demo",
+  "access": {"kind":"unrestricted"}
 }
 ```
 
@@ -1502,6 +1503,7 @@ starts at sequence 0 with a retention floor of 0:
   "namespace_id": "demo",
   "created_at_ms": 1752623000000,
   "created_by": "usr_8f3c",
+  "access": {"kind":"unrestricted"},
   "head_seq": 0,
   "retention_floor_seq": 0
 }
@@ -1628,7 +1630,7 @@ Checkpoint listing and user-checkpoint deletion are explicit exceptions. They
 remain available because permanent user pins must stay discoverable and
 releasable after deletion. Releasing a fork-owned checkpoint remains rejected.
 
-Deletion is immediate logical deletion followed by asynchronous, conditional reclamation. Deletion itself reclaims nothing. Dependent forks, retained checkpoints, grace windows, and maintenance not running can all delay reclamation. Continued writes through already-issued capabilities can also leave objects for later passes. A maintenance run with `kind` set to `gc` ages out unneeded WAL, metadata, and pins. GC derives `reclaim_after_ms` from the current tombstone’s deletion stamp and the retirement grace. Once that deadline passes and the complete pin listing contains no pin on the namespace, the pass reclaims its owned content and source pin. It publishes no retirement manifest. The pass lists and deletes the namespace’s content prefix. The tombstone and hint remain. Segments become collectible by their ordinary age rule once no pin protects them.
+Deletion is immediate logical deletion followed by asynchronous, conditional reclamation. Deletion itself reclaims nothing. Dependent forks, pin cleanup, grace windows, and maintenance not running can all delay reclamation. Continued writes through already-issued capabilities can also leave objects for later passes. A maintenance run with `kind` set to `gc` ages out unneeded WAL, metadata, and pins. GC derives `reclaim_after_ms` from the current tombstone’s deletion stamp and the retirement grace. Once that deadline passes and the complete pin listing contains no pin on the namespace, the pass reclaims its owned content and source pin. It publishes no retirement manifest. The pass lists and deletes the namespace’s content prefix. The tombstone and hint remain. Segments become collectible by their ordinary age rule once no pin protects them.
 
 Run GC repeatedly to catch late writes and keep the provider's incomplete
 multipart-upload lifecycle rule. Deleting an object key does not erase
@@ -2843,7 +2845,8 @@ Representative request:
 
 ```json
 {
-  "new_namespace_id": "demo-branch"
+  "new_namespace_id": "demo-branch",
+  "access": {"kind":"unrestricted"}
 }
 ```
 
@@ -2854,6 +2857,7 @@ Representative response:
   "namespace_id": "demo-branch",
   "created_at_ms": 1752625000000,
   "created_by": "usr_8f3c",
+  "access": {"kind":"unrestricted"},
   "fork_basis": {
     "source_namespace_id": "demo",
     "source_head_seq": 418

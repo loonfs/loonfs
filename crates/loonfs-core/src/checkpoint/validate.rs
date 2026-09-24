@@ -71,32 +71,20 @@ pub(super) fn validate_manifest_materialization_ranges(
             message: "retention floor is beyond the manifest head sequence".to_owned(),
         });
     }
-    if payload.base_seq > payload.head_seq {
-        return Err(ManifestLoadError::RunManifestMismatch {
-            object_key: object_key.to_owned(),
-            message: format!(
-                "base_seq `{}` is after manifest head_seq `{}`",
-                payload.base_seq, payload.head_seq
-            ),
-        });
-    }
 
     if payload.runs.is_empty() {
-        if payload.status.is_deleted()
-            || (payload.head_seq == ChangeSeq(0)
-                && payload.base_seq == ChangeSeq(0)
-                && payload.next_inode_id == loonfs_api::FIRST_ALLOCATABLE_INODE_ID
-                && payload.next_run_no == RunNo(0))
+        if payload.head_seq == ChangeSeq(0)
+            && payload.next_inode_id == loonfs_api::FIRST_ALLOCATABLE_INODE_ID
+            && payload.next_run_no == RunNo(0)
         {
             return Ok(());
         }
         return Err(ManifestLoadError::RunManifestMismatch {
             object_key: object_key.to_owned(),
-            message: "an empty active manifest must describe genesis".to_owned(),
+            message: "an empty manifest must describe genesis".to_owned(),
         });
     }
 
-    let mut saw_base_seq_run = false;
     let mut saw_head_seq_run = false;
     let mut seen_run_nos = HashSet::new();
     let mut seen_segment_ids = HashSet::new();
@@ -116,17 +104,16 @@ pub(super) fn validate_manifest_materialization_ranges(
                 message: format!("duplicate metadata run number `{}`", run.run_no),
             });
         }
-        if run.run_seq < payload.base_seq || run.run_seq > payload.head_seq {
+        if run.run_seq > payload.head_seq {
             return Err(ManifestLoadError::RunManifestMismatch {
                 object_key: object_key.to_owned(),
                 message: format!(
-                    "metadata run `{}` seq `{}` is outside [`{}`, `{}`]",
-                    run.run_no, run.run_seq, payload.base_seq, payload.head_seq
+                    "metadata run `{}` seq `{}` exceeds head seq `{}`",
+                    run.run_no, run.run_seq, payload.head_seq
                 ),
             });
         }
         if !run.segments.is_empty() {
-            saw_base_seq_run |= run.run_seq == payload.base_seq;
             saw_head_seq_run |= run.run_seq == payload.head_seq;
         }
         for descriptor in &run.segments {
@@ -139,16 +126,7 @@ pub(super) fn validate_manifest_materialization_ranges(
         }
     }
 
-    if !saw_base_seq_run {
-        return Err(ManifestLoadError::RunManifestMismatch {
-            object_key: object_key.to_owned(),
-            message: format!(
-                "namespace manifest has no metadata file at base_seq `{}`",
-                payload.base_seq
-            ),
-        });
-    }
-    if !saw_head_seq_run && !payload.status.is_deleted() {
+    if !saw_head_seq_run {
         return Err(ManifestLoadError::RunManifestMismatch {
             object_key: object_key.to_owned(),
             message: format!(
@@ -216,13 +194,11 @@ fn validate_segment_key_ranges(
 ) -> Result<(), ManifestLoadError> {
     for run in runs {
         for family_segments in ordered_manifest_segments(object_key, &run.segments)? {
-            validate_segment_numbering(run.run_no, &family_segments.segments)?;
             validate_segment_key_order(run.run_no, &family_segments.segments)?;
             for descriptor in &family_segments.segments {
-                if descriptor.row_count > 0
-                    && (descriptor.min_row_key.is_empty()
-                        || descriptor.max_row_key.is_empty()
-                        || descriptor.min_row_key > descriptor.max_row_key)
+                if descriptor.min_row_key.is_empty()
+                    || descriptor.max_row_key.is_empty()
+                    || descriptor.min_row_key > descriptor.max_row_key
                 {
                     return Err(ManifestLoadError::SegmentDescriptorMismatch {
                         object_key: metadata_segment_object_key(descriptor),
@@ -291,24 +267,6 @@ fn validate_run_index_parity(
     Ok(())
 }
 
-fn validate_segment_numbering(
-    run_no: RunNo,
-    descriptors: &[MetadataSegmentRef],
-) -> Result<(), ManifestLoadError> {
-    for (position, descriptor) in descriptors.iter().enumerate() {
-        if descriptor.segment_index as usize != position {
-            return Err(ManifestLoadError::SegmentDescriptorMismatch {
-                object_key: metadata_segment_object_key(descriptor),
-                message: format!(
-                    "segment carries index {} at position {position} of family `{:?}` in run `{run_no}`; a family's segments within one run are numbered from zero, once each, in the order they were written",
-                    descriptor.segment_index, descriptor.family
-                ),
-            });
-        }
-    }
-    Ok(())
-}
-
 fn validate_segment_key_order(
     run_no: RunNo,
     descriptors: &[MetadataSegmentRef],
@@ -316,7 +274,10 @@ fn validate_segment_key_order(
     let mut previous: Option<&MetadataSegmentRef> = None;
     for descriptor in descriptors {
         if descriptor.row_count == 0 {
-            continue;
+            return Err(ManifestLoadError::SegmentDescriptorMismatch {
+                object_key: metadata_segment_object_key(descriptor),
+                message: "metadata segment has no rows".to_owned(),
+            });
         }
         if let Some(previous) = previous {
             if descriptor.min_row_key <= previous.max_row_key {

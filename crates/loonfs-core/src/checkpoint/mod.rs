@@ -49,7 +49,6 @@ pub use self::error::{ManifestLoadError, ManifestLoadFailureClass};
 pub use self::files::{CheckpointFile, CheckpointFilesPage, CheckpointFilesPageCursor};
 pub use self::flush::{ensure_metadata_publication_budget, fold_wal_tail, next_run_no_after};
 pub use self::list::CheckpointPageCursor;
-pub(crate) use self::load::decode_manifest_at;
 pub use self::read_basis::{load_checkpoint_read_basis, CheckpointReadBasis};
 pub use self::reorganize::{MetadataCompactionPolicy, MetadataReorganizeOutcome};
 pub use self::runs::MetadataFamilyGroup;

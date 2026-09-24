@@ -53,7 +53,7 @@ async fn abandoned_pins_with_collected_bases_can_be_reaped_after_failed_cleanup(
                 &store,
                 &namespace_id,
                 owner,
-                selected.state.manifest.clone(),
+                selected.state.manifest(),
                 &setup,
             ),
             async {
@@ -202,8 +202,8 @@ async fn missing_basis_checks_each_pin_and_propagates_pin_read_errors() {
         .await
         .expect("manifest");
     let mut ids = [
-        PinId::generate(manifest.state.manifest.manifest_no),
-        PinId::generate(manifest.state.manifest.manifest_no),
+        PinId::generate(manifest.state.manifest().manifest_no),
+        PinId::generate(manifest.state.manifest().manifest_no),
     ];
     ids.sort();
     for (index, id) in ids.iter().enumerate() {
@@ -212,8 +212,8 @@ async fn missing_basis_checks_each_pin_and_propagates_pin_read_errors() {
             &loonfs_api::wire::control::PinPayload {
                 pin_id: id.clone(),
                 namespace_id: namespace_id.clone(),
-                head_seq: manifest.state.manifest.head_seq,
-                payload_checksum: manifest.state.manifest.payload_checksum.clone(),
+                head_seq: manifest.state.manifest().head_seq,
+                payload_checksum: manifest.state.manifest().payload_checksum.clone(),
                 created_at_ms: setup.now_ms,
                 owner: PinOwner::User {
                     name: format!("pin-{index}"),

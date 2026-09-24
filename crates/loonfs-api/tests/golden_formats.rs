@@ -311,7 +311,6 @@ fn sample_wal_payload() -> WalSegmentPayload {
         namespace_id: namespace_id(),
         wal_no: WalNo(2),
         writer_epoch: WriterEpoch(3),
-        prior_head_seq: ChangeSeq(1),
         head_seq: ChangeSeq(2),
         next_inode_id: InodeId(10),
         records: vec![WalCommitPayload {
@@ -390,7 +389,6 @@ fn sample_manifest_payload() -> NamespaceManifestPayload {
         manifest_no: ManifestNo(2),
 
         head_seq: ChangeSeq(2),
-        base_seq: ChangeSeq(2),
         writer_epoch: WriterEpoch(3),
         next_inode_id: InodeId(10),
         next_run_no: RunNo(1),
@@ -403,7 +401,6 @@ fn sample_manifest_payload() -> NamespaceManifestPayload {
                 owner_namespace_id: namespace_id(),
                 segment_id: segment_id(),
                 family: MetadataRowFamily::Inodes,
-                segment_index: 0,
                 row_count: 6,
                 min_row_key: "commit-receipt".to_owned(),
                 max_row_key: "tombstone".to_owned(),

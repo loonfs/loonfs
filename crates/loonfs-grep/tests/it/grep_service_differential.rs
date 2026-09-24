@@ -266,7 +266,7 @@ async fn planless_scan_returns_exact_materialized_and_wal_boundary_revisions_onc
     let materialized_manifest =
         control::metadata_manifest(&fixture.store, &fixture.namespace_id).await;
     assert_eq!(
-        materialized_manifest.manifest.head_seq,
+        materialized_manifest.manifest().head_seq,
         materialized_head.seq
     );
 
@@ -282,10 +282,10 @@ async fn planless_scan_returns_exact_materialized_and_wal_boundary_revisions_onc
         .expect("write WAL-only file");
     let head = control::head(&fixture.store, &fixture.namespace_id).await;
     let manifest = control::metadata_manifest(&fixture.store, &fixture.namespace_id).await;
-    assert_eq!(manifest.manifest.head_seq, materialized_head.seq);
+    assert_eq!(manifest.manifest().head_seq, materialized_head.seq);
     assert_eq!(
         head.seq.0,
-        manifest.manifest.head_seq.0 + 1,
+        manifest.manifest().head_seq.0 + 1,
         "the WAL-only file must be committed immediately after the materialized boundary"
     );
 

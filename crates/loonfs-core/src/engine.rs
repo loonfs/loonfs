@@ -624,7 +624,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         path: impl AsRef<str>,
         request: PageRequest<FileRevisionsPageCursor>,
         context: &RuntimeReadContext,
-    ) -> Result<Page<FileRevision, FileRevisionsPageCursor>> {
+    ) -> Result<(InodeId, Page<FileRevision, FileRevisionsPageCursor>)> {
         let head_view = self.authorization_head_view().await?;
         let access = self.read_access(context, head_view.as_ref())?;
         let view = self.load_read_view(context).await?;

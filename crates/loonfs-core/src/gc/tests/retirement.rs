@@ -35,8 +35,8 @@ async fn deleted_namespace_uses_its_deletion_clock_without_publishing_a_manifest
         .await
         .expect("same tombstone");
     assert_eq!(
-        before.state.manifest.manifest_no,
-        after.state.manifest.manifest_no
+        before.state.manifest().manifest_no,
+        after.state.manifest().manifest_no
     );
     assert_eq!(store.counts().puts, 0);
 }
@@ -79,7 +79,7 @@ async fn retired_fork_reclaims_without_reading_inherited_segments() {
     let tombstone = crate::namespace::control::load_current_manifest(&inner, &target)
         .await
         .expect("target tombstone");
-    let payload = tombstone.envelope.payload();
+    let payload = tombstone.state.envelope.payload();
     let source_pin = &payload
         .fork_basis
         .as_ref()
@@ -304,7 +304,7 @@ async fn a_fork_basis_naming_its_pin_with_a_different_checksum_is_corrupt() {
     let current = crate::namespace::control::load_current_manifest(&store, &target)
         .await
         .expect("target");
-    let mut payload = current.envelope.payload().clone();
+    let mut payload = current.state.envelope.payload().clone();
     let basis = payload.fork_basis.as_mut().expect("fork basis");
     basis.manifest.payload_checksum = format!("sha256:{}", "0".repeat(64));
     let pin_id = basis.source_pin_id.clone();

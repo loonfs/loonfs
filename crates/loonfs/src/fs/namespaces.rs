@@ -104,13 +104,8 @@ impl FsWriter {
         result
     }
 
-    /// Deletes a namespace: a fenced, terminal head transition (format
-    /// spec, "Tombstones and deletion"). Commits acknowledged before the
-    /// swap stay committed; reads, writes, forks, and re-creation of the id
-    /// fail with `namespace_deleted` afterward. Repeated garbage collection
-    /// reclaims the namespace's own content after retirement and its grace
-    /// period. See the API spec, "Deleting, retaining, and reclaiming", for
-    /// blockers and limits.
+    /// Ends the namespace after folding its final WAL tail.
+    /// See [namespace deletion](../../../../docs/specs/format.md#94-deleting-a-namespace).
     ///
     /// Sequenced as a barrier through the publication service: mutations
     /// admitted before the delete publish first, and mutations admitted

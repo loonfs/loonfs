@@ -131,7 +131,7 @@ pub(crate) async fn load_namespace_manifest_envelope<S: ObjectStore + ?Sized>(
     manifest_no: &ManifestNo,
 ) -> Result<NamespaceManifestEnvelope, ManifestLoadError> {
     let manifest_key = metadata_manifest_object(namespace_id, manifest_no);
-    load_namespace_manifest_envelope_if_present(store, namespace_id, manifest_no, &manifest_key)
+    load_namespace_manifest_envelope_if_present(store, namespace_id, manifest_no)
         .await?
         .ok_or(ManifestLoadError::MissingManifest {
             object_key: manifest_key,
@@ -189,6 +189,7 @@ pub(crate) async fn load_manifest_segments_for_inspection<'a, S: ObjectStore + ?
             .map_err(|err| ManifestLoadError::ReadManifest {
                 object_key: manifest_key.clone(),
                 message: err.public_message().into_owned(),
+                class: crate::error::StoreFailureClass::of(&err),
             })?
         else {
             return Err(ManifestLoadError::MissingManifest {
@@ -243,10 +244,10 @@ pub(crate) async fn load_namespace_manifest_envelope_if_present<S: ObjectStore +
     store: &S,
     namespace_id: &NamespaceId,
     manifest_no: &ManifestNo,
-    manifest_key: &str,
 ) -> Result<Option<NamespaceManifestEnvelope>, ManifestLoadError> {
+    let manifest_key = metadata_manifest_object(namespace_id, manifest_no);
     let Some(manifest_bytes) = store
-        .get(manifest_key, None)
+        .get(&manifest_key, None)
         .instrument(tracing::debug_span!(
             "loonfs.phase",
             phase = "load_namespace_manifest",
@@ -256,11 +257,12 @@ pub(crate) async fn load_namespace_manifest_envelope_if_present<S: ObjectStore +
         .map_err(|err| ManifestLoadError::ReadManifest {
             object_key: manifest_key.to_owned(),
             message: err.public_message().into_owned(),
+            class: crate::error::StoreFailureClass::of(&err),
         })?
     else {
         return Ok(None);
     };
-    decode_manifest_at(namespace_id, *manifest_no, manifest_key, &manifest_bytes).map(Some)
+    decode_manifest_at(namespace_id, *manifest_no, &manifest_key, &manifest_bytes).map(Some)
 }
 
 pub(crate) fn decode_manifest_at(

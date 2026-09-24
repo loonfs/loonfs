@@ -247,7 +247,7 @@ async fn read_floor_seq<S: ObjectStore + ?Sized>(
         .await
         .expect("resolve retention floor")
         .state
-        .retention_floor_seq
+        .retention_floor_seq()
 }
 
 /// Checkpoints, then folds every delta run into the base through
@@ -375,7 +375,7 @@ async fn drain_reorganization<S: ObjectStore + ?Sized>(
                     .await
                     .expect("read metadata manifest")
                     .state
-                    .manifest
+                    .manifest()
                     .manifest_no;
                 return (manifest_no, published);
             }
@@ -424,7 +424,7 @@ async fn visible_namespace<S: ObjectStore + ?Sized>(
         .await
         .expect("read metadata manifest")
         .state
-        .manifest
+        .manifest()
         .manifest_no;
     let materialized =
         load_manifest_materialization_for_inspection(store, namespace_id, manifest_no)
@@ -545,7 +545,7 @@ async fn current_manifest_number<S: ObjectStore + ?Sized>(
         .await
         .expect("read metadata manifest")
         .state
-        .manifest
+        .manifest()
         .manifest_no
 }
 
@@ -814,20 +814,17 @@ pub(crate) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
         .as_ref()
         .map_or(RunNo(0), |previous| previous.manifest.payload().next_run_no);
     let mut next_run_no = next_run_no_after(run_no)?;
-    let (base_seq, runs) = match previous_manifest {
+    let runs = match previous_manifest {
         Some(previous) if is_bootstrap_seed_manifest(previous.manifest.payload()) => {
             let run_segments =
                 build_manifest_segments(store, namespace_id, metadata_state, policy).await?;
             debug_assert_manifest_segments_do_not_overlap(&run_segments);
-            (
-                head_seq,
-                vec![MetadataRunRef {
-                    run_no,
-                    run_seq: head_seq,
-                    tier: RunTier::Base,
-                    segments: flatten_manifest_segments(run_segments),
-                }],
-            )
+            vec![MetadataRunRef {
+                run_no,
+                run_seq: head_seq,
+                tier: RunTier::Base,
+                segments: flatten_manifest_segments(run_segments),
+            }]
         }
         Some(previous)
             if delta_run_count(previous.manifest.payload()) < policy.max_delta_runs.get() =>
@@ -852,34 +849,28 @@ pub(crate) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
             } else {
                 next_run_no = run_no;
             }
-            (previous.manifest.payload().base_seq, runs)
+            runs
         }
         Some(_) => {
             let run_segments =
                 build_manifest_segments(store, namespace_id, metadata_state, policy).await?;
             debug_assert_manifest_segments_do_not_overlap(&run_segments);
-            (
-                head_seq,
-                vec![MetadataRunRef {
-                    run_no,
-                    run_seq: head_seq,
-                    tier: RunTier::Base,
-                    segments: flatten_manifest_segments(run_segments),
-                }],
-            )
+            vec![MetadataRunRef {
+                run_no,
+                run_seq: head_seq,
+                tier: RunTier::Base,
+                segments: flatten_manifest_segments(run_segments),
+            }]
         }
         _ => {
             let run_segments =
                 build_manifest_segments(store, namespace_id, metadata_state, policy).await?;
-            (
-                head_seq,
-                vec![MetadataRunRef {
-                    run_no,
-                    run_seq: head_seq,
-                    tier: RunTier::Base,
-                    segments: flatten_manifest_segments(run_segments),
-                }],
-            )
+            vec![MetadataRunRef {
+                run_no,
+                run_seq: head_seq,
+                tier: RunTier::Base,
+                segments: flatten_manifest_segments(run_segments),
+            }]
         }
     };
 
@@ -897,7 +888,6 @@ pub(crate) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
         manifest_no,
 
         head_seq,
-        base_seq,
         writer_epoch: head.writer_epoch,
         next_inode_id: head.next_inode_id,
         next_run_no,
@@ -914,7 +904,7 @@ pub(crate) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
 
 #[cfg(test)]
 fn is_bootstrap_seed_manifest(payload: &NamespaceManifestPayload) -> bool {
-    payload.head_seq == ChangeSeq(0) && payload.base_seq == ChangeSeq(0)
+    payload.head_seq == ChangeSeq(0) && payload.base_seq() == ChangeSeq(0)
 }
 
 pub(crate) async fn write_namespace_manifest<S: ObjectStore + ?Sized>(
@@ -964,7 +954,7 @@ pub(super) async fn publish_manifest_with_segments<S: ObjectStore + ?Sized>(
         manifest_no,
 
         head_seq,
-        base_seq: head_seq,
+
         writer_epoch: loonfs_api::WriterEpoch(1),
         next_inode_id: InodeId(64),
         next_run_no: RunNo(1),

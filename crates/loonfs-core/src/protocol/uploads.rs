@@ -501,7 +501,7 @@ async fn ensure_upload_namespace_available<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
 ) -> Result<VerifiedNamespaceCatalogEntry> {
     let manifest = load_current_manifest(store, namespace_id).await?;
-    let head = crate::namespace::state::NamespaceReadState::from(manifest.envelope.payload());
+    let head = crate::namespace::state::NamespaceReadState::from(manifest.state.envelope.payload());
     crate::namespace::control::ensure_namespace_live(&head)?;
     Ok(VerifiedNamespaceCatalogEntry::from_head(&head))
 }

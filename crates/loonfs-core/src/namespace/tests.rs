@@ -83,7 +83,7 @@ async fn creation_installs_hint_and_manifest_then_reads_genesis() {
     let manifest = load_current_manifest(&store, &namespace_id)
         .await
         .expect("manifest");
-    let payload = manifest.envelope.payload();
+    let payload = manifest.state.envelope.payload();
     assert_eq!(payload.manifest_no, ManifestNo(1));
     assert!(payload.runs.is_empty());
     assert_eq!(payload.folded_wal_no, WalNo(0));
@@ -223,7 +223,7 @@ async fn a_plain_create_whose_response_was_lost_cannot_claim_an_advanced_namespa
     let current = load_current_manifest(&store.inner, &namespace_id)
         .await
         .expect("current manifest");
-    assert_eq!(current.envelope.payload().manifest_no, ManifestNo(2));
+    assert_eq!(current.state.envelope.payload().manifest_no, ManifestNo(2));
 }
 
 #[tokio::test]
@@ -308,8 +308,9 @@ async fn nested_forks_read_copied_runs_without_source_control_reads() {
     let target_manifest = load_current_manifest(&store, &target)
         .await
         .expect("target manifest");
-    assert_eq!(target_manifest.state.manifest.manifest_no, ManifestNo(1));
+    assert_eq!(target_manifest.state.manifest().manifest_no, ManifestNo(1));
     assert!(target_manifest
+        .state
         .envelope
         .payload()
         .runs
@@ -336,8 +337,9 @@ async fn nested_forks_read_copied_runs_without_source_control_reads() {
     let manifest = load_current_manifest(&store, &nested)
         .await
         .expect("nested manifest");
-    assert_eq!(manifest.state.manifest.manifest_no, ManifestNo(1));
+    assert_eq!(manifest.state.manifest().manifest_no, ManifestNo(1));
     let owners = manifest
+        .state
         .envelope
         .payload()
         .runs
@@ -449,7 +451,7 @@ async fn a_pending_hint_cannot_name_a_manifest_collected_after_its_replacement()
     let current = load_current_manifest(&store, &namespace_id)
         .await
         .expect("discover past lagging hint");
-    assert_eq!(current.state.manifest.manifest_no, ManifestNo(4));
+    assert_eq!(current.state.manifest().manifest_no, ManifestNo(4));
     load_current_metadata_view(&store, &namespace_id)
         .await
         .expect("read committed state");

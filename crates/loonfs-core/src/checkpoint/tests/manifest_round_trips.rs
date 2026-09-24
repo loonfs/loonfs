@@ -181,7 +181,10 @@ async fn manifest_round_trip_uses_manifest_materialization_for_mixed_namespace()
         .await
         .expect("materialization after");
 
-    assert_eq!(after.manifest.manifest.manifest_no, checkpoint.manifest_no);
+    assert_eq!(
+        after.manifest.manifest().manifest_no,
+        checkpoint.manifest_no
+    );
     assert_eq!(before.head.seq, after.head.seq);
     assert!(metadata_states_equivalent(
         &before.metadata_state,
@@ -265,7 +268,7 @@ async fn manifest_round_trip_supports_empty_namespace() {
                 .await
                 .expect("manifest")
                 .state
-                .manifest,
+                .manifest(),
         ),
     )
     .await
@@ -293,7 +296,10 @@ async fn manifest_round_trip_supports_empty_namespace() {
     let materialization = load_current_projection(&store, &namespace_id)
         .await
         .expect("materialization");
-    assert_eq!(materialization.manifest.manifest.manifest_no, ManifestNo(1));
+    assert_eq!(
+        materialization.manifest.manifest().manifest_no,
+        ManifestNo(1)
+    );
     let record = load_checkpoint_record(&store, &namespace_id, &checkpoint.checkpoint_id)
         .await
         .expect("read pin")
@@ -416,7 +422,7 @@ async fn create_checkpoint_surfaces_conflicting_invalid_manifest() {
         &namespace_id,
         &current
             .state
-            .manifest
+            .manifest()
             .manifest_no
             .successor()
             .expect("next"),
@@ -637,8 +643,8 @@ async fn manifest_delta_run_materialization_matches_checkpoint_projection() {
     // Checkpoints only append: the base run stays the bootstrap seed's and
     // each checkpoint contributes one delta run.
     assert_eq!(
-        second_materialized.manifest.payload().base_seq,
-        first_materialized.manifest.payload().base_seq
+        second_materialized.manifest.payload().base_seq(),
+        first_materialized.manifest.payload().base_seq()
     );
     assert_eq!(
         base_tier(&second_materialized.manifest),
@@ -685,7 +691,7 @@ async fn manifest_delta_run_materialization_matches_checkpoint_projection() {
             .await
             .expect("load chained manifest");
     assert_eq!(
-        latest_materialized.manifest.payload().base_seq,
+        latest_materialized.manifest.payload().base_seq(),
         ChangeSeq(0),
         "always-append checkpoints keep the first published base"
     );
@@ -824,7 +830,6 @@ async fn manifest_run_rejects_rows_after_run_seq() {
         manifest_no: manifest_no(materialization.head.seq),
 
         head_seq: materialization.head.seq,
-        base_seq: first,
         writer_epoch: materialization.head.writer_epoch,
         next_inode_id: materialization.head.next_inode_id,
         next_run_no: RunNo(2),
@@ -947,13 +952,13 @@ async fn create_checkpoint_pins_a_current_basis_without_building_a_new_manifest(
     let materialization = load_current_projection(&store, &namespace_id)
         .await
         .expect("materialization");
-    let covering_manifest_no = ManifestNo(materialization.manifest.manifest.manifest_no.0 + 1);
+    let covering_manifest_no = ManifestNo(materialization.manifest.manifest().manifest_no.0 + 1);
     let manifest_without_checkpoint = build_namespace_manifest_from_metadata_state(
         &store,
         &namespace_id,
         ManifestMetadataSource {
             head: &materialization.head,
-            basis_manifest_no: Some(materialization.manifest.manifest.manifest_no),
+            basis_manifest_no: Some(materialization.manifest.manifest().manifest_no),
             retention_floor_seq: read_floor_seq(&store, &namespace_id).await,
             metadata_state: &materialization.metadata_state,
         },

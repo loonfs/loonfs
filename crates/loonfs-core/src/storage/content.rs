@@ -796,7 +796,7 @@ mod tests {
         store: &S,
         content_ref: &ContentRef,
     ) -> Result<Vec<u8>, DurableContentValidationError> {
-        ContentLocation::resolve(&content_ref.owner_namespace_id, None, content_ref)?
+        ContentLocation::resolve(None, content_ref)?
             .get_bytes(store, content_ref)
             .await
     }

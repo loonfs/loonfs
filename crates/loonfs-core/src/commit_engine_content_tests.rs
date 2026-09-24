@@ -298,12 +298,40 @@ async fn assert_expired_content_stays_rejected_on_retry(elapsed_ms: u64) {
     let alias = CommitCandidate::new(primary.request().clone());
     let later = CommitCandidate::new(directory_request("later", "later"));
     store.block_next();
-    let publish = engine.publish_batch(
-        &store,
-        vec![primary, alias, later, replay],
-        &publication,
-        &options,
-    );
+    let candidates = vec![primary, alias, later, replay];
+    let batch_started_ms = engine.monotonic_now_ms();
+    let publish = async {
+        let mut result = engine
+            .publish_batch_attempt(
+                &store,
+                &candidates,
+                &publication,
+                &options,
+                batch_started_ms,
+            )
+            .await;
+        // The first attempt finds the proof expired after loading its view
+        // and aborts; the retry owner tries again from the same origin.
+        while result.results.iter().any(|result| {
+            matches!(
+                result,
+                Err(CoreError::WalPublish(
+                    crate::commit::WalPublishError::StaleHead
+                ))
+            )
+        }) {
+            result = engine
+                .publish_batch_attempt(
+                    &store,
+                    &candidates,
+                    &publication,
+                    &options,
+                    batch_started_ms,
+                )
+                .await;
+        }
+        result
+    };
     let advance = async {
         store.wait_until_blocked().await;
         // Cross the inclusive proof deadline during the first view load only.

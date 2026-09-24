@@ -138,10 +138,10 @@ pub(crate) async fn verify_checkpoint_basis<S: ObjectStore + ?Sized>(
     let manifest = load_current_manifest(store, &record.namespace_id).await?;
     let pinned = record.manifest();
     Ok(
-        if manifest.envelope.payload().status.is_deleted()
-            || manifest.state.retention_floor_seq > record.head_seq
-            || manifest.state.manifest.manifest_no != pinned.manifest_no
-            || manifest.state.manifest.payload_checksum != pinned.payload_checksum
+        if manifest.state.envelope.payload().status.is_deleted()
+            || manifest.state.retention_floor_seq() > record.head_seq
+            || manifest.state.manifest().manifest_no != pinned.manifest_no
+            || manifest.state.manifest().payload_checksum != pinned.payload_checksum
         {
             CheckpointBasisVerification::Invalid
         } else {

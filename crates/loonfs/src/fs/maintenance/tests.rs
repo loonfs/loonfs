@@ -339,7 +339,7 @@ async fn current_manifest_payload<S: ObjectStore + ?Sized>(
     let root = loonfs_core::control::load_namespace_current_manifest(store, namespace_id)
         .await
         .expect("read the metadata root");
-    let key = metadata_manifest_object(namespace_id, &root.state.manifest.manifest_no);
+    let key = metadata_manifest_object(namespace_id, &root.state.manifest().manifest_no);
     let bytes = store
         .get(&key, None)
         .await

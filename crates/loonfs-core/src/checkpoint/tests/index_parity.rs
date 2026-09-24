@@ -173,7 +173,7 @@ async fn load_perturbed_manifest(
 fn segment_modelled_on(modelled_on: &MetadataSegmentRef) -> MetadataSegmentRef {
     MetadataSegmentRef {
         segment_id: loonfs_api::MetadataSegmentId::generate(),
-        segment_index: 0,
+
         ..modelled_on.clone()
     }
 }
@@ -1099,11 +1099,12 @@ async fn manifest_load_rejects_descriptors_off_the_frozen_segment_layout() {
         assert!(descriptor.row_count > 0, "the segment should hold rows");
         std::mem::swap(&mut descriptor.min_row_key, &mut descriptor.max_row_key);
     }
-    let perturbations: [(&str, Perturbation); 4] = [
+    let perturbations: [(&str, Perturbation); 5] = [
         ("filter not adjacent to index", misalign_filter),
         ("inline length disagrees with handle", truncate_inline),
         ("segment with rows has no max key", clear_max_key),
         ("segment key range descends", invert_key_range),
+        ("segment has no rows", |descriptor| descriptor.row_count = 0),
     ];
     for (index, (label, perturb)) in perturbations.iter().enumerate() {
         let mut perturbed = payload.clone();
@@ -1174,44 +1175,6 @@ async fn a_manifest_whose_group_base_fragmented_does_not_load() {
 }
 
 #[tokio::test]
-async fn a_manifest_that_numbers_one_family_twice_in_one_run_does_not_load() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    seed_folded_base_with_a_delta_run(&store, &namespace_id).await;
-
-    let manifest = current_manifest(&store, &namespace_id).await;
-    let existing = base_segment_of_family(&manifest, ApiMetadataRowFamily::Inodes);
-    assert_eq!(existing.segment_index, 0);
-
-    let mut repeated = manifest.payload().clone();
-    repeated
-        .runs
-        .iter_mut()
-        .find(|run| {
-            run.tier == RunTier::Base
-                && run
-                    .segments
-                    .iter()
-                    .any(|descriptor| descriptor.family == existing.family)
-        })
-        .expect("the base run should exist")
-        .segments
-        .push(segment_modelled_on(&existing));
-
-    let error = load_perturbed_manifest(&store, &namespace_id, repeated, 2)
-        .await
-        .expect_err("two segments of one family at one index must not load");
-    let ManifestLoadError::SegmentDescriptorMismatch { message, .. } = &error else {
-        panic!("expected a segment descriptor mismatch, got {error:?}")
-    };
-    assert!(
-        message.contains("Inodes") && message.contains("numbered from zero"),
-        "the rejection must name the family and the numbering rule, got `{message}`"
-    );
-}
-
-#[tokio::test]
 async fn a_manifest_whose_run_segments_overlap_in_key_range_does_not_load() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -1220,13 +1183,9 @@ async fn a_manifest_whose_run_segments_overlap_in_key_range_does_not_load() {
 
     let manifest = current_manifest(&store, &namespace_id).await;
     let existing = base_segment_of_family(&manifest, ApiMetadataRowFamily::Inodes);
-    assert_eq!(existing.segment_index, 0);
 
     let mut overlapping = manifest.payload().clone();
-    let mut second = segment_modelled_on(&existing);
-    // Index one keeps the numbering valid, leaving the overlapping range as
-    // the only error.
-    second.segment_index = 1;
+    let second = segment_modelled_on(&existing);
     overlapping
         .runs
         .iter_mut()

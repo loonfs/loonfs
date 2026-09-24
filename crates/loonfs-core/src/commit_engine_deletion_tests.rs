@@ -57,9 +57,9 @@ async fn deletion_budget_includes_writer_acquisition() {
     let manifest = crate::namespace::control::load_current_manifest(&store, &namespace_id)
         .await
         .expect("manifest");
-    assert!(!manifest.envelope.payload().status.is_deleted());
+    assert!(!manifest.state.envelope.payload().status.is_deleted());
     assert_eq!(
-        manifest.envelope.payload().manifest_no,
+        manifest.state.envelope.payload().manifest_no,
         loonfs_api::ManifestNo(2)
     );
 }
@@ -116,7 +116,7 @@ async fn a_stale_writer_stays_fenced_after_namespace_deletion() {
             parents: false,
         },
     ));
-    for attempt in 0..2 {
+    for attempt in 0..3 {
         store.reset();
         let error = stale
             .publish_batch(
@@ -129,7 +129,14 @@ async fn a_stale_writer_stays_fenced_after_namespace_deletion() {
             .results
             .remove(0)
             .expect_err("stale writer");
-        assert_eq!(error.code(), loonfs_api::ErrorCode::WriterFenced);
+        assert_eq!(
+            error.code(),
+            if attempt == 0 {
+                loonfs_api::ErrorCode::StaleHead
+            } else {
+                loonfs_api::ErrorCode::WriterFenced
+            }
+        );
         assert_eq!(store.counts().puts, usize::from(attempt == 0));
         assert_eq!(store.counts().compare_and_swaps, 0);
     }

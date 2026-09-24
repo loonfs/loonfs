@@ -321,9 +321,9 @@ This example assumes 12 is the discovered WAL tip. Manifest and WAL discovery mu
 
 After selecting a manifest, discover the WAL tip by probing consecutive numbers. If the hint names a WAL number above `folded_wal_no`, load that object and probe forward from it; otherwise probe from the folded boundary. The first absent successor ends discovery. Replay still requires every WAL number between the folded boundary and the discovered tip, including numbers below the hint.
 
-Each data segment must contain contiguous commits following its `prior_head_seq`. Namespace identity, WAL number, sequence range, allocation state, and writer epoch must validate. Empty fence segments contain no metadata changes. Epochs cannot decrease along the log or exceed the current manifest's epoch. If a WAL object exposes a newer epoch, reload the manifest before deciding that the object is invalid.
+Each data segment must contain contiguous commits following the preceding head. Its `prior_head_seq` is derived by subtracting one from the first record sequence; a first sequence of zero is invalid. A fence derives its preceding head from `head_seq`. Namespace identity, WAL number, sequence range, allocation state, and writer epoch must validate. Empty fence segments contain no metadata changes. Epochs cannot decrease along the log or exceed the current manifest's epoch. If a WAL object exposes a newer epoch, reload the manifest before deciding that the object is invalid.
 
-After WAL discovery, check for a successor to the selected manifest and reload if one appeared. This prevents a concurrent fold or retention advance from making a reclaimed WAL number look unused. Required missing or malformed objects fail the read.
+A deleted manifest ends discovery without a WAL or manifest successor probe. For an active manifest, check for a successor after WAL discovery and reload if one appeared. This prevents a concurrent fold or retention advance from making a reclaimed WAL number look unused. Required missing or malformed objects fail the read.
 
 A read is evaluated at one sequence. Replaying the WAL produces a projection of its metadata changes and any file bytes stored inline. This is the *projected WAL tail*. An implementation may query verified metadata segments and this projection directly, without loading every metadata row into memory, provided it applies the same visibility rules.
 
@@ -454,7 +454,7 @@ A writer session acquires authority lazily, before its first semantic publicatio
 
 Another session can acquire a higher epoch. Its numbered fence prevents an older writer from extending the log using a previously observed tip: the stale writer's put collides, discovery observes the higher epoch, and the session returns `writer_fenced`. A fenced session does not automatically reacquire authority.
 
-A fence has `head_seq` equal to `prior_head_seq`, preserves `next_inode_id`, and contains no commit records. It advances WAL position without advancing logical history. Concurrent attempts are serialized by conditional creation of the next number.
+A fence preserves `head_seq` and `next_inode_id` and contains no commit records. Its derived `prior_head_seq` equals `head_seq`. It advances WAL position without advancing logical history. Concurrent attempts are serialized by conditional creation of the next number.
 
 There is no writer lease or writer-expiry timestamp. The `writer_id` and `acquired_at_ms` fields describe the acquisition; the epoch determines authority. An acquisition retried after an uncertain outcome can advance the epoch again. Commit retry identity is separate and uses durable receipts.
 
@@ -530,7 +530,7 @@ While the receipt is retained, an equal fingerprint under the same `commit_id` i
 
 Inline content is identified by its bytes. While the commit receipt is retained, retrying the same request with the same inline bytes returns the original commit, even if a new content ID was assigned. Changed bytes or a different subject return `commit_id_reuse_conflict`.
 
-Before returning a retained publication receipt, check for a successor to its manifest with HEAD when manifest revalidation is due. A present successor invalidates the projection and requires ordinary publication discovery and writer fencing. Repeated replays share that check for the namespace within the revalidation interval. Check for the commit receipt before uploading inline bytes as content objects. If the receipt is still available, return the original result for an identical request or a reuse conflict for a changed request. Neither requires another upload, even after a restart or on another server.
+Receipt lookup uses the publisher's current projection. The publisher refreshes that projection when its WAL publication budget expires or its fold threshold is reached. Check for the commit receipt before uploading inline bytes as content objects. If the receipt is still available, return the original result for an identical request or a reuse conflict for a changed request. Neither requires another upload, even after a restart or on another server.
 
 The guarantee is bounded by retention. Receipts below the retention floor can be removed during compaction. Once a receipt is gone, the old ID cannot be distinguished from an unused ID and a later request can execute as a new mutation. A receipt that has not yet been compacted may still be available, but callers must not depend on that extra lifetime.
 
@@ -570,7 +570,7 @@ A namespace manifest describes one complete metadata file set through `head_seq`
 
 A run is the collection of segments produced together. `run_no` is allocated from the manifest's `next_run_no`, which advances when that run is published. A WAL flush allocates one run number across the families it writes. A compaction allocates a run number for its selected family group.
 
-Each run records `run_seq`, `tier`, and its segment descriptors. A non-empty manifest must have a run at `base_seq` and a run at `head_seq`, and all run sequences lie between them. An empty active manifest has equal head, base, and floor sequences. Within one run, each family's segments have dense, zero-based `segment_index` values and strictly separated ascending key ranges. Different runs can overlap because a later run can contain additional rows for the same inode, name slot, or revision history.
+Each run records `run_seq`, `tier`, and its segment descriptors. `base_seq` is derived as the smallest `run_seq` among runs with segments, or `head_seq` when none have segments. A non-empty manifest must have a non-empty run at `head_seq`; no run sequence may exceed it. An empty manifest describes genesis. Within one run, each family's segments follow list order and have strictly separated ascending key ranges. Every segment contains at least one row. Different runs can overlap because a later run can contain additional rows for the same inode, name slot, or revision history.
 
 The manifest must not contain duplicate run numbers or a run number at or above `next_run_no`. A family's segment ranges must not overlap or descend. Metadata producers must not write the same logical row key twice within one run.
 
@@ -1138,7 +1138,6 @@ A namespace manifest contains:
 | `compactor_epoch` | Current compaction authority. |
 | `head_seq` | Materialized head sequence; on deletion, the final namespace sequence. |
 | `activity` | Required cumulative activity counters defined in section 7.4. |
-| `base_seq` | Oldest run sequence represented by the file set. |
 | `writer_epoch` | Current writer authority. |
 | `next_inode_id` | First inode ID available at the recorded boundary. |
 | `next_run_no` | Next run number to allocate. |
@@ -1152,12 +1151,13 @@ A run contains `run_no`, `run_seq`, `tier`, and `segments`. Tier is `delta` or `
 | `owner_namespace_id` | Namespace storing the segment. |
 | `segment_id` | Immutable generated segment identity. |
 | `family` | Metadata row family. |
-| `segment_index` | Zero-based position within this run's family segment list. |
-| `row_count` | Number of stored rows. |
+| `row_count` | Positive number of stored rows. |
 | `min_row_key`, `max_row_key` | Inclusive key range. |
 | `index_block`, `filter_block` | Index and filter handles. |
 | `filter_inline?` | Exact stored filter bytes as lowercase hexadecimal. |
 | `object_checksum` | SHA-256 of the complete stored segment. |
+
+The oldest non-empty run sequence defines `base_seq`; with no such run, it equals `head_seq`. It is not stored. Segments follow their list order within each family.
 
 The owner and segment ID determine the object key. The descriptor stores no separate path or compaction-job identity.
 
@@ -1165,9 +1165,9 @@ The owner and segment ID determine the object key. The descriptor stores no sepa
 
 `MAX_WAL_SEGMENT_BYTES` is 512 MiB (536,870,912 bytes) for the complete decompressed WAL document, including its envelope. Writers keep every segment within this limit through request and batch admission; readers refuse larger documents. A writer composes each batch so the sum of its requests' bounds plus the document overhead stays within the limit. This is a format constraint because every successful publication must remain readable with bounded decompression.
 
-A WAL segment's payload contains `namespace_id`, `wal_no`, `writer_epoch`, `prior_head_seq`, `head_seq`, `next_inode_id`, and `records`.
+A WAL segment's payload contains `namespace_id`, `wal_no`, `writer_epoch`, `head_seq`, `next_inode_id`, and `records`.
 
-For a data segment, `records` covers the sequences after `prior_head_seq` through `head_seq` contiguously. The WAL number must match the key, and the allocation high-water mark must agree with replay. A fence has an empty record list, `head_seq` equal to `prior_head_seq`, and an unchanged allocator. Fences participate in WAL numbering and epoch validation but produce no logical changes.
+For a data segment, `prior_head_seq` is derived with checked subtraction from the first record sequence. `records` covers the sequences after it through `head_seq` contiguously. A first sequence of zero is invalid. The WAL number must match the key, and the allocation high-water mark must agree with replay. A fence has an empty record list and an unchanged head and allocator. Its derived `prior_head_seq` equals `head_seq`. Fences participate in WAL numbering and epoch validation but produce no logical changes.
 
 Each commit contains `seq`, `commit_id`, `committed_by`, `semantic_commit_fingerprint`, `committed_at_ms`, optional `message`, `deltas`, and optional `inline_content`. A delta wrapper contains `semantic_operation_index` and `delta`. The latter is a kind-tagged object with these fields:
 
@@ -1612,7 +1612,7 @@ Backfill's `target_seq` is the pinned checkpoint's sequence. Its cursor resumes 
 
 The nested `index` contains `next_run_no` and optional `reorganize`. Reorganization contains `snapshot_segment_ids`, `output_segment_ids`, `row_key_cursor`, `output_level`, and `run_no`. Its cursor is inclusive. Input and output segment IDs must be unique, disjoint, and present in the manifest's segment list. Each output must have the recorded level and run number. The extension can rebuild its state from a fresh core checkpoint.
 
-Grep segment descriptors use the shared run vocabulary: `run_no`, `run_seq`, `segment_index`, `row_count`, and inclusive minimum and maximum keys. The complete descriptor fields are `segment_id`, `run_no`, `run_seq`, `level`, `segment_index`, `row_count`, `min_row_key`, `max_row_key`, `index_block`, `filter_block`, optional `filter_inline`, and `object_checksum`. The block handles and checksums have the same representation as metadata segment descriptors.
+Grep segments follow list order. Each descriptor carries a positive row count. The complete descriptor fields are `segment_id`, `run_no`, `level`, `row_count`, `min_row_key`, `max_row_key`, `index_block`, `filter_block`, optional `filter_inline`, and `object_checksum`. The block handles and checksums have the same representation as metadata segment descriptors.
 
 Grep uses a numeric `level` rather than the core's base/delta tier. Level 0 is delta output, level 1 is an intermediate merge, and level 2 is the base. In-progress reorganization records the output level and run number so resumed steps continue the same run. Every descriptor and in-progress output run number must be below `next_run_no`.
 

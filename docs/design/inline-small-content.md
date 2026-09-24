@@ -164,7 +164,7 @@ No candidate family is added. The existing deletion rules remain, provided the i
 - **WAL objects** are collected at or below `folded_wal_no` once old enough. The fold invariant makes this safe for inline bytes.
 - **Content objects** written by a fold are published content. They produce the same permanent `content_publications` rows. A live namespace's content prefix is still never enumerated.
 - **Upload sessions** are not involved in an inline write. Unpublished inline content cannot exist, so the ownership question that sessions answer does not arise. A write that falls back uses a session as today.
-- **Deleted namespaces** sweep WAL objects and the owner's content prefix as today. Inline bytes that were never folded are removed with their WAL object. No object was written for them, and nothing needs one.
+- **Deleted namespaces** have their final WAL tail folded before the tombstone is published. Collection derives a retirement deadline from the deletion stamp and grace period. After that deadline and a complete empty pin listing, it lists and deletes the owner's content prefix and releases its source pin. It stores no deadline and scans no content-publication rows.
 
 A WAL object is collected once folded and past the collection grace, so an inline value is stored twice only until then: once in its WAL object and once in its content object. The per-object budget bounds one WAL object, not how many are retained. Inline bytes also make change-feed reads larger.
 

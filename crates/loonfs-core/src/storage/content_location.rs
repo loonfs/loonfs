@@ -6,7 +6,7 @@ use super::content::{
 };
 use crate::error::CoreError;
 use bytes::Bytes;
-use loonfs_api::{ContentRef, NamespaceId};
+use loonfs_api::ContentRef;
 use loonfs_objectstore::ObjectStore;
 
 /// Identifies where a published reference's bytes are read from.
@@ -20,18 +20,15 @@ pub enum ContentLocation {
 
 impl ContentLocation {
     pub(crate) fn resolve(
-        namespace_id: &NamespaceId,
         tail: Option<&crate::wal::ProjectedWalTail>,
         content_ref: &ContentRef,
     ) -> Result<Self, DurableContentValidationError> {
         let object_key = content_object_key_for_ref(content_ref)?;
-        if content_ref.owner_namespace_id == *namespace_id {
-            if let Some(bytes) = tail.and_then(|tail| tail.inline_content(content_ref)) {
-                return Ok(Self::Tail {
-                    bytes: bytes.clone(),
-                    object_key,
-                });
-            }
+        if let Some(bytes) = tail.and_then(|tail| tail.inline_content(content_ref)) {
+            return Ok(Self::Tail {
+                bytes: bytes.clone(),
+                object_key,
+            });
         }
         Ok(Self::Object { object_key })
     }

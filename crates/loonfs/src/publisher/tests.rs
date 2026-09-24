@@ -2674,7 +2674,7 @@ async fn successful_delete_waits_for_fold_before_evicting_the_namespace_publishe
         loonfs_core::control::load_namespace_current_manifest(blocking.inner(), &namespace_id)
             .await
             .expect("manifest during fold");
-    assert!(!manifest.envelope.payload().status.is_deleted());
+    assert!(!manifest.state.envelope.payload().status.is_deleted());
 
     blocking.release();
     settle_delete(delete, "delete waiting for the earlier fold")

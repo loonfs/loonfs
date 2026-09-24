@@ -12,25 +12,34 @@ use loonfs_objectstore::ObjectStore;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CurrentManifest {
-    pub manifest: ManifestRef,
-    pub retention_floor_seq: loonfs_api::ChangeSeq,
-    pub folded_wal_no: loonfs_api::WalNo,
-    pub compactor_epoch: u64,
+    pub envelope: std::sync::Arc<loonfs_api::wire::manifest::NamespaceManifestEnvelope>,
 }
 
 impl CurrentManifest {
-    pub(crate) fn position(&self) -> (loonfs_api::ChangeSeq, loonfs_api::ManifestNo) {
-        (self.manifest.head_seq, self.manifest.manifest_no)
+    pub fn manifest(&self) -> ManifestRef {
+        crate::checkpoint::publish::manifest_ref_for(
+            &self.envelope.payload().namespace_id,
+            &self.envelope,
+        )
+    }
+
+    pub fn retention_floor_seq(&self) -> loonfs_api::ChangeSeq {
+        self.envelope.payload().retention_floor_seq
+    }
+
+    pub fn folded_wal_no(&self) -> loonfs_api::WalNo {
+        self.envelope.payload().folded_wal_no
+    }
+
+    pub fn compactor_epoch(&self) -> u64 {
+        self.envelope.payload().compactor_epoch
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoadedManifest {
     pub object_key: String,
-    pub discovery_start_manifest_no: loonfs_api::ManifestNo,
     pub state: CurrentManifest,
-    pub hinted_wal_no: loonfs_api::WalNo,
-    pub envelope: loonfs_api::wire::manifest::NamespaceManifestEnvelope,
 }
 
 pub(crate) fn ensure_namespace_live(head: &NamespaceReadState) -> crate::error::Result<()> {
@@ -135,7 +144,29 @@ pub(crate) async fn load_current_manifest_if_present<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> Result<Option<LoadedManifest>, ControlObjectLoadError> {
-    let object_key = hint(namespace_id);
+    Ok(discover_manifest(store, namespace_id)
+        .await?
+        .map(|(manifest, _)| manifest))
+}
+
+pub(crate) async fn load_current_manifest_with_hint<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+) -> Result<(LoadedManifest, LoadedHint), ControlObjectLoadError> {
+    discover_manifest(store, namespace_id)
+        .await?
+        .ok_or_else(|| ControlObjectLoadError::MissingObject {
+            object_key: loonfs_objectstore::keys::metadata_manifest_object(
+                namespace_id,
+                &loonfs_api::ManifestNo(1),
+            ),
+        })
+}
+
+async fn discover_manifest<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+) -> Result<Option<(LoadedManifest, LoadedHint)>, ControlObjectLoadError> {
     let mut hint = match load_hint(store, namespace_id).await {
         Ok(hint) => hint,
         Err(ControlObjectLoadError::MissingObject { .. }) => return Ok(None),
@@ -145,22 +176,27 @@ pub(crate) async fn load_current_manifest_if_present<S: ObjectStore + ?Sized>(
         let mut manifest_no = hint.state.manifest_no;
         if manifest_no == loonfs_api::ManifestNo(0) {
             return Err(ControlObjectLoadError::Codec {
-                object_key,
+                object_key: hint.object_key,
                 message: "manifest hint must be at least one".to_owned(),
             });
         }
-        let mut current = load_discovered_manifest(store, namespace_id, manifest_no).await?;
+        let mut current = load_manifest_by_number(store, namespace_id, manifest_no).await?;
         while let Some(previous) = &current {
+            // A tombstone is the last manifest of its namespace.
+            if previous.state.envelope.payload().status.is_deleted() {
+                return Ok(current.map(|manifest| (manifest, hint)));
+            }
             let Ok(next) = manifest_no.successor() else {
                 break;
             };
-            let Some(manifest) = load_discovered_manifest(store, namespace_id, next).await? else {
+            let Some(manifest) = load_manifest_by_number(store, namespace_id, next).await? else {
                 break;
             };
             previous
+                .state
                 .envelope
                 .payload()
-                .ensure_successor(manifest.envelope.payload())
+                .ensure_successor(manifest.state.envelope.payload())
                 .map_err(|error| ControlObjectLoadError::Codec {
                     object_key: manifest.object_key.clone(),
                     message: error.to_string(),
@@ -178,58 +214,46 @@ pub(crate) async fn load_current_manifest_if_present<S: ObjectStore + ?Sized>(
         }
         if current.is_none() && manifest_no != loonfs_api::ManifestNo(1) {
             return Err(ControlObjectLoadError::Codec {
-                object_key,
+                object_key: hint.object_key,
                 message: format!("hinted manifest `{manifest_no}` is missing"),
             });
         }
-        if let Some(current) = &mut current {
-            current.discovery_start_manifest_no = hint.state.manifest_no;
-            current.hinted_wal_no = hint.state.wal_no;
-        }
-        return Ok(current);
+        return Ok(current.map(|manifest| (manifest, hint)));
     }
 }
 
-pub(crate) async fn load_discovered_manifest<S: ObjectStore + ?Sized>(
+pub(crate) async fn load_manifest_by_number<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     manifest_no: loonfs_api::ManifestNo,
 ) -> Result<Option<LoadedManifest>, ControlObjectLoadError> {
     let object_key = loonfs_objectstore::keys::metadata_manifest_object(namespace_id, &manifest_no);
-    let bytes =
-        store
-            .get(&object_key, None)
-            .await
-            .map_err(|error| ControlObjectLoadError::Store {
-                object_key: object_key.clone(),
-                message: error.public_message().into_owned(),
-                class: crate::error::StoreFailureClass::of(&error),
-            })?;
-    let envelope = bytes
-        .map(|bytes| {
-            crate::checkpoint::decode_manifest_at(namespace_id, manifest_no, &object_key, &bytes)
-        })
-        .transpose()
-        .map_err(|error| ControlObjectLoadError::Codec {
+    let envelope = crate::checkpoint::load_namespace_manifest_envelope_if_present(
+        store,
+        namespace_id,
+        &manifest_no,
+    )
+    .await
+    .map_err(|error| match error {
+        crate::checkpoint::ManifestLoadError::ReadManifest {
+            object_key,
+            message,
+            class,
+        } => ControlObjectLoadError::Store {
+            object_key,
+            message,
+            class,
+        },
+        error => ControlObjectLoadError::Codec {
             object_key: object_key.clone(),
             message: error.to_string(),
-        })?;
+        },
+    })?;
     Ok(envelope.map(|envelope| LoadedManifest {
         object_key,
-        discovery_start_manifest_no: manifest_no,
-        hinted_wal_no: loonfs_api::WalNo(0),
         state: CurrentManifest {
-            manifest: ManifestRef {
-                owner_namespace_id: namespace_id.clone(),
-                manifest_no,
-                head_seq: envelope.payload().head_seq,
-                payload_checksum: envelope.payload_checksum().to_owned(),
-            },
-            retention_floor_seq: envelope.payload().retention_floor_seq,
-            folded_wal_no: envelope.payload().folded_wal_no,
-            compactor_epoch: envelope.payload().compactor_epoch,
+            envelope: std::sync::Arc::new(envelope),
         },
-        envelope,
     }))
 }
 

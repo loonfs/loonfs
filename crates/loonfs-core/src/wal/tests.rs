@@ -163,8 +163,8 @@ async fn fences_fold_and_are_reclaimed_at_the_folded_boundary() {
     let current = load_current_manifest(&store, &namespace_id)
         .await
         .expect("manifest");
-    assert_eq!(current.envelope.payload().head_seq, ChangeSeq(0));
-    assert_eq!(current.envelope.payload().folded_wal_no, WalNo(1));
+    assert_eq!(current.state.envelope.payload().head_seq, ChangeSeq(0));
+    assert_eq!(current.state.envelope.payload().folded_wal_no, WalNo(1));
     let config = crate::gc::GcConfig {
         grace_window_ms: crate::limits::GC_MIN_GRACE_WINDOW_MS,
     };
@@ -228,8 +228,8 @@ async fn a_same_sequence_writer_acquisition_does_not_cover_a_fence_flush() {
     let current = load_current_manifest(&store, &namespace_id)
         .await
         .expect("manifest");
-    assert_eq!(current.envelope.payload().head_seq, ChangeSeq(0));
-    assert_eq!(current.envelope.payload().folded_wal_no, WalNo(2));
+    assert_eq!(current.state.envelope.payload().head_seq, ChangeSeq(0));
+    assert_eq!(current.state.envelope.payload().folded_wal_no, WalNo(2));
 }
 
 fn directory(name: &str) -> CommitCandidate {
@@ -262,7 +262,7 @@ pub(crate) async fn publish<S: ObjectStore>(
 }
 
 #[tokio::test]
-async fn a_number_collision_replans_and_commits_the_next_number_without_a_swap() {
+async fn a_number_collision_returns_after_one_attempt_and_a_retry_commits_the_next_number() {
     let directory = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("race").expect("namespace");
     let store = std::sync::Arc::new(RecordingStore::new(
@@ -296,7 +296,15 @@ async fn a_number_collision_replans_and_commits_the_next_number_without_a_swap()
         result
     });
     assert_eq!(winner.expect("winner").committed_seq, ChangeSeq(2));
-    assert_eq!(loser.expect("replanned").committed_seq, ChangeSeq(3));
+    assert_eq!(loser.expect_err("collision").code(), ErrorCode::StaleHead);
+    assert_eq!(store.counts().create_if_absent_puts, 2);
+    assert_eq!(
+        publish(&mut first, &store, "left")
+            .await
+            .expect("retry")
+            .committed_seq,
+        ChangeSeq(3)
+    );
     assert_eq!(store.counts().create_if_absent_puts, 3);
     assert_eq!(store.counts().compare_and_swaps, 0);
     let view = load_current_metadata_view(&store, &namespace_id)
@@ -339,13 +347,15 @@ async fn a_stale_writer_collides_with_the_fence_and_writes_nothing_else() {
         .await
         .expect("takeover fence");
     store.reset();
-    assert_eq!(
-        publish(&mut stale, &store, "stale")
-            .await
-            .expect_err("fenced")
-            .code(),
-        ErrorCode::WriterFenced
-    );
+    for expected in [ErrorCode::StaleHead, ErrorCode::WriterFenced] {
+        assert_eq!(
+            publish(&mut stale, &store, "stale")
+                .await
+                .expect_err("displaced writer")
+                .code(),
+            expected
+        );
+    }
     assert_eq!(store.counts().puts, 1);
     assert_eq!(store.counts().compare_and_swaps, 0);
     assert!(store
@@ -607,7 +617,6 @@ async fn a_warm_probe_reports_a_broken_chain_at_its_own_epoch_as_corruption() {
         .wal_no
         .successor()
         .expect("next WAL number");
-    broken.prior_head_seq = ChangeSeq(5);
     broken.head_seq = ChangeSeq(5);
     store
         .put_if_absent(
@@ -644,4 +653,31 @@ async fn a_warm_probe_reports_a_broken_chain_at_its_own_epoch_as_corruption() {
         ),
         "{error}"
     );
+}
+
+#[tokio::test]
+async fn fence_publication_enforces_the_wal_budget_before_the_put() {
+    let directory = tempdir().expect("directory");
+    let namespace_id = NamespaceId::parse("fence-budget").expect("namespace");
+    let store = RecordingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::prefix(wal_segment_prefix(&namespace_id)),
+    );
+    let head = crate::namespace::state::NamespaceReadState::initial(
+        namespace_id.clone(),
+        1_000,
+        loonfs_test_support::test_actor(),
+    );
+    let fence = super::prepare_segment(namespace_id, WriterEpoch(1), &head, &[]).expect("fence");
+    let timer =
+        loonfs_test_support::clock::ManualClock::new(crate::limits::WAL_PUBLISH_BUDGET_MS + 1);
+    let error = super::publish_segment(&store, &fence, &timer, 0)
+        .await
+        .expect_err("expired budget");
+    assert_eq!(error.code(), ErrorCode::StaleHead);
+    assert_eq!(store.counts().puts, 0);
+    super::publish_segment(&store, &fence, &timer, 1)
+        .await
+        .expect("budget boundary");
+    assert_eq!(store.counts().create_if_absent_puts, 1);
 }

@@ -486,14 +486,14 @@ fn maintenance_step_after_existing_manifest_writes_delta_manifest() {
         &namespace_id,
     ))
     .expect("metadata root");
-    let manifest_key = metadata_manifest_object(&namespace_id, &root.state.manifest.manifest_no);
+    let manifest_key = metadata_manifest_object(&namespace_id, &root.state.manifest().manifest_no);
     let manifest_bytes = block_on(raw_store.get(&manifest_key, None))
         .expect("read namespace manifest")
         .expect("namespace manifest exists");
     let manifest = decode_namespace_manifest_json(&manifest_bytes).expect("decode manifest");
     // A WAL flush only appends: the base marker stays where the first
     // published manifest put it until reorganization folds the delta runs.
-    assert_eq!(manifest.payload().base_seq, ChangeSeq(1));
+    assert_eq!(manifest.payload().base_seq(), ChangeSeq(1));
     let delta_files = manifest
         .payload()
         .runs

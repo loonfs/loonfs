@@ -133,9 +133,9 @@ pub(crate) fn sample_active_manifest(
             next_run_no: RunNo(4),
         },
         vec![
-            segment_ref(1, 1, 0, 0),
-            segment_ref(2, 2, 0, 0),
-            segment_ref(3, 3, 1, 0),
+            segment_ref(1, 1, 0),
+            segment_ref(2, 2, 0),
+            segment_ref(3, 3, 1),
         ],
     )
     .expect("valid active manifest state")
@@ -158,7 +158,7 @@ pub(crate) fn sample_backfilling_manifest() -> GrepManifestState {
             reorganize: None,
             next_run_no: RunNo(2),
         },
-        vec![segment_ref(1, 1, 0, 0)],
+        vec![segment_ref(1, 1, 0)],
     )
     .expect("valid backfilling manifest state")
 }
@@ -186,22 +186,13 @@ fn sample_hint() -> GrepHint {
     }
 }
 
-/// One segment descriptor. `number` picks the segment id and its run
-/// sequence, and only the first segment carries an inlined filter, so a
-/// manifest holding several of these pins both the present and the absent
-/// spelling of that field.
-pub(crate) fn segment_ref(
-    number: u8,
-    run_no: u64,
-    level: u32,
-    segment_index: u32,
-) -> GrepSegmentRef {
+pub(crate) fn segment_ref(number: u8, run_no: u64, level: u32) -> GrepSegmentRef {
     GrepSegmentRef {
         segment_id: segment_id(number),
         run_no: RunNo(run_no),
-        run_seq: ChangeSeq(7 + u64::from(number)),
+
         level,
-        segment_index,
+
         row_count: 99,
         min_row_key: "gram-616263-00000000000000000001".to_owned(),
         max_row_key: "gram-7a7a7a-00000000000000000099".to_owned(),

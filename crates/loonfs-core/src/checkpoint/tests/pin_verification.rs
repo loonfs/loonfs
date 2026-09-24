@@ -48,7 +48,7 @@ async fn pin_creation_retries_after_compaction_and_collection() {
                 let current =
                     compact_and_collect_replaced_segments(&store, &namespace_id, &selected).await;
                 assert_eq!(
-                    selected.state.manifest.head_seq != current.head_seq,
+                    selected.state.manifest().head_seq != current.head_seq,
                     advance_head
                 );
                 store.release();
@@ -93,7 +93,7 @@ pub(super) async fn compact_and_collect_replaced_segments<S: ObjectStore>(
     let report = reorganize_metadata_step(
         store,
         namespace_id,
-        selected.state.compactor_epoch,
+        selected.state.compactor_epoch(),
         MetadataLsmPolicy::default(),
         MetadataCompactionPolicy::CompactImmediately,
     )
@@ -106,8 +106,9 @@ pub(super) async fn compact_and_collect_replaced_segments<S: ObjectStore>(
     let current = load_current_manifest(store, namespace_id)
         .await
         .expect("current manifest");
-    assert_ne!(selected.state.manifest, current.state.manifest);
+    assert_ne!(selected.state.manifest(), current.state.manifest());
     let current_segments: BTreeSet<_> = current
+        .state
         .envelope
         .payload()
         .runs
@@ -116,6 +117,7 @@ pub(super) async fn compact_and_collect_replaced_segments<S: ObjectStore>(
         .map(metadata_segment_object_key)
         .collect();
     let replaced: Vec<_> = selected
+        .state
         .envelope
         .payload()
         .runs
@@ -145,7 +147,7 @@ pub(super) async fn compact_and_collect_replaced_segments<S: ObjectStore>(
     for key in replaced {
         assert!(store.head(&key).await.expect("replaced segment").is_none());
     }
-    current.state.manifest
+    current.state.manifest()
 }
 
 #[tokio::test]
@@ -176,7 +178,7 @@ async fn namespace_deletion_during_pin_verification_deletes_the_pin() {
                 name: "racing".to_owned(),
                 expires_at_ms: None
             },
-            current.state.manifest,
+            current.state.manifest(),
             &context,
         ),
         async {
