@@ -57,10 +57,7 @@ impl PublisherRegistry {
         }
         let kept = {
             let slot = publisher.engine.lock().await;
-            let unfolded_bytes = slot
-                .inline_tail_estimate()
-                .map(|tail| tail.bytes)
-                .unwrap_or(0);
+            let unfolded_bytes = slot.wal_tail_inline_bytes().unwrap_or(0);
             permit.reserve_inline(
                 plan.ordered_inline_content[..plan.segment_inline_values]
                     .iter()

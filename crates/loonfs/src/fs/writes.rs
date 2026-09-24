@@ -883,7 +883,6 @@ pub(crate) struct EnginePublishResult {
     pub(crate) wal_tail_segments: u64,
     pub(crate) wal_tail_inline_bytes: usize,
     pub(crate) wal_tail_observed: bool,
-    pub(crate) wal_tail_manifest_no: Option<loonfs_api::ManifestNo>,
 }
 
 /// Publishes already-classified candidates as one batch — one WAL
@@ -911,7 +910,6 @@ pub(crate) async fn publish_batch_with_engine(
                 wal_tail_segments: 0,
                 wal_tail_inline_bytes: 0,
                 wal_tail_observed: false,
-                wal_tail_manifest_no: None,
             };
         }
     };
@@ -927,15 +925,6 @@ pub(crate) async fn publish_batch_with_engine(
     // crates) exceed rustc's type-recursion depth.
     let mut publish =
         Box::pin(engine.publish_batch(&store, candidates, &context, &tail_options)).await;
-    let wal_tail_manifest_no = publish
-        .resulting_read_state
-        .as_ref()
-        .map(|state| state.basis.manifest_no())
-        .or_else(|| {
-            engine
-                .wal_fold_input()
-                .map(|input| input.basis.manifest_no())
-        });
     if let Some(state) = &publish.resulting_read_state {
         writer
             .hint_raise
@@ -970,7 +959,6 @@ pub(crate) async fn publish_batch_with_engine(
         wal_tail_segments,
         wal_tail_inline_bytes,
         wal_tail_observed,
-        wal_tail_manifest_no,
     }
 }
 

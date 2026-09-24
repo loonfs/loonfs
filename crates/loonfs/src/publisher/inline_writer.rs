@@ -1,8 +1,5 @@
 //! Inline writer preparation, publication, fallback, and maintenance contracts.
 
-#[path = "inline_fold_accounting.rs"]
-mod fold_accounting;
-
 use super::*;
 use crate::{InlineContentOptions, MetadataMaintenanceOptions, PutFileOptions};
 use loonfs_api::wire::wal::decode_wal_segment_envelope_zstd;
@@ -704,8 +701,11 @@ async fn repeated_projection_invalidation_does_not_repeat_the_tail_limit_oversho
     writer.shutdown().await.expect("shutdown");
 }
 
+/// A publish during a fold observes the old tail, so its count still holds
+/// the folded bytes. The fold leaves that count alone; the next publish
+/// observes the new tail and replaces it.
 #[tokio::test]
-async fn fold_completion_keeps_inline_bytes_published_while_it_ran() {
+async fn fold_completion_leaves_the_last_observed_count_until_the_next_publish() {
     let directory = tempdir().expect("directory");
     let namespace = NamespaceId::parse("inline-fold-race").expect("namespace");
     let store = Arc::new(blocking_fold_store(
@@ -755,7 +755,7 @@ async fn fold_completion_keeps_inline_bytes_published_while_it_ran() {
     writer.wait_for_fold(&namespace).await.expect("finish fold");
     assert_eq!(
         writer.publisher().wal_tail_inline_bytes(&namespace).await,
-        Some(4)
+        Some(8)
     );
 
     let fold_permits = writer
@@ -764,38 +764,53 @@ async fn fold_completion_keeps_inline_bytes_published_while_it_ran() {
         .acquire_many(crate::DEFAULT_MAX_CONCURRENT_FOLDS as u32)
         .await
         .expect("hold next fold");
-    let prepared = vec![
-        writer
-            .prepare_file_bytes(&namespace, b"more")
-            .await
-            .expect("prepare first value"),
-        writer
-            .prepare_file_bytes(&namespace, b"last")
-            .await
-            .expect("prepare second value"),
-    ];
-    let request = CommitRequest {
-        commit_id: CommitId::parse("after-fold").expect("commit"),
-        actor_id: loonfs_test_support::test_actor(),
-        subject: None,
-        message: None,
-        operations: vec![
-            put_operation("/after-fold-1", &prepared[0]),
-            put_operation("/after-fold-2", &prepared[1]),
-        ],
-        preconditions: Vec::new(),
-    };
-    writer
-        .commit_candidate(&namespace, CommitCandidate::prepared(request, prepared))
-        .await
-        .expect("publish after fold");
+    // The stale count leaves no room under the limit, so this batch stages
+    // both values and observes the real four-byte tail on the way.
+    commit_two_values(&writer, &namespace, "after-fold").await;
     let usage = loonfs_core::cache::load_namespace_wal_tail_usage(store.as_ref(), &namespace)
         .await
         .expect("tail usage");
+    assert_eq!(usage.wal_tail_inline_bytes, 4);
+    assert_eq!(
+        writer.publisher().wal_tail_inline_bytes(&namespace).await,
+        Some(4)
+    );
+    commit_two_values(&writer, &namespace, "recovered").await;
+    let usage = loonfs_core::cache::load_namespace_wal_tail_usage(store.as_ref(), &namespace)
+        .await
+        .expect("tail usage after recovery");
     assert_eq!(usage.wal_tail_inline_bytes, 8);
 
     drop(fold_permits);
     writer.shutdown().await.expect("shutdown");
+}
+
+async fn commit_two_values(writer: &crate::FsWriter, namespace: &NamespaceId, label: &str) {
+    let prepared = vec![
+        writer
+            .prepare_file_bytes(namespace, b"more")
+            .await
+            .expect("prepare first value"),
+        writer
+            .prepare_file_bytes(namespace, b"last")
+            .await
+            .expect("prepare second value"),
+    ];
+    let request = CommitRequest {
+        commit_id: CommitId::parse(label).expect("commit"),
+        actor_id: loonfs_test_support::test_actor(),
+        subject: None,
+        message: None,
+        operations: vec![
+            put_operation(&format!("/{label}-1"), &prepared[0]),
+            put_operation(&format!("/{label}-2"), &prepared[1]),
+        ],
+        preconditions: Vec::new(),
+    };
+    writer
+        .commit_candidate(namespace, CommitCandidate::prepared(request, prepared))
+        .await
+        .expect("publish two values");
 }
 
 #[tokio::test]
@@ -859,17 +874,20 @@ async fn inline_bytes_make_automatic_and_explicit_folds_due_before_segment_count
         );
         if mode == "explicit" {
             let step = maintenance
-                .maintain_metadata(&namespace, options)
+                .maintain_metadata(&namespace, options.clone())
                 .await
                 .expect("explicit fold");
             assert!(matches!(
                 step.wal_flush,
                 crate::WalFlushStepOutcome::Flushed { .. }
             ));
-            assert_eq!(
-                writer.publisher().wal_tail_inline_bytes(&namespace).await,
-                Some(0)
-            );
+            // The fold does not lower the writer's count; with nothing left
+            // unfolded, the next pass does not consult it.
+            let again = maintenance
+                .maintain_metadata(&namespace, options)
+                .await
+                .expect("pass after the fold");
+            assert_eq!(again.wal_flush, crate::WalFlushStepOutcome::NotNeeded);
         } else if mode == "scheduled" {
             let jobs = crate::MaintenanceRegistry::new();
             jobs.register(Arc::new(
@@ -977,4 +995,135 @@ async fn invalid_inline_policy_is_rejected_before_store_access() {
         .build()
         .await
         .expect("zero threshold permits empty content");
+}
+
+#[tokio::test]
+async fn a_delayed_fold_callback_preserves_a_freshly_observed_tail() {
+    check_delayed_fold_callback(RuntimeCacheConfig::default()).await;
+}
+
+#[tokio::test]
+async fn a_delayed_fold_callback_preserves_an_uncached_tail() {
+    check_delayed_fold_callback(RuntimeCacheConfig::disabled()).await;
+}
+
+/// A publish can observe the folded manifest before the fold's completion
+/// callback runs. The callback must leave that fresh count alone.
+async fn check_delayed_fold_callback(cache: RuntimeCacheConfig) {
+    let directory = tempdir().expect("directory");
+    let namespace = NamespaceId::parse("fold-accounting").expect("namespace");
+    let store = Arc::new(BlockingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::exact(loonfs_objectstore::keys::hint(&namespace)),
+        OperationClass::CompareAndSwap,
+    ));
+    let writer = crate::FsWriter::builder_with_store(store.clone())
+        .writer_id("inline-writer")
+        .runtime_cache(cache)
+        .inline_content(InlineContentOptions {
+            inline_content_threshold_bytes: Some(4),
+            inline_content_fold_at_bytes: 4,
+            inline_content_tail_limit_bytes: 8,
+            ..Default::default()
+        })
+        .min_publish_interval_ms(0)
+        .monotonic_timer(Arc::new(ManualClock::new(0)))
+        .build()
+        .await
+        .expect("writer");
+    writer
+        .create_namespace(
+            &namespace,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("namespace");
+    let permits = writer
+        .bits
+        .wal_fold_permits
+        .acquire_many(crate::DEFAULT_MAX_CONCURRENT_FOLDS as u32)
+        .await
+        .expect("hold automatic folds");
+    writer
+        .put_file_bytes(&namespace, "/first", b"four", put_options("first"))
+        .await
+        .expect("first inline commit");
+    let maintenance = writer
+        .maintenance_handle("maintenance")
+        .expect("maintenance");
+    store.block_next();
+    let fold = maintenance.flush_wal(&namespace);
+    let publish_after_fold = async {
+        timeout(Duration::from_secs(10), store.wait_until_blocked())
+            .await
+            .expect("fold reached its hint update");
+        // The immutable manifest is durable; its best-effort hint update waits.
+        let usage = loonfs_core::cache::load_namespace_wal_tail_usage(store.as_ref(), &namespace)
+            .await
+            .expect("observe the completed fold");
+        assert_eq!(usage.wal_tail_inline_bytes, 0);
+        writer.invalidate_namespace(&namespace);
+        writer
+            .put_file_bytes(&namespace, "/during", b"next", put_options("during"))
+            .await
+            .expect("publish against the new manifest");
+        assert_eq!(
+            writer.publisher().wal_tail_inline_bytes(&namespace).await,
+            Some(4)
+        );
+        store.release();
+    };
+    let (folded, ()) = tokio::join!(fold, publish_after_fold);
+    folded.expect("delayed fold completion");
+    assert_eq!(
+        writer.publisher().wal_tail_inline_bytes(&namespace).await,
+        Some(4)
+    );
+    let prepared = vec![
+        writer
+            .prepare_file_bytes(&namespace, b"more")
+            .await
+            .expect("prepare"),
+        writer
+            .prepare_file_bytes(&namespace, b"last")
+            .await
+            .expect("prepare"),
+    ];
+    let request = CommitRequest {
+        commit_id: CommitId::parse("after-fold").expect("commit"),
+        actor_id: loonfs_test_support::test_actor(),
+        subject: None,
+        message: None,
+        preconditions: Vec::new(),
+        operations: vec![
+            put_operation("/more", &prepared[0]),
+            put_operation("/last", &prepared[1]),
+        ],
+    };
+    writer
+        .commit_candidate(&namespace, CommitCandidate::prepared(request, prepared))
+        .await
+        .expect("publish with only four inline bytes available");
+    let usage = loonfs_core::cache::load_namespace_wal_tail_usage(store.as_ref(), &namespace)
+        .await
+        .expect("actual tail usage");
+    assert_eq!(usage.wal_tail_inline_bytes, 8);
+    for (path, bytes) in [
+        ("/first", b"four"),
+        ("/during", b"next"),
+        ("/more", b"more"),
+        ("/last", b"last"),
+    ] {
+        assert_eq!(
+            writer
+                .reader()
+                .get_file_bytes(&namespace, path)
+                .await
+                .expect("read")
+                .bytes,
+            bytes
+        );
+    }
+    drop(permits);
+    writer.shutdown().await.expect("shutdown");
 }
