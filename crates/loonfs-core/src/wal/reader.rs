@@ -77,16 +77,25 @@ pub(super) struct WalWalk<'a> {
     wal_no: WalNo,
     seq: ChangeSeq,
     tip: Option<WalNo>,
+    epoch: WriterEpoch,
+    epoch_bound: WriterEpoch,
 }
 
 impl<'a> WalWalk<'a> {
     /// Reads until the first absent number.
-    pub(super) fn after(namespace_id: &'a NamespaceId, wal_no: WalNo, seq: ChangeSeq) -> Self {
+    pub(super) fn after(
+        namespace_id: &'a NamespaceId,
+        wal_no: WalNo,
+        seq: ChangeSeq,
+        epoch_bound: WriterEpoch,
+    ) -> Self {
         Self {
             namespace_id,
             wal_no,
             seq,
             tip: None,
+            epoch: WriterEpoch(0),
+            epoch_bound,
         }
     }
 
@@ -126,15 +135,55 @@ impl<'a> WalWalk<'a> {
                 None => Ok(None),
             };
         };
+        self.validate(object_key, envelope).map(Some)
+    }
+
+    pub(super) async fn at_hint<S: ObjectStore + ?Sized>(
+        &mut self,
+        store: &S,
+        wal_no: WalNo,
+    ) -> Result<ValidatedWalSegment, WalTailLoadError> {
+        let loaded = load_wal_segment(store, self.namespace_id, wal_no).await;
+        let envelope = loaded
+            .envelope?
+            .ok_or_else(|| WalTailLoadError::MissingWalObject {
+                object_key: loaded.object_key.clone(),
+            })?;
+        self.seq = envelope
+            .payload()
+            .prior_head_seq()
+            .ok_or_else(|| WalTailLoadError::Replay {
+                object_key: loaded.object_key.clone(),
+                error: WalSegmentError::SeqOverflow,
+            })?;
+        self.validate(loaded.object_key, envelope)
+    }
+
+    pub(super) fn validate(
+        &mut self,
+        object_key: String,
+        envelope: WalSegmentEnvelope,
+    ) -> Result<ValidatedWalSegment, WalTailLoadError> {
+        let payload = envelope.payload();
+        if payload.writer_epoch < self.epoch || payload.writer_epoch > self.epoch_bound {
+            return Err(WalTailLoadError::Replay {
+                object_key,
+                error: WalSegmentError::WriterEpochMismatch {
+                    expected_max: self.epoch_bound,
+                    actual: payload.writer_epoch,
+                },
+            });
+        }
         validate_wal_segment_for_replay(self.seq, &envelope).map_err(|error| {
             WalTailLoadError::Replay {
                 object_key: object_key.clone(),
                 error,
             }
         })?;
-        self.wal_no = wal_no;
-        self.seq = envelope.payload().head_seq;
-        Ok(Some(ValidatedWalSegment::new(object_key, envelope)))
+        self.wal_no = payload.wal_no;
+        self.seq = payload.head_seq;
+        self.epoch = payload.writer_epoch;
+        Ok(ValidatedWalSegment::new(object_key, envelope))
     }
 }
 
@@ -142,22 +191,15 @@ pub(super) async fn load_wal_tail<S: ObjectStore + ?Sized>(
     store: &S,
     request: WalTailLoadRequest<'_>,
 ) -> Result<ValidatedWalTail, WalTailLoadError> {
-    let mut walk = WalWalk::after(request.namespace_id, request.base_wal_no, request.base_seq)
-        .through(request.tip_wal_no);
+    let mut walk = WalWalk::after(
+        request.namespace_id,
+        request.base_wal_no,
+        request.base_seq,
+        request.writer_epoch,
+    )
+    .through(request.tip_wal_no);
     let mut segments = Vec::new();
-    let mut epoch = WriterEpoch(0);
     while let Some(segment) = walk.next(store).await? {
-        let writer_epoch = segment.envelope().payload().writer_epoch;
-        if writer_epoch < epoch || writer_epoch > request.writer_epoch {
-            return Err(WalTailLoadError::Replay {
-                object_key: segment.object_key().to_owned(),
-                error: WalSegmentError::WriterEpochMismatch {
-                    expected_max: request.writer_epoch,
-                    actual: writer_epoch,
-                },
-            });
-        }
-        epoch = writer_epoch;
         segments.push(segment);
     }
     if walk.seq() != request.head_seq {

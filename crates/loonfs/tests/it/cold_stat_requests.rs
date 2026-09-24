@@ -150,7 +150,7 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
     let root = loonfs_core::control::load_namespace_current_manifest(&store, &namespace_id)
         .await
         .expect("load metadata root");
-    let manifest_key = metadata_manifest_object(&namespace_id, &root.state.manifest.manifest_no);
+    let manifest_key = metadata_manifest_object(&namespace_id, &root.state.manifest().manifest_no);
     let manifest_bytes = store
         .get(&manifest_key, None)
         .await

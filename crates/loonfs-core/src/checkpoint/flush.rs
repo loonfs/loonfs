@@ -158,9 +158,9 @@ async fn try_flush_wal_projection<S: ObjectStore + ?Sized>(
             }
         };
     Ok(TryFlushWal::Settled(Box::new(FlushedBasis {
-        current_manifest_no: current.manifest.manifest_no,
-        current_manifest_head_seq: current.manifest.head_seq,
-        manifest: current.manifest,
+        current_manifest_no: current.manifest().manifest_no,
+        current_manifest_head_seq: current.manifest().head_seq,
+        manifest: current.manifest(),
         target_head_seq: head_seq,
         outcome,
     })))
@@ -355,7 +355,7 @@ async fn build_namespace_manifest_for_projection<S: ObjectStore + ?Sized>(
     // A WAL flush keeps existing runs and writes the WAL delta as one new delta
     // run. Reorganization merges delta runs into the base separately.
     //
-    let (base_seq, runs, next_run_no) = if projection
+    let (runs, next_run_no) = if projection
         .manifest_segments
         .manifest()
         .payload()
@@ -364,7 +364,6 @@ async fn build_namespace_manifest_for_projection<S: ObjectStore + ?Sized>(
     {
         let run_no = RunNo(0);
         (
-            head_seq,
             vec![MetadataRunRef {
                 run_no,
                 run_seq: head_seq,
@@ -406,14 +405,13 @@ async fn build_namespace_manifest_for_projection<S: ObjectStore + ?Sized>(
             });
             next_run_no = next_run_no_after(run_no)?;
         }
-        (previous_manifest.payload().base_seq, runs, next_run_no)
+        (runs, next_run_no)
     };
 
     Ok(NamespaceManifestPayload {
         activity,
         manifest_no,
         head_seq,
-        base_seq,
         writer_epoch: projection.head.writer_epoch,
         next_inode_id: projection.head.next_inode_id,
         next_run_no,

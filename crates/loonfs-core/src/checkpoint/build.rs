@@ -105,7 +105,7 @@ pub(super) async fn write_manifest_segment<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     family: MetadataRowFamily,
-    segment_index: u32,
+
     built: BuiltSegmentBlocks,
 ) -> Result<MetadataSegmentRef> {
     let segment_id = MetadataSegmentId::generate();
@@ -114,7 +114,7 @@ pub(super) async fn write_manifest_segment<S: ObjectStore + ?Sized>(
         owner_namespace_id: namespace_id.clone(),
         segment_id,
         family,
-        segment_index,
+
         row_count: built.row_count,
         min_row_key: built.min_row_key,
         max_row_key: built.max_row_key,
@@ -194,17 +194,13 @@ impl<'a> MetadataSegmentWriter<'a> {
     }
 
     async fn write_segment<S: ObjectStore + ?Sized>(&mut self, store: &S) -> Result<()> {
-        let segment_index = u32::try_from(self.segments.len())
-            .map_err(|_| CoreError::Internal("metadata segment index overflow".to_owned()))?;
         let built = std::mem::take(&mut self.builder)
             .finish()
             .map_err(|error| {
                 CoreError::Internal(format!("failed to encode metadata segment: {error}"))
             })?;
-        self.segments.push(
-            write_manifest_segment(store, self.namespace_id, self.family, segment_index, built)
-                .await?,
-        );
+        self.segments
+            .push(write_manifest_segment(store, self.namespace_id, self.family, built).await?);
         Ok(())
     }
 }

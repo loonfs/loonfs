@@ -726,7 +726,7 @@ async fn current_metadata_state<S: ObjectStore + ?Sized>(
             .await
             .expect("read manifest")
             .state
-            .manifest
+            .manifest()
             .manifest_no,
     )
     .await
@@ -2949,7 +2949,7 @@ async fn a_cancelled_finalization_does_not_take_the_races_it_has_left() {
     let current = load_current_manifest(&store, &namespace_id)
         .await
         .expect("current manifest");
-    let mut winner = current.envelope.payload().clone();
+    let mut winner = current.state.envelope.payload().clone();
     winner.manifest_no = winner.manifest_no.successor().expect("next manifest");
     let recorded = Arc::new(RecordingStore::new(
         store.clone(),
@@ -2994,6 +2994,7 @@ async fn a_cancelled_finalization_does_not_take_the_races_it_has_left() {
         load_current_manifest(&store, &namespace_id)
             .await
             .expect("current manifest")
+            .state
             .envelope
             .payload(),
         &winner,
@@ -3274,7 +3275,7 @@ async fn a_new_compactor_epoch_an_expired_job_and_a_deletion_each_prevent_public
     let tombstone = crate::namespace::control::load_current_manifest(&store, &namespace)
         .await
         .expect("tombstone");
-    let mut successor = tombstone.envelope.payload().clone();
+    let mut successor = tombstone.state.envelope.payload().clone();
     successor.manifest_no = successor.manifest_no.successor().expect("next number");
     let error = super::super::publish::publish_manifest(
         &store,
@@ -3388,7 +3389,7 @@ async fn two_groups_with_one_epoch_publish_after_a_number_conflict() {
             .await
             .expect("manifest")
             .state
-            .compactor_epoch,
+            .compactor_epoch(),
         epoch
     );
 }

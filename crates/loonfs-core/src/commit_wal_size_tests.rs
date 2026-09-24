@@ -8,7 +8,7 @@ use crate::metadata::{InMemoryMetadataView, MetadataState};
 use crate::namespace::state::NamespaceReadState;
 use crate::path::write::PublishPlanningSession;
 use crate::storage::inline_content::InlineContent;
-use crate::wal::prepare_wal_segment;
+use crate::wal::prepare_segment;
 use loonfs_api::wire::wal::{WalDelta, MAX_WAL_SEGMENT_BYTES, WAL_SEGMENT_OVERHEAD_BYTES};
 use loonfs_api::{
     ActorId, AttributeKey, Attributes, AttributesRevisionNo, ChangeSeq, Checksum, CommitId,
@@ -190,7 +190,7 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
             u64::MAX,
             candidate.inline_content(),
         );
-        let encoded = prepare_wal_segment(
+        let encoded = prepare_segment(
             namespace_id.clone(),
             head.writer_epoch,
             &head,

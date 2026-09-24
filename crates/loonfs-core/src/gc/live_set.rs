@@ -42,11 +42,11 @@ impl LiveSet {
         grace_window_ms: u64,
         context: &MutationContext,
     ) -> Result<Self> {
-        let head = anchor.manifest.envelope.payload();
+        let head = anchor.manifest.state.envelope.payload();
         let mut live = Self {
             namespace_deleted: head.status.is_deleted(),
             current_tombstone: head.status.is_deleted().then(|| head.clone()),
-            discovery_start_manifest_no: anchor.manifest.discovery_start_manifest_no,
+            discovery_start_manifest_no: anchor.hint.state.manifest_no,
             objects: BTreeSet::from([anchor.manifest.object_key.clone()]),
             has_pins: false,
             grace_window_ms: grace_window_ms.max(NAMESPACE_RETIREMENT_GRACE_MS),
@@ -120,7 +120,7 @@ impl LiveSet {
         }
         let key = metadata_manifest_object(namespace_id, &manifest_no);
         let envelope =
-            load_namespace_manifest_envelope_if_present(store, namespace_id, &manifest_no, &key)
+            load_namespace_manifest_envelope_if_present(store, namespace_id, &manifest_no)
                 .await
                 .map_err(|error| {
                     CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))

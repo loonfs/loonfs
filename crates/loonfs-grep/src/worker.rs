@@ -276,7 +276,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
     /// Disables grep by publishing the next manifest. Existing segments become grep-GC
     /// candidates and are never deleted synchronously.
     pub async fn disable(&self, namespace_id: &NamespaceId) -> Result<GrepDisableOutcome> {
-        ensure_live_namespace(&self.reads(namespace_id)).await?;
+        self.reads(namespace_id).head().await?;
         let Some(current) = load_current_grep_manifest(&self.store, namespace_id).await? else {
             return Ok(GrepDisableOutcome::NotEnabled);
         };
@@ -528,7 +528,6 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             stats,
             progress,
         } = unit;
-        let run_seq = progress.run_seq();
         let rows = gram_postings_rows(postings)?;
         let current_run_no = current.manifest_state().index().next_run_no;
         let next_run_no = if rows.is_empty() {
@@ -542,7 +541,6 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         let new_segments = write_index_segments(
             &self.store,
             namespace_id,
-            run_seq,
             current_run_no,
             rows,
             policy.max_rows_per_segment,
@@ -579,7 +577,6 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                 ),
             },
             CollectedProgress::Incremental {
-                run_seq: _,
                 built_through_seq,
                 next_event_index,
             } => (
@@ -681,15 +678,11 @@ enum IncrementalWork {
 
 struct IncrementalCursor {
     resume: ChangeFeedResume,
-    run_seq: ChangeSeq,
 }
 
 impl IncrementalCursor {
     fn new(resume: ChangeFeedResume) -> Self {
-        Self {
-            run_seq: resume.built_through_seq(),
-            resume,
-        }
+        Self { resume }
     }
 
     fn stop_at(
@@ -711,13 +704,11 @@ impl IncrementalCursor {
         } else {
             0
         };
-        self.run_seq = change_seq;
         self.resume = ChangeFeedResume::new(change_seq, next_event_index);
         Ok(())
     }
 
     fn finish_change(&mut self, change_seq: ChangeSeq) {
-        self.run_seq = change_seq;
         self.resume = ChangeFeedResume::new(change_seq, 0);
     }
 }
@@ -737,19 +728,9 @@ enum CollectedProgress {
         next_cursor: Option<InodeId>,
     },
     Incremental {
-        run_seq: ChangeSeq,
         built_through_seq: ChangeSeq,
         next_event_index: u32,
     },
-}
-
-impl CollectedProgress {
-    fn run_seq(&self) -> ChangeSeq {
-        match self {
-            Self::Backfill { target_seq, .. } => *target_seq,
-            Self::Incremental { run_seq, .. } => *run_seq,
-        }
-    }
 }
 
 /// Collects one backfill step from the files the checkpoint pins.
@@ -780,14 +761,13 @@ async fn collect_backfill_unit(
             .list_checkpoint_files_page(checkpoint_id, cursor, files_remaining)
             .await?;
         if page.checkpoint_seq != target_seq {
-            // The manifest and its checkpoint disagree about which state is
-            // being walked; the walk cannot be resumed against either.
-            return Err(CoreError::CheckpointUnavailable(format!(
-                "checkpoint `{checkpoint_id}` pins sequence `{}` but the grep manifest is \
+            return Err(GrepError::CorruptIndex {
+                message: format!(
+                    "checkpoint `{checkpoint_id}` pins sequence `{}` but the grep manifest is \
                  backfilling sequence `{target_seq}`",
-                page.checkpoint_seq
-            ))
-            .into());
+                    page.checkpoint_seq
+                ),
+            });
         }
         let page_exhausted_family = page.next_cursor.is_none();
         let mut budget_reached = false;
@@ -914,7 +894,6 @@ async fn collect_incremental_unit(
         postings,
         stats,
         progress: CollectedProgress::Incremental {
-            run_seq: cursor.run_seq,
             built_through_seq: cursor.resume.built_through_seq(),
             next_event_index: cursor.resume.next_event_index(),
         },
@@ -975,7 +954,6 @@ fn gram_postings_rows(postings: BTreeMap<Gram, Vec<GramPosting>>) -> Result<Vec<
 async fn write_index_segments<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    run_seq: ChangeSeq,
     run_no: RunNo,
     rows: Vec<IndexRow>,
     max_rows_per_segment: NonZeroUsize,
@@ -984,26 +962,14 @@ async fn write_index_segments<S: ObjectStore + ?Sized>(
     if rows.is_empty() {
         return Ok(Vec::new());
     }
-    let mut requests = Vec::new();
-    for (segment_index, segment_rows) in rows.chunks(max_rows_per_segment.get()).enumerate() {
-        let segment_index = u32::try_from(segment_index)
-            .map_err(|_| CoreError::Internal("index segment index overflow".to_owned()))?;
-        requests.push((segment_index, segment_rows.to_vec()));
-    }
+    let requests: Vec<_> = rows
+        .chunks(max_rows_per_segment.get())
+        .map(<[_]>::to_vec)
+        .collect();
     write_segments_in_waves(
         requests,
         const { NonZeroUsize::new(MAX_GREP_WORKER_IO).unwrap() },
-        |(segment_index, segment_rows)| {
-            write_index_segment(
-                store,
-                namespace_id,
-                run_seq,
-                run_no,
-                segment_index,
-                segment_rows,
-                level,
-            )
-        },
+        |segment_rows| write_index_segment(store, namespace_id, run_no, segment_rows, level),
     )
     .await
 }
@@ -1011,9 +977,7 @@ async fn write_index_segments<S: ObjectStore + ?Sized>(
 async fn write_index_segment<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    run_seq: ChangeSeq,
     run_no: RunNo,
-    segment_index: u32,
     rows: Vec<IndexRow>,
     level: u32,
 ) -> Result<GrepSegmentRef> {
@@ -1041,10 +1005,10 @@ async fn write_index_segment<S: ObjectStore + ?Sized>(
         .map_err(grep_immutable_write_error)?;
     Ok(GrepSegmentRef {
         segment_id,
-        run_seq,
+
         run_no,
         level,
-        segment_index,
+
         row_count: built.row_count,
         min_row_key: built.min_row_key,
         max_row_key: built.max_row_key,
@@ -1150,21 +1114,12 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         )
         .await?;
         let rows = gram_postings_rows(merged.postings)?;
-        // Only an empty snapshot falls through, and an empty one merges no
-        // rows and writes no segment for this to stamp. The lifecycle's
-        // watermark is not a substitute: a backfilling manifest has none.
-        let run_seq = snapshot
-            .iter()
-            .map(|segment| segment.run_seq)
-            .max()
-            .unwrap_or(ChangeSeq(0));
         let manifest_no = next_manifest_no(Some(&current))?;
         let timer = StdMonotonicTimer::default();
         let publication_started_ms = timer.monotonic_now_ms();
         let new_segments = write_index_segments(
             &self.store,
             namespace_id,
-            run_seq,
             reorganize.run_no,
             rows,
             policy.max_rows_per_segment,
@@ -1372,15 +1327,6 @@ impl<S: ObjectStore + ?Sized> SegmentBlockLoader<IndexRow, GrepSegmentRef>
         }))
         .await
     }
-}
-
-async fn ensure_live_namespace(reads: &NamespaceReads<'_>) -> Result<()> {
-    live_namespace_probe(reads).await
-}
-
-async fn live_namespace_probe(reads: &NamespaceReads<'_>) -> Result<()> {
-    reads.head().await?;
-    Ok(())
 }
 
 fn core_state_error(

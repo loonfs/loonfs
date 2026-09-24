@@ -260,7 +260,7 @@ fn constructor_rejects_reorganization_segment_mismatch() {
                 next_event_index: 0,
             },
             index,
-            vec![segment_ref(1, 1, 0, 0)]
+            vec![segment_ref(1, 1, 0)]
         ),
         Err(GrepManifestStateError::MissingReorganizeSnapshotSegment { .. })
     ));
@@ -268,7 +268,7 @@ fn constructor_rejects_reorganization_segment_mismatch() {
 
 #[test]
 fn constructor_rejects_a_segment_with_no_rows() {
-    let mut segment = segment_ref(1, 1, 0, 0);
+    let mut segment = segment_ref(1, 1, 0);
     segment.row_count = 0;
 
     assert!(matches!(

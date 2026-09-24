@@ -49,13 +49,8 @@ pub(super) async fn load_manifest_materialization_for_inspection_if_present<
     manifest_number: &ManifestNo,
 ) -> Result<Option<ManifestMaterializationForInspection>, ManifestLoadError> {
     let manifest_key = metadata_manifest_object(namespace_id, manifest_number);
-    let manifest = load_namespace_manifest_envelope_if_present(
-        store,
-        namespace_id,
-        manifest_number,
-        &manifest_key,
-    )
-    .await?;
+    let manifest =
+        load_namespace_manifest_envelope_if_present(store, namespace_id, manifest_number).await?;
     let Some(manifest) = manifest else {
         return Ok(None);
     };

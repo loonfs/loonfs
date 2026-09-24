@@ -110,7 +110,7 @@ async fn failed_manifest_and_over_budget_retries_keep_materialized_content() {
             .await
             .expect("manifest")
             .state
-            .manifest,
+            .manifest(),
         *input.basis.manifest()
     );
     for value in &values {
@@ -146,7 +146,7 @@ async fn failed_manifest_and_over_budget_retries_keep_materialized_content() {
             .await
             .expect("manifest")
             .state
-            .manifest,
+            .manifest(),
         *input.basis.manifest()
     );
     store.reset();
@@ -267,7 +267,7 @@ async fn an_existing_different_object_is_corruption_and_stops_manifest_publicati
             .await
             .expect("manifest")
             .state
-            .manifest,
+            .manifest(),
         *input.basis.manifest()
     );
     assert_eq!(
@@ -327,7 +327,7 @@ async fn a_materialization_transport_failure_remains_retryable() {
             .await
             .expect("manifest")
             .state
-            .manifest,
+            .manifest(),
         *input.basis.manifest()
     );
 }

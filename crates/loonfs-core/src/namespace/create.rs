@@ -20,7 +20,7 @@ pub(super) async fn publish_namespace<S: ObjectStore + ?Sized>(
 ) -> Result<()> {
     let namespace_id = &start.namespace_id;
     if let Some(current) = load_current_manifest_if_present(store, namespace_id).await? {
-        if current.envelope.payload().status.is_deleted() {
+        if current.state.envelope.payload().status.is_deleted() {
             return Err(CoreError::NamespaceDeleted {
                 namespace_id: namespace_id.clone(),
             });
@@ -41,7 +41,7 @@ pub(super) async fn publish_namespace<S: ObjectStore + ?Sized>(
         ManifestPublicationOutcome::CoveredByCurrent(_)
         | ManifestPublicationOutcome::PredecessorChanged(_) => {
             let current = super::control::load_current_manifest(store, namespace_id).await?;
-            if current.envelope.payload().status.is_deleted() {
+            if current.state.envelope.payload().status.is_deleted() {
                 return Err(CoreError::NamespaceDeleted {
                     namespace_id: namespace_id.clone(),
                 });

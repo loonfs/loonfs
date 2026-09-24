@@ -131,10 +131,10 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
         .map_err(CoreError::ControlObjectLoad)?;
     let floor_seq = anchor.retention_floor_seq();
     let current_manifest = anchor.manifest.state;
-    if current_manifest.compactor_epoch != compactor_epoch {
+    if current_manifest.compactor_epoch() != compactor_epoch {
         return Ok(MetadataReorganizeOutcome::Fenced);
     }
-    let segments = load_manifest_segments(store, None, &current_manifest.manifest).await?;
+    let segments = load_manifest_segments(store, None, &current_manifest.manifest()).await?;
     let previous = segments.manifest();
 
     let delta_runs = delta_run_count(previous.payload());
@@ -222,7 +222,7 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
         }),
         ManifestPublicationOutcome::CoveredByCurrent(current)
         | ManifestPublicationOutcome::PredecessorChanged(current)
-            if current.compactor_epoch != compactor_epoch =>
+            if current.compactor_epoch() != compactor_epoch =>
         {
             Ok(MetadataReorganizeOutcome::Fenced)
         }
@@ -252,7 +252,7 @@ pub async fn metadata_maintenance_due<S: ObjectStore + ?Sized>(
     }
     let current_manifest = anchor.manifest;
     let segments =
-        load_manifest_segments(store, segment_cache, &current_manifest.state.manifest).await?;
+        load_manifest_segments(store, segment_cache, &current_manifest.state.manifest()).await?;
     Ok(manifest_has_reorganization_work(
         segments.manifest().payload(),
         segments.scan_runs.as_ref(),
@@ -769,11 +769,6 @@ pub(super) fn build_replacement_manifest(
             segments: output.segments,
         });
     }
-    let base_seq = runs
-        .iter()
-        .map(|run| run.run_seq)
-        .min()
-        .expect("a replacement manifest should hold at least one run");
     let retention_floor_seq = previous.payload().retention_floor_seq.max(floor_seq);
     let manifest_no = next_manifest_no_after(previous.payload().manifest_no)?;
     encode_manifest(NamespaceManifestPayload {
@@ -781,7 +776,6 @@ pub(super) fn build_replacement_manifest(
         namespace_id: namespace_id.clone(),
         manifest_no,
         head_seq: previous.payload().head_seq,
-        base_seq,
         writer_epoch: previous.payload().writer_epoch,
         next_inode_id: previous.payload().next_inode_id,
         next_run_no,

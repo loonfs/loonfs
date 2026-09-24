@@ -53,7 +53,6 @@ async fn segment(store: &impl ObjectStore, rows: &[MetadataRow]) -> MetadataSegm
         store,
         &NamespaceId::parse("bounded-pages").expect("namespace"),
         FAMILY,
-        0,
         built,
     )
     .await

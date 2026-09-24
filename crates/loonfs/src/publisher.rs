@@ -1435,6 +1435,11 @@ impl NamespacePublisher {
         let (results, retry_count) = async {
             let mut results = Vec::new();
             let mut retry_count = 0_u64;
+            // Every attempt of this batch ages its evidence from one origin.
+            let batch_started_ms = {
+                let mut slot = self.engine.lock().await;
+                self.engine_for(&mut slot).monotonic_now_ms()
+            };
             for attempt in 0..CONTENTION_RETRY_LIMIT {
                 let Some(writer) = self.writer.upgrade() else {
                     results = candidates
@@ -1444,7 +1449,7 @@ impl NamespacePublisher {
                     break;
                 };
                 results = self
-                    .publish_through_engine(&writer, &candidates, &permits)
+                    .publish_through_engine(&writer, &candidates, &permits, batch_started_ms)
                     .await;
                 if !results.iter().any(is_retryable_wal_publish) {
                     break;
@@ -1473,6 +1478,7 @@ impl NamespacePublisher {
         writer: &Arc<WriterBits>,
         candidates: &[CommitCandidate],
         permits: &[Arc<AdmissionPermit>],
+        batch_started_ms: u64,
     ) -> Vec<CommitResult> {
         let mut slot = self.engine.lock().await;
         let engine = self.engine_for(&mut slot);
@@ -1482,6 +1488,7 @@ impl NamespacePublisher {
             &self.namespace_id,
             engine,
             candidates,
+            batch_started_ms,
         )
         .await;
         if !publish.results.iter().any(is_retryable_wal_publish) {

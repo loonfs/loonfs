@@ -222,7 +222,6 @@ mod tests {
             owner_namespace_id: namespace_id(),
             segment_id: metadata_segment_id(),
             family: MetadataRowFamily::Inodes,
-            segment_index: 0,
             row_count: 0,
             min_row_key: String::new(),
             max_row_key: String::new(),

@@ -3,7 +3,7 @@
 use crate::control_update::{settle_control_write, CasAttempt, WriteEvidence};
 use crate::error::{CoreError, Result};
 use crate::namespace::control::{
-    load_current_manifest_if_present, load_discovered_manifest, raise_hint, CurrentManifest,
+    load_current_manifest_if_present, load_manifest_by_number, raise_hint, CurrentManifest,
 };
 use crate::time::MonotonicTimer;
 use bytes::Bytes;
@@ -38,6 +38,41 @@ pub(crate) fn encode_manifest(
     })
 }
 
+pub(crate) enum ManifestChange<T> {
+    Next(Box<NamespaceManifestPayload>, T),
+    Finished(T),
+}
+
+pub(crate) async fn update_manifest<S, T, F, Fut>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    timer: &dyn MonotonicTimer,
+    started_ms: u64,
+    mut change: F,
+) -> Result<T>
+where
+    S: ObjectStore + ?Sized,
+    F: FnMut(NamespaceManifestPayload) -> Fut,
+    Fut: std::future::Future<Output = Result<ManifestChange<T>>>,
+{
+    loop {
+        let current = crate::namespace::control::load_current_manifest(store, namespace_id).await?;
+        let predecessor = current.state.envelope.payload().manifest_no;
+        let (mut payload, result) = match change(current.state.envelope.payload().clone()).await? {
+            ManifestChange::Next(payload, result) => (*payload, result),
+            ManifestChange::Finished(result) => return Ok(result),
+        };
+        payload.manifest_no = super::flush::next_manifest_no_after(predecessor)?;
+        let manifest = encode_manifest(payload)?;
+        if matches!(
+            publish_manifest(store, manifest, timer, started_ms).await?,
+            ManifestPublicationOutcome::Published(_)
+        ) {
+            return Ok(result);
+        }
+    }
+}
+
 #[tracing::instrument(
     level = "debug",
     name = "loonfs.phase",
@@ -67,24 +102,23 @@ pub(crate) async fn publish_manifest<S: ObjectStore + ?Sized>(
     let names_own_pin = manifest.envelope().payload().manifest_no == ManifestNo(1)
         && manifest.envelope().payload().fork_basis.is_some();
     let candidate = CurrentManifest {
-        manifest: manifest_ref_for(namespace_id, manifest.envelope()),
-        retention_floor_seq: manifest.envelope().payload().retention_floor_seq,
-        folded_wal_no: manifest.envelope().payload().folded_wal_no,
-        compactor_epoch: manifest.envelope().payload().compactor_epoch,
+        envelope: std::sync::Arc::new(manifest.envelope().clone()),
     };
     let current = load_current_manifest_if_present(store, namespace_id)
         .await
         .map_err(CoreError::ControlObjectLoad)?;
     if let Some(current) = &current {
         // A tombstone ends its namespace; work that raced the deletion stops here.
-        if current.envelope.payload().status.is_deleted()
-            && current.state.manifest != candidate.manifest
+        if current.state.envelope.payload().status.is_deleted()
+            && current.state.manifest() != candidate.manifest()
         {
             return Err(CoreError::NamespaceDeleted {
                 namespace_id: namespace_id.clone(),
             });
         }
-        if manifest.envelope().payload().writer_epoch < current.envelope.payload().writer_epoch {
+        if manifest.envelope().payload().writer_epoch
+            < current.state.envelope.payload().writer_epoch
+        {
             return Ok(ManifestPublicationOutcome::PredecessorChanged(
                 current.state.clone(),
             ));
@@ -97,6 +131,7 @@ pub(crate) async fn publish_manifest<S: ObjectStore + ?Sized>(
     let payload = manifest.envelope().payload();
     let legal = match &current {
         Some(current) => current
+            .state
             .envelope
             .payload()
             .ensure_successor(payload)
@@ -112,7 +147,7 @@ pub(crate) async fn publish_manifest<S: ObjectStore + ?Sized>(
             payload.manifest_no
         )));
     }
-    let object_key = metadata_manifest_object(namespace_id, &candidate.manifest.manifest_no);
+    let object_key = metadata_manifest_object(namespace_id, &candidate.manifest().manifest_no);
     super::flush::ensure_metadata_publication_budget(timer, started_ms, namespace_id)?;
     let outcome = match store
         .put_if_absent(&object_key, Bytes::from(manifest.into_bytes()))
@@ -130,10 +165,10 @@ pub(crate) async fn publish_manifest<S: ObjectStore + ?Sized>(
                 |_, ()| async {
                     // Only the exact manifest at this number confirms the put;
                     // a later manifest may already cover it.
-                    let landed = load_discovered_manifest(
+                    let landed = load_manifest_by_number(
                         store,
                         namespace_id,
-                        candidate.manifest.manifest_no,
+                        candidate.manifest().manifest_no,
                     )
                     .await
                     .map_err(CoreError::ControlObjectLoad)?;
@@ -175,8 +210,8 @@ pub(crate) async fn publish_manifest<S: ObjectStore + ?Sized>(
         if let Err(error) = raise_hint(
             store,
             namespace_id,
-            candidate.manifest.manifest_no,
-            candidate.folded_wal_no,
+            candidate.manifest().manifest_no,
+            candidate.folded_wal_no(),
             None,
         )
         .await
@@ -193,19 +228,23 @@ fn classify_current(
     expected_predecessor: Option<ManifestNo>,
     confirm_authorship: bool,
 ) -> ManifestClassification {
-    let outcome = if current.manifest == candidate.manifest {
+    let outcome = if current.manifest() == candidate.manifest() {
         if confirm_authorship {
             ManifestPublicationOutcome::Published(current.clone())
         } else {
             ManifestPublicationOutcome::CoveredByCurrent(current.clone())
         }
-    } else if current.compactor_epoch > candidate.compactor_epoch {
+    } else if current.compactor_epoch() > candidate.compactor_epoch() {
         ManifestPublicationOutcome::PredecessorChanged(current.clone())
-    } else if current.folded_wal_no >= candidate.folded_wal_no
-        && current.position() >= candidate.position()
+    } else if current.folded_wal_no() >= candidate.folded_wal_no()
+        && (current.manifest().head_seq, current.manifest().manifest_no)
+            >= (
+                candidate.manifest().head_seq,
+                candidate.manifest().manifest_no,
+            )
     {
         ManifestPublicationOutcome::CoveredByCurrent(current.clone())
-    } else if Some(current.manifest.manifest_no) == expected_predecessor {
+    } else if Some(current.manifest().manifest_no) == expected_predecessor {
         return ManifestClassification::Installable;
     } else {
         ManifestPublicationOutcome::PredecessorChanged(current.clone())

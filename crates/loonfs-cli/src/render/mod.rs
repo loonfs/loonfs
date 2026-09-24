@@ -741,7 +741,7 @@ mod tests {
             pass.next_reclamation_at_ms = next;
             assert_eq!(
                 gc_summary(&pass).lines().last(),
-                Some("namespace can be reclaimed at or after 2023-11-14 22:13:20Z when no pins remain")
+                Some("namespace can be reclaimed at or after 2023-11-14 22:13:20Z after pin cleanup; only fork pins can hold it beyond this deadline")
             );
         }
         let empty = gc_summary(&GcResponse::empty(

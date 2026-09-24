@@ -82,13 +82,13 @@ impl Iterator for LocalTree {
             let relative = path
                 .strip_prefix(&self.root)
                 .expect("a descendant of the root");
-            if let Err(error) =
-                loonfs_api::AbsolutePath::parse(relative_remote(&self.remote_root, relative))
-            {
+            if let Err(error) = relative_remote(&self.remote_root, relative).and_then(|remote| {
+                loonfs_api::AbsolutePath::parse(remote).map_err(|error| {
+                    CliError::invalid_request(error.to_string()).with_param("local_path")
+                })
+            }) {
                 frame.has_children = true;
-                return Some(failure(
-                    CliError::invalid_request(error.to_string()).with_param("local_path"),
-                ));
+                return Some(failure(error));
             }
             let file_type = match entry.file_type() {
                 Ok(file_type) => file_type,
@@ -112,11 +112,10 @@ impl Iterator for LocalTree {
                 let relative = path
                     .strip_prefix(&self.root)
                     .expect("a descendant of the root");
-                let remote = relative
-                    .components()
-                    .map(|part| part.as_os_str().to_string_lossy())
-                    .collect::<Vec<_>>()
-                    .join("/");
+                let remote = match relative_remote("", relative) {
+                    Ok(remote) => remote.trim_start_matches('/').to_owned(),
+                    Err(error) => return Some(failure(error)),
+                };
                 return Some(TreeEntry::File(FileJob {
                     remote,
                     size_bytes: entry.metadata().ok().map(|metadata| metadata.len()),
@@ -209,7 +208,8 @@ impl RemoteTree<'_> {
                     }
                     PathEntryKind::File { size_bytes, .. } => {
                         return Some(TreeEntry::File(FileJob {
-                            remote: relative_remote(self.root, &relative),
+                            remote: relative_remote(self.root, &relative)
+                                .expect("remote names should be valid UTF-8"),
                             local: relative,
                             size_bytes: Some(size_bytes),
                         }))
@@ -217,7 +217,8 @@ impl RemoteTree<'_> {
                 }
             }
             if frame.needs_page {
-                let remote = relative_remote(self.root, &frame.relative);
+                let remote = relative_remote(self.root, &frame.relative)
+                    .expect("remote names should be valid UTF-8");
                 let page = async {
                     let spec = parse_remote(self.context, &remote, self.param)?;
                     self.context
@@ -249,6 +250,22 @@ impl RemoteTree<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn remote_paths_reject_non_utf8_names_without_replacement() {
+        use std::os::unix::ffi::OsStrExt;
+        for bytes in [b"bad-\xff".as_slice(), b"bad-\xfe".as_slice()] {
+            let path = Path::new(std::ffi::OsStr::from_bytes(bytes));
+            for result in [
+                crate::commands::context::default_remote_put_path(path).map(|_| ()),
+                relative_remote("/destination", path).map(|_| ()),
+            ] {
+                let error = result.expect_err("invalid name");
+                assert_eq!(error.code, loonfs_api::ErrorCode::InvalidRequest.as_str());
+            }
+        }
+    }
 
     #[test]
     fn local_discovery_prunes_unrepresentable_depth_before_opening_children() {

@@ -163,6 +163,7 @@ async fn cached_and_replayed_folds_count_commits_once_and_reads_use_only_manifes
         assert!(store.take().is_empty());
         let mut stored_bytes = 0;
         for segment in current
+            .state
             .envelope
             .payload()
             .runs
@@ -390,6 +391,7 @@ async fn namespace_deletion_requires_a_successful_final_fold() {
     assert!(!load_namespace_current_manifest(&store, &ns)
         .await
         .expect("manifest")
+        .state
         .envelope
         .payload()
         .status
@@ -409,7 +411,7 @@ async fn namespace_deletion_requires_a_successful_final_fold() {
     let final_manifest = load_namespace_current_manifest(&store, &ns)
         .await
         .expect("deleted manifest");
-    assert!(final_manifest.envelope.payload().status.is_deleted());
+    assert!(final_manifest.state.envelope.payload().status.is_deleted());
     assert_eq!(
         final_manifest
             .statistics()
@@ -421,8 +423,11 @@ async fn namespace_deletion_requires_a_successful_final_fold() {
             mutations: ActivityCounter::parse(1).expect("activity")
         }
     );
-    assert_eq!(final_manifest.envelope.payload().head_seq, ChangeSeq(1));
-    assert!(!final_manifest.envelope.payload().runs.is_empty());
+    assert_eq!(
+        final_manifest.state.envelope.payload().head_seq,
+        ChangeSeq(1)
+    );
+    assert!(!final_manifest.state.envelope.payload().runs.is_empty());
 }
 
 #[tokio::test]

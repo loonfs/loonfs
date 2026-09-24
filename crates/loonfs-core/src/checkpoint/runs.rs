@@ -158,13 +158,12 @@ fn metadata_run_manifest(run: &MetadataRunRef) -> MetadataRunManifest {
         segments: CHECKPOINT_ROW_FAMILIES
             .into_iter()
             .map(|family| {
-                let mut segments = run
+                let segments = run
                     .segments
                     .iter()
                     .filter(|descriptor| descriptor.family == family)
                     .cloned()
                     .collect::<Vec<_>>();
-                segments.sort_by_key(|descriptor| descriptor.segment_index);
                 MetadataFamilySegments { family, segments }
             })
             .collect(),

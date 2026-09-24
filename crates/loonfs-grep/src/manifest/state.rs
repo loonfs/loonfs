@@ -181,9 +181,7 @@ impl ChangeFeedResume {
 pub struct GrepSegmentRef {
     pub segment_id: IndexSegmentId,
     pub run_no: RunNo,
-    pub run_seq: ChangeSeq,
     pub level: u32,
-    pub segment_index: u32,
     pub row_count: u64,
     pub min_row_key: String,
     pub max_row_key: String,

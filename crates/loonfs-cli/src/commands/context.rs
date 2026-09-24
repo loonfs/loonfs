@@ -332,6 +332,12 @@ pub(crate) fn destination_user_path(
     parse_user_path_arg(path_param, raw, false)
 }
 
+pub(crate) fn utf8_local_name(name: &std::ffi::OsStr) -> Result<&str, CliError> {
+    name.to_str().ok_or_else(|| {
+        CliError::invalid_request("local path is not valid UTF-8").with_param("local_path")
+    })
+}
+
 pub(crate) fn default_remote_put_path(local_path: &Path) -> Result<AbsolutePath, CliError> {
     let file_name = local_path.file_name().ok_or_else(|| {
         CliError::invalid_request(format!(
@@ -340,7 +346,7 @@ pub(crate) fn default_remote_put_path(local_path: &Path) -> Result<AbsolutePath,
         ))
         .with_param("local_path")
     })?;
-    AbsolutePath::parse(format!("/{}", file_name.to_string_lossy()))
+    AbsolutePath::parse(format!("/{}", utf8_local_name(file_name)?))
         .map_err(|error| CliError::invalid_request(error.to_string()).with_param("local_path"))
 }
 

@@ -551,6 +551,11 @@ impl NamespaceCommitEngine {
             .expect("writer session state lock should not be poisoned")
     }
 
+    /// The clock a retry owner reads the batch origin from.
+    pub fn monotonic_now_ms(&self) -> u64 {
+        self.timer.monotonic_now_ms()
+    }
+
     #[cfg(test)]
     pub(crate) fn monotonic_timer(mut self, timer: Arc<dyn MonotonicTimer>) -> Self {
         self.timer = timer;
@@ -667,6 +672,7 @@ impl NamespaceCommitEngine {
         deleted
     }
 
+    /// One attempt whose deadlines start now.
     pub async fn publish_batch<S: ObjectStore + ?Sized>(
         &mut self,
         store: &S,
@@ -674,47 +680,23 @@ impl NamespaceCommitEngine {
         context: &MutationContext,
         tail_options: &PublishTailOptions,
     ) -> NamespaceCommitEnginePublishResult {
-        let candidates = candidates.as_ref();
         let batch_started_ms = self.timer.monotonic_now_ms();
-        let mut result = Box::pin(self.publish_batch_inner(
-            store,
-            candidates,
-            context,
-            tail_options,
-            batch_started_ms,
-        ))
-        .await;
-        for _ in 1..crate::limits::CONTENTION_RETRY_LIMIT {
-            if !result.results.iter().any(|result| {
-                matches!(
-                    result,
-                    Err(CoreError::WalPublish(
-                        crate::commit::WalPublishError::StaleHead
-                    ))
-                )
-            }) {
-                break;
-            }
-            result = Box::pin(self.publish_batch_inner(
-                store,
-                candidates,
-                context,
-                tail_options,
-                batch_started_ms,
-            ))
-            .await;
-        }
-        result
+        self.publish_batch_attempt(store, candidates, context, tail_options, batch_started_ms)
+            .await
     }
 
-    async fn publish_batch_inner<S: ObjectStore + ?Sized>(
+    /// One attempt of a batch that began at `batch_started_ms`. A retry owner
+    /// passes the same origin to every attempt so content evidence keeps
+    /// aging across retries instead of looking fresh again.
+    pub async fn publish_batch_attempt<S: ObjectStore + ?Sized>(
         &mut self,
         store: &S,
-        candidates: &[CommitCandidate],
+        candidates: impl AsRef<[CommitCandidate]>,
         context: &MutationContext,
         tail_options: &PublishTailOptions,
         batch_started_ms: u64,
     ) -> NamespaceCommitEnginePublishResult {
+        let candidates = candidates.as_ref();
         let attempt_started_ms = self.timer.monotonic_now_ms();
         if candidates.is_empty() {
             return NamespaceCommitEnginePublishResult {
@@ -876,10 +858,27 @@ pub(crate) async fn publish_namespace_commits_batch<S: ObjectStore + ?Sized>(
     context: &MutationContext,
 ) -> Vec<Result<Commit>> {
     let mut engine = NamespaceCommitEngine::new(namespace_id.clone());
-    engine
-        .publish_batch(store, candidates, context, &PublishTailOptions::default())
-        .await
-        .results
+    let batch_started_ms = engine.monotonic_now_ms();
+    let options = PublishTailOptions::default();
+    let mut result = engine
+        .publish_batch_attempt(store, &candidates, context, &options, batch_started_ms)
+        .await;
+    for _ in 1..crate::limits::CONTENTION_RETRY_LIMIT {
+        if !result.results.iter().any(|result| {
+            matches!(
+                result,
+                Err(CoreError::WalPublish(
+                    crate::commit::WalPublishError::StaleHead
+                ))
+            )
+        }) {
+            break;
+        }
+        result = engine
+            .publish_batch_attempt(store, &candidates, context, &options, batch_started_ms)
+            .await;
+    }
+    result.results
 }
 
 /// Deletes a namespace through a fresh, uncached commit engine: a one-shot
@@ -1209,10 +1208,7 @@ mod tests {
             .expect("read head")
             .writer_epoch;
 
-        // A is fenced terminally: both attempts fail with writer_fenced, the
-        // second without ever reaching the store, and the session never
-        // bumps the epoch back.
-        for attempt in 0..2 {
+        for attempt in 0..3 {
             let fenced = engine_a
                 .publish_batch(
                     &store,
@@ -1222,7 +1218,15 @@ mod tests {
                 )
                 .await;
             let error = fenced.results[0].as_ref().expect_err("fenced publish");
-            assert_eq!(error.code(), ErrorCode::WriterFenced, "attempt {attempt}");
+            assert_eq!(
+                error.code(),
+                if attempt == 0 {
+                    ErrorCode::StaleHead
+                } else {
+                    ErrorCode::WriterFenced
+                },
+                "attempt {attempt}"
+            );
         }
         let head = load_namespace_read_state(&store, &namespace_id)
             .await
@@ -1361,16 +1365,23 @@ mod tests {
             .remove(0)
             .expect("writer b takeover commit");
 
-        let fenced = engine_a1
-            .publish_batch(
-                &store,
-                vec![create_dir("from-a-second", "gamma")],
-                &writer_a,
-                &PublishTailOptions::default(),
-            )
-            .await;
-        let error = fenced.results[0].as_ref().expect_err("fenced publish");
-        assert_eq!(error.code(), ErrorCode::WriterFenced);
+        for expected in [ErrorCode::StaleHead, ErrorCode::WriterFenced] {
+            let result = engine_a1
+                .publish_batch(
+                    &store,
+                    vec![create_dir("from-a-second", "gamma")],
+                    &writer_a,
+                    &PublishTailOptions::default(),
+                )
+                .await;
+            assert_eq!(
+                result.results[0]
+                    .as_ref()
+                    .expect_err("displaced writer")
+                    .code(),
+                expected
+            );
+        }
         let epoch_after_fencing = load_namespace_read_state(&store, &namespace_id)
             .await
             .expect("read head")

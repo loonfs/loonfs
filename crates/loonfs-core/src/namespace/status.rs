@@ -120,7 +120,7 @@ pub async fn load_namespace_diagnostics<S: ObjectStore + ?Sized>(
     super::control::ensure_namespace_live(&loaded.read_state)?;
     let wal_tail_segments = loaded.read_state.unfolded_wal_segments();
     let retention_floor_seq = loaded.retention_floor_seq();
-    let manifest_no = loaded.manifest.state.manifest.manifest_no;
+    let manifest_no = loaded.manifest.state.manifest().manifest_no;
     Ok(NamespaceStorageDiagnostics::new(
         loaded.read_state,
         retention_floor_seq,

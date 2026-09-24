@@ -1116,7 +1116,7 @@ async fn history_needs_the_history_right() {
             engine
                 .list_file_revisions_page("/team/file", read_page(10), &context)
                 .await
-                .map(|page| page.items.len())
+                .map(|(_, page)| page.items.len())
                 .map_err(|error| error.code()),
             expected
         );

@@ -1606,6 +1606,66 @@ async fn grep_manifest_lifecycle_pins_not_materialized_error_surface() {
 }
 
 #[tokio::test]
+async fn a_backfill_checkpoint_mismatch_is_corruption_without_writes() {
+    let directory = tempdir().expect("directory");
+    let namespace_id = NamespaceId::parse("checkpoint-mismatch").expect("namespace");
+    let recording = Arc::new(RecordingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::any(),
+    ));
+    let store: SharedObjectStore = recording.clone();
+    let writer = FsWriter::builder_with_store(store.clone())
+        .writer_id("checkpoint-mismatch-writer")
+        .build()
+        .await
+        .expect("writer");
+    writer
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("create");
+    let worker = worker(&store).await;
+    worker.enable(&namespace_id).await.expect("enable");
+    let current = load_current_grep_manifest(&*store, &namespace_id)
+        .await
+        .expect("load")
+        .expect("manifest");
+    let mut status = current.manifest_state().status().clone();
+    let GrepIndexStatus::Backfilling { target_seq, .. } = &mut status else {
+        panic!("backfill")
+    };
+    *target_seq = ChangeSeq(1);
+    let next = GrepManifestState::new(
+        namespace_id.clone(),
+        current.manifest_no().successor().expect("next"),
+        status,
+        current.manifest_state().index().clone(),
+        current.manifest_state().segments().to_vec(),
+    )
+    .expect("manifest");
+    publish_grep_manifest(
+        &*store,
+        Some(&current),
+        &next,
+        &loonfs_test_support::clock::ManualClock::new(0),
+        0,
+    )
+    .await
+    .expect("mismatched manifest");
+    recording.reset();
+    let error = worker
+        .build_step(&namespace_id, GramIndexBuildPolicy::default())
+        .await
+        .expect_err("mismatch");
+    assert!(matches!(error, GrepError::CorruptIndex { .. }), "{error:?}");
+    assert_eq!(recording.counts().puts, 0);
+    assert_eq!(recording.counts().deletes, 0);
+    writer.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
 async fn backfilling_manifest_without_checkpoint_id_is_index_corrupt() {
     let temp_dir = tempdir().expect("tempdir");
     let store: SharedObjectStore =
@@ -1737,7 +1797,7 @@ async fn planless_scan_covers_wal_revisions_at_or_below_index_watermark() {
     let head = control::head(&store, &namespace_id).await;
     let metadata_manifest = control::metadata_manifest(&store, &namespace_id).await;
     assert!(
-        metadata_manifest.manifest.head_seq < head.seq,
+        metadata_manifest.manifest().head_seq < head.seq,
         "the WAL-only revision must sit past metadata materialization"
     );
     let grep_manifest = loonfs_grep::manifest::load_current_grep_manifest(&*store, &namespace_id)
@@ -2369,8 +2429,8 @@ async fn gc_preserves_discovery_and_applies_successor_and_segment_age_rules() {
         )
         .await
         .expect("namespace");
-    let obsolete = crate::golden_formats::segment_ref(1, 1, 0, 0);
-    let live = crate::golden_formats::segment_ref(2, 2, 0, 0);
+    let obsolete = crate::golden_formats::segment_ref(1, 1, 0);
+    let live = crate::golden_formats::segment_ref(2, 2, 0);
     for segment in [&obsolete, &live] {
         store
             .put_if_absent(

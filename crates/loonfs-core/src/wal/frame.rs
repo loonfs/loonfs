@@ -11,8 +11,6 @@ pub(crate) type PreparedWalSegment = loonfs_api::wire::envelope::EncodedEnvelope
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
 pub enum WalSegmentError {
-    #[error("WAL segment contains no records")]
-    EmptySegment,
     #[error("WAL segment namespace mismatch: expected `{expected}`, actual `{actual}`")]
     NamespaceMismatch {
         expected: NamespaceId,
@@ -31,11 +29,6 @@ pub enum WalSegmentError {
     ActivityOverflow,
     #[error("WAL number cannot exceed 9007199254740991")]
     NumberOverflow,
-    #[error("WAL segment prior head seq mismatch: expected `{expected}`, actual `{actual}`")]
-    PriorHeadSeqMismatch {
-        expected: ChangeSeq,
-        actual: ChangeSeq,
-    },
     #[error(
         "WAL segment writer epoch mismatch: expected at most `{expected_max}`, actual `{actual}`"
     )]

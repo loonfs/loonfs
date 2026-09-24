@@ -465,15 +465,15 @@ pub(super) async fn finalize_metadata_compaction<S: ObjectStore + ?Sized>(
         let Some(current_manifest) = load_current_manifest_if_present(store, namespace_id)
             .await
             .map_err(CoreError::ControlObjectLoad)?
-            .filter(|loaded| !loaded.envelope.payload().status.is_deleted())
+            .filter(|loaded| !loaded.state.envelope.payload().status.is_deleted())
             .map(|loaded| loaded.state)
         else {
             return Ok(MetadataCompactionJobOutcome::Abandoned);
         };
-        if current_manifest.compactor_epoch != publication.compactor_epoch {
+        if current_manifest.compactor_epoch() != publication.compactor_epoch {
             return Ok(MetadataCompactionJobOutcome::Fenced);
         }
-        let segments = load_manifest_segments(store, None, &current_manifest.manifest).await?;
+        let segments = load_manifest_segments(store, None, &current_manifest.manifest()).await?;
         if input_segment_keys(&segments, spec).as_ref() != Some(input_keys) {
             tracing::info!(
                 namespace_id = namespace_id.as_str(),
@@ -532,7 +532,7 @@ pub(super) async fn finalize_metadata_compaction<S: ObjectStore + ?Sized>(
             }
             ManifestPublicationOutcome::CoveredByCurrent(current)
             | ManifestPublicationOutcome::PredecessorChanged(current)
-                if current.compactor_epoch != publication.compactor_epoch =>
+                if current.compactor_epoch() != publication.compactor_epoch =>
             {
                 return Ok(MetadataCompactionJobOutcome::Fenced);
             }
@@ -570,7 +570,7 @@ async fn load_current_manifest_segments<'a, S: ObjectStore + ?Sized>(
     else {
         return Ok(None);
     };
-    load_manifest_segments(store, None, &current_manifest.manifest)
+    load_manifest_segments(store, None, &current_manifest.manifest())
         .await
         .map(Some)
 }

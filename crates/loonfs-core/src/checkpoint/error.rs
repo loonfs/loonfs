@@ -20,7 +20,11 @@ pub enum ManifestLoadError {
     #[error("missing namespace manifest `{object_key}`")]
     MissingManifest { object_key: String },
     #[error("failed to read namespace manifest `{object_key}`: {message}")]
-    ReadManifest { object_key: String, message: String },
+    ReadManifest {
+        object_key: String,
+        message: String,
+        class: crate::error::StoreFailureClass,
+    },
     #[error("namespace manifest codec error for `{object_key}`: {message}")]
     ManifestCodec { object_key: String, message: String },
     #[error(

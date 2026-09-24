@@ -222,10 +222,15 @@ where
 
 async fn create_remote_directory(
     context: &CommandContext,
-    remote: String,
+    remote_root: &str,
+    relative: PathBuf,
     parents: bool,
     message: Option<String>,
 ) -> (String, Result<DirectoryOutcome, CliError>) {
+    let remote = match relative_remote(remote_root, &relative) {
+        Ok(remote) => remote,
+        Err(error) => return (relative.display().to_string(), Err(error)),
+    };
     let result = async {
         let spec = parse_remote(context, &remote, "destination_path")?;
         create_directory_tolerating_existing(
@@ -252,14 +257,12 @@ async fn create_remote_directory(
     (remote, result)
 }
 
-fn relative_remote(root: &str, relative: &Path) -> String {
-    joined_remote(
-        root,
-        &relative
-            .components()
-            .map(|part| part.as_os_str().to_string_lossy().into_owned())
-            .collect::<Vec<_>>(),
-    )
+fn relative_remote(root: &str, relative: &Path) -> Result<String, CliError> {
+    let parts = relative
+        .components()
+        .map(|part| super::context::utf8_local_name(part.as_os_str()).map(str::to_owned))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(joined_remote(root, &parts))
 }
 
 fn warn_drift(tally: &TreeTally, runtime: RuntimeBehavior) {
@@ -343,14 +346,7 @@ pub(crate) async fn run_put_tree(
     let tally = transfer_tree(
         futures::stream::iter(entries),
         transfer,
-        |relative| {
-            create_remote_directory(
-                context,
-                relative_remote(remote_root, &relative),
-                true,
-                message.clone(),
-            )
-        },
+        |relative| create_remote_directory(context, remote_root, relative, true, message.clone()),
         Some(&progress),
         runtime,
         "stored",
@@ -496,7 +492,8 @@ pub(crate) async fn run_copy_tree(
         let destination = relative_remote(destination_root, &job.local);
         async move {
             let from = parse_remote(context, &job.remote, "source_path");
-            let to = parse_remote(context, &destination, "destination_path");
+            let to = destination
+                .and_then(|destination| parse_remote(context, &destination, "destination_path"));
             let (from, to) = match (from, to) {
                 (Ok(from), Ok(to)) => (from, to),
                 (Err(error), _) | (_, Err(error)) => return (job.remote, Err(error)),
@@ -528,10 +525,12 @@ pub(crate) async fn run_copy_tree(
         entries,
         transfer,
         |relative| {
+            let parents = relative.as_os_str().is_empty();
             create_remote_directory(
                 context,
-                relative_remote(destination_root, &relative),
-                relative.as_os_str().is_empty(),
+                destination_root,
+                relative,
+                parents,
                 message.clone(),
             )
         },

@@ -1,6 +1,6 @@
 //! Namespace deletion status published as successive manifests.
 
-use crate::checkpoint::publish::{encode_manifest, publish_manifest, ManifestPublicationOutcome};
+use crate::checkpoint::publish::{update_manifest, ManifestChange};
 use crate::error::{CoreError, Result};
 use crate::namespace::read_anchor::load_read_anchor;
 use crate::namespace::writer_epoch::ensure_writer_not_fenced;
@@ -9,6 +9,11 @@ use crate::time::MonotonicTimer;
 use loonfs_api::wire::control::{AcquiredWriter, NamespaceStatus};
 use loonfs_api::{DeleteNamespaceResponse, NamespaceId};
 use loonfs_objectstore::ObjectStore;
+
+enum DeleteManifest {
+    FoldFirst,
+    Deleted(DeleteNamespaceResponse),
+}
 
 pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
     store: &S,
@@ -33,31 +38,42 @@ pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
                 });
             }
         }
-        // The delete barrier has drained admitted commits. Fold the final tail
-        // before publishing a terminal manifest, so its rows and totals cover
-        // the same head. A failed fold leaves the namespace active.
-        if anchor.manifest.envelope.payload().folded_wal_no != head.wal_no {
-            crate::checkpoint::ensure_metadata_publication_budget(timer, started_ms, namespace_id)?;
-            crate::checkpoint::flush_wal(store, namespace_id).await?;
-            continue;
+        let result = update_manifest(store, namespace_id, timer, started_ms, |mut payload| {
+            let acquired_writer = &acquired_writer;
+            async move {
+                let current = super::state::NamespaceReadState::from(&payload);
+                super::control::ensure_namespace_live(&current)?;
+                ensure_writer_not_fenced(&current, acquired_writer)?;
+                if payload.folded_wal_no < head.wal_no {
+                    return Ok(ManifestChange::Finished(DeleteManifest::FoldFirst));
+                }
+                if let Some(expected) = options.expected_head_seq {
+                    if payload.head_seq != expected {
+                        return Err(CoreError::StaleHeadPrecondition {
+                            precondition_index: None,
+                            expected,
+                            actual: payload.head_seq,
+                        });
+                    }
+                }
+                payload.status = NamespaceStatus::Deleted {
+                    deleted_at_ms: context.now_ms,
+                };
+                let response = DeleteNamespaceResponse {
+                    namespace_id: namespace_id.clone(),
+                    head_seq: payload.head_seq,
+                };
+                Ok(ManifestChange::Next(
+                    Box::new(payload),
+                    DeleteManifest::Deleted(response),
+                ))
+            }
+        })
+        .await?;
+        if let DeleteManifest::Deleted(response) = result {
+            return Ok(response);
         }
-        let mut payload = anchor.manifest.envelope.payload().clone();
-        payload.manifest_no = payload
-            .manifest_no
-            .successor()
-            .map_err(|error| CoreError::Internal(format!("manifest number {error}")))?;
-        payload.status = NamespaceStatus::Deleted {
-            deleted_at_ms: context.now_ms,
-        };
-        let manifest = encode_manifest(payload)?;
-        if matches!(
-            publish_manifest(store, manifest, timer, started_ms).await?,
-            ManifestPublicationOutcome::Published(_)
-        ) {
-            return Ok(DeleteNamespaceResponse {
-                namespace_id: namespace_id.clone(),
-                head_seq: head.seq,
-            });
-        }
+        crate::checkpoint::ensure_metadata_publication_budget(timer, started_ms, namespace_id)?;
+        crate::checkpoint::flush_wal(store, namespace_id).await?;
     }
 }

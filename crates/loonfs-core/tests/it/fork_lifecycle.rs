@@ -825,7 +825,10 @@ async fn fork_namespace_reads_inherited_content_and_isolates_metadata() {
             .expect("clone metadata root");
     let clone_manifest_bytes = store
         .get(
-            &metadata_manifest_object(&clone_namespace_id, &clone_root.state.manifest.manifest_no),
+            &metadata_manifest_object(
+                &clone_namespace_id,
+                &clone_root.state.manifest().manifest_no,
+            ),
             None,
         )
         .await
@@ -1340,6 +1343,7 @@ async fn gc_preserves_unflushed_data_then_the_current_manifest_tombstone() {
     let mut expected = vec![hint(&namespace_id), current.object_key.clone()];
     expected.extend(
         current
+            .state
             .envelope
             .payload()
             .runs

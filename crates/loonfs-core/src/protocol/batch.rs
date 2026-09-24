@@ -12,12 +12,11 @@ use crate::commit::{materialize_commit, wal_payload_from_materialized_commit, Wa
 use crate::commit_engine::CommitCandidate;
 use crate::context::MutationContext;
 use crate::error::{CoreError, Result};
-use crate::limits::WAL_PUBLISH_BUDGET_MS;
 use crate::namespace::state::NamespaceReadState;
 use crate::path::write::PublishPlanningSession;
 use crate::storage::inline_content::InlineContent;
 use crate::time::MonotonicTimer;
-use crate::wal::{prepare_wal_segment, publish_segment, resulting_head_after};
+use crate::wal::{prepare_segment, publish_segment};
 use loonfs_api::v0::Commit;
 use loonfs_api::wire::wal::WalCommitPayload;
 use loonfs_api::NamespaceId;
@@ -208,7 +207,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
     if accepted_commits.is_empty() {
         return PublishBatchAgainstViewResult::unchanged(finish_batch_outcomes(&slots));
     }
-    let wal = match prepare_wal_segment(
+    let wal = match prepare_segment(
         namespace_id.clone(),
         view.acquired_writer.writer_epoch,
         &view.head,
@@ -222,7 +221,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
             )
         }
     };
-    let resulting_head = resulting_head_after(&wal, &view.head);
+    let resulting_head = view.head.after_segment(wal.envelope().payload());
     let now_ms = clock.timer.monotonic_now_ms();
     let elapsed_ms = now_ms.saturating_sub(clock.batch_started_ms);
     let Some(publication_now_ms) = context.now_ms.checked_add(elapsed_ms) else {
@@ -244,17 +243,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
             }
         }
     }
-    let tip_age_ms = now_ms.saturating_sub(clock.tip_observed_ms);
-    if tip_age_ms > WAL_PUBLISH_BUDGET_MS {
-        return abort_batch(
-            slots,
-            &CoreError::WalPublish(WalPublishError::PublishBudgetExceeded {
-                elapsed_ms: tip_age_ms,
-                budget_ms: WAL_PUBLISH_BUDGET_MS,
-            }),
-        );
-    }
-    if let Err(error) = publish_segment(store, &wal).await {
+    if let Err(error) = publish_segment(store, &wal, clock.timer, clock.tip_observed_ms).await {
         return abort_batch(slots, &error);
     }
 

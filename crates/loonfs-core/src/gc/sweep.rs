@@ -175,10 +175,10 @@ impl<S: ObjectStore + ?Sized> Sweep<'_, '_, S> {
     }
 
     async fn delete_key(&self, key: &str) -> Result<()> {
-        match self.store.delete(key).await {
-            Ok(()) | Err(loonfs_objectstore::ObjectStoreError::NotFound { .. }) => Ok(()),
-            Err(error) => Err(CoreError::store(key, &error)),
-        }
+        self.store
+            .delete(key)
+            .await
+            .map_err(|error| CoreError::store(key, &error))
     }
 
     fn note_reclamation_deadline(&mut self, at_ms: Option<u64>) {

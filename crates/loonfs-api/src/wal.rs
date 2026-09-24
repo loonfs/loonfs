@@ -43,7 +43,6 @@ pub const WAL_SEGMENT_OVERHEAD_BYTES: usize = cbor_map_bytes(&[
     ("namespace_id", cbor_string_bytes(crate::ids::MAX_ID_BYTES)),
     ("wal_no", 9),
     ("writer_epoch", 9),
-    ("prior_head_seq", 9),
     ("head_seq", 9),
     ("next_inode_id", 9),
     ("records", 9),
@@ -289,14 +288,21 @@ pub struct WalSegmentPayload {
     pub wal_no: WalNo,
     /// Fencing epoch of the writer that proposed this segment.
     pub writer_epoch: WriterEpoch,
-    /// Head sequence this segment was built on. A fence's equals its own `head_seq`.
-    pub prior_head_seq: ChangeSeq,
     /// Visible sequence after this segment.
     pub head_seq: ChangeSeq,
     /// Allocation high-water mark after this segment.
     pub next_inode_id: InodeId,
     /// Logical commits in contiguous ascending sequence order.
     pub records: Vec<WalCommitPayload>,
+}
+
+impl WalSegmentPayload {
+    /// Returns the preceding head, rejecting a data segment that starts at zero.
+    pub fn prior_head_seq(&self) -> Option<ChangeSeq> {
+        self.records.first().map_or(Some(self.head_seq), |record| {
+            record.seq.0.checked_sub(1).map(ChangeSeq)
+        })
+    }
 }
 
 /// A WAL segment decoded through its checked durable codec.
@@ -516,7 +522,6 @@ mod tests {
             namespace_id,
             wal_no: WalNo(1),
             writer_epoch: WriterEpoch(1),
-            prior_head_seq: ChangeSeq(0),
             head_seq: ChangeSeq(lengths.len() as u64),
             next_inode_id: InodeId(3),
             records,
@@ -669,7 +674,6 @@ mod tests {
             namespace_id: NamespaceId::parse("bounded").expect("namespace"),
             wal_no: WalNo(1),
             writer_epoch: WriterEpoch(1),
-            prior_head_seq: ChangeSeq(0),
             head_seq: ChangeSeq(0),
             next_inode_id: InodeId(2),
             records: Vec::new(),

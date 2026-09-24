@@ -11,7 +11,7 @@ async fn current_manifest_no<S: ObjectStore + ?Sized>(
         .await
         .expect("read metadata manifest")
         .state
-        .manifest
+        .manifest()
         .manifest_no
 }
 
@@ -220,7 +220,7 @@ async fn retention_advancement_uses_published_manifest_and_updates_floor_only() 
         &store,
         None,
         &namespace_id,
-        &manifest.manifest.manifest_no,
+        &manifest.manifest().manifest_no,
     )
     .await
     .expect("load current manifest")
@@ -295,7 +295,7 @@ async fn retention_floor_does_not_advance_past_a_missing_basis_segment() {
         &store,
         None,
         &namespace_id,
-        &manifest.manifest.manifest_no,
+        &manifest.manifest().manifest_no,
     )
     .await
     .expect("load current manifest");
@@ -360,7 +360,7 @@ async fn retention_floor_does_not_advance_when_a_basis_segment_cannot_be_checked
         &setup_store,
         None,
         &namespace_id,
-        &manifest.manifest.manifest_no,
+        &manifest.manifest().manifest_no,
     )
     .await
     .expect("load current manifest");
@@ -1077,7 +1077,7 @@ async fn checkpoints_append_past_the_threshold_and_reorganization_drains() {
     .expect("load appended manifest");
     assert_eq!(delta_runs(&appended.manifest).len(), rounds);
     assert!(delta_runs(&appended.manifest).len() > DEFAULT_MAX_CHECKPOINT_DELTA_RUNS);
-    assert_eq!(appended.manifest.payload().base_seq, ChangeSeq(0));
+    assert_eq!(appended.manifest.payload().base_seq(), ChangeSeq(0));
 
     // Reorganization folds one family group per unit, each publishing its
     // own manifest — the manifest chain is the progress record.
@@ -1125,7 +1125,7 @@ async fn checkpoints_append_past_the_threshold_and_reorganization_drains() {
         .expect("materialization");
     assert!(delta_runs(&drained.manifest).is_empty());
     assert_eq!(
-        drained.manifest.payload().base_seq,
+        drained.manifest.payload().base_seq(),
         ChangeSeq(u64::try_from(rounds).expect("round count fits"))
     );
     assert!(metadata_states_equivalent(
@@ -1454,7 +1454,7 @@ async fn whole_run_compaction_rewrites_base_segments() {
     let compacted_run_prefix = format!("namespaces/{}/segments/seg_", namespace_id.as_str());
 
     assert_eq!(
-        compacted_materialized.manifest.payload().base_seq,
+        compacted_materialized.manifest.payload().base_seq(),
         compacted.captured_seq
     );
     assert!(delta_runs(&compacted_materialized.manifest).is_empty());
@@ -1680,7 +1680,7 @@ async fn a_namespace_retains_from_birth_before_retention_advances() {
         .await
         .expect("missing floor defaults")
         .state
-        .retention_floor_seq;
+        .retention_floor_seq();
     assert_eq!(floor, ChangeSeq(0));
 }
 
@@ -1737,7 +1737,7 @@ async fn over_budget_wal_flush_aborts_without_publishing() {
         .await
         .expect("in-budget retry succeeds");
     assert_eq!(advanced.outcome, loonfs_api::FlushWalOutcome::Published);
-    assert!(advanced.manifest_no > manifest_before.manifest.manifest_no);
+    assert!(advanced.manifest_no > manifest_before.manifest().manifest_no);
 }
 
 #[tokio::test]

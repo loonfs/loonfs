@@ -1,6 +1,6 @@
 //! Creates namespaces.
 
-use super::install::publish_namespace;
+use super::create::publish_namespace;
 use crate::context::MutationContext;
 use crate::error::{CoreError, Result};
 use crate::metadata::{AccessRevisionRecord, InodeRecord, MetadataState};

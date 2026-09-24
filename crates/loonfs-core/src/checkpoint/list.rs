@@ -3,7 +3,7 @@
 use super::record::load_checkpoint_record_at_key;
 use crate::control_object::ControlObjectLoadError;
 use crate::error::{CoreError, Result};
-use crate::namespace::control::load_namespace_read_state;
+use crate::namespace::control::load_current_manifest;
 use futures::StreamExt;
 use loonfs_api::{Checkpoint, NamespaceId, Page, PageCursor, PageRequest};
 use loonfs_objectstore::keys::checkpoint_prefix;
@@ -49,7 +49,7 @@ pub(crate) async fn list_checkpoints_page<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     request: PageRequest<CheckpointPageCursor>,
 ) -> Result<Page<Checkpoint, CheckpointPageCursor>> {
-    load_namespace_read_state(store, namespace_id)
+    load_current_manifest(store, namespace_id)
         .await
         .map_err(CoreError::ControlObjectLoad)?;
 

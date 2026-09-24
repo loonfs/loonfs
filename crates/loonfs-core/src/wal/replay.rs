@@ -25,7 +25,7 @@ pub(crate) fn project_validated_wal_tail(
         if replayed.resulting_head.next_inode_id != payload.next_inode_id {
             return Err(WalSegmentError::SegmentSummaryMismatch);
         }
-        replayed.resulting_head.wal_no = payload.wal_no;
+        replayed.resulting_head = replayed.resulting_head.after_segment(payload);
     }
     Ok(replayed)
 }
@@ -94,13 +94,6 @@ pub(crate) fn validate_wal_segment_for_replay(
     expected_prior_head_seq: ChangeSeq,
     envelope: &WalSegmentEnvelope,
 ) -> Result<(), WalSegmentError> {
-    if envelope.payload().prior_head_seq != expected_prior_head_seq {
-        return Err(WalSegmentError::PriorHeadSeqMismatch {
-            expected: expected_prior_head_seq,
-            actual: envelope.payload().prior_head_seq,
-        });
-    }
-
     if envelope.payload().records.is_empty() {
         if envelope.payload().head_seq != expected_prior_head_seq {
             return Err(WalSegmentError::SegmentSummaryMismatch);

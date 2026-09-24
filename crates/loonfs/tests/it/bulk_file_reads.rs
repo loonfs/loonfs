@@ -519,7 +519,7 @@ async fn foreign_metadata_segment_owners(
             .state;
     let key = loonfs_objectstore::keys::metadata_manifest_object(
         namespace_id,
-        &manifest.manifest.manifest_no,
+        &manifest.manifest().manifest_no,
     );
     let bytes = store
         .get(&key, None)

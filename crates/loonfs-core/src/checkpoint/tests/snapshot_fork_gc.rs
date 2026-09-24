@@ -59,7 +59,7 @@ impl Fixture {
         let report = reorganize_metadata_step(
             &store,
             &source,
-            selected.state.compactor_epoch,
+            selected.state.compactor_epoch(),
             MetadataLsmPolicy::default(),
             MetadataCompactionPolicy::CompactImmediately,
         )
@@ -73,6 +73,7 @@ impl Fixture {
             .await
             .expect("current");
         let current_segments: BTreeSet<_> = current
+            .state
             .envelope
             .payload()
             .runs
@@ -81,6 +82,7 @@ impl Fixture {
             .map(metadata_segment_object_key)
             .collect();
         let replaced: Vec<_> = selected
+            .state
             .envelope
             .payload()
             .runs

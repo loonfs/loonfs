@@ -1,6 +1,6 @@
 //! The namespace manifest format: the durable document naming the
 //! metadata segment runs that materialize one namespace file-set version
-//! (format spec, "Namespace manifests").
+//! ([manifest format](../../../docs/specs/format.md#71-manifests-runs-and-segments)).
 
 use crate::control::{ForkBasis, NamespaceStatus, WriterBlock};
 use crate::envelope::EnvelopeCodecError;
@@ -191,8 +191,6 @@ pub struct MetadataSegmentRef {
     pub segment_id: MetadataSegmentId,
     /// Row schema and lookup ordering encoded in this segment.
     pub family: MetadataRowFamily,
-    /// Zero-based shard position among segments emitted for the same family and run.
-    pub segment_index: u32,
     /// Number of row payloads in the segment, used for validation and planning.
     pub row_count: u64,
     /// Inclusive least durable row key; the segment is corrupt if decoded rows disagree.
@@ -484,7 +482,7 @@ pub struct DeletedBinding {
     pub display_name: DisplayName,
 }
 
-/// Tombstone-row event vocabulary (format spec, "Tombstones and deletion").
+/// Events retained for recoverable subtree deletion.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TombstoneRowAction {
@@ -1198,8 +1196,6 @@ pub struct NamespaceManifestPayload {
     pub head_seq: ChangeSeq,
     /// Activity committed in this namespace through `head_seq`.
     pub activity: ManifestActivity,
-    /// Oldest run sequence still represented by `runs`.
-    pub base_seq: ChangeSeq,
     /// Current writer fencing epoch.
     pub writer_epoch: WriterEpoch,
     /// First inode identity available after replaying the manifest snapshot.
@@ -1232,6 +1228,16 @@ impl fmt::Display for ManifestChainError {
 impl std::error::Error for ManifestChainError {}
 
 impl NamespaceManifestPayload {
+    /// Returns the oldest non-empty run sequence, or the head when there are none.
+    pub fn base_seq(&self) -> ChangeSeq {
+        self.runs
+            .iter()
+            .filter(|run| !run.segments.is_empty())
+            .map(|run| run.run_seq)
+            .min()
+            .unwrap_or(self.head_seq)
+    }
+
     /// Constructs manifest 1 with the root inode reserved.
     pub fn initial(
         namespace_id: NamespaceId,
@@ -1251,7 +1257,6 @@ impl NamespaceManifestPayload {
             compactor_epoch: 0,
             head_seq: ChangeSeq(0),
             activity: ManifestActivity::default(),
-            base_seq: ChangeSeq(0),
             writer_epoch: WriterEpoch(0),
             next_inode_id: crate::FIRST_ALLOCATABLE_INODE_ID,
             next_run_no: RunNo(0),
@@ -1292,10 +1297,7 @@ impl NamespaceManifestPayload {
                 if !self.runs.is_empty() {
                     return invalid("runs");
                 }
-                if self.head_seq != ChangeSeq(0)
-                    || self.base_seq != ChangeSeq(0)
-                    || self.retention_floor_seq != ChangeSeq(0)
-                {
+                if self.head_seq != ChangeSeq(0) || self.retention_floor_seq != ChangeSeq(0) {
                     return invalid("head_seq");
                 }
                 if self.next_inode_id != crate::FIRST_ALLOCATABLE_INODE_ID {
@@ -1617,7 +1619,6 @@ mod tests {
             manifest_no: ManifestNo(10),
 
             head_seq: ChangeSeq(10),
-            base_seq: ChangeSeq(10),
             writer_epoch: WriterEpoch(2),
             next_inode_id: InodeId(42),
             next_run_no: RunNo(1),
@@ -1640,7 +1641,7 @@ mod tests {
         let decoded = decode_namespace_manifest_json(&encoded).expect("decode manifest");
 
         assert_eq!(decoded, envelope);
-        assert_eq!(decoded.payload.base_seq, ChangeSeq(10));
+        assert_eq!(decoded.payload.base_seq(), ChangeSeq(10));
         assert_eq!(decoded.payload.runs.len(), 1);
         assert_eq!(decoded.payload.runs[0].run_seq, ChangeSeq(10));
     }
@@ -1661,7 +1662,6 @@ mod tests {
             manifest_no: ManifestNo(12),
 
             head_seq: ChangeSeq(12),
-            base_seq: ChangeSeq(10),
             writer_epoch: WriterEpoch(2),
             next_inode_id: InodeId(42),
             next_run_no: RunNo(2),
@@ -2077,7 +2077,6 @@ mod tests {
             owner_namespace_id: NamespaceId::parse(owner_namespace_id).expect("valid namespace id"),
             segment_id: MetadataSegmentId::parse(segment_id).expect("valid segment id"),
             family: MetadataRowFamily::Inodes,
-            segment_index: 0,
             row_count: 0,
             min_row_key: String::new(),
             max_row_key: String::new(),

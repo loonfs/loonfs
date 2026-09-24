@@ -368,17 +368,8 @@ pub(super) fn file_revisions_page_response(
     namespace_id: NamespaceId,
     head_seq: ChangeSeq,
     page: Page<FileRevision, FileRevisionsPageCursor>,
-    fallback_inode_id: Option<InodeId>,
+    inode_id: InodeId,
 ) -> std::result::Result<ListFileRevisionsResponse, CoreError> {
-    let inode_id = page
-        .items
-        .first()
-        .map(|revision| revision.inode_id)
-        .or_else(|| page.next_cursor.as_ref().map(|cursor| cursor.inode_id))
-        .or(fallback_inode_id)
-        .ok_or_else(|| {
-            CoreError::InvalidCursor("empty revision page lacks inode identity".into())
-        })?;
     let next_cursor = encode_next_cursor(page.next_cursor.as_ref())?;
     Ok(ListFileRevisionsResponse {
         namespace_id,

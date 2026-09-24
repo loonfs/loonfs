@@ -1,7 +1,7 @@
 //! Fork installation copies pinned source runs into a new namespace.
 
 use super::control::load_current_manifest_if_present;
-use super::install::publish_namespace;
+use super::create::publish_namespace;
 use crate::checkpoint::record::{delete_checkpoint_record, write_checkpoint_record};
 use crate::checkpoint::{
     classify_live_snapshot, create_checkpoint, load_checkpoint_record,
@@ -29,7 +29,7 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
     let started_ms = timer.monotonic_now_ms();
     let target = super::control::load_current_manifest_if_present(store, new_namespace_id).await?;
     if let Some(target) = target {
-        return Err(if target.envelope.payload().status.is_deleted() {
+        return Err(if target.state.envelope.payload().status.is_deleted() {
             CoreError::NamespaceDeleted {
                 namespace_id: new_namespace_id.clone(),
             }
@@ -175,7 +175,7 @@ pub(crate) async fn target_retains_checkpoint<S: ObjectStore + ?Sized>(
     let Some(target) = load_current_manifest_if_present(store, target_namespace_id).await? else {
         return Ok(false);
     };
-    let Some(basis) = target.envelope.payload().fork_basis.as_ref() else {
+    let Some(basis) = target.state.envelope.payload().fork_basis.as_ref() else {
         return Ok(false);
     };
     if basis.source_pin_id != record.pin_id {
