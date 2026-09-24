@@ -17,7 +17,6 @@ mod delete;
 mod error;
 mod files;
 mod flush;
-mod frozen_floor;
 mod list;
 mod load;
 pub(crate) mod publish;

@@ -50,8 +50,6 @@ pub enum MetadataRowFamily {
     DirentryBinds,
     /// Re-indexes directory bindings by child for parent discovery.
     DirentryChildBinds,
-    /// Stores immutable events that retire exact historical bindings.
-    DirentryUnbinds,
     /// Stores file revisions newest-first within each inode.
     Revisions,
     /// Stores set and revoke events used to determine active subtree tombstones.
@@ -136,7 +134,6 @@ impl MetadataFamilyGroup {
             Self::Bindings => &[
                 MetadataRowFamily::DirentryBinds,
                 MetadataRowFamily::DirentryChildBinds,
-                MetadataRowFamily::DirentryUnbinds,
             ],
             Self::Revisions => &[MetadataRowFamily::Revisions],
             Self::Inodes => &[MetadataRowFamily::Inodes],
@@ -220,10 +217,8 @@ pub struct MetadataSegmentRef {
 pub enum MetadataRow {
     /// Establishes one inode's immutable identity and kind.
     Inode(InodeRecord),
-    /// Records one generation of a directory name binding.
-    DirentryBind(DirentryBindRecord),
-    /// Retires one exact directory-binding generation.
-    DirentryUnbind(DirentryUnbindRecord),
+    /// Stores the value of a directory slot at one delta position.
+    DirentryBinding(DirentryBindingRecord),
     /// Publishes one immutable content revision for a file inode.
     FileRevision(RevisionRecord),
     /// Changes whether one root inode has an active subtree tombstone.
@@ -274,44 +269,58 @@ pub struct InodeRecord {
     pub committed_at_ms: u64,
 }
 
-/// One generation of a directory name binding.
+/// Stores one slot change in both binding indexes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct DirentryBindRecord {
-    /// Directory in which the name was bound.
+pub struct DirentryBindingRecord {
+    /// Directory containing the slot.
     pub parent_inode_id: InodeId,
-    /// Policy-derived key used for uniqueness and lookup.
+    /// Canonical component used for lookup.
     pub name_key: NameKey,
-    /// User-facing component spelling retained for directory responses.
-    pub display_name: DisplayName,
-    /// Inode reached while this binding generation remains active.
+    /// Child affected by this change.
     pub child_inode_id: InodeId,
-    /// Commit sequence that created this binding generation.
-    pub bind_seq: ChangeSeq,
-    /// Position that disambiguates the binding within `bind_seq`.
-    pub bind_delta_index: u32,
+    /// Commit that published this change.
+    pub committed_seq: ChangeSeq,
+    /// Order within the commit.
+    pub delta_index: u32,
+    /// Value after this change.
+    pub state: DirentryBindingState,
 }
 
-/// One event that retires an exact directory-binding generation.
+impl DirentryBindingRecord {
+    /// Returns the position used to order slot changes.
+    pub fn position(&self) -> DeltaPosition {
+        DeltaPosition {
+            seq: self.committed_seq,
+            delta_index: self.delta_index,
+        }
+    }
+
+    /// Returns the spelling while the slot is bound.
+    pub fn display_name(&self) -> Option<&DisplayName> {
+        match &self.state {
+            DirentryBindingState::Bound { display_name } => Some(display_name),
+            DirentryBindingState::Unbound => None,
+        }
+    }
+
+    /// Returns whether the slot has a child at this position.
+    pub fn is_bound(&self) -> bool {
+        matches!(self.state, DirentryBindingState::Bound { .. })
+    }
+}
+
+/// An unbound value hides older values of the slot or child.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct DirentryUnbindRecord {
-    /// Directory that held the targeted binding.
-    pub parent_inode_id: InodeId,
-    /// Canonical name key of the targeted binding.
-    pub name_key: NameKey,
-    /// User-facing spelling the retired binding carried.
-    pub display_name: DisplayName,
-    /// Child identity recorded by the targeted binding.
-    pub child_inode_id: InodeId,
-    /// Commit sequence that created the binding being retired.
-    pub bind_seq: ChangeSeq,
-    /// Delta position of the binding being retired.
-    pub bind_delta_index: u32,
-    /// Commit sequence from which this unbind takes effect.
-    pub unbind_seq: ChangeSeq,
-    /// Position that disambiguates the unbind within `unbind_seq`.
-    pub unbind_delta_index: u32,
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum DirentryBindingState {
+    /// The slot names its child.
+    Bound {
+        /// Caller spelling preserved for reads.
+        display_name: DisplayName,
+    },
+    /// The slot is available.
+    Unbound,
 }
 
 /// One immutable content revision for a file inode.
@@ -343,7 +352,7 @@ pub struct SubtreeTombstoneRecord {
     /// Inode whose rooted subtree the event governs.
     pub root_inode_id: InodeId,
     /// Position of the event in namespace history.
-    pub generation: TombstoneGeneration,
+    pub generation: DeltaPosition,
     /// Commit ID associated with this row.
     pub commit_id: CommitId,
     /// What this event did.
@@ -447,16 +456,12 @@ pub struct AccessRevisionRecord {
     pub grants: AccessGrants,
 }
 
-/// Names one deletion generation: the commit that recorded a tombstone
-/// event and the position that disambiguates it inside that commit.
-///
-/// Shared by the tombstone row and the WAL delta that revokes one, so a
-/// revoke names its target in the same spelling everywhere.
+/// Identifies one delta within committed namespace history.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
 )]
 #[serde(deny_unknown_fields)]
-pub struct TombstoneGeneration {
+pub struct DeltaPosition {
     /// Commit sequence that published the event.
     pub seq: ChangeSeq,
     /// Position that disambiguates the event within `seq`.
@@ -465,8 +470,7 @@ pub struct TombstoneGeneration {
 
 /// Directory binding removed by a path deletion.
 ///
-/// Tombstones retain this binding after the corresponding unbind row may be
-/// collected. Undelete uses it to restore the original parent and name.
+/// Tombstones retain this binding after old slot versions are collected. Undelete uses it to restore the original parent and name.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DeletedBinding {
@@ -491,7 +495,7 @@ pub enum TombstoneRowAction {
     /// binding, so the revoke has no place to put one.
     Revoke {
         /// The exact `set` event being compensated.
-        target: TombstoneGeneration,
+        target: DeltaPosition,
     },
 }
 
@@ -543,7 +547,6 @@ impl MetadataRowFamily {
             Self::Inodes => "inodes",
             Self::DirentryBinds => "direntry_binds",
             Self::DirentryChildBinds => "direntry_child_binds",
-            Self::DirentryUnbinds => "direntry_unbinds",
             Self::Revisions => "revisions",
             Self::Tombstones => "tombstones",
             Self::ActiveDeletions => "active_deletions",
@@ -563,7 +566,6 @@ impl MetadataRowFamily {
             Self::Inodes => lookup_keys::INODE_ROW_PREFIX,
             Self::DirentryBinds => lookup_keys::DIRENTRY_BIND_ROW_PREFIX,
             Self::DirentryChildBinds => lookup_keys::DIRENTRY_CHILD_BIND_ROW_PREFIX,
-            Self::DirentryUnbinds => lookup_keys::DIRENTRY_UNBIND_ROW_PREFIX,
             Self::Revisions => lookup_keys::REVISION_ROW_PREFIX,
             Self::Tombstones => lookup_keys::TOMBSTONE_ROW_PREFIX,
             Self::ActiveDeletions => lookup_keys::ACTIVE_DELETION_ROW_PREFIX,
@@ -583,8 +585,7 @@ impl MetadataRow {
     pub fn row_key(&self) -> String {
         self.row_key_for_family(match self {
             Self::Inode(_) => MetadataRowFamily::Inodes,
-            Self::DirentryBind(_) => MetadataRowFamily::DirentryBinds,
-            Self::DirentryUnbind(_) => MetadataRowFamily::DirentryUnbinds,
+            Self::DirentryBinding(_) => MetadataRowFamily::DirentryBinds,
             Self::FileRevision(_) => MetadataRowFamily::Revisions,
             Self::Tombstone(_) => MetadataRowFamily::Tombstones,
             Self::ActiveDeletion(_) => MetadataRowFamily::ActiveDeletions,
@@ -602,24 +603,23 @@ impl MetadataRow {
     pub fn row_key_for_family(&self, family: MetadataRowFamily) -> String {
         match self {
             Self::Inode(record) => lookup_keys::inode_key(record.inode_id),
-            Self::DirentryBind(record) => match family {
+            Self::DirentryBinding(record) => match family {
                 MetadataRowFamily::DirentryBinds => Some(lookup_keys::direntry_bind_row_key(
                     record.parent_inode_id,
                     record.name_key.as_str(),
-                    record.bind_seq,
-                    record.bind_delta_index,
+                    record.committed_seq,
+                    record.delta_index,
                 )),
                 MetadataRowFamily::DirentryChildBinds => {
                     Some(lookup_keys::direntry_child_bind_row_key(
                         record.child_inode_id,
-                        record.bind_seq,
-                        record.bind_delta_index,
+                        record.committed_seq,
+                        record.delta_index,
                         record.parent_inode_id,
                         record.name_key.as_str(),
                     ))
                 }
                 MetadataRowFamily::Inodes
-                | MetadataRowFamily::DirentryUnbinds
                 | MetadataRowFamily::Revisions
                 | MetadataRowFamily::Tombstones
                 | MetadataRowFamily::ActiveDeletions
@@ -629,15 +629,7 @@ impl MetadataRow {
                 | MetadataRowFamily::Attributes
                 | MetadataRowFamily::Access => None,
             }
-            .expect("a direntry bind row should use a direntry bind family"),
-            Self::DirentryUnbind(record) => lookup_keys::direntry_unbind_row_key(
-                record.parent_inode_id,
-                record.name_key.as_str(),
-                record.bind_seq,
-                record.bind_delta_index,
-                record.unbind_seq,
-                record.unbind_delta_index,
-            ),
+            .expect("a binding row should use a binding family"),
             Self::FileRevision(record) => lookup_keys::revision_row_key(
                 record.inode_id,
                 record.revision_no,
@@ -678,7 +670,7 @@ impl MetadataRow {
     pub fn filter_key_for_family(&self, family: MetadataRowFamily) -> String {
         match self {
             Self::Inode(_) => self.row_key_for_family(family),
-            Self::DirentryBind(record) => match family {
+            Self::DirentryBinding(record) => match family {
                 MetadataRowFamily::DirentryBinds => Some(lookup_keys::direntry_bind_probe(
                     record.parent_inode_id,
                     record.name_key.as_str(),
@@ -687,7 +679,6 @@ impl MetadataRow {
                     Some(lookup_keys::direntry_child_probe(record.child_inode_id))
                 }
                 MetadataRowFamily::Inodes
-                | MetadataRowFamily::DirentryUnbinds
                 | MetadataRowFamily::Revisions
                 | MetadataRowFamily::Tombstones
                 | MetadataRowFamily::ActiveDeletions
@@ -697,10 +688,7 @@ impl MetadataRow {
                 | MetadataRowFamily::Attributes
                 | MetadataRowFamily::Access => None,
             }
-            .expect("a direntry bind row should use a direntry bind family"),
-            Self::DirentryUnbind(record) => {
-                lookup_keys::direntry_unbind_probe(record.parent_inode_id, record.name_key.as_str())
-            }
+            .expect("a binding row should use a binding family"),
             Self::FileRevision(record) => lookup_keys::revision_probe(record.inode_id),
             Self::Tombstone(record) => lookup_keys::tombstone_probe(record.root_inode_id),
             // The family is only ever range-scanned in key order, never
@@ -730,7 +718,7 @@ pub fn hex_encode_row_key_component(value: &str) -> String {
 ///
 /// See [metadata rows and row keys](../../../docs/specs/format.md#a6-metadata-rows-and-row-keys).
 pub mod lookup_keys {
-    use super::{hex_encode_row_key_component, TombstoneGeneration};
+    use super::{hex_encode_row_key_component, DeltaPosition};
     use crate::{
         AccessRevisionNo, AttributesRevisionNo, ChangeSeq, ContentId, InodeId, RevisionNo,
     };
@@ -746,7 +734,6 @@ pub mod lookup_keys {
 
     pub(super) const DIRENTRY_BIND_ROW_PREFIX: &str = "direntry-bind-";
     pub(super) const DIRENTRY_CHILD_BIND_ROW_PREFIX: &str = "direntry-child-bind-";
-    pub(super) const DIRENTRY_UNBIND_ROW_PREFIX: &str = "direntry-unbind-";
     pub(super) const TOMBSTONE_ROW_PREFIX: &str = "tombstone-";
     pub(super) const CONTENT_PUBLICATION_ROW_PREFIX: &str = "content-publication-";
     pub(super) const COMMIT_RECEIPT_ROW_PREFIX: &str = "commit-receipt-";
@@ -787,22 +774,22 @@ pub mod lookup_keys {
         )
     }
 
-    /// Builds the prefix for every generation of a parent/name binding.
+    /// Builds the prefix for every version of a parent/name slot.
     pub fn direntry_bind_prefix(parent_inode_id: InodeId, name_key: &str) -> String {
         format!("{}-", direntry_bind_probe(parent_inode_id, name_key))
     }
 
-    /// Builds a row key for one generation of a parent/name binding.
+    /// Builds a row key for one parent/name slot version.
     pub fn direntry_bind_row_key(
         parent_inode_id: InodeId,
         name_key: &str,
-        bind_seq: ChangeSeq,
-        bind_delta_index: u32,
+        committed_seq: ChangeSeq,
+        delta_index: u32,
     ) -> String {
         format!(
-            "{}{:020}-{bind_delta_index:010}",
+            "{}{:020}-{delta_index:010}",
             direntry_bind_prefix(parent_inode_id, name_key),
-            bind_seq.0
+            committed_seq.0
         )
     }
 
@@ -816,70 +803,21 @@ pub mod lookup_keys {
         format!("{}-", direntry_child_probe(child_inode_id))
     }
 
-    /// Builds a reverse-index row key for one binding generation.
+    /// Builds a reverse-index row key for one binding version.
     pub(super) fn direntry_child_bind_row_key(
         child_inode_id: InodeId,
-        bind_seq: ChangeSeq,
-        bind_delta_index: u32,
+        committed_seq: ChangeSeq,
+        delta_index: u32,
         parent_inode_id: InodeId,
         name_key: &str,
     ) -> String {
         format!(
-            "{}{:020}-{bind_delta_index:010}-{:020}-{}",
+            "{}{:020}-{delta_index:010}-{:020}-{}",
             direntry_child_prefix(child_inode_id),
-            bind_seq.0,
+            committed_seq.0,
             parent_inode_id.0,
             hex_encode_row_key_component(name_key)
         )
-    }
-
-    /// Builds the Bloom filter probe for unbinds of one parent/name pair.
-    pub fn direntry_unbind_probe(parent_inode_id: InodeId, name_key: &str) -> String {
-        format!(
-            "{}{}",
-            direntry_unbind_parent_prefix(parent_inode_id),
-            hex_encode_row_key_component(name_key)
-        )
-    }
-
-    /// Builds the prefix for unbinds of one binding generation.
-    pub fn direntry_unbind_binding_prefix(
-        parent_inode_id: InodeId,
-        name_key: &str,
-        bind_seq: ChangeSeq,
-        bind_delta_index: u32,
-    ) -> String {
-        format!(
-            "{}{:020}-{bind_delta_index:010}-",
-            direntry_unbind_name_prefix(parent_inode_id, name_key),
-            bind_seq.0
-        )
-    }
-
-    /// Builds a row key for one unbind event.
-    pub(super) fn direntry_unbind_row_key(
-        parent_inode_id: InodeId,
-        name_key: &str,
-        bind_seq: ChangeSeq,
-        bind_delta_index: u32,
-        unbind_seq: ChangeSeq,
-        unbind_delta_index: u32,
-    ) -> String {
-        format!(
-            "{}{:020}-{unbind_delta_index:010}",
-            direntry_unbind_binding_prefix(parent_inode_id, name_key, bind_seq, bind_delta_index),
-            unbind_seq.0
-        )
-    }
-
-    /// Builds the prefix for unbinds below one parent directory.
-    pub(super) fn direntry_unbind_parent_prefix(parent_inode_id: InodeId) -> String {
-        format!("{DIRENTRY_UNBIND_ROW_PREFIX}{:020}-", parent_inode_id.0)
-    }
-
-    /// Builds the prefix for unbinds of one parent/name pair.
-    pub fn direntry_unbind_name_prefix(parent_inode_id: InodeId, name_key: &str) -> String {
-        format!("{}-", direntry_unbind_probe(parent_inode_id, name_key))
     }
 
     /// Builds the Bloom filter probe for one tombstone root.
@@ -896,10 +834,7 @@ pub mod lookup_keys {
     ///
     /// The action is stored in the value, so delete and revoke rows for one
     /// generation share a key.
-    pub(super) fn tombstone_row_key(
-        root_inode_id: InodeId,
-        generation: TombstoneGeneration,
-    ) -> String {
+    pub(super) fn tombstone_row_key(root_inode_id: InodeId, generation: DeltaPosition) -> String {
         format!(
             "{}{:020}-{:010}",
             tombstone_prefix(root_inode_id),
@@ -1695,13 +1630,15 @@ mod tests {
 
     #[test]
     fn direntry_bind_row_key_supports_parent_and_child_indexes() {
-        let row = super::MetadataRow::DirentryBind(super::DirentryBindRecord {
+        let row = super::MetadataRow::DirentryBinding(super::DirentryBindingRecord {
             parent_inode_id: InodeId(9),
             name_key: NameKey::parse("report.txt").expect("valid name key"),
-            display_name: crate::DisplayName::parse("Report.txt").expect("valid display name"),
+            state: super::DirentryBindingState::Bound {
+                display_name: crate::DisplayName::parse("Report.txt").expect("valid display name"),
+            },
             child_inode_id: InodeId(42),
-            bind_seq: ChangeSeq(17),
-            bind_delta_index: 3,
+            committed_seq: ChangeSeq(17),
+            delta_index: 3,
         });
 
         assert_eq!(
@@ -1716,13 +1653,15 @@ mod tests {
 
     #[test]
     fn row_keys_hex_encode_dash_containing_variable_components() {
-        let row = super::MetadataRow::DirentryBind(super::DirentryBindRecord {
+        let row = super::MetadataRow::DirentryBinding(super::DirentryBindingRecord {
             parent_inode_id: InodeId(9),
             name_key: NameKey::parse("report-2024").expect("valid name key"),
-            display_name: crate::DisplayName::parse("report-2024").expect("valid display name"),
+            state: super::DirentryBindingState::Bound {
+                display_name: crate::DisplayName::parse("report-2024").expect("valid display name"),
+            },
             child_inode_id: InodeId(42),
-            bind_seq: ChangeSeq(17),
-            bind_delta_index: 3,
+            committed_seq: ChangeSeq(17),
+            delta_index: 3,
         });
 
         assert_eq!(
@@ -1828,13 +1767,15 @@ mod tests {
     fn row_key_prefixes_match_the_row_keys_they_front() {
         let name_key = NameKey::parse("report.txt").expect("valid name key");
         let display_name = crate::DisplayName::parse("report.txt").expect("valid display name");
-        let bind = super::MetadataRow::DirentryBind(super::DirentryBindRecord {
+        let bind = super::MetadataRow::DirentryBinding(super::DirentryBindingRecord {
             parent_inode_id: InodeId(9),
             name_key: name_key.clone(),
-            display_name: display_name.clone(),
+            state: super::DirentryBindingState::Bound {
+                display_name: display_name.clone(),
+            },
             child_inode_id: InodeId(42),
-            bind_seq: ChangeSeq(17),
-            bind_delta_index: 3,
+            committed_seq: ChangeSeq(17),
+            delta_index: 3,
         });
         let revision = super::MetadataRow::FileRevision(super::RevisionRecord {
             inode_id: InodeId(42),
@@ -1851,7 +1792,7 @@ mod tests {
                 b"row key prefix sample",
             ),
         });
-        let rows: [(MetadataRowFamily, super::MetadataRow); 10] = [
+        let rows: [(MetadataRowFamily, super::MetadataRow); 9] = [
             (
                 MetadataRowFamily::Inodes,
                 super::MetadataRow::Inode(super::InodeRecord {
@@ -1865,19 +1806,6 @@ mod tests {
             ),
             (MetadataRowFamily::DirentryBinds, bind.clone()),
             (MetadataRowFamily::DirentryChildBinds, bind),
-            (
-                MetadataRowFamily::DirentryUnbinds,
-                super::MetadataRow::DirentryUnbind(super::DirentryUnbindRecord {
-                    parent_inode_id: InodeId(9),
-                    name_key,
-                    display_name,
-                    child_inode_id: InodeId(42),
-                    bind_seq: ChangeSeq(17),
-                    bind_delta_index: 3,
-                    unbind_seq: ChangeSeq(19),
-                    unbind_delta_index: 0,
-                }),
-            ),
             (MetadataRowFamily::Revisions, revision),
             (
                 MetadataRowFamily::ContentPublications,
@@ -1892,7 +1820,7 @@ mod tests {
                 MetadataRowFamily::Tombstones,
                 super::MetadataRow::Tombstone(super::SubtreeTombstoneRecord {
                     root_inode_id: InodeId(42),
-                    generation: super::TombstoneGeneration {
+                    generation: super::DeltaPosition {
                         seq: ChangeSeq(12),
                         delta_index: 0,
                     },
@@ -1990,7 +1918,7 @@ mod tests {
                     MetadataRowFamily::Tombstones,
                     super::MetadataRow::Tombstone(super::SubtreeTombstoneRecord {
                         root_inode_id: InodeId(42),
-                        generation: super::TombstoneGeneration {
+                        generation: super::DeltaPosition {
                             seq: ChangeSeq(12),
                             delta_index: 3,
                         },

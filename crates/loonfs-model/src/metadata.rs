@@ -17,8 +17,7 @@ use loonfs_api::{ActorId, ChangeSeq, CommitId, ContentRef, InodeId, InodeKind, R
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct MetadataState {
     pub inodes: Vec<InodeRecord>,
-    pub direntry_binds: Vec<DirentryBindRecord>,
-    pub direntry_unbinds: Vec<DirentryUnbindRecord>,
+    pub direntry_binds: Vec<DirentryBindingRecord>,
     pub revisions: Vec<RevisionRecord>,
     pub content_publications: Vec<ContentPublicationRecord>,
     pub subtree_tombstones: Vec<SubtreeTombstoneRecord>,
@@ -37,27 +36,21 @@ pub struct InodeRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DirentryBindRecord {
+pub struct DirentryBindingRecord {
     pub parent_inode_id: InodeId,
-    pub name_key: String,
-    pub display_name: String,
+    pub name_key: loonfs_api::NameKey,
     pub child_inode_id: InodeId,
-    pub bind_seq: ChangeSeq,
-    pub bind_delta_index: u32,
+    pub committed_seq: ChangeSeq,
+    pub delta_index: u32,
+    pub state: DirentryBindingState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DirentryUnbindRecord {
-    pub parent_inode_id: InodeId,
-    pub name_key: String,
-    /// User-facing spelling the retired binding carried. The unbind row is
-    /// the durable home of a deleted name while it is retained.
-    pub display_name: String,
-    pub child_inode_id: InodeId,
-    pub bind_seq: ChangeSeq,
-    pub bind_delta_index: u32,
-    pub unbind_seq: ChangeSeq,
-    pub unbind_delta_index: u32,
+pub enum DirentryBindingState {
+    Bound {
+        display_name: loonfs_api::DisplayName,
+    },
+    Unbound,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -199,33 +192,31 @@ impl MetadataState {
                     display_name,
                     child_inode_id,
                 } => {
-                    metadata_state.direntry_binds.push(DirentryBindRecord {
+                    metadata_state.direntry_binds.push(DirentryBindingRecord {
                         parent_inode_id: *parent_inode_id,
-                        name_key: name_key.as_str().to_owned(),
-                        display_name: display_name.as_str().to_owned(),
+                        name_key: name_key.clone(),
                         child_inode_id: *child_inode_id,
-                        bind_seq: committed_seq,
-                        bind_delta_index: *delta_index,
+                        committed_seq,
+                        delta_index: *delta_index,
+                        state: DirentryBindingState::Bound {
+                            display_name: display_name.clone(),
+                        },
                     });
                 }
                 WalDelta::UnbindDirentry {
                     delta_index,
                     parent_inode_id,
                     name_key,
-                    display_name,
                     child_inode_id,
-                    bind_seq,
-                    bind_delta_index,
+                    ..
                 } => {
-                    metadata_state.direntry_unbinds.push(DirentryUnbindRecord {
+                    metadata_state.direntry_binds.push(DirentryBindingRecord {
                         parent_inode_id: *parent_inode_id,
-                        name_key: name_key.as_str().to_owned(),
-                        display_name: display_name.as_str().to_owned(),
+                        name_key: name_key.clone(),
                         child_inode_id: *child_inode_id,
-                        bind_seq: *bind_seq,
-                        bind_delta_index: *bind_delta_index,
-                        unbind_seq: committed_seq,
-                        unbind_delta_index: *delta_index,
+                        committed_seq,
+                        delta_index: *delta_index,
+                        state: DirentryBindingState::Unbound,
                     });
                 }
                 WalDelta::AppendFileRevision {
@@ -365,7 +356,7 @@ impl MetadataState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use loonfs_api::wire::manifest::TombstoneGeneration;
+    use loonfs_api::wire::manifest::DeltaPosition;
     use loonfs_api::NameKey;
 
     fn commit_id() -> CommitId {
@@ -390,7 +381,7 @@ mod tests {
         );
 
         assert_eq!(applied.direntry_binds.len(), 1);
-        assert_eq!(applied.direntry_binds[0].name_key, "persisted-key");
+        assert_eq!(applied.direntry_binds[0].name_key.as_str(), "persisted-key");
     }
 
     #[test]
@@ -414,7 +405,7 @@ mod tests {
                 WalDelta::RevokeSubtreeTombstone {
                     delta_index: 2,
                     root_inode_id: InodeId(2),
-                    target: TombstoneGeneration {
+                    target: DeltaPosition {
                         seq: ChangeSeq(4),
                         delta_index: 3,
                     },

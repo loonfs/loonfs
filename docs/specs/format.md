@@ -69,13 +69,13 @@ The directory state at sequence 18 and the file content state at sequence 19 are
 
 ### 1.3 Directory bindings
 
-A directory binding associates a parent inode and a name with a child inode. The stored `display_name` preserves the caller's spelling. The derived `name_key` is used for sibling-name comparison.
+A directory slot is `(parent_inode_id, name_key)`. Its value is bound to one child inode or unbound. A bound value stores `display_name` to preserve the caller's spelling. The derived `name_key` determines sibling-name comparison.
 
-Each bind has a generation consisting of `(bind_seq, bind_delta_index)`. An unbind identifies the exact bind it removes, including the parent, name key, child inode, and bind generation. It does not mean “remove whatever currently has this name.”
+Every binding change produces a `direntry_binding` row with `committed_seq` and `delta_index`. These fields identify the row's own position in namespace history. At sequence `N`, the slot's value is the row with the greatest `(committed_seq, delta_index)` whose sequence is at or below `N`. An unbound value, or no row, means the name is available. The last delta wins when a commit changes a slot more than once.
 
-For example, suppose a file is moved away from `/reports/Final.txt` and a different file is created there. An unbind of the original generation must not remove the replacement. The generation also distinguishes multiple bindings created within one commit.
+The `direntry_binds` and `direntry_child_binds` families store the same rows, ordered by slot and child respectively. The child index uses the same version rule to find a child's current parent. Commit validation requires one child per slot and one parent per child. Moving a child first unbinds its old slot. Both indexes therefore agree at every read sequence.
 
-The format maintains bindings in two orders: by parent and name, and by child inode. These are the same bind rows, not independent sources of directory state. The child ordering supports parent lookup and the rule that a child has only one current parent binding.
+A bind writes a bound value to both indexes. An unbind writes an unbound value with the parent, name, and child from its WAL delta. Validation checks that the delta targets the current binding. The WAL retains that target's sequence and delta index; the materialized row stores only the unbind event's own position. An unbound value is a tombstone for older values of the slot or child. Section 10.3 defines when it can be removed.
 
 ### 1.4 Names and paths
 
@@ -136,7 +136,7 @@ Tombstone events are ordered by `(seq, delta_index)`. A `set` event starts a del
 
 An undelete request identifies the deletion by inode and committed deletion sequence. Validation must confirm the currently active deletion. A request for a deletion that is no longer active returns `not_deleted`; it must not cancel a later deletion. A deletion created earlier in the same uncommitted request cannot yet be addressed by its committed deletion sequence. Only the root of a deletion can be undeleted independently; descendants hidden by that root do not each have a separate deletion to revoke.
 
-A `set` stores the removed binding in `deleted_binding`, with `parent_inode_id`, `name_key`, and `display_name`. This information remains available after old bind and unbind rows are compacted. An undelete restores that parent and name unless the request supplies a different destination. A `revoke` stores its target generation and must not contain a deleted binding.
+A `set` stores the removed binding in `deleted_binding`, with `parent_inode_id`, `name_key`, and `display_name`. This information remains available after old binding versions are compacted. An undelete restores that parent and name unless the request supplies a different destination. A `revoke` stores its target generation and must not contain a deleted binding.
 
 The derived `active_deletions` family supports listing recoverable deletions in deletion-sequence order. A `set` produces a `listed` row. A revoke produces a `removed` row for the same `(deletion_seq, root_inode_id)`. Removal rows sort before listed rows, so a scan can suppress cancelled entries. Tombstone events remain authoritative.
 
@@ -162,7 +162,7 @@ Every row that records an event copies the commit's actor and timestamp as `comm
 | --- | --- |
 | Inode, file revision, tombstone event, attribute revision, access revision, commit | `committed_by`, `committed_at_ms` |
 | Listed active deletion | `deleted_by`, `deleted_at_ms` |
-| Bind and unbind | Neither actor nor timestamp |
+| Directory binding | Neither actor nor timestamp |
 
 The root inode in a newly created namespace is attributed to the actor id `loonfs`. A fork inherits the root inode from its source basis; the target manifest's creation time is the creation time of the namespace, not a rewrite of inherited inode timestamps.
 
@@ -342,7 +342,7 @@ For a warm read, the reference runtime probes the next WAL number with GET. An a
 
 At sequence `N`, ignore events after `N`. An inode must have been created by `N` and must not be covered by an active tombstone on itself or an ancestor.
 
-A directory binding must be the current binding for its parent-and-name slot and the current parent binding for its child. A matching unbind removes only the targeted generation. Sequence and delta position determine the order when several events affect the same item.
+A directory slot uses its newest version at or below `N`, ordered by `(committed_seq, delta_index)`. A bound version identifies the child; an unbound version or no version means absence. Parent lookup uses the same rule in the child index. Path lookup needs one slot-index lookup per component. A listing scans one parent prefix in name order, selects the newest visible version per name, and includes bound entries whose inodes, covering subtree tombstones, and caller permissions allow visibility. Snapshots and checkpoints apply these rules through their pinned manifests at their captured sequences.
 
 A file's current content is its latest revision committed by `N`. Attributes are the latest applicable complete attribute revision, or the initial empty map when no applicable attribute row exists. Recoverable-deletion listing uses the derived active-deletion state; historical tombstone evaluation remains based on tombstone events.
 
@@ -583,7 +583,7 @@ Each run records `run_seq`, `tier`, and its segment descriptors. `base_seq` is d
 
 The manifest must not contain duplicate run numbers or a run number at or above `next_run_no`. A family's segment ranges must not overlap or descend. Metadata producers must not write the same logical row key twice within one run.
 
-Metadata rows describe immutable facts at specific positions. Reads merge those facts and apply the visibility rules, rather than choosing arbitrary values for a conflicting row key. The parent-and-name binding family and child-binding index contain the same bind records in different orders. Manifest validation checks their per-run row counts; reorganization checks full row-level equality across its selected complete input runs.
+Metadata rows describe immutable facts at specific positions. Reads merge those facts and apply the visibility rules, rather than choosing arbitrary values for a conflicting row key. The parent-and-name binding family and child-binding index contain the same binding versions in different orders. Manifest validation checks their per-run row counts; reorganization checks full row-level equality across its selected complete input runs.
 
 The `commits` and `commit_receipts` families hold one row each per retained commit; manifest validation checks their per-run row counts the same way.
 
@@ -787,11 +787,11 @@ The existence check detects missing recovery material before abandoning the corr
 
 ### 10.2 Compaction windows
 
-Metadata is compacted by family group. Directory binds, the child-binding index, and unbinds form one group because they must remain consistent. The `commits` and `commit_receipts` families form another group, and each of the other seven groups contains one family. Appendix A.6 lists the groups.
+Metadata is compacted by family group. The slot and child binding indexes form one group because they must remain consistent. The `commits` and `commit_receipts` families form another group, and each of the other seven groups contains one family. Appendix A.6 lists the groups.
 
 A bounded rebuild merges an oldest-first contiguous window. It can skip the group's oldest run when that run is too large for one bounded step and merge the delta runs above it instead. It cannot skip an intervening delta run.
 
-An output run is `base` if and only if the window includes the group's oldest run. Only that kind of rebuild can drop rows under the retention rules. A rebuild above the oldest run produces a `delta` run and drops nothing, because an omitted older run may contain the other half of a binding or removal pair.
+An output run is `base` if and only if the window includes the group's oldest run. Only that kind of rebuild can drop rows under the retention rules. A rebuild above the oldest run produces a `delta` run and drops nothing, because an excluded older run may contain versions hidden by a tombstone in the selected window.
 
 A group has at most one base run. A bottom-anchored rebuild replaces the existing base when one exists and is stamped with the manifest's `head_seq`. Base runs are ordered before delta runs regardless of their sequence stamp. A rebuild that skips the oldest run is stamped with its newest input's sequence and remains at that position in the group.
 
@@ -804,7 +804,7 @@ The following rules apply only when the selected inputs include the group's olde
 | Family | Rows retained or removed |
 | --- | --- |
 | `inodes` | Retain all inode rows. |
-| `direntry_binds`, `direntry_child_binds`, `direntry_unbinds` | Remove bindings superseded or unbound at or below the floor and spent unbind markers, while preserving state at every retained sequence and parity between both bind indexes. |
+| `direntry_binds`, `direntry_child_binds` | For each slot or child, retain all versions above the floor and the newest version at or below it. Drop that floor version too if it is unbound. |
 | `revisions` | Retain every file revision, including revisions of deleted files. |
 | `tombstones` | Retain all set and revoke events. |
 | `active_deletions` | Retain listed deletions until revoked. Remove a cancelled `listed`/`removed` pair together. The floor does not expire a recoverable deletion. |
@@ -812,6 +812,12 @@ The following rules apply only when the selected inputs include the group's olde
 | `content_publications` | Retain all publication evidence, regardless of floor. |
 | `attributes` | For each inode, retain all revisions above the floor and the newest revision at or below it; remove earlier revisions. |
 | `access` | For each inode, retain all revisions above the floor and the newest revision at or below it; remove earlier revisions. |
+
+An unbound binding version is a tombstone. It must remain while it hides older versions of its slot or child. Only a bottom-anchored rebuild, which includes the group's oldest run, can drop it together with every older version it hides. A rebuild that excludes the oldest run keeps every row, including unbound values at or below the floor. Runs cover separate sequence ranges, so a bottom-anchored rebuild contains all older versions relevant to its floor state.
+
+Each binding event appears in both indexes. At the floor, a bound value is current in both indexes or neither: replacing a slot's child requires an unbind, and moving a child requires unbinding its old slot. Removing unbound floor values and the older values they hide leaves the same event set in both indexes. Row counts and row digests verify that agreement. Later events above the floor all remain.
+
+Binding positions come from the publishing delta. A later bind does not depend on a prior unbound value. Attribute and access revisions retain their cleared floor state because its revision number is needed to validate the next update.
 
 An empty attribute map, or an access row with no boundary and no grants, is retained when it is the state at the floor. Removing it could expose an older row and restore state that had been cleared. Attribute and access rows are not removed merely because the inode is deleted, so undelete can restore the same state.
 
@@ -1202,13 +1208,12 @@ WAL replay applies these normalized records in sequence and delta order. It does
 
 ### A.6 Metadata rows and row keys
 
-Rows are kind-tagged CBOR objects in the data blocks. The row-kind schema and the row-family ordering are separate: the same `direntry_bind` row appears in both bind families.
+Rows are kind-tagged CBOR objects in the data blocks. The row-kind schema and the row-family ordering are separate: the same `direntry_binding` row appears in both binding families.
 
 | Row kind | Fields after `kind` |
 | --- | --- |
 | `inode` | `inode_id`, `inode_kind`, `committed_seq`, `commit_id`, `committed_by`, `committed_at_ms` |
-| `direntry_bind` | `parent_inode_id`, `name_key`, `display_name`, `child_inode_id`, `bind_seq`, `bind_delta_index` |
-| `direntry_unbind` | The bind fields, followed by `unbind_seq`, `unbind_delta_index` |
+| `direntry_binding` | `parent_inode_id`, `name_key`, `child_inode_id`, `committed_seq`, `delta_index`, `state` |
 | `file_revision` | `inode_id`, `revision_no`, `committed_seq`, `commit_id`, `committed_by`, `committed_at_ms`, `delta_index`, `content_ref` |
 | `tombstone` | `root_inode_id`, `generation`, `commit_id`, `action`, `committed_by`, `committed_at_ms` |
 | `active_deletion` | `root_inode_id`, `deletion_seq`, `action` |
@@ -1219,6 +1224,8 @@ Rows are kind-tagged CBOR objects in the data blocks. The row-kind schema and th
 | `access_revision` | `inode_id`, `access_revision_no`, `committed_seq`, `commit_id`, `delta_index`, `committed_by`, `committed_at_ms`, `boundary`, `grants` |
 
 A `commit` row is the WAL commit record of A.5 without its inline content. The `inline_content` field is omitted, and a row that carries one is invalid.
+
+For a directory binding, `state` is `{"kind":"bound","display_name":...}` or `{"kind":"unbound"}`. Both indexes contain that complete row.
 
 For a tombstone, `generation` is `{seq, delta_index}`. A set action is `{"kind":"set","deleted_binding":...}`. A revoke action is `{"kind":"revoke","target":...}`.
 
@@ -1231,9 +1238,8 @@ In the following grammar, `u64::MAX - x` and `u32::MAX - x` mean subtraction bef
 | Family | Row key |
 | --- | --- |
 | `inodes` | `inode-{inode_id:020}` |
-| `direntry_binds` | `direntry-bind-{parent_inode_id:020}-{name_key_hex}-{bind_seq:020}-{bind_delta_index:010}` |
-| `direntry_child_binds` | `direntry-child-bind-{child_inode_id:020}-{bind_seq:020}-{bind_delta_index:010}-{parent_inode_id:020}-{name_key_hex}` |
-| `direntry_unbinds` | `direntry-unbind-{parent_inode_id:020}-{name_key_hex}-{bind_seq:020}-{bind_delta_index:010}-{unbind_seq:020}-{unbind_delta_index:010}` |
+| `direntry_binds` | `direntry-bind-{parent_inode_id:020}-{name_key_hex}-{committed_seq:020}-{delta_index:010}` |
+| `direntry_child_binds` | `direntry-child-bind-{child_inode_id:020}-{committed_seq:020}-{delta_index:010}-{parent_inode_id:020}-{name_key_hex}` |
 | `revisions` | `revision-{inode_id:020}-{u64::MAX - revision_no:020}-{u64::MAX - committed_seq:020}-{u32::MAX - delta_index:010}` |
 | `tombstones` | `tombstone-{root_inode_id:020}-{generation.seq:020}-{generation.delta_index:010}` |
 | `active_deletions` | `active-deletion-{deletion_seq:020}-{root_inode_id:020}-{sort_rank:010}` |
@@ -1243,7 +1249,9 @@ In the following grammar, `u64::MAX - x` and `u32::MAX - x` mean subtraction bef
 | `attributes` | `attribute-{inode_id:020}-{u64::MAX - attributes_revision_no:020}-{u64::MAX - committed_seq:020}-{u32::MAX - delta_index:010}` |
 | `access` | `access-{inode_id:020}-{u64::MAX - access_revision_no:020}-{u64::MAX - committed_seq:020}-{u32::MAX - delta_index:010}` |
 
-Ascending byte order therefore scans an inode's file revisions, attributes, and access rows newest-first. The active-deletion `sort_rank` is 0 for a removed entry and 1 for a listed entry. The stored widths are still ten digits.
+Binding keys sort positions oldest first within each slot or child. Reads select the greatest visible position. Compaction retains at most one candidate floor row while scanning each group.
+
+Ascending byte order scans an inode's file revisions, attributes, and access rows newest-first. The active-deletion `sort_rank` is 0 for a removed entry and 1 for a listed entry. The stored widths are still ten digits.
 
 Bloom filters use the following keys, which are not always full row keys:
 
@@ -1252,7 +1260,6 @@ Bloom filters use the following keys, which are not always full row keys:
 | `inodes` | Complete row key |
 | `direntry_binds` | `direntry-bind-{parent_inode_id:020}-{name_key_hex}` |
 | `direntry_child_binds` | `direntry-child-bind-{child_inode_id:020}` |
-| `direntry_unbinds` | `direntry-unbind-{parent_inode_id:020}-{name_key_hex}` |
 | `revisions` | `revision-{inode_id:020}` |
 | `tombstones` | `tombstone-{root_inode_id:020}` |
 | `active_deletions` | Complete row key |
@@ -1268,7 +1275,7 @@ The family groups are fixed:
 
 | Group | Members |
 | --- | --- |
-| `bindings` | `direntry_binds`, `direntry_child_binds`, `direntry_unbinds` |
+| `bindings` | `direntry_binds`, `direntry_child_binds` |
 | `revisions` | `revisions` |
 | `inodes` | `inodes` |
 | `tombstones` | `tombstones` |

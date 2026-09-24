@@ -118,10 +118,10 @@ pub(crate) use tests::{access_fixture_cases, access_fixture_state};
 mod tests {
     use super::*;
     use crate::metadata::{
-        DirentryBindRecord, InodeRecord, MetadataState, MetadataStateBuilder,
+        DirentryBindingRecord, InodeRecord, MetadataState, MetadataStateBuilder,
         SubtreeTombstoneRecord,
     };
-    use loonfs_api::wire::manifest::{DeletedBinding, TombstoneGeneration};
+    use loonfs_api::wire::manifest::{DeletedBinding, DeltaPosition};
     use loonfs_api::{
         AccessGrants, AccessRevisionNo, ActorId, ChangeSeq, CommitId, DisplayName, InodeKind,
         NameKey, PrincipalId,
@@ -173,19 +173,19 @@ mod tests {
             (2, 8, "tool"),
         ] {
             let display_name = DisplayName::parse(name).expect("display name");
-            builder.push_direntry_bind(DirentryBindRecord {
+            builder.push_direntry_binding(DirentryBindingRecord {
                 parent_inode_id: InodeId(parent),
                 name_key: NameKey::for_display_name(&display_name),
-                display_name,
+                state: loonfs_api::wire::manifest::DirentryBindingState::Bound { display_name },
                 child_inode_id: InodeId(child),
-                bind_seq: ChangeSeq(1),
-                bind_delta_index: 0,
+                committed_seq: ChangeSeq(1),
+                delta_index: 0,
             });
         }
         let display_name = DisplayName::parse("old").expect("display name");
         builder.push_subtree_tombstone(SubtreeTombstoneRecord {
             root_inode_id: InodeId(6),
-            generation: TombstoneGeneration {
+            generation: DeltaPosition {
                 seq: ChangeSeq(3),
                 delta_index: 0,
             },
@@ -297,13 +297,13 @@ mod tests {
             (InodeId(3), InodeId(2), "two"),
         ] {
             let display_name = DisplayName::parse(name).expect("display name");
-            builder.push_direntry_bind(DirentryBindRecord {
+            builder.push_direntry_binding(DirentryBindingRecord {
                 parent_inode_id,
                 name_key: NameKey::for_display_name(&display_name),
-                display_name,
+                state: loonfs_api::wire::manifest::DirentryBindingState::Bound { display_name },
                 child_inode_id,
-                bind_seq: ChangeSeq(1),
-                bind_delta_index: 0,
+                committed_seq: ChangeSeq(1),
+                delta_index: 0,
             });
         }
         let state = builder.finish();

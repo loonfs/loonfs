@@ -11,23 +11,23 @@
 use super::durable_cache::ParentNameCacheKey;
 use super::manifest_index;
 use super::view::DIRECTORY_PAGE_RAW_SCAN_LIMIT;
-use super::visibility::{self, BindingIdentity, MetadataVisibilityReads};
+use super::visibility::{self, MetadataVisibilityReads};
 use super::{
-    AccessRevisionRecord, AttributesProjection, DirentryBindRecord, InodeRecord, MetadataView,
+    AccessRevisionRecord, AttributesProjection, DirentryBindingRecord, InodeRecord, MetadataView,
     RecoverableDeletion, ResolvedVisiblePath, RevisionRecord, SubtreeTombstoneRecord,
 };
 use crate::error::CoreError;
 use loonfs_api::wire::manifest::lookup_keys;
 use loonfs_api::{AbsolutePath, ChangeSeq, InodeId, InodeKind, NameKey, ROOT_INODE_ID};
 use loonfs_objectstore::ObjectStore;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 
-pub(super) fn latest_visible_bind<'a>(
-    rows: impl Iterator<Item = &'a DirentryBindRecord>,
+pub(super) fn latest_visible_binding<'a>(
+    rows: impl Iterator<Item = &'a DirentryBindingRecord>,
     visible_seq: ChangeSeq,
-) -> Option<DirentryBindRecord> {
-    rows.filter(|direntry| direntry.bind_seq <= visible_seq)
-        .max_by_key(|direntry| (direntry.bind_seq, direntry.bind_delta_index))
+) -> Option<DirentryBindingRecord> {
+    rows.filter(|direntry| direntry.committed_seq <= visible_seq)
+        .max_by_key(|direntry| direntry.position())
         .cloned()
 }
 
@@ -52,31 +52,23 @@ async fn fetch_active_subtree_tombstone<S: ObjectStore + ?Sized>(
 async fn fetch_latest_parent_binding_for_child<S: ObjectStore + ?Sized>(
     base: &MetadataView<'_, '_, S>,
     child_inode_id: InodeId,
-) -> Result<Option<DirentryBindRecord>, CoreError> {
+) -> Result<Option<DirentryBindingRecord>, CoreError> {
+    if child_inode_id == ROOT_INODE_ID {
+        return Ok(None);
+    }
     let bindings = base.direntry_binds_for_child(child_inode_id).await?;
-    Ok(latest_visible_bind(bindings.iter(), base.visible_seq()))
-}
-
-async fn fetch_is_direntry_unbound<S: ObjectStore + ?Sized>(
-    base: &MetadataView<'_, '_, S>,
-    direntry: &DirentryBindRecord,
-) -> Result<bool, CoreError> {
-    let unbinds = base.direntry_unbinds_for_binding(direntry).await?;
-    let unbound = unbinds
-        .iter()
-        .any(|unbind| unbind.unbind_seq <= base.visible_seq());
-    Ok(unbound)
+    Ok(latest_visible_binding(bindings.iter(), base.visible_seq()))
 }
 
 async fn fetch_bound_child<S: ObjectStore + ?Sized>(
     base: &MetadataView<'_, '_, S>,
     parent_inode_id: InodeId,
     name_key: &NameKey,
-) -> Result<Option<DirentryBindRecord>, CoreError> {
+) -> Result<Option<DirentryBindingRecord>, CoreError> {
     let bindings = base
         .direntry_binds_for_parent_name(parent_inode_id, name_key)
         .await?;
-    Ok(latest_visible_bind(bindings.iter(), base.visible_seq()))
+    Ok(latest_visible_binding(bindings.iter(), base.visible_seq()))
 }
 
 async fn fetch_latest_revision_head_of_visible<S: ObjectStore + ?Sized>(
@@ -97,7 +89,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         &self,
         parent_inode_id: InodeId,
         start_after_name_key: Option<&str>,
-    ) -> Vec<DirentryBindPageCandidate> {
+    ) -> Vec<DirentryBindingPageCandidate> {
         let mut candidates = self
             .row_states()
             .flat_map(|state| state.direntry_binds())
@@ -106,12 +98,12 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
                     && start_after_name_key
                         .is_none_or(|last_name_key| direntry.name_key.as_str() > last_name_key)
             })
-            .map(|record| DirentryBindPageCandidate {
+            .map(|record| DirentryBindingPageCandidate {
                 row_key: lookup_keys::direntry_bind_row_key(
                     record.parent_inode_id,
                     record.name_key.as_str(),
-                    record.bind_seq,
-                    record.bind_delta_index,
+                    record.committed_seq,
+                    record.delta_index,
                 ),
                 record: record.clone(),
             })
@@ -123,7 +115,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
 
 #[derive(Debug, Clone)]
 pub(crate) struct VisibleChildEntry {
-    pub(crate) binding: DirentryBindRecord,
+    pub(crate) binding: DirentryBindingRecord,
     pub(crate) inode: InodeRecord,
 }
 
@@ -146,14 +138,13 @@ pub(crate) struct MetadataViewSessionCounters {
     pub(crate) direntry_child_scan_calls: u64,
     pub(crate) scan_prefix_calls: u64,
     pub(crate) scan_range_page_calls: u64,
-    pub(crate) list_preload_unbind_range_scans: u64,
     pub(crate) list_preload_child_lookups: u64,
 }
 
 pub(crate) type MetadataViewSessionCounterField =
     (&'static str, fn(&MetadataViewSessionCounters) -> u64);
 
-pub(crate) const METADATA_VIEW_SESSION_COUNTER_FIELDS: [MetadataViewSessionCounterField; 13] = [
+pub(crate) const METADATA_VIEW_SESSION_COUNTER_FIELDS: [MetadataViewSessionCounterField; 12] = [
     ("list_page_visible_child_calls", |counters| {
         counters.visible_child_calls
     }),
@@ -181,9 +172,6 @@ pub(crate) const METADATA_VIEW_SESSION_COUNTER_FIELDS: [MetadataViewSessionCount
     ("list_page_scan_range_page_calls", |counters| {
         counters.scan_range_page_calls
     }),
-    ("list_page_preload_unbind_range_scans", |counters| {
-        counters.list_preload_unbind_range_scans
-    }),
     ("list_page_preload_child_lookups", |counters| {
         counters.list_preload_child_lookups
     }),
@@ -206,15 +194,14 @@ pub(crate) struct MetadataViewSession<'a, 'store, S: ObjectStore + ?Sized> {
     base: MetadataView<'a, 'store, S>,
     inode_at_seq_cache: HashMap<InodeId, Option<InodeRecord>>,
     visible_inode_cache: HashMap<InodeId, Option<InodeRecord>>,
-    bound_child_cache: HashMap<ParentNameCacheKey, Option<DirentryBindRecord>>,
-    current_parent_binding_cache: HashMap<InodeId, Option<DirentryBindRecord>>,
-    latest_parent_binding_cache: HashMap<InodeId, Option<DirentryBindRecord>>,
+    bound_child_cache: HashMap<ParentNameCacheKey, Option<DirentryBindingRecord>>,
+    current_parent_binding_cache: HashMap<InodeId, Option<DirentryBindingRecord>>,
+    latest_parent_binding_cache: HashMap<InodeId, Option<DirentryBindingRecord>>,
     latest_revision_head_cache: HashMap<InodeId, Option<RevisionRecord>>,
     attributes_cache: HashMap<InodeId, AttributesProjection>,
     access_row_cache: HashMap<InodeId, Option<AccessRevisionRecord>>,
     active_tombstone_cache: HashMap<InodeId, Option<SubtreeTombstoneRecord>>,
     covering_tombstone_cache: HashMap<InodeId, Option<SubtreeTombstoneRecord>>,
-    unbind_cache: HashMap<BindingIdentity, bool>,
     counters: MetadataViewSessionCounters,
 }
 
@@ -232,7 +219,6 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
             access_row_cache: HashMap::new(),
             active_tombstone_cache: HashMap::new(),
             covering_tombstone_cache: HashMap::new(),
-            unbind_cache: HashMap::new(),
             counters: MetadataViewSessionCounters::default(),
         }
     }
@@ -255,23 +241,17 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
     fn cached_latest_parent_binding_for_child(
         &self,
         child_inode_id: InodeId,
-    ) -> Option<Option<DirentryBindRecord>> {
+    ) -> Option<Option<DirentryBindingRecord>> {
         self.latest_parent_binding_cache
             .get(&child_inode_id)
             .cloned()
-    }
-
-    fn cached_is_direntry_unbound(&self, direntry: &DirentryBindRecord) -> Option<bool> {
-        self.unbind_cache
-            .get(&BindingIdentity::from(direntry))
-            .copied()
     }
 
     fn cached_bound_child(
         &self,
         parent_inode_id: InodeId,
         name_key: &NameKey,
-    ) -> Option<Option<DirentryBindRecord>> {
+    ) -> Option<Option<DirentryBindingRecord>> {
         self.bound_child_cache
             .get(&ParentNameCacheKey {
                 parent_inode_id,
@@ -303,7 +283,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
             return Ok(Vec::new());
         }
 
-        let mut stream = DirentryBindNameGroupStream::new(
+        let mut stream = DirentryBindingNameGroupStream::new(
             self.base
                 .tail_direntry_bind_page_candidates(parent_inode_id, start_after_name_key),
             self.base.manifest_segments().is_none(),
@@ -354,12 +334,12 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
     /// latest bound child for that name.
     async fn next_candidate_name_groups(
         &mut self,
-        stream: &mut DirentryBindNameGroupStream,
+        stream: &mut DirentryBindingNameGroupStream,
         parent_inode_id: InodeId,
         start_after_name_key: Option<&str>,
         group_limit: usize,
-    ) -> Result<Vec<DirentryBindNameGroup>, CoreError> {
-        let mut groups: Vec<DirentryBindNameGroup> = Vec::new();
+    ) -> Result<Vec<DirentryBindingNameGroup>, CoreError> {
+        let mut groups: Vec<DirentryBindingNameGroup> = Vec::new();
         loop {
             if stream.manifest_candidates.is_empty() && !stream.manifest_exhausted {
                 self.counters.scan_range_page_calls =
@@ -383,10 +363,13 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
                         page.last().map(|candidate| candidate.row_key.clone());
                     stream
                         .manifest_candidates
-                        .extend(page.into_iter().map(|candidate| DirentryBindPageCandidate {
-                            row_key: candidate.row_key,
-                            record: candidate.record,
-                        }));
+                        .extend(
+                            page.into_iter()
+                                .map(|candidate| DirentryBindingPageCandidate {
+                                    row_key: candidate.row_key,
+                                    record: candidate.record,
+                                }),
+                        );
                 }
                 continue;
             }
@@ -430,7 +413,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
                         stream.pushed_back = Some(candidate);
                         break;
                     }
-                    groups.push(DirentryBindNameGroup {
+                    groups.push(DirentryBindingNameGroup {
                         name_key: candidate.record.name_key.clone(),
                         rows: vec![candidate.record],
                     });
@@ -440,88 +423,31 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
         Ok(groups)
     }
 
-    /// Seeds the session caches for one wave of name groups: the latest bind
-    /// per name from rows the stream already carried, unbind facts from one
-    /// range scan, and the child-keyed lookups batched concurrently. The
-    /// canonical visibility rules then decide over cache hits; anything the
-    /// preload cannot answer (cross-directory binding chases) falls back to
-    /// the ordinary per-key scans.
     async fn preload_group_visibility(
         &mut self,
         parent_inode_id: InodeId,
-        groups: &[DirentryBindNameGroup],
+        groups: &[DirentryBindingNameGroup],
     ) -> Result<(), CoreError> {
         let visible_seq = self.base.visible_seq();
-        let mut latest_binds = Vec::with_capacity(groups.len());
+        let mut child_inode_ids = Vec::with_capacity(groups.len());
         for group in groups {
-            let latest = latest_visible_bind(group.rows.iter(), visible_seq);
+            let latest = latest_visible_binding(group.rows.iter(), visible_seq);
+            if let Some(binding) = latest.as_ref().filter(|binding| binding.is_bound()) {
+                child_inode_ids.push(binding.child_inode_id);
+                self.latest_parent_binding_cache
+                    .insert(binding.child_inode_id, Some(binding.clone()));
+                self.current_parent_binding_cache
+                    .insert(binding.child_inode_id, Some(binding.clone()));
+            }
             self.bound_child_cache.insert(
                 ParentNameCacheKey {
                     parent_inode_id,
                     name_key: group.name_key.clone(),
                 },
-                latest.clone(),
+                latest,
             );
-            if let Some(latest) = latest {
-                latest_binds.push(latest);
-            }
         }
-        let (Some(first_group), Some(last_group)) = (groups.first(), groups.last()) else {
-            return Ok(());
-        };
-
-        self.counters.list_preload_unbind_range_scans = self
-            .counters
-            .list_preload_unbind_range_scans
-            .saturating_add(1);
-        let unbinds = self
-            .base
-            .direntry_unbinds_for_parent_name_range(
-                parent_inode_id,
-                &first_group.name_key,
-                &last_group.name_key,
-            )
-            .await?;
-        let unbound_identities: HashSet<BindingIdentity> = unbinds
-            .iter()
-            .filter(|unbind| unbind.unbind_seq <= visible_seq)
-            .map(BindingIdentity::from)
-            .collect();
-        for direntry in &latest_binds {
-            let cache_key = BindingIdentity::from(direntry);
-            let unbound = unbound_identities.contains(&cache_key);
-            self.unbind_cache.insert(cache_key, unbound);
-        }
-
-        let mut pending_child_ids: Vec<InodeId> = latest_binds
-            .iter()
-            .map(|direntry| direntry.child_inode_id)
-            .collect();
-        pending_child_ids.sort_unstable();
-        pending_child_ids.dedup();
-        self.preload_visibility(&pending_child_ids).await?;
-
-        for child_inode_id in pending_child_ids {
-            let latest_binding = self
-                .latest_parent_binding_cache
-                .get(&child_inode_id)
-                .cloned()
-                .flatten();
-            if let Some(latest_binding) = &latest_binding {
-                // A child bound in this directory within the preloaded name
-                // range gets its unbind fact from the range scan; bindings
-                // elsewhere fall back to the ordinary per-binding scan.
-                if latest_binding.parent_inode_id == parent_inode_id
-                    && latest_binding.name_key.as_str() >= first_group.name_key.as_str()
-                    && latest_binding.name_key.as_str() <= last_group.name_key.as_str()
-                {
-                    let cache_key = BindingIdentity::from(latest_binding);
-                    let unbound = unbound_identities.contains(&cache_key);
-                    self.unbind_cache.entry(cache_key).or_insert(unbound);
-                }
-            }
-        }
-        Ok(())
+        self.preload_visibility(&child_inode_ids).await
     }
 
     pub(crate) async fn preload_visibility(
@@ -549,22 +475,27 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
 
         let visible_seq = self.base.visible_seq();
         let base = &self.base;
+        let parent_bindings = &self.latest_parent_binding_cache;
         let lookups =
             futures::future::try_join_all(pending.into_iter().map(|inode_id| async move {
-                let (inode, bindings, tombstones) = futures::try_join!(
+                let (inode, binding, tombstones) = futures::try_join!(
                     base.inode_at_seq(inode_id),
-                    base.direntry_binds_for_child(inode_id),
+                    async {
+                        if let Some(binding) = parent_bindings.get(&inode_id) {
+                            Ok(binding.clone())
+                        } else {
+                            fetch_latest_parent_binding_for_child(base, inode_id).await
+                        }
+                    },
                     base.tombstones_for_root(inode_id),
                 )?;
-                Ok::<_, CoreError>((inode_id, inode, bindings, tombstones))
+                Ok::<_, CoreError>((inode_id, inode, binding, tombstones))
             }))
             .await?;
 
-        for (inode_id, inode, bindings, tombstones) in lookups {
+        for (inode_id, inode, binding, tombstones) in lookups {
             self.inode_at_seq_cache.insert(inode_id, inode);
-            let latest_binding = latest_visible_bind(bindings.iter(), visible_seq);
-            self.latest_parent_binding_cache
-                .insert(inode_id, latest_binding);
+            self.latest_parent_binding_cache.insert(inode_id, binding);
             let active_tombstone =
                 super::rows::active_tombstone_from_records(tombstones.iter().cloned(), visible_seq);
             self.active_tombstone_cache
@@ -573,17 +504,6 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
         Ok(())
     }
 
-    /// Resolves `absolute_path` with the canonical visibility rules after a
-    /// pipelined preload of the walk's storage lookups.
-    ///
-    /// For each path component, the preload issues the independent probes
-    /// (inode, tombstone, child-keyed binding, the previous binding's
-    /// unbind fact) as one concurrent wave alongside the next component's
-    /// bound-child scan — the only lookup the walk truly serializes on —
-    /// and seeds the session's caches with exactly what those lookups would
-    /// have fetched. The canonical rules then decide over cache hits, so a
-    /// cold resolution costs one round-trip wave per path component instead
-    /// of five-plus sequential lookups each.
     pub(crate) async fn resolve_visible_path(
         &mut self,
         absolute_path: &AbsolutePath,
@@ -594,13 +514,6 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
         visibility::resolve_visible_path(self, absolute_path).await
     }
 
-    /// The preload behind [`Self::resolve_visible_path`]: batches storage
-    /// probes and seeds primitive caches, decides nothing. Seeded values are
-    /// byte-identical to what the corresponding cache-miss paths compute, so
-    /// visibility decisions are unchanged; anything the preload skips (a
-    /// renamed child's foreign binding, an unbound name) falls back to the
-    /// ordinary per-key scans. Stops probing once a component has no bound
-    /// child or its binding is revoked — the canonical walk reports those.
     async fn preload_path_walk(
         &mut self,
         absolute_path: &AbsolutePath,
@@ -613,17 +526,22 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
             .collect();
 
         let mut current_inode_id = ROOT_INODE_ID;
-        let mut pending_binding: Option<DirentryBindRecord> = None;
+        let mut pending_binding: Option<DirentryBindingRecord> = None;
         for wave in 0..=component_name_keys.len() {
             let lookup_name_key = component_name_keys.get(wave);
             let is_leaf_wave = wave == component_name_keys.len();
 
-            let arrived_by_binding = pending_binding.take();
+            if let Some(binding) = pending_binding.take() {
+                self.latest_parent_binding_cache
+                    .insert(current_inode_id, Some(binding.clone()));
+                self.current_parent_binding_cache
+                    .insert(current_inode_id, Some(binding));
+            }
             let prefetch_revision =
                 is_leaf_wave && prefetch_leaf_revision == LeafRevisionPrefetch::Prefetch;
 
             let base = &self.base;
-            let (inode, tombstone, parent_binding, unbind, bound_child, revision) = futures::try_join!(
+            let (inode, tombstone, parent_binding, bound_child, revision) = futures::try_join!(
                 async {
                     match self.cached_inode_at_seq(current_inode_id) {
                         Some(inode) => Ok(inode),
@@ -641,17 +559,6 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
                         Some(binding) => Ok(binding),
                         None => fetch_latest_parent_binding_for_child(base, current_inode_id).await,
                     }
-                },
-                async {
-                    let Some(binding) = &arrived_by_binding else {
-                        return Ok(None);
-                    };
-                    let cache_key = BindingIdentity::from(binding);
-                    let unbound = match self.cached_is_direntry_unbound(binding) {
-                        Some(unbound) => unbound,
-                        None => fetch_is_direntry_unbound(base, binding).await?,
-                    };
-                    Ok(Some((cache_key, unbound)))
                 },
                 async {
                     let Some(name_key) = lookup_name_key else {
@@ -687,20 +594,11 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
                 self.latest_revision_head_cache
                     .insert(current_inode_id, revision);
             }
-            if let Some((cache_key, unbound)) = unbind {
-                self.unbind_cache.insert(cache_key, unbound);
-                if unbound {
-                    // The walk dead-ends at the previous component; probing
-                    // deeper would warm caches for nothing.
-                    break;
-                }
-            }
-
             let Some((cache_key, bound)) = bound_child else {
                 break;
             };
             self.bound_child_cache.insert(cache_key, bound.clone());
-            let Some(binding) = bound else {
+            let Some(binding) = bound.filter(DirentryBindingRecord::is_bound) else {
                 break;
             };
             current_inode_id = binding.child_inode_id;
@@ -713,7 +611,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
         &mut self,
         parent_inode_id: InodeId,
         name_key: &NameKey,
-    ) -> Result<Option<DirentryBindRecord>, CoreError> {
+    ) -> Result<Option<DirentryBindingRecord>, CoreError> {
         self.counters.visible_child_calls = self.counters.visible_child_calls.saturating_add(1);
         visibility::visible_child(self, parent_inode_id, name_key).await
     }
@@ -859,7 +757,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
     pub(crate) async fn current_parent_binding_for_child(
         &mut self,
         child_inode_id: InodeId,
-    ) -> Result<Option<DirentryBindRecord>, CoreError> {
+    ) -> Result<Option<DirentryBindingRecord>, CoreError> {
         self.counters.current_parent_binding_calls =
             self.counters.current_parent_binding_calls.saturating_add(1);
         if let Some(cached) = self
@@ -876,14 +774,10 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
         Ok(binding)
     }
 
-    /// Latest binding whose child is `child_inode_id` at the visible seq,
-    /// regardless of whether it has since been unbound. The
-    /// [`MetadataVisibilityReads`] primitive backing the session's cached
-    /// [`Self::current_parent_binding_for_child`].
     async fn latest_parent_binding_for_child(
         &mut self,
         child_inode_id: InodeId,
-    ) -> Result<Option<DirentryBindRecord>, CoreError> {
+    ) -> Result<Option<DirentryBindingRecord>, CoreError> {
         if let Some(cached) = self.cached_latest_parent_binding_for_child(child_inode_id) {
             return Ok(cached);
         }
@@ -941,7 +835,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
         &mut self,
         parent_inode_id: InodeId,
         name_key: &NameKey,
-    ) -> Result<Option<DirentryBindRecord>, CoreError> {
+    ) -> Result<Option<DirentryBindingRecord>, CoreError> {
         let cache_key = ParentNameCacheKey {
             parent_inode_id,
             name_key: name_key.clone(),
@@ -953,20 +847,6 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
         let binding = fetch_bound_child(&self.base, parent_inode_id, name_key).await?;
         self.bound_child_cache.insert(cache_key, binding.clone());
         Ok(binding)
-    }
-
-    async fn is_direntry_unbound(
-        &mut self,
-        direntry: &DirentryBindRecord,
-    ) -> Result<bool, CoreError> {
-        let cache_key = BindingIdentity::from(direntry);
-        if let Some(cached) = self.cached_is_direntry_unbound(direntry) {
-            return Ok(cached);
-        }
-        self.counters.scan_prefix_calls = self.counters.scan_prefix_calls.saturating_add(1);
-        let unbound = fetch_is_direntry_unbound(&self.base, direntry).await?;
-        self.unbind_cache.insert(cache_key, unbound);
-        Ok(unbound)
     }
 }
 
@@ -983,18 +863,18 @@ impl<S: ObjectStore + ?Sized> MetadataVisibilityReads for MetadataViewSession<'_
         self.inode_at_seq(inode_id).await
     }
 
-    async fn find_latest_bound_child(
+    async fn find_latest_slot_binding(
         &mut self,
         parent_inode_id: InodeId,
         name_key: &NameKey,
-    ) -> Result<Option<DirentryBindRecord>, Self::Error> {
+    ) -> Result<Option<DirentryBindingRecord>, Self::Error> {
         self.bound_child(parent_inode_id, name_key).await
     }
 
     async fn find_latest_parent_binding_for_child(
         &mut self,
         child_inode_id: InodeId,
-    ) -> Result<Option<DirentryBindRecord>, Self::Error> {
+    ) -> Result<Option<DirentryBindingRecord>, Self::Error> {
         self.latest_parent_binding_for_child(child_inode_id).await
     }
 
@@ -1003,13 +883,6 @@ impl<S: ObjectStore + ?Sized> MetadataVisibilityReads for MetadataViewSession<'_
         root_inode_id: InodeId,
     ) -> Result<Option<SubtreeTombstoneRecord>, Self::Error> {
         self.active_subtree_tombstone(root_inode_id).await
-    }
-
-    async fn is_binding_unbound(
-        &mut self,
-        direntry: &DirentryBindRecord,
-    ) -> Result<bool, Self::Error> {
-        self.is_direntry_unbound(direntry).await
     }
 
     async fn find_access_row(
@@ -1022,7 +895,7 @@ impl<S: ObjectStore + ?Sized> MetadataVisibilityReads for MetadataViewSession<'_
     async fn current_parent_binding_for_child(
         &mut self,
         child_inode_id: InodeId,
-    ) -> Result<Option<DirentryBindRecord>, Self::Error> {
+    ) -> Result<Option<DirentryBindingRecord>, Self::Error> {
         MetadataViewSession::current_parent_binding_for_child(self, child_inode_id).await
     }
 
@@ -1043,17 +916,17 @@ impl<S: ObjectStore + ?Sized> MetadataVisibilityReads for MetadataViewSession<'_
 
 /// Cursor state for the merged manifest+tail direntry-bind stream, grouped
 /// by name key across calls.
-struct DirentryBindNameGroupStream {
+struct DirentryBindingNameGroupStream {
     manifest_after_row_key: Option<String>,
     manifest_exhausted: bool,
-    manifest_candidates: VecDeque<DirentryBindPageCandidate>,
-    tail_candidates: Vec<DirentryBindPageCandidate>,
+    manifest_candidates: VecDeque<DirentryBindingPageCandidate>,
+    tail_candidates: Vec<DirentryBindingPageCandidate>,
     tail_index: usize,
-    pushed_back: Option<DirentryBindPageCandidate>,
+    pushed_back: Option<DirentryBindingPageCandidate>,
 }
 
-impl DirentryBindNameGroupStream {
-    fn new(tail_candidates: Vec<DirentryBindPageCandidate>, manifest_exhausted: bool) -> Self {
+impl DirentryBindingNameGroupStream {
+    fn new(tail_candidates: Vec<DirentryBindingPageCandidate>, manifest_exhausted: bool) -> Self {
         Self {
             manifest_after_row_key: None,
             manifest_exhausted,
@@ -1066,13 +939,13 @@ impl DirentryBindNameGroupStream {
 }
 
 /// Every bind row the stream carried for one name key, in row-key order.
-struct DirentryBindNameGroup {
+struct DirentryBindingNameGroup {
     name_key: NameKey,
-    rows: Vec<DirentryBindRecord>,
+    rows: Vec<DirentryBindingRecord>,
 }
 
 #[derive(Clone)]
-struct DirentryBindPageCandidate {
+struct DirentryBindingPageCandidate {
     row_key: String,
-    record: DirentryBindRecord,
+    record: DirentryBindingRecord,
 }

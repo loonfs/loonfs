@@ -3,10 +3,10 @@
 
 use super::{
     AccessRevisionRecord, AttributesRevisionRecord, CommitReceiptRecord, ContentPublicationRecord,
-    DirentryBindRecord, DirentryUnbindRecord, InodeRecord, MetadataState, RevisionRecord,
-    SubtreeTombstoneRecord, TombstoneRowAction,
+    DirentryBindingRecord, InodeRecord, MetadataState, RevisionRecord, SubtreeTombstoneRecord,
+    TombstoneRowAction,
 };
-use loonfs_api::wire::manifest::TombstoneGeneration;
+use loonfs_api::wire::manifest::{DeltaPosition, DirentryBindingState};
 use loonfs_api::wire::wal::{WalCommitPayload, WalDelta};
 use loonfs_api::{ActorId, ChangeSeq, CommitId};
 
@@ -86,33 +86,31 @@ impl MetadataState {
                 display_name,
                 child_inode_id,
             } => {
-                self.push_direntry_bind_record(DirentryBindRecord {
+                self.push_direntry_binding_record(DirentryBindingRecord {
                     parent_inode_id: *parent_inode_id,
                     name_key: name_key.clone(),
-                    display_name: display_name.clone(),
                     child_inode_id: *child_inode_id,
-                    bind_seq: committed_seq,
-                    bind_delta_index: *delta_index,
+                    committed_seq,
+                    delta_index: *delta_index,
+                    state: DirentryBindingState::Bound {
+                        display_name: display_name.clone(),
+                    },
                 });
             }
             WalDelta::UnbindDirentry {
                 delta_index,
                 parent_inode_id,
                 name_key,
-                display_name,
                 child_inode_id,
-                bind_seq,
-                bind_delta_index,
+                ..
             } => {
-                self.push_direntry_unbind_record(DirentryUnbindRecord {
+                self.push_direntry_binding_record(DirentryBindingRecord {
                     parent_inode_id: *parent_inode_id,
                     name_key: name_key.clone(),
-                    display_name: display_name.clone(),
                     child_inode_id: *child_inode_id,
-                    bind_seq: *bind_seq,
-                    bind_delta_index: *bind_delta_index,
-                    unbind_seq: committed_seq,
-                    unbind_delta_index: *delta_index,
+                    committed_seq,
+                    delta_index: *delta_index,
+                    state: DirentryBindingState::Unbound,
                 });
             }
             WalDelta::AppendFileRevision {
@@ -146,7 +144,7 @@ impl MetadataState {
             } => {
                 self.push_subtree_tombstone_record(SubtreeTombstoneRecord {
                     root_inode_id: *root_inode_id,
-                    generation: TombstoneGeneration {
+                    generation: DeltaPosition {
                         seq: committed_seq,
                         delta_index: *delta_index,
                     },
@@ -165,7 +163,7 @@ impl MetadataState {
             } => {
                 self.push_subtree_tombstone_record(SubtreeTombstoneRecord {
                     root_inode_id: *root_inode_id,
-                    generation: TombstoneGeneration {
+                    generation: DeltaPosition {
                         seq: committed_seq,
                         delta_index: *delta_index,
                     },

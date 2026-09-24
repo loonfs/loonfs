@@ -5,8 +5,8 @@ use super::indexes::MetadataIndexes;
 use crate::checkpoint::DecodedRowWeight;
 use loonfs_api::wire::manifest::{
     AccessRevisionRecord, ActiveDeletionRecord, ActiveDeletionRowAction, AttributesRevisionRecord,
-    CommitReceiptRecord, ContentPublicationRecord, DeletedBinding, DirentryBindRecord,
-    DirentryUnbindRecord, InodeRecord, RevisionRecord, SubtreeTombstoneRecord, TombstoneRowAction,
+    CommitReceiptRecord, ContentPublicationRecord, DeletedBinding, DirentryBindingRecord,
+    InodeRecord, RevisionRecord, SubtreeTombstoneRecord, TombstoneRowAction,
 };
 use loonfs_api::wire::wal::WalCommitPayload;
 use loonfs_api::{ActorId, ChangeSeq, CommitId, InodeId, InodeKind};
@@ -14,8 +14,7 @@ use loonfs_api::{ActorId, ChangeSeq, CommitId, InodeId, InodeKind};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataState {
     pub(super) inodes: Vec<InodeRecord>,
-    pub(super) direntry_binds: Vec<DirentryBindRecord>,
-    pub(super) direntry_unbinds: Vec<DirentryUnbindRecord>,
+    pub(super) direntry_binds: Vec<DirentryBindingRecord>,
     pub(super) revisions: Vec<RevisionRecord>,
     pub(super) subtree_tombstones: Vec<SubtreeTombstoneRecord>,
     pub(super) commit_receipts: Vec<CommitReceiptRecord>,
@@ -31,7 +30,6 @@ pub struct MetadataState {
 impl Default for MetadataState {
     fn default() -> Self {
         Self::from_rows(
-            Vec::new(),
             Vec::new(),
             Vec::new(),
             Vec::new(),
@@ -142,8 +140,7 @@ impl MetadataState {
     )]
     pub(crate) fn from_rows(
         inodes: Vec<InodeRecord>,
-        direntry_binds: Vec<DirentryBindRecord>,
-        direntry_unbinds: Vec<DirentryUnbindRecord>,
+        direntry_binds: Vec<DirentryBindingRecord>,
         revisions: Vec<RevisionRecord>,
         subtree_tombstones: Vec<SubtreeTombstoneRecord>,
         commit_receipts: Vec<CommitReceiptRecord>,
@@ -155,7 +152,6 @@ impl MetadataState {
         let mut state = Self {
             inodes,
             direntry_binds,
-            direntry_unbinds,
             revisions,
             subtree_tombstones,
             commit_receipts,
@@ -186,12 +182,8 @@ impl MetadataState {
         &self.inodes
     }
 
-    pub fn direntry_binds(&self) -> &[DirentryBindRecord] {
+    pub fn direntry_binds(&self) -> &[DirentryBindingRecord] {
         &self.direntry_binds
-    }
-
-    pub fn direntry_unbinds(&self) -> &[DirentryUnbindRecord] {
-        &self.direntry_unbinds
     }
 
     pub fn revisions(&self) -> &[RevisionRecord] {
@@ -259,16 +251,10 @@ impl MetadataState {
         self.inodes.push(record);
     }
 
-    pub(crate) fn push_direntry_bind_record(&mut self, record: DirentryBindRecord) {
-        self.indexes.record_bind(&record);
+    pub(crate) fn push_direntry_binding_record(&mut self, record: DirentryBindingRecord) {
+        self.indexes.record_binding(&record);
         self.record_row_weight(record.decoded_weight());
         self.direntry_binds.push(record);
-    }
-
-    pub(crate) fn push_direntry_unbind_record(&mut self, record: DirentryUnbindRecord) {
-        self.indexes.record_unbind(&record);
-        self.record_row_weight(record.decoded_weight());
-        self.direntry_unbinds.push(record);
     }
 
     pub(crate) fn push_revision_record(&mut self, record: RevisionRecord) {
@@ -324,12 +310,8 @@ impl MetadataStateBuilder {
         self.state.push_inode_record(record);
     }
 
-    pub(crate) fn push_direntry_bind(&mut self, record: DirentryBindRecord) {
-        self.state.push_direntry_bind_record(record);
-    }
-
-    pub(crate) fn push_direntry_unbind(&mut self, record: DirentryUnbindRecord) {
-        self.state.push_direntry_unbind_record(record);
+    pub(crate) fn push_direntry_binding(&mut self, record: DirentryBindingRecord) {
+        self.state.push_direntry_binding_record(record);
     }
 
     pub(crate) fn push_revision(&mut self, record: RevisionRecord) {
@@ -371,7 +353,6 @@ fn metadata_row_count(state: &MetadataState) -> usize {
         .inodes
         .len()
         .saturating_add(state.direntry_binds.len())
-        .saturating_add(state.direntry_unbinds.len())
         .saturating_add(state.revisions.len())
         .saturating_add(state.subtree_tombstones.len())
         .saturating_add(state.commit_receipts.len())
@@ -390,7 +371,6 @@ fn metadata_decoded_bytes(state: &MetadataState) -> usize {
     }
     total(&state.inodes)
         .saturating_add(total(&state.direntry_binds))
-        .saturating_add(total(&state.direntry_unbinds))
         .saturating_add(total(&state.revisions))
         .saturating_add(total(&state.subtree_tombstones))
         .saturating_add(total(&state.commit_receipts))

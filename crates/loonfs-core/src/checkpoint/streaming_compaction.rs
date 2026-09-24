@@ -10,30 +10,26 @@
 //! retention floor; delta merges preserve every row.
 
 use super::block_fetch::segment_object_len;
+use super::block_load::SessionBlockMemo;
 use super::build::MetadataSegmentWriter;
-use super::cache::{MetadataSegmentCache, MetadataSegmentCacheConfig};
 use super::compaction_merge::{
     locality_of, refill_iterators, select_next_iterator, LocalityGrouping,
     MetadataSegmentBlockLoader, MetadataSegmentRowIterator,
 };
 use super::compaction_retention::{KeptRow, RetentionRule};
 use super::error::ManifestLoadError;
-use super::frozen_floor::{
-    bind_survives_frozen_floor, unbinding_at_or_below_floor, unbindings_at_or_below_floor,
-    BindingIdentity,
-};
 use super::load::load_manifest_segments;
 use super::publish::{publish_manifest, ManifestPublicationOutcome};
 use super::reorganize::{
     build_replacement_manifest, group_run_descriptors, MergePlacement, ReplacementOutput,
 };
 use super::runs::{MetadataFamilyGroup, MetadataLsmPolicy, MetadataRunManifest};
-use super::scan::{Readahead, VerifiedMetadataSegments};
+use super::scan::VerifiedMetadataSegments;
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::limits::METADATA_COMPACTION_BUDGET_MS;
 use crate::namespace::control::load_current_manifest_if_present;
 use crate::time::{Deadline, StdMonotonicTimer};
-use loonfs_api::wire::manifest::{lookup_keys, MetadataRow, MetadataRowFamily, MetadataSegmentRef};
+use loonfs_api::wire::manifest::{MetadataRowFamily, MetadataSegmentRef};
 use loonfs_api::{ChangeSeq, ManifestNo, MetadataCompactionId, NamespaceId, RunNo};
 use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::ObjectStore;
@@ -42,15 +38,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::Notify;
-
-/// Decoded-byte budget for the cache the reverse-index point reads share.
-///
-/// Those reads are keyed by child while the unbind family is keyed by parent,
-/// so they land all over the family and each one would otherwise re-fetch the
-/// filter and index sections the read before it just used. The cache is an
-/// LRU with a byte budget, so what it holds is this number and not a function
-/// of how many reads the job makes.
-const PROBE_CACHE_DECODED_BYTES: usize = 16 * 1024 * 1024;
 
 /// Rows between two progress lines. A job that needs one at all is bigger
 /// than a step's whole row budget, so this is coarse on purpose: a handful of
@@ -205,19 +192,10 @@ pub(super) struct MetadataMergeResult {
     pub(super) rows_written: u64,
     pub(super) input_bytes: u64,
     pub(super) output_bytes: u64,
-    /// Point reads into the input's unbind family, one per reverse bind
-    /// row at or below the frozen floor. Zero for a merge that resolves the
-    /// reverse index from what it streamed
-    /// ([`ReverseBindResolution::CollectedUnbinds`]).
-    pub(super) unbind_probes: u64,
-    /// Generation identities such a merge collected, which is what its reverse
-    /// resolution holds instead of making those reads. Bounded by the below-
-    /// floor unbind rows in the window, and therefore by the step's budgets.
-    pub(super) collected_unbind_generations: usize,
     /// The most decoded input blocks the merge's iterators held at once, and
     /// the most rows one retention operator held. These are what bound the
     /// merge's memory, so tests assert they do not follow the size of the
-    /// group, of one inode's history, or of one name slot's generations.
+    /// group, of one inode's history, or of one slot's versions.
     pub(super) peak_resident_blocks: usize,
     pub(super) peak_operator_rows: usize,
 }
@@ -228,6 +206,7 @@ pub(super) struct MetadataMergeResult {
 )]
 pub(super) async fn merge_group_in_step<S: ObjectStore + ?Sized>(
     store: &S,
+    index_memo: Option<&SessionBlockMemo>,
     namespace_id: &NamespaceId,
     group: MetadataFamilyGroup,
     runs: &[MetadataRunManifest],
@@ -235,21 +214,15 @@ pub(super) async fn merge_group_in_step<S: ObjectStore + ?Sized>(
     frozen_floor_seq: ChangeSeq,
     policy: MetadataLsmPolicy,
 ) -> Result<MetadataMergeResult> {
-    let probe_cache = MetadataSegmentCache::new(MetadataSegmentCacheConfig {
-        max_decoded_bytes: PROBE_CACHE_DECODED_BYTES,
-    });
     let merge = GroupMerge::new(
         store,
+        index_memo,
         namespace_id,
         group,
         placement,
         frozen_floor_seq,
         policy,
         runs.to_vec(),
-        &probe_cache,
-        // The window is capped by the step's budgets, so the set of below-floor
-        // unbound generations is capped with it and costs no store reads.
-        ReverseBindResolution::CollectedUnbinds(BTreeSet::new()),
         // A step-contained merge is bounded by the step's input budgets and
         // ends in the step's own publication, so it has nothing to report
         // progress about.
@@ -271,22 +244,15 @@ pub(super) async fn run_metadata_compaction<S: ObjectStore + ?Sized>(
     policy: MetadataLsmPolicy,
     cancellation: &MetadataCompactionCancellation,
 ) -> Result<std::result::Result<MetadataMergeResult, MetadataCompactionJobOutcome>> {
-    let probe_cache = MetadataSegmentCache::new(MetadataSegmentCacheConfig {
-        max_decoded_bytes: PROBE_CACHE_DECODED_BYTES,
-    });
     let merge = GroupMerge::new(
         segments.store,
+        None,
         namespace_id,
         spec.group,
         spec.placement,
         spec.frozen_floor_seq,
         policy,
         resolve_input_runs(segments, spec)?,
-        &probe_cache,
-        // A job has no bound on the group it rebuilds, so it reads the
-        // input per reverse row rather than holding a set that would follow
-        // the group's size.
-        ReverseBindResolution::PointProbeInput,
         Some(ProgressReporter::new(spec.input_rows())),
     );
     let mut control = MergeControl {
@@ -593,18 +559,6 @@ pub(super) fn input_segment_keys<S: ObjectStore + ?Sized>(
     Some(keys)
 }
 
-/// Source used to determine whether a reverse bind survives the frozen floor.
-///
-/// Reverse binds and unbinds have different key prefixes. Background jobs use
-/// point reads to keep memory bounded. Step-contained merges reuse a bounded
-/// set collected while processing forward binds.
-enum ReverseBindResolution {
-    /// Probe the input for each reverse row, with a bounded cache.
-    PointProbeInput,
-    /// Use unbound generations collected from the bounded forward-bind input.
-    CollectedUnbinds(BTreeSet<BindingIdentity>),
-}
-
 /// One set of families the engine merges and judges together, and how it
 /// groups their rows while doing it.
 pub(super) struct RetentionCluster {
@@ -613,27 +567,16 @@ pub(super) struct RetentionCluster {
     pub(super) rule: RetentionRule,
 }
 
-/// The bindings group merges its two forward families together, because an
-/// unbind retires the bind of its generation. The reverse index is keyed by
-/// child, so it shares no group with the rows it indexes and streams on its
-/// own.
-///
-/// The forward cluster is first, and must stay first: a merge resolving
-/// reverse rows from [`ReverseBindResolution::CollectedUnbinds`] fills that set
-/// while streaming the unbind family here.
 const BINDINGS_CLUSTERS: [RetentionCluster; 2] = [
     RetentionCluster {
-        families: &[
-            MetadataRowFamily::DirentryBinds,
-            MetadataRowFamily::DirentryUnbinds,
-        ],
-        locality: LocalityGrouping::LeadingKeyComponents(4),
-        rule: RetentionRule::ForwardBindings,
+        families: &[MetadataRowFamily::DirentryBinds],
+        locality: LocalityGrouping::LeadingKeyComponents(2),
+        rule: RetentionRule::Bindings,
     },
     RetentionCluster {
         families: &[MetadataRowFamily::DirentryChildBinds],
-        locality: LocalityGrouping::Row,
-        rule: RetentionRule::ReverseBindProbe,
+        locality: LocalityGrouping::LeadingKeyComponents(1),
+        rule: RetentionRule::Bindings,
     },
 ];
 
@@ -697,14 +640,14 @@ pub(super) fn retention_clusters(group: MetadataFamilyGroup) -> &'static [Retent
 /// Merging one family group: the shared engine, whatever is driving it.
 struct GroupMerge<'a, S: ObjectStore + ?Sized> {
     store: &'a S,
+    index_memo: Option<&'a SessionBlockMemo>,
     namespace_id: &'a NamespaceId,
     group: MetadataFamilyGroup,
     /// Where the output stands in the group and whether rows may be dropped.
     placement: MergePlacement,
     frozen_floor_seq: ChangeSeq,
     policy: MetadataLsmPolicy,
-    input: VerifiedMetadataSegments<'a, S>,
-    reverse_binds: ReverseBindResolution,
+    input_runs: Vec<MetadataRunManifest>,
     result: MetadataMergeResult,
     canonical_digest: RowDigest,
     index_digest: RowDigest,
@@ -749,14 +692,13 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
     )]
     fn new(
         store: &'a S,
+        index_memo: Option<&'a SessionBlockMemo>,
         namespace_id: &'a NamespaceId,
         group: MetadataFamilyGroup,
         placement: MergePlacement,
         frozen_floor_seq: ChangeSeq,
         policy: MetadataLsmPolicy,
         input_runs: Vec<MetadataRunManifest>,
-        probe_cache: &'a MetadataSegmentCache,
-        reverse_binds: ReverseBindResolution,
         progress: Option<ProgressReporter>,
     ) -> Self {
         let input_bytes = input_runs
@@ -766,13 +708,13 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
             .sum();
         Self {
             store,
+            index_memo,
             namespace_id,
             group,
             placement,
             frozen_floor_seq,
             policy,
-            input: VerifiedMetadataSegments::from_runs(store, probe_cache, input_runs),
-            reverse_binds,
+            input_runs,
             result: MetadataMergeResult {
                 input_bytes,
                 ..MetadataMergeResult::default()
@@ -857,7 +799,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
         // One iterator per input run and family. The planner caps run fan-in;
         // each iterator advances through that run's segments sequentially.
         let mut iterators = Vec::new();
-        for run in self.input.scan_runs.iter() {
+        for run in self.input_runs.iter() {
             for family in cluster.families {
                 let segments: Vec<MetadataSegmentRef> = group_run_descriptors(run, self.group)
                     .filter(|descriptor| descriptor.family == *family)
@@ -918,17 +860,10 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
             let row = iterators[next].take_head();
             self.result.rows_read += 1;
             self.report_progress();
-            self.collect_unbinding(&row);
-            let kept = match rule {
-                // The reverse index is the one family no grouping can decide,
-                // so the merge reads the input for it rather than holding
-                // state.
-                RetentionRule::ReverseBindProbe => self
-                    .reverse_bind_survives(&row)
-                    .await?
-                    .then_some((family, row)),
-                _ => operator.push(family, row, floor_seq)?,
-            };
+            if let Some(kept) = operator.take_floor_value_before(&row, floor_seq) {
+                self.write_row(kept, &mut writers).await?;
+            }
+            let kept = operator.push(family, row, floor_seq)?;
             self.result.peak_operator_rows =
                 self.result.peak_operator_rows.max(operator.held_rows());
             if let Some(kept) = kept {
@@ -981,8 +916,11 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
     /// Fills every iterator that has run out of rows and records what the merge
     /// then holds.
     async fn refill(&mut self, iterators: &mut [MetadataSegmentRowIterator]) -> Result<()> {
-        let resident =
-            refill_iterators(&MetadataSegmentBlockLoader::new(self.store), iterators).await?;
+        let resident = refill_iterators(
+            &MetadataSegmentBlockLoader::new(self.store, self.index_memo),
+            iterators,
+        )
+        .await?;
         self.result.peak_resident_blocks = self.result.peak_resident_blocks.max(resident);
         Ok(())
     }
@@ -1008,107 +946,6 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
             _ => writer.push(row, &mut |_| {})?,
         }
         writer.roll_full_segments(self.store, self.policy).await
-    }
-
-    /// Remembers a below-floor unbind for the reverse pass, when the merge is
-    /// resolving reverse rows from what it streamed rather than from the store.
-    ///
-    /// Every unbind row of the input goes through here, because the forward
-    /// cluster streams the whole unbind family before the reverse cluster
-    /// starts. That is what makes the collected set answer exactly what a
-    /// point read into the same input would answer.
-    fn collect_unbinding(&mut self, row: &MetadataRow) {
-        let ReverseBindResolution::CollectedUnbinds(unbound_at_floor) = &mut self.reverse_binds
-        else {
-            return;
-        };
-        if let Some(generation) = unbinding_at_or_below_floor(row, self.frozen_floor_seq) {
-            unbound_at_floor.insert(generation);
-            self.result.collected_unbind_generations = unbound_at_floor.len();
-        }
-    }
-
-    /// Whether one reverse bind row survives the frozen floor.
-    ///
-    /// The reverse index is keyed by child and the unbind family by parent, so
-    /// no grouping of the merged stream can hold a reverse row together with
-    /// the unbind that retires it. Both resolutions close that the same way:
-    /// they run [`bind_survives_frozen_floor`] against the generations
-    /// [`unbinding_at_or_below_floor`] retired, out of the same immutable
-    /// input and against the same frozen floor as the forward pass. So the
-    /// two bind families drop in lockstep — which they must, because the format
-    /// gives every bind row exactly one reverse row and a run whose two counts
-    /// disagree does not load.
-    ///
-    /// They differ only in where the set comes from
-    /// ([`ReverseBindResolution`]). A collected set answers with no read at
-    /// all. A probe reads the unbinds of one binding, and only rows at or
-    /// below the floor cost one: a bind above the floor survives whatever
-    /// retired it later.
-    async fn reverse_bind_survives(&mut self, row: &MetadataRow) -> Result<bool> {
-        let MetadataRow::DirentryBind(crate::metadata::DirentryBindRecord {
-            parent_inode_id,
-            name_key,
-            bind_seq,
-            bind_delta_index,
-            ..
-        }) = row
-        else {
-            return Ok(true);
-        };
-        if *bind_seq > self.frozen_floor_seq {
-            return Ok(true);
-        }
-        if let ReverseBindResolution::CollectedUnbinds(unbound_at_floor) = &self.reverse_binds {
-            return Ok(bind_survives_frozen_floor(
-                row,
-                self.frozen_floor_seq,
-                unbound_at_floor,
-            ));
-        }
-        let unbind_rows = self
-            .read_unbinds_of_binding(
-                &lookup_keys::direntry_unbind_binding_prefix(
-                    *parent_inode_id,
-                    name_key.as_str(),
-                    *bind_seq,
-                    *bind_delta_index,
-                ),
-                &lookup_keys::direntry_unbind_probe(*parent_inode_id, name_key.as_str()),
-            )
-            .await?;
-        self.result.unbind_probes += 1;
-        let unbound_at_floor = unbindings_at_or_below_floor(&unbind_rows, self.frozen_floor_seq);
-        Ok(bind_survives_frozen_floor(
-            row,
-            self.frozen_floor_seq,
-            &unbound_at_floor,
-        ))
-    }
-
-    /// One point read into the input's unbind family.
-    ///
-    /// The unbind key grammar leads with the binding a row names, so the
-    /// prefix selects the unbinds of that one binding and nothing else. The
-    /// bloom filter is keyed by parent and name, so a binding no operation
-    /// ever retired misses it outright and costs no index or data fetch.
-    /// Decoded sections land in the merge's own bounded cache, and the per-read
-    /// memo is dropped with the read, so what these reads hold is the cache's
-    /// byte budget however many of them the merge makes.
-    async fn read_unbinds_of_binding(
-        &self,
-        prefix: &str,
-        filter_probe: &str,
-    ) -> Result<Vec<MetadataRow>> {
-        self.input
-            .scan_prefix_for_lookup(
-                MetadataRowFamily::DirentryUnbinds,
-                prefix,
-                filter_probe,
-                Readahead::Disabled,
-            )
-            .await
-            .map_err(manifest_load_failure)
     }
 
     /// Refuses to hand back a run whose secondary index does not hold the same
@@ -1229,26 +1066,26 @@ mod tests {
     use loonfs_api::{ChangeSeq, DisplayName, InodeId, NameKey};
 
     fn bind(parent: u64, name: &str, bind_seq: u64) -> MetadataRow {
-        MetadataRow::DirentryBind(crate::metadata::DirentryBindRecord {
+        MetadataRow::DirentryBinding(crate::metadata::DirentryBindingRecord {
             parent_inode_id: InodeId(parent),
             name_key: NameKey::parse(name).expect("name key"),
-            display_name: DisplayName::parse(name).expect("display name"),
+            state: loonfs_api::wire::manifest::DirentryBindingState::Bound {
+                display_name: DisplayName::parse(name).expect("display name"),
+            },
             child_inode_id: InodeId(42),
-            bind_seq: ChangeSeq(bind_seq),
-            bind_delta_index: 0,
+            committed_seq: ChangeSeq(bind_seq),
+            delta_index: 0,
         })
     }
 
     fn unbind(parent: u64, name: &str, bind_seq: u64) -> MetadataRow {
-        MetadataRow::DirentryUnbind(crate::metadata::DirentryUnbindRecord {
+        MetadataRow::DirentryBinding(crate::metadata::DirentryBindingRecord {
             parent_inode_id: InodeId(parent),
             name_key: NameKey::parse(name).expect("name key"),
-            display_name: DisplayName::parse(name).expect("display name"),
             child_inode_id: InodeId(42),
-            bind_seq: ChangeSeq(bind_seq),
-            bind_delta_index: 0,
-            unbind_seq: ChangeSeq(bind_seq + 1),
-            unbind_delta_index: 0,
+            committed_seq: ChangeSeq(bind_seq + 1),
+            delta_index: 0,
+            state: loonfs_api::wire::manifest::DirentryBindingState::Unbound,
         })
     }
 

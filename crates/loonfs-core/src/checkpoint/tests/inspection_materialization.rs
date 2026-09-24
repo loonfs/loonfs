@@ -233,15 +233,12 @@ pub(crate) fn append_rows_to_metadata(
         match family {
             MetadataRowFamily::Inodes => metadata_state
                 .push_inode(row_decode::inode_from_manifest_row(row.clone()).map_err(mismatch)?),
-            MetadataRowFamily::DirentryBinds => metadata_state.push_direntry_bind(
-                row_decode::direntry_bind_from_manifest_row(row.clone()).map_err(mismatch)?,
+            MetadataRowFamily::DirentryBinds => metadata_state.push_direntry_binding(
+                row_decode::direntry_binding_from_manifest_row(row.clone()).map_err(mismatch)?,
             ),
             MetadataRowFamily::DirentryChildBinds => {
-                row_decode::direntry_bind_from_manifest_row(row.clone()).map_err(mismatch)?;
+                row_decode::direntry_binding_from_manifest_row(row.clone()).map_err(mismatch)?;
             }
-            MetadataRowFamily::DirentryUnbinds => metadata_state.push_direntry_unbind(
-                row_decode::direntry_unbind_from_manifest_row(row.clone()).map_err(mismatch)?,
-            ),
             MetadataRowFamily::Revisions => metadata_state.push_revision(
                 row_decode::revision_from_manifest_row(row.clone()).map_err(mismatch)?,
             ),

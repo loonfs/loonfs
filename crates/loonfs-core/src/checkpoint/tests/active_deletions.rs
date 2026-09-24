@@ -13,14 +13,14 @@ use crate::path::read::load_current_metadata_view;
 use crate::{NamespaceEngine, RuntimeReadContext};
 use loonfs_api::v0::DirectoryBinding;
 use loonfs_api::wire::manifest::{
-    ActiveDeletionRowAction, DeletedBinding, InodeRecord, TombstoneGeneration,
+    ActiveDeletionRowAction, DeletedBinding, DeltaPosition, InodeRecord,
 };
 use loonfs_api::{AttributeInclusion, InodeKind};
 use loonfs_api::{DisplayName, Page, PageRequest, TrashEntry, TrashPageCursor};
 use std::sync::Arc;
 
-fn generation(seq: u64) -> TombstoneGeneration {
-    TombstoneGeneration {
+fn generation(seq: u64) -> DeltaPosition {
+    DeltaPosition {
         seq: ChangeSeq(seq),
         delta_index: 0,
     }

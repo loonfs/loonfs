@@ -26,8 +26,8 @@ use loonfs_api::wire::control::{
 use loonfs_api::wire::envelope::EnvelopeCodecError;
 use loonfs_api::wire::manifest::{
     decode_namespace_manifest_json, encode_namespace_manifest_json, ActiveDeletionRowAction,
-    DeletedBinding, MetadataRow, MetadataRowFamily, MetadataRunRef, MetadataSegmentRef,
-    NamespaceAccess, NamespaceManifestPayload, RunTier, TombstoneGeneration, TombstoneRowAction,
+    DeletedBinding, DeltaPosition, MetadataRow, MetadataRowFamily, MetadataRunRef,
+    MetadataSegmentRef, NamespaceAccess, NamespaceManifestPayload, RunTier, TombstoneRowAction,
 };
 use loonfs_api::wire::wal::{
     decode_wal_segment_envelope_zstd, encode_wal_segment_envelope_zstd, WalCommitDelta,
@@ -1225,7 +1225,6 @@ fn metadata_row_family_wire_tags_are_pinned() {
         MetadataRowFamily::Inodes,
         MetadataRowFamily::DirentryBinds,
         MetadataRowFamily::DirentryChildBinds,
-        MetadataRowFamily::DirentryUnbinds,
         MetadataRowFamily::Revisions,
         MetadataRowFamily::Tombstones,
         MetadataRowFamily::ActiveDeletions,
@@ -1244,7 +1243,6 @@ fn metadata_row_family_wire_tags_are_pinned() {
             "\"inodes\"",
             "\"direntry_binds\"",
             "\"direntry_child_binds\"",
-            "\"direntry_unbinds\"",
             "\"revisions\"",
             "\"tombstones\"",
             "\"active_deletions\"",
@@ -1479,7 +1477,7 @@ fn wal_decode_rejects_unknown_fields_inside_tombstone_deltas() {
             delta: WalDelta::RevokeSubtreeTombstone {
                 delta_index: 1,
                 root_inode_id: InodeId(9),
-                target: TombstoneGeneration {
+                target: DeltaPosition {
                     seq: ChangeSeq(1),
                     delta_index: 0,
                 },
@@ -1720,7 +1718,7 @@ fn wal_delta_wire_tags_match_spec_names() {
             serde_json::to_value(WalDelta::RevokeSubtreeTombstone {
                 delta_index: 0,
                 root_inode_id: InodeId(2),
-                target: TombstoneGeneration {
+                target: DeltaPosition {
                     seq: ChangeSeq(1),
                     delta_index: 1,
                 },
@@ -1761,7 +1759,7 @@ fn wal_delta_wire_tags_match_spec_names() {
 fn sample_tombstone_set_row() -> MetadataRow {
     MetadataRow::Tombstone(loonfs_api::wire::manifest::SubtreeTombstoneRecord {
         root_inode_id: InodeId(5),
-        generation: TombstoneGeneration {
+        generation: DeltaPosition {
             seq: ChangeSeq(8),
             delta_index: 0,
         },
@@ -1783,13 +1781,13 @@ fn sample_tombstone_set_row() -> MetadataRow {
 fn sample_tombstone_revoke_row() -> MetadataRow {
     MetadataRow::Tombstone(loonfs_api::wire::manifest::SubtreeTombstoneRecord {
         root_inode_id: InodeId(5),
-        generation: TombstoneGeneration {
+        generation: DeltaPosition {
             seq: ChangeSeq(9),
             delta_index: 0,
         },
         commit_id: commit_id(),
         action: TombstoneRowAction::Revoke {
-            target: TombstoneGeneration {
+            target: DeltaPosition {
                 seq: ChangeSeq(8),
                 delta_index: 0,
             },
@@ -2000,33 +1998,36 @@ fn sample_segment_blocks() -> loonfs_api::wire::sst_blocks::BuiltSegmentBlocks {
         sample_cleared_attributes_row(),
         sample_populated_attributes_row(),
         sample_commit_receipt_row(),
-        MetadataRow::DirentryBind(loonfs_api::wire::manifest::DirentryBindRecord {
+        MetadataRow::DirentryBinding(loonfs_api::wire::manifest::DirentryBindingRecord {
             parent_inode_id: InodeId(1),
             name_key: name_key("docs"),
-            display_name: loonfs_api::DisplayName::parse("docs").expect("valid display name"),
+            state: loonfs_api::wire::manifest::DirentryBindingState::Bound {
+                display_name: loonfs_api::DisplayName::parse("docs").expect("valid display name"),
+            },
             child_inode_id: InodeId(2),
-            bind_seq: ChangeSeq(3),
-            bind_delta_index: 0,
+            committed_seq: ChangeSeq(3),
+            delta_index: 0,
         }),
-        MetadataRow::DirentryBind(loonfs_api::wire::manifest::DirentryBindRecord {
+        MetadataRow::DirentryBinding(loonfs_api::wire::manifest::DirentryBindingRecord {
             parent_inode_id: InodeId(1),
             name_key: name_key("docs-archive"),
-            display_name: loonfs_api::DisplayName::parse("docs-archive")
-                .expect("valid display name"),
+            state: loonfs_api::wire::manifest::DirentryBindingState::Bound {
+                display_name: loonfs_api::DisplayName::parse("docs-archive")
+                    .expect("valid display name"),
+            },
             child_inode_id: InodeId(5),
-            bind_seq: ChangeSeq(6),
-            bind_delta_index: 0,
+            committed_seq: ChangeSeq(6),
+            delta_index: 0,
         }),
-        MetadataRow::DirentryUnbind(loonfs_api::wire::manifest::DirentryUnbindRecord {
+        MetadataRow::DirentryBinding(loonfs_api::wire::manifest::DirentryBindingRecord {
             parent_inode_id: InodeId(1),
             name_key: name_key("docs-archive"),
-            display_name: loonfs_api::DisplayName::parse("Docs-Archive")
-                .expect("valid display name"),
             child_inode_id: InodeId(5),
-            bind_seq: ChangeSeq(6),
-            bind_delta_index: 0,
-            unbind_seq: ChangeSeq(8),
-            unbind_delta_index: 0,
+
+            committed_seq: ChangeSeq(8),
+            delta_index: 0,
+
+            state: loonfs_api::wire::manifest::DirentryBindingState::Unbound,
         }),
     ];
     rows.extend(sample_inode_rows());
@@ -2860,4 +2861,81 @@ fn namespace_manifest_lifecycle_variants_match_golden_bytes() {
             payload
         );
     }
+}
+
+fn sample_binding_rows() -> Vec<MetadataRow> {
+    use loonfs_api::wire::manifest::{DirentryBindingRecord, DirentryBindingState};
+    [
+        DirentryBindingState::Bound {
+            display_name: loonfs_api::DisplayName::parse("Report.txt").expect("display name"),
+        },
+        DirentryBindingState::Unbound,
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(delta_index, state)| {
+        MetadataRow::DirentryBinding(DirentryBindingRecord {
+            parent_inode_id: InodeId(1),
+            name_key: name_key("report.txt"),
+            child_inode_id: InodeId(2),
+            committed_seq: ChangeSeq(3),
+            delta_index: u32::try_from(delta_index).expect("two states fit in u32"),
+            state,
+        })
+    })
+    .collect()
+}
+
+#[test]
+fn binding_index_blocks_pin_both_slot_values_and_key_orders() {
+    use loonfs_api::wire::sst_blocks::SegmentBlocksBuilder;
+    for (family, fixture) in [
+        (
+            MetadataRowFamily::DirentryBinds,
+            "sst_block_data_direntry_binds.v1.bin",
+        ),
+        (
+            MetadataRowFamily::DirentryChildBinds,
+            "sst_block_data_direntry_child_binds.v1.bin",
+        ),
+    ] {
+        let rows = sample_binding_rows();
+        let mut builder =
+            SegmentBlocksBuilder::new(std::num::NonZeroUsize::new(4096).expect("nonzero target"));
+        for row in &rows {
+            builder
+                .push(
+                    &row.row_key_for_family(family),
+                    &row.filter_key_for_family(family),
+                    row,
+                )
+                .expect("push row");
+        }
+        let built = builder.finish().expect("finish block");
+        let index = sample_segment_index(&built);
+        assert_eq!(index.len(), 1);
+        assert_matches_golden(
+            fixture,
+            &unzstd(segment_section(&built.bytes, &index[0].block)),
+        );
+        let decoded = decode_golden_data_block(fixture);
+        assert_eq!(decoded.rows, rows);
+        assert_eq!(
+            decoded.row_keys,
+            rows.iter()
+                .map(|row| row.row_key_for_family(family))
+                .collect::<Vec<_>>()
+        );
+    }
+}
+
+#[test]
+fn mixed_family_block_pins_binding_values_beside_other_rows() {
+    let mut rows = sample_binding_rows();
+    rows.extend(sample_inode_rows());
+    rows.extend(sample_revision_rows());
+    rows.sort_by_key(MetadataRow::row_key);
+    let fixture = "sst_block_data_mixed.v1.bin";
+    assert_rows_match_single_block_golden(fixture, &rows);
+    assert_eq!(decode_golden_data_block(fixture).rows, rows);
 }

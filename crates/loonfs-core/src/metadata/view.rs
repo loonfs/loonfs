@@ -5,15 +5,15 @@ use super::durable_cache::{
     DurableVisibilityCache, DurableVisibilityCacheInner, ParentNameCacheKey, SharedRows,
 };
 use super::manifest_index;
-use super::view_session::{latest_visible_bind, LeafRevisionPrefetch};
-use super::visibility::{self, BindingIdentity, MetadataVisibilityReads};
+use super::view_session::{latest_visible_binding, LeafRevisionPrefetch};
+use super::visibility::{self, MetadataVisibilityReads};
 use crate::checkpoint::VerifiedMetadataSegments;
 use crate::error::CoreError;
 use crate::metadata::{
-    active_deletion_from_tombstone, recoverable_deletion_from_active_record,
-    unbind_matches_binding, AccessRevisionRecord, ActiveDeletionRecord, AttributesRevisionRecord,
-    CommitReceiptRecord, DirentryBindRecord, DirentryUnbindRecord, InodeRecord, MetadataState,
-    RecoverableDeletion, ResolvedVisiblePath, RevisionRecord, SubtreeTombstoneRecord,
+    active_deletion_from_tombstone, recoverable_deletion_from_active_record, AccessRevisionRecord,
+    ActiveDeletionRecord, AttributesRevisionRecord, CommitReceiptRecord, DirentryBindingRecord,
+    InodeRecord, MetadataState, RecoverableDeletion, ResolvedVisiblePath, RevisionRecord,
+    SubtreeTombstoneRecord,
 };
 use crate::namespace::state::NamespaceReadState;
 use loonfs_api::wire::manifest::lookup_keys;
@@ -301,7 +301,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         &self,
         parent_inode_id: InodeId,
         name_key: &NameKey,
-    ) -> Result<Option<DirentryBindRecord>, CoreError> {
+    ) -> Result<Option<DirentryBindingRecord>, CoreError> {
         visibility::visible_child(&mut self.reads(), parent_inode_id, name_key).await
     }
 
@@ -628,20 +628,16 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     pub(crate) async fn current_parent_binding_for_child(
         &self,
         child_inode_id: InodeId,
-    ) -> Result<Option<DirentryBindRecord>, CoreError> {
+    ) -> Result<Option<DirentryBindingRecord>, CoreError> {
         visibility::current_parent_binding_for_child(&mut self.reads(), child_inode_id).await
     }
 
-    /// Latest binding whose child is `child_inode_id` at the visible seq,
-    /// regardless of whether it has since been unbound. The
-    /// [`MetadataVisibilityReads`] primitive backing
-    /// [`Self::current_parent_binding_for_child`]'s canonical rule.
     async fn latest_parent_binding_for_child(
         &self,
         child_inode_id: InodeId,
-    ) -> Result<Option<DirentryBindRecord>, CoreError> {
+    ) -> Result<Option<DirentryBindingRecord>, CoreError> {
         let bindings = self.direntry_binds_for_child(child_inode_id).await?;
-        let latest = latest_visible_bind(bindings.iter(), self.visible_seq());
+        let latest = latest_visible_binding(bindings.iter(), self.visible_seq());
         Ok(latest)
     }
 
@@ -665,23 +661,12 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         &self,
         parent_inode_id: InodeId,
         name_key: &NameKey,
-    ) -> Result<Option<DirentryBindRecord>, CoreError> {
+    ) -> Result<Option<DirentryBindingRecord>, CoreError> {
         let bindings = self
             .direntry_binds_for_parent_name(parent_inode_id, name_key)
             .await?;
-        let latest = latest_visible_bind(bindings.iter(), self.visible_seq());
+        let latest = latest_visible_binding(bindings.iter(), self.visible_seq());
         Ok(latest)
-    }
-
-    pub(crate) async fn is_direntry_unbound(
-        &self,
-        direntry: &DirentryBindRecord,
-    ) -> Result<bool, CoreError> {
-        let unbinds = self.direntry_unbinds_for_binding(direntry).await?;
-        let unbound = unbinds
-            .iter()
-            .any(|unbind| unbind.unbind_seq <= self.visible_seq());
-        Ok(unbound)
     }
 
     pub(crate) async fn active_subtree_tombstone(
@@ -700,7 +685,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         &self,
         parent_inode_id: InodeId,
         name_key: &NameKey,
-    ) -> Result<SharedRows<DirentryBindRecord>, CoreError> {
+    ) -> Result<SharedRows<DirentryBindingRecord>, CoreError> {
         let cache_key = ParentNameCacheKey {
             parent_inode_id,
             name_key: name_key.clone(),
@@ -731,7 +716,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     pub(super) async fn direntry_binds_for_child(
         &self,
         child_inode_id: InodeId,
-    ) -> Result<SharedRows<DirentryBindRecord>, CoreError> {
+    ) -> Result<SharedRows<DirentryBindingRecord>, CoreError> {
         self.shared_rows(
             |inner| &mut inner.binds_for_child,
             child_inode_id,
@@ -744,27 +729,6 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
             }),
             MetadataState::direntry_binds,
             |direntry| direntry.child_inode_id == child_inode_id,
-        )
-        .await
-    }
-
-    pub(super) async fn direntry_unbinds_for_binding(
-        &self,
-        direntry: &DirentryBindRecord,
-    ) -> Result<SharedRows<DirentryUnbindRecord>, CoreError> {
-        let cache_key = BindingIdentity::from(direntry);
-        self.shared_rows(
-            |inner| &mut inner.unbinds_for_binding,
-            cache_key,
-            Box::pin(async {
-                if let Some(segments) = self.manifest_segments() {
-                    manifest_index::direntry_unbinds_for_binding(segments, direntry).await
-                } else {
-                    Ok(Vec::new())
-                }
-            }),
-            MetadataState::direntry_unbinds,
-            |unbind| unbind_matches_binding(unbind, direntry),
         )
         .await
     }
@@ -936,41 +900,6 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         )
         .await
     }
-
-    /// Every unbind for `parent_inode_id` with a name key in
-    /// `[first_name_key, last_name_key]`, merged across manifest segments and
-    /// row states. Complete over the range: callers treat absence as "no
-    /// unbind exists".
-    pub(super) async fn direntry_unbinds_for_parent_name_range(
-        &self,
-        parent_inode_id: InodeId,
-        first_name_key: &NameKey,
-        last_name_key: &NameKey,
-    ) -> Result<Vec<DirentryUnbindRecord>, CoreError> {
-        let mut unbinds = if let Some(segments) = self.manifest_segments() {
-            manifest_index::direntry_unbinds_for_parent_name_range(
-                segments,
-                parent_inode_id,
-                first_name_key,
-                last_name_key,
-            )
-            .await?
-        } else {
-            Vec::new()
-        };
-        unbinds.extend(self.row_states().flat_map(|state| {
-            state
-                .direntry_unbinds()
-                .iter()
-                .filter(move |unbind| {
-                    unbind.parent_inode_id == parent_inode_id
-                        && unbind.name_key >= *first_name_key
-                        && unbind.name_key <= *last_name_key
-                })
-                .cloned()
-        }));
-        Ok(unbinds)
-    }
 }
 
 /// [`MetadataView`] as a [`MetadataVisibilityReads`] source: it answers only
@@ -989,18 +918,18 @@ impl<S: ObjectStore + ?Sized> MetadataVisibilityReads for MetadataViewReads<'_, 
         self.view.inode_at_seq(inode_id).await
     }
 
-    async fn find_latest_bound_child(
+    async fn find_latest_slot_binding(
         &mut self,
         parent_inode_id: InodeId,
         name_key: &NameKey,
-    ) -> Result<Option<DirentryBindRecord>, Self::Error> {
+    ) -> Result<Option<DirentryBindingRecord>, Self::Error> {
         self.view.bound_child(parent_inode_id, name_key).await
     }
 
     async fn find_latest_parent_binding_for_child(
         &mut self,
         child_inode_id: InodeId,
-    ) -> Result<Option<DirentryBindRecord>, Self::Error> {
+    ) -> Result<Option<DirentryBindingRecord>, Self::Error> {
         self.view
             .latest_parent_binding_for_child(child_inode_id)
             .await
@@ -1011,13 +940,6 @@ impl<S: ObjectStore + ?Sized> MetadataVisibilityReads for MetadataViewReads<'_, 
         root_inode_id: InodeId,
     ) -> Result<Option<SubtreeTombstoneRecord>, Self::Error> {
         self.view.active_subtree_tombstone(root_inode_id).await
-    }
-
-    async fn is_binding_unbound(
-        &mut self,
-        direntry: &DirentryBindRecord,
-    ) -> Result<bool, Self::Error> {
-        self.view.is_direntry_unbound(direntry).await
     }
 
     async fn find_access_row(

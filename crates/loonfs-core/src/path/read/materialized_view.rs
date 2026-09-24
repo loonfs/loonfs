@@ -12,8 +12,8 @@ use crate::checkpoint::{
 use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, MetadataViewError, Result};
 use crate::metadata::{
-    binding_generation, LeafRevisionPrefetch, MetadataView, MetadataViewSession,
-    ResolvedVisiblePath, RevisionRecord, VisibleChildEntry, METADATA_VIEW_SESSION_COUNTER_FIELDS,
+    LeafRevisionPrefetch, MetadataView, MetadataViewSession, ResolvedVisiblePath, RevisionRecord,
+    VisibleChildEntry, METADATA_VIEW_SESSION_COUNTER_FIELDS,
 };
 use crate::namespace::basis::MetadataBasis;
 #[cfg(test)]
@@ -1018,7 +1018,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             .transpose()?;
         let binding_generation = resolved
             .binding_generation
-            .map(|generation| generation.encode(&self.namespace_id));
+            .map(|position| crate::binding_generation::encode(position, &self.namespace_id));
         Ok(PathEntry {
             namespace_id: self.namespace_id.clone(),
             path: absolute_path,
@@ -1043,7 +1043,12 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
     ) -> Result<PathEntry> {
         let child_path = AbsolutePath::parse(&resolved_dir.absolute_path)
             .map_err(map_path_error_to_core)?
-            .join(&child.binding.display_name);
+            .join(
+                child
+                    .binding
+                    .display_name()
+                    .expect("visible binding should be bound"),
+            );
         self.build_authoritative_path_entry_with_session(
             session,
             &ResolvedVisiblePath {
@@ -1053,8 +1058,12 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 created_by: child.inode.committed_by,
                 created_at_ms: child.inode.committed_at_ms,
                 parent_inode_id: Some(child.binding.parent_inode_id),
-                display_name: child.binding.display_name.to_string(),
-                binding_generation: Some(binding_generation(&child.binding)),
+                display_name: child
+                    .binding
+                    .display_name()
+                    .expect("visible binding should be bound")
+                    .to_string(),
+                binding_generation: Some(child.binding.position()),
             },
             attributes,
         )

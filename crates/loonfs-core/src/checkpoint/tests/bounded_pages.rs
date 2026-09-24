@@ -21,13 +21,15 @@ fn rows(start: usize, count: usize, generation: u64) -> Vec<MetadataRow> {
                 })
                 .collect();
             let name = format!("file-{index:06}-{suffix}");
-            MetadataRow::DirentryBind(crate::metadata::DirentryBindRecord {
+            MetadataRow::DirentryBinding(crate::metadata::DirentryBindingRecord {
                 parent_inode_id: InodeId(1),
                 name_key: NameKey::parse(&name).expect("name"),
-                display_name: loonfs_api::DisplayName::parse(&name).expect("display name"),
+                state: loonfs_api::wire::manifest::DirentryBindingState::Bound {
+                    display_name: loonfs_api::DisplayName::parse(&name).expect("display name"),
+                },
                 child_inode_id: InodeId(index as u64 + 2),
-                bind_seq: ChangeSeq(generation),
-                bind_delta_index: 0,
+                committed_seq: ChangeSeq(generation),
+                delta_index: 0,
             })
         })
         .collect()

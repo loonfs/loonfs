@@ -377,16 +377,13 @@ async fn a_base_rebuild_drops_what_the_floor_covers_and_keeps_what_it_does_not()
     );
     assert!(!binds.iter().any(|row| matches!(
         row,
-        MetadataRow::DirentryBind (crate::metadata::DirentryBindRecord { display_name, .. }) if display_name.as_str() == "tmp.txt"
+        MetadataRow::DirentryBinding (crate::metadata::DirentryBindingRecord { state: loonfs_api::wire::manifest::DirentryBindingState::Bound { display_name }, .. }) if display_name.as_str() == "tmp.txt"
     )));
-    let unbinds = manifest_rows_for_family(
-        &materialized.metadata_state,
-        ApiMetadataRowFamily::DirentryUnbinds,
-    );
-    assert!(
-        unbinds.is_empty(),
-        "spent unbind markers survived: {unbinds:?}"
-    );
+    assert!(materialized
+        .metadata_state
+        .direntry_binds()
+        .iter()
+        .all(|binding| binding.is_bound()));
 
     let restored = restore_file_revision(
         &store,
@@ -404,25 +401,25 @@ async fn a_base_rebuild_drops_what_the_floor_covers_and_keeps_what_it_does_not()
 fn drop_pass_keeps_the_floor_visible_binding_across_a_later_rename() {
     use std::collections::BTreeMap;
     let bind = |seq: u64, delta: u32| {
-        MetadataRow::DirentryBind(crate::metadata::DirentryBindRecord {
+        MetadataRow::DirentryBinding(crate::metadata::DirentryBindingRecord {
             parent_inode_id: InodeId(1),
             name_key: NameKey::parse("docs").expect("valid name key"),
-            display_name: loonfs_api::DisplayName::parse("docs").expect("valid display name"),
+            state: loonfs_api::wire::manifest::DirentryBindingState::Bound {
+                display_name: loonfs_api::DisplayName::parse("docs").expect("valid display name"),
+            },
             child_inode_id: InodeId(2),
-            bind_seq: ChangeSeq(seq),
-            bind_delta_index: delta,
+            committed_seq: ChangeSeq(seq),
+            delta_index: delta,
         })
     };
-    let unbind = |bind_seq: u64, delta: u32, unbind_seq: u64| {
-        MetadataRow::DirentryUnbind(crate::metadata::DirentryUnbindRecord {
+    let unbind = |unbind_seq: u64| {
+        MetadataRow::DirentryBinding(crate::metadata::DirentryBindingRecord {
             parent_inode_id: InodeId(1),
             name_key: NameKey::parse("docs").expect("valid name key"),
-            display_name: loonfs_api::DisplayName::parse("docs").expect("valid display name"),
             child_inode_id: InodeId(2),
-            bind_seq: ChangeSeq(bind_seq),
-            bind_delta_index: delta,
-            unbind_seq: ChangeSeq(unbind_seq),
-            unbind_delta_index: 0,
+            committed_seq: ChangeSeq(unbind_seq),
+            delta_index: 0,
+            state: loonfs_api::wire::manifest::DirentryBindingState::Unbound,
         })
     };
     let mut rows = BTreeMap::new();
@@ -430,51 +427,51 @@ fn drop_pass_keeps_the_floor_visible_binding_across_a_later_rename() {
     // it happens above the floor, so bind, unbind, and replacement all stay.
     rows.insert(
         ApiMetadataRowFamily::DirentryBinds,
-        vec![bind(1, 0), bind(2, 1)],
+        vec![bind(1, 0), unbind(2), bind(2, 1)],
     );
     rows.insert(
         ApiMetadataRowFamily::DirentryChildBinds,
-        vec![bind(1, 0), bind(2, 1)],
+        vec![bind(1, 0), unbind(2), bind(2, 1)],
     );
-    rows.insert(ApiMetadataRowFamily::DirentryUnbinds, vec![unbind(1, 0, 2)]);
 
     fold_rows_with_retention(MetadataFamilyGroup::Bindings, &mut rows, ChangeSeq(1)).expect("drop");
 
-    assert_eq!(rows[&ApiMetadataRowFamily::DirentryBinds].len(), 2);
-    assert_eq!(rows[&ApiMetadataRowFamily::DirentryChildBinds].len(), 2);
-    assert_eq!(rows[&ApiMetadataRowFamily::DirentryUnbinds].len(), 1);
+    assert_eq!(rows[&ApiMetadataRowFamily::DirentryBinds].len(), 3);
+    assert_eq!(rows[&ApiMetadataRowFamily::DirentryChildBinds].len(), 3);
 }
 
 #[test]
 fn drop_pass_resolves_same_seq_rebinds_by_delta_index() {
     use std::collections::BTreeMap;
     let bind = |delta: u32| {
-        MetadataRow::DirentryBind(crate::metadata::DirentryBindRecord {
+        MetadataRow::DirentryBinding(crate::metadata::DirentryBindingRecord {
             parent_inode_id: InodeId(1),
             name_key: NameKey::parse("docs").expect("valid name key"),
-            display_name: loonfs_api::DisplayName::parse("docs").expect("valid display name"),
+            state: loonfs_api::wire::manifest::DirentryBindingState::Bound {
+                display_name: loonfs_api::DisplayName::parse("docs").expect("valid display name"),
+            },
             child_inode_id: InodeId(2),
-            bind_seq: ChangeSeq(1),
-            bind_delta_index: delta,
+            committed_seq: ChangeSeq(1),
+            delta_index: delta,
         })
     };
-    let unbind = MetadataRow::DirentryUnbind(crate::metadata::DirentryUnbindRecord {
+    let unbind = MetadataRow::DirentryBinding(crate::metadata::DirentryBindingRecord {
         parent_inode_id: InodeId(1),
         name_key: NameKey::parse("docs").expect("valid name key"),
-        display_name: loonfs_api::DisplayName::parse("docs").expect("valid display name"),
         child_inode_id: InodeId(2),
-        bind_seq: ChangeSeq(1),
-        bind_delta_index: 0,
-        unbind_seq: ChangeSeq(1),
-        unbind_delta_index: 1,
+        committed_seq: ChangeSeq(1),
+        delta_index: 1,
+        state: loonfs_api::wire::manifest::DirentryBindingState::Unbound,
     });
     let mut rows = BTreeMap::new();
-    rows.insert(ApiMetadataRowFamily::DirentryBinds, vec![bind(0), bind(2)]);
+    rows.insert(
+        ApiMetadataRowFamily::DirentryBinds,
+        vec![bind(0), unbind.clone(), bind(2)],
+    );
     rows.insert(
         ApiMetadataRowFamily::DirentryChildBinds,
-        vec![bind(0), bind(2)],
+        vec![bind(0), unbind.clone(), bind(2)],
     );
-    rows.insert(ApiMetadataRowFamily::DirentryUnbinds, vec![unbind]);
 
     fold_rows_with_retention(MetadataFamilyGroup::Bindings, &mut rows, ChangeSeq(1)).expect("drop");
 
@@ -488,26 +485,27 @@ fn drop_pass_resolves_same_seq_rebinds_by_delta_index() {
         assert_eq!(kept.len(), 1);
         assert!(matches!(
             kept[0],
-            MetadataRow::DirentryBind(crate::metadata::DirentryBindRecord {
-                bind_delta_index: 2,
+            MetadataRow::DirentryBinding(crate::metadata::DirentryBindingRecord {
+                delta_index: 2,
                 ..
             })
         ));
     }
-    assert!(rows[&ApiMetadataRowFamily::DirentryUnbinds].is_empty());
 }
 
 #[test]
 fn drop_pass_refuses_superseded_bind_without_unbind() {
     use std::collections::BTreeMap;
     let bind = |delta: u32| {
-        MetadataRow::DirentryBind(crate::metadata::DirentryBindRecord {
+        MetadataRow::DirentryBinding(crate::metadata::DirentryBindingRecord {
             parent_inode_id: InodeId(1),
             name_key: NameKey::parse("docs").expect("valid name key"),
-            display_name: loonfs_api::DisplayName::parse("docs").expect("valid display name"),
+            state: loonfs_api::wire::manifest::DirentryBindingState::Bound {
+                display_name: loonfs_api::DisplayName::parse("docs").expect("valid display name"),
+            },
             child_inode_id: InodeId(2),
-            bind_seq: ChangeSeq(1),
-            bind_delta_index: delta,
+            committed_seq: ChangeSeq(1),
+            delta_index: delta,
         })
     };
     let mut rows = BTreeMap::new();

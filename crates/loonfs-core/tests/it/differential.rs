@@ -1,6 +1,6 @@
 //! Differential checks between core metadata and the `loonfs-model` oracle.
 
-use loonfs_api::wire::manifest::{DeletedBinding, TombstoneGeneration};
+use loonfs_api::wire::manifest::{DeletedBinding, DeltaPosition};
 use loonfs_api::wire::wal::WalDelta;
 use loonfs_api::{
     AccessGrants, AccessRevisionNo, ActorId, AttributeKey, AttributeValue, Attributes,
@@ -15,7 +15,16 @@ use loonfs_model::metadata::{
 };
 
 type NormalizedInodes = Vec<(u64, &'static str, u64, CommitId, ActorId, u64)>;
-type NormalizedDirentryBinds = Vec<(u64, String, u64, u64, u32)>;
+type NormalizedDirentryBinds = Vec<NormalizedDirectoryBinding>;
+
+#[derive(Debug, PartialEq, Eq)]
+struct NormalizedDirectoryBinding {
+    parent_inode_id: InodeId,
+    name_key: NameKey,
+    child_inode_id: InodeId,
+    position: DeltaPosition,
+    display_name: Option<DisplayName>,
+}
 type NormalizedRevisions = Vec<(u64, u64, u64, CommitId, u64, ActorId, u32, ContentId)>;
 type NormalizedTombstones = Vec<NormalizedTombstone>;
 type NormalizedAttributes = Vec<NormalizedAttributeRevision>;
@@ -248,7 +257,7 @@ fn undelete(
     inode_id: InodeId,
     parent_inode_id: InodeId,
     display_name: &str,
-    target: TombstoneGeneration,
+    target: DeltaPosition,
 ) -> Vec<WalDelta> {
     let mut deltas = vec![WalDelta::RevokeSubtreeTombstone {
         delta_index,
@@ -372,7 +381,7 @@ fn metadata_apply_matches_model_for_undelete() {
             InodeId(3),
             InodeId(2),
             "Readme.TXT",
-            TombstoneGeneration {
+            DeltaPosition {
                 seq: ChangeSeq(3),
                 delta_index: 1,
             },
@@ -491,7 +500,7 @@ fn metadata_apply_matches_model_for_delete_then_undelete_with_attributes() {
             InodeId(2),
             InodeId(1),
             "Readme.TXT",
-            TombstoneGeneration {
+            DeltaPosition {
                 seq: ChangeSeq(3),
                 delta_index: 1,
             },
@@ -578,14 +587,12 @@ fn normalize_core(state: &CoreMetadataState) -> NormalizedMetadata {
         state
             .direntry_binds()
             .iter()
-            .map(|direntry| {
-                (
-                    direntry.parent_inode_id.0,
-                    direntry.display_name.as_str().to_owned(),
-                    direntry.child_inode_id.0,
-                    direntry.bind_seq.0,
-                    direntry.bind_delta_index,
-                )
+            .map(|direntry| NormalizedDirectoryBinding {
+                parent_inode_id: direntry.parent_inode_id,
+                name_key: direntry.name_key.clone(),
+                child_inode_id: direntry.child_inode_id,
+                position: direntry.position(),
+                display_name: direntry.display_name().cloned(),
             })
             .collect(),
         state
@@ -704,14 +711,20 @@ fn normalize_model(state: &ModelMetadataState) -> NormalizedMetadata {
             .collect(),
         direntry_binds
             .iter()
-            .map(|direntry| {
-                (
-                    direntry.parent_inode_id.0,
-                    direntry.display_name.clone(),
-                    direntry.child_inode_id.0,
-                    direntry.bind_seq.0,
-                    direntry.bind_delta_index,
-                )
+            .map(|direntry| NormalizedDirectoryBinding {
+                parent_inode_id: direntry.parent_inode_id,
+                name_key: direntry.name_key.clone(),
+                child_inode_id: direntry.child_inode_id,
+                position: DeltaPosition {
+                    seq: direntry.committed_seq,
+                    delta_index: direntry.delta_index,
+                },
+                display_name: match &direntry.state {
+                    loonfs_model::metadata::DirentryBindingState::Bound { display_name } => {
+                        Some(display_name.clone())
+                    }
+                    loonfs_model::metadata::DirentryBindingState::Unbound => None,
+                },
             })
             .collect(),
         revisions

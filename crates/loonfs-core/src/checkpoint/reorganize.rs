@@ -172,6 +172,7 @@ pub(super) async fn reorganize_metadata_step_with_deadline<S: ObjectStore + ?Siz
     // step publishes the manifest that names this merge's output.
     let merged = merge_group_in_step(
         store,
+        Some(&segments.block_memo),
         namespace_id,
         group,
         &input.runs,

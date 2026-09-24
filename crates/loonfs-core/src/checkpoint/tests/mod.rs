@@ -9,6 +9,7 @@ mod attributes;
 mod bounded_pages;
 mod cache;
 mod cas_recovery;
+mod directory_bindings;
 mod index_parity;
 pub(crate) mod inspection_materialization;
 mod inventory;
@@ -24,9 +25,7 @@ mod streaming_compaction;
 use super::build::{build_manifest_segments, build_manifest_segments_from_rows};
 use super::cache::{MetadataSegmentBlockKind, MetadataSegmentCache, MetadataSegmentCacheConfig};
 use super::compaction_merge::locality_of;
-use super::compaction_retention::RetentionRule;
 use super::error::ManifestLoadError;
-use super::frozen_floor::{bind_survives_frozen_floor, unbindings_at_or_below_floor};
 use super::load::{
     append_rows_to_metadata, head_from_manifest, load_manifest_materialization_for_inspection,
     load_manifest_metadata_state_for_inspection_from_manifest,
@@ -270,29 +269,11 @@ async fn checkpoint_then_reorganize<S: ObjectStore + ?Sized>(
     .0
 }
 
-/// Runs the merge engine's retention operators over rows a test holds in
-/// memory, so a rule test can state a handful of rows and a floor and assert
-/// what survives without a namespace, a manifest, or segments.
-///
-/// It is a harness, not a second implementation: the clusters, the locality
-/// grouping, and the operators are the engine's own. The one thing it does
-/// differently is the reverse bind index, which a merge decides by point-reading
-/// the unbinds of one binding out of its snapshot. Here the whole unbind family
-/// is in hand, so the shared rules are applied to it directly — which is what
-/// the point read does with the rows it fetched.
 fn fold_rows_with_retention(
     group: MetadataFamilyGroup,
     rows_by_family: &mut BTreeMap<ApiMetadataRowFamily, Vec<MetadataRow>>,
     floor_seq: ChangeSeq,
 ) -> crate::error::Result<()> {
-    // Built from the input rows, before any cluster replaces them: a merge's
-    // point reads go to its immutable snapshot, never to what it has written.
-    let unbound_at_floor = unbindings_at_or_below_floor(
-        rows_by_family
-            .get(&ApiMetadataRowFamily::DirentryUnbinds)
-            .map_or(&[][..], Vec::as_slice),
-        floor_seq,
-    );
     for cluster in retention_clusters(group) {
         // The stream a merge sees: the cluster's rows by locality, then family,
         // then row key.
@@ -324,13 +305,10 @@ fn fold_rows_with_retention(
                 }
                 locality = Some(row_locality.to_owned());
             }
-            let survivor = match cluster.rule {
-                RetentionRule::ReverseBindProbe => {
-                    bind_survives_frozen_floor(&row, floor_seq, &unbound_at_floor)
-                        .then_some((family, row))
-                }
-                _ => operator.push(family, row, floor_seq)?,
-            };
+            if let Some((family, row)) = operator.take_floor_value_before(&row, floor_seq) {
+                kept.entry(family).or_default().push(row);
+            }
+            let survivor = operator.push(family, row, floor_seq)?;
             if let Some((family, row)) = survivor {
                 kept.entry(family).or_default().push(row);
             }

@@ -5,7 +5,7 @@
 use super::materialized_view::LoadedMetadataView;
 use crate::authorize::ReadAccess;
 use crate::error::{CoreError, Result};
-use crate::metadata::{binding_generation, MetadataViewSession, ResolvedVisiblePath};
+use crate::metadata::{DirentryBindingRecord, MetadataViewSession, ResolvedVisiblePath};
 use loonfs_api::{AbsolutePath, InodeId, InodeKind, RevisionNo, ROOT_INODE_ID};
 use loonfs_objectstore::ObjectStore;
 use std::collections::{HashMap, HashSet};
@@ -126,9 +126,16 @@ pub(crate) async fn resolve_visible_inode<S: ObjectStore + ?Sized>(
             .map(|binding| binding.parent_inode_id),
         display_name: current_binding
             .as_ref()
-            .map(|binding| binding.display_name.to_string())
+            .map(|binding| {
+                binding
+                    .display_name()
+                    .expect("visible binding should be bound")
+                    .to_string()
+            })
             .unwrap_or_default(),
-        binding_generation: current_binding.as_ref().map(binding_generation),
+        binding_generation: current_binding
+            .as_ref()
+            .map(DirentryBindingRecord::position),
     }))
 }
 
@@ -173,7 +180,11 @@ async fn current_path<S: ObjectStore + ?Sized>(
     // Cache each path reconstructed from the known ancestor to the leaf.
     let mut path = base;
     for binding in climbed.iter().rev() {
-        path = path.join(&binding.display_name);
+        path = path.join(
+            binding
+                .display_name()
+                .expect("visible binding should be bound"),
+        );
         ancestor_paths.insert(binding.child_inode_id, path.clone());
     }
     Ok(Some(path))

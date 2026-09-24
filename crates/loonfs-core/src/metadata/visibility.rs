@@ -3,76 +3,15 @@
 //! [`MetadataVisibilityReads`] defines the required storage lookups. The
 //! composite methods and free functions apply the same visibility rules to
 //! in-memory state, manifest-backed views, and mutation previews.
-//! [`BindingIdentity`] provides the common bind/unbind comparison.
 
 use super::queries::{ResolvedVisiblePath, VisiblePathError};
 use super::{
-    AccessRevisionRecord, DirentryBindRecord, DirentryUnbindRecord, InodeRecord, MetadataState,
-    SubtreeTombstoneRecord,
+    AccessRevisionRecord, DirentryBindingRecord, InodeRecord, MetadataState, SubtreeTombstoneRecord,
 };
-use crate::binding_generation::BindingGeneration;
 use futures::FutureExt;
 use loonfs_api::{AbsolutePath, ChangeSeq, InodeId, InodeKind, NameKey, ROOT_INODE_ID};
 use std::collections::BTreeSet;
 use std::future::Future;
-
-/// The identity key of a direntry binding event.
-///
-/// Two records describe the same binding event iff all five fields agree.
-/// Unbind records carry the identity of the bind they revoke, so an unbind
-/// matches a bind through the same comparison. `display_name` is
-/// presentation, not identity.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) struct BindingIdentity {
-    pub(crate) parent_inode_id: InodeId,
-    pub(crate) name_key: NameKey,
-    pub(crate) child_inode_id: InodeId,
-    pub(crate) bind_seq: ChangeSeq,
-    pub(crate) bind_delta_index: u32,
-}
-
-impl From<&DirentryBindRecord> for BindingIdentity {
-    fn from(record: &DirentryBindRecord) -> Self {
-        Self {
-            parent_inode_id: record.parent_inode_id,
-            name_key: record.name_key.clone(),
-            child_inode_id: record.child_inode_id,
-            bind_seq: record.bind_seq,
-            bind_delta_index: record.bind_delta_index,
-        }
-    }
-}
-
-impl From<&DirentryUnbindRecord> for BindingIdentity {
-    fn from(record: &DirentryUnbindRecord) -> Self {
-        Self {
-            parent_inode_id: record.parent_inode_id,
-            name_key: record.name_key.clone(),
-            child_inode_id: record.child_inode_id,
-            bind_seq: record.bind_seq,
-            bind_delta_index: record.bind_delta_index,
-        }
-    }
-}
-
-pub(crate) fn same_binding(left: &DirentryBindRecord, right: &DirentryBindRecord) -> bool {
-    BindingIdentity::from(left) == BindingIdentity::from(right)
-}
-
-pub(crate) fn binding_generation(record: &DirentryBindRecord) -> BindingGeneration {
-    BindingGeneration {
-        bind_seq: record.bind_seq,
-        bind_delta_index: record.bind_delta_index,
-    }
-}
-
-/// True iff `unbind` revokes exactly the binding event `direntry`.
-pub(crate) fn unbind_matches_binding(
-    unbind: &DirentryUnbindRecord,
-    direntry: &DirentryBindRecord,
-) -> bool {
-    BindingIdentity::from(unbind) == BindingIdentity::from(direntry)
-}
 
 /// Storage lookups scoped to one read sequence.
 ///
@@ -85,33 +24,24 @@ pub(crate) trait MetadataVisibilityReads {
     /// The inode record created at or before the read seq, if any.
     async fn find_inode(&mut self, inode_id: InodeId) -> Result<Option<InodeRecord>, Self::Error>;
 
-    /// Latest bind for `(parent, name_key)` at the read seq, regardless of
-    /// whether it has since been unbound.
-    async fn find_latest_bound_child(
+    /// Returns the latest slot value, including an unbound value.
+    async fn find_latest_slot_binding(
         &mut self,
         parent_inode_id: InodeId,
         name_key: &NameKey,
-    ) -> Result<Option<DirentryBindRecord>, Self::Error>;
+    ) -> Result<Option<DirentryBindingRecord>, Self::Error>;
 
-    /// Latest bind whose child is `child_inode_id` at the read seq,
-    /// regardless of whether it has since been unbound.
+    /// Returns the latest child-index value, including an unbound value.
     async fn find_latest_parent_binding_for_child(
         &mut self,
         child_inode_id: InodeId,
-    ) -> Result<Option<DirentryBindRecord>, Self::Error>;
+    ) -> Result<Option<DirentryBindingRecord>, Self::Error>;
 
     /// Latest subtree tombstone rooted at `root_inode_id` at the read seq.
     async fn find_active_subtree_tombstone(
         &mut self,
         root_inode_id: InodeId,
     ) -> Result<Option<SubtreeTombstoneRecord>, Self::Error>;
-
-    /// Whether an unbind revoking exactly this binding event exists at the
-    /// read seq.
-    async fn is_binding_unbound(
-        &mut self,
-        direntry: &DirentryBindRecord,
-    ) -> Result<bool, Self::Error>;
 
     /// Newest access row of `inode_id` at the read seq, if any.
     async fn find_access_row(
@@ -123,7 +53,7 @@ pub(crate) trait MetadataVisibilityReads {
     async fn current_parent_binding_for_child(
         &mut self,
         child_inode_id: InodeId,
-    ) -> Result<Option<DirentryBindRecord>, Self::Error>
+    ) -> Result<Option<DirentryBindingRecord>, Self::Error>
     where
         Self: Sized,
     {
@@ -135,7 +65,7 @@ pub(crate) trait MetadataVisibilityReads {
         &mut self,
         parent_inode_id: InodeId,
         name_key: &NameKey,
-    ) -> Result<Option<DirentryBindRecord>, Self::Error>
+    ) -> Result<Option<DirentryBindingRecord>, Self::Error>
     where
         Self: Sized,
     {
@@ -166,7 +96,7 @@ pub(crate) trait MetadataVisibilityReads {
         &mut self,
         parent_inode_id: InodeId,
         name_key: &NameKey,
-    ) -> Result<Option<DirentryBindRecord>, Self::Error>
+    ) -> Result<Option<DirentryBindingRecord>, Self::Error>
     where
         Self: Sized,
     {
@@ -174,18 +104,6 @@ pub(crate) trait MetadataVisibilityReads {
     }
 }
 
-/// Which leg of the child-visibility walk answered no.
-///
-/// A visible child needs three durable families to agree: the forward bind
-/// row under `(parent, name_key)`, the child's own latest parent binding,
-/// and the inode rows for the parent and the child. When any one of them
-/// comes back empty, the walk answers "no child", and from the outside every
-/// leg looks the same. This names the leg that stopped the walk, so a read
-/// that answers not-found says which lookup produced the absence instead of
-/// only that there was one.
-///
-/// Only absences are named. A visible child is the ordinary answer and says
-/// nothing at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AbsentVisibilityLeg {
     /// The parent inode is not visible at the read seq.
@@ -195,13 +113,8 @@ pub(crate) enum AbsentVisibilityLeg {
     ParentNotDirectory,
     /// No bind row exists under `(parent, name_key)`.
     ForwardBinding,
-    /// A bind row exists and an unbind revokes it.
+    /// The newest visible slot value is unbound.
     BindingUnbound,
-    /// The bound child has no current parent binding of its own.
-    ReverseIndex,
-    /// The child's current parent binding is a different bind event: the
-    /// child was bound elsewhere and this name is the stale one.
-    BindingSuperseded,
     /// The bound child's inode is not visible at the read seq.
     ChildInode,
 }
@@ -216,8 +129,6 @@ impl AbsentVisibilityLeg {
             Self::ParentNotDirectory => "parent_not_directory",
             Self::ForwardBinding => "forward_binding",
             Self::BindingUnbound => "binding_unbound",
-            Self::ReverseIndex => "reverse_index",
-            Self::BindingSuperseded => "binding_superseded",
             Self::ChildInode => "child_inode",
         }
     }
@@ -233,79 +144,51 @@ impl AbsentVisibilityLeg {
 fn trace_absent_leg(
     leg: AbsentVisibilityLeg,
     parent_inode_id: InodeId,
-    direntry: Option<&DirentryBindRecord>,
+    direntry: Option<&DirentryBindingRecord>,
 ) {
     tracing::debug!(
         leg = leg.name(),
         parent_inode_id = parent_inode_id.0,
         child_inode_id = direntry.map(|direntry| direntry.child_inode_id.0),
-        bind_seq = direntry.map(|direntry| direntry.bind_seq.0),
+        committed_seq = direntry.map(|direntry| direntry.committed_seq.0),
         "visibility walk found no child"
     );
 }
 
-/// The child's current parent binding: the latest binding for the child that
-/// has not been unbound. Returns `None` when the latest binding was revoked,
-/// even if an older un-revoked binding row still exists — bindings are
-/// superseded by later ones, never resurrected.
 pub(crate) async fn current_parent_binding_for_child<R: MetadataVisibilityReads>(
     reads: &mut R,
     child_inode_id: InodeId,
-) -> Result<Option<DirentryBindRecord>, R::Error> {
+) -> Result<Option<DirentryBindingRecord>, R::Error> {
+    if child_inode_id == ROOT_INODE_ID {
+        return Ok(None);
+    }
     let Some(direntry) = reads
         .find_latest_parent_binding_for_child(child_inode_id)
         .await?
     else {
         return Ok(None);
     };
-    if reads.is_binding_unbound(&direntry).await? {
+    if !direntry.is_bound() {
         return Ok(None);
     }
     Ok(Some(direntry))
 }
 
-/// The ACTIVE binding for `(parent, name_key)`: the latest bind under that
-/// name that (1) has not been unbound and (2) is also the child inode's
-/// current binding — a child renamed elsewhere leaves its old name bound in
-/// the rows but inactive.
-///
-/// Condition (2) is checked by comparing identities against
-/// [`current_parent_binding_for_child`], which already folds in the unbound
-/// check.
 pub(crate) async fn active_child_binding<R: MetadataVisibilityReads>(
     reads: &mut R,
     parent_inode_id: InodeId,
     name_key: &NameKey,
-) -> Result<Option<DirentryBindRecord>, R::Error> {
+) -> Result<Option<DirentryBindingRecord>, R::Error> {
     let Some(direntry) = reads
-        .find_latest_bound_child(parent_inode_id, name_key)
+        .find_latest_slot_binding(parent_inode_id, name_key)
         .await?
     else {
         trace_absent_leg(AbsentVisibilityLeg::ForwardBinding, parent_inode_id, None);
         return Ok(None);
     };
-    if reads.is_binding_unbound(&direntry).await? {
+    if !direntry.is_bound() {
         trace_absent_leg(
             AbsentVisibilityLeg::BindingUnbound,
-            parent_inode_id,
-            Some(&direntry),
-        );
-        return Ok(None);
-    }
-    let Some(latest_binding) = reads
-        .current_parent_binding_for_child(direntry.child_inode_id)
-        .await?
-    else {
-        trace_absent_leg(
-            AbsentVisibilityLeg::ReverseIndex,
-            parent_inode_id,
-            Some(&direntry),
-        );
-        return Ok(None);
-    };
-    if !same_binding(&latest_binding, &direntry) {
-        trace_absent_leg(
-            AbsentVisibilityLeg::BindingSuperseded,
             parent_inode_id,
             Some(&direntry),
         );
@@ -394,7 +277,7 @@ pub(crate) async fn visible_child<R: MetadataVisibilityReads>(
     reads: &mut R,
     parent_inode_id: InodeId,
     name_key: &NameKey,
-) -> Result<Option<DirentryBindRecord>, R::Error> {
+) -> Result<Option<DirentryBindingRecord>, R::Error> {
     let Some(parent) = reads.visible_inode(parent_inode_id).await? else {
         trace_absent_leg(AbsentVisibilityLeg::ParentInode, parent_inode_id, None);
         return Ok(None);
@@ -494,10 +377,13 @@ where
 
         current_inode_id = direntry.child_inode_id;
         current_parent_inode_id = Some(direntry.parent_inode_id);
+        let bound_display_name = direntry
+            .display_name()
+            .expect("visible binding should be bound");
         current_absolute_path =
-            join_display_path(&current_absolute_path, direntry.display_name.as_str());
-        current_display_name = direntry.display_name.to_string();
-        current_binding_generation = Some(binding_generation(&direntry));
+            join_display_path(&current_absolute_path, bound_display_name.as_str());
+        current_display_name = bound_display_name.to_string();
+        current_binding_generation = Some(direntry.position());
     }
 
     let inode = reads
@@ -565,11 +451,11 @@ impl MetadataVisibilityReads for MetadataStateReads<'_> {
         })
     }
 
-    async fn find_latest_bound_child(
+    async fn find_latest_slot_binding(
         &mut self,
         parent_inode_id: InodeId,
         name_key: &NameKey,
-    ) -> Result<Option<DirentryBindRecord>, Self::Error> {
+    ) -> Result<Option<DirentryBindingRecord>, Self::Error> {
         Ok(if self.base_seq >= self.state.indexed_seq() {
             self.state.indexes.latest_bind(parent_inode_id, name_key)
         } else {
@@ -581,7 +467,7 @@ impl MetadataVisibilityReads for MetadataStateReads<'_> {
     async fn find_latest_parent_binding_for_child(
         &mut self,
         child_inode_id: InodeId,
-    ) -> Result<Option<DirentryBindRecord>, Self::Error> {
+    ) -> Result<Option<DirentryBindingRecord>, Self::Error> {
         Ok(self.state.latest_parent_binding_for_child_at_seq(
             child_inode_id,
             self.base_seq.min(self.state.indexed_seq()),
@@ -600,18 +486,6 @@ impl MetadataVisibilityReads for MetadataStateReads<'_> {
         })
     }
 
-    async fn is_binding_unbound(
-        &mut self,
-        direntry: &DirentryBindRecord,
-    ) -> Result<bool, Self::Error> {
-        Ok(if self.base_seq >= self.state.indexed_seq() {
-            self.state.indexes.is_unbound(direntry)
-        } else {
-            self.state
-                .is_direntry_unbound_at_seq_scan(direntry, self.base_seq)
-        })
-    }
-
     async fn find_access_row(
         &mut self,
         inode_id: InodeId,
@@ -622,7 +496,7 @@ impl MetadataVisibilityReads for MetadataStateReads<'_> {
     async fn current_parent_binding_for_child(
         &mut self,
         child_inode_id: InodeId,
-    ) -> Result<Option<DirentryBindRecord>, Self::Error> {
+    ) -> Result<Option<DirentryBindingRecord>, Self::Error> {
         if self.base_seq >= self.state.indexed_seq() {
             return Ok(self.state.indexes.active_parent_for_child(child_inode_id));
         }
@@ -633,7 +507,7 @@ impl MetadataVisibilityReads for MetadataStateReads<'_> {
         &mut self,
         parent_inode_id: InodeId,
         name_key: &NameKey,
-    ) -> Result<Option<DirentryBindRecord>, Self::Error> {
+    ) -> Result<Option<DirentryBindingRecord>, Self::Error> {
         if self.base_seq >= self.state.indexed_seq() {
             return Ok(self.state.indexes.active_child(parent_inode_id, name_key));
         }

@@ -1,7 +1,7 @@
 //! Shared path-planning checks and visible-ancestor walks.
 
 use crate::authorize::{Absence, Authorizer, Replacement};
-use crate::binding_generation::BindingGeneration;
+use crate::binding_generation;
 use crate::commit::{CandidateAllocation, CommitOp, ResolvedBinding};
 use crate::error::{CoreError, Result};
 use crate::metadata::access::{access_chain, effective_rights, is_administrator};
@@ -115,7 +115,7 @@ pub(super) fn check_binding_generation<S: ObjectStore + ?Sized>(
     resolved: &ResolvedVisiblePath,
     expected_binding_generation: &BindingGenerationToken,
 ) -> Result<()> {
-    let expected = BindingGeneration::decode(expected_binding_generation, view.namespace_id)
+    let expected = binding_generation::decode(expected_binding_generation, view.namespace_id)
         .map_err(|error| CoreError::InvalidCommitField {
             field: "expected_binding_generation",
             message: format!("invalid expected binding generation: {error}"),
@@ -128,7 +128,7 @@ pub(super) fn check_binding_generation<S: ObjectStore + ?Sized>(
         return Err(CoreError::BindingGenerationMismatch {
             inode_id: resolved.inode_id,
             expected_binding_generation: expected_binding_generation.clone(),
-            actual_binding_generation: Some(current.encode(view.namespace_id)),
+            actual_binding_generation: Some(binding_generation::encode(current, view.namespace_id)),
             precondition_index: None,
         });
     }
@@ -153,10 +153,12 @@ pub(super) async fn source_binding<S: ObjectStore + ?Sized>(
     Ok(ResolvedBinding {
         parent_inode_id,
         name_key: binding.name_key.clone(),
-        display_name: binding.display_name.clone(),
+        display_name: binding
+            .display_name()
+            .expect("visible binding should be bound")
+            .clone(),
         child_inode_id: binding.child_inode_id,
-        bind_seq: binding.bind_seq,
-        bind_delta_index: binding.bind_delta_index,
+        position: binding.position(),
     })
 }
 
@@ -184,7 +186,10 @@ pub(super) async fn reject_tombstoned_path_ancestor<S: ObjectStore + ?Sized>(
         let Some(bound_child) = view.view.visible_child(current_inode, &name_key).await? else {
             return Ok(());
         };
-        let visible_component = bound_child.display_name.clone();
+        let visible_component = bound_child
+            .display_name()
+            .expect("visible binding should be bound")
+            .clone();
         let visible_path = current_path.join(&visible_component);
         if let Some(tombstone) = view
             .view

@@ -162,8 +162,11 @@ fn bind_direntry_replay_uses_persisted_name_key() {
     assert_eq!(applied.direntry_binds().len(), 1);
     let bind = &applied.direntry_binds()[0];
     assert_eq!(bind.name_key.as_str(), "persisted-key");
-    assert_eq!(bind.display_name.as_str(), "Report.TXT");
-    assert_eq!(bind.bind_delta_index, 7);
+    assert_eq!(
+        bind.display_name().expect("bound value").as_str(),
+        "Report.TXT"
+    );
+    assert_eq!(bind.delta_index, 7);
 }
 
 #[test]
@@ -187,15 +190,17 @@ fn child_lookup_uses_persisted_name_key_without_recanonicalizing() {
                 committed_at_ms: 4_200,
             },
         ],
-        vec![DirentryBindRecord {
+        vec![DirentryBindingRecord {
             parent_inode_id: InodeId(1),
             name_key: NameKey::parse("persisted-key").expect("valid name key"),
-            display_name: loonfs_api::DisplayName::parse("Report.TXT").expect("valid display name"),
+            state: loonfs_api::wire::manifest::DirentryBindingState::Bound {
+                display_name: loonfs_api::DisplayName::parse("Report.TXT")
+                    .expect("valid display name"),
+            },
             child_inode_id: InodeId(2),
-            bind_seq: ChangeSeq(1),
-            bind_delta_index: 0,
+            committed_seq: ChangeSeq(1),
+            delta_index: 0,
         }],
-        Vec::new(),
         Vec::new(),
         Vec::new(),
         Vec::new(),
@@ -243,25 +248,29 @@ fn maintained_indexes_track_bind_unbind_rename_and_tombstone() {
             },
         ],
         vec![
-            DirentryBindRecord {
+            DirentryBindingRecord {
                 parent_inode_id: InodeId(1),
                 name_key: NameKey::parse("docs").expect("valid name key"),
-                display_name: loonfs_api::DisplayName::parse("docs").expect("valid display name"),
+                state: loonfs_api::wire::manifest::DirentryBindingState::Bound {
+                    display_name: loonfs_api::DisplayName::parse("docs")
+                        .expect("valid display name"),
+                },
                 child_inode_id: InodeId(2),
-                bind_seq: ChangeSeq(1),
-                bind_delta_index: 0,
+                committed_seq: ChangeSeq(1),
+                delta_index: 0,
             },
-            DirentryBindRecord {
+            DirentryBindingRecord {
                 parent_inode_id: InodeId(2),
                 name_key: NameKey::parse("report.txt").expect("valid name key"),
-                display_name: loonfs_api::DisplayName::parse("report.txt")
-                    .expect("valid display name"),
+                state: loonfs_api::wire::manifest::DirentryBindingState::Bound {
+                    display_name: loonfs_api::DisplayName::parse("report.txt")
+                        .expect("valid display name"),
+                },
                 child_inode_id: InodeId(3),
-                bind_seq: ChangeSeq(2),
-                bind_delta_index: 0,
+                committed_seq: ChangeSeq(2),
+                delta_index: 0,
             },
         ],
-        Vec::new(),
         Vec::new(),
         Vec::new(),
         Vec::new(),
@@ -397,24 +406,37 @@ fn stale_binding_is_not_active_after_newer_bind_claims_same_name() {
             },
         ],
         vec![
-            DirentryBindRecord {
+            DirentryBindingRecord {
                 parent_inode_id: InodeId(1),
                 name_key: NameKey::parse("report").expect("valid name key"),
-                display_name: loonfs_api::DisplayName::parse("report").expect("valid display name"),
+                state: loonfs_api::wire::manifest::DirentryBindingState::Bound {
+                    display_name: loonfs_api::DisplayName::parse("report")
+                        .expect("valid display name"),
+                },
                 child_inode_id: InodeId(2),
-                bind_seq: ChangeSeq(1),
-                bind_delta_index: 0,
+                committed_seq: ChangeSeq(1),
+                delta_index: 0,
             },
-            DirentryBindRecord {
+            DirentryBindingRecord {
                 parent_inode_id: InodeId(1),
                 name_key: NameKey::parse("report").expect("valid name key"),
-                display_name: loonfs_api::DisplayName::parse("report").expect("valid display name"),
+                child_inode_id: InodeId(2),
+                committed_seq: ChangeSeq(2),
+                delta_index: 0,
+                state: loonfs_api::wire::manifest::DirentryBindingState::Unbound,
+            },
+            DirentryBindingRecord {
+                parent_inode_id: InodeId(1),
+                name_key: NameKey::parse("report").expect("valid name key"),
+                state: loonfs_api::wire::manifest::DirentryBindingState::Bound {
+                    display_name: loonfs_api::DisplayName::parse("report")
+                        .expect("valid display name"),
+                },
                 child_inode_id: InodeId(3),
-                bind_seq: ChangeSeq(2),
-                bind_delta_index: 0,
+                committed_seq: ChangeSeq(2),
+                delta_index: 1,
             },
         ],
-        Vec::new(),
         Vec::new(),
         Vec::new(),
         Vec::new(),
@@ -461,15 +483,17 @@ fn resolve_visible_path_folds_names_and_uses_stored_display_name() {
                 committed_at_ms: 4_200,
             },
         ],
-        vec![DirentryBindRecord {
+        vec![DirentryBindingRecord {
             parent_inode_id: InodeId(1),
             name_key: NameKey::parse("report.txt").expect("valid name key"),
-            display_name: loonfs_api::DisplayName::parse("Report.TXT").expect("valid display name"),
+            state: loonfs_api::wire::manifest::DirentryBindingState::Bound {
+                display_name: loonfs_api::DisplayName::parse("Report.TXT")
+                    .expect("valid display name"),
+            },
             child_inode_id: InodeId(2),
-            bind_seq: ChangeSeq(1),
-            bind_delta_index: 0,
+            committed_seq: ChangeSeq(1),
+            delta_index: 0,
         }],
-        Vec::new(),
         Vec::new(),
         Vec::new(),
         Vec::new(),
@@ -495,7 +519,6 @@ fn resolve_visible_path_folds_names_and_uses_stored_display_name() {
 fn find_commit_receipt_returns_latest_matching_receipt() {
     let commit_id = CommitId::parse("same-commit").expect("valid commit id");
     let metadata_state = MetadataState::from_rows(
-        Vec::new(),
         Vec::new(),
         Vec::new(),
         Vec::new(),
@@ -865,7 +888,6 @@ fn churned_binding_state_rebuilt() -> MetadataState {
     MetadataState::from_rows(
         incremental.inodes().to_vec(),
         incremental.direntry_binds().to_vec(),
-        incremental.direntry_unbinds().to_vec(),
         incremental.revisions().to_vec(),
         incremental.subtree_tombstones().to_vec(),
         incremental.commit_receipts().to_vec(),
@@ -887,7 +909,7 @@ fn bound_child_at_head_sees_latest_bind_including_dead_bindings() {
         .bound_child_at_seq(InodeId(1), &name_key("contested"), head)
         .expect("bind at head");
     assert_eq!(head_bind.child_inode_id, InodeId(3));
-    assert_eq!(head_bind.bind_seq, ChangeSeq(3));
+    assert_eq!(head_bind.committed_seq, ChangeSeq(3));
 
     // The deleted name still answers with its dead binding: the bind is
     // unbound but tombstone-ancestry walks must see it.
@@ -895,7 +917,7 @@ fn bound_child_at_head_sees_latest_bind_including_dead_bindings() {
         .bound_child_at_seq(InodeId(1), &name_key("deleted"), head)
         .expect("dead binding visible at head");
     assert_eq!(dead_bind.child_inode_id, InodeId(4));
-    assert!(state.is_direntry_unbound_at_seq(&dead_bind, head));
+    assert!(!dead_bind.is_bound());
     assert!(state
         .visible_child(InodeId(1), &name_key("deleted"), head)
         .is_none());
@@ -905,13 +927,12 @@ fn bound_child_at_head_sees_latest_bind_including_dead_bindings() {
 fn bound_child_below_indexed_seq_still_scans_history() {
     let state = churned_binding_state();
 
-    // At seq 2 the contested name's latest bind is still child 2's
-    // (unbound) binding; the rebind at seq 3 is not visible yet.
     let historical = state
         .bound_child_at_seq(InodeId(1), &name_key("contested"), ChangeSeq(2))
         .expect("historical bind");
     assert_eq!(historical.child_inode_id, InodeId(2));
-    assert_eq!(historical.bind_seq, ChangeSeq(1));
+    assert_eq!(historical.committed_seq, ChangeSeq(2));
+    assert!(!historical.is_bound());
 }
 
 #[test]
@@ -975,15 +996,17 @@ fn has_visible_children_sees_through_unbinds() {
                 committed_at_ms: 4_200,
             },
         ],
-        vec![DirentryBindRecord {
+        vec![DirentryBindingRecord {
             parent_inode_id: dir,
             name_key: NameKey::parse("doc.txt").expect("valid name key"),
-            display_name: loonfs_api::DisplayName::parse("doc.txt").expect("valid display name"),
+            state: loonfs_api::wire::manifest::DirentryBindingState::Bound {
+                display_name: loonfs_api::DisplayName::parse("doc.txt")
+                    .expect("valid display name"),
+            },
             child_inode_id: InodeId(2),
-            bind_seq: ChangeSeq(2),
-            bind_delta_index: 0,
+            committed_seq: ChangeSeq(2),
+            delta_index: 0,
         }],
-        Vec::new(),
         Vec::new(),
         Vec::new(),
         Vec::new(),
@@ -1005,17 +1028,18 @@ fn has_visible_children_sees_through_unbinds() {
 
     let emptied = MetadataState::from_rows(
         state.inodes().to_vec(),
-        state.direntry_binds().to_vec(),
-        vec![DirentryUnbindRecord {
-            parent_inode_id: dir,
-            name_key: NameKey::parse("doc.txt").expect("valid name key"),
-            display_name: loonfs_api::DisplayName::parse("doc.txt").expect("valid display name"),
-            child_inode_id: InodeId(2),
-            bind_seq: ChangeSeq(2),
-            bind_delta_index: 0,
-            unbind_seq: ChangeSeq(3),
-            unbind_delta_index: 0,
-        }],
+        [
+            state.direntry_binds().to_vec(),
+            vec![DirentryBindingRecord {
+                parent_inode_id: dir,
+                name_key: NameKey::parse("doc.txt").expect("valid name key"),
+                child_inode_id: InodeId(2),
+                committed_seq: ChangeSeq(3),
+                delta_index: 0,
+                state: loonfs_api::wire::manifest::DirentryBindingState::Unbound,
+            }],
+        ]
+        .concat(),
         Vec::new(),
         Vec::new(),
         Vec::new(),

@@ -450,8 +450,10 @@ async fn a_binding_precondition_for_an_unbound_name_is_rejected() {
             name_key: NameKey::parse("missing.txt").expect("valid name key"),
             display_name: test_display_name("missing.txt"),
             child_inode_id: InodeId(9),
-            bind_seq: ChangeSeq(1),
-            bind_delta_index: 0,
+            position: loonfs_api::wire::manifest::DeltaPosition {
+                seq: ChangeSeq(1),
+                delta_index: 0,
+            },
         },
         inode_id: InodeId(2),
         new_parent_inode_id: InodeId(1),
