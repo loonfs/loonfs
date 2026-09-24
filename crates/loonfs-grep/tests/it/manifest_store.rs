@@ -261,3 +261,162 @@ fn state(
     )
     .expect("valid manifest")
 }
+
+#[tokio::test]
+async fn missing_hint_etags_fail_without_repeated_store_attempts() {
+    use loonfs_test_support::stores::MetadataMapStore;
+    let directory = tempfile::tempdir().expect("directory");
+    let namespace_id = namespace_id("etag");
+    let raw = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
+    let store = RecordingStore::new(
+        MetadataMapStore::without_etag(raw.clone(), KeyPredicate::exact(hint_key(&namespace_id))),
+        KeyPredicate::any(),
+    );
+    let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
+    let first = state(namespace_id.clone(), ManifestNo(1), RunNo(0));
+    assert!(matches!(
+        publish_grep_manifest(&store, None, &first, &deadline).await,
+        Err(GrepError::StoreUnavailable { .. })
+    ));
+    assert_eq!(store.counts().puts, 1);
+    assert!(load_grep_manifest(&raw, &namespace_id, ManifestNo(1))
+        .await
+        .expect("manifest")
+        .is_none());
+    assert!(matches!(
+        load_current_grep_manifest(&store, &namespace_id).await,
+        Err(GrepManifestError::Store { .. })
+    ));
+    let published = publish_grep_manifest(&raw, None, &first, &deadline)
+        .await
+        .expect("first manifest");
+    store.reset();
+    assert!(matches!(
+        raise_grep_hint(
+            &store,
+            &namespace_id,
+            ManifestNo(2),
+            published.hint,
+            &deadline
+        )
+        .await,
+        Err(GrepManifestError::Store { .. })
+    ));
+    assert_eq!(
+        store
+            .take()
+            .iter()
+            .filter(|operation| matches!(operation, RecordedOperation::CompareAndSwap { .. }))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn ambiguous_manifest_puts_reconcile_the_exact_landed_state() {
+    for apply in [false, true] {
+        let directory = tempfile::tempdir().expect("directory");
+        let namespace_id = namespace_id("ambiguous");
+        let store = FailStore::new(
+            LocalFsStore::new(directory.path()).expect("store"),
+            KeyPredicate::prefix(manifests_prefix(&namespace_id)),
+            OperationClass::PutCreateIfAbsent,
+            InjectedError::Transport("lost acknowledgement".to_owned()),
+        );
+        let store = if apply {
+            store.apply_then_fail()
+        } else {
+            store
+        };
+        let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
+        let first = publish_grep_manifest(
+            &store,
+            None,
+            &state(namespace_id.clone(), ManifestNo(1), RunNo(0)),
+            &deadline,
+        )
+        .await
+        .expect("first");
+        store.fail_next(1);
+        let next = state(namespace_id.clone(), ManifestNo(2), RunNo(1));
+        let result = publish_grep_manifest(&store, Some(&first), &next, &deadline).await;
+        if apply {
+            assert_eq!(result.expect("landed manifest").manifest_state(), &next);
+        } else {
+            assert!(matches!(result, Err(GrepError::PublicationConflict { .. })));
+            let current = load_current_grep_manifest(&store, &namespace_id)
+                .await
+                .expect("reload")
+                .expect("current");
+            publish_grep_manifest(&store, Some(&current), &next, &deadline)
+                .await
+                .expect("caller replans");
+        }
+        store.fail_next(1);
+        let different = state(namespace_id.clone(), ManifestNo(2), RunNo(2));
+        assert!(matches!(
+            publish_grep_manifest(&store, Some(&first), &different, &deadline).await,
+            Err(GrepError::PublicationConflict { .. })
+        ));
+    }
+}
+
+#[tokio::test]
+async fn regressing_successors_fail_on_publication_and_discovery() {
+    for (before_run, after_run, before_seq, after_seq, before_event, after_event) in [
+        (2, 1, 4, 4, 0, 0),
+        (2, 2, 4, 3, 0, 0),
+        (2, 2, 4, 4, 0, 1),
+        (2, 2, 4, 4, 2, 1),
+    ] {
+        let directory = tempfile::tempdir().expect("directory");
+        let namespace_id = namespace_id("successor");
+        let store = RecordingStore::new(
+            LocalFsStore::new(directory.path()).expect("store"),
+            KeyPredicate::any(),
+        );
+        let manifest = |number, run, seq, event| {
+            GrepManifestState::new(
+                namespace_id.clone(),
+                ManifestNo(number),
+                GrepIndexStatus::Active {
+                    built_through_seq: ChangeSeq(seq),
+                    next_event_index: event,
+                },
+                GrepIndexState {
+                    next_run_no: RunNo(run),
+                    reorganize: None,
+                },
+                Vec::new(),
+            )
+            .expect("state")
+        };
+        let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
+        let first = publish_grep_manifest(
+            &store,
+            None,
+            &manifest(1, before_run, before_seq, before_event),
+            &deadline,
+        )
+        .await
+        .expect("first");
+        let next = manifest(2, after_run, after_seq, after_event);
+        store.reset();
+        assert!(matches!(
+            publish_grep_manifest(&store, Some(&first), &next, &deadline).await,
+            Err(GrepError::CorruptIndex { .. })
+        ));
+        assert_eq!(store.counts().puts, 0);
+        store
+            .put_if_absent(
+                &manifest_key(&namespace_id, &ManifestNo(2)),
+                Bytes::from(encode_grep_manifest(next).expect("encode").into_bytes()),
+            )
+            .await
+            .expect("corrupt chain");
+        assert!(matches!(
+            load_current_grep_manifest(&store, &namespace_id).await,
+            Err(GrepManifestError::Corrupt { .. })
+        ));
+    }
+}

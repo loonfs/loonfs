@@ -982,10 +982,11 @@ struct OwnedStagingSession {
 pub(crate) async fn stage_owned_bytes<S: ObjectStore + ?Sized>(
     store: &S,
     catalog: &VerifiedNamespaceCatalogEntry,
+    subject_id: Option<&SubjectId>,
     bytes: &[u8],
     context: &MutationContext,
 ) -> Result<PreparedContent> {
-    let session = open_owned_staging_session(store, catalog, context).await?;
+    let session = open_owned_staging_session(store, catalog, subject_id, context).await?;
     let stored = stage_bytes_under_content_id(
         store,
         catalog.namespace_id().clone(),
@@ -1012,11 +1013,12 @@ pub(crate) async fn stage_owned_bytes<S: ObjectStore + ?Sized>(
 pub(crate) async fn stage_owned_stream<S: ObjectStore + ?Sized>(
     store: &S,
     catalog: &VerifiedNamespaceCatalogEntry,
+    subject_id: Option<&SubjectId>,
     body: ByteStream,
     payload_kind: StreamedPayloadKind,
     context: &MutationContext,
 ) -> Result<PreparedContent> {
-    let session = open_owned_staging_session(store, catalog, context).await?;
+    let session = open_owned_staging_session(store, catalog, subject_id, context).await?;
     let staged = stage_streamed_under_content_id(
         store,
         catalog.namespace_id().clone(),
@@ -1050,11 +1052,10 @@ pub(crate) async fn stage_owned_stream<S: ObjectStore + ?Sized>(
 
 /// Creates the internal upload session that owns an in-process content
 /// write.
-///
-/// Its ID is not exposed. Garbage collection is its only later reader.
 async fn open_owned_staging_session<S: ObjectStore + ?Sized>(
     store: &S,
     catalog: &VerifiedNamespaceCatalogEntry,
+    subject_id: Option<&SubjectId>,
     context: &MutationContext,
 ) -> Result<OwnedStagingSession> {
     // Do not recheck namespace availability here. The catalog came from the
@@ -1063,7 +1064,8 @@ async fn open_owned_staging_session<S: ObjectStore + ?Sized>(
     // unreferenced completed session and content.
     let session = NewUploadSession::service_proxied();
     let (state, metadata) =
-        create_upload_session_with_state(store, catalog, None, session, context).await?;
+        create_upload_session_with_state(store, catalog, subject_id.cloned(), session, context)
+            .await?;
     let upload_id = state.upload_id.clone();
     let content_id = state.content_id.clone();
     // If a provider cannot return a usable compare token, retain the old load path.
@@ -1339,6 +1341,7 @@ fn completed_upload(
         prepared: PreparedContent::for_completed_upload(
             content_ref.clone(),
             completed_at_ms.saturating_add(COMPLETED_UPLOAD_ADMISSION_WINDOW_MS),
+            Some(upload_id.clone()),
         ),
         receipt: receipt_within_window(content_ref, completed_at_ms, now_ms),
     }

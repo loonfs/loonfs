@@ -612,7 +612,7 @@ async fn enable_creates_no_checkpoint_when_the_manifest_load_fails() {
 }
 
 #[tokio::test]
-async fn enable_retains_its_checkpoint_when_the_manifest_write_result_is_ambiguous() {
+async fn enable_confirms_its_checkpoint_after_an_ambiguous_manifest_write() {
     let temp_dir = tempdir().expect("tempdir");
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
@@ -657,11 +657,14 @@ async fn enable_retains_its_checkpoint_when_the_manifest_write_result_is_ambiguo
         Arc::clone(&host.block_cache),
     );
 
-    let error = worker
+    let outcome = worker
         .enable(&namespace_id)
         .await
-        .expect_err("manifest publication acknowledgement fails");
-    assert!(matches!(error, GrepError::StoreUnavailable { .. }));
+        .expect("confirm landed manifest");
+    assert!(matches!(
+        outcome,
+        loonfs_grep::GrepEnableOutcome::Enabled { .. }
+    ));
     assert_eq!(failing_store.attempts(), 1);
 
     assert_fresh_backfill_attempt(&store, &namespace_id).await;
@@ -669,7 +672,7 @@ async fn enable_retains_its_checkpoint_when_the_manifest_write_result_is_ambiguo
 }
 
 #[tokio::test]
-async fn restart_retains_its_checkpoint_when_the_manifest_write_result_is_ambiguous() {
+async fn restart_confirms_its_checkpoint_after_an_ambiguous_manifest_write() {
     let temp_dir = tempdir().expect("tempdir");
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
@@ -724,11 +727,14 @@ async fn restart_retains_its_checkpoint_when_the_manifest_write_result_is_ambigu
         Arc::clone(&host.block_cache),
     );
 
-    let error = worker
+    let outcome = worker
         .build_step(&namespace_id, GramIndexBuildPolicy::default())
         .await
-        .expect_err("restart publication acknowledgement fails");
-    assert!(matches!(error, GrepError::StoreUnavailable { .. }));
+        .expect("confirm landed restart");
+    assert!(matches!(
+        outcome,
+        GrepBuildOutcome::BackfillRestarted { .. }
+    ));
     assert_eq!(failing_store.attempts(), 1);
 
     let checkpoint_id = assert_fresh_backfill_attempt(&store, &namespace_id).await;
@@ -1647,14 +1653,17 @@ async fn a_backfill_checkpoint_mismatch_is_corruption_without_writes() {
         current.manifest_state().segments().to_vec(),
     )
     .expect("manifest");
-    publish_grep_manifest(
-        &*store,
-        Some(&current),
-        &next,
-        &loonfs::Deadline::start(Arc::new(loonfs_test_support::clock::ManualClock::new(0))),
-    )
-    .await
-    .expect("mismatched manifest");
+    store
+        .put_if_absent(
+            &manifest_key(&namespace_id, &next.manifest_no()),
+            loonfs_grep::manifest::encode_grep_manifest(next.clone())
+                .expect("encode")
+                .into_bytes()
+                .into(),
+        )
+        .await
+        .expect("inject mismatched checkpoint");
+    write_hint(&*store, &namespace_id, next.manifest_no()).await;
     recording.reset();
     let error = worker
         .build_step(&namespace_id, GramIndexBuildPolicy::default())

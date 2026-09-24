@@ -89,10 +89,10 @@ async fn hosted_subject_cannot_import_a_foreign_bare_content_reference() {
         )
         .await
         .expect("destination namespace");
-    let mut options = PutFileOptions::new(loonfs_test_support::test_actor());
-    options.commit.subject = Some(subject("administrator"));
+    let options = PutFileOptions::new(loonfs_test_support::test_actor());
     state
         .writer
+        .as_subject(subject("administrator"))
         .put_file_bytes(&source, "/private", b"private bytes", options)
         .await
         .expect("publish source");

@@ -50,16 +50,20 @@ impl MetadataMaintenanceOptions {
             return Ok(Self::default());
         };
         let Some(max_wal_tail_segments) = NonZeroU64::new(threshold) else {
-            return Err(RuntimeError::Config(
-                "max_wal_tail_segments must be greater than zero".to_owned(),
-            ));
+            return Err(RuntimeError::InvalidRequest {
+                message: "max_wal_tail_segments must be greater than zero".to_owned(),
+                param: "/max_wal_tail_segments",
+            });
         };
         let reject_writes_at_segments = MAX_UNFLUSHED_WAL_SEGMENTS;
         if max_wal_tail_segments.get() > reject_writes_at_segments {
-            return Err(RuntimeError::Config(format!(
-                "max_wal_tail_segments may not exceed the write-rejection threshold \
+            return Err(RuntimeError::InvalidRequest {
+                message: format!(
+                    "max_wal_tail_segments may not exceed the write-rejection threshold \
                  ({reject_writes_at_segments})"
-            )));
+                ),
+                param: "/max_wal_tail_segments",
+            });
         }
         Ok(Self {
             max_wal_tail_segments,

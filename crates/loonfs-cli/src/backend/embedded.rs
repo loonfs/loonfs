@@ -38,21 +38,12 @@ use std::sync::Arc;
 use super::step_budget::{wait_for_grep_index, GrepWaitStep};
 use super::{GrepWaitProgress, MaintenanceDrainProgress, MaintenanceKeyProgress, StepBudget};
 
-/// Purpose-specific handles over one shared store client: reads go through
-/// the reader, mutations through the writer, and maintenance through the
-/// maintenance handle. A local runner receives bounded publication hints, and
-/// every mutation settles admitted work before the one-shot process exits. A
-/// publish gated on `maintenance_required` waits for metadata maintenance,
-/// then resubmits, so embedded writes recover from WAL debt
-/// instead of hard-stopping. `loonfs maintenance` commands remain the explicit path
-/// for everything else (GC, retention, forced steps).
 pub(crate) struct EmbeddedBackend {
     pub(crate) writer: FsWriter,
     pub(crate) reader: FsReader,
     /// The unscoped reader grep's index and change-feed reads keep using
     /// when a subject scopes the others.
     pub(crate) service_reader: FsReader,
-    pub(crate) subject: Option<loonfs_api::Subject>,
     pub(crate) maintenance: FsMaintenance,
     pub(crate) jobs: MaintenanceRegistry,
     pub(crate) runner: MaintenanceRunner,
@@ -64,15 +55,6 @@ pub(crate) struct EmbeddedBackend {
     pub(crate) grep_block_cache: Arc<GrepBlockCache>,
 }
 
-/// How many times a gated publish resubmits after settling the maintenance
-/// step it scheduled. One recovery is the normal case; the second covers a
-/// step that raced another writer's debt. Past that the error surfaces.
-const MAX_MAINTENANCE_RECOVERIES: usize = 2;
-
-const EMBEDDED_SNAPSHOT_MAX_TTL_MS: u64 = 86_400_000;
-const EMBEDDED_SNAPSHOT_MAX_LIFETIME_MS: u64 = 604_800_000;
-const EMBEDDED_SNAPSHOT_MAX_LIVE_PER_NAMESPACE: usize = 16;
-
 /// A selected maintenance job and its executor.
 type HostedJob = (MaintenanceJobId, Arc<dyn MaintenanceJob>);
 
@@ -81,7 +63,10 @@ impl EmbeddedBackend {
     /// exits (tearing down the runtime) while a step is mid-flight. A settle
     /// failure after a committed mutation is reported as a warning on
     /// stderr, never as the mutation's outcome — the commit landed.
-    async fn drain_runner_after<T>(&self, result: Result<T, CliError>) -> Result<T, CliError> {
+    pub(super) async fn drain_runner_after<T>(
+        &self,
+        result: Result<T, CliError>,
+    ) -> Result<T, CliError> {
         match (result, self.runner.drain().await) {
             (result, Ok(())) => result,
             (Ok(value), Err(error)) => {
@@ -92,40 +77,6 @@ impl EmbeddedBackend {
             }
             (Err(error), Err(_)) => Err(error),
         }
-    }
-
-    /// Runs one mutation with `maintenance_required` recovery: a gated
-    /// publish observes the oversized WAL tail and emits a maintenance hint,
-    /// so settle the local runner and resubmit. A gated attempt commits
-    /// nothing, so the resubmission cannot double-apply.
-    async fn publish_with_maintenance_recovery<T, F, Fut>(
-        &self,
-        namespace_id: &NamespaceId,
-        attempt: F,
-    ) -> Result<T, CliError>
-    where
-        F: Fn() -> Fut,
-        Fut: std::future::Future<Output = Result<T, RuntimeError>>,
-    {
-        let mut result = attempt().await;
-        for _ in 0..MAX_MAINTENANCE_RECOVERIES {
-            let gated = matches!(
-                &result,
-                Err(RuntimeError::Core(error))
-                    if matches!(error.code(), ErrorCode::MaintenanceRequired)
-            );
-            if !gated {
-                break;
-            }
-            self.writer
-                .wait_for_fold(namespace_id)
-                .await
-                .map_err(map_runtime_error)?;
-            self.runner.drain().await.map_err(map_runtime_error)?;
-            result = attempt().await;
-        }
-        let result = result.scoped(namespace_id);
-        self.drain_runner_after(result).await
     }
 
     /// A grep worker over this backend's own handles: grep's keyspace rides
@@ -196,27 +147,15 @@ impl EmbeddedBackend {
         snapshot_id: Option<&PinId>,
     ) -> Result<ListPathEntriesResponse, CliError> {
         let request = cli_page_request(limit, cursor)?;
-        if let Some(snapshot_id) = snapshot_id {
-            let snapshot = self
-                .reader
-                .pin_namespace_at_snapshot(spec.namespace(), snapshot_id)
-                .await
-                .scoped(spec.namespace())?;
-            return snapshot
-                .list_path_entries_page(
-                    spec.absolute_path().as_str(),
-                    request,
-                    ListPathEntriesOptions::default(),
-                )
-                .await
-                .scoped(spec.namespace());
-        }
         self.reader
             .list_path_entries_page(
                 spec.namespace(),
                 spec.absolute_path().as_str(),
                 request,
-                ListPathEntriesOptions::default(),
+                ListPathEntriesOptions {
+                    snapshot_id: snapshot_id.cloned(),
+                    ..Default::default()
+                },
             )
             .await
             .scoped(spec.namespace())
@@ -227,19 +166,6 @@ impl EmbeddedBackend {
         spec: &NamespacePath,
         options: &StatPathOptions,
     ) -> Result<PathEntry, CliError> {
-        if let Some(snapshot_id) = &options.snapshot_id {
-            let snapshot = self
-                .reader
-                .pin_namespace_at_snapshot(spec.namespace(), snapshot_id)
-                .await
-                .scoped(spec.namespace())?;
-            let mut options = options.clone();
-            options.snapshot_id = None;
-            return snapshot
-                .get_path_entry(spec.absolute_path().as_str(), options)
-                .await
-                .scoped(spec.namespace());
-        }
         self.reader
             .get_path_entry(
                 spec.namespace(),
@@ -258,7 +184,7 @@ impl EmbeddedBackend {
     ) -> Result<GrepResponse, CliError> {
         let store = self.writer.object_store();
         let reads = NamespaceReads::new(&self.service_reader, namespace_id);
-        let reads = match &self.subject {
+        let reads = match self.writer.subject() {
             Some(subject) => reads.as_subject(subject.clone()),
             None => reads,
         };
@@ -506,32 +432,26 @@ impl EmbeddedBackend {
             .scoped(spec.namespace())
     }
 
+    #[cfg(test)]
     pub(super) async fn put_file_bytes(
         &self,
         spec: &NamespacePath,
         bytes: &[u8],
         options: &PutFileOptions,
     ) -> Result<Commit, CliError> {
-        self.publish_with_maintenance_recovery(spec.namespace(), || {
-            self.writer.put_file_bytes(
+        let result = self
+            .writer
+            .put_file_bytes(
                 spec.namespace(),
                 spec.absolute_path().as_str(),
                 bytes,
                 options.clone(),
             )
-        })
-        .await
+            .await
+            .scoped(spec.namespace());
+        self.drain_runner_after(result).await
     }
 
-    /// Writes a file from a payload read once, straight into the runtime's
-    /// streaming staging path.
-    ///
-    /// Unlike the buffered call this one makes a single attempt. The
-    /// `maintenance_required` recovery above works by resubmitting, and a
-    /// stream is consumed by the attempt that reads it: there is no second
-    /// attempt to make. A gated publish commits nothing, so rerunning the
-    /// command — with the same `--commit-id` if the caller wants the retry
-    /// to be idempotent — is the honest recovery.
     pub(super) async fn put_file_stream(
         &self,
         spec: &NamespacePath,
@@ -556,14 +476,16 @@ impl EmbeddedBackend {
         spec: &NamespacePath,
         options: &DeleteOptions,
     ) -> Result<Commit, CliError> {
-        self.publish_with_maintenance_recovery(spec.namespace(), || {
-            self.writer.delete_path(
+        let result = self
+            .writer
+            .delete_path(
                 spec.namespace(),
                 spec.absolute_path().as_str(),
                 options.clone(),
             )
-        })
-        .await
+            .await
+            .scoped(spec.namespace());
+        self.drain_runner_after(result).await
     }
 
     pub(super) async fn create_directory(
@@ -571,14 +493,16 @@ impl EmbeddedBackend {
         spec: &NamespacePath,
         options: &CreateDirectoryOptions,
     ) -> Result<Commit, CliError> {
-        self.publish_with_maintenance_recovery(spec.namespace(), || {
-            self.writer.create_directory(
+        let result = self
+            .writer
+            .create_directory(
                 spec.namespace(),
                 spec.absolute_path().as_str(),
                 options.clone(),
             )
-        })
-        .await
+            .await
+            .scoped(spec.namespace());
+        self.drain_runner_after(result).await
     }
 
     pub(super) async fn update_attributes(
@@ -586,14 +510,16 @@ impl EmbeddedBackend {
         spec: &NamespacePath,
         options: &UpdateAttributesOptions,
     ) -> Result<Commit, CliError> {
-        self.publish_with_maintenance_recovery(spec.namespace(), || {
-            self.writer.update_attributes(
+        let result = self
+            .writer
+            .update_attributes(
                 spec.namespace(),
                 spec.absolute_path().as_str(),
                 options.clone(),
             )
-        })
-        .await
+            .await
+            .scoped(spec.namespace());
+        self.drain_runner_after(result).await
     }
 
     pub(super) async fn move_path(
@@ -602,15 +528,17 @@ impl EmbeddedBackend {
         to: &NamespacePath,
         options: &MoveOptions,
     ) -> Result<Commit, CliError> {
-        self.publish_with_maintenance_recovery(from.namespace(), || {
-            self.writer.move_path(
+        let result = self
+            .writer
+            .move_path(
                 from.namespace(),
                 from.absolute_path().as_str(),
                 to.absolute_path().as_str(),
                 options.clone(),
             )
-        })
-        .await
+            .await
+            .scoped(from.namespace());
+        self.drain_runner_after(result).await
     }
 
     pub(super) async fn copy_path(
@@ -619,15 +547,17 @@ impl EmbeddedBackend {
         to: &NamespacePath,
         options: &CopyOptions,
     ) -> Result<Commit, CliError> {
-        self.publish_with_maintenance_recovery(from.namespace(), || {
-            self.writer.copy_path(
+        let result = self
+            .writer
+            .copy_path(
                 from.namespace(),
                 from.absolute_path().as_str(),
                 to.absolute_path().as_str(),
                 options.clone(),
             )
-        })
-        .await
+            .await
+            .scoped(from.namespace());
+        self.drain_runner_after(result).await
     }
 
     pub(super) async fn restore_file_revision(
@@ -636,15 +566,17 @@ impl EmbeddedBackend {
         source_revision_no: RevisionNo,
         options: &RestoreRevisionOptions,
     ) -> Result<Commit, CliError> {
-        self.publish_with_maintenance_recovery(spec.namespace(), || {
-            self.writer.restore_file_revision(
+        let result = self
+            .writer
+            .restore_file_revision(
                 spec.namespace(),
                 spec.absolute_path().as_str(),
                 source_revision_no,
                 options.clone(),
             )
-        })
-        .await
+            .await
+            .scoped(spec.namespace());
+        self.drain_runner_after(result).await
     }
 
     pub(super) async fn undelete(
@@ -655,16 +587,18 @@ impl EmbeddedBackend {
         destination_path: Option<&AbsolutePath>,
         options: &UndeleteOptions,
     ) -> Result<Commit, CliError> {
-        self.publish_with_maintenance_recovery(namespace_id, || {
-            self.writer.undelete(
+        let result = self
+            .writer
+            .undelete(
                 namespace_id,
                 inode_id,
                 deletion_seq,
                 destination_path.map(|destination_path| destination_path.as_str()),
                 options.clone(),
             )
-        })
-        .await
+            .await
+            .scoped(namespace_id);
+        self.drain_runner_after(result).await
     }
 
     pub(super) async fn create_snapshot(
@@ -673,8 +607,13 @@ impl EmbeddedBackend {
         name: &str,
         ttl_ms: u64,
     ) -> Result<SnapshotSummary, CliError> {
-        let now_ms = validate_embedded_snapshot_ttl(namespace_id, ttl_ms)?;
-        let expires_at_ms = now_ms.saturating_add(ttl_ms);
+        let now_ms = loonfs::current_time_ms()
+            .map_err(RuntimeError::Core)
+            .scoped(namespace_id)?;
+        let policy = loonfs::SnapshotPolicy::default();
+        let expires_at_ms = policy
+            .expires_at_ms(now_ms, ttl_ms)
+            .map_err(map_runtime_error)?;
         let checkpoint = self
             .writer
             .create_snapshot_with_quota(
@@ -684,14 +623,12 @@ impl EmbeddedBackend {
                     expires_at_ms,
                 },
                 now_ms,
-                EMBEDDED_SNAPSHOT_MAX_LIVE_PER_NAMESPACE,
+                policy.max_live_per_namespace,
             )
             .await
-            .scoped(namespace_id)
-            .map_err(|error| error.with_invalid_request_param("/name"))?;
-        SnapshotSummary::from_checkpoint(checkpoint).ok_or_else(|| {
-            CliError::runtime_error("snapshot creation returned a non-snapshot checkpoint")
-        })
+            .scoped(namespace_id)?;
+        Ok(SnapshotSummary::from_checkpoint(checkpoint)
+            .expect("snapshot creation should return a snapshot-owned checkpoint"))
     }
 
     pub(super) async fn list_snapshots_page(
@@ -713,7 +650,6 @@ impl EmbeddedBackend {
             .list_snapshots_page(namespace_id, request)
             .await
             .scoped(namespace_id)
-            .map_err(|error| error.with_invalid_request_param("cursor"))
     }
 
     pub(super) async fn extend_snapshot(
@@ -722,13 +658,18 @@ impl EmbeddedBackend {
         snapshot_id: &PinId,
         ttl_ms: u64,
     ) -> Result<SnapshotSummary, CliError> {
-        let now_ms = validate_embedded_snapshot_ttl(namespace_id, ttl_ms)?;
+        let now_ms = loonfs::current_time_ms()
+            .map_err(RuntimeError::Core)
+            .scoped(namespace_id)?;
+        let policy = loonfs::SnapshotPolicy::default();
         self.writer
             .extend_snapshot(
                 namespace_id,
                 snapshot_id,
-                now_ms.saturating_add(ttl_ms),
-                EMBEDDED_SNAPSHOT_MAX_LIFETIME_MS,
+                policy
+                    .expires_at_ms(now_ms, ttl_ms)
+                    .map_err(map_runtime_error)?,
+                policy.max_lifetime_ms,
             )
             .await
             .scoped(namespace_id)
@@ -748,7 +689,6 @@ impl EmbeddedBackend {
             .create_checkpoint(namespace_id, CreateCheckpointOptions::from_request(request))
             .await
             .scoped(namespace_id)
-            .map_err(|error| error.with_invalid_request_param("/name"))
     }
 
     pub(super) async fn list_checkpoints_page(
@@ -777,17 +717,10 @@ impl EmbeddedBackend {
         namespace_id: &NamespaceId,
         request: RunMaintenanceRequest,
     ) -> Result<RunMaintenanceResponse, CliError> {
-        let result = self
-            .maintenance
+        self.maintenance
             .run_maintenance(namespace_id, request)
-            .await;
-        let invalid_threshold = matches!(&result, Err(RuntimeError::Config(_)));
-        let result = result.scoped(namespace_id);
-        if invalid_threshold {
-            result.map_err(|error| error.with_invalid_request_param("/max_wal_tail_segments"))
-        } else {
-            result
-        }
+            .await
+            .scoped(namespace_id)
     }
 
     /// Proves this profile's object store honours the contract LoonFS
@@ -807,77 +740,25 @@ impl EmbeddedBackend {
         snapshot_id: Option<&PinId>,
     ) -> Result<ListChangesResponse, CliError> {
         let limit = resolve_cli_page_limit(limit)?;
-        let captured_seq = match snapshot_id {
-            Some(snapshot_id) => Some(
-                self.reader
-                    .pin_namespace_at_snapshot(namespace_id, snapshot_id)
-                    .await
-                    .scoped(namespace_id)?
-                    .head_seq(),
-            ),
-            None => None,
-        };
-        if let Some(captured_seq) = captured_seq {
-            if after_seq > captured_seq {
-                return Err(CliError::invalid_request(format!(
-                    "after_seq `{after_seq}` is above snapshot sequence `{captured_seq}`"
-                ))
-                .with_param("after_seq"));
-            }
-            if after_seq == captured_seq {
-                return Ok(ListChangesResponse {
-                    namespace_id: namespace_id.clone(),
-                    after_seq,
-                    through_seq: captured_seq,
-                    next_after_seq: None,
-                    changes: Vec::new(),
-                });
-            }
+        if let Some(snapshot_id) = snapshot_id {
+            return self
+                .reader
+                .pin_namespace_at_snapshot(namespace_id, snapshot_id)
+                .await
+                .scoped(namespace_id)?
+                .list_changes(after_seq, limit)
+                .await
+                .scoped(namespace_id);
         }
-        let mut page = self
-            .reader
+        self.reader
             .list_changes(
                 namespace_id,
                 after_seq,
                 RuntimeListChangesOptions { limit: Some(limit) },
             )
             .await
-            .scoped(namespace_id)?;
-        if let Some(captured_seq) = captured_seq {
-            page.changes
-                .retain(|change| change.committed_seq <= captured_seq);
-            page.through_seq = captured_seq;
-            page.next_after_seq = page
-                .changes
-                .last()
-                .map(|change| change.committed_seq)
-                .filter(|last_seq| *last_seq < captured_seq);
-        }
-        Ok(page)
+            .scoped(namespace_id)
     }
-}
-
-fn validate_embedded_snapshot_ttl(
-    namespace_id: &NamespaceId,
-    ttl_ms: u64,
-) -> Result<u64, CliError> {
-    if ttl_ms == 0 || ttl_ms > EMBEDDED_SNAPSHOT_MAX_TTL_MS {
-        return Err(CliError::invalid_request(format!(
-            "ttl_ms must be greater than zero and may not exceed the `snapshot.max_ttl_ms` limit \
-             of {EMBEDDED_SNAPSHOT_MAX_TTL_MS} milliseconds"
-        ))
-        .with_param("/ttl_ms"));
-    }
-    if ttl_ms > EMBEDDED_SNAPSHOT_MAX_LIFETIME_MS {
-        return Err(CliError::invalid_request(format!(
-            "ttl_ms may not exceed the `snapshot.max_lifetime_ms` limit of \
-             {EMBEDDED_SNAPSHOT_MAX_LIFETIME_MS} milliseconds"
-        ))
-        .with_param("/ttl_ms"));
-    }
-    loonfs::current_time_ms()
-        .map_err(RuntimeError::Core)
-        .scoped(namespace_id)
 }
 
 /// How long an assignment rests before it is asserted again, unless
@@ -1422,7 +1303,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn embedded_writes_recover_from_preexisting_wal_debt() {
+    async fn embedded_writes_report_preexisting_wal_debt_without_retry() {
         let temp_dir = tempdir().expect("create temp dir");
         let store_config = StoreConfig::LocalFs {
             root: temp_dir.path().display().to_string(),
@@ -1462,7 +1343,7 @@ mod tests {
         let target = EmbeddedTarget::new(&store_config, None)
             .await
             .expect("build embedded target");
-        target
+        let error = target
             .backend
             .put_file_bytes(
                 &NamespacePath::parse("demo", "/recovered.txt").expect("namespace path"),
@@ -1470,9 +1351,8 @@ mod tests {
                 &PutFileOptions::new(loonfs_test_support::test_actor()),
             )
             .await
-            .unwrap_or_else(|error| {
-                panic!("recovery put failed: {} {}", error.code, error.message)
-            });
+            .expect_err("WAL debt requires maintenance before resubmission");
+        assert_eq!(error.code, ErrorCode::MaintenanceRequired.as_str());
     }
     #[tokio::test]
     async fn a_fenced_put_fails_terminally_and_names_both_epochs() {

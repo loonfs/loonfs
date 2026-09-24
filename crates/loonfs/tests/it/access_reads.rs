@@ -227,9 +227,9 @@ async fn check_former_writer_read(warm_before_handoff: bool) {
         )
         .await
         .expect("namespace");
-    let mut options = loonfs::PutFileOptions::new(loonfs_test_support::test_actor());
-    options.commit.subject = Some(subject("prn_root"));
+    let options = loonfs::PutFileOptions::new(loonfs_test_support::test_actor());
     old_writer
+        .as_subject(subject("prn_root"))
         .put_file_bytes(&namespace_id, "/team/file", b"private payload", options)
         .await
         .expect("publish file");

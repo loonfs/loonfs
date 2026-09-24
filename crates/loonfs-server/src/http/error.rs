@@ -108,16 +108,14 @@ impl ApiResponseError {
         Self::new(ErrorCode::InvalidRequest, &error.to_string()).with_param("namespace_id")
     }
 
-    pub(super) fn runtime(error: RuntimeError) -> Self {
-        let code = error.code();
-        let details = error.details();
-        let message = error.public_message();
-        let mut response = Self::new(code, &message);
-        response.body.details = details.map(Box::new);
-        if let Some(param) = error.invalid_request_param() {
-            response = response.with_invalid_request_param(param);
-        }
+    pub(super) fn from_api_error(code: ErrorCode, body: ApiError) -> Self {
+        let mut response = Self::new(code, &body.message);
+        response.body = Box::new(body);
         response
+    }
+
+    pub(super) fn runtime(error: RuntimeError) -> Self {
+        Self::from_api_error(error.code(), error.to_api_error())
     }
 
     pub(super) fn runtime_for_namespace(namespace_id: &NamespaceId, error: RuntimeError) -> Self {

@@ -93,9 +93,9 @@ async fn create_namespace(writer: &FsWriter, namespace_id: &NamespaceId, access:
 }
 
 async fn publish_inline(writer: &FsWriter, namespace_id: &NamespaceId) -> ContentRef {
-    let mut options = PutFileOptions::new(loonfs_test_support::test_actor());
-    options.commit.subject = Some(subject("administrator"));
+    let options = PutFileOptions::new(loonfs_test_support::test_actor());
     writer
+        .as_subject(subject("administrator"))
         .put_file_bytes(namespace_id, "/source", b"private inline bytes", options)
         .await
         .expect("publish source");
@@ -349,12 +349,12 @@ async fn deleted_owner_import_uses_updated_access_state_in_the_surviving_head() 
         .expect("fork");
     // The replacement lands after the fork, so only the source's final runs
     // carry it; the fork keeps the administrator it inherited.
-    let mut access = UpdateAccessOptions::new(
+    let access = UpdateAccessOptions::new(
         loonfs_test_support::test_actor(),
         administrator_grants("replacement"),
     );
-    access.commit.subject = Some(subject("administrator"));
     writer
+        .as_subject(subject("administrator"))
         .update_access(&source, "/", access)
         .await
         .expect("replace administrator");

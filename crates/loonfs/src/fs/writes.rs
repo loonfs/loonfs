@@ -17,17 +17,13 @@ use loonfs_core::NamespaceWriterEngine;
 use std::sync::Arc;
 
 fn single_operation(commit: &CommitOptions, operation: FilesystemOperation) -> CommitRequest {
-    let request = CommitRequest::single(
+    CommitRequest::single(
         commit.commit_id.clone().unwrap_or_else(CommitId::generate),
         commit.actor_id.clone(),
         commit.message.clone(),
         operation,
     )
-    .preconditions(commit.preconditions.clone());
-    match &commit.subject {
-        Some(subject) => request.with_subject(subject.clone()),
-        None => request,
-    }
+    .preconditions(commit.preconditions.clone())
 }
 
 impl FsWriter {
@@ -178,7 +174,14 @@ impl FsWriter {
             .await?;
         Ok(self
             .engine(namespace_id)
-            .stage_owned_bytes(&catalog, bytes)
+            .stage_owned_bytes(
+                &catalog,
+                self.core
+                    .subject
+                    .as_ref()
+                    .map(|subject| &subject.subject_id),
+                bytes,
+            )
             .await?)
     }
 
@@ -241,7 +244,14 @@ impl FsWriter {
             .await?;
         Ok(self
             .engine(namespace_id)
-            .stage_owned_stream(&catalog, body)
+            .stage_owned_stream(
+                &catalog,
+                self.core
+                    .subject
+                    .as_ref()
+                    .map(|subject| &subject.subject_id),
+                body,
+            )
             .await?)
     }
 
@@ -415,10 +425,29 @@ impl FsWriter {
                 .resolve_content_location(&content_ref, &context)
                 .await?
             {
-                return Ok(engine.stage_owned_bytes(&catalog, &bytes).await?);
+                return Ok(engine
+                    .stage_owned_bytes(
+                        &catalog,
+                        self.core
+                            .subject
+                            .as_ref()
+                            .map(|subject| &subject.subject_id),
+                        &bytes,
+                    )
+                    .await?);
             }
         }
-        match engine.import_content_ref(&catalog, &content_ref).await {
+        match engine
+            .import_content_ref(
+                &catalog,
+                self.core
+                    .subject
+                    .as_ref()
+                    .map(|subject| &subject.subject_id),
+                &content_ref,
+            )
+            .await
+        {
             Err(crate::CoreError::DurableContent(
                 loonfs_core::content::DurableContentValidationError::MissingContentObject {
                     ..
@@ -859,6 +888,10 @@ impl FsWriter {
         namespace_id: &NamespaceId,
         candidate: CommitCandidate,
     ) -> Result<Commit> {
+        let candidate = match &self.core.subject {
+            Some(subject) => candidate.with_subject(subject.clone()),
+            None => candidate,
+        };
         self.publisher
             .submit_candidate(namespace_id.clone(), candidate)
             .await

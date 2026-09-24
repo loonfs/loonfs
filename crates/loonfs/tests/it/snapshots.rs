@@ -445,3 +445,110 @@ fn tombstoned_namespace_keeps_checkpoint_inventory_and_user_delete_available() {
         ErrorCode::NamespaceDeleted,
     );
 }
+
+#[tokio::test]
+async fn shared_read_options_select_the_snapshot_for_paths_and_inodes() {
+    let directory = tempdir().expect("directory");
+    let writer = FsWriter::builder_with_store(Arc::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+    ))
+    .writer_id("snapshot-options")
+    .build()
+    .await
+    .expect("writer");
+    let namespace = namespace_id("options");
+    writer
+        .create_namespace(
+            &namespace,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("namespace");
+    writer
+        .put_file_bytes(
+            &namespace,
+            "/file",
+            b"before",
+            PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("file");
+    let reader = writer.reader();
+    let root = reader
+        .get_path_entry(&namespace, "/", Default::default())
+        .await
+        .expect("root");
+    let before = reader
+        .get_path_entry(&namespace, "/file", Default::default())
+        .await
+        .expect("file");
+    let snapshot = writer
+        .create_snapshot(
+            &namespace,
+            CreateSnapshotOptions {
+                name: "options".to_owned(),
+                expires_at_ms: u64::MAX,
+            },
+        )
+        .await
+        .expect("snapshot");
+    writer
+        .delete_path(
+            &namespace,
+            "/file",
+            loonfs::DeleteOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("delete");
+    let options = loonfs::StatPathOptions {
+        snapshot_id: Some(snapshot.checkpoint_id.clone()),
+        ..Default::default()
+    };
+    assert_eq!(
+        reader
+            .get_path_entry(&namespace, "/file", options.clone())
+            .await
+            .expect("snapshot path"),
+        before
+    );
+    assert_eq!(
+        reader
+            .get_inode(&namespace, before.inode_id, options)
+            .await
+            .expect("snapshot inode"),
+        before
+    );
+    let request = PageRequest {
+        limit: PaginationPolicy::default()
+            .resolve_limit(None)
+            .expect("limit"),
+        cursor: None,
+    };
+    let paths = reader
+        .list_path_entries_page(
+            &namespace,
+            "/",
+            request.clone(),
+            loonfs::ListPathEntriesOptions {
+                snapshot_id: Some(snapshot.checkpoint_id.clone()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("snapshot paths");
+    let inodes = reader
+        .list_inode_children_page(
+            &namespace,
+            root.inode_id,
+            request,
+            loonfs::ListInodeChildrenOptions {
+                snapshot_id: Some(snapshot.checkpoint_id),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("snapshot children");
+    assert_eq!(paths.entries.len(), 1);
+    assert_eq!(paths.entries, inodes.entries);
+    assert_eq!(paths.head_seq, snapshot.captured_seq);
+}

@@ -641,29 +641,13 @@ fn snapshot_expiry_from_ttl(
     now_ms: u64,
     ttl_ms: u64,
 ) -> Result<u64, ApiResponseError> {
-    if ttl_ms == 0 || ttl_ms > state.config.snapshot_max_ttl_ms {
-        return Err(ApiResponseError::new(
-            ErrorCode::InvalidRequest,
-            &format!(
-                "ttl_ms must be greater than zero and may not exceed the \
-                 `{LIMIT_SNAPSHOT_MAX_TTL_MS}` limit of {} milliseconds",
-                state.config.snapshot_max_ttl_ms
-            ),
-        )
-        .with_param("/ttl_ms"));
+    loonfs::SnapshotPolicy {
+        max_ttl_ms: state.config.snapshot_max_ttl_ms,
+        max_lifetime_ms: state.config.snapshot_max_lifetime_ms,
+        max_live_per_namespace: state.config.snapshot_max_live_per_namespace,
     }
-    if ttl_ms > state.config.snapshot_max_lifetime_ms {
-        return Err(ApiResponseError::new(
-            ErrorCode::InvalidRequest,
-            &format!(
-                "ttl_ms may not exceed the `{LIMIT_SNAPSHOT_MAX_LIFETIME_MS}` limit of {} \
-                 milliseconds",
-                state.config.snapshot_max_lifetime_ms
-            ),
-        )
-        .with_param("/ttl_ms"));
-    }
-    Ok(now_ms.saturating_add(ttl_ms))
+    .expires_at_ms(now_ms, ttl_ms)
+    .map_err(ApiResponseError::runtime)
 }
 
 #[cfg_attr(
@@ -868,14 +852,6 @@ pub(super) async fn run_maintenance(
         .maintenance
         .run_maintenance(&namespace_id, request)
         .await
-        .map_err(|error| {
-            let invalid_threshold = matches!(&error, loonfs::RuntimeError::Config(_));
-            let response = ApiResponseError::runtime_for_namespace(&namespace_id, error);
-            if invalid_threshold {
-                response.with_invalid_request_param("/max_wal_tail_segments")
-            } else {
-                response
-            }
-        })?;
+        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
     Ok(Json(result))
 }

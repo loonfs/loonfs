@@ -62,6 +62,22 @@ impl From<CoreError> for GrepError {
 }
 
 impl GrepError {
+    /// Preserves public error fields for embedded and HTTP callers.
+    pub fn to_api_error(&self) -> loonfs_api::ApiError {
+        if let Self::Runtime(error) = self {
+            return error.to_api_error();
+        }
+        loonfs_api::ApiError {
+            code: self.code().as_str().to_owned(),
+            message: self.public_message().into_owned(),
+            param: None,
+            feature: matches!(self, Self::NotEnabled | Self::Backfilling)
+                .then(|| loonfs_api::FEATURE_QUERY_GREP.to_owned()),
+            request_id: None,
+            details: None,
+        }
+    }
+
     /// Returns the caller-action category for this failure.
     pub fn kind(&self) -> ErrorKind {
         self.code().kind()

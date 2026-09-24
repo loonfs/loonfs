@@ -333,8 +333,7 @@ async fn a_revoked_administrator_cannot_delete_a_snapshot_through_the_former_wri
         .await
         .expect("create snapshot");
     let snapshot_id = snapshot.checkpoint_id;
-    let mut options = loonfs::PutFileOptions::new(loonfs_test_support::test_actor());
-    options.commit.subject = Some(subject("root", "prn_root"));
+    let options = loonfs::PutFileOptions::new(loonfs_test_support::test_actor());
     root.put_file_bytes(&namespace, "/file", b"private payload", options)
         .await
         .expect("publish after snapshot creation");
@@ -379,4 +378,41 @@ async fn a_revoked_administrator_cannot_delete_a_snapshot_through_the_former_wri
         .expect("snapshot still exists");
     peer.shutdown().await.expect("peer shutdown");
     writer.shutdown().await.expect("old writer shutdown");
+}
+
+#[tokio::test]
+async fn a_scoped_writer_uses_its_subject_for_commits_and_upload_ownership() {
+    let (_directory, writer, namespace) = create_namespace().await;
+    let root = subject("root", "prn_root");
+    let scoped = writer.as_subject(root.clone());
+    scoped
+        .put_file_bytes(
+            &namespace,
+            "/scoped",
+            b"bytes",
+            loonfs::PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("scoped commit");
+    let upload = scoped
+        .create_upload(&namespace, None)
+        .await
+        .expect("scoped upload");
+    scoped
+        .get_upload(&namespace, &upload.upload_id, None)
+        .await
+        .expect("same subject");
+    let staged = scoped
+        .prepare_file_bytes(&namespace, &vec![0; 128 * 1024])
+        .await
+        .expect("stage scoped content");
+    scoped
+        .get_upload(&namespace, staged.upload_id().expect("staged upload"), None)
+        .await
+        .expect("staged upload belongs to the scoped subject");
+    let other = writer.as_subject(subject("other", "prn_root"));
+    assert!(other
+        .get_upload(&namespace, &upload.upload_id, Some(&root))
+        .await
+        .is_err());
 }

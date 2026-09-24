@@ -111,7 +111,13 @@ impl PublisherRegistry {
             .await?;
         let engine = self.read_core.writer_engine(&writer.identity, namespace_id);
         for value in values {
-            let proof = engine.stage_owned_bytes(&catalog, value.bytes()).await?;
+            let proof = engine
+                .stage_owned_bytes(
+                    &catalog,
+                    candidate.subject().map(|subject| &subject.subject_id),
+                    value.bytes(),
+                )
+                .await?;
             candidate.stage_inline_content(&value.content_ref().content_id, proof);
         }
         Ok(())

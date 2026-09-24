@@ -475,12 +475,13 @@ async fn snapshot_pins_serve_captured_state_and_enforce_release() {
         snapshot_id: Some(snapshot.checkpoint_id.clone()),
         ..Default::default()
     };
-    assert_core_error_kind(
+    assert_eq!(
         runtime
             .reader
             .get_path_entry(&namespace_id, "/pinned.txt", snapshot_options.clone())
-            .await,
-        ErrorCode::InvalidRequest,
+            .await
+            .expect("read with snapshot options"),
+        captured,
     );
 
     runtime
@@ -500,9 +501,12 @@ async fn snapshot_pins_serve_captured_state_and_enforce_release() {
         .pin_namespace_at_snapshot(&namespace_id, &snapshot.checkpoint_id)
         .await
         .expect("pin live snapshot");
-    assert_core_error_kind(
-        pinned.get_path_entry("/pinned.txt", snapshot_options).await,
-        ErrorCode::InvalidRequest,
+    assert_eq!(
+        pinned
+            .get_path_entry("/pinned.txt", snapshot_options)
+            .await
+            .expect("read pinned entry with snapshot options"),
+        captured,
     );
     assert_eq!(pinned.head_seq(), snapshot.captured_seq);
     assert_eq!(

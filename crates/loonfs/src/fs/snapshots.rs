@@ -9,6 +9,50 @@ use loonfs_api::PinId;
 use loonfs_core::CheckpointPageCursor;
 use std::num::NonZeroU32;
 
+/// Limits applied to snapshot lifetimes and namespace quota.
+#[derive(Debug, Clone, Copy)]
+pub struct SnapshotPolicy {
+    /// Largest requested lifetime from the current time.
+    pub max_ttl_ms: u64,
+    /// Largest lifetime from the snapshot's creation time.
+    pub max_lifetime_ms: u64,
+    /// Most live snapshots one namespace may hold.
+    pub max_live_per_namespace: usize,
+}
+
+impl Default for SnapshotPolicy {
+    fn default() -> Self {
+        Self {
+            max_ttl_ms: 86_400_000,
+            max_lifetime_ms: 604_800_000,
+            max_live_per_namespace: 16,
+        }
+    }
+}
+
+impl SnapshotPolicy {
+    /// Validates a requested lifetime before any snapshot write.
+    pub fn expires_at_ms(&self, now_ms: u64, ttl_ms: u64) -> Result<u64> {
+        let message = if ttl_ms == 0 || ttl_ms > self.max_ttl_ms {
+            Some(format!("ttl_ms must be greater than zero and may not exceed the `snapshot.max_ttl_ms` limit of {} milliseconds", self.max_ttl_ms))
+        } else if ttl_ms > self.max_lifetime_ms {
+            Some(format!(
+                "ttl_ms may not exceed the `snapshot.max_lifetime_ms` limit of {} milliseconds",
+                self.max_lifetime_ms
+            ))
+        } else {
+            None
+        };
+        if let Some(message) = message {
+            return Err(RuntimeError::InvalidRequest {
+                message,
+                param: "/ttl_ms",
+            });
+        }
+        Ok(now_ms.saturating_add(ttl_ms))
+    }
+}
+
 /// A pager over live snapshots.
 pub type SnapshotsPager = loonfs_api::Pager<ListSnapshotsResponse, RuntimeError>;
 

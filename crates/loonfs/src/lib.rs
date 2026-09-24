@@ -178,7 +178,7 @@ pub use config::{
 };
 pub use fs::{
     ChangesPager, CheckpointsPager, FileRevisionsPager, FsReadSnapshot, InodeChildrenPager,
-    PathEntriesPager, SnapshotsPager, TrashPager,
+    PathEntriesPager, SnapshotPolicy, SnapshotsPager, TrashPager,
 };
 pub use handle::{
     FsMaintenance, FsMaintenanceBuilder, FsReader, FsReaderBuilder, FsWriter, FsWriterBuilder,
@@ -214,6 +214,14 @@ pub enum RuntimeError {
     /// An error surfaced by the underlying `loonfs-core` engine.
     #[error(transparent)]
     Core(#[from] CoreError),
+    /// A request field fails runtime policy.
+    #[error("invalid request: {message}")]
+    InvalidRequest {
+        /// Public reason the field was rejected.
+        message: String,
+        /// Header, query parameter, or JSON Pointer identifying the field.
+        param: &'static str,
+    },
     /// The runtime configuration is invalid.
     #[error("invalid runtime config: {0}")]
     Config(String),
@@ -223,11 +231,23 @@ pub enum RuntimeError {
 }
 
 impl RuntimeError {
+    /// Preserves public error fields for embedded and HTTP callers.
+    pub fn to_api_error(&self) -> loonfs_api::ApiError {
+        loonfs_api::ApiError {
+            code: self.code().as_str().to_owned(),
+            message: self.public_message().into_owned(),
+            param: self.invalid_request_param(),
+            feature: None,
+            request_id: None,
+            details: self.details().map(Box::new),
+        }
+    }
+
     /// Returns the stable machine-readable reason for this error.
     pub fn code(&self) -> ErrorCode {
         match self {
             Self::Core(error) => error.code(),
-            Self::Config(_) => ErrorCode::InvalidRequest,
+            Self::Config(_) | Self::InvalidRequest { .. } => ErrorCode::InvalidRequest,
             Self::RuntimeTask(_) => ErrorCode::ServerError,
         }
     }
@@ -241,13 +261,16 @@ impl RuntimeError {
     pub fn details(&self) -> Option<loonfs_api::ErrorDetails> {
         match self {
             Self::Core(error) => error.details(),
-            Self::Config(_) | Self::RuntimeTask(_) => None,
+            Self::Config(_) | Self::RuntimeTask(_) | Self::InvalidRequest { .. } => None,
         }
     }
 
-    /// Identifies a malformed commit field as a JSON Pointer for HTTP errors.
+    /// Identifies the rejected header, query parameter, or body field.
     pub fn invalid_request_param(&self) -> Option<String> {
         match self {
+            Self::InvalidRequest { param, .. } => Some((*param).to_owned()),
+            Self::Core(CoreError::InvalidCursor(_)) => Some("cursor".to_owned()),
+            Self::Core(CoreError::InvalidCheckpointRequest(_)) => Some("/name".to_owned()),
             Self::Core(CoreError::SubjectRequired { .. }) => Some("Loonfs-Principals".to_owned()),
             Self::Core(CoreError::FailedOperation {
                 operation_index,
@@ -271,16 +294,16 @@ impl RuntimeError {
     pub fn public_message(&self) -> std::borrow::Cow<'static, str> {
         let store_message = match self {
             Self::Core(error) => error.object_store_public_message(),
-            Self::Config(_) | Self::RuntimeTask(_) => None,
+            Self::Config(_) | Self::RuntimeTask(_) | Self::InvalidRequest { .. } => None,
         };
         if let Some(message) = store_message {
             return message;
         }
 
         match self {
-            Self::Config(message) | Self::RuntimeTask(message) => {
-                std::borrow::Cow::Owned(message.clone())
-            }
+            Self::Config(message)
+            | Self::RuntimeTask(message)
+            | Self::InvalidRequest { message, .. } => std::borrow::Cow::Owned(message.clone()),
             Self::Core(error) => std::borrow::Cow::Owned(error.to_string()),
         }
     }

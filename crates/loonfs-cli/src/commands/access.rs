@@ -21,7 +21,7 @@ pub(crate) async fn run_access_set(
     let options = UpdateAccessOptions {
         boundary: args.boundary,
         grants: parse_grants(&args.grants).map_err(|error| context.fail(kind, error))?,
-        commit: commit_options(context.actor(), context.subject.as_ref(), &args.commit)
+        commit: commit_options(context.actor(), &args.commit)
             .map_err(|error| context.fail(kind, error))?,
         expected_inode_id: args.expected_inode_id,
         expected_access_revision_no: args.expected_revision.map(AccessRevisionNo),

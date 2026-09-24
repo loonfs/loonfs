@@ -51,7 +51,12 @@ pub struct FsWriter {
 }
 
 impl FsWriter {
-    /// Clones this writer with the subject used for namespace administration and reads.
+    /// Returns `None` for an unscoped service handle.
+    pub fn subject(&self) -> Option<&loonfs_api::Subject> {
+        self.core.subject.as_ref()
+    }
+
+    /// Clones this writer with the subject used for its reads, commits, and uploads.
     pub fn as_subject(&self, subject: loonfs_api::Subject) -> Self {
         Self {
             core: self.core.as_subject(subject),

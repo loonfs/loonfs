@@ -19,17 +19,6 @@ use loonfs_api::{
 use loonfs_core::{NamespaceReaderEngine, RuntimeReadContext};
 use tracing::Instrument;
 
-/// Runtime readers require callers to pin snapshots explicitly.
-fn reject_snapshot_option(snapshot_id: &Option<PinId>, reader: &str) -> Result<()> {
-    if snapshot_id.is_some() {
-        return Err(loonfs_core::Error::InvalidCheckpointRequest(format!(
-            "snapshot_id is not supported by {reader}"
-        ))
-        .into());
-    }
-    Ok(())
-}
-
 fn validate_pinned_directory_cursor(
     cursor: Option<&DirectoryPageCursor>,
     pinned_head_seq: ChangeSeq,
@@ -102,6 +91,15 @@ impl FsReadSnapshot {
         after_seq: ChangeSeq,
         limit: EffectiveLimit,
     ) -> Result<ListChangesResponse> {
+        if after_seq > self.head_seq() {
+            return Err(RuntimeError::InvalidRequest {
+                message: format!(
+                    "after_seq `{after_seq}` is above snapshot sequence `{}`",
+                    self.head_seq()
+                ),
+                param: "after_seq",
+            });
+        }
         self.engine.require_administrator(&self.context).await?;
         Ok(self
             .engine
@@ -115,10 +113,6 @@ impl FsReadSnapshot {
         absolute_path: &str,
         options: StatPathOptions,
     ) -> Result<PathEntry> {
-        reject_snapshot_option(
-            &options.snapshot_id,
-            "FsReadSnapshot because it is already pinned",
-        )?;
         Ok(self
             .engine
             .resolve_path(absolute_path, options, &self.context)
@@ -132,10 +126,6 @@ impl FsReadSnapshot {
         request: PageRequest<DirectoryPageCursor>,
         options: ListPathEntriesOptions,
     ) -> Result<ListPathEntriesResponse> {
-        reject_snapshot_option(
-            &options.snapshot_id,
-            "FsReadSnapshot because it is already pinned",
-        )?;
         validate_pinned_directory_cursor(
             request.cursor.as_ref(),
             self.head_seq(),
@@ -167,10 +157,6 @@ impl FsReadSnapshot {
         inode_id: InodeId,
         options: StatPathOptions,
     ) -> Result<PathEntry> {
-        reject_snapshot_option(
-            &options.snapshot_id,
-            "FsReadSnapshot because it is already pinned",
-        )?;
         Ok(self
             .engine
             .stat_inode(inode_id, options, &self.context)
@@ -184,10 +170,6 @@ impl FsReadSnapshot {
         request: PageRequest<DirectoryPageCursor>,
         options: ListInodeChildrenOptions,
     ) -> Result<ListInodeChildrenResponse> {
-        reject_snapshot_option(
-            &options.snapshot_id,
-            "FsReadSnapshot because it is already pinned",
-        )?;
         validate_pinned_directory_cursor(
             request.cursor.as_ref(),
             self.head_seq(),
@@ -466,10 +448,13 @@ impl FsReader {
         absolute_path: &str,
         options: StatPathOptions,
     ) -> Result<PathEntry> {
-        reject_snapshot_option(
-            &options.snapshot_id,
-            "FsReader; call pin_namespace_at_snapshot first",
-        )?;
+        if let Some(snapshot_id) = &options.snapshot_id {
+            return self
+                .pin_namespace_at_snapshot(namespace_id, snapshot_id)
+                .await?
+                .get_path_entry(absolute_path, options)
+                .await;
+        }
         let span = tracing::Span::current();
         self.core.record_trace_context(&span);
         let (engine, read_context) = self.core.pinned_metadata_read(namespace_id).await?;
@@ -498,10 +483,13 @@ impl FsReader {
         inode_id: InodeId,
         options: StatPathOptions,
     ) -> Result<PathEntry> {
-        reject_snapshot_option(
-            &options.snapshot_id,
-            "FsReader; call pin_namespace_at_snapshot first",
-        )?;
+        if let Some(snapshot_id) = &options.snapshot_id {
+            return self
+                .pin_namespace_at_snapshot(namespace_id, snapshot_id)
+                .await?
+                .get_inode(inode_id, options)
+                .await;
+        }
         let span = tracing::Span::current();
         self.core.record_trace_context(&span);
         let (engine, read_context) = self.core.pinned_metadata_read(namespace_id).await?;
@@ -565,10 +553,13 @@ impl FsReader {
         request: PageRequest<DirectoryPageCursor>,
         options: ListPathEntriesOptions,
     ) -> Result<ListPathEntriesResponse> {
-        reject_snapshot_option(
-            &options.snapshot_id,
-            "FsReader; call pin_namespace_at_snapshot first",
-        )?;
+        if let Some(snapshot_id) = &options.snapshot_id {
+            return self
+                .pin_namespace_at_snapshot(namespace_id, snapshot_id)
+                .await?
+                .list_path_entries_page(absolute_path, request, options)
+                .await;
+        }
         reject_snapshot_bound_directory_cursor(request.cursor.as_ref())?;
         self.core.record_trace_context(&tracing::Span::current());
         let (mut response, next_cursor) = self
@@ -668,10 +659,13 @@ impl FsReader {
         request: PageRequest<DirectoryPageCursor>,
         options: ListInodeChildrenOptions,
     ) -> Result<ListInodeChildrenResponse> {
-        reject_snapshot_option(
-            &options.snapshot_id,
-            "FsReader; call pin_namespace_at_snapshot first",
-        )?;
+        if let Some(snapshot_id) = &options.snapshot_id {
+            return self
+                .pin_namespace_at_snapshot(namespace_id, snapshot_id)
+                .await?
+                .list_inode_children_page(inode_id, request, options)
+                .await;
+        }
         reject_snapshot_bound_directory_cursor(request.cursor.as_ref())?;
         self.core.record_trace_context(&tracing::Span::current());
         let (engine, read_context) = self
