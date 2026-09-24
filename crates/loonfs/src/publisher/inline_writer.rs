@@ -1,5 +1,8 @@
 //! Inline writer preparation, publication, fallback, and maintenance contracts.
 
+#[path = "inline_fold_accounting.rs"]
+mod fold_accounting;
+
 use super::*;
 use crate::{InlineContentOptions, MetadataMaintenanceOptions, PutFileOptions};
 use loonfs_api::wire::wal::decode_wal_segment_envelope_zstd;
