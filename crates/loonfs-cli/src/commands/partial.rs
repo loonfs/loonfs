@@ -304,36 +304,4 @@ mod tests {
         );
         assert_eq!(resumable_bytes(&destination, &other), 0);
     }
-
-    #[test]
-    fn an_old_partial_sidecar_cleanly_restarts_from_byte_zero() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let destination = dir.path().join("file.bin");
-        let partial_path = sibling(&destination, PARTIAL_SUFFIX).expect("partial path");
-        let meta_path = sibling(&destination, META_SUFFIX).expect("meta path");
-        let expected = meta_for(b"0123456789");
-
-        std::fs::write(&partial_path, b"0123").expect("write partial");
-        std::fs::write(
-            &meta_path,
-            serde_json::json!({
-                "content_id": expected.content_id,
-                "size_bytes": expected.size_bytes,
-                "checksum": expected.checksum
-            })
-            .to_string(),
-        )
-        .expect("write old sidecar");
-
-        assert_eq!(resumable_bytes(&destination, &expected), 0);
-        let restarted = PartialDownload::open(&destination, Some(&expected), 0)
-            .expect("restart partial download");
-        assert_eq!(restarted.resumed_from, 0);
-        assert_eq!(
-            std::fs::metadata(partial_path)
-                .expect("partial metadata")
-                .len(),
-            0
-        );
-    }
 }

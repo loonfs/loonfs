@@ -83,9 +83,7 @@ either way.
     "filesystem.namespaces.fork": true,
     "filesystem.namespaces.delete": true,
     "filesystem.snapshots": true,
-    "filesystem.attributes": true,
     "filesystem.commits.inline_content": true,
-    "filesystem.inodes.list_children": true,
     "query.grep": true
   },
   "limits": {
@@ -168,8 +166,6 @@ hoc.
 | `filesystem.namespaces.fork` | Forking namespaces (`POST /v0/namespaces/{ns}/forks`). | |
 | `filesystem.namespaces.delete` | Deleting namespaces (`DELETE /v0/namespaces/{ns}`). | Deletion is terminal. Metadata and the namespace's own content become conditionally reclaimable through maintenance runs with `kind` set to `gc` (section 6.3). A deployment may still advertise `false` and answer `not_supported`. |
 | `filesystem.snapshots` | Creating, listing, extending, and releasing snapshots under `/v0/namespaces/{ns}/snapshots`. | |
-| `filesystem.attributes` | Writing inode attributes (`update_attributes`) and projecting them onto `GET /filesystem/entry` and `GET /filesystem/entries`. | Implemented by the core runtime rather than composed by a host, so a deployment serving `filesystem/v0` advertises it. |
-| `filesystem.inodes.list_children` | Listing a directory's children by parent inode ID (`GET /v0/namespaces/{ns}/inodes/{inode_id}/children`). | Implemented by the core runtime rather than composed by a host, so a deployment serving `filesystem/v0` advertises it. The key exists so inode-driven sync clients can gate on deployments built before the route existed. |
 | `filesystem.commits.inline_content` | Sending file content in a `put_file`, `create_file_by_inode`, or `put_file_revision_by_inode` commit operation. | Advertised when inline writes are enabled. The per-file limit is `commit.max_inline_content_bytes_per_operation`. Without this feature, upload content before committing. |
 | `filesystem.uploads.direct_put` | Starting presigned `direct_put` upload sessions (`POST /v0/namespaces/{ns}/uploads`). | The server returns a short-lived, create-only presigned PUT capability for the exact content object. The provider must report a durable whole-object checksum after the write. The key is present only on an endpoint the live conformance suite has run against. Independent of `filesystem.uploads.direct_multipart`: a provider may offer this and no multipart API at all. Raw object keys and caller-managed object-store writes are not part of this feature. |
 | `filesystem.uploads.direct_multipart` | Starting presigned `direct_multipart` upload sessions (`POST /v0/namespaces/{ns}/uploads`) and signing their parts (`POST /v0/namespaces/{ns}/uploads/{upload_id}/parts`). | The server opens the provider's multipart upload and returns one short-lived, checksum-bound capability per part. It needs an S3-style multipart API on top of the signing the other keys need, so a provider without one advertises this key alone as absent. |
@@ -1723,8 +1719,7 @@ target remains the authority for what is being listed. Responses include
 The inode route accepts `snapshot_id` and addresses the directory by its stable
 identity instead of a name, so a listing and its resumption stay on the same directory across
 concurrent renames or moves of the parent; entry paths reflect the parent's
-location at each page's head. It is gated by the `filesystem.inodes.list_children`
-feature. An unknown or hidden target inode answers `inode_not_found`, and a
+location at each page's head. An unknown or hidden target inode answers `inode_not_found`, and a
 file target answers `path_conflict`: an inode-addressed caller asked for
 children, never for the entry itself, so there is no single-entry file
 listing on this route. A directory deleted mid-listing answers

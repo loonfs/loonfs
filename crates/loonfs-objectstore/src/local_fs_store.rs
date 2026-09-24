@@ -1137,7 +1137,7 @@ mod tests {
         ));
         let temp_shaped = store
             .put(
-                "namespaces/ns-scratch/control/.head.json.tmp-9-9",
+                "namespaces/ns-scratch/.hint.json.tmp-9-9",
                 Bytes::from_static(b"x"),
                 PutMode::Overwrite,
             )

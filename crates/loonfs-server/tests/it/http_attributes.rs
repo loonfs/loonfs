@@ -275,28 +275,6 @@ async fn the_client_round_trips_the_read_options() {
         .all(|entry| entry.attributes.is_some()));
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn the_served_capability_document_advertises_attributes() {
-    let temp_dir = tempdir().expect("tempdir");
-    let harness = start_server(test_config(
-        temp_dir.path().join("store"),
-        "loonfs-server-attributes-capabilities",
-        "http-attributes-capabilities",
-    ))
-    .await;
-
-    let document = harness
-        .client
-        .get_capabilities()
-        .await
-        .expect("read capabilities");
-    assert_eq!(
-        document.features.get(loonfs_api::FEATURE_ATTRIBUTES),
-        Some(&true)
-    );
-    document.validate().expect("the document is well formed");
-}
-
 #[tokio::test]
 async fn an_unrestricted_namespace_answers_namespace_unrestricted_over_http() {
     let temp_dir = tempdir().expect("tempdir");

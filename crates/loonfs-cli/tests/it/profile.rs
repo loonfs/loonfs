@@ -238,10 +238,6 @@ fn config_resolution_is_independent_of_file_existence() {
     assert_eq!(default["path"], default_path);
     assert_eq!(default["source"], "default");
 
-    // Even an existing old file cannot override the selected XDG location.
-    let old_path = harness.home_dir.join(".loonfs").join("config.toml");
-    fs::create_dir_all(old_path.parent().expect("old config directory")).expect("directory");
-    fs::write(&old_path, MINIMAL_CONFIG).expect("old config");
     for exists in [false, true] {
         if exists {
             fs::create_dir_all(xdg_path.parent().expect("xdg directory")).expect("directory");

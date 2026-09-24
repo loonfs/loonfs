@@ -470,8 +470,6 @@ mod tests {
             .remove("owner_namespace_id");
         assert!(serde_json::from_value::<ContentRef>(missing_owner).is_err());
         assert!(object.contains_key("checksum"));
-        assert!(!object.contains_key("storage_checksum"));
-        assert!(!object.contains_key("whole_file_sha256"));
     }
 
     #[test]

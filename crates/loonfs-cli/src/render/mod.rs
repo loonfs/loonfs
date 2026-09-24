@@ -133,7 +133,7 @@ mod tests {
 
     const POISON_PROVIDER_DETAIL: &str = "<Error>AccessDenied</Error> \
         arn:aws:iam::123456789012:role/private-role private-bucket \
-        namespaces/customer-a/head.json x-amz-request-id=provider-request \
+        namespaces/customer-a/hint.json x-amz-request-id=provider-request \
         x-amz-id-2=provider-host-id AKIAEXAMPLE";
 
     fn assert_provider_markers_absent(rendered: &str) {
@@ -141,7 +141,7 @@ mod tests {
             "<Error>AccessDenied</Error>",
             "arn:aws:iam::123456789012:role/private-role",
             "private-bucket",
-            "namespaces/customer-a/head.json",
+            "namespaces/customer-a/hint.json",
             "x-amz-request-id=provider-request",
             "x-amz-id-2=provider-host-id",
             "AKIAEXAMPLE",
@@ -155,7 +155,7 @@ mod tests {
 
     fn poison_permission_runtime_error() -> loonfs::RuntimeError {
         loonfs::RuntimeError::Core(loonfs::CoreError::Store {
-            object_key: "namespaces/customer-a/head.json".to_owned(),
+            object_key: "namespaces/customer-a/hint.json".to_owned(),
             message: POISON_PROVIDER_DETAIL.to_owned(),
             class: loonfs::StoreFailureClass::PermissionDenied,
         })
@@ -193,7 +193,7 @@ mod tests {
     #[test]
     fn provider_failure_is_safe_on_embedded_remote_and_doctor_surfaces() {
         let public_message = loonfs::ObjectStoreError::PermissionDenied {
-            object_key: "namespaces/customer-a/head.json".to_owned(),
+            object_key: "namespaces/customer-a/hint.json".to_owned(),
             message: POISON_PROVIDER_DETAIL.to_owned(),
         }
         .public_message()

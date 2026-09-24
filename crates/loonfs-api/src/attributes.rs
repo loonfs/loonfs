@@ -335,17 +335,6 @@ mod tests {
     }
 
     #[test]
-    fn attribute_value_rejects_the_old_tagged_shape() {
-        assert!(
-            serde_json::from_str::<AttributeValue>(r#"{"kind":"string","value":"hello"}"#).is_err()
-        );
-        assert!(serde_json::from_str::<AttributeValue>(
-            r#"{"kind":"string_list","values":["a","b"]}"#
-        )
-        .is_err());
-    }
-
-    #[test]
     fn attribute_value_accepts_empty_and_free_text() {
         for text in ["", "a\n\u{0}b", "draft,review", "café ☃ 日本語 🙂"] {
             assert_eq!(value(text).as_str(), text);

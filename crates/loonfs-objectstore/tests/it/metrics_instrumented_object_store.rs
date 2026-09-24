@@ -230,9 +230,9 @@ async fn records_list_count() {
     let store = instrumented_object_store(temp_dir.path(), recorder.clone());
 
     store
-        .put_overwrite("namespaces/ns-1/descriptor.json", bytes(b"descriptor"))
+        .put_overwrite("namespaces/ns-1/object", bytes(b"content"))
         .await
-        .expect("put descriptor");
+        .expect("put object");
     store
         .put_overwrite(
             &hint(&loonfs_api::NamespaceId::parse("ns-1").expect("valid namespace id")),

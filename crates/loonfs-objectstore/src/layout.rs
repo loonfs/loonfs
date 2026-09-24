@@ -233,7 +233,6 @@ mod tests {
                 owner.as_str()
             );
         }
-        assert!(parse_object_key(&format!("namespaces/ab/content/7/{content_id}")).is_none());
     }
 
     #[test]
@@ -249,16 +248,22 @@ mod tests {
     }
 
     #[test]
-    fn parser_rejects_retired_and_malformed_paths() {
+    fn parser_rejects_malformed_paths() {
         for key in [
-            "namespaces/ns-1/descriptor.json",
-            "namespaces/ns-1/control/head.json",
-            "namespaces/ns-1/wal/wal_00000000000000000001-0123456789abcdef.wal.zst",
-            "namespaces/ns-1/wal/segments/random.tmp",
-            "namespaces/ns-1/metadata/compactions/cmp_1/segments/seg_1.tmp",
-            "namespaces/ns-1/metadata/compactions/cmp_1/lease.json",
-            "namespaces/ns-1/metadata/compaction_leases/unknown.json",
-            "namespaces/ab/content/1/deadbeef",
+            "namespaces/ns-1/wal/00000000000000000000.wal.zst",
+            "namespaces/ns-1/wal/1.wal.zst",
+            "namespaces/ns-1/wal/99999999999999999999.wal.zst",
+            "namespaces/ns-1/wal/0000000000000000000x.wal.zst",
+            "namespaces/ns-1/wal/00000000000000000001.tmp",
+            "namespaces/ns-1/segments/seg_1.tmp",
+            "namespaces/ns-1/manifests/00000000000000000001.tmp",
+            "namespaces/ns-1/pins/pin_1.tmp",
+            "namespaces/ns-1/uploads/upl_1.tmp",
+            "private/random.json",
+            "namespaces/ns-1/unknown/file.json",
+            "../namespaces/ns-1/hint.json",
+            "namespaces/ns-1/../hint.json",
+            "namespaces/ns-1/content/nested/object",
         ] {
             assert!(
                 parse_object_key(key).is_none(),

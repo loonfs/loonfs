@@ -945,6 +945,7 @@ async fn read_fixture() -> (
                 access_grants(&[
                     ("team", &[Read, Write, Create, Remove]),
                     ("viewer", &[Read]),
+                    ("writer", &[Write]),
                     ("historian", &[Read, History]),
                 ]),
             ),
@@ -996,15 +997,53 @@ async fn reads_require_read_and_absence_hides_the_inode() {
             entry.path.as_str() != "/team/secret"
         );
     }
-    let stranger = read_engine(&store, &namespace_id, "stranger");
-    assert_eq!(
-        stranger
-            .resolve_path("/team/file", StatPathOptions::default(), &context)
+    for (principal, path, inode_id, path_error, inode_error) in [
+        (
+            "stranger",
+            "/team/file",
+            entry.inode_id,
+            Some(ErrorCode::PathNotFound),
+            Some(ErrorCode::InodeNotFound),
+        ),
+        (
+            "writer",
+            "/team/file",
+            entry.inode_id,
+            Some(ErrorCode::Forbidden),
+            Some(ErrorCode::Forbidden),
+        ),
+        ("viewer", "/team/file", entry.inode_id, None, None),
+        (
+            "viewer",
+            "/team/absent",
+            InodeId(999),
+            Some(ErrorCode::PathNotFound),
+            Some(ErrorCode::InodeNotFound),
+        ),
+    ] {
+        let reader = read_engine(&store, &namespace_id, principal);
+        let path_result = reader
+            .resolve_path(path, StatPathOptions::default(), &context)
             .await
-            .expect_err("hidden path")
-            .code(),
-        ErrorCode::PathNotFound
-    );
+            .map(|entry| entry.inode_id)
+            .map_err(|error| error.code());
+        let inode_result = reader
+            .stat_inode(inode_id, StatPathOptions::default(), &context)
+            .await
+            .map(|entry| entry.inode_id)
+            .map_err(|error| error.code());
+        assert_eq!(
+            path_result,
+            path_error.map_or(Ok(inode_id), Err),
+            "{principal}: {path}"
+        );
+        assert_eq!(
+            inode_result,
+            inode_error.map_or(Ok(inode_id), Err),
+            "{principal}: {inode_id}"
+        );
+    }
+    let stranger = read_engine(&store, &namespace_id, "stranger");
     assert_eq!(
         stranger
             .list_path_page(
@@ -1025,14 +1064,6 @@ async fn reads_require_read_and_absence_hides_the_inode() {
             .expect_err("hidden content")
             .code(),
         ErrorCode::PathNotFound
-    );
-    assert_eq!(
-        stranger
-            .stat_inode(entry.inode_id, StatPathOptions::default(), &context)
-            .await
-            .expect_err("hidden inode")
-            .code(),
-        ErrorCode::InodeNotFound
     );
     assert_eq!(
         read_engine(&store, &namespace_id, "uploader")

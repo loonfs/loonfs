@@ -535,10 +535,6 @@ fn namespace_manifest_matches_golden_bytes() {
         .expect("encode")
         .into_bytes();
     assert_matches_golden("manifest.v1.json", &encoded);
-    let document: serde_json::Value = serde_json::from_slice(&encoded).expect("manifest json");
-    let payload = document["payload"].as_object().expect("manifest payload");
-    assert!(!payload.contains_key("index_files"));
-    assert!(!payload.contains_key("features"));
 }
 
 #[test]
@@ -865,10 +861,6 @@ fn every_durable_status_is_a_kind_tagged_object() {
         let payload = document["payload"]
             .as_object()
             .unwrap_or_else(|| panic!("`{fixture}` has an object payload"));
-        assert!(
-            !payload.contains_key("state") && !payload.contains_key("lifecycle"),
-            "`{fixture}` spells its lifecycle field `status`"
-        );
         let status = payload
             .get("status")
             .unwrap_or_else(|| panic!("`{fixture}` writes a `status`"));
@@ -983,21 +975,16 @@ fn pins_reject_an_untagged_or_unknown_owner() {
 
 #[test]
 fn upload_sessions_reject_an_untagged_or_incomplete_status() {
-    for untagged in ["open", "condemned"] {
-        assert_control_payload_edit_is_corrupt::<UploadSessionPayload>(
-            "control_upload_session.v1.json",
-            ControlObjectKind::UploadSession,
-            |payload| payload["status"] = serde_json::Value::from(untagged),
-        );
-    }
-    // Statuses this format does not define are refused by tag alone.
-    for unknown_kind in ["active", "condemned"] {
-        assert_control_payload_edit_is_corrupt::<UploadSessionPayload>(
-            "control_upload_session.v1.json",
-            ControlObjectKind::UploadSession,
-            |payload| payload["status"]["kind"] = serde_json::Value::from(unknown_kind),
-        );
-    }
+    assert_control_payload_edit_is_corrupt::<UploadSessionPayload>(
+        "control_upload_session.v1.json",
+        ControlObjectKind::UploadSession,
+        |payload| payload["status"] = serde_json::Value::from("open"),
+    );
+    assert_control_payload_edit_is_corrupt::<UploadSessionPayload>(
+        "control_upload_session.v1.json",
+        ControlObjectKind::UploadSession,
+        |payload| payload["status"]["kind"] = serde_json::Value::from("unknown_status"),
+    );
     // Every status is defined by its own stamp: without one it cannot be
     // aged, so it is not that status.
     for tagged_without_its_stamp in ["open", "completed", "aborted"] {
@@ -1029,44 +1016,17 @@ fn mutable_control_enums_fail_closed_on_unknown_variants() {
 }
 
 #[test]
-fn upload_sessions_reject_the_pre_mode_flat_encoding() {
-    // Reject a string mode and mode-specific fields at the top level.
+fn upload_sessions_require_a_tagged_mode_and_reject_unknown_fields() {
     assert_control_payload_edit_is_corrupt::<UploadSessionPayload>(
         "control_upload_session.v1.json",
         ControlObjectKind::UploadSession,
-        |payload| {
-            let content_ref = payload["status"]["content_ref"].clone();
-            let object = payload.as_object_mut().expect("payload object");
-            object.insert("mode".to_owned(), serde_json::Value::from("direct_put"));
-            object.insert(
-                "claimed_checksum".to_owned(),
-                content_ref["checksum"].clone(),
-            );
-            object.insert("direct_put_content_ref".to_owned(), content_ref.clone());
-            object.insert("staged_content_ref".to_owned(), content_ref);
-        },
+        |payload| payload["unknown_field"] = serde_json::Value::from(true),
     );
-    // Reject each top-level mode-specific field on its own.
-    for legacy_field in [
-        "claimed_checksum",
-        "direct_put_content_ref",
-        "provider_multipart_upload_id",
-        "multipart_part_size_bytes",
-        "staged_content_ref",
-    ] {
-        assert_control_payload_edit_is_corrupt::<UploadSessionPayload>(
-            "control_upload_session.v1.json",
-            ControlObjectKind::UploadSession,
-            |payload| payload[legacy_field] = serde_json::Value::from("direct_put"),
-        );
-    }
-    // A mode must be a tagged object, not a string.
     assert_control_payload_edit_is_corrupt::<UploadSessionPayload>(
         "control_upload_session.v1.json",
         ControlObjectKind::UploadSession,
         |payload| payload["mode"] = serde_json::Value::from("direct_put"),
     );
-    // Every session must declare a mode.
     assert_control_payload_edit_is_corrupt::<UploadSessionPayload>(
         "control_upload_session.v1.json",
         ControlObjectKind::UploadSession,
@@ -2528,40 +2488,6 @@ fn provenance_rows_reject_every_missing_required_field() {
             );
         }
     }
-}
-
-// ---------------------------------------------------------------------------
-// Attribute rows: the retired tagged value is not a value
-// ---------------------------------------------------------------------------
-
-#[test]
-fn attribute_rows_reject_the_retired_tagged_value_shape() {
-    let mut row = row_cbor(&MetadataRow::AttributesRevision(
-        loonfs_api::wire::manifest::AttributesRevisionRecord {
-            inode_id: InodeId(2),
-            attributes_revision_no: AttributesRevisionNo(1),
-            committed_seq: ChangeSeq(5),
-            commit_id: commit_id(),
-            delta_index: 0,
-            committed_by: actor(),
-            committed_at_ms: 5_000,
-            attributes: sample_attributes(),
-        },
-    ));
-    let owner = cbor_entry(cbor_entry(&mut row, "attributes"), "owner");
-    *owner = ciborium::Value::Map(vec![
-        (
-            ciborium::Value::from("kind"),
-            ciborium::Value::from("string"),
-        ),
-        (ciborium::Value::from("value"), ciborium::Value::from("ada")),
-    ]);
-
-    let refusal = assert_row_is_corrupt(&row, "an attribute value is one string");
-    assert!(
-        refusal.contains("string") || refusal.contains("map"),
-        "unexpected refusal: {refusal}"
-    );
 }
 
 #[test]

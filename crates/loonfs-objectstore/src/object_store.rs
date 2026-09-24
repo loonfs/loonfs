@@ -759,13 +759,13 @@ mod tests {
 
     const POISON_PROVIDER_DETAIL: &str = "<Error>AccessDenied</Error> \
         arn:aws:iam::123456789012:role/private-role private-bucket \
-        namespaces/customer-a/head.json x-amz-request-id=provider-request \
+        namespaces/customer-a/hint.json x-amz-request-id=provider-request \
         x-amz-id-2=provider-host-id AKIAEXAMPLE";
 
     #[test]
     fn public_permission_message_drops_every_provider_marker() {
         let error = ObjectStoreError::PermissionDenied {
-            object_key: "namespaces/customer-a/head.json".to_owned(),
+            object_key: "namespaces/customer-a/hint.json".to_owned(),
             message: POISON_PROVIDER_DETAIL.to_owned(),
         };
 
@@ -778,7 +778,7 @@ mod tests {
             "<Error>AccessDenied</Error>",
             "arn:aws:iam::123456789012:role/private-role",
             "private-bucket",
-            "namespaces/customer-a/head.json",
+            "namespaces/customer-a/hint.json",
             "x-amz-request-id=provider-request",
             "x-amz-id-2=provider-host-id",
             "AKIAEXAMPLE",

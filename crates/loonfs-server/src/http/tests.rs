@@ -2508,10 +2508,10 @@ async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
     );
 
     let (body, description) = (
-        r#"{"commit_id":"stale-actor","actor_id":"old-body-actor","operations":[{"kind":"create_directory","path":"/docs"}]}"#,
-        "body actor is unknown",
+        r#"{"commit_id":"unknown-field","unknown_field":true,"operations":[{"kind":"create_directory","path":"/docs"}]}"#,
+        "unknown body field",
     );
-    let stale = expect_enveloped(
+    let unknown = expect_enveloped(
         || {
             raw_agent()
                 .post(&commits_url)
@@ -2524,7 +2524,7 @@ async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
         400,
         "invalid_request",
     );
-    assert_eq!(stale["param"], "/actor_id");
+    assert_eq!(unknown["param"], "/unknown_field");
     expect_enveloped(
         || {
             raw_agent()

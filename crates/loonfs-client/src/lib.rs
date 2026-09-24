@@ -167,9 +167,9 @@ impl Client {
     /// redeployment's new capabilities builds a new client. The CLI is
     /// one-shot, so its view is always fresh.
     ///
-    /// Feature keys that are not parented by an advertised API group are
-    /// dropped rather than trusted, per the spec's client guidance for
-    /// malformed documents.
+    /// Malformed feature keys, including keys outside an advertised API
+    /// group, are dropped rather than trusted, per the spec's client
+    /// guidance for malformed documents.
     pub async fn get_capabilities(&self) -> Result<CapabilityDocument> {
         if let Some(document) = self.capabilities.get() {
             return Ok(document.clone());
