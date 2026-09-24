@@ -666,21 +666,8 @@ impl NamespaceCommitEngine {
         deleted
     }
 
-    /// One attempt whose deadlines start now.
-    pub async fn publish_batch<S: ObjectStore + ?Sized>(
-        &mut self,
-        store: &S,
-        candidates: impl AsRef<[CommitCandidate]>,
-        context: &MutationContext,
-        tail_options: &PublishTailOptions,
-    ) -> NamespaceCommitEnginePublishResult {
-        let batch = Deadline::start(Arc::clone(&self.timer));
-        self.publish_batch_attempt(store, candidates, context, tail_options, &batch)
-            .await
-    }
-
     /// Retries share `batch` so content evidence continues aging.
-    pub async fn publish_batch_attempt<S: ObjectStore + ?Sized>(
+    pub async fn publish_batch<S: ObjectStore + ?Sized>(
         &mut self,
         store: &S,
         candidates: impl AsRef<[CommitCandidate]>,
@@ -855,7 +842,7 @@ pub(crate) async fn publish_namespace_commits_batch<S: ObjectStore + ?Sized>(
     let batch = Deadline::start(Arc::clone(&engine.timer));
     let options = PublishTailOptions::default();
     let mut result = engine
-        .publish_batch_attempt(store, &candidates, context, &options, &batch)
+        .publish_batch(store, &candidates, context, &options, &batch)
         .await;
     for _ in 1..crate::limits::CONTENTION_RETRY_LIMIT {
         if !result.results.iter().any(|result| {
@@ -869,7 +856,7 @@ pub(crate) async fn publish_namespace_commits_batch<S: ObjectStore + ?Sized>(
             break;
         }
         result = engine
-            .publish_batch_attempt(store, &candidates, context, &options, &batch)
+            .publish_batch(store, &candidates, context, &options, &batch)
             .await;
     }
     result.results
@@ -1171,6 +1158,7 @@ mod tests {
                 vec![create_dir("from-a-first", "alpha")],
                 &writer_a,
                 &PublishTailOptions::default(),
+                &Deadline::start(Arc::new(StdMonotonicTimer::default())),
             )
             .await;
         first.results[0].as_ref().expect("writer a first commit");
@@ -1185,6 +1173,7 @@ mod tests {
                 vec![create_dir("from-b-first", "beta")],
                 &writer_b,
                 &PublishTailOptions::default(),
+                &Deadline::start(Arc::new(StdMonotonicTimer::default())),
             )
             .await;
         takeover.results[0]
@@ -1202,6 +1191,7 @@ mod tests {
                     vec![create_dir("from-a-second", "gamma")],
                     &writer_a,
                     &PublishTailOptions::default(),
+                    &Deadline::start(Arc::new(StdMonotonicTimer::default())),
                 )
                 .await;
             let error = fenced.results[0].as_ref().expect_err("fenced publish");
@@ -1253,6 +1243,7 @@ mod tests {
                 vec![create_dir("from-a-first", "alpha")],
                 &writer_a,
                 &PublishTailOptions::default(),
+                &Deadline::start(Arc::new(StdMonotonicTimer::default())),
             )
             .await
             .results[0]
@@ -1271,6 +1262,7 @@ mod tests {
                     vec![create_dir("from-a-second", "gamma")],
                     &writer_a,
                     &PublishTailOptions::default(),
+                    &Deadline::start(Arc::new(StdMonotonicTimer::default())),
                 )
                 .await;
             result.results[0].as_ref().err().map(|error| error.code())
@@ -1288,6 +1280,7 @@ mod tests {
                 vec![create_dir("from-b-first", "beta")],
                 &writer_b,
                 &PublishTailOptions::default(),
+                &Deadline::start(Arc::new(StdMonotonicTimer::default())),
             )
             .await
             .results[0]
@@ -1318,6 +1311,7 @@ mod tests {
                 vec![create_dir("from-a-first", "alpha")],
                 &writer_a,
                 &PublishTailOptions::default(),
+                &Deadline::start(Arc::new(StdMonotonicTimer::default())),
             )
             .await
             .results
@@ -1332,6 +1326,7 @@ mod tests {
                 vec![create_dir("from-b-first", "beta")],
                 &writer_b,
                 &PublishTailOptions::default(),
+                &Deadline::start(Arc::new(StdMonotonicTimer::default())),
             )
             .await
             .results
@@ -1345,6 +1340,7 @@ mod tests {
                     vec![create_dir("from-a-second", "gamma")],
                     &writer_a,
                     &PublishTailOptions::default(),
+                    &Deadline::start(Arc::new(StdMonotonicTimer::default())),
                 )
                 .await;
             assert_eq!(
@@ -1372,6 +1368,7 @@ mod tests {
                 vec![create_dir("from-a-third", "delta")],
                 &writer_a,
                 &PublishTailOptions::default(),
+                &Deadline::start(Arc::new(StdMonotonicTimer::default())),
             )
             .await;
         let error = still_fenced.results[0]
@@ -1424,6 +1421,7 @@ mod tests {
                 vec![create_dir("budgeted", "alpha")],
                 &writer,
                 &PublishTailOptions::default(),
+                &Deadline::start(Arc::clone(&over_budget.timer)),
             )
             .await;
         let error = abandoned.results[0]
@@ -1454,6 +1452,7 @@ mod tests {
                 vec![create_dir("budgeted", "alpha")],
                 &writer,
                 &PublishTailOptions::default(),
+                &Deadline::start(Arc::new(StdMonotonicTimer::default())),
             )
             .await;
         let response = retried.results[0].as_ref().expect("rebuilt publish");
@@ -1485,6 +1484,7 @@ mod tests {
             vec![create_dir("seed-commit", "docs")],
             &writer,
             &PublishTailOptions::default(),
+            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
         )
         .await
         .results
@@ -1513,6 +1513,7 @@ mod tests {
                 vec![create_dir("uncached-a", "alpha")],
                 &writer,
                 &PublishTailOptions::default(),
+                &Deadline::start(Arc::new(StdMonotonicTimer::default())),
             )
             .await
             .results
@@ -1529,6 +1530,7 @@ mod tests {
                 vec![create_dir("uncached-b", "beta")],
                 &writer,
                 &PublishTailOptions::default(),
+                &Deadline::start(Arc::new(StdMonotonicTimer::default())),
             )
             .await
             .results
@@ -1550,6 +1552,7 @@ mod tests {
                 vec![create_dir("cached-a", "gamma")],
                 &writer,
                 &PublishTailOptions::default(),
+                &Deadline::start(Arc::new(StdMonotonicTimer::default())),
             )
             .await
             .results
@@ -1566,6 +1569,7 @@ mod tests {
                 vec![create_dir("cached-b", "delta")],
                 &writer,
                 &PublishTailOptions::default(),
+                &Deadline::start(Arc::new(StdMonotonicTimer::default())),
             )
             .await
             .results

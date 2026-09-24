@@ -10,12 +10,15 @@ use loonfs_core::content::{prepare_existing_content_ref, store_bytes_as_content}
 use loonfs_core::publish::{
     CommitCandidate, CommitRequest, FilesystemOperation, NamespaceCommitEngine, PublishTailOptions,
 };
+use loonfs_core::time::Deadline;
 use loonfs_core::{gc_namespace, GcConfig};
 use loonfs_core::{BootstrapOptions, MutationContext, ResolvedUploadCompletion};
 use loonfs_objectstore::keys::wal_segment_prefix;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
+use loonfs_objectstore::timing::StdMonotonicTimer;
 use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::stores::{KeyPredicate, OperationClass, RecordingStore};
+use std::sync::Arc;
 use tempfile::tempdir;
 
 async fn put_file<S: ObjectStore + ?Sized>(
@@ -56,6 +59,7 @@ async fn put_file<S: ObjectStore + ?Sized>(
             )],
             context,
             &PublishTailOptions::default(),
+            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
         )
         .await
         .results

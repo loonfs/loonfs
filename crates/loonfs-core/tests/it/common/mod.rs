@@ -55,6 +55,9 @@ pub(crate) async fn read_context<S: ObjectStore + ?Sized>(
 pub(crate) mod commit_split_support {
     #![allow(dead_code)]
 
+    use loonfs_core::time::Deadline;
+    use loonfs_objectstore::timing::StdMonotonicTimer;
+
     use super::{namespace_engine, read_context};
     use async_trait::async_trait;
     use bytes::Bytes;
@@ -77,7 +80,7 @@ pub(crate) mod commit_split_support {
     use std::collections::HashSet;
     use std::path::Path;
 
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
 
     pub(crate) async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
         store: &S,
@@ -189,7 +192,13 @@ pub(crate) mod commit_split_support {
     ) -> Vec<Result<loonfs_api::v0::Commit, CoreError>> {
         let mut engine = NamespaceCommitEngine::new(namespace_id.clone());
         engine
-            .publish_batch(store, candidates, context, &PublishTailOptions::default())
+            .publish_batch(
+                store,
+                candidates,
+                context,
+                &PublishTailOptions::default(),
+                &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+            )
             .await
             .results
     }

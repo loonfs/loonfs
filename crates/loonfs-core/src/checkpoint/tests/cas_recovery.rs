@@ -103,6 +103,7 @@ async fn publishers_racing_one_number_load_the_winner_and_retry_when_needed() {
                     )],
                     &context,
                     &crate::protocol::PublishTailOptions::default(),
+                    &Deadline::start(Arc::new(StdMonotonicTimer::default())),
                 )
                 .await
                 .results

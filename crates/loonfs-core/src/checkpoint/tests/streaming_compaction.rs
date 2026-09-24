@@ -461,6 +461,7 @@ async fn publish_one_operation<S: ObjectStore + ?Sized>(
             )],
             context,
             &PublishTailOptions::default(),
+            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
         )
         .await
         .results

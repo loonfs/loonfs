@@ -41,6 +41,7 @@ pub(crate) fn encode_manifest(
 pub(crate) enum ManifestChange<T> {
     Next(Box<NamespaceManifestPayload>, T),
     Finished(T),
+    Again,
 }
 
 pub(crate) async fn update_manifest<S, T, F, Fut>(
@@ -60,6 +61,7 @@ where
         let (mut payload, result) = match change(current.state.envelope.payload().clone()).await? {
             ManifestChange::Next(payload, result) => (*payload, result),
             ManifestChange::Finished(result) => return Ok(result),
+            ManifestChange::Again => continue,
         };
         payload.manifest_no = super::flush::next_manifest_no_after(predecessor)?;
         let manifest = encode_manifest(payload)?;

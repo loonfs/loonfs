@@ -10,9 +10,11 @@ pub(crate) mod ops;
 use crate::cache::{
     StoredMetadataBlockCache, StoredMetadataBlockCacheCloseError, StoredMetadataBlockKey,
 };
+use crate::time::{Deadline, StdMonotonicTimer};
 use async_trait::async_trait;
 use bytes::Bytes;
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::sync::Mutex;
 
 /// Appends one small commit per WAL segment without folding the tail.
@@ -45,6 +47,7 @@ pub async fn append_wal_segments<S: loonfs_objectstore::ObjectStore + ?Sized>(
                 vec![crate::publish::CommitCandidate::new(request)],
                 context,
                 &crate::publish::PublishTailOptions::default(),
+                &Deadline::start(Arc::new(StdMonotonicTimer::default())),
             )
             .await
             .results;

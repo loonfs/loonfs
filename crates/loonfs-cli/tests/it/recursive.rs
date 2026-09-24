@@ -250,11 +250,11 @@ fn recursive_transfers_roundtrip_a_tree() {
 
     // A local tree with nesting, an empty directory chain, and a root file.
     let tree = harness.temp_dir.path().join("tree");
-    fs::create_dir_all(tree.join("docs/nested")).expect("create tree dirs");
+    fs::create_dir_all(tree.join("docs/日本語")).expect("create tree dirs");
     fs::create_dir_all(tree.join("empty/inner")).expect("create empty chain");
     fs::write(tree.join("top.txt"), b"top").expect("write top");
     fs::write(tree.join("docs/a.txt"), b"alpha").expect("write a");
-    fs::write(tree.join("docs/nested/b.txt"), b"beta").expect("write b");
+    fs::write(tree.join("docs/日本語/é.txt"), b"beta").expect("write b");
 
     // A plain put on a directory names the recursive flag.
     let plain = harness.run(&["--json", "put", tree.to_str().expect("utf-8 path"), "/up"]);
@@ -287,7 +287,7 @@ fn recursive_transfers_roundtrip_a_tree() {
     {
         assert_eq!(change["committed_by"], serde_json::json!("tree-actor"));
     }
-    for path in ["/up/top.txt", "/up/docs/nested/b.txt", "/up/empty/inner"] {
+    for path in ["/up/top.txt", "/up/docs/日本語/é.txt", "/up/empty/inner"] {
         assert_success(&harness.run(&["--json", "stat", path]));
     }
 
@@ -349,7 +349,7 @@ fn recursive_transfers_roundtrip_a_tree() {
     let get_data = json_data(&get);
     assert_eq!(get_data["files"], 3);
     assert_eq!(
-        fs::read(downloaded.join("docs/nested/b.txt")).expect("downloaded bytes"),
+        fs::read(downloaded.join("docs/日本語/é.txt")).expect("downloaded bytes"),
         b"beta"
     );
     assert!(downloaded.join("empty/inner").is_dir());

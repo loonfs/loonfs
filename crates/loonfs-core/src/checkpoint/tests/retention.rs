@@ -907,6 +907,7 @@ async fn publish_backpressure_rejects_at_the_longest_tail_the_head_describes() {
                 vec![CommitCandidate::new(request)],
                 &context,
                 &tail_options,
+                &Deadline::start(Arc::new(StdMonotonicTimer::default())),
             )
             .await
             .results
@@ -934,6 +935,7 @@ async fn publish_backpressure_rejects_at_the_longest_tail_the_head_describes() {
             vec![CommitCandidate::new(request.clone())],
             &context,
             &tail_options,
+            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
         )
         .await
         .results
@@ -949,6 +951,7 @@ async fn publish_backpressure_rejects_at_the_longest_tail_the_head_describes() {
             vec![CommitCandidate::new(request.clone())],
             &context,
             &tail_options,
+            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
         )
         .await;
     assert_eq!(replay.results.len(), 1);
@@ -980,6 +983,7 @@ async fn publish_backpressure_rejects_at_the_longest_tail_the_head_describes() {
                 vec![CommitCandidate::new(candidate)],
                 &context,
                 &tail_options,
+                &Deadline::start(Arc::new(StdMonotonicTimer::default())),
             )
             .await;
         assert_eq!(result.results.len(), 1);
@@ -1001,6 +1005,7 @@ async fn publish_backpressure_rejects_at_the_longest_tail_the_head_describes() {
             ],
             &context,
             &tail_options,
+            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
         )
         .await;
     assert_eq!(mixed.results.len(), 3);

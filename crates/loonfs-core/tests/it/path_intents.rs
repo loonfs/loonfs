@@ -15,11 +15,14 @@ use loonfs_api::{
 use loonfs_core::commit::CommitValidationError;
 use loonfs_core::content::store_bytes_as_content;
 use loonfs_core::publish::{CommitCandidate, CommitRequest, FilesystemOperation};
+use loonfs_core::time::Deadline;
 use loonfs_core::{Error as CoreError, ErrorCode, MutationContext};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
+use loonfs_objectstore::timing::StdMonotonicTimer;
 use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::ids::{namespace_id, page_limit};
 use loonfs_test_support::stores::OperationClass;
+use std::sync::Arc;
 use tempfile::tempdir;
 
 fn named_entry(entry: &PathEntry) -> &str {
@@ -1789,7 +1792,13 @@ async fn the_folding_corpus_pins_directory_admission_collisions_and_lookup() {
             ));
             store.take();
             let result = engine
-                .publish_batch(&store, vec![candidate], &context, &Default::default())
+                .publish_batch(
+                    &store,
+                    vec![candidate],
+                    &context,
+                    &Default::default(),
+                    &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+                )
                 .await
                 .results
                 .into_iter()
