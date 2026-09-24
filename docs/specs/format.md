@@ -849,7 +849,7 @@ Every age decision uses the call's fixed `now_ms`. A later call reads fresh root
 | Hint's observed manifest number | All manifest numbers at or above it, so discovery can probe forward. Intermediate numbers do not protect additional runs. |
 | Current active manifest's folded boundary | Every WAL number above `folded_wal_no`. |
 
-Pin bodies are not needed to identify these roots: the manifest number is part of the pin key. Bodies are read later for owner and expiry decisions. A pin naming a missing manifest is corruption. Each listed pin protects its files for the whole pass, even if that pass deletes the pin.
+Pin bodies are not needed to identify these roots: the manifest number is part of the pin key. Bodies are normally read later for owner and expiry decisions. If a pin's manifest is absent, the collector reads the pin and applies the same owner and grace rules as pin cleanup. An absent or collectable pin does not require that missing basis; this permits recovery from failed installation cleanup and concurrent pin removal. A retained pin naming a missing manifest is corruption. Invalid or unreadable manifests still fail the pass. Each listed pin whose manifest is present protects its files for the whole pass, even if that pass deletes the pin.
 
 Segments in a tombstone are collectible by the ordinary age rule once no pin protects them. Retirement does not read them.
 

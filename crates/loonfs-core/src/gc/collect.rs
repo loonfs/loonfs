@@ -32,7 +32,7 @@ pub async fn gc_namespace<S: ObjectStore + ?Sized>(
         namespace_id,
         &anchor,
         config.grace_window_ms,
-        context.now_ms,
+        context,
     )
     .await?;
     report.reclaim_after_ms = live

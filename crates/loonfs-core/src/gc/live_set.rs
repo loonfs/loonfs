@@ -2,6 +2,7 @@
 
 use crate::checkpoint::load_namespace_manifest_envelope_if_present;
 use crate::checkpoint::record::checkpoint_key_ids;
+use crate::context::MutationContext;
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::limits::NAMESPACE_RETIREMENT_GRACE_MS;
 use crate::namespace::read_anchor::NamespaceReadAnchor;
@@ -39,7 +40,7 @@ impl LiveSet {
         namespace_id: &NamespaceId,
         anchor: &NamespaceReadAnchor,
         grace_window_ms: u64,
-        now_ms: u64,
+        context: &MutationContext,
     ) -> Result<Self> {
         let head = anchor.manifest.envelope.payload();
         let mut live = Self {
@@ -49,20 +50,22 @@ impl LiveSet {
             objects: BTreeSet::from([anchor.manifest.object_key.clone()]),
             has_pins: false,
             grace_window_ms: grace_window_ms.max(NAMESPACE_RETIREMENT_GRACE_MS),
-            now_ms,
+            now_ms: context.now_ms,
             required_wal_from: required_from(&anchor.read_state),
         };
         let mut manifests = BTreeSet::new();
         // A tombstone roots its runs like any current manifest: an import from
         // a deleted owner is still authorized against its final access state.
-        live.load_manifest(
-            store,
-            namespace_id,
-            head.manifest_no,
-            &anchor.manifest.object_key,
-            &mut manifests,
-        )
-        .await?;
+        if !live
+            .load_manifest(store, namespace_id, head.manifest_no, &mut manifests)
+            .await?
+        {
+            return Err(missing_root_manifest(
+                namespace_id,
+                head.manifest_no,
+                &anchor.manifest.object_key,
+            ));
+        }
         let prefix = checkpoint_prefix(namespace_id);
         let mut listing = store.list_prefix_stream(&prefix);
         while let Some(key) = listing
@@ -76,14 +79,31 @@ impl LiveSet {
                 continue;
             }
             let (_, pin_id) = checkpoint_key_ids(&key).map_err(CoreError::ControlObjectLoad)?;
-            live.load_manifest(
-                store,
-                namespace_id,
-                pin_id.manifest_no(),
-                &key,
-                &mut manifests,
-            )
-            .await?;
+            if live
+                .load_manifest(store, namespace_id, pin_id.manifest_no(), &mut manifests)
+                .await?
+            {
+                continue;
+            }
+            // A failed pin installation can outlive both its basis and its
+            // cleanup attempt. Another collector can also remove a released
+            // pin's basis after this pass listed it. Only tolerate absence
+            // when the same owner/grace rules used by the sweep allow it.
+            match super::reap::sweep_checkpoint_record(store, &key, grace_window_ms, &live, context)
+                .await?
+            {
+                super::reap::CheckpointSweep::Retain { .. } => {
+                    return Err(missing_root_manifest(
+                        namespace_id,
+                        pin_id.manifest_no(),
+                        &key,
+                    ));
+                }
+                super::reap::CheckpointSweep::Gone
+                | super::reap::CheckpointSweep::DeleteUser
+                | super::reap::CheckpointSweep::DeleteSnapshot
+                | super::reap::CheckpointSweep::DeleteFork => {}
+            }
         }
         Ok(live)
     }
@@ -93,11 +113,10 @@ impl LiveSet {
         store: &S,
         namespace_id: &NamespaceId,
         manifest_no: ManifestNo,
-        root_key: &str,
         manifests: &mut BTreeSet<ManifestNo>,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         if manifests.contains(&manifest_no) {
-            return Ok(());
+            return Ok(true);
         }
         let key = metadata_manifest_object(namespace_id, &manifest_no);
         let envelope =
@@ -107,14 +126,14 @@ impl LiveSet {
                     CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
                 })?;
         let Some(envelope) = envelope else {
-            return Err(CoreError::NamespaceCorrupt(format!(
-                "root `{root_key}` pins missing manifest `{key}`"
-            )));
+            // Do not cache absence: another pin for this number may still
+            // require retention even when an earlier pin was deletable.
+            return Ok(false);
         };
         let payload = envelope.payload();
         self.protect_manifest(key, payload);
         manifests.insert(manifest_no);
-        Ok(())
+        Ok(true)
     }
 
     fn protect_manifest(&mut self, key: String, payload: &NamespaceManifestPayload) {
@@ -156,4 +175,13 @@ impl LiveSet {
             RetirementState::Eligible
         }
     }
+}
+
+fn missing_root_manifest(
+    namespace_id: &NamespaceId,
+    manifest_no: ManifestNo,
+    root_key: &str,
+) -> CoreError {
+    let key = metadata_manifest_object(namespace_id, &manifest_no);
+    CoreError::NamespaceCorrupt(format!("root `{root_key}` pins missing manifest `{key}`"))
 }
