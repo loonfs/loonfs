@@ -349,12 +349,19 @@ async fn manifest_publication_recovers_an_ambiguous_put_and_tolerates_a_failed_h
         )
         .apply_then_fail();
         store.fail_next(1);
-        assert!(matches!(
-            publish_manifest(&store, candidate)
-                .await
-                .expect("published"),
-            ManifestPublicationOutcome::Published(_)
-        ));
+        let outcome = publish_manifest(&store, candidate)
+            .await
+            .expect("published");
+        if fail_hint {
+            assert!(matches!(outcome, ManifestPublicationOutcome::Published(_)));
+        } else {
+            // The put landed, but a rival could have written the same bytes,
+            // so the read-back counts as the current manifest.
+            assert!(matches!(
+                outcome,
+                ManifestPublicationOutcome::CoveredByCurrent(_)
+            ));
+        }
         assert_eq!(
             load_current_manifest(&store, &namespace_id)
                 .await
@@ -596,4 +603,42 @@ async fn namespace_status_and_change_feed_reload_a_head_behind_the_floor() {
     .expect("change feed reloads the stale head");
     assert_eq!(changes.through_seq, ChangeSeq(1));
     assert!(changes.changes.is_empty());
+}
+
+#[tokio::test]
+async fn an_ambiguous_compactor_claim_retries_instead_of_confirming() {
+    use loonfs_test_support::stores::{FailStore, InjectedError};
+
+    let directory = tempdir().expect("directory");
+    let namespace_id = NamespaceId::parse("claimed").expect("namespace");
+    let claim_key = metadata_manifest_object(&namespace_id, &ManifestNo(2));
+    let store = FailStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::new(move |key| key == claim_key),
+        OperationClass::PutCreateIfAbsent,
+        InjectedError::Transport("response lost".to_owned()),
+    )
+    .apply_then_fail();
+    store.fail_next(1);
+    crate::namespace::bootstrap::bootstrap_namespace(
+        &store,
+        &namespace_id,
+        &test_context(),
+        &loonfs_test_support::test_actor(),
+        &loonfs_api::NamespaceAccess::unrestricted(),
+        false,
+    )
+    .await
+    .expect("create");
+    // The claim landed, but a rival could have written the same bytes, so the
+    // claimant reads it as the rival's and takes the next epoch.
+    let epoch = super::super::compactor::claim_compactor(&store, &namespace_id)
+        .await
+        .expect("claim");
+    assert_eq!(epoch, 2);
+    let current = load_current_manifest(&store, &namespace_id)
+        .await
+        .expect("current manifest");
+    assert_eq!(current.envelope.payload().manifest_no, ManifestNo(3));
+    assert_eq!(current.envelope.payload().compactor_epoch, 2);
 }

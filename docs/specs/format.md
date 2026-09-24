@@ -711,7 +711,7 @@ The fixed creation grace on the source pin protects installation. Before initiat
 
 A losing manifest-1 put reads the winner and verifies its namespace identity. Active status means `namespace_exists`. Deleted status follows the lifetime rule in section 1. Invalid bytes or key/payload disagreement are corruption. No loser overwrites the winner.
 
-A confirmed precondition failure is a conflict. A put with an unknown transport outcome can confirm its own success only by reading back the exact proposed manifest, except for a plain create under section 9.1. A fork's unique source pin makes its exact read-back proof of publication. An explicit `allow_existing` retry can instead return an existing active namespace.
+A confirmed precondition failure is a conflict. A put with an unknown transport outcome confirms its own success only when a fork's first manifest reads back exactly: its source pin is unique to that attempt. Every other manifest, including a plain create under section 9.1, a compactor claim, a writer acquisition, or a tombstone, can be rebuilt byte for byte by another publisher, so an exact read-back counts as the current manifest and the attempt retries from it. An explicit `allow_existing` retry can instead return an existing active namespace.
 
 Abandoned attempts can leave a hint or fork pin. A leftover hint does not install a namespace. An unused fork pin is collected after its installation grace under section 11.7.
 

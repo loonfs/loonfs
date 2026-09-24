@@ -61,8 +61,11 @@ pub(crate) async fn publish_manifest<S: ObjectStore + ?Sized>(
         .checked_sub(1)
         .filter(|number| *number > 0)
         .map(ManifestNo);
-    let plain_create = manifest.envelope().payload().manifest_no == loonfs_api::ManifestNo(1)
-        && manifest.envelope().payload().fork_basis.is_none();
+    // A fork's first manifest names its source pin, which no other publisher
+    // holds. Every other payload can be rebuilt byte for byte by a rival, so
+    // identical bytes prove nothing about who wrote them.
+    let names_own_pin = manifest.envelope().payload().manifest_no == ManifestNo(1)
+        && manifest.envelope().payload().fork_basis.is_some();
     let candidate = CurrentManifest {
         manifest: manifest_ref_for(namespace_id, manifest.envelope()),
         retention_floor_seq: manifest.envelope().payload().retention_floor_seq,
@@ -139,7 +142,7 @@ pub(crate) async fn publish_manifest<S: ObjectStore + ?Sized>(
                             &landed.state,
                             &candidate,
                             expected_predecessor,
-                            !plain_create,
+                            names_own_pin,
                         ),
                         None => {
                             classify_current_manifest(
@@ -147,7 +150,7 @@ pub(crate) async fn publish_manifest<S: ObjectStore + ?Sized>(
                                 namespace_id,
                                 &candidate,
                                 expected_predecessor,
-                                !plain_create,
+                                names_own_pin,
                             )
                             .await?
                         }
