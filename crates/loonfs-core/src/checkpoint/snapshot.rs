@@ -8,6 +8,7 @@ use crate::context::MutationContext;
 use crate::control_update::{retry_while_contended, CasAttempt, WriteEvidence};
 use crate::error::{CoreError, Result};
 use crate::namespace::state::NamespaceReadState;
+use crate::time::MonotonicTimer;
 use loonfs_api::wire::control::PinOwner;
 use loonfs_api::{Checkpoint, DeleteSnapshotResponse, NamespaceId, PinId};
 use loonfs_objectstore::keys::checkpoint_record;
@@ -36,15 +37,19 @@ pub(crate) async fn extend_snapshot_expiry<S: ObjectStore + ?Sized>(
     requested_expires_at_ms: u64,
     max_lifetime_ms: u64,
     context: &MutationContext,
+    timer: &dyn MonotonicTimer,
 ) -> Result<Checkpoint> {
+    let started_ms = timer.monotonic_now_ms();
     let object_key = checkpoint_record(namespace_id, checkpoint_id);
     retry_while_contended(
         || async {
-            let loaded = classify_live_snapshot(
-                load_checkpoint_record(store, namespace_id, checkpoint_id).await?,
-                checkpoint_id,
-                context.now_ms,
-            )?;
+            let loaded = load_checkpoint_record(store, namespace_id, checkpoint_id).await?;
+            let elapsed_ms = timer.monotonic_now_ms().saturating_sub(started_ms);
+            let now_ms = context
+                .now_ms
+                .checked_add(elapsed_ms)
+                .ok_or_else(|| CoreError::Internal("snapshot renewal time overflow".to_owned()))?;
+            let loaded = classify_live_snapshot(loaded, checkpoint_id, now_ms)?;
             let mut next = loaded.state.clone();
             let lifetime_ceiling = next.created_at_ms.saturating_add(max_lifetime_ms);
             let expires_at_ms = snapshot_expiry_mut(&mut next.owner)
@@ -74,6 +79,8 @@ pub(crate) async fn extend_snapshot_expiry<S: ObjectStore + ?Sized>(
         |_, new_expires_at_ms| {
             let object_key = object_key.clone();
             async move {
+                // This read proves an earlier CAS landed; it does not start a
+                // new extension. Expiry after that CAS must not erase success.
                 let current = classify_live_snapshot(
                     load_checkpoint_record(store, namespace_id, checkpoint_id).await?,
                     checkpoint_id,

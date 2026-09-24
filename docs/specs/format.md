@@ -680,6 +680,8 @@ Explicit deletion checks the owner and deletes the pin. Deleting it again return
 
 An unexpired snapshot's expiry can be extended by compare-and-swap. The manifest reference, identity, and owner do not change. An extension cannot recreate a deleted pin or make an expired snapshot usable again. See the API specification for duration and request constraints.
 
+Each renewal attempt checks expiry after loading the pin, using the request clock plus elapsed monotonic time across the whole extension call. Expiry during an already-started compare-and-swap does not undo a successful extension.
+
 ## 9. Namespace lifecycle and forks
 
 Namespace creation and deletion publish numbered manifests. Retirement is derived from the tombstone and the complete pin listing. It publishes no manifest.
