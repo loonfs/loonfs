@@ -43,7 +43,7 @@ pub enum GrepIndexStatus {
         /// zero when the cursor is at the commit boundary and the whole
         /// commit is represented.
         ///
-        /// A commit's events are one per committed operation in request
+        /// A commit's events are one per internal operation in request
         /// order, derived from its durable delta vector; incremental
         /// indexing relies on that stable order when a step's budget stops
         /// it inside a commit.

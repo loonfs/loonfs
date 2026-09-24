@@ -21,9 +21,9 @@ Newer, unindexed revisions are therefore scanned exhaustively within the query's
 
 ## What gets indexed
 
-Eligibility is evaluated during indexing rather than upload. The initial rule has two conditions:
+Eligibility is evaluated during indexing rather than upload. The rule has two conditions:
 
-| Condition | Version-1 rule |
+| Condition | Rule |
 | --- | --- |
 | Content size | At most 8 MiB. |
 | Text sample | The first 8 KiB contains no NUL byte and passes the UTF-8 sample check. |
@@ -32,7 +32,7 @@ An incomplete final UTF-8 character is accepted when it follows a nonempty valid
 
 Builders and queries must apply the same eligibility rule. Otherwise, a builder could advance its watermark past a file that a query considers searchable even though the file has no postings. The size cap and sampling rule are therefore part of the versioned search semantics, not independent deployment tunables.
 
-Attributes already exist in the filesystem model. Using an attribute as a text/binary override remains deferred; current indexing does not treat an arbitrary resource-type hint as an eligibility override. Introducing one would require coordinated builder, query, and rebuild behavior.
+Attributes do not override eligibility. A text or binary override would need the builder, queries, and rebuilds to change together.
 
 ## Postings
 
@@ -55,7 +55,7 @@ Inode identity alone does not make an index reusable across namespaces. A fork b
 
 ## Segments, manifests, and discovery
 
-Grep segments use the layout in [metadata block storage](metadata-block-storage.md): prefix-compressed row keys, independently compressed data blocks, a bloom filter, an index, and per-section checksums. The payload is grep-specific. The filter key is the gram prefix, so a negative result excludes a segment for that gram.
+Grep segments use the layout in [metadata block storage](metadata-block-storage.md): prefix-compressed row keys, independently compressed data blocks, a bloom filter, an index, and per-section checksums. The payload is grep-specific. The filter key is the `gram-{hex}` part of the row key, so a negative result excludes a segment for that gram.
 
 ```text
 namespaces/{namespace_id}/extensions/grep/
@@ -66,7 +66,7 @@ namespaces/{namespace_id}/extensions/grep/
 
 The hint records a manifest number from which discovery starts. A reader loads that manifest and probes consecutive numbers until not-found. The current manifest contains lifecycle, visible segments, the run allocator, and pending reorganization. Core manifests contain none of this state.
 
-Enablement writes the hint naming manifest 1 before creating manifest 1. Later publications write completed segments, then the next manifest with put-if-absent. A competing publisher reloads the winner and re-plans. Successful publication raises the hint by CAS; a failed raise does not undo publication.
+Enablement writes the hint naming manifest 1 before creating manifest 1. Later publications write completed segments, then the next manifest with put-if-absent. A publisher that loses the race stops, and its next scheduled step loads the winner and plans again. Successful publication raises the hint by CAS; a failed raise does not undo publication.
 
 Queries check for a successor to their cached manifest on every request. A present successor requires discovery again. The hint can lag and does not replace this freshness check. The [grep format](../specs/format.md#appendix-d-grep-extension-format) defines identity and checksum validation.
 
@@ -110,23 +110,23 @@ The index does not prevent the namespace's retention floor from advancing. If in
 
 ## Maintenance scheduling
 
-`GrepWorker` runs through the existing maintenance runner as a separate job from core metadata maintenance. Each invocation builds one bounded batch, or performs one reorganization step when there is no remaining build work for that invocation. The runner handles duplicate scheduling hints, concurrency, backoff, and periodic checks. A failure for one namespace does not require delaying unrelated namespaces.
+The grep maintenance job wraps `GrepWorker` and runs through the maintenance runner, separately from core metadata maintenance. Each invocation builds one bounded batch, or performs one reorganization step when there is no remaining build work for that invocation. The runner handles duplicate scheduling hints, concurrency, backoff, and periodic checks. A failure for one namespace does not require delaying unrelated namespaces.
 
 The periodic probe discovers the current grep manifest. For an active index at a commit boundary, it also checks the namespace head for another commit. Enabling the index schedules initial work; publications and queries that observe index lag can schedule more work.
 
 A query-only server does not register the maintenance job and rejects index mutations. No grep operation enumerates all namespaces to discover work.
 
-Embedded CLI profiles run a local maintenance scheduler and settle admitted work after mutations. `loonfs maintenance index enable` captures a target sequence and performs bounded passes until the index reaches it. Later namespace writes do not extend that target. `--no-wait` returns after enablement; `--max-steps` and `--deadline-ms` bound the wait and report incomplete progress as an error. Repeating the command can advance an existing index that has fallen behind.
+Embedded CLI profiles run a local maintenance scheduler and settle admitted work after mutations. `loonfs maintenance index enable` captures a target sequence and performs bounded passes until the index reaches it. Later namespace writes do not extend that target. `--no-wait` returns after enablement. `--max-steps` and `--deadline-ms` bound the wait; when either runs out, the command prints its progress and exits nonzero. Repeating the command can advance an existing index that has fallen behind.
 
-For namespaces that may remain inactive, assign maintenance explicitly with `loonfs maintenance loop --namespaces <id>`. `--jobs grep-index` selects index maintenance, and `--drain` processes the current assignment and exits, subject to its step and deadline limits. A namespace without an enabled index returns `not_enabled` after the status read.
+For namespaces that may remain inactive, an embedded profile can assign maintenance explicitly with `loonfs maintenance loop --namespaces <id>`. `--jobs grep-index` selects index maintenance, and `--drain` processes the current assignment and exits, subject to its step and deadline limits. A namespace without an enabled index returns `not_enabled` after the grep manifest is read.
 
-These assignments are separate from grep garbage collection. Build and reorganization do not automatically perform the explicit GC operation described below.
+Build and reorganization do not collect garbage. Grep garbage collection is its own `grep_gc` job, described below.
 
 ## Reorganization
 
 The index uses three tiers: delta, mid, and base. Delta runs are merged into mid runs; accumulated mid runs are merged with the base into a new base.
 
-The thresholds count logical runs, not physical segments. Every build publication allocates one `run_no` for its batch from `next_run_no`. A run can contain several segments without changing the reorganization count. Separate backfill batches remain separate runs even though they share the same captured target sequence.
+The thresholds count logical runs, not physical segments. Every build publication that writes rows allocates one `run_no` for its batch from `next_run_no`. A run can contain several segments without changing the reorganization count. Separate backfill batches remain separate runs even though they share the same captured target sequence.
 
 With eight delta runs per mid run and eight mid runs per base rewrite, a simplified sequence of full batches produces a base rewrite about once per 64 build runs. A two-tier scheme rewriting the base after every eight delta runs would rewrite it eight times as often in that example. This is a constant-factor reduction; a fixed three-tier structure does not establish logarithmic cumulative write amplification as the corpus grows.
 
@@ -144,7 +144,7 @@ The manifest records the segment `level` (`0`, `1`, or `2`), `run_no`, and `next
 
 ### Old postings
 
-The initial design does not remove postings solely because their revisions later become unobservable. Queries filter those candidates against current metadata before reporting results. Removing the postings requires a separate, correct liveness policy; it is not implied by routine segment merging.
+The index does not remove postings solely because their revisions later become unobservable. Queries filter those candidates against current metadata before reporting results. Removing the postings requires a separate, correct liveness policy; it is not implied by routine segment merging.
 
 This means the index can grow with historical revisions, not only the current visible files. The impact depends on the workload and should be measured rather than hidden by an index-size estimate based only on the current corpus.
 
@@ -174,7 +174,7 @@ Candidates are then resolved in batches against the pinned metadata: visibility,
 
 For each remaining candidate, the server reads the referenced content, verifies it, and runs the original pattern. Content reads use limited concurrency. The response contains line-oriented matches rather than a streaming file response.
 
-A match identifies the inode, revision, derived absolute path, one-based line number, byte offset, and matching line. Long lines can be truncated to the configured cap, with `line_truncated` indicating that truncation. Matches are ordered by inode ID and byte offset.
+A match identifies the inode, revision, derived absolute path, one-based line number, byte offset, and matching line. Lines longer than 512 bytes are truncated, with `line_truncated` indicating that truncation. Matches are ordered by inode ID and byte offset.
 
 ### Pagination
 
@@ -182,7 +182,7 @@ A page is bounded by both its match limit and its verified-candidate budget. A p
 
 The continuation records scan progress, including candidates that produced no matches, rather than only the last emitted match. It is bound to the result-selecting request fields: pattern, case flag, path scope, `allow_scan`, and `allow_stale`. Reusing it with different request semantics is rejected.
 
-Each page reports the namespace `head_seq` used for that page. All metadata phases within the page share that view, but later pages can observe a newer head. The current grep request has no snapshot selector for keeping an entire multipage search at one durable snapshot. Namespace snapshot support elsewhere in the API does not imply that grep pagination already has that contract.
+Each page reports the namespace `head_seq` used for that page. All metadata phases within the page share that view, but later pages can observe a newer head. A grep request has no snapshot selector, so a multipage search is not held at one durable snapshot.
 
 ## Freshness and the unindexed tail
 
@@ -190,13 +190,13 @@ At a completed watermark, the index contains the postings needed for eligible re
 
 For example, an index completed through sequence 100 can still return a current result at head 103 by considering the new revisions from commits 101 through 103. A metadata-only rename in that interval changes a result's path through the pinned metadata view without requiring a new content posting.
 
-If the tail exceeds the query's budget, the default is a typed `index_lagging` error. With `allow_stale`, the server can return indexed-only results and report `tail_scanned: false`, together with the index and head positions. Stale results remain subject to visibility and content verification; they may omit eligible revisions that are not yet indexed.
+If the tail exceeds the query's budget, or its change history is below the retention floor, the default is a typed `index_lagging` error. With `allow_stale`, the server can return indexed-only results and report `tail_scanned: false`, together with the index and head positions. Stale results remain subject to visibility and content verification; they may omit eligible revisions that are not yet indexed.
 
 Index maintenance reduces this gap when it runs. Core WAL-tail backpressure does not, by itself, bound grep lag: metadata can be flushed while grep maintenance remains behind. The query's tail budget and explicit stale-result option define the behavior when the gap is too large.
 
 ## Grep garbage collection
 
-Grep GC is explicit and namespace-scoped. It is invoked through `loonfs maintenance index gc` or `POST /v0/maintenance/namespaces/{ns}/grep/index/gc`. Index building and reorganization do not run it implicitly.
+Grep GC is namespace-scoped. It runs through `loonfs maintenance index gc`, `POST /v0/maintenance/namespaces/{ns}/grep/index/gc`, or the `grep_gc` maintenance job, which `loonfs maintenance loop` runs when `--jobs` selects `grep-gc` or is omitted. Index building and reorganization do not run it.
 
 Each call loads the current manifest, builds its live segment set, and scans the manifest and segment collections from beginning to end. It uses a fixed call clock and stores no progress cursor. Invalid or unreadable roots fail before deletion.
 
@@ -222,14 +222,4 @@ The following distinctions matter for compatibility and tuning:
 | Posting writer target | Approximately 256 postings per row. |
 | Serving limits | Match count, candidate verification, matching-line length, content-read concurrency, and unindexed-tail budgets. |
 
-Writer targets and serving budgets are not alternate interpretations of stored postings. Changes to tokenization or eligibility require a compatible version and rebuild strategy after release. Rebuildability permits replacement of derived state; it does not make a large rebuild inexpensive.
-
-## Deferred work
-
-Resource-type attributes could provide explicit text/binary eligibility overrides, but that behavior is not implemented by the current rule. Dead-posting reclamation also remains separate from ordinary compaction and requires a valid revision-liveness policy.
-
-Dynamic size-tiered leveling is an option if large-corpus measurements show that the fixed three-tier layout still causes excessive rewriting. The presence of a numeric `level` field is not sufficient evidence that arbitrary future levels are compatible with existing validation and publication rules. Compatibility must be established before describing that change as writer policy alone.
-
-Variable-length grams could improve selectivity by choosing boundaries using corpus frequency, but would require new tokenization semantics and supporting statistics. A richer full-text index could reuse the extension keyspace, segment machinery, and change-feed-driven maintenance without being presented as an existing grep feature.
-
-A stable snapshot across all pages of a grep query is also deferred. The current per-page snapshot contract should remain explicit until the request and retention protocols support a longer-lived query view.
+Writer targets and serving budgets are not alternate interpretations of stored postings. Changes to tokenization or eligibility require a new version and a rebuild strategy. Rebuildability permits replacement of derived state; it does not make a large rebuild inexpensive.

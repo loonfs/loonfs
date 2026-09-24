@@ -1,6 +1,6 @@
 # LoonFS storage format
 
-LoonFS stores a directory tree, file revision history, and the metadata needed to read and update both in object storage. File contents are stored separately from metadata. Before publishing metadata that references a file's contents, LoonFS writes the complete bytes durably.
+LoonFS stores a directory tree, file revision history, and the metadata needed to read and update both in object storage. File contents are stored separately from metadata. File content is durable no later than the commit that references it; section 1.5 describes the uploaded and inline paths.
 
 For example, an upload may finish even though the subsequent metadata commit fails. The uploaded object exists, but no file references it. To recover the filesystem after a restart, a reader needs a durable record of which changes were committed.
 
@@ -103,7 +103,7 @@ A change to any name-key mapping changes the format semantics, even if the seria
 
 ### 1.5 File contents and ownership
 
-Each file revision contains one `ContentRef`. The current kind, `blob_v1`, represents a complete file stored as one immutable object. Its bytes are the file bytes; LoonFS does not add an envelope around the content object.
+Each file revision contains one `ContentRef`. The current kind, `blob_v1`, identifies a complete file whose bytes are stored as one immutable content object. The object's bytes are the file bytes; LoonFS does not add an envelope around the content object.
 
 A reference contains the original owner namespace, a random content ID that is never reused, the complete size, and a full-object checksum. It does not contain a bucket address or object-store path.
 
@@ -112,6 +112,15 @@ The owner namespace and content ID in the reference determine the key:
 ```text
 namespaces/{owner_namespace_id}/content/{content_id}
 ```
+
+File content is durable no later than the commit that references it. The bytes take one of two paths:
+
+| Path | How the bytes become durable |
+| --- | --- |
+| Uploaded | An upload session writes and verifies the content object before the commit (section 5). |
+| Inline | The WAL object that commits the revision carries the bytes (Appendix A.5), so they become durable in the same publication that makes the revision visible. Before a flush publishes a manifest whose `folded_wal_no` covers that WAL object, it writes the bytes to the content object (section 7.2). |
+
+WAL collection requires that coverage, so a WAL object is never deleted while its inline bytes exist only in the WAL. A reference is therefore the content's identity, not proof that the content object exists. Section 4.5 defines where a reader finds the bytes.
 
 The original owner's manifest is not required to read inherited content. This matters for forks: a descendant can continue reading the exact objects in its pinned basis after the source namespace is deleted.
 
@@ -167,7 +176,7 @@ The rights are `read`, `history`, `write`, `create`, `remove`, `share`, `manage`
 
 An inode begins at access revision `0` with no boundary and no grants; that initial state has no persisted access row. The root inode of an ACL namespace is the exception: it begins with a row at revision `0` holding the manifest's `root_grants`, materialized at genesis like the root inode row itself. Each accepted update increments `access_revision_no` by one and stores the complete resulting state. A row with no boundary and no grants is a real revision, distinguishable from an inode whose access was never changed.
 
-Each namespace records an access mode in its manifest, fixed at creation: `unrestricted`, or `acl` with a `principal_scope` naming the identity domain of its principal ids and the `root_grants` the root inode holds at genesis, normally `admin` for each initial administrator. Before authorization reads a grant, the request's subject scope must match this value. A fork copies the source access mode and scope. An inode's effective rights for a set of principals are the union of those principals' grants on the inode's own row and on each ancestor's row, walking current parent bindings and stopping after a row whose boundary is set or at the root. A deletion root has no current binding; its tombstone's saved parent supplies that edge. Revisiting an inode during the walk is namespace corruption. `admin` on the root row confers every right everywhere and is never inherited. The `update_access` operation replaces an inode's row; the API specification defines it.
+Each namespace records an access mode in its manifest, fixed at creation: `unrestricted`, or `acl` with a `principal_scope` naming the identity domain of its principal ids and the `root_grants` the root inode holds at genesis, normally `admin` for each initial administrator. Before authorization reads a grant, the request's subject scope must match this value. A fork copies the source access mode and scope. An inode's effective rights for a set of principals are the union of those principals' grants on the inode's own row and on each ancestor's row, walking current parent bindings and stopping after a row whose boundary is set or at the root. A deletion root has no current binding; its tombstone's saved parent supplies that edge. Revisiting an inode during the walk is namespace corruption. `admin` on the root row confers every right everywhere and is never inherited. The `update_access` operation replaces an inode's row and appears in the change feed as an `access_changed` event. The API specification defines that operation and how reads, commits, and upload sessions are authorized against access rows.
 
 ## 2. Objects and references
 
@@ -380,7 +389,7 @@ Reading speculative bytes does not by itself establish freshness or change reten
 
 ### 5.1 Upload sessions
 
-Every new content object is associated with an upload session before it becomes eligible for metadata publication. The content ID is allocated when the session is created, before the file bytes are read. New content belongs to the session's namespace under section 1.5.
+Every uploaded content object is associated with an upload session before it becomes eligible for metadata publication. The content ID is allocated when the session is created, before the file bytes are read. New content belongs to the session's namespace under section 1.5.
 
 An upload session contains `namespace_id`, `upload_id`, `content_id`, `created_at_ms`, optional `subject_id`, a tagged `mode`, and a tagged `status`.
 
@@ -494,7 +503,7 @@ The publication budget is measured from observing the tip used to plan the batch
 For example, three requests accepted after sequence 40 can be written together as sequences 41, 42, and 43 in WAL object 10. Creating that object commits all three. They remain separate logical commits, while a request containing several operations remains one commit.
 
 ```text
-upload and verify content
+upload and verify content (uploaded path only)
            │
            v
 validate requests A, B, C against the current view
@@ -647,13 +656,15 @@ A pin is a durable record that holds one manifest. It preserves that manifest an
 
 Each pin is stored under `pins/{pin_id}.json`. Its positioned ID identifies the manifest number and includes a fresh random suffix. Repeated creates over the same manifest or label create distinct records.
 
-| Owner | Stored owner fields | Lifetime |
-| --- | --- | --- |
-| `user` | `name`, optional `expires_at_ms` | Explicit deletion, or GC after expiry and grace. |
-| `snapshot` | `name`, required `expires_at_ms` | Reads require an unexpired snapshot; GC adds grace before deletion. |
-| `fork` | `target_namespace_id` | Retained while that target depends on the source. |
+| Owner | Stored owner fields | Reads | Removal |
+| --- | --- | --- | --- |
+| `user` | `name`, optional `expires_at_ms` | Readable while the record exists, including after expiry. | Explicit deletion, or GC after expiry plus grace. Without an expiry, only explicit deletion removes it from an active namespace. |
+| `snapshot` | `name`, required `expires_at_ms` | Readable only before expiry. | Explicit deletion, or GC after expiry plus grace. |
+| `fork` | `target_namespace_id` | Not read through the pin; it retains the runs that the target's manifest lists. | GC after the target stops depending on it (section 11.7). |
 
 The record also stores namespace, head sequence, payload checksum, and creation time. The manifest number comes from the pin ID. It has no lifecycle status. Creating the record establishes the candidate pin; deleting it ends the pin. Fork pins have no expiry or renewal protocol.
+
+Expiry, read eligibility, collection eligibility, and removal are separate. An expired record still exists: it appears in the complete pin listing and keeps its manifest and segments retained until collection deletes it. Section 11.7 defines when each owner becomes collectable.
 
 ### 8.2 Creating and verifying a pin
 
@@ -674,7 +685,7 @@ A fork of a snapshot uses a different protecting root. It first writes a fork pi
 
 A read through a pin derives the manifest number from the ID, confirms the pin's existence and owner, and verifies its manifest reference. Reads use that manifest directly, without replaying later namespace history.
 
-User pins remain readable while their records exist, even after an optional expiry. Snapshot reads and extensions require an unexpired snapshot owner. Expiry and physical deletion are therefore different events: an expired snapshot remains a collection root until its record is deleted after grace.
+Reads follow the owner rules in section 8.1. Snapshot extensions also require an unexpired snapshot owner.
 
 Explicit deletion checks the owner and deletes the pin. Deleting it again returns not-found. Callers cannot delete fork-owned pins through the user checkpoint API. Collection roots follow section 11.2; retirement eligibility follows section 9.5.
 
@@ -776,7 +787,7 @@ The existence check detects missing recovery material before abandoning the corr
 
 ### 10.2 Compaction windows
 
-Metadata is compacted by family group. Directory binds, the child-binding index, and unbinds form one group because they must remain consistent. Each of the other seven groups contains one family.
+Metadata is compacted by family group. Directory binds, the child-binding index, and unbinds form one group because they must remain consistent. The `commits` and `commit_receipts` families form another group, and each of the other seven groups contains one family. Appendix A.6 lists the groups.
 
 A bounded rebuild merges an oldest-first contiguous window. It can skip the group's oldest run when that run is too large for one bounded step and merge the delta runs above it instead. It cannot skip an intervening delta run.
 
@@ -1019,8 +1030,6 @@ An extension must remain rebuildable from authoritative core state. Its absence 
 ### 12.5 Reserved functionality
 
 The current inode kinds are `file` and `dir`. Mount creation and traversal are not defined by this version; no standard operation creates a mount.
-
-Access rows and the namespace access mode are stored as section 1.8 defines. Commits and upload sessions are authorized against access rows as the API specification defines. Reads evaluate access rows as the API specification defines. Access changes publish in commit order and appear in the change feed as `access_changed` events.
 
 ## Appendix A. Durable records and byte encodings
 

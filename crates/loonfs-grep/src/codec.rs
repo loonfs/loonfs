@@ -217,7 +217,7 @@ pub enum IndexRow {
 
 impl IndexRow {
     /// Packs postings into a row for `gram`. The postings must be
-    /// non-empty and strictly ascending, as for [`encode_gram_postings`].
+    /// non-empty and strictly ascending, as for `encode_gram_postings`.
     pub fn gram_postings(
         gram: Gram,
         postings: &[GramPosting],

@@ -314,20 +314,22 @@ pub enum ContentRefValidationError {
     InvalidChecksum(ChecksumValidationError),
 }
 
-/// A reference to one immutable content object.
+/// Identifies one piece of immutable file content.
 ///
-/// The object must be durable before the reference is published.
+/// The owner namespace and content id name the content object that holds the
+/// bytes. A reference is not proof that the object exists: content committed
+/// inline has no object until a flush writes it.
 // Request bodies and durable records share this type, so it rejects unknown
 // fields in every context. After release, new content kinds, not new fields.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct ContentRef {
-    /// Content strategy used by the referenced object.
+    /// Content strategy used by the referenced content.
     pub kind: ContentRefKind,
     /// Namespace that originally wrote the bytes.
     pub owner_namespace_id: NamespaceId,
-    /// Immutable identity of the referenced object.
+    /// Immutable identity of the content; with the owner, it determines the object key.
     pub content_id: ContentId,
     /// Complete byte length of the referenced content.
     pub size_bytes: u64,

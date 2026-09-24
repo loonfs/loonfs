@@ -1121,12 +1121,14 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
 }
 
 impl<S: ObjectStore> NamespaceEngine<S, Writable> {
-    /// Creates or reuses a named checkpoint for the current namespace head.
+    /// Creates a new user checkpoint for the current namespace head.
     ///
-    /// The checkpoint pins a manifest for retention and provenance. If the head
-    /// has no manifest, the method first publishes one without compacting
-    /// metadata. `ttl_ms` sets an expiration time; `None` keeps the checkpoint
-    /// until it is deleted.
+    /// Every call generates a fresh `PinId`; `name` is a label, not a key.
+    /// When WAL objects follow the current manifest's `folded_wal_no`, the
+    /// method first folds them into a new manifest without compacting
+    /// metadata. `ttl_ms` sets `expires_at_ms`; an expired checkpoint stays
+    /// listed and readable, and keeps its manifest retained, until collection
+    /// deletes it. `None` keeps the checkpoint until it is deleted.
     pub async fn create_checkpoint(&self, name: String, ttl_ms: Option<u64>) -> Result<Checkpoint> {
         let context = self.mutation_context()?;
         let expires_at_ms = ttl_ms.map(|ttl_ms| context.now_ms.saturating_add(ttl_ms));
@@ -1161,7 +1163,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
 }
 
 impl<S: ObjectStore, M> NamespaceEngine<S, M> {
-    /// Lists one page of active checkpoints in ascending id order. Expired
+    /// Lists one page of existing checkpoints in ascending id order. Expired
     /// records remain visible until garbage collection deletes them.
     pub async fn list_checkpoints_page(
         &self,

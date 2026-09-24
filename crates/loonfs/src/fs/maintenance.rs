@@ -36,7 +36,7 @@ enum ReorganizationStep {
     CompactionPlanned(loonfs_core::MetadataCompactionSpec),
 }
 
-/// A pager over active checkpoints.
+/// A pager over existing checkpoints.
 pub type CheckpointsPager = loonfs_api::Pager<ListCheckpointsResponse, RuntimeError>;
 
 fn metadata_compaction_response(
@@ -471,9 +471,12 @@ impl FsMaintenance {
         }))
     }
 
-    /// Runs one streaming metadata compaction in the caller's task.
+    /// Runs one metadata compaction unit in the caller's task.
     ///
-    /// Use this when [`ReorganizeStepOutcome::CompactionRequired`] is reported.
+    /// The unit is a bounded merge when the selected window fits one step,
+    /// and otherwise one streaming compaction of a family group. Use this
+    /// when [`ReorganizeStepOutcome::CompactionRequired`] is reported, and
+    /// repeat it while it publishes to compact every eligible group.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.maintenance.compact_metadata",
@@ -591,11 +594,11 @@ impl FsMaintenance {
         outcome
     }
 
-    /// Runs the v1 mark-and-sweep garbage collector for one namespace.
+    /// Runs one complete garbage-collection pass for one namespace.
     ///
-    /// Bounded calls return an enumeration cursor; every resume rebuilds the
-    /// current live roots. A pass runs only when asked here or by a writer's
-    /// collection job, which schedules one for each upload deadline it created.
+    /// Every call rebuilds the current live roots and keeps no cursor. A pass
+    /// runs only when asked here or by a writer's collection job, which
+    /// schedules one for each upload deadline it created.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.maintenance.gc_namespace",
@@ -631,13 +634,15 @@ impl FsMaintenance {
         Ok(report)
     }
 
-    /// Creates a checkpoint for the current namespace head.
+    /// Creates a new user checkpoint for the current namespace head.
     ///
-    /// A checkpoint pins a manifest version for retention and provenance.
-    /// Every call is its own pin under its own id, held until deleted — the
-    /// name is a label, not a key. If the current head has no manifest yet,
-    /// one is published first for the current durable namespace state; this
-    /// is not a request to compact metadata.
+    /// A checkpoint pins a manifest for retention and provenance. Every call
+    /// creates its own pin under a fresh id; the name is a label, not a key.
+    /// When WAL objects follow the current manifest, they are first folded
+    /// into a new manifest; this is not a request to compact metadata. The pin
+    /// lasts until it is deleted, either explicitly or by garbage collection
+    /// after its expiry plus grace
+    /// ([format section 8](../../../../docs/specs/format.md#8-pins)).
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.maintenance.checkpoint_create",
@@ -693,8 +698,9 @@ impl FsMaintenance {
         })
     }
 
-    /// Lists one page of active checkpoints in ascending id order. The cursor
-    /// resumes a live listing and does not create a snapshot.
+    /// Lists one page of existing checkpoints in ascending id order, including
+    /// expired checkpoints that garbage collection has not yet deleted. The
+    /// cursor resumes a live listing and does not create a snapshot.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.maintenance.list_checkpoints",

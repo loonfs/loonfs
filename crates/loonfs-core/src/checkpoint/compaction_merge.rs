@@ -93,7 +93,7 @@ pub struct SegmentRowIterator<Row, Segment, SortKey> {
 }
 
 impl<Row, Segment, SortKey> SegmentRowIterator<Row, Segment, SortKey> {
-    /// Creates an iterator over segments already ordered by segment index.
+    /// Creates an iterator over segments already in their run's list order.
     pub fn new(sort_key: SortKey, segments: Vec<Segment>, lower: Option<String>) -> Self {
         Self {
             sort_key,

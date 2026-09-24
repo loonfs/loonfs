@@ -4,7 +4,7 @@ LoonFS stores filesystem metadata in immutable segments arranged as a log-struct
 
 The main storage tradeoff is between object size and read amplification. Larger objects reduce object counts and can be efficient to write, but a metadata lookup should not require downloading an entire object. LoonFS therefore divides each segment into independently readable sections.
 
-This document explains that layout, the read path, and the maintenance cycle. The [storage format](../specs/format.md) defines the durable encodings and required behavior. [Streaming compaction](metadata-streaming-compaction.md) describes the merge implementation and its resource limits in more detail.
+This document explains that layout and the read path. The [storage format](../specs/format.md#a7-block-segment-encoding) defines the durable encodings and required behavior. [Streaming compaction](metadata-streaming-compaction.md) describes the merge implementation and its resource limits.
 
 ## Segment objects
 
@@ -30,7 +30,7 @@ manifest descriptor
 
 The descriptor is the entry point for a read. Keeping these handles in the manifest avoids a separate footer lookup and another copy of the segment's structural metadata. The tradeoff is that an isolated segment is not a self-contained recovery description: its manifest descriptor is required to interpret it.
 
-The descriptor also records a SHA-256 checksum of the complete segment for whole-object verification and related checks. Normal ranged reads use the section CRCs. Section checksums detect corruption in the ranges read. They do not authenticate individual ranges through the complete-object SHA-256 digest.
+The descriptor also records a SHA-256 checksum of the complete segment, which the block cache uses as the segment's identity. Reads verify the CRC of each section they fetch. Section checksums detect corruption in the ranges read; they do not authenticate a range against the complete-object digest.
 
 ## Reads
 
@@ -52,64 +52,21 @@ The implementation also combines reads when transferring some additional bytes i
 
 These are read-path optimizations. They do not change block boundaries, checksum coverage, or the visibility rules applied to the rows.
 
-## Flushes and reorganization
+## Flushes and compaction
 
-A flush and a reorganization both publish manifests, but they perform different work.
+A flush and a compaction both publish manifests, but they perform different work. A flush materializes the visible WAL tail into a new run, which is a delta run except for the first flush over an empty manifest. The rows it encodes are proportional to the changes since the previous flush, but the complete manifest still describes the retained file set. A compaction merges complete runs for one family group; runs outside its window remain referenced without being rewritten.
 
-A flush materializes the visible WAL tail into a new delta run. The new manifest retains the previous runs and adds the newly written segments. The metadata rows encoded by the flush are proportional to the changes since the previous flush. This does not make every part of the operation independent of namespace size: the complete manifest still describes the retained file set.
-
-Reorganization merges complete runs for one family group. The bindings group includes the parent-and-name bindings, child-binding index, and unbind records because their retention decisions must remain consistent. Other groups, such as revisions, can be processed independently.
-
-Each ordinary maintenance step limits its input by run count, decoded row count, and decoded data-block bytes. It selects a contiguous merge window. Runs outside that window remain referenced without being rewritten.
-
-## When rows can be removed
-
-A merge can remove obsolete rows only when its window starts at the oldest run in the family group. This is a bottom-anchored merge, and its output is a base run. The input then includes the older records required to apply the retention rules to that window.
-
-A window above the oldest run produces a delta run and preserves every input row. The excluded older run may contain the other records needed for a deletion decision. Merging only the newer runs can reduce run count, but it cannot safely apply the same retention rules.
-
-For example:
-
-```text
-Before:                       Merge the two newest runs:
-
-  delta 3                       delta 4  <- rows from delta 2 and 3
-  delta 2                       delta 1
-  delta 1                       base
-  base
-```
-
-This merge reduces the number of delta runs without rewriting the base. No rows are removed from the merged inputs. The resulting delta run is placed at the sequence of its newest input, not automatically at the manifest's current head sequence.
-
-A bottom-anchored output is instead stamped at the manifest head sequence and ordered as the group's base. A group has at most one base run. The storage format defines the per-family retention rules; file revision rows are not removed by advancing the replay floor.
-
-## Larger family groups
-
-When an eligible merge window exceeds an ordinary step's row or byte budget, streaming compaction processes it using the same merge engine. It writes output directly under the namespace’s segment prefix and publishes the completed file set in the next numbered manifest. The compactor epoch, publication time bound, and segment minimum age protect this process under the collection rules.
-
-Both execution paths select at most eight input runs. A large backlog can therefore require several publications. The size-tiered policy can also defer a rewrite when too little newer data has accumulated relative to the oldest selected run. A maintenance budget does not guarantee that every invocation reduces the run count or removes all delta runs.
-
-The [streaming-compaction design](metadata-streaming-compaction.md) specifies window eligibility, placement, resource bounds, and explicit compaction behavior.
-
-## Publication and restart behavior
-
-Each completed merge is published through the next numbered manifest put-if-absent. Until that conditional update succeeds, readers use the earlier manifest. A partially written output set is never a published file set.
-
-After a bounded merge is interrupted, the next invocation plans from the current manifest. There is no separate row-level continuation record for that merge. A background compaction also restarts from the current manifest after process failure rather than resuming partial output segments.
-
-Concurrent publications are reconciled at finalization. A compaction removes only its selected inputs, after confirming that their descriptors are unchanged, and preserves newer or unrelated runs.
-
-The merge validates the parent-and-name binding rows and child-index rows selected for output. It also rejects duplicate logical input keys, including duplicates that would otherwise be removed by retention. Matching index digests alone are insufficient to detect the same duplicate in both families.
+Each published file set replaces the previous one through the next numbered manifest put-if-absent, and readers use the earlier manifest until that put succeeds. The [storage format](../specs/format.md#10-retention-and-compaction) defines where a merged run is placed and which rows it can remove. [Streaming compaction](metadata-streaming-compaction.md) describes window selection, resource bounds, and restart behavior.
 
 ## Constants and tunables
 
 The encoding and the writer's target sizes have different compatibility requirements.
 
-Bloom hashing and the block grammar are durable-format rules. The filter uses two fixed-seed 64-bit hashes, with seven probes and approximately ten bits per inserted key. A change that alters interpretation of stored filters requires the appropriate format-version change after release.
+Bloom hashing and the block grammar are durable-format rules. The filter uses two fixed-seed 64-bit hashes, with seven probes and approximately ten bits per inserted key. A change that alters the interpretation of stored filters requires a new format version.
 
 Block sizes, segment targets, and ordinary maintenance budgets are implementation settings:
 
-| Setting | Current default | Meaning |
+| Setting | Default | Meaning |
 | --- | --- | --- |
 | Data-block target | 64 KiB decoded | A block is closed after its target is reached. |
 | Segment byte target | 8 MiB decoded | A segment can exceed the target by its final row. |

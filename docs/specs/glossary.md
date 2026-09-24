@@ -21,8 +21,9 @@
 | **Display name** | The stored spelling of a directory entry's name. |
 | **Name key** | The normalized and case-folded value used for sibling-name comparison and lookup. |
 | **Revision** | One committed content state of a file, ordered by a revision number scoped to that inode. |
-| **Content object** | The complete bytes of one uploaded file, stored immutably under `namespaces/{owner_namespace_id}/content/{content_id}`. |
-| **Content reference** | A `blob_v1` record containing the original owner namespace, content ID, complete size, and checksum. |
+| **Content object** | The complete bytes of one piece of file content, stored immutably under `namespaces/{owner_namespace_id}/content/{content_id}`. |
+| **Content reference** | A `blob_v1` record containing the original owner namespace, content ID, complete size, and checksum. It identifies content; it does not prove that the content object exists yet. |
+| **Inline content** | File bytes carried in the WAL commit that references them. A flush writes them to a content object before the WAL object can be collected ([format section 1.5](format.md#15-file-contents-and-ownership)). |
 | **Upload session** | A durable record for one upload, with a fixed identity and mode and an open, completed, or aborted status. Completion alone does not commit a file. |
 | **Metadata segment** | An immutable, sorted set of rows in one metadata family, stored in independently readable blocks. |
 | **Run** | The metadata segments produced together, identified by a manifest-allocated run number. |
@@ -49,4 +50,4 @@
 | **Capability document** | The deployment's advertised protocol version, API groups, features, and advisory limits. |
 | **Extension** | A derived subsystem with its own objects and collection rules under `namespaces/{namespace_id}/extensions/{name}/`. |
 
-The [format](format.md) defines stored representations and lifecycle rules. The [API](api.md) defines request, response, and cursor behavior. Mounts, ACL records, and shares have no implemented durable schema in this format.
+The [format](format.md) defines stored representations and lifecycle rules. The [API](api.md) defines request, response, and cursor behavior.

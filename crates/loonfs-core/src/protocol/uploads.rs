@@ -5,9 +5,9 @@
 //! compare-and-swap that records a terminal state determines the result.
 //! Provider cleanup runs only after that durable transition.
 //!
-//! Every content object is created through a session. Before metadata
-//! references the object, the session record gives garbage collection a
-//! durable owner and status.
+//! Every uploaded content object is created through a session. Before
+//! metadata references the object, the session record gives garbage
+//! collection a durable owner and status.
 
 use crate::authorize::{Authorizer, CommitAuthority};
 use crate::context::MutationContext;

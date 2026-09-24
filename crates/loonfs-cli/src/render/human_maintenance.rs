@@ -111,7 +111,7 @@ pub(super) fn human_checkpoint_created(checkpoint: &Checkpoint) -> String {
 
 pub(super) fn human_checkpoints_listed(response: &ListCheckpointsResponse) -> String {
     let mut lines = vec![
-        format!("active checkpoints for {}", response.namespace_id),
+        format!("checkpoints for {}", response.namespace_id),
         "CREATED\tEXPIRES\tSEQ\tOWNER\tCHECKPOINT".to_owned(),
     ];
     for checkpoint in &response.checkpoints {

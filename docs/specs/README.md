@@ -2,7 +2,7 @@
 
 LoonFS is a filesystem built on object storage. Each namespace has a directory tree, file revision history, and an ordered log of metadata changes. Files retain their inode identities when renamed or moved. Forks start from an existing namespace's state and share its stored objects while maintaining independent subsequent history.
 
-A file write has two steps: store and verify the bytes, then commit the metadata that references them. Creating the next numbered write-ahead log (WAL) object commits its records. Readers discover the current manifest and WAL tip, then combine materialized metadata with later commits.
+An uploaded file is written in two steps: store and verify the bytes, then commit the metadata that references them. A small file can instead carry its bytes inline in the commit. Creating the next numbered write-ahead log (WAL) object commits its records. [Format section 1.5](format.md#15-file-contents-and-ownership) defines when file content becomes durable. Readers discover the current manifest and WAL tip, then combine materialized metadata with later commits.
 
 Object storage contains all required recovery state, including control records, retained metadata, and file content. Some of a fork's dependencies can be stored under an ancestor's prefix. Local caches and derived search indexes can be rebuilt, but required manifests, metadata segments, and pins must be retained according to the format rules.
 

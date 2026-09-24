@@ -593,7 +593,7 @@
       },
       "ContentRef": {
         "additionalProperties": false,
-        "description": "A reference to one immutable content object.\n\nThe object must be durable before the reference is published.",
+        "description": "Identifies one piece of immutable file content.\n\nThe owner namespace and content id name the content object that holds the\nbytes. A reference is not proof that the object exists: content committed\ninline has no object until a flush writes it.",
         "properties": {
           "checksum": {
             "$ref": "#/components/schemas/Checksum",
@@ -601,11 +601,11 @@
           },
           "content_id": {
             "$ref": "#/components/schemas/ContentId",
-            "description": "Immutable identity of the referenced object."
+            "description": "Immutable identity of the content; with the owner, it determines the object key."
           },
           "kind": {
             "$ref": "#/components/schemas/ContentRefKind",
-            "description": "Content strategy used by the referenced object."
+            "description": "Content strategy used by the referenced content."
           },
           "owner_namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",

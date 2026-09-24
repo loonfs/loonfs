@@ -136,7 +136,9 @@ pub enum WalDelta {
         inode_id: InodeId,
         /// Monotonic per-file revision number validated against visible history.
         revision_no: RevisionNo,
-        /// Immutable content that must already be durable before publication.
+        /// Content of the new revision. Uploaded bytes are durable before
+        /// publication; inline bytes travel in this commit's `inline_content`
+        /// ([format section 1.5](../../../docs/specs/format.md#15-file-contents-and-ownership)).
         content_ref: ContentRef,
     },
     /// Hides a rooted subtree from snapshots at this delta's sequence or later.

@@ -916,7 +916,7 @@ pub struct ListFileRevisionsResponse {
 pub struct CreateCheckpointRequest {
     /// The non-unique label recorded on the checkpoint.
     pub name: String,
-    /// The checkpoint lifetime in milliseconds, or `None` for an explicit deletion only.
+    /// The checkpoint lifetime in milliseconds, or `None` to keep the checkpoint until it is deleted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub ttl_ms: Option<u64>,
@@ -1038,13 +1038,14 @@ impl SnapshotSummary {
     }
 }
 
-/// One page of active checkpoint records.
+/// One page of existing checkpoint records, including expired records that
+/// collection has not yet deleted.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ListCheckpointsResponse {
     /// Namespace the records belong to.
     pub namespace_id: NamespaceId,
-    /// The active records in ascending checkpoint ID order.
+    /// The records in ascending checkpoint ID order.
     pub checkpoints: Vec<Checkpoint>,
     /// Opaque cursor for the next page.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1362,7 +1363,8 @@ pub struct AdvanceRetentionResponse {
 pub enum RunMaintenanceRequest {
     /// Runs WAL flushing and one bounded metadata reorganization step.
     Metadata(MetadataMaintenanceRequest),
-    /// Runs one full metadata compaction.
+    /// Runs one metadata compaction unit: one bounded merge, or one streaming
+    /// compaction of a family group.
     MetadataCompaction(MetadataCompactionRequest),
     /// Collects aged, unreferenced objects.
     Gc(GcRequest),
@@ -1407,7 +1409,8 @@ pub struct MetadataMaintenanceRequest {
     pub max_wal_tail_segments: Option<u64>,
 }
 
-/// An option-free request that selects one full metadata compaction.
+/// An option-free request for one metadata compaction unit. Repeat it while
+/// it publishes to compact every eligible family group.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
@@ -1477,7 +1480,7 @@ pub enum ReorganizeStepOutcome {
 pub enum RunMaintenanceResponse {
     /// Result of WAL flushing and one bounded metadata reorganization step.
     Metadata(MetadataMaintenanceResponse),
-    /// Result of one full metadata compaction.
+    /// Result of one metadata compaction unit.
     MetadataCompaction(MetadataCompactionResponse),
     /// Counts and deadlines from one collection call.
     Gc(GcResponse),
