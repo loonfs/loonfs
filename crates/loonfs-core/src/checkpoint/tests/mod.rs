@@ -16,6 +16,7 @@ mod manifest_gc_races;
 mod manifest_round_trips;
 mod pin_verification;
 mod retention;
+mod snapshot_fork_gc;
 mod streaming_compaction;
 
 use super::build::{build_manifest_segments, build_manifest_segments_from_rows};
