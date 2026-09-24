@@ -105,7 +105,7 @@ A change to any name-key mapping changes the format semantics, even if the seria
 
 Each file revision contains one `ContentRef`. The current kind, `blob_v1`, represents a complete file stored as one immutable object. Its bytes are the file bytes; LoonFS does not add an envelope around the content object.
 
-A reference contains the original owner namespace, a random content ID, the complete size, and a full-object checksum. It does not contain a bucket address or object-store path.
+A reference contains the original owner namespace, a random content ID that is never reused, the complete size, and a full-object checksum. It does not contain a bucket address or object-store path.
 
 The owner namespace and content ID in the reference determine the key:
 
@@ -173,7 +173,7 @@ Each namespace records an access mode in its manifest, fixed at creation: `unres
 
 ### 2.1 Storage layout
 
-Content objects live beside their owner's metadata. A fork reads inherited content at the source owner's key. Retirement lists and deletes the namespace's content prefix after upload-session cleanup.
+Content ownership follows section 1.5. Appendix A.8 defines the object keys.
 
 ```text
 namespaces/{namespace_id}/
@@ -183,7 +183,7 @@ namespaces/{namespace_id}/
 ├── segments/{segment_id}.sst.zst
 ├── pins/{pin_id}.json
 ├── uploads/{upload_id}.json
-├── content/{content_id}
+├── content/
 └── extensions/{extension_name}/...
 ```
 
@@ -380,7 +380,7 @@ Reading speculative bytes does not by itself establish freshness or change reten
 
 ### 5.1 Upload sessions
 
-Every new content object is associated with an upload session before it becomes eligible for metadata publication. The content ID is allocated when the session is created, before the file bytes are read. New content belongs to the session's namespace and is stored at `namespaces/{owner_namespace_id}/content/{content_id}`.
+Every new content object is associated with an upload session before it becomes eligible for metadata publication. The content ID is allocated when the session is created, before the file bytes are read. New content belongs to the session's namespace under section 1.5.
 
 An upload session contains `namespace_id`, `upload_id`, `content_id`, `created_at_ms`, optional `subject_id`, a tagged `mode`, and a tagged `status`.
 
@@ -580,6 +580,8 @@ The `commits` and `commit_receipts` families hold one row each per retained comm
 
 ### 7.2 Publishing a materialized file set
 
+The first manifest has number 1, the requested namespace identity, creation time, and `created_by`, active status, and no writer block. Both epochs, the local folded WAL number, and activity counters start at zero. A plain create has no fork basis or runs, next inode ID 2, and head sequence, base sequence, retention floor, and next run number zero. A fork has the immutable source basis and inherited state described in section 9.2; its head and retention floor equal the pinned source sequence.
+
 A flush starts from the verified manifest and discovered WAL tip. It materializes the required numbers after `folded_wal_no`, writes new segments, and publishes the next manifest with `folded_wal_no` set to the captured tip. A fence is folded even when the logical sequence does not change. Ordinary flushes write a run at the head when materializing new state.
 
 Before writing segments or publishing the manifest, a flush writes every inline value it covers as a content object, verified against its reference. A manifest whose `folded_wal_no` is `n` implies a content object exists for every inline value in WAL segments up to `n`. WAL collection's rule is unchanged because it already requires each segment to be at or below `folded_wal_no`.
@@ -674,7 +676,7 @@ A read through a pin derives the manifest number from the ID, confirms the pin's
 
 User pins remain readable while their records exist, even after an optional expiry. Snapshot reads and extensions require an unexpired snapshot owner. Expiry and physical deletion are therefore different events: an expired snapshot remains a collection root until its record is deleted after grace.
 
-Explicit deletion checks the owner and deletes the pin. Deleting it again returns not-found. Callers cannot delete fork-owned pins through the user checkpoint API. Every pin encountered in a collector's initial listing protects its files for that whole pass, including a pin that the same pass subsequently deletes.
+Explicit deletion checks the owner and deletes the pin. Deleting it again returns not-found. Callers cannot delete fork-owned pins through the user checkpoint API. Collection roots follow section 11.2; retirement eligibility follows section 9.5.
 
 ### 8.4 Extending a snapshot
 
@@ -684,17 +686,17 @@ Each renewal attempt checks expiry after loading the pin, using the request cloc
 
 ## 9. Namespace lifecycle and forks
 
-Namespace creation and deletion publish numbered manifests. Retirement is derived from the tombstone and the complete pin listing. It publishes no manifest.
+Namespace creation and deletion publish numbered manifests. Section 9.5 defines retirement.
 
 ### 9.1 Creating a namespace
 
 Read existing namespace state before writing new objects. An existing active namespace returns `namespace_exists`, or its current summary with `allow_existing`. Corruption and read errors are not absence. These completed-namespace checks write nothing.
 
-For an absent namespace, build manifest 1 with the namespace's creation time and application-supplied `created_by`, no fork basis, active status, next inode ID 2, and no runs or writer block. Head sequence, base sequence, the retention floor, folded WAL number, next run number, both epochs, and all three activity counters start at zero.
+For an absent namespace, build the first manifest under section 7.2.
 
 Write the hint naming manifest 1 and WAL 0, then manifest 1, both with put-if-absent. A hint collision is permitted. The manifest put decides which installation wins. A hint left before that put does not establish namespace existence.
 
-After an unknown transport outcome, identical read-back bytes do not prove who published manifest 1 without a fork basis, so a plain create answers `namespace_exists`, or the existing summary with `allow_existing`.
+Conflicting and unknown publication outcomes follow section 9.3.
 
 ### 9.2 Forking a namespace
 
@@ -702,23 +704,22 @@ A fork starts independent history from the source's retained metadata:
 
 1. Load the target’s current manifest before writing a source pin. Continue only if the target is absent. Create a verified source pin whose owner names the target namespace, either from the source head or a live snapshot under section 8.2.
 2. Load and verify the pinned manifest.
-3. Copy its run references, base sequence, inode allocator, and next run number into the target manifest. The initial head is the captured source sequence. Preserve every segment's owner.
-4. Set target identity, creation time, and `created_by` from the fork request, immutable `fork_basis`, active status, and no writer block. Activity counters start at zero and the retention floor equals the head. Both epochs and the local folded WAL number start at zero.
-5. Install the target hint naming manifest 1 and WAL 0, then target manifest 1, as section 9.1 describes.
+3. Copy the pinned manifest's run references, head sequence, inode allocator, next run number, and access configuration. The inherited runs determine the same base sequence. Preserve every segment's owner. Set the fork basis to the pinned manifest reference and source pin ID.
+4. Build the remaining first-manifest fields under section 7.2 and install it under section 9.1.
 
-The target copies no file bytes or metadata segments. Its head is at least the captured source sequence and every copied run sequence. Its WAL starts at number 1. Its first data commit is one sequence above its initial head. It can itself be forked immediately because its manifest already lists its inherited runs.
+The target copies no file bytes or metadata segments. Its first data commit is one sequence above its initial head. It can itself be forked immediately because its manifest already lists its inherited runs.
 
-The fixed creation grace on the source pin protects installation. Before initiating the target manifest put, the installer checks the time elapsed since before the source pin write against `METADATA_PUBLICATION_BUDGET_MS`. The remaining grace covers provider operations and the clock allowance.
+The fixed creation grace on the source pin protects installation. The metadata publication budget in section 7.2 starts at the beginning of the fork call, before target discovery and source pin creation. The remaining grace covers provider operations and the clock allowance.
 
 ### 9.3 Conflicting and unknown installations
 
-A losing manifest-1 put reads the winner and verifies its namespace identity. Active status means `namespace_exists`. Deleted status follows the lifetime rule in section 1. Invalid bytes or key/payload disagreement are corruption. No loser overwrites the winner.
+A losing manifest-1 put returns to the existing-state checks in section 9.1. Deleted status follows the lifetime rule in section 1. Invalid bytes or key/payload disagreement are corruption. No loser overwrites the winner.
 
-A confirmed precondition failure is a conflict. A put with an unknown transport outcome confirms its own success only when a fork's first manifest reads back exactly: its source pin is unique to that attempt. Every other manifest, including a plain create under section 9.1, a compactor claim, a writer acquisition, or a tombstone, can be rebuilt byte for byte by another publisher, so an exact read-back counts as the current manifest and the attempt retries from it. An explicit `allow_existing` retry can instead return an existing active namespace.
+A confirmed precondition failure is a conflict. A put with an unknown transport outcome confirms its own success only when a fork's first manifest reads back exactly: its source pin is unique to that attempt. Every other manifest, including a plain create under section 9.1, a compactor claim, a writer acquisition, or a tombstone, can be rebuilt byte for byte by another publisher, so an exact read-back counts as the current manifest and the attempt retries from it.
 
 On `namespace_exists` or `namespace_deleted`, a fork installer reloads the target and deletes its source pin unless the target’s fork basis names it. A matching pin ID with a different manifest reference is corruption under section 11.7.
 
-Abandoned attempts can leave a hint or fork pin. A leftover hint does not install a namespace. An unused fork pin is collected after its installation grace under section 11.7.
+An unused fork pin is collected after its installation grace under section 11.7.
 
 ### 9.4 Deleting a namespace
 
@@ -726,11 +727,11 @@ Deletion uses the acquired writer epoch. After admitted commits finish, it folds
 
 An ordinary operation that observes deletion returns `namespace_deleted`. A cached reader can still use its active view until the next manifest revalidation is due. Deletion does not immediately remove content.
 
-The tombstone protects its runs like any current manifest, so the final metadata stays readable and an import from a deleted owner is authorized against it. Every WAL object of a deleted namespace is folded, so none is required. Pins still protect their referenced manifests and segments. The tombstone, hint, and rooted runs remain after content reclamation. A separate purge operation is outside this specification.
+Collection roots follow section 11.2. A separate purge operation is outside this specification.
 
 ### 9.5 Retirement
 
-Retirement is derived, not stored. For a tombstone `T`, the deadline is:
+No retirement deadline is stored and collection publishes no manifest. For a tombstone `T`, the derived deadline is:
 
 ```text
 deadline(T) = T.deleted_at_ms
@@ -739,7 +740,7 @@ deadline(T) = T.deleted_at_ms
 
 A tombstone is eligible when the pass clock reaches its deadline and the complete pin listing contains no pin on the namespace. Pins deleted later in the same pass still count. Any unrecognized key under the pin prefix also blocks reclamation.
 
-Eligible tombstones release their own content and source pins under section 11.8. Collection publishes no manifest. Other owners remain outside that sweep.
+Eligible tombstones release their own content and source pins under section 11.8. Other owners remain outside that sweep.
 
 ### 9.6 Fork dependencies after deletion
 
@@ -844,14 +845,14 @@ Every age decision uses the call's fixed `now_ms`. A later call reads fresh root
 | Evidence captured for the pass | Objects protected |
 | --- | --- |
 | Current active namespace manifest | The manifest and every segment in its runs. |
-| Current deleted manifest | The tombstone only. |
+| Current deleted manifest | The tombstone and every segment in its runs. |
 | Every recognized pin key in the complete listing | The numbered manifest in its ID and every segment in that manifest. |
 | Hint's observed manifest number | All manifest numbers at or above it, so discovery can probe forward. Intermediate numbers do not protect additional runs. |
 | Current active manifest's folded boundary | Every WAL number above `folded_wal_no`. |
 
 Pin bodies are not needed to identify these roots: the manifest number is part of the pin key. Bodies are normally read later for owner and expiry decisions. If a pin's manifest is absent, the collector reads the pin and applies the same owner and grace rules as pin cleanup. An absent or collectable pin does not require that missing basis; this permits recovery from failed installation cleanup and concurrent pin removal. A retained pin naming a missing manifest is corruption. Invalid or unreadable manifests still fail the pass. Each listed pin whose manifest is present protects its files for the whole pass, even if that pass deletes the pin.
 
-Segments in a tombstone are collectible by the ordinary age rule once no pin protects them. Retirement does not read them.
+The tombstone retains its runs so an import from a deleted owner can still be authorized against its final access state. Retirement does not read those segments. Retirement eligibility follows section 9.5.
 
 A retention floor may pass a pinned manifest's head sequence. That does not remove its protection. Reads through the pin use the pinned file set directly.
 
@@ -867,7 +868,7 @@ Being unreferenced makes an object a candidate; it does not make it immediately 
 | Metadata segment | No root lists it, and its provider age is strictly greater than 24 hours. |
 | Pin record | Owner-specific rules in section 11.7. |
 | Upload session and its content | Status-specific rules in section 11.6. |
-| An eligible tombstone’s owned content | Deadline and pin checks in section 9.5 pass, followed by the prefix sweep in section 11.8. |
+| An eligible tombstone’s owned content | Sections 9.5 and 11.8. |
 
 The hint and current manifest are never swept. Unrecognized keys outside an eligible tombstone’s content prefix are retained by core GC. On an age-gated candidate, a missing provider timestamp or one in the future cannot establish sufficient age. If a manifest's successor is absent, that absence does not itself prevent deleting the predecessor.
 
@@ -897,17 +898,14 @@ A failed required-root read stops collection. An uncertain fork-target read reta
 
 ### 11.6 Upload-session cleanup
 
-Uploads are collected through their session records. Retirement separately lists the deleted namespace’s content prefix. A tombstone’s retirement state takes precedence over the session status rules.
+Uploads are collected through their session records. Retirement under section 9.5 takes precedence over the session status rules. Section 11.8 defines the subsequent content sweep.
 
 | Session and namespace | Action |
 | --- | --- |
-| Open session, before expiry plus `T` | Retain. |
-| Open session, after expiry plus `T` | CAS to `aborted`, then clean content and provider transfer state. A lost CAS retains it. |
+| Open session | Retain until expiry plus `T`; then CAS to `aborted` and clean content and provider transfer state. A lost CAS retains it. |
 | Aborted session | Retry content and provider cleanup; remove the record after abort time plus `T`. |
-| Completed session in an active namespace, before content grace | Retain. |
-| Completed session in an active namespace, after content grace | Check publication evidence. Keep published content; delete unreferenced content. Remove the session after successful cleanup or a confirmed publication. |
-| Session in a deleted namespace inside its retirement grace | Retain; report the namespace’s derived deadline. |
-| Session in a deleted namespace that pins hold after its grace | Retain; report no time of its own. |
+| Completed session in an active namespace | Retain until content grace passes; then check publication evidence. Keep published content; delete unreferenced content. Remove the session after successful cleanup or a confirmed publication. |
+| Session in a deleted namespace ineligible under section 9.5 | Retain; report a future retirement deadline, if any. |
 | Completed session in an eligible deleted namespace | Delete the session's exact content key, then the record; no publication lookup or additional completion grace is required. |
 
 Before completion, a session owns its random content identity exclusively and cannot issue admission evidence. In active namespaces or eligible tombstones, cleanup first wins the terminal transition, then removes content and any provider transfer. A failed cleanup leaves the record for another attempt. Open and aborted sessions still require provider cleanup after namespace retirement because provider upload state can exist outside object listings.
@@ -945,28 +943,24 @@ For a fork pin naming target `T`:
 
 | Condition | Decision |
 | --- | --- |
-| Inside the creation grace | Retain. |
-| Target’s current fork basis names this pin with the same manifest reference | Retain, including when the target is deleted. |
+| Inside the creation grace; or the target’s current fork basis names this pin with the same manifest reference; or a target store read fails | Retain, including when the target is deleted. |
 | Target absent or its fork basis does not name this pin | Delete the abandoned installation’s pin. |
 | Target’s current fork basis names this pin with a different manifest reference | Fail with `namespace_corrupt`. |
-| Target store read fails | Retain the pin. |
 
-A target basis that names the pin with a different manifest reference is corruption, not evidence that the pin can be reclaimed.
+The source discovers the target’s current manifest through its hint. It reads no target WAL and performs no listing. Section 11.8 defines source-pin release.
 
-The source discovers the target’s current manifest through its hint. It reads no target WAL and performs no listing. Reclamation releases the source pin named by the target’s tombstone.
-
-Any listed pin, including an unrecognized key, prevents reclamation for the whole pass. A candidate pin written too late to verify must be deleted by its creator. If that creator crashes first, its installation grace and owner rules still apply.
+A candidate pin written too late to verify must be deleted by its creator. If that creator crashes first, its installation grace and owner rules still apply.
 
 ### 11.8 Sweeping a retired owner's content
 
-After session cleanup, reclaim the eligible tombstone using the deadline and complete pin listing captured for the pass, as specified in section 9.5.
+After session cleanup, reclaim a tombstone eligible under section 9.5:
 
-1. List `namespaces/{namespace_id}/content/` and delete every listed key with bounded concurrency. Count listed keys whose deletion succeeds in `deleted.retired_content_objects`. Apply no additional age check. A listing or deletion failure ends the call before releasing the source pin.
+1. List the namespace’s content prefix from Appendix A.8 and delete every listed key with bounded concurrency. Count listed keys whose deletion succeeds in `deleted.retired_content_objects`. Apply no additional age check. A listing or deletion failure ends the call before releasing the source pin.
 2. Delete the source pin named by the tombstone’s fork basis, if any. Count it only if it was present.
 
-The prefix contains only this namespace’s lifetime. Inherited fork content remains under the source namespace’s prefix. Imports copy bytes under the destination namespace’s ID. A deleted namespace refuses upload capabilities and completion, and the retirement grace exceeds the lifetime of issued presigned URLs.
+Content ownership follows section 1.5. A deleted namespace refuses upload capabilities and completion, and the retirement grace exceeds the lifetime of issued presigned URLs.
 
-Content and source-pin cleanup are idempotent. With no new objects, a later content sweep makes one empty LIST and no DELETE, and reports zero reclaimed objects. The tombstone and hint remain. Its segments need no retirement protection. Deleting listed content counts as maintenance progress. No progress record or journal is stored.
+Content and source-pin cleanup are idempotent. With no new objects, a later content sweep makes one empty LIST and no DELETE, and reports zero reclaimed objects. Retained roots follow section 11.2. Deleting listed content counts as maintenance progress. No progress record or journal is stored.
 
 ## 12. Encodings, versions, and extensions
 
@@ -1093,7 +1087,7 @@ For example, the 15 UTF-8 bytes represented by `Hello, LoonFS!\n`, with a single
 }
 ```
 
-The key is `namespaces/{owner_namespace_id}/content/{content_id}`. Content IDs are random and never reused.
+Section 1.5 defines content identity and key derivation.
 
 A checksum is `{ "algorithm": <name>, "value": <lowercase hex> }`:
 

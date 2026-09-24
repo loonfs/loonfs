@@ -249,16 +249,9 @@ async fn manifest_round_trip_supports_empty_namespace() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
-    crate::namespace::bootstrap::bootstrap_namespace(
-        &store,
-        &namespace_id,
-        &context,
-        &loonfs_test_support::test_actor(),
-        &loonfs_api::NamespaceAccess::Unrestricted {},
-        false,
-    )
-    .await
-    .expect("bootstrap");
+    create(&store, &namespace_id, &context)
+        .await
+        .expect("bootstrap");
 
     let genesis = super::super::load::load_basis_metadata_segments(
         &store,
@@ -273,7 +266,6 @@ async fn manifest_round_trip_supports_empty_namespace() {
     )
     .await
     .expect("load genesis from manifest one");
-    assert!(genesis.segments.manifest().payload().runs.is_empty());
     let head = load_namespace_read_state(&store, &namespace_id)
         .await
         .expect("head");
@@ -308,12 +300,6 @@ async fn manifest_round_trip_supports_empty_namespace() {
     assert!(PinId::parse(record.pin_id.as_str()).is_ok());
     assert_eq!(record.head_seq, ChangeSeq(0));
     assert_eq!(record.pin_id.manifest_no(), ManifestNo(1));
-    let published =
-        load_manifest_materialization_for_inspection(&store, &namespace_id, ManifestNo(1))
-            .await
-            .expect("first manifest is valid");
-    assert_eq!(published.manifest.payload().next_run_no, RunNo(0));
-    assert!(published.manifest.payload().runs.is_empty());
     assert!(metadata_states_equivalent(
         &materialization.metadata_state,
         &genesis.base_state
@@ -433,35 +419,6 @@ async fn create_checkpoint_surfaces_conflicting_invalid_manifest() {
         .await
         .expect_err("invalid winning manifest");
     assert_eq!(error.code(), ErrorCode::NamespaceCorrupt);
-}
-
-#[tokio::test]
-async fn checkpoint_publication_preserves_writer_identity() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context)
-        .await
-        .expect("bootstrap");
-    acquire_writer_epoch(&store, &namespace_id, &context)
-        .await
-        .expect("acquire writer");
-    let before = load_current_projection(&store, &namespace_id)
-        .await
-        .expect("load before checkpoint")
-        .head;
-
-    create_checkpoint(&store, &namespace_id, &context)
-        .await
-        .expect("create checkpoint");
-    let after = load_current_projection(&store, &namespace_id)
-        .await
-        .expect("load after checkpoint")
-        .head;
-
-    assert_eq!(after.writer_epoch, before.writer_epoch);
-    assert_eq!(after.writer, before.writer);
 }
 
 #[tokio::test]

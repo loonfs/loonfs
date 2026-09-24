@@ -113,11 +113,11 @@ mod tests {
     use crate::commit_engine::{publish_namespace_commits_batch, CommitCandidate};
     use crate::context::MutationContext;
     use crate::error::{CoreError, ErrorCode};
-    use crate::namespace::bootstrap::bootstrap_namespace;
     use crate::namespace::control::load_namespace_read_state;
     use crate::path::read::load_current_metadata_view;
     use crate::storage::content::store_bytes_as_content;
     use crate::storage::content_admission::PreparedContent;
+    use crate::test_support::ops::create;
     use loonfs_api::{CommitId, DeleteDirectoryBehavior, DestinationBehavior, InodeId};
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use std::collections::BTreeSet;
@@ -140,16 +140,9 @@ mod tests {
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let context = test_context();
-        bootstrap_namespace(
-            &store,
-            &namespace_id,
-            &context,
-            &loonfs_test_support::test_actor(),
-            &loonfs_api::NamespaceAccess::Unrestricted {},
-            false,
-        )
-        .await
-        .expect("bootstrap");
+        create(&store, &namespace_id, &context)
+            .await
+            .expect("bootstrap");
         (temp_dir, store, namespace_id, context)
     }
 

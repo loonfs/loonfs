@@ -5,9 +5,9 @@ mod retention;
 
 use super::*;
 use crate::checkpoint::{flush_wal, fold_wal_tail};
-use crate::namespace::bootstrap::bootstrap_namespace;
 use crate::path::read::load_current_metadata_view;
 use crate::storage::content::store_bytes_as_content;
+use crate::test_support::ops::create;
 use bytes::Bytes;
 use loonfs_api::v0::PathEntryKind;
 use loonfs_api::wire::wal::{decode_wal_segment_envelope_zstd, WalDelta};
@@ -34,16 +34,9 @@ async fn setup() -> (
         writer_id: WriterId::parse("writer").expect("writer"),
         now_ms: 1_000,
     };
-    bootstrap_namespace(
-        &store,
-        &namespace_id,
-        &context,
-        &loonfs_test_support::test_actor(),
-        &loonfs_api::NamespaceAccess::Unrestricted {},
-        false,
-    )
-    .await
-    .expect("bootstrap");
+    create(&store, &namespace_id, &context)
+        .await
+        .expect("bootstrap");
     let engine = NamespaceCommitEngine::new(namespace_id);
     engine
         .session_writer_epoch(&store, &context)

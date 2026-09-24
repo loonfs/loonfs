@@ -2,7 +2,7 @@
 
 | Term | Meaning |
 | --- | --- |
-| **Namespace** | A directory tree with its own ordered metadata history, manifests, WAL, and retention policy. Its id names one lifetime. Forks can share stored objects across namespaces. |
+| **Namespace** | A directory tree with its own ordered metadata history, manifests, WAL, and retention policy. Its id names one lifetime; deletion is terminal and a create or fork into that id returns `namespace_deleted` ([format section 1.1](format.md#11-namespaces-and-identity)). Forks can share stored objects across namespaces. |
 | **Head** | The current logical position and state derived from the current manifest and later WAL objects; not a separate durable object. |
 | **Sequence (`seq`)** | A namespace-local position assigned to one committed mutation request. |
 | **Commit** | One successfully published mutation request whose operations share a sequence. |
@@ -34,7 +34,7 @@
 | **Fork** | A new namespace initialized from a retained source view, sharing stored objects with independent subsequent metadata history. |
 | **Tombstone** | A committed deletion event that hides an inode or subtree while preserving the information needed for undelete. |
 | **Retention floor** | The lower bound for guaranteed incremental replay and retained metadata views. It limits superseded metadata and receipt retention but does not expire a live namespace's file revisions. |
-| **Namespace retirement** | Eligibility to reclaim a deleted namespace's content prefix and source pin, derived from its deletion stamp, grace period, and complete pin listing. No retirement deadline is stored. |
+| **Namespace retirement** | Eligibility to reclaim a deleted namespace's content prefix and source pin under [format section 9.5](format.md#95-retirement). |
 | **Change feed** | Committed filesystem events ordered by namespace sequence and operation position. |
 | **Cursor** | A position used to resume a paginated read or bounded index build under its consistency rules. Core and grep GC complete one pass without a cursor. |
 | **Precondition** | A requirement checked against the applicable metadata state before a new mutation is accepted. |

@@ -342,10 +342,10 @@ fn finish_batch_outcomes(slots: &[BatchOutcomeSlot]) -> Vec<Result<Commit>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::namespace::bootstrap::bootstrap_namespace;
     use crate::namespace::writer_epoch::acquire_writer_epoch;
     use crate::path::write::{CommitRequest, FilesystemOperation};
     use crate::protocol::load_publish_metadata_view;
+    use crate::test_support::ops::create;
     use crate::time::StdMonotonicTimer;
     use loonfs_api::{AbsolutePath, ChangeSeq, CommitId, MAX_PUBLIC_INTEGER};
     use loonfs_objectstore::keys::{hint, wal_segment_prefix};
@@ -369,16 +369,9 @@ mod tests {
             writer_id: loonfs_api::WriterId::parse("writer").expect("writer id"),
             now_ms: 1_000,
         };
-        bootstrap_namespace(
-            &store,
-            &namespace_id,
-            &context,
-            &loonfs_test_support::test_actor(),
-            &loonfs_api::NamespaceAccess::unrestricted(),
-            false,
-        )
-        .await
-        .expect("bootstrap");
+        create(&store, &namespace_id, &context)
+            .await
+            .expect("bootstrap");
         let acquired = acquire_writer_epoch(&store, &namespace_id, &context)
             .await
             .expect("acquire writer");
@@ -457,16 +450,9 @@ mod tests {
             writer_id: loonfs_api::WriterId::parse("writer").expect("writer id"),
             now_ms: 1_000,
         };
-        bootstrap_namespace(
-            &store,
-            &namespace_id,
-            &context,
-            &loonfs_test_support::test_actor(),
-            &loonfs_api::NamespaceAccess::Unrestricted {},
-            false,
-        )
-        .await
-        .expect("bootstrap namespace");
+        create(&store, &namespace_id, &context)
+            .await
+            .expect("bootstrap namespace");
         let acquired_writer = acquire_writer_epoch(&store, &namespace_id, &context)
             .await
             .expect("acquire writer");

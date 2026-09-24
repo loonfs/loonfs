@@ -905,8 +905,8 @@ mod tests {
     use super::*;
     use crate::error::ErrorCode;
     use crate::limits::WAL_PUBLISH_BUDGET_MS;
-    use crate::namespace::bootstrap::bootstrap_namespace;
     use crate::namespace::control::load_namespace_read_state;
+    use crate::test_support::ops::create;
     use futures::StreamExt;
     use loonfs_api::{
         ChangeSeq, ContentRef, PrincipalId, PrincipalScope, PrincipalSet, Subject, SubjectId,
@@ -1160,16 +1160,9 @@ mod tests {
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let writer_a = context("writer-a");
-        bootstrap_namespace(
-            &store,
-            &namespace_id,
-            &writer_a,
-            &loonfs_test_support::test_actor(),
-            &loonfs_api::NamespaceAccess::Unrestricted {},
-            false,
-        )
-        .await
-        .expect("bootstrap");
+        create(&store, &namespace_id, &writer_a)
+            .await
+            .expect("bootstrap");
 
         let mut engine_a = NamespaceCommitEngine::new(namespace_id.clone());
         let first = engine_a
@@ -1249,16 +1242,9 @@ mod tests {
             OperationClass::Read,
         ));
 
-        bootstrap_namespace(
-            store.inner(),
-            &namespace_id,
-            &writer_a,
-            &loonfs_test_support::test_actor(),
-            &loonfs_api::NamespaceAccess::Unrestricted {},
-            false,
-        )
-        .await
-        .expect("bootstrap");
+        create(store.inner(), &namespace_id, &writer_a)
+            .await
+            .expect("bootstrap");
 
         let mut engine_a = NamespaceCommitEngine::new(namespace_id.clone());
         engine_a
@@ -1319,16 +1305,9 @@ mod tests {
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let writer_a = context("writer-a");
-        bootstrap_namespace(
-            &store,
-            &namespace_id,
-            &writer_a,
-            &loonfs_test_support::test_actor(),
-            &loonfs_api::NamespaceAccess::Unrestricted {},
-            false,
-        )
-        .await
-        .expect("bootstrap");
+        create(&store, &namespace_id, &writer_a)
+            .await
+            .expect("bootstrap");
 
         let session = SharedWriterSessionState::default();
         let mut engine_a1 =
@@ -1427,16 +1406,9 @@ mod tests {
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let writer = context("writer-a");
-        bootstrap_namespace(
-            &store,
-            &namespace_id,
-            &writer,
-            &loonfs_test_support::test_actor(),
-            &loonfs_api::NamespaceAccess::Unrestricted {},
-            false,
-        )
-        .await
-        .expect("bootstrap");
+        create(&store, &namespace_id, &writer)
+            .await
+            .expect("bootstrap");
         let mut over_budget = NamespaceCommitEngine::new(namespace_id.clone())
             .monotonic_timer(Arc::new(ExpiredBudgetTimer(AtomicU64::new(0))));
         over_budget
@@ -1504,16 +1476,9 @@ mod tests {
             RecordingStore::metadata_segments(LocalFsStore::new(temp_dir.path()).expect("store"));
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let writer = context("writer-a");
-        bootstrap_namespace(
-            &store,
-            &namespace_id,
-            &writer,
-            &loonfs_test_support::test_actor(),
-            &loonfs_api::NamespaceAccess::Unrestricted {},
-            false,
-        )
-        .await
-        .expect("bootstrap");
+        create(&store, &namespace_id, &writer)
+            .await
+            .expect("bootstrap");
         let mut seed = NamespaceCommitEngine::new(namespace_id.clone());
         seed.publish_batch(
             &store,

@@ -1608,7 +1608,7 @@ fn content_failure_reason(error: DurableContentValidationError) -> Result<String
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::namespace::bootstrap::bootstrap_namespace;
+    use crate::test_support::ops::create;
     use loonfs_api::wire::control::decode_control_object;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_objectstore::PutMode;
@@ -1632,16 +1632,9 @@ mod tests {
         context: &MutationContext,
     ) -> (NamespaceId, UploadId, ContentRef, String) {
         let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-        bootstrap_namespace(
-            store,
-            &namespace_id,
-            context,
-            &loonfs_test_support::test_actor(),
-            &loonfs_api::NamespaceAccess::Unrestricted {},
-            false,
-        )
-        .await
-        .expect("bootstrap");
+        create(store, &namespace_id, context)
+            .await
+            .expect("bootstrap");
         let begin = begin_service_proxied_upload(store, &namespace_id, None, context)
             .await
             .expect("begin upload");
@@ -1905,16 +1898,9 @@ mod tests {
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("namespace id");
         let setup = context(1_000);
-        bootstrap_namespace(
-            &store,
-            &namespace_id,
-            &setup,
-            &loonfs_test_support::test_actor(),
-            &loonfs_api::NamespaceAccess::Unrestricted {},
-            false,
-        )
-        .await
-        .expect("bootstrap");
+        create(&store, &namespace_id, &setup)
+            .await
+            .expect("bootstrap");
         let begin = begin_direct_put_upload_target(
             &store,
             &namespace_id,
@@ -1994,16 +1980,9 @@ mod tests {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-        bootstrap_namespace(
-            &store,
-            &namespace_id,
-            &context(1_000),
-            &loonfs_test_support::test_actor(),
-            &loonfs_api::NamespaceAccess::Unrestricted {},
-            false,
-        )
-        .await
-        .expect("bootstrap");
+        create(&store, &namespace_id, &context(1_000))
+            .await
+            .expect("bootstrap");
         let content_id = ContentId::generate();
         let content_key = content_blob(&namespace_id, &content_id);
         store
@@ -2070,16 +2049,9 @@ mod tests {
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("namespace id");
         let setup = context(1_000);
-        bootstrap_namespace(
-            &store,
-            &namespace_id,
-            &setup,
-            &loonfs_test_support::test_actor(),
-            &loonfs_api::NamespaceAccess::Unrestricted {},
-            false,
-        )
-        .await
-        .expect("bootstrap");
+        create(&store, &namespace_id, &setup)
+            .await
+            .expect("bootstrap");
         let begin = begin_direct_put_upload_target(
             &store,
             &namespace_id,

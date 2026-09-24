@@ -294,8 +294,8 @@ mod tests {
     };
     use crate::context::MutationContext;
     use crate::error::CoreError;
-    use crate::namespace::bootstrap::bootstrap_namespace;
     use crate::namespace::read_anchor::load_read_anchor;
+    use crate::test_support::ops::create;
     use crate::{NamespaceEngine, RuntimeReadContext};
     use loonfs_api::v0::FilesystemChange;
     use loonfs_api::wire::wal::WalDelta;
@@ -334,16 +334,13 @@ mod tests {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = namespace_id();
-        bootstrap_namespace(
+        create(
             &store,
             &namespace_id,
             &MutationContext {
                 writer_id: loonfs_api::WriterId::parse("writer").expect("writer id"),
                 now_ms: 1,
             },
-            &loonfs_test_support::test_actor(),
-            &loonfs_api::NamespaceAccess::Unrestricted {},
-            false,
         )
         .await
         .expect("bootstrap");

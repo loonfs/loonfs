@@ -970,10 +970,7 @@ job's result. None of the jobs creates a pin.
 
 Races and supersessions are outcomes, not errors.
 
-A deleted namespace accepts only a run with `kind` set to `gc`, which is how
-its reclaimable state is collected; naming anything else is refused with
-`namespace_deleted`, because a tombstone has nothing to flush, reorganize,
-or retain.
+A deleted namespace accepts only a run with `kind` set to `gc`; other jobs return `namespace_deleted`. Retirement follows [format section 9.5](format.md#95-retirement).
 
 `wal_flush.outcome` has four values. `not_needed` means the WAL tail was below the threshold. `flushed` means this step published the next current manifest. `already_published` means the current manifest already covered the captured WAL tail, so this step published no manifest. `retries_exhausted` means concurrent updates prevented every attempt from publishing; nothing was flushed, and a later step can try again.
 
@@ -1117,11 +1114,11 @@ request path and never a presigned capability handed to a client.
 
 Routes under `/v0/maintenance/` belong to the `maintenance/v0` API group. `GET /v0/namespaces/{ns}/grep` belongs to `query/v0`. Everything else shown belongs to `filesystem/v0`.
 
-A GC response includes `next_reclamation_at_ms` when a deleted namespace is inside its retirement grace, a retained user or snapshot pin has a future deletion time, or an upload session has a future cleanup time. It is the earliest of those future times examined by the pass. User and snapshot pins become eligible for deletion by the namespace retirement deadline. Only a fork pin can remain required beyond that deadline; it carries no time. Upload cleanup times include lease plus grace, abort grace, and completed-content grace. Candidates that age out by provider timestamps carry no time here. Absence does not mean that nothing remains to collect.
+A GC response includes `next_reclamation_at_ms` when a deleted namespace is inside its retirement grace, a retained user or snapshot pin has a future deletion time, or an upload session has a future cleanup time. It is the earliest of those future times examined by the pass. Fork pins carry no cleanup time. Upload cleanup times include lease plus grace, abort grace, and completed-content grace. Candidates that age out by provider timestamps carry no time here. Absence does not mean that nothing remains to collect.
 
-`reclaim_after_ms` is present when the current manifest is deleted. It equals `deleted_at_ms + max(configured_grace, NAMESPACE_RETIREMENT_GRACE_MS)`, including when pins still block reclamation. It is absent for an active namespace. No retirement deadline is stored and collection publishes no manifest.
+`reclaim_after_ms` is the deadline defined in [format section 9.5](format.md#95-retirement) when the current manifest is deleted, including when pins still block reclamation. It is absent for an active namespace.
 
-Every call reads the current manifest and uses one fixed clock. It keeps its live set in memory and writes no collection progress. Every family lists from the beginning and sweeps to the end. The collector uses a separate complete pin listing to find retained manifests and check retirement eligibility. Any pin on the namespace blocks reclamation, including unrecognized keys and pins deleted later in the pass. Manifest read failures fail the call before sweeping.
+Every call reads the current manifest and uses one fixed clock. It keeps its live set in memory and writes no collection progress. Every family lists from the beginning and sweeps to the end. Collection roots follow [format section 11.2](format.md#112-reference-roots). Manifest read failures fail the call before sweeping.
 
 A GC response groups related counts. `deleted` contains `wal_segments`,
 `metadata_segments`, `manifests`, `upload_sessions`, `content_objects`,
@@ -1155,20 +1152,13 @@ that reason, and the fields sum to the total:
 Retention is counted per candidate examined, not per object in the
 namespace, so one object two passes both examine is counted by each.
 
-Current manifests, active or deleted, and pinned manifests protect their metadata segments. An unreferenced object becomes eligible for collection after its
-own provider timestamp is at least `grace_window_ms` old. Metadata segments
-use the separate `UNREFERENCED_SEGMENT_MIN_AGE_MS` age gate and must be
-strictly older than that bound. A live namespace
-also retains the manifest numbers needed for forward discovery from its
-hint. Those intermediate manifests do not protect their runs.
+Candidate and age rules follow [format section 11.3](format.md#113-candidate-and-age-rules).
 
 #### Deleting, retaining, and reclaiming
 
-Namespace deletion ends access immediately. Ordinary namespace GC then
-conditionally reclaims the namespace's own content. This is asynchronous
-reclamation, with no fixed completion time or guarantee of physical erasure.
+An ordinary operation that observes namespace deletion returns `namespace_deleted`; cached readers follow [format section 9.4](format.md#94-deleting-a-namespace). Collection is asynchronous, with no fixed completion time or guarantee of physical erasure.
 
-Dependent forks delay reclamation. GC derives the deadline from the tombstone’s deletion stamp. User and snapshot pins become eligible for deletion by that deadline; only a fork pin can remain required afterward. At or after that deadline, a complete pin listing must contain no pin on the namespace. A qualifying pass cleans upload sessions, lists and deletes every key under the namespace’s content prefix, and releases its source pin. The tombstone and hint remain. Its segments become collectible once no pin protects them and their age permits collection. Purging the tombstone and hint is outside this API. Every other owner’s prefix remains.
+Retirement eligibility and content reclamation follow [format sections 9.5](format.md#95-retirement) and [11.8](format.md#118-sweeping-a-retired-owners-content). Purging the tombstone and hint is outside this API.
 
 Retention is coarse: a deleted ancestor keeps every object it
 published while a live descendant still depends on it. GC does not select
@@ -1516,7 +1506,7 @@ or emit a namespace `name` alias.
 
 Create and fork install hint and manifest 1 in order. The conditional put of manifest 1 decides existence ([format: namespace lifecycle](format.md#9-namespace-lifecycle-and-forks)). A create or fork that loses that write to another active namespace answers `namespace_exists` (409). A create or fork into a deleted id answers `namespace_deleted` (410) before writing anything. There is no partially created namespace.
 
-A namespace id identifies one lifetime and cannot be reused after deletion. Applications that reuse a human name must keep their own name-to-id map and mint a fresh namespace id for each lifetime.
+Namespace lifetime follows [format section 1.1](format.md#11-namespaces-and-identity). Applications that reuse a human name must keep their own name-to-id map and mint a fresh namespace id for each lifetime.
 
 A new request after a lost creation acknowledgement returns
 `namespace_exists`, unless it explicitly allows an existing namespace.
@@ -1624,13 +1614,13 @@ The embedded `load_namespace_statistics` and `load_checkpoint_statistics` loader
 In an ACL namespace this operation requires an administrator subject; a request
 with no subject headers acts as the token holder.
 
-Deletion is a fenced manifest publication ([format: namespace deletion](format.md#94-deleting-a-namespace)). It linearizes at the manifest put: commits acknowledged before it stay committed. Reads, commits, forks from the id, status, another deletion, and create or fork into the id fail with `namespace_deleted` (410). The tombstone remains the current manifest after content reclamation.
+Deletion is a fenced manifest publication ([format: namespace deletion](format.md#94-deleting-a-namespace)). It linearizes at the manifest put: commits acknowledged before it stay committed. Once they observe deletion, reads, commits, forks from the id, status, another deletion, and create or fork into the id fail with `namespace_deleted` (410). The tombstone remains the current manifest after content reclamation.
 
 Checkpoint listing and user-checkpoint deletion are explicit exceptions. They
 remain available because permanent user pins must stay discoverable and
 releasable after deletion. Releasing a fork-owned checkpoint remains rejected.
 
-Deletion is immediate logical deletion followed by asynchronous, conditional reclamation. Deletion itself reclaims nothing. Dependent forks, pin cleanup, grace windows, and maintenance not running can all delay reclamation. Continued writes through already-issued capabilities can also leave objects for later passes. A maintenance run with `kind` set to `gc` ages out unneeded WAL, metadata, and pins. GC derives `reclaim_after_ms` from the current tombstone’s deletion stamp and the retirement grace. Once that deadline passes and the complete pin listing contains no pin on the namespace, the pass reclaims its owned content and source pin. It publishes no retirement manifest. The pass lists and deletes the namespace’s content prefix. The tombstone and hint remain. Segments become collectible by their ordinary age rule once no pin protects them.
+Deletion itself reclaims nothing. Retirement eligibility follows [format section 9.5](format.md#95-retirement), retained roots follow [section 11.2](format.md#112-reference-roots), and the content sweep follows [section 11.8](format.md#118-sweeping-a-retired-owners-content).
 
 Run GC repeatedly to catch late writes and keep the provider's incomplete
 multipart-upload lifecycle rule. Deleting an object key does not erase
@@ -3021,7 +3011,7 @@ A conforming server must:
 2. publish visible metadata only through logical commits stored in visible
    numbered WAL objects;
 3. validate that referenced content is already durable before publish;
-4. preserve `(namespace_id, inode_id)` as canonical identity;
+4. preserve `(namespace_id, inode_id)` as canonical item identity and the namespace lifetime in [format section 1.1](format.md#11-namespaces-and-identity);
 5. resolve content through the reference's owner namespace and content ID;
 6. implement tombstone-first delete;
 7. serve replay from the highest numbered verified manifest found through

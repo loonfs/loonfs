@@ -1117,9 +1117,9 @@ mod tests {
     use super::*;
     use crate::commit_engine::{publish_namespace_commits_batch, CommitCandidate};
     use crate::context::MutationContext;
-    use crate::namespace::bootstrap::bootstrap_namespace;
     use crate::namespace::control::load_namespace_read_state;
     use crate::path::write::{CommitRequest, FilesystemOperation};
+    use crate::test_support::ops::create;
     use bytes::Bytes;
     use loonfs_api::{AttributeValue, AttributesRevisionNo, CommitId, ErrorCode};
     use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -1142,16 +1142,9 @@ mod tests {
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("namespace id");
         let context = context();
-        bootstrap_namespace(
-            &store,
-            &namespace_id,
-            &context,
-            &loonfs_test_support::test_actor(),
-            &loonfs_api::NamespaceAccess::Unrestricted {},
-            false,
-        )
-        .await
-        .expect("bootstrap");
+        create(&store, &namespace_id, &context)
+            .await
+            .expect("bootstrap");
 
         for (commit_id, operation) in [
             (

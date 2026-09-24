@@ -65,7 +65,7 @@ use crate::publish::{
 };
 use crate::storage::content::{prepare_stored_content, store_bytes_as_content};
 use crate::test_support::ops::{
-    delete_path, move_path, put_file_bytes, restore_file_revision, write_file_bytes,
+    create, delete_path, move_path, put_file_bytes, restore_file_revision, write_file_bytes,
 };
 use crate::test_support::{RecordedStoredMetadataBlockCall, RecordingStoredMetadataBlockCache};
 use crate::MutationContext;
@@ -215,15 +215,7 @@ async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     context: &MutationContext,
 ) -> Result<loonfs_api::Namespace, crate::error::CoreError> {
-    let summary = crate::namespace::bootstrap::bootstrap_namespace(
-        store,
-        namespace_id,
-        context,
-        &loonfs_test_support::test_actor(),
-        &loonfs_api::NamespaceAccess::Unrestricted {},
-        false,
-    )
-    .await?;
+    let summary = create(store, namespace_id, context).await?;
     acquire_writer_epoch(store, namespace_id, context)
         .await
         .expect("acquire fixture writer");

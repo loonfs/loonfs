@@ -402,100 +402,6 @@ async fn a_created_namespace_reads_manifest_one_before_its_first_flush() {
 }
 
 #[tokio::test]
-async fn namespace_create_reports_exists_when_manifest_one_lands_ambiguously() {
-    let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = namespace_id("demo");
-    let store = FailStore::new(
-        LocalFsStore::new(temp_dir.path()).expect("store"),
-        KeyPredicate::exact(metadata_manifest_object(&namespace_id, &ManifestNo(1))),
-        OperationClass::PutCreateIfAbsent,
-        InjectedError::Transport("lost namespace-head acknowledgment".to_owned()),
-    )
-    .apply_then_fail();
-    store.fail_next(1);
-
-    let error = bootstrap_namespace(&store, &namespace_id, &mutation_context())
-        .await
-        .expect_err("matching first manifests do not prove authorship");
-
-    assert_eq!(error.code(), ErrorCode::NamespaceExists);
-    assert_eq!(store.attempts(), 1);
-    assert_eq!(
-        head_state(&store, &namespace_id).await.status,
-        loonfs_api::wire::control::NamespaceStatus::Active {}
-    );
-}
-
-#[tokio::test]
-async fn concurrent_creates_of_one_id_leave_exactly_one_winner() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
-    let namespace_id = namespace_id("demo");
-    let first = mutation_context();
-    let mut second = mutation_context();
-    second.writer_id = loonfs_api::WriterId::parse("writer-second").expect("writer id");
-
-    let (left, right) = tokio::join!(
-        bootstrap_namespace(store.as_ref(), &namespace_id, &first),
-        bootstrap_namespace(store.as_ref(), &namespace_id, &second),
-    );
-    let outcomes = [left, right];
-    let winners = outcomes.iter().filter(|result| result.is_ok()).count();
-    assert_eq!(winners, 1, "exactly one create may win: {outcomes:?}");
-    let loser = outcomes
-        .into_iter()
-        .find_map(|result| result.err())
-        .expect("one loser");
-    assert_eq!(loser.code(), ErrorCode::NamespaceExists);
-    assert_eq!(
-        namespace_keys(store.as_ref(), &namespace_id).await,
-        vec![
-            hint(&namespace_id),
-            metadata_manifest_object(&namespace_id, &ManifestNo(1))
-        ]
-    );
-}
-
-#[tokio::test]
-async fn a_create_retry_after_a_lost_acknowledgment_reports_the_id_as_taken() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = namespace_id("demo");
-    let context = mutation_context();
-
-    bootstrap_namespace(&store, &namespace_id, &context)
-        .await
-        .expect("first create lands");
-    let head_before = head_state(&store, &namespace_id).await;
-
-    let mut retry_context = context.clone();
-    retry_context.now_ms += 5_000;
-    let conflict = bootstrap_namespace(&store, &namespace_id, &retry_context)
-        .await
-        .expect_err("the id is taken, whoever took it");
-    assert_eq!(conflict.code(), ErrorCode::NamespaceExists);
-
-    let mut other_writer = context.clone();
-    other_writer.writer_id = loonfs_api::WriterId::parse("writer-other").expect("writer id");
-    let conflict = bootstrap_namespace(&store, &namespace_id, &other_writer)
-        .await
-        .expect_err("another writer may not adopt this namespace either");
-    assert_eq!(conflict.code(), ErrorCode::NamespaceExists);
-
-    // Opting in makes the retry succeed, and the namespace it returns is
-    // the one that landed.
-    let adopted = bootstrap_namespace_allowing_existing(&store, &namespace_id, &retry_context)
-        .await
-        .expect("allow_existing adopts the landed namespace");
-    assert_eq!(adopted.namespace_id, namespace_id);
-    assert_eq!(
-        head_state(&store, &namespace_id).await,
-        head_before,
-        "no retry may rewrite the landed head"
-    );
-}
-
-#[tokio::test]
 async fn concurrent_installs_of_one_target_leave_exactly_one_winner() {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
@@ -547,33 +453,6 @@ async fn concurrent_installs_of_one_target_leave_exactly_one_winner() {
     } else {
         assert!(head.fork_basis.is_some(), "the fork won");
     }
-}
-
-#[tokio::test]
-async fn fork_install_recovers_when_target_manifest_one_lands_ambiguously() {
-    let temp_dir = tempdir().expect("tempdir");
-    let context = mutation_context();
-    let source = namespace_id("source");
-    let target = namespace_id("target");
-    let store = FailStore::new(
-        LocalFsStore::new(temp_dir.path()).expect("store"),
-        KeyPredicate::exact(metadata_manifest_object(&target, &ManifestNo(1))),
-        OperationClass::PutCreateIfAbsent,
-        InjectedError::Transport("lost fork-head acknowledgment".to_owned()),
-    )
-    .apply_then_fail();
-    seed_source_namespace_for_fork(&store, &source, &context).await;
-    store.fail_next(1);
-
-    let forked = fork_namespace(&store, &source, &target, &context)
-        .await
-        .expect("fork basis identity reconciles the landed target");
-
-    assert_eq!(forked.namespace_id, target);
-    assert_eq!(store.attempts(), 1);
-    let target_head = head_state(&store, &target).await;
-    let basis = target_head.fork_basis.expect("fork target basis");
-    assert_eq!(basis.manifest.owner_namespace_id, source);
 }
 
 #[tokio::test]

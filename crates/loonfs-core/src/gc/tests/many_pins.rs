@@ -13,16 +13,9 @@ async fn one_pass_deletes_an_aged_upload_and_every_expired_snapshot_among_many_p
         KeyPredicate::prefix(loonfs_objectstore::keys::namespace_prefix(&namespace_id)),
     );
     let setup = context(1_000);
-    bootstrap_namespace(
-        &store,
-        &namespace_id,
-        &setup,
-        &loonfs_test_support::test_actor(),
-        &loonfs_api::NamespaceAccess::Unrestricted {},
-        false,
-    )
-    .await
-    .expect("bootstrap");
+    create(&store, &namespace_id, &setup)
+        .await
+        .expect("bootstrap");
     let permanent = create_checkpoint(&store, &namespace_id, &setup)
         .await
         .expect("permanent pin");

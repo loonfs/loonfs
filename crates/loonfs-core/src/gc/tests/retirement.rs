@@ -48,16 +48,9 @@ async fn retired_fork_reclaims_without_reading_inherited_segments() {
     let source = NamespaceId::parse("source").expect("namespace");
     let target = NamespaceId::parse("target").expect("namespace");
     let setup = context(1_000);
-    bootstrap_namespace(
-        &inner,
-        &source,
-        &setup,
-        &loonfs_test_support::test_actor(),
-        &loonfs_api::NamespaceAccess::unrestricted(),
-        false,
-    )
-    .await
-    .expect("bootstrap source");
+    create(&inner, &source, &setup)
+        .await
+        .expect("bootstrap source");
     let source_content = publish_owned_content(&inner, &source, 2).await;
     fork_namespace(
         &inner,
@@ -171,16 +164,9 @@ async fn open_direct_upload_outlives_retirement_and_still_gets_provider_cleanup(
     let inner = FakeMultipartStore::new(LocalFsStore::new(directory.path()).expect("store"));
     let clock = ManualClock::new(1_000);
     let setup = context(clock.now_ms());
-    bootstrap_namespace(
-        &inner,
-        &namespace_id,
-        &setup,
-        &loonfs_test_support::test_actor(),
-        &loonfs_api::NamespaceAccess::unrestricted(),
-        false,
-    )
-    .await
-    .expect("bootstrap");
+    create(&inner, &namespace_id, &setup)
+        .await
+        .expect("bootstrap");
     let upload = crate::protocol::begin_direct_multipart_upload_target(
         &inner,
         &namespace_id,
@@ -281,16 +267,7 @@ async fn a_fork_basis_naming_its_pin_with_a_different_checksum_is_corrupt() {
     let source = NamespaceId::parse("source").expect("namespace");
     let target = NamespaceId::parse("target").expect("namespace");
     let setup = context(1_000);
-    bootstrap_namespace(
-        &store,
-        &source,
-        &setup,
-        &loonfs_test_support::test_actor(),
-        &loonfs_api::NamespaceAccess::unrestricted(),
-        false,
-    )
-    .await
-    .expect("bootstrap");
+    create(&store, &source, &setup).await.expect("bootstrap");
     fork_namespace(
         &store,
         &source,

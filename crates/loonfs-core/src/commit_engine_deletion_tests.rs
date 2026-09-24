@@ -1,8 +1,8 @@
 //! Writer fencing and deletion budgets.
 
 use super::*;
-use crate::namespace::bootstrap::bootstrap_namespace;
-use loonfs_api::{AbsolutePath, NamespaceAccess, WriterId};
+use crate::test_support::ops::create;
+use loonfs_api::{AbsolutePath, WriterId};
 use loonfs_objectstore::keys::hint;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::clock::ManualClock;
@@ -29,16 +29,9 @@ async fn deletion_budget_includes_writer_acquisition() {
         OperationClass::Read,
     );
     let context = context();
-    bootstrap_namespace(
-        &store,
-        &namespace_id,
-        &context,
-        &loonfs_test_support::test_actor(),
-        &NamespaceAccess::unrestricted(),
-        false,
-    )
-    .await
-    .expect("bootstrap");
+    create(&store, &namespace_id, &context)
+        .await
+        .expect("bootstrap");
     let clock = Arc::new(ManualClock::new(0));
     let mut publisher =
         NamespaceCommitEngine::new(namespace_id.clone()).monotonic_timer(clock.clone());
@@ -73,16 +66,9 @@ async fn a_stale_writer_stays_fenced_after_namespace_deletion() {
     );
     let namespace_id = NamespaceId::parse("terminal-writer").expect("namespace");
     let context = context();
-    bootstrap_namespace(
-        &store,
-        &namespace_id,
-        &context,
-        &loonfs_test_support::test_actor(),
-        &NamespaceAccess::unrestricted(),
-        false,
-    )
-    .await
-    .expect("bootstrap");
+    create(&store, &namespace_id, &context)
+        .await
+        .expect("bootstrap");
     let mut stale = NamespaceCommitEngine::new(namespace_id.clone());
     stale
         .publish_batch(
