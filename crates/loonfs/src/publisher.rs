@@ -592,6 +592,15 @@ impl PublisherRegistry {
     }
 
     pub(crate) async fn wal_tail_inline_bytes(&self, namespace_id: &NamespaceId) -> Option<usize> {
+        self.inline_tail_estimate(namespace_id)
+            .await
+            .map(|tail| tail.bytes)
+    }
+
+    pub(crate) async fn inline_tail_estimate(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> Option<InlineTailEstimate> {
         let publisher = self
             .shared
             .lock_state()
@@ -599,17 +608,13 @@ impl PublisherRegistry {
             .get(namespace_id)
             .cloned()?;
         let slot = publisher.engine.lock().await;
-        slot.engine
-            .as_ref()
-            .and_then(|engine| engine.wal_fold_input())
-            .map(|input| input.wal_tail_inline_bytes)
-            .or(slot.last_known_wal_tail_inline_bytes)
+        slot.inline_tail_estimate()
     }
 
     pub(crate) async fn record_fold_outcome(
         &self,
         namespace_id: &NamespaceId,
-        folded_inline_bytes: Option<usize>,
+        folded_inline: Option<InlineTailEstimate>,
     ) {
         let publisher = self
             .shared
@@ -622,7 +627,7 @@ impl PublisherRegistry {
                 .engine
                 .lock()
                 .await
-                .record_successful_fold(folded_inline_bytes);
+                .record_successful_fold(folded_inline);
         }
     }
 
@@ -821,15 +826,43 @@ struct EngineSlot {
     session: SharedWriterSessionState,
     /// Another writer can make this stale by publishing or folding, and a local
     /// fold subtracts what it covered; the next publish corrects it.
-    last_known_wal_tail_inline_bytes: Option<usize>,
+    last_known_inline_tail: Option<InlineTailEstimate>,
+}
+
+/// A byte count can be credited to a fold only against the same observed basis.
+#[derive(Clone, Copy)]
+pub(crate) struct InlineTailEstimate {
+    bytes: usize,
+    manifest_no: Option<loonfs_api::ManifestNo>,
+}
+
+impl InlineTailEstimate {
+    fn from_input(input: &loonfs_core::publish::WalFoldInput) -> Self {
+        Self {
+            bytes: input.wal_tail_inline_bytes,
+            manifest_no: Some(input.basis.manifest_no()),
+        }
+    }
 }
 
 impl EngineSlot {
-    fn record_successful_fold(&mut self, folded_inline_bytes: Option<usize>) {
-        if let (Some(known), Some(folded)) =
-            (self.last_known_wal_tail_inline_bytes, folded_inline_bytes)
-        {
-            self.last_known_wal_tail_inline_bytes = Some(known.saturating_sub(folded));
+    fn inline_tail_estimate(&self) -> Option<InlineTailEstimate> {
+        self.engine
+            .as_ref()
+            .and_then(NamespaceCommitEngine::wal_fold_input)
+            .as_ref()
+            .map(InlineTailEstimate::from_input)
+            .or(self.last_known_inline_tail)
+    }
+
+    fn record_successful_fold(&mut self, folded_inline: Option<InlineTailEstimate>) {
+        if let (Some(known), Some(folded)) = (&mut self.last_known_inline_tail, folded_inline) {
+            if known.manifest_no.is_some() && known.manifest_no == folded.manifest_no {
+                known.bytes = known.bytes.saturating_sub(folded.bytes);
+                // This is now an estimate, not a fresh observation. Another
+                // completion must not credit the same bytes again.
+                known.manifest_no = None;
+            }
         }
         if let Some(engine) = self.engine.as_mut() {
             engine.invalidate_projection();
@@ -1027,7 +1060,7 @@ impl NamespacePublisher {
             engine: Arc::new(AsyncMutex::new(EngineSlot {
                 engine: None,
                 session: Arc::clone(&session),
-                last_known_wal_tail_inline_bytes: None,
+                last_known_inline_tail: None,
             })),
             session,
             shared: Arc::downgrade(&registry.shared),
@@ -1515,7 +1548,10 @@ impl NamespacePublisher {
         }
         let retained_tail_weight = engine.retained_tail_weight();
         if publish.wal_tail_observed {
-            slot.last_known_wal_tail_inline_bytes = Some(publish.wal_tail_inline_bytes);
+            slot.last_known_inline_tail = Some(InlineTailEstimate {
+                bytes: publish.wal_tail_inline_bytes,
+                manifest_no: publish.wal_tail_manifest_no,
+            });
         }
         self.settle_retained_projection(retained_tail_weight);
         drop(slot);
@@ -1601,7 +1637,7 @@ impl NamespacePublisher {
             }
             input
         };
-        let folded_inline_bytes = input.as_ref().map(|input| input.wal_tail_inline_bytes);
+        let folded_inline = input.as_ref().map(InlineTailEstimate::from_input);
         match writer.identity.mutation_context() {
             Ok(_) => {}
             Err(error) => {
@@ -1637,7 +1673,7 @@ impl NamespacePublisher {
                 // tail from the new manifest instead of starting another fold
                 // over a stale count.
                 let mut slot = self.engine.lock().await;
-                slot.record_successful_fold(folded_inline_bytes);
+                slot.record_successful_fold(folded_inline);
             }
             Err(error) => {
                 let error = RuntimeError::Core(error);
