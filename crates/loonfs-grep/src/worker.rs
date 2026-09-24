@@ -20,11 +20,11 @@ use crate::reads::{published_revision, NamespaceReads};
 use crate::service::is_indexable_text_content;
 use crate::{GrepError, Result};
 use futures::future::try_join_all;
+use loonfs::Deadline;
 use loonfs::{
-    ensure_metadata_publication_budget, next_run_no_after, refill_iterators, select_next_iterator,
-    write_segments_in_waves, CheckpointFilesPageCursor, CoreError, CreateCheckpointOptions,
-    FsMaintenance, FsReader, RuntimeError, SegmentBlockLoader, SegmentRowIterator,
-    StoreFailureClass,
+    next_run_no_after, refill_iterators, select_next_iterator, write_segments_in_waves,
+    CheckpointFilesPageCursor, CoreError, CreateCheckpointOptions, FsMaintenance, FsReader,
+    RuntimeError, SegmentBlockLoader, SegmentRowIterator, StoreFailureClass,
 };
 use loonfs_api::v0::{FilesystemChange, GrepIndex, GrepIndexLifecycle};
 use loonfs_api::wire::sst_blocks::{
@@ -35,7 +35,7 @@ use loonfs_api::{
     sha256_digest, ChangeSeq, ContentRef, ErrorCode, IndexSegmentId, InodeId, ManifestNo,
     NamespaceId, PinId, RevisionNo, RunNo,
 };
-use loonfs_objectstore::timing::{MonotonicTimer, StdMonotonicTimer};
+use loonfs_objectstore::timing::StdMonotonicTimer;
 use loonfs_objectstore::{ImmutableWriteError, ObjectStore, ObjectStoreError};
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::{NonZeroU64, NonZeroUsize};
@@ -253,10 +253,9 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                 return Err(error);
             }
         };
-        let timer = StdMonotonicTimer::default();
-        let started_ms = timer.monotonic_now_ms();
+        let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
         let published =
-            publish_grep_manifest(&self.store, current.as_ref(), &next, &timer, started_ms).await;
+            publish_grep_manifest(&self.store, current.as_ref(), &next, &deadline).await;
         match published {
             Ok(published) => Ok(GrepEnableOutcome::Enabled {
                 state: published.manifest_state().status().clone(),
@@ -301,17 +300,8 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             Vec::new(),
         )
         .map_err(|error| core_state_error(namespace_id, error))?;
-        let timer = StdMonotonicTimer::default();
-        let publication_started_ms = timer.monotonic_now_ms();
-        match publish_grep_manifest(
-            &self.store,
-            Some(&current),
-            &next,
-            &timer,
-            publication_started_ms,
-        )
-        .await
-        {
+        let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
+        match publish_grep_manifest(&self.store, Some(&current), &next, &deadline).await {
             Ok(_) => {
                 if let Some(checkpoint_id) = checkpoint_id {
                     self.delete_checkpoint_if_present(namespace_id, &checkpoint_id)
@@ -484,17 +474,8 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                 return Err(error);
             }
         };
-        let timer = StdMonotonicTimer::default();
-        let publication_started_ms = timer.monotonic_now_ms();
-        match publish_grep_manifest(
-            &self.store,
-            Some(current),
-            &next,
-            &timer,
-            publication_started_ms,
-        )
-        .await
-        {
+        let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
+        match publish_grep_manifest(&self.store, Some(current), &next, &deadline).await {
             Ok(_) => {
                 if let Some(previous_checkpoint_id) = previous_checkpoint_id {
                     self.delete_checkpoint_if_present(namespace_id, &previous_checkpoint_id)
@@ -536,8 +517,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             next_run_no_after(current_run_no)?
         };
         let manifest_no = next_manifest_no(Some(&current))?;
-        let timer = StdMonotonicTimer::default();
-        let publication_started_ms = timer.monotonic_now_ms();
+        let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
         let new_segments = write_index_segments(
             &self.store,
             namespace_id,
@@ -599,16 +579,8 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             segments,
         )
         .map_err(|error| core_state_error(namespace_id, error))?;
-        ensure_metadata_publication_budget(&timer, publication_started_ms, namespace_id)?;
-        match publish_grep_manifest(
-            &self.store,
-            Some(&current),
-            &next,
-            &timer,
-            publication_started_ms,
-        )
-        .await
-        {
+        deadline.ensure_metadata_publication_budget(namespace_id)?;
+        match publish_grep_manifest(&self.store, Some(&current), &next, &deadline).await {
             Ok(_) => {
                 if let Some(checkpoint_id) = completed_checkpoint_id {
                     self.delete_checkpoint_if_present(namespace_id, &checkpoint_id)
@@ -1115,8 +1087,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         .await?;
         let rows = gram_postings_rows(merged.postings)?;
         let manifest_no = next_manifest_no(Some(&current))?;
-        let timer = StdMonotonicTimer::default();
-        let publication_started_ms = timer.monotonic_now_ms();
+        let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
         let new_segments = write_index_segments(
             &self.store,
             namespace_id,
@@ -1156,16 +1127,8 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             segments,
         )
         .map_err(|error| core_state_error(namespace_id, error))?;
-        ensure_metadata_publication_budget(&timer, publication_started_ms, namespace_id)?;
-        match publish_grep_manifest(
-            &self.store,
-            Some(&current),
-            &next,
-            &timer,
-            publication_started_ms,
-        )
-        .await
-        {
+        deadline.ensure_metadata_publication_budget(namespace_id)?;
+        match publish_grep_manifest(&self.store, Some(&current), &next, &deadline).await {
             Ok(_) => Ok(GrepReorganizeOutcome::UnitPublished {
                 merged_rows: merged.rows,
                 segments_written,

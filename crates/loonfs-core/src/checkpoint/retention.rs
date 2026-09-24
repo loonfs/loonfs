@@ -5,12 +5,13 @@ use super::publish::{update_manifest, ManifestChange};
 use super::runs::MAX_MAINTENANCE_SEGMENT_IO;
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::namespace::{control::ensure_namespace_live, state::NamespaceReadState};
-use crate::time::{MonotonicTimer, StdMonotonicTimer};
+use crate::time::{Deadline, StdMonotonicTimer};
 use loonfs_api::wire::manifest::NamespaceManifestPayload;
 use loonfs_api::{AdvanceRetentionResponse, NamespaceId};
 use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::ObjectStore;
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 async fn verify_manifest_segments_exist<S: ObjectStore + ?Sized>(
     store: &S,
@@ -49,28 +50,21 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> Result<AdvanceRetentionResponse> {
-    let timer = StdMonotonicTimer::default();
-    let started_ms = timer.monotonic_now_ms();
-    let floor = update_manifest(
-        store,
-        namespace_id,
-        &timer,
-        started_ms,
-        |mut payload| async move {
-            ensure_namespace_live(&NamespaceReadState::from(&payload))?;
-            let target = payload.head_seq;
-            if payload.retention_floor_seq >= target {
-                return Ok(ManifestChange::Finished(payload.retention_floor_seq));
-            }
-            verify_manifest_segments_exist(store, &payload)
-                .await
-                .map_err(|error| {
-                    CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
-                })?;
-            payload.retention_floor_seq = target;
-            Ok(ManifestChange::Next(Box::new(payload), target))
-        },
-    )
+    let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
+    let floor = update_manifest(store, namespace_id, &deadline, |mut payload| async move {
+        ensure_namespace_live(&NamespaceReadState::from(&payload))?;
+        let target = payload.head_seq;
+        if payload.retention_floor_seq >= target {
+            return Ok(ManifestChange::Finished(payload.retention_floor_seq));
+        }
+        verify_manifest_segments_exist(store, &payload)
+            .await
+            .map_err(|error| {
+                CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
+            })?;
+        payload.retention_floor_seq = target;
+        Ok(ManifestChange::Next(Box::new(payload), target))
+    })
     .await?;
     Ok(AdvanceRetentionResponse {
         namespace_id: namespace_id.clone(),

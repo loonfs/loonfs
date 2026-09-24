@@ -1197,7 +1197,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             requested_expires_at_ms,
             max_lifetime_ms,
             &self.mutation_context()?,
-            &crate::time::StdMonotonicTimer::default(),
+            Arc::new(crate::time::StdMonotonicTimer::default()),
         )
         .await
     }

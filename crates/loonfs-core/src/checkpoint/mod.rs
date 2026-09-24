@@ -47,7 +47,7 @@ pub use self::compaction_merge::{
 };
 pub use self::error::{ManifestLoadError, ManifestLoadFailureClass};
 pub use self::files::{CheckpointFile, CheckpointFilesPage, CheckpointFilesPageCursor};
-pub use self::flush::{ensure_metadata_publication_budget, fold_wal_tail, next_run_no_after};
+pub use self::flush::{fold_wal_tail, next_run_no_after};
 pub use self::list::CheckpointPageCursor;
 pub use self::read_basis::{load_checkpoint_read_basis, CheckpointReadBasis};
 pub use self::reorganize::{MetadataCompactionPolicy, MetadataReorganizeOutcome};
@@ -70,7 +70,7 @@ pub(crate) use self::create::create_checkpoint;
 pub(crate) use self::data_block_load::DecodedRowWeight;
 pub(crate) use self::delete::delete_checkpoint;
 pub(crate) use self::files::list_checkpoint_files_page;
-pub(crate) use self::flush::flush_wal;
+pub(crate) use self::flush::{flush_wal, flush_wal_with_deadline};
 pub(crate) use self::list::list_checkpoints_page;
 pub(crate) use self::load::{
     ensure_manifest_reference_matches, load_basis_metadata_segments,

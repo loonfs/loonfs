@@ -82,15 +82,14 @@ pub use loonfs_core::limits::{
     MAX_MULTIPART_PARTS, MAX_SIGNED_PARTS_PER_REQUEST, METADATA_PUBLICATION_BUDGET_MS,
     UNREFERENCED_SEGMENT_MIN_AGE_MS,
 };
-pub use loonfs_core::time::current_time_ms;
+pub use loonfs_core::time::{current_time_ms, Deadline, Observation};
 pub use loonfs_core::{
-    delete_if_aged, ensure_metadata_publication_budget, next_run_no_after, refill_iterators,
-    select_next_iterator, write_segments_in_waves, CheckpointFile, CheckpointFilesPage,
-    CheckpointFilesPageCursor, CheckpointPageCursor, CurrentFileState, DeleteNamespaceOptions,
-    Error as CoreError, ErrorCode, ErrorKind, FileContentStream, GcConfig, GraceAge,
-    MetadataCompactionJobOutcome, MetadataCompactionPolicy, MetadataViewError, SegmentBlockLoader,
-    SegmentRowIterator, StoreFailureClass, WriterFence, CONTENT_READ_CHUNK_BYTES,
-    MAX_RESOLVE_CURRENT_FILES,
+    delete_if_aged, next_run_no_after, refill_iterators, select_next_iterator,
+    write_segments_in_waves, CheckpointFile, CheckpointFilesPage, CheckpointFilesPageCursor,
+    CheckpointPageCursor, CurrentFileState, DeleteNamespaceOptions, Error as CoreError, ErrorCode,
+    ErrorKind, FileContentStream, GcConfig, GraceAge, MetadataCompactionJobOutcome,
+    MetadataCompactionPolicy, MetadataViewError, SegmentBlockLoader, SegmentRowIterator,
+    StoreFailureClass, WriterFence, CONTENT_READ_CHUNK_BYTES, MAX_RESOLVE_CURRENT_FILES,
 };
 pub use publisher::{NamespaceAdvanceHint, NamespaceAdvanceObserver};
 

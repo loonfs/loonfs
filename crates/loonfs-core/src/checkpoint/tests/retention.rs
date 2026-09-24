@@ -1,6 +1,7 @@
 //! Checkpoint retention, reorganization, compaction, and publication budgets.
 
 use super::*;
+use crate::time::Deadline;
 use loonfs_objectstore::keys::{checkpoint_prefix, wal_segment_prefix};
 
 async fn current_manifest_no<S: ObjectStore + ?Sized>(
@@ -811,8 +812,7 @@ async fn checkpoint_verification_rejects_a_deleted_namespace() {
         Default::default(),
         acquired,
         &context,
-        &crate::time::StdMonotonicTimer::default(),
-        0,
+        &crate::time::Deadline::start(Arc::new(crate::time::StdMonotonicTimer::default())),
     )
     .await
     .expect("delete");
@@ -1714,8 +1714,8 @@ async fn over_budget_wal_flush_aborts_without_publishing() {
 
     // Every reading advances 20 minutes against the 15-minute budget: the
     // pre-CAS check observes the publication as over budget.
-    let overrun = SteppingTimer::new(20 * 60 * 1000);
-    let error = super::flush::flush_wal_with_timer(&store, &namespace_id, &overrun)
+    let overrun = Deadline::start(Arc::new(SteppingTimer::new(20 * 60 * 1000)));
+    let error = super::flush::flush_wal_with_deadline(&store, &namespace_id, &overrun)
         .await
         .expect_err("over-budget publication must abort");
     assert!(
@@ -1775,8 +1775,8 @@ async fn over_budget_reorganization_aborts_without_publishing() {
         max_delta_runs: NonZeroUsize::MIN,
         ..Default::default()
     };
-    let overrun = SteppingTimer::new(20 * 60 * 1000);
-    let error = super::reorganize::reorganize_metadata_step_with_timer(
+    let overrun = Deadline::start(Arc::new(SteppingTimer::new(20 * 60 * 1000)));
+    let error = super::reorganize::reorganize_metadata_step_with_deadline(
         &store,
         &namespace_id,
         0,

@@ -8,9 +8,9 @@ use super::error::{GrepManifestError, Result};
 use super::state::{GrepHint, GrepManifestState};
 use crate::keyspace::{hint_key, manifest_key};
 use bytes::Bytes;
+use loonfs::Deadline;
 use loonfs::{StoreFailureClass, METADATA_PUBLICATION_BUDGET_MS};
 use loonfs_api::{ManifestNo, NamespaceId};
-use loonfs_objectstore::timing::MonotonicTimer;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -129,8 +129,7 @@ pub async fn publish_grep_manifest<S: ObjectStore + ?Sized>(
     store: &S,
     current: Option<&LoadedGrepManifest>,
     next: &GrepManifestState,
-    timer: &impl MonotonicTimer,
-    started_ms: u64,
+    deadline: &Deadline,
 ) -> crate::Result<LoadedGrepManifest> {
     let namespace_id = next.namespace_id();
     let object_key = manifest_key(namespace_id, &next.manifest_no());
@@ -164,12 +163,12 @@ pub async fn publish_grep_manifest<S: ObjectStore + ?Sized>(
     let (manifest, bytes) = encode_grep_manifest(next.clone())
         .map_err(|error| corrupt(&object_key, error))?
         .into_parts();
-    loonfs::ensure_metadata_publication_budget(timer, started_ms, namespace_id)?;
+    deadline.ensure_metadata_publication_budget(namespace_id)?;
     let hint = match current {
         Some(current) => current.hint.clone(),
         None => create_grep_hint(store, namespace_id).await?,
     };
-    loonfs::ensure_metadata_publication_budget(timer, started_ms, namespace_id)?;
+    deadline.ensure_metadata_publication_budget(namespace_id)?;
     match store.put_if_absent(&object_key, Bytes::from(bytes)).await {
         Ok(_) => {}
         Err(ObjectStoreError::PreconditionFailed { .. }) => {
@@ -183,8 +182,7 @@ pub async fn publish_grep_manifest<S: ObjectStore + ?Sized>(
         namespace_id,
         next.manifest_no(),
         loaded.hint.clone(),
-        timer,
-        started_ms,
+        deadline,
     )
     .await
     {
@@ -226,11 +224,10 @@ pub async fn raise_grep_hint<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     manifest_no: ManifestNo,
     mut current: LoadedGrepHint,
-    timer: &impl MonotonicTimer,
-    started_ms: u64,
+    deadline: &Deadline,
 ) -> Result<LoadedGrepHint> {
     let object_key = hint_key(namespace_id);
-    while timer.monotonic_now_ms().saturating_sub(started_ms) <= METADATA_PUBLICATION_BUDGET_MS {
+    while deadline.elapsed_ms() <= METADATA_PUBLICATION_BUDGET_MS {
         let raised = GrepHint {
             namespace_id: namespace_id.clone(),
             manifest_no: current.state.manifest_no.max(manifest_no),

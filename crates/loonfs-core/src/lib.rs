@@ -93,8 +93,7 @@ pub mod path;
 /// these types without creating a dependency cycle.
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
-/// Wall-clock access used to assign durable timestamps. Both core commits
-/// and the `loonfs` runtime use this API so they share the same time source.
+/// Durable timestamps and monotonic publication budgets.
 pub mod time;
 
 /// Cache types and configuration used by runtime read paths. The `loonfs`
@@ -166,11 +165,11 @@ pub mod publish {
 
 // Crate-root re-exports used by `loonfs` or required by public return types.
 pub use checkpoint::{
-    ensure_metadata_publication_budget, fold_wal_tail, next_run_no_after, refill_iterators,
-    select_next_iterator, CheckpointFile, CheckpointFilesPage, CheckpointFilesPageCursor,
-    CheckpointPageCursor, MetadataCompactionCancellation, MetadataCompactionJobOutcome,
-    MetadataCompactionPolicy, MetadataCompactionSpec, MetadataFamilyGroup,
-    MetadataReorganizeOutcome, SegmentBlockLoader, SegmentRowIterator,
+    fold_wal_tail, next_run_no_after, refill_iterators, select_next_iterator, CheckpointFile,
+    CheckpointFilesPage, CheckpointFilesPageCursor, CheckpointPageCursor,
+    MetadataCompactionCancellation, MetadataCompactionJobOutcome, MetadataCompactionPolicy,
+    MetadataCompactionSpec, MetadataFamilyGroup, MetadataReorganizeOutcome, SegmentBlockLoader,
+    SegmentRowIterator,
 };
 pub use checkpoint::{ManifestLoadError, ManifestLoadFailureClass};
 pub use context::MutationContext;

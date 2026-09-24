@@ -122,7 +122,7 @@ async fn cached_and_replayed_folds_count_commits_once_and_reads_use_only_manifes
             None,
             &ns,
             input.clone(),
-            &StdMonotonicTimer::default(),
+            &loonfs_core::time::Deadline::start(std::sync::Arc::new(StdMonotonicTimer::default())),
         )
         .await
         .expect("fold");
@@ -138,9 +138,15 @@ async fn cached_and_replayed_folds_count_commits_once_and_reads_use_only_manifes
         assert_eq!(folded.manifest.head_seq, ChangeSeq(4));
         assert_eq!(folded.inode_record_count, 5); // Root, two directories, two files.
                                                   // A stale cached fold and a fresh engine both see already-covered activity.
-        loonfs_core::fold_wal_tail(&store, None, &ns, input, &StdMonotonicTimer::default())
-            .await
-            .expect("repeat fold");
+        loonfs_core::fold_wal_tail(
+            &store,
+            None,
+            &ns,
+            input,
+            &loonfs_core::time::Deadline::start(std::sync::Arc::new(StdMonotonicTimer::default())),
+        )
+        .await
+        .expect("repeat fold");
         namespace_engine(&store, &ns, &context)
             .flush_wal()
             .await

@@ -1,9 +1,79 @@
 //! Clocks used for durable timestamps and local publication time limits.
 
 use crate::error::{CoreError, Result};
+use crate::limits::METADATA_PUBLICATION_BUDGET_MS;
+use loonfs_api::NamespaceId;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(crate) use loonfs_objectstore::timing::{MonotonicTimer, StdMonotonicTimer};
+
+#[derive(Debug, Clone)]
+pub struct Deadline {
+    timer: Arc<dyn MonotonicTimer>,
+    started_ms: u64,
+}
+
+impl Deadline {
+    pub fn start(timer: Arc<dyn MonotonicTimer>) -> Self {
+        let started_ms = timer.monotonic_now_ms();
+        Self { timer, started_ms }
+    }
+
+    pub fn elapsed_ms(&self) -> u64 {
+        self.now_ms().saturating_sub(self.started_ms)
+    }
+
+    fn now_ms(&self) -> u64 {
+        self.timer.monotonic_now_ms()
+    }
+
+    pub fn observe(&self) -> Observation {
+        Observation::now(Arc::clone(&self.timer))
+    }
+
+    pub(crate) fn elapsed_at(&self, observation: &Observation) -> u64 {
+        observation.at_ms.saturating_sub(self.started_ms)
+    }
+
+    pub fn ensure_metadata_publication_budget(&self, namespace_id: &NamespaceId) -> Result<()> {
+        let elapsed_ms = self.elapsed_ms();
+        if elapsed_ms <= METADATA_PUBLICATION_BUDGET_MS {
+            return Ok(());
+        }
+        tracing::error!(
+            namespace_id = namespace_id.as_str(),
+            elapsed_ms,
+            budget_ms = METADATA_PUBLICATION_BUDGET_MS,
+            "metadata publication overran its budget; aborting before the manifest put-if-absent",
+        );
+        Err(CoreError::MetadataPublicationBudgetExceeded {
+            elapsed_ms,
+            budget_ms: METADATA_PUBLICATION_BUDGET_MS,
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Observation {
+    timer: Arc<dyn MonotonicTimer>,
+    at_ms: u64,
+}
+
+impl Observation {
+    pub fn now(timer: Arc<dyn MonotonicTimer>) -> Self {
+        let at_ms = timer.monotonic_now_ms();
+        Self { timer, at_ms }
+    }
+
+    pub fn age_ms(&self) -> u64 {
+        self.timer.monotonic_now_ms().saturating_sub(self.at_ms)
+    }
+
+    pub(crate) fn age_at(&self, observation: &Self) -> u64 {
+        observation.at_ms.saturating_sub(self.at_ms)
+    }
+}
 
 /// Reads the wall clock as unix milliseconds.
 ///
@@ -27,6 +97,20 @@ fn unix_ms(now: SystemTime) -> Result<u64> {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn retries_keep_the_deadline_origin_and_observations_age_independently() {
+        let clock = Arc::new(loonfs_test_support::clock::ManualClock::new(100));
+        let deadline = Deadline::start(clock.clone());
+        clock.advance_ms(30);
+        let observation = deadline.observe();
+        let retry = deadline.clone();
+        clock.advance_ms(20);
+        assert_eq!(deadline.elapsed_ms(), 50);
+        assert_eq!(retry.elapsed_ms(), 50);
+        assert_eq!(observation.age_ms(), 20);
+        assert_eq!(deadline.elapsed_at(&observation), 30);
+    }
 
     #[test]
     fn pre_epoch_clock_is_an_error_not_timestamp_zero() {

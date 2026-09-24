@@ -5,7 +5,7 @@ use crate::error::{CoreError, Result};
 use crate::namespace::control::{
     load_current_manifest_if_present, load_manifest_by_number, raise_hint, CurrentManifest,
 };
-use crate::time::MonotonicTimer;
+use crate::time::Deadline;
 use bytes::Bytes;
 use loonfs_api::wire::control::ManifestRef;
 use loonfs_api::wire::envelope::EncodedEnvelope;
@@ -46,8 +46,7 @@ pub(crate) enum ManifestChange<T> {
 pub(crate) async fn update_manifest<S, T, F, Fut>(
     store: &S,
     namespace_id: &NamespaceId,
-    timer: &dyn MonotonicTimer,
-    started_ms: u64,
+    deadline: &Deadline,
     mut change: F,
 ) -> Result<T>
 where
@@ -65,7 +64,7 @@ where
         payload.manifest_no = super::flush::next_manifest_no_after(predecessor)?;
         let manifest = encode_manifest(payload)?;
         if matches!(
-            publish_manifest(store, manifest, timer, started_ms).await?,
+            publish_manifest(store, manifest, deadline).await?,
             ManifestPublicationOutcome::Published(_)
         ) {
             return Ok(result);
@@ -83,8 +82,7 @@ where
 pub(crate) async fn publish_manifest<S: ObjectStore + ?Sized>(
     store: &S,
     manifest: EncodedEnvelope<NamespaceManifestPayload>,
-    timer: &dyn MonotonicTimer,
-    started_ms: u64,
+    deadline: &Deadline,
 ) -> Result<ManifestPublicationOutcome> {
     let namespace_id = manifest.envelope().payload().namespace_id.clone();
     let namespace_id = &namespace_id;
@@ -148,7 +146,7 @@ pub(crate) async fn publish_manifest<S: ObjectStore + ?Sized>(
         )));
     }
     let object_key = metadata_manifest_object(namespace_id, &candidate.manifest().manifest_no);
-    super::flush::ensure_metadata_publication_budget(timer, started_ms, namespace_id)?;
+    deadline.ensure_metadata_publication_budget(namespace_id)?;
     let outcome = match store
         .put_if_absent(&object_key, Bytes::from(manifest.into_bytes()))
         .await
@@ -203,8 +201,7 @@ pub(crate) async fn publish_manifest<S: ObjectStore + ?Sized>(
         Err(error) => return Err(CoreError::store(&object_key, &error)),
     };
     if matches!(outcome, ManifestPublicationOutcome::Published(_))
-        && timer.monotonic_now_ms().saturating_sub(started_ms)
-            <= crate::limits::METADATA_PUBLICATION_BUDGET_MS
+        && deadline.elapsed_ms() <= crate::limits::METADATA_PUBLICATION_BUDGET_MS
     {
         // Publication is already durable; a failed hint update cannot undo it.
         if let Err(error) = raise_hint(

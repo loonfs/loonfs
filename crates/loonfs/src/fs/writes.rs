@@ -899,7 +899,7 @@ pub(crate) async fn publish_batch_with_engine(
     namespace_id: &NamespaceId,
     engine: &mut loonfs_core::publish::NamespaceCommitEngine,
     candidates: &[CommitCandidate],
-    batch_started_ms: u64,
+    batch: &loonfs_core::time::Deadline,
 ) -> EnginePublishResult {
     let batch_size = u64::try_from(candidates.len()).unwrap_or(u64::MAX);
     let store = core.store();
@@ -924,14 +924,9 @@ pub(crate) async fn publish_batch_with_engine(
     // Boxing erases the engine's deeply nested publish future; without
     // it, callers awaiting a put or commit (CLI, server, embedding
     // crates) exceed rustc's type-recursion depth.
-    let mut publish = Box::pin(engine.publish_batch_attempt(
-        &store,
-        candidates,
-        &context,
-        &tail_options,
-        batch_started_ms,
-    ))
-    .await;
+    let mut publish =
+        Box::pin(engine.publish_batch_attempt(&store, candidates, &context, &tail_options, batch))
+            .await;
     if let Some(state) = &publish.resulting_read_state {
         writer
             .hint_raise

@@ -30,6 +30,7 @@ use loonfs_core::limits::{CONTENTION_RETRY_LIMIT, FOLD_AT_WAL_SEGMENTS};
 use loonfs_core::publish::{
     NamespaceCommitEngine, PublishTailWeight, SharedWriterSessionState, WriterSessionState,
 };
+use loonfs_core::time::{Deadline, Observation};
 use loonfs_objectstore::timing::MonotonicTimer;
 use std::collections::{HashMap, VecDeque};
 use std::num::NonZeroUsize;
@@ -857,9 +858,9 @@ struct NamespacePublisherState {
     worker: Option<WorkerHandle>,
     fold: Option<FoldHandle>,
     next_fold_generation: u64,
-    /// Earliest instant the next WAL put may start. `None` is
-    /// a cold namespace: it publishes immediately.
-    next_allowed_publish_at: Option<u64>,
+    /// The last reserved WAL put. `None` is a cold namespace: it publishes
+    /// immediately.
+    last_publish: Option<Observation>,
 }
 
 struct WorkerHandle {
@@ -1013,7 +1014,7 @@ impl NamespacePublisher {
                 worker: None,
                 fold: None,
                 next_fold_generation: 0,
-                next_allowed_publish_at: None,
+                last_publish: None,
             })),
             engine: Arc::new(AsyncMutex::new(EngineSlot {
                 engine: None,
@@ -1435,11 +1436,7 @@ impl NamespacePublisher {
         let (results, retry_count) = async {
             let mut results = Vec::new();
             let mut retry_count = 0_u64;
-            // Every attempt of this batch ages its evidence from one origin.
-            let batch_started_ms = {
-                let mut slot = self.engine.lock().await;
-                self.engine_for(&mut slot).monotonic_now_ms()
-            };
+            let batch = Deadline::start(Arc::clone(&self.timer));
             for attempt in 0..CONTENTION_RETRY_LIMIT {
                 let Some(writer) = self.writer.upgrade() else {
                     results = candidates
@@ -1449,7 +1446,7 @@ impl NamespacePublisher {
                     break;
                 };
                 results = self
-                    .publish_through_engine(&writer, &candidates, &permits, batch_started_ms)
+                    .publish_through_engine(&writer, &candidates, &permits, &batch)
                     .await;
                 if !results.iter().any(is_retryable_wal_publish) {
                     break;
@@ -1478,7 +1475,7 @@ impl NamespacePublisher {
         writer: &Arc<WriterBits>,
         candidates: &[CommitCandidate],
         permits: &[Arc<AdmissionPermit>],
-        batch_started_ms: u64,
+        batch: &Deadline,
     ) -> Vec<CommitResult> {
         let mut slot = self.engine.lock().await;
         let engine = self.engine_for(&mut slot);
@@ -1488,7 +1485,7 @@ impl NamespacePublisher {
             &self.namespace_id,
             engine,
             candidates,
-            batch_started_ms,
+            batch,
         )
         .await;
         if !publish.results.iter().any(is_retryable_wal_publish) {
@@ -1530,6 +1527,7 @@ impl NamespacePublisher {
     fn engine_for<'slot>(&self, slot: &'slot mut EngineSlot) -> &'slot mut NamespaceCommitEngine {
         slot.engine.get_or_insert_with(|| {
             NamespaceCommitEngine::new(self.namespace_id.clone())
+                .monotonic_timer(Arc::clone(&self.timer))
                 .segment_cache(self.read_core.metadata_segment_cache())
                 .writer_session(Arc::clone(&slot.session))
         })
@@ -1620,7 +1618,7 @@ impl NamespacePublisher {
             Some(segment_cache.as_ref()),
             &self.namespace_id,
             input,
-            self.timer.as_ref(),
+            &Deadline::start(Arc::clone(&self.timer)),
         )
         .instrument(phase_span!(self.read_core, "wal_fold", self.namespace_id))
         .await;
@@ -1801,14 +1799,15 @@ impl NamespacePublisher {
     /// Waits until the namespace may start another WAL put.
     async fn await_publish_slot(&self) {
         loop {
-            let Some(sleep_until) = self.lock_state().next_allowed_publish_at else {
+            let Some(last_publish) = self.lock_state().last_publish.clone() else {
                 break;
             };
-            let now_ms = self.timer.monotonic_now_ms();
-            if sleep_until <= now_ms {
+            let remaining_ms =
+                duration_ms(self.min_publish_interval).saturating_sub(last_publish.age_ms());
+            if remaining_ms == 0 {
                 break;
             }
-            wait_for_publish_pacing(Duration::from_millis(sleep_until - now_ms)).await;
+            wait_for_publish_pacing(Duration::from_millis(remaining_ms)).await;
         }
     }
 
@@ -1818,11 +1817,7 @@ impl NamespacePublisher {
     }
 
     fn reserve_next_publish_slot(&self, state: &mut NamespacePublisherState) {
-        state.next_allowed_publish_at = Some(
-            self.timer
-                .monotonic_now_ms()
-                .saturating_add(duration_ms(self.min_publish_interval)),
-        );
+        state.last_publish = Some(Observation::now(Arc::clone(&self.timer)));
     }
 
     fn elapsed_ms_since(&self, started_at_ms: u64) -> u64 {

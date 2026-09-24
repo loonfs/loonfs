@@ -16,6 +16,7 @@ use super::super::streaming_compaction::{
     MetadataCompactionSpec, MetadataMergeResult,
 };
 use super::*;
+use crate::time::Deadline;
 use crate::time::{MonotonicTimer, StdMonotonicTimer};
 use loonfs_api::wire::manifest::ActiveDeletionRowAction;
 use loonfs_objectstore::keys::metadata_segment_prefix;
@@ -656,11 +657,11 @@ async fn finalize_streaming_compaction_under<S: ObjectStore + ?Sized>(
     result: &MetadataMergeResult,
     cancellation: &MetadataCompactionCancellation,
 ) -> MetadataCompactionJobOutcome {
-    let timer = StdMonotonicTimer::default();
+    let timer = Arc::new(StdMonotonicTimer::default());
     let publication = CompactionPublication {
         compactor_epoch: 0,
-        timer: &timer,
-        started_ms: 0,
+        compaction: Deadline::start(timer.clone()),
+        publication: Deadline::start(timer.clone()),
     };
     finalize_metadata_compaction(
         store,
@@ -3192,11 +3193,11 @@ async fn a_new_compactor_epoch_an_expired_job_and_a_deletion_each_prevent_public
     )
     .await
     .expect("merge");
-    let timer = SteppingTimer(AtomicU64::new(0));
+    let timer = Arc::new(SteppingTimer(AtomicU64::new(0)));
     let mut publication = CompactionPublication {
         compactor_epoch: epoch,
-        timer: &timer,
-        started_ms: 0,
+        compaction: Deadline::start(timer.clone()),
+        publication: Deadline::start(timer.clone()),
     };
     let next_epoch = super::super::compactor::claim_compactor(&store, &namespace)
         .await
@@ -3280,8 +3281,7 @@ async fn a_new_compactor_epoch_an_expired_job_and_a_deletion_each_prevent_public
     let error = super::super::publish::publish_manifest(
         &store,
         super::super::publish::encode_manifest(successor).expect("encode"),
-        &timer,
-        0,
+        &Deadline::start(timer.clone()),
     )
     .await
     .expect_err("a tombstone ends the namespace");
@@ -3306,11 +3306,11 @@ async fn two_groups_with_one_epoch_publish_after_a_number_conflict() {
     let first_keys = input_keys_now(&store, &namespace, &first).await;
     let second_keys = input_keys_now(&store, &namespace, &second).await;
     let cancellation = MetadataCompactionCancellation::default();
-    let timer = StdMonotonicTimer::default();
+    let timer = Arc::new(StdMonotonicTimer::default());
     let publication = CompactionPublication {
         compactor_epoch: epoch,
-        timer: &timer,
-        started_ms: timer.monotonic_now_ms(),
+        compaction: Deadline::start(timer.clone()),
+        publication: Deadline::start(timer.clone()),
     };
     let first_output = run_compaction(
         &store,

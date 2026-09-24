@@ -669,14 +669,17 @@ async fn fence_publication_enforces_the_wal_budget_before_the_put() {
         loonfs_test_support::test_actor(),
     );
     let fence = super::prepare_segment(namespace_id, WriterEpoch(1), &head, &[]).expect("fence");
-    let timer =
-        loonfs_test_support::clock::ManualClock::new(crate::limits::WAL_PUBLISH_BUDGET_MS + 1);
-    let error = super::publish_segment(&store, &fence, &timer, 0)
+    let timer = std::sync::Arc::new(loonfs_test_support::clock::ManualClock::new(0));
+    let expired = crate::time::Observation::now(timer.clone());
+    timer.advance_ms(1);
+    let boundary = crate::time::Observation::now(timer.clone());
+    timer.advance_ms(crate::limits::WAL_PUBLISH_BUDGET_MS);
+    let error = super::publish_segment(&store, &fence, &expired)
         .await
         .expect_err("expired budget");
     assert_eq!(error.code(), ErrorCode::StaleHead);
     assert_eq!(store.counts().puts, 0);
-    super::publish_segment(&store, &fence, &timer, 1)
+    super::publish_segment(&store, &fence, &boundary)
         .await
         .expect("budget boundary");
     assert_eq!(store.counts().create_if_absent_puts, 1);

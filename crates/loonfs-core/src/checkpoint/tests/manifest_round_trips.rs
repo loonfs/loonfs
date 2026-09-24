@@ -91,7 +91,7 @@ async fn a_publish_projection_fold_writes_the_replayed_tail_rows() {
         None,
         &namespace_id,
         Some(input),
-        &crate::time::StdMonotonicTimer::default(),
+        &crate::time::Deadline::start(Arc::new(crate::time::StdMonotonicTimer::default())),
     )
     .await
     .expect("fold publish projection");

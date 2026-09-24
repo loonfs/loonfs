@@ -15,7 +15,7 @@ use crate::error::{CoreError, Result};
 use crate::namespace::state::NamespaceReadState;
 use crate::path::write::PublishPlanningSession;
 use crate::storage::inline_content::InlineContent;
-use crate::time::MonotonicTimer;
+use crate::time::{Deadline, Observation};
 use crate::wal::{prepare_segment, publish_segment};
 use loonfs_api::v0::Commit;
 use loonfs_api::wire::wal::WalCommitPayload;
@@ -79,11 +79,9 @@ impl BatchOutcomeSlot {
 }
 
 pub(crate) struct PublicationClock<'a> {
-    pub(crate) timer: &'a dyn MonotonicTimer,
-    // Paired with MutationContext::now_ms; never reset by an internal retry.
-    pub(crate) batch_started_ms: u64,
-    pub(crate) attempt_started_ms: u64,
-    pub(crate) tip_observed_ms: u64,
+    pub(crate) batch: &'a Deadline,
+    pub(crate) attempt: Observation,
+    pub(crate) tip: Observation,
 }
 
 pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
@@ -108,9 +106,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
             candidates.len()
         ]);
     }
-    let elapsed_before_attempt_ms = clock
-        .attempt_started_ms
-        .saturating_sub(clock.batch_started_ms);
+    let elapsed_before_attempt_ms = clock.batch.elapsed_at(&clock.attempt);
     let Some(admission_now_ms) = context.now_ms.checked_add(elapsed_before_attempt_ms) else {
         return PublishBatchAgainstViewResult::unchanged(vec![
             Err(CoreError::Internal(
@@ -222,8 +218,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
         }
     };
     let resulting_head = view.head.after_segment(wal.envelope().payload());
-    let now_ms = clock.timer.monotonic_now_ms();
-    let elapsed_ms = now_ms.saturating_sub(clock.batch_started_ms);
+    let elapsed_ms = clock.batch.elapsed_ms();
     let Some(publication_now_ms) = context.now_ms.checked_add(elapsed_ms) else {
         return abort_batch(
             slots,
@@ -243,7 +238,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
             }
         }
     }
-    if let Err(error) = publish_segment(store, &wal, clock.timer, clock.tip_observed_ms).await {
+    if let Err(error) = publish_segment(store, &wal, &clock.tip).await {
         return abort_batch(slots, &error);
     }
 
@@ -419,6 +414,10 @@ mod tests {
             )
         });
         store.reset();
+        let timer = std::sync::Arc::new(ManualClock::new(0));
+        let batch = Deadline::start(timer.clone());
+        let attempt = batch.observe();
+        timer.advance_ms(1);
         let result = publish_namespace_commits_batch_against_publish_view(
             &store,
             &namespace_id,
@@ -426,10 +425,9 @@ mod tests {
             &context,
             &view,
             PublicationClock {
-                timer: &ManualClock::new(1),
-                batch_started_ms: 0,
-                attempt_started_ms: 0,
-                tip_observed_ms: 0,
+                batch: &batch,
+                tip: attempt.clone(),
+                attempt,
             },
         )
         .await;
@@ -500,6 +498,7 @@ mod tests {
                 parents: false,
             },
         ));
+        let batch = Deadline::start(std::sync::Arc::new(StdMonotonicTimer::default()));
         let result = publish_namespace_commits_batch_against_publish_view(
             &store,
             &namespace_id,
@@ -507,10 +506,9 @@ mod tests {
             &context,
             &view,
             PublicationClock {
-                timer: &StdMonotonicTimer::default(),
-                batch_started_ms: 0,
-                attempt_started_ms: 0,
-                tip_observed_ms: 0,
+                batch: &batch,
+                attempt: batch.observe(),
+                tip: batch.observe(),
             },
         )
         .await;

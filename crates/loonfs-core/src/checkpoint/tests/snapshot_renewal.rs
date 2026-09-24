@@ -43,7 +43,7 @@ async fn snapshot_expiry_after_the_renewal_cas_starts_preserves_success() {
             KeyPredicate::exact(&key),
             OperationClass::CompareAndSwap,
         );
-        let clock = ManualClock::new(context.now_ms);
+        let clock = Arc::new(ManualClock::new(context.now_ms));
         store.block_next();
         let renew = extend_snapshot_expiry(
             &store,
@@ -52,7 +52,7 @@ async fn snapshot_expiry_after_the_renewal_cas_starts_preserves_success() {
             1_002,
             20_000,
             &context,
-            &clock,
+            clock.clone(),
         );
         let expire = async {
             store.wait_until_blocked().await;
@@ -106,7 +106,7 @@ async fn snapshot_expiring_during_renewal_load_cannot_be_extended_or_reported_li
             KeyPredicate::exact(checkpoint_record(&namespace_id, &pin.pin_id)),
             OperationClass::Read,
         );
-        let clock = ManualClock::new(context.now_ms);
+        let clock = Arc::new(ManualClock::new(context.now_ms));
         store.block_next();
         let renew = extend_snapshot_expiry(
             &store,
@@ -115,7 +115,7 @@ async fn snapshot_expiring_during_renewal_load_cannot_be_extended_or_reported_li
             requested_expiry,
             20_000,
             &context,
-            &clock,
+            clock.clone(),
         );
         let expire = async {
             store.wait_until_blocked().await;
@@ -169,7 +169,7 @@ async fn snapshot_renewal_contention_does_not_restart_the_expiry_clock() {
         KeyPredicate::exact(checkpoint_record(&namespace_id, &pin.pin_id)),
         OperationClass::CompareAndSwap,
     );
-    let clock = ManualClock::new(context.now_ms);
+    let clock = Arc::new(ManualClock::new(context.now_ms));
     store.block_next();
     let renew = extend_snapshot_expiry(
         &store,
@@ -178,7 +178,7 @@ async fn snapshot_renewal_contention_does_not_restart_the_expiry_clock() {
         10_000,
         20_000,
         &context,
-        &clock,
+        clock.clone(),
     );
     let contender = async {
         store.wait_until_blocked().await;
@@ -189,7 +189,7 @@ async fn snapshot_renewal_contention_does_not_restart_the_expiry_clock() {
             1_002,
             20_000,
             &context,
-            &clock,
+            clock.clone(),
         )
         .await
         .expect("competing extension");

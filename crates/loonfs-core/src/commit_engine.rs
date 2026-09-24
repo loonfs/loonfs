@@ -18,7 +18,7 @@ use crate::protocol::{
 };
 use crate::storage::content_admission::{ContentTokenError, PreparedContent};
 use crate::storage::inline_content::InlineContent;
-use crate::time::{MonotonicTimer, StdMonotonicTimer};
+use crate::time::{Deadline, MonotonicTimer, Observation, StdMonotonicTimer};
 use crate::wal::ProjectedWalTail;
 use loonfs_api::v0::Commit;
 use loonfs_api::wire::control::AcquiredWriter;
@@ -513,7 +513,7 @@ pub type SharedWriterSessionState = Arc<Mutex<WriterSessionState>>;
 pub struct NamespaceCommitEngine {
     namespace_id: NamespaceId,
     publish_tail_projection: Option<PublishTailProjection>,
-    projection_loaded_ms: Option<u64>,
+    projection_observed: Option<Observation>,
     /// This session's epoch and fencing for the namespace; see
     /// [`WriterSessionState`].
     session: SharedWriterSessionState,
@@ -529,7 +529,7 @@ impl NamespaceCommitEngine {
         Self {
             namespace_id,
             publish_tail_projection: None,
-            projection_loaded_ms: None,
+            projection_observed: None,
             session: SharedWriterSessionState::default(),
             timer: Arc::new(StdMonotonicTimer::default()),
             segment_cache: None,
@@ -551,13 +551,8 @@ impl NamespaceCommitEngine {
             .expect("writer session state lock should not be poisoned")
     }
 
-    /// The clock a retry owner reads the batch origin from.
-    pub fn monotonic_now_ms(&self) -> u64 {
-        self.timer.monotonic_now_ms()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn monotonic_timer(mut self, timer: Arc<dyn MonotonicTimer>) -> Self {
+    /// Uses the runtime clock for publication budgets.
+    pub fn monotonic_timer(mut self, timer: Arc<dyn MonotonicTimer>) -> Self {
         self.timer = timer;
         self
     }
@@ -571,7 +566,7 @@ impl NamespaceCommitEngine {
     /// remain in session state and are not reset by cache invalidation.
     pub fn invalidate_projection(&mut self) {
         self.publish_tail_projection = None;
-        self.projection_loaded_ms = None;
+        self.projection_observed = None;
     }
 
     /// Checks the cached WAL tail without store reads or writer acquisition.
@@ -653,7 +648,7 @@ impl NamespaceCommitEngine {
         options: DeleteNamespaceOptions,
         context: &MutationContext,
     ) -> Result<DeleteNamespaceResponse> {
-        let started_ms = self.timer.monotonic_now_ms();
+        let deadline = Deadline::start(Arc::clone(&self.timer));
         let acquired_writer = self.session_writer_epoch(store, context).await?;
         let deleted = crate::namespace::delete::delete_namespace(
             store,
@@ -661,8 +656,7 @@ impl NamespaceCommitEngine {
             options,
             acquired_writer,
             context,
-            self.timer.as_ref(),
-            started_ms,
+            &deadline,
         )
         .await;
         self.invalidate_projection();
@@ -680,24 +674,22 @@ impl NamespaceCommitEngine {
         context: &MutationContext,
         tail_options: &PublishTailOptions,
     ) -> NamespaceCommitEnginePublishResult {
-        let batch_started_ms = self.timer.monotonic_now_ms();
-        self.publish_batch_attempt(store, candidates, context, tail_options, batch_started_ms)
+        let batch = Deadline::start(Arc::clone(&self.timer));
+        self.publish_batch_attempt(store, candidates, context, tail_options, &batch)
             .await
     }
 
-    /// One attempt of a batch that began at `batch_started_ms`. A retry owner
-    /// passes the same origin to every attempt so content evidence keeps
-    /// aging across retries instead of looking fresh again.
+    /// Retries share `batch` so content evidence continues aging.
     pub async fn publish_batch_attempt<S: ObjectStore + ?Sized>(
         &mut self,
         store: &S,
         candidates: impl AsRef<[CommitCandidate]>,
         context: &MutationContext,
         tail_options: &PublishTailOptions,
-        batch_started_ms: u64,
+        batch: &Deadline,
     ) -> NamespaceCommitEnginePublishResult {
         let candidates = candidates.as_ref();
-        let attempt_started_ms = self.timer.monotonic_now_ms();
+        let attempt = batch.observe();
         if candidates.is_empty() {
             return NamespaceCommitEnginePublishResult {
                 results: Vec::new(),
@@ -722,8 +714,8 @@ impl NamespaceCommitEngine {
             }
         };
 
-        if self.projection_loaded_ms.is_some_and(|loaded_ms| {
-            attempt_started_ms.saturating_sub(loaded_ms) >= crate::limits::WAL_PUBLISH_BUDGET_MS
+        if self.projection_observed.as_ref().is_some_and(|observed| {
+            observed.age_at(&attempt) >= crate::limits::WAL_PUBLISH_BUDGET_MS
         }) || self
             .publish_tail_projection
             .as_ref()
@@ -741,7 +733,10 @@ impl NamespaceCommitEngine {
             self.publish_tail_projection.as_ref(),
         )
         .await;
-        let projection_loaded_ms = self.projection_loaded_ms.unwrap_or(attempt_started_ms);
+        let projection_observed = self
+            .projection_observed
+            .clone()
+            .unwrap_or_else(|| attempt.clone());
         let (publish_view, projection) = match loaded {
             Ok(value) => value,
             Err(error) => {
@@ -766,14 +761,13 @@ impl NamespaceCommitEngine {
             context,
             &publish_view,
             crate::protocol::PublicationClock {
-                timer: self.timer.as_ref(),
-                batch_started_ms,
-                attempt_started_ms,
-                tip_observed_ms: projection_loaded_ms,
+                batch,
+                attempt,
+                tip: projection_observed.clone(),
             },
         )
         .await;
-        self.projection_loaded_ms = Some(projection_loaded_ms);
+        self.projection_observed = Some(projection_observed);
         let (wal_tail_segments, wal_tail_inline_bytes, resulting_read_state) =
             self.update_publish_tail_projection(projection, published.effect, tail_options);
         NamespaceCommitEnginePublishResult {
@@ -858,10 +852,10 @@ pub(crate) async fn publish_namespace_commits_batch<S: ObjectStore + ?Sized>(
     context: &MutationContext,
 ) -> Vec<Result<Commit>> {
     let mut engine = NamespaceCommitEngine::new(namespace_id.clone());
-    let batch_started_ms = engine.monotonic_now_ms();
+    let batch = Deadline::start(Arc::clone(&engine.timer));
     let options = PublishTailOptions::default();
     let mut result = engine
-        .publish_batch_attempt(store, &candidates, context, &options, batch_started_ms)
+        .publish_batch_attempt(store, &candidates, context, &options, &batch)
         .await;
     for _ in 1..crate::limits::CONTENTION_RETRY_LIMIT {
         if !result.results.iter().any(|result| {
@@ -875,7 +869,7 @@ pub(crate) async fn publish_namespace_commits_batch<S: ObjectStore + ?Sized>(
             break;
         }
         result = engine
-            .publish_batch_attempt(store, &candidates, context, &options, batch_started_ms)
+            .publish_batch_attempt(store, &candidates, context, &options, &batch)
             .await;
     }
     result.results

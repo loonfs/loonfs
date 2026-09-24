@@ -9,8 +9,9 @@ use crate::NamespaceId;
 use loonfs_api::WalNo;
 use loonfs_core::control::LoadedHint;
 use loonfs_core::limits::HINT_RAISE_SEGMENTS;
+use loonfs_core::time::Observation;
 use std::collections::BTreeMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 #[derive(Default)]
 pub(crate) struct DiscoveryHints {
@@ -20,7 +21,7 @@ pub(crate) struct DiscoveryHints {
 struct Raised {
     known: Option<LoadedHint>,
     wal_no: WalNo,
-    at_ms: u64,
+    observed: Observation,
 }
 
 impl DiscoveryHints {
@@ -35,7 +36,7 @@ impl DiscoveryHints {
         namespace_id: &NamespaceId,
         wal_no: WalNo,
     ) {
-        let now_ms = core.inner.timer.monotonic_now_ms();
+        let observed = Observation::now(Arc::clone(&core.inner.timer));
         let interval_ms = core
             .runtime_cache_config()
             .manifest_revalidation_interval_ms;
@@ -49,10 +50,10 @@ impl DiscoveryHints {
                 .or_insert_with(|| Raised {
                     known: None,
                     wal_no: WalNo(0),
-                    at_ms: now_ms,
+                    observed: observed.clone(),
                 });
             let due = wal_no.0.saturating_sub(raised.wal_no.0) >= HINT_RAISE_SEGMENTS
-                || now_ms.saturating_sub(raised.at_ms) >= interval_ms;
+                || raised.observed.age_ms() >= interval_ms;
             if !due {
                 return;
             }
@@ -70,7 +71,7 @@ impl DiscoveryHints {
                         Raised {
                             known: Some(hint),
                             wal_no,
-                            at_ms: now_ms,
+                            observed: observed.clone(),
                         },
                     );
             }

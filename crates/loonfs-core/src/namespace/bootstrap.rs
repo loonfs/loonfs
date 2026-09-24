@@ -4,12 +4,13 @@ use super::create::publish_namespace;
 use crate::context::MutationContext;
 use crate::error::{CoreError, Result};
 use crate::metadata::{AccessRevisionRecord, InodeRecord, MetadataState};
-use crate::time::{MonotonicTimer, StdMonotonicTimer};
+use crate::time::{Deadline, StdMonotonicTimer};
 use loonfs_api::wire::manifest::{NamespaceAccess, NamespaceManifestPayload};
 use loonfs_api::{
     AccessRevisionNo, ActorId, ChangeSeq, InodeKind, Namespace, NamespaceId, ROOT_INODE_ID,
 };
 use loonfs_objectstore::ObjectStore;
+use std::sync::Arc;
 
 pub(crate) async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
     store: &S,
@@ -19,15 +20,14 @@ pub(crate) async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
     access: &NamespaceAccess,
     allow_existing: bool,
 ) -> Result<Namespace> {
-    let timer = StdMonotonicTimer::default();
-    let started_ms = timer.monotonic_now_ms();
+    let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
     let start = NamespaceManifestPayload::initial(
         namespace_id.clone(),
         context.now_ms,
         actor_id.clone(),
         access.clone(),
     );
-    match publish_namespace(store, &start, &timer, started_ms).await {
+    match publish_namespace(store, &start, &deadline).await {
         Ok(()) => {}
         Err(CoreError::NamespaceExists { .. }) if allow_existing => {}
         Err(error) => return Err(error),

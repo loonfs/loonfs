@@ -18,7 +18,6 @@ use super::compaction_merge::{
 };
 use super::compaction_retention::{KeptRow, RetentionRule};
 use super::error::ManifestLoadError;
-use super::flush::ensure_metadata_publication_budget;
 use super::frozen_floor::{
     bind_survives_frozen_floor, unbinding_at_or_below_floor, unbindings_at_or_below_floor,
     BindingIdentity,
@@ -33,7 +32,7 @@ use super::scan::{Readahead, VerifiedMetadataSegments};
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::limits::METADATA_COMPACTION_BUDGET_MS;
 use crate::namespace::control::load_current_manifest_if_present;
-use crate::time::{MonotonicTimer, StdMonotonicTimer};
+use crate::time::{Deadline, StdMonotonicTimer};
 use loonfs_api::wire::manifest::{lookup_keys, MetadataRow, MetadataRowFamily, MetadataSegmentRef};
 use loonfs_api::{ChangeSeq, ManifestNo, MetadataCompactionId, NamespaceId, RunNo};
 use loonfs_objectstore::keys::metadata_segment_object_key;
@@ -324,12 +323,8 @@ pub(crate) async fn run_metadata_compaction_job<S: ObjectStore + ?Sized>(
     policy: MetadataLsmPolicy,
     cancellation: &MetadataCompactionCancellation,
 ) -> Result<MetadataCompactionJobOutcome> {
-    let timer = StdMonotonicTimer::default();
-    let publication = CompactionPublication {
-        compactor_epoch,
-        timer: &timer,
-        started_ms: timer.monotonic_now_ms(),
-    };
+    let timer = Arc::new(StdMonotonicTimer::default());
+    let compaction = Deadline::start(timer.clone());
     let Some(segments) = load_current_manifest_segments(store, namespace_id).await? else {
         return Ok(MetadataCompactionJobOutcome::Abandoned);
     };
@@ -360,7 +355,11 @@ pub(crate) async fn run_metadata_compaction_job<S: ObjectStore + ?Sized>(
                     &input_keys,
                     result,
                     cancellation,
-                    &publication,
+                    &CompactionPublication {
+                        compactor_epoch,
+                        compaction,
+                        publication: Deadline::start(timer),
+                    },
                 )
                 .await?
             }
@@ -416,18 +415,15 @@ fn log_metadata_compaction_outcome(
     }
 }
 
-pub(super) struct CompactionPublication<'a> {
+pub(super) struct CompactionPublication {
     pub(super) compactor_epoch: u64,
-    pub(super) timer: &'a dyn MonotonicTimer,
-    pub(super) started_ms: u64,
+    pub(super) compaction: Deadline,
+    pub(super) publication: Deadline,
 }
 
-impl CompactionPublication<'_> {
+impl CompactionPublication {
     fn expired(&self) -> bool {
-        self.timer
-            .monotonic_now_ms()
-            .saturating_sub(self.started_ms)
-            > METADATA_COMPACTION_BUDGET_MS
+        self.compaction.elapsed_ms() > METADATA_COMPACTION_BUDGET_MS
     }
 }
 
@@ -446,14 +442,13 @@ pub(super) async fn finalize_metadata_compaction<S: ObjectStore + ?Sized>(
     input_keys: &BTreeSet<String>,
     result: MetadataMergeResult,
     cancellation: &MetadataCompactionCancellation,
-    publication: &CompactionPublication<'_>,
+    publication: &CompactionPublication,
 ) -> Result<MetadataCompactionJobOutcome> {
     let rows_read = result.rows_read;
     let rows_written = result.rows_written;
     let input_bytes = result.input_bytes;
     let output_bytes = result.output_bytes;
     let output_segments = result.output_segments.len();
-    let timer = publication.timer;
     for attempt in 1..=MAX_FINALIZATION_ATTEMPTS {
         if publication.expired() {
             return Ok(MetadataCompactionJobOutcome::Abandoned);
@@ -461,7 +456,6 @@ pub(super) async fn finalize_metadata_compaction<S: ObjectStore + ?Sized>(
         if cancellation.is_cancelled() {
             return Ok(MetadataCompactionJobOutcome::Cancelled);
         }
-        let publication_started_ms = timer.monotonic_now_ms();
         let Some(current_manifest) = load_current_manifest_if_present(store, namespace_id)
             .await
             .map_err(CoreError::ControlObjectLoad)?
@@ -515,9 +509,11 @@ pub(super) async fn finalize_metadata_compaction<S: ObjectStore + ?Sized>(
         if publication.expired() {
             return Ok(MetadataCompactionJobOutcome::Abandoned);
         }
-        ensure_metadata_publication_budget(timer, publication_started_ms, namespace_id)?;
+        publication
+            .publication
+            .ensure_metadata_publication_budget(namespace_id)?;
         let manifest_no = manifest.envelope().payload().manifest_no;
-        let published = publish_manifest(store, manifest, timer, publication_started_ms).await?;
+        let published = publish_manifest(store, manifest, &publication.publication).await?;
         drop(segments);
         let lost_to = match published {
             ManifestPublicationOutcome::Published(_) => {

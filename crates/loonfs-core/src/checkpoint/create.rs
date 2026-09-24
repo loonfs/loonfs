@@ -10,10 +10,11 @@ use crate::context::MutationContext;
 use crate::control_update::{retry_while_contended, CasAttempt};
 use crate::error::CoreError;
 use crate::error::Result;
-use crate::time::{MonotonicTimer, StdMonotonicTimer};
+use crate::time::{Deadline, StdMonotonicTimer};
 use loonfs_api::wire::control::{PinOwner, PinPayload};
 use loonfs_api::{NamespaceId, PinId};
 use loonfs_objectstore::ObjectStore;
+use std::sync::Arc;
 
 pub(crate) use crate::limits::PIN_VERIFY_BUDGET_MS;
 
@@ -28,11 +29,12 @@ pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
     context: &MutationContext,
 ) -> Result<PinPayload> {
     validate_checkpoint_owner(&owner)?;
-    let timer = &StdMonotonicTimer::default();
+    let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
+    let deadline = &deadline;
     let owner = &owner;
     let created = retry_while_contended(
         || async move {
-            let basis = match try_flush_wal(store, namespace_id, timer).await? {
+            let basis = match try_flush_wal(store, namespace_id, deadline).await? {
                 TryFlushWal::Settled(basis) => basis,
                 TryFlushWal::RaceLost => {
                     return Ok(CasAttempt::Contended(CoreError::WalPublish(
@@ -71,7 +73,6 @@ pub(crate) async fn create_checkpoint_at_basis<S: ObjectStore + ?Sized>(
     context: &MutationContext,
 ) -> Result<PinPayload> {
     validate_checkpoint_owner(&owner)?;
-    let timer = StdMonotonicTimer::default();
     let checkpoint_id = PinId::generate(manifest.manifest_no);
     let record = PinPayload {
         pin_id: checkpoint_id.clone(),
@@ -81,7 +82,7 @@ pub(crate) async fn create_checkpoint_at_basis<S: ObjectStore + ?Sized>(
         created_at_ms: context.now_ms,
         owner,
     };
-    let verify_started_ms = timer.monotonic_now_ms();
+    let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
     write_checkpoint_record(store, &record).await?;
 
     let verification = match verify_checkpoint_basis(store, &record).await {
@@ -103,8 +104,7 @@ pub(crate) async fn create_checkpoint_at_basis<S: ObjectStore + ?Sized>(
             return Err(error);
         }
     };
-    let within_budget =
-        timer.monotonic_now_ms().saturating_sub(verify_started_ms) <= PIN_VERIFY_BUDGET_MS;
+    let within_budget = deadline.elapsed_ms() <= PIN_VERIFY_BUDGET_MS;
     if verification == CheckpointBasisVerification::Verified && within_budget {
         return Ok(record);
     }
