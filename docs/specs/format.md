@@ -438,7 +438,7 @@ The evidence expires. A completed session can produce evidence only during `COMP
 
 The reference HTTP server mints signed content tokens as its representation of this evidence. An embedded implementation need not mint tokens. Token encoding, signing, and HTTP responses are defined in the [API specification][api-spec].
 
-Immediately before publishing newly accepted requests, the writer checks that externally supplied content references have matching, unexpired admission evidence. The check includes time spent acquiring or checking the writer, loading the view, planning, and preparing the WAL. It uses the request clock plus the attempt's elapsed monotonic time, rather than the original request timestamp alone.
+Immediately before publishing newly accepted requests, the writer checks that externally supplied content references have matching, unexpired admission evidence. The check includes time spent acquiring or checking the writer, loading the view, planning, and preparing the WAL. It uses the request clock plus elapsed monotonic time since the batch call began, including earlier attempts. Retrying does not restart evidence validity.
 
 A retained matching commit receipt replays without new content-admission evidence. Internal copy and restore operations retain references already established by the validated namespace state; they do not authorize arbitrary cross-namespace imports. An import outside the pinned fork relationship writes verified bytes under a fresh destination-owned identity.
 

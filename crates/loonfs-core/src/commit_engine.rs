@@ -675,8 +675,15 @@ impl NamespaceCommitEngine {
         tail_options: &PublishTailOptions,
     ) -> NamespaceCommitEnginePublishResult {
         let candidates = candidates.as_ref();
-        let mut result =
-            Box::pin(self.publish_batch_inner(store, candidates, context, tail_options)).await;
+        let batch_started_ms = self.timer.monotonic_now_ms();
+        let mut result = Box::pin(self.publish_batch_inner(
+            store,
+            candidates,
+            context,
+            tail_options,
+            batch_started_ms,
+        ))
+        .await;
         for _ in 1..crate::limits::CONTENTION_RETRY_LIMIT {
             if !result.results.iter().any(|result| {
                 matches!(
@@ -688,8 +695,14 @@ impl NamespaceCommitEngine {
             }) {
                 break;
             }
-            result =
-                Box::pin(self.publish_batch_inner(store, candidates, context, tail_options)).await;
+            result = Box::pin(self.publish_batch_inner(
+                store,
+                candidates,
+                context,
+                tail_options,
+                batch_started_ms,
+            ))
+            .await;
         }
         result
     }
@@ -700,6 +713,7 @@ impl NamespaceCommitEngine {
         candidates: &[CommitCandidate],
         context: &MutationContext,
         tail_options: &PublishTailOptions,
+        batch_started_ms: u64,
     ) -> NamespaceCommitEnginePublishResult {
         let attempt_started_ms = self.timer.monotonic_now_ms();
         if candidates.is_empty() {
@@ -771,6 +785,7 @@ impl NamespaceCommitEngine {
             &publish_view,
             crate::protocol::PublicationClock {
                 timer: self.timer.as_ref(),
+                batch_started_ms,
                 attempt_started_ms,
                 tip_observed_ms: projection_loaded_ms,
             },

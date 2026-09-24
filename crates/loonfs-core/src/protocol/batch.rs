@@ -4,7 +4,7 @@
 
 use super::candidates::{
     prepare_candidate_request, validate_candidate_content_references, BatchDedup,
-    CandidateAdmission,
+    CandidateAdmission, CandidateTime,
 };
 use super::changes::committed_change_from_wal_record;
 use super::publish_view::PublishMetadataView;
@@ -81,6 +81,8 @@ impl BatchOutcomeSlot {
 
 pub(crate) struct PublicationClock<'a> {
     pub(crate) timer: &'a dyn MonotonicTimer,
+    // Paired with MutationContext::now_ms; never reset by an internal retry.
+    pub(crate) batch_started_ms: u64,
     pub(crate) attempt_started_ms: u64,
     pub(crate) tip_observed_ms: u64,
 }
@@ -107,6 +109,17 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
             candidates.len()
         ]);
     }
+    let elapsed_before_attempt_ms = clock
+        .attempt_started_ms
+        .saturating_sub(clock.batch_started_ms);
+    let Some(admission_now_ms) = context.now_ms.checked_add(elapsed_before_attempt_ms) else {
+        return PublishBatchAgainstViewResult::unchanged(vec![
+            Err(CoreError::Internal(
+                "publication time overflow".to_owned()
+            ));
+            candidates.len()
+        ]);
+    };
     let mut slots = Vec::with_capacity(candidates.len());
     let mut session = PublishPlanningSession::new(&view.head);
     let mut accepted_commits = Vec::new();
@@ -126,7 +139,10 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
                 &session,
                 candidate,
                 index,
-                context.now_ms,
+                CandidateTime {
+                    committed_at_ms: context.now_ms,
+                    admission_now_ms,
+                },
                 &mut dedup,
             )
             .instrument(tracing::debug_span!(
@@ -208,7 +224,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
     };
     let resulting_head = resulting_head_after(&wal, &view.head);
     let now_ms = clock.timer.monotonic_now_ms();
-    let elapsed_ms = now_ms.saturating_sub(clock.attempt_started_ms);
+    let elapsed_ms = now_ms.saturating_sub(clock.batch_started_ms);
     let Some(publication_now_ms) = context.now_ms.checked_add(elapsed_ms) else {
         return abort_batch(
             slots,
@@ -422,6 +438,7 @@ mod tests {
             &view,
             PublicationClock {
                 timer: &ManualClock::new(1),
+                batch_started_ms: 0,
                 attempt_started_ms: 0,
                 tip_observed_ms: 0,
             },
@@ -502,6 +519,7 @@ mod tests {
             &view,
             PublicationClock {
                 timer: &StdMonotonicTimer::default(),
+                batch_started_ms: 0,
                 attempt_started_ms: 0,
                 tip_observed_ms: 0,
             },
