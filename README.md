@@ -66,7 +66,7 @@ LoonFS is designed with a core set of foundational ideas.
 
 - **Inodes are identity, paths are views.** The identity of a filesystem item is `(namespace_id, inode_id)`. Paths are "views" that point to inodes, and may change over time without changing the item’s identity.
 
-- **Commits are the unit of transactional change.** File bytes are written to object storage before metadata can reference them. Metadata changes are recorded as logical commits, and a commit becomes visible when put-if-absent creates its numbered WAL object.
+- **Commits are the unit of transactional change.** File bytes are durable no later than the commit that references them. Uploaded bytes are stored before the commit, and small files can carry their bytes in the commit itself ([format section 1.5](docs/specs/format.md#15-file-contents-and-ownership)). Metadata changes are recorded as logical commits, and a commit becomes visible when put-if-absent creates its numbered WAL object.
 
 - **Numbered manifests and WAL objects are authoritative.** The current manifest records namespace identity, status, and writer authority. Later WAL objects record committed changes. `hint.json` is advisory and starts discovery of those numbered objects.
 

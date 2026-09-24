@@ -273,7 +273,7 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | --- | --- | --- |
 | `invalid_request` | 400 | The request is malformed: a path, id, cursor, parameter, staged content reference, configuration value, or commit request limit fails validation. The message names the offending field or limit. |
 | `unauthorized` | 401 | Missing or wrong credentials. |
-| `forbidden` | 403 | The subject holds a right on the inode but not the one the operation needs. An inode on which the subject holds no right at all is reported as not found instead. |
+| `forbidden` | 403 | The subject lacks authority the operation needs: some but not all required rights on a checked inode, the authority a move or access update requires, administrator rights on an administrator-only surface, or the namespace's principal scope. A checked inode on which the subject holds no right answers `path_not_found` or `inode_not_found` instead ([authorization](#authorization-in-acl-namespaces)). |
 | `content_too_large` | 413 | A request or proxied response exceeds its advertised size limit. Send smaller proxied uploads or use `direct_put` when available. Multipart completions must fit within `upload.complete.max_request_body_bytes`. For large reads, request a download grant when `filesystem.downloads.direct_get` is available. |
 | `route_not_found` | 404 | No route matches the request path. |
 | `method_not_allowed` | 405 | The path exists but does not serve this HTTP method. |
@@ -282,8 +282,8 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | `checkpoint_not_found` | 404 | The checkpoint id names no existing pin. |
 | `snapshot_not_found` | 404 | The snapshot id names no pin. Refresh state or choose another snapshot. |
 | `snapshot_gone` | 410 | The snapshot has expired, or was deleted while a fork was verifying its selected snapshot. |
-| `path_not_found` | 404 | No visible entry at the path. |
-| `inode_not_found` | 404 | The requested visible or retained inode does not exist. |
+| `path_not_found` | 404 | No visible entry at the path. In an ACL namespace, a checked entry on which the subject holds no right also answers this code. |
+| `inode_not_found` | 404 | The requested visible or retained inode does not exist. In an ACL namespace, a checked inode on which the subject holds no right also answers this code. |
 | `revision_not_found` | 404 | The file has no such revision. |
 | `upload_not_found` | 404 | No upload session with this id, or one that was aborted: an aborted session will never select content, so it reports the absence that its deletion will. |
 | `namespace_exists` | 409 | The create or fork target already exists: another namespace holds the id. |
@@ -427,7 +427,8 @@ To write a file, prepare its content and then commit the change. Committed
 changes are available through the change feed in sequence order.
 
 Uploaded content is durable before the commit, but the file is not yet visible.
-Inline content can become durable and visible in the same write. In both cases,
+Inline content becomes durable and visible in the same write
+([format section 1.5](format.md#15-file-contents-and-ownership)). In both cases,
 the commit takes effect when the next numbered WAL segment is written with
 put-if-absent. Accepting a request into a batch does not mean it has committed.
 
@@ -591,8 +592,9 @@ Preconditions are admission conditions, stored only through the fingerprint in W
 
 ### Actor attribution
 
-Every commit, namespace creation, and namespace fork requires the
-`Loonfs-Actor` header. The application supplies a stable opaque identifier
+Every commit, namespace creation, namespace fork, and administrator recovery
+requires an actor in the `Loonfs-Actor` header ([identity headers](#identity-headers)).
+The application supplies a stable opaque identifier
 of 1 to 256 visible ASCII characters (0x21 through 0x7E), with the identity scope it needs. LoonFS preserves
 it on the commit and the metadata created by that commit. Namespace creation
 and forking record it as `created_by` on the namespace. LoonFS does not
@@ -623,21 +625,14 @@ Responses expose attribution through these fields:
 principal ids. `Loonfs-Principals` carries comma-separated principal ids without whitespace.
 Principal, subject, and scope ids never contain a comma, so the list is
 unambiguous.
-`Loonfs-Subject` identifies the subject the request acts as and defaults to
-`Loonfs-Actor`. The principal count is capped by the advertised
-`access.max_principals_per_request` limit. `Loonfs-Subject` or `Loonfs-Principal-Scope`
-without `Loonfs-Principals` answers `invalid_request` with `param` set to
-`Loonfs-Principals`. Principals without scope answer `invalid_request` with
-`param` set to `Loonfs-Principal-Scope`. Omitting all three headers uses the
-token holder's service authority; `Loonfs-Actor` alone remains valid for service
-attribution. An unrestricted namespace ignores a complete subject context, but
-the HTTP binding still rejects an incomplete one.
-In an ACL namespace, per-subject reads, commits, and upload operations require
-scope and principals. A subject scope that differs from the namespace's
-`principal_scope` answers `forbidden`, naming the expected and actual scopes,
-before any grant is read. Administrator-only surfaces and maintenance act as
-the token holder when the subject context is absent. When principals are
-present, a subject or actor is required.
+`Loonfs-Subject` identifies the subject the request acts as. The principal
+count is capped by the advertised `access.max_principals_per_request` limit.
+Without a subject context, a request acts with the token holder's service
+authority, except on the operations that require a subject context in an ACL
+namespace. The [identity header table](#identity-headers) lists those
+operations and how the subject id falls back to `Loonfs-Actor`. A subject
+scope that differs from the namespace's `principal_scope` answers `forbidden`,
+naming the expected and actual scopes, before any grant is read.
 These ids are opaque and reach access logs like the actor id; use internal ids,
 never email addresses or display names.
 
@@ -645,6 +640,56 @@ The subject id is part of a commit's semantic identity. Retrying a commit id
 from another subject answers `commit_id_reuse_conflict`. The scope is not part
 of the fingerprint or upload ownership: a namespace has one scope and refuses
 subjects from every other scope.
+
+### Identity headers
+
+Four request headers carry identity. `Loonfs-Actor` is attribution: an actor
+id of 1 to 256 visible ASCII characters (0x21 through 0x7E). `Loonfs-Subject`,
+`Loonfs-Principal-Scope`, and `Loonfs-Principals` form the subject context that
+an ACL namespace authorizes against ([subject and principals](#subject-and-principals)).
+All four are optional in the transport schema. Each operation enforces its own
+requirements while handling the request:
+
+| Operations | `Loonfs-Actor` | Subject context |
+| --- | --- | --- |
+| `create_commit` | Required. Recorded as `committed_by`. | Required in an ACL namespace. |
+| `create_namespace` | Required. Recorded as `created_by`. | Not read. |
+| `fork_namespace` | Required. Recorded as `created_by`. | Optional. When present, an ACL source requires an administrator subject. When absent, the request acts as the token holder. |
+| `delete_namespace`, `create_snapshot`, `list_snapshots`, `extend_snapshot`, `delete_snapshot`, `list_changes` | Not required. | Optional, with the same administrator rule as `fork_namespace`. |
+| Path and inode reads, downloads, `list_trash`, `grep`, and upload-session operations | Not required. | Required in an ACL namespace. |
+| `run_maintenance` | Required by `recover_administrator`, which records it as `committed_by` on the recovery commit. Other jobs do not record it, but still reject a malformed value. | Not read. |
+| `get_capabilities`, `get_namespace`, the other maintenance operations, and the health, readiness, and metrics routes | Not read. | Not read. |
+
+Where an operation reads the subject context:
+
+- `Loonfs-Principals` and `Loonfs-Principal-Scope` are sent together.
+  `Loonfs-Subject` or the scope without principals answers `invalid_request`
+  with `param` `Loonfs-Principals`. Principals without the scope answer
+  `invalid_request` with `param` `Loonfs-Principal-Scope`.
+- The subject id is `Loonfs-Subject` when present, and otherwise
+  `Loonfs-Actor`. With neither, the request answers `invalid_request` with
+  `param` `Loonfs-Subject`. An actor used as the subject id must also be a
+  valid subject id, which cannot contain a comma; otherwise the `param` is
+  `Loonfs-Actor`.
+- An operation that does not require an actor accepts a complete explicit
+  subject (`Loonfs-Subject`, scope, and principals) without one.
+- An unrestricted namespace checks no rights, but it still rejects an
+  incomplete or malformed subject context. A commit's subject id joins its
+  fingerprint in either access mode.
+- In an ACL namespace, an operation that requires the subject context answers
+  `invalid_request` with `param` `Loonfs-Principals` when it is absent. A
+  subject scope that differs from the namespace's `principal_scope` answers
+  `forbidden`.
+
+A missing required `Loonfs-Actor` answers `invalid_request` with `param`
+`Loonfs-Actor` and message `missing required header Loonfs-Actor`. A malformed
+actor answers `invalid_request` with the same `param` and the validator's
+reason. Authorization is checked first.
+Header names are case-insensitive; HTTP/2 sends them lowercase. Retries and
+replayed requests must carry the same header values, so saved requests must
+keep the actor and subject context beside the body. Request headers reach
+access logs, so every value must be an opaque identifier, never an email or a
+display name.
 
 ### 5.2 Commit responses and safe retry
 
@@ -814,24 +859,9 @@ Everything else, `GET /v0/capabilities` included, requires the token. The
 generated `openapi.json` states this as a global `bearer_auth` requirement
 with those two operations overriding it.
 
-The `Loonfs-Actor` request header is required by `create_commit`,
-`create_namespace`, and `fork_namespace`. Other operations ignore it. Its value
-is an actor id containing 1 to 256 visible ASCII characters (0x21 through 0x7E).
-A future operation that records attribution reads the same header. Header names
-are case-insensitive; HTTP/2 sends them lowercase. Missing required headers answer
-`invalid_request` with `param` `Loonfs-Actor` and message
-`missing required header Loonfs-Actor`. Malformed values answer `invalid_request`
-with the same `param` and the actor validator's reason. Authorization is checked
-first. Retries and replayed requests must carry the same header value, so saved
-requests must keep the actor beside the body. Request headers reach access logs,
-so the value must be an opaque identifier, never an email or a display name.
-
-`Loonfs-Principal-Scope`, `Loonfs-Principals`, and `Loonfs-Subject` are optional
-headers on every operation in the transport schema. Their requirements are
-enforced while handling the request rather than by the operation's schema.
-Scope and principals must be present together. When `Loonfs-Subject` is
-present, they are required. When principals are present, the subject id
-defaults to the actor.
+The identity headers `Loonfs-Actor`, `Loonfs-Subject`, `Loonfs-Principal-Scope`,
+and `Loonfs-Principals` are optional in the transport schema. The
+[identity header table](#identity-headers) lists what each operation requires.
 
 Request bodies reject unknown fields, at every level of nesting, with 400
 `invalid_request`. Most request fields are optional and several of those are
@@ -895,8 +925,6 @@ The table below lists the retry class for every v0 operation.
 | List snapshots | `list_snapshots` | `idempotent` | `GET /v0/namespaces/{ns}/snapshots?limit=100&cursor=...`. |
 | Extend a snapshot | `extend_snapshot` | `idempotent` | `POST /v0/namespaces/{ns}/snapshots/{snapshot_id}/extend`; requires `ttl_ms` and clamps to the lifetime ceiling. |
 | Delete a snapshot | `delete_snapshot` | `not_idempotent` | `DELETE /v0/namespaces/{ns}/snapshots/{snapshot_id}` (deletes the pin; a missing id returns `snapshot_not_found`) |
-
-In an ACL namespace every snapshot operation requires an administrator subject; a request with no subject headers acts as the token holder.
 | Fork a namespace | `fork_namespace` | `not_idempotent` | `POST /v0/namespaces/{source_ns}/forks`; requires the `Loonfs-Actor` header |
 | Delete a namespace | `delete_namespace` | `not_idempotent` | `DELETE /v0/namespaces/{ns}?expected_head_seq=418` (feature `filesystem.namespaces.delete`; the precondition is optional) |
 | Read namespace diagnostics | `get_namespace_diagnostics` | `idempotent` | `GET /v0/maintenance/namespaces/{ns}/diagnostics` |
@@ -978,6 +1006,11 @@ current manifest first. Segments this run wrote remain unreferenced, and a
 later GC pass can delete them. `fenced` means a newer runtime holds the
 compactor epoch.
 
+A `metadata_compaction` run compacts one unit: a bounded merge when the
+selected window fits one step, or otherwise one streaming compaction of a
+family group. Repeat the run while it publishes to compact every eligible
+group.
+
 `compaction.outcome` has six values. `not_needed` means no family group has
 eligible input. `bounded_merge_published` means the planner selected and
 published a bounded merge. `published` reports the manifest number and row,
@@ -1002,7 +1035,7 @@ floor has advanced.
 
 #### Checkpoint inventory
 
-A checkpoint name is a label, not a key. Every create call generates a new record, so the same name may identify multiple checkpoints. Create and list use one checkpoint object with `namespace_id`, `checkpoint_id`, `owner`, `created_at_ms`, optional `expires_at_ms`, `captured_seq`, and `manifest_no`. Create returns this object directly. For API-created checkpoints, `owner` is `user` with the requested `name`, and `created_at_ms` is the durable record timestamp.
+A checkpoint name is a label, not a key. Every create call generates a new record, so the same name may identify multiple checkpoints. Creation first folds any WAL tail after the current manifest, then pins the resulting manifest. Create and list use one checkpoint object with `namespace_id`, `checkpoint_id`, `owner`, `created_at_ms`, optional `expires_at_ms`, `captured_seq`, and `manifest_no`. Create returns this object directly. For API-created checkpoints, `owner` is `user` with the requested `name`, and `created_at_ms` is the durable record timestamp.
 
 The id is `pin_{manifest_no:020}-{16 lowercase hex}`. It identifies the
 manifest used by checkpoint and snapshot reads. Every pin has a fresh id.
@@ -1041,7 +1074,8 @@ collected while a client is paging can affect later pages.
 
 Deletion removes the record. An expired user pin remains listed and readable
 until GC deletes it after expiry plus grace. A permanent user pin on a live
-namespace requires explicit deletion.
+namespace requires explicit deletion. [Format section 8.1](format.md#81-records-and-owners)
+defines reads and removal for each pin owner.
 
 #### Snapshots
 
@@ -1060,7 +1094,7 @@ expired. The maintenance checkpoint listing keeps expired records visible until
 collection deletes them. Snapshot deletion removes the pin. A second delete returns
 `snapshot_not_found`.
 
-Snapshot reads in an ACL namespace require `read` and `history` on the historical inode, evaluated at the current head.
+In an ACL namespace, creating, listing, extending, and deleting snapshots requires an administrator subject; a request with no subject context acts as the token holder. Snapshot reads require `read` and `history` on the historical inode, evaluated at the current head.
 
 These operations manage the snapshot lifetime. Path stat, inode stat, path directory listing,
 inode children listing, file content, download, and change-feed requests accept an optional
@@ -2830,8 +2864,7 @@ Representative request:
 
 ```json
 {
-  "new_namespace_id": "demo-branch",
-  "access": {"kind":"unrestricted"}
+  "new_namespace_id": "demo-branch"
 }
 ```
 
@@ -2869,8 +2902,11 @@ Forking does not extend the snapshot, and later deletion does not affect the for
 The fork records the `Loonfs-Actor` header as `created_by`, independently of the source's creator.
 Namespace creation and forking produce no change-feed event.
 
-The new namespace reads inherited content at each reference's owner key and starts with
-independent future namespace metadata. The fork creates a fork-owned source checkpoint so the
+The new namespace reads inherited content at each reference's owner key and starts its own
+metadata history. The fork shares the source's existing content and
+metadata objects without copying the filesystem. Forking the current head may first flush the
+source's outstanding WAL tail, which writes that tail's inline content to content objects.
+The fork creates a fork-owned source checkpoint so the
 source-owned immutable metadata segments stay available for as long as the
 target may still read them. It verifies the checkpoint, then installs the target namespace with a conditional manifest write. The manifest records the source checkpoint for the target's lifetime.
 
@@ -3005,7 +3041,7 @@ A conforming server must:
 1. treat object storage as the authoritative durable foundation;
 2. publish visible metadata only through logical commits stored in visible
    numbered WAL objects;
-3. validate that referenced content is already durable before publish;
+3. make referenced content durable no later than the commit that references it ([format section 1.5](format.md#15-file-contents-and-ownership));
 4. preserve `(namespace_id, inode_id)` as canonical item identity and the namespace lifetime in [format section 1.1](format.md#11-namespaces-and-identity);
 5. resolve content through the reference's owner namespace and content ID;
 6. implement tombstone-first delete;
@@ -3029,7 +3065,7 @@ A conforming server must:
 A conforming writer or client must:
 
 1. treat paths as selectors, not as durable identity;
-2. upload or otherwise stage content before asking the server to publish it;
+2. upload content before asking the server to publish it, unless the commit carries the bytes inline;
 3. use commit ids or equivalent idempotency keys for safe retry;
 4. tolerate commit rejection when preconditions no longer hold;
 5. re-bootstrap if its cursor falls behind the retention floor;
@@ -3222,7 +3258,7 @@ matter.
 | Concern | Server | Client |
 | --- | --- | --- |
 | Path resolution | Authoritative | Supplies user intent by path when using the filesystem surface. |
-| Content hashing and upload | May accept direct bytes, proxy uploads, or issue upload capabilities, but must verify that any content referenced by a commit is already durable. A server may issue short-lived content admission tokens after validation to avoid repeating expensive checks. | Usually responsible for reading local bytes, computing content hashes, and uploading missing content when originating new data. Clients may forward admission tokens when provided, but must tolerate slow-path validation. |
+| Content hashing and upload | May accept inline bytes, proxy uploads, or issue upload capabilities. Must verify that uploaded content referenced by a commit is durable before publishing the commit. A server may issue short-lived content admission tokens after validation to avoid repeating expensive checks. | Usually responsible for reading local bytes, computing content hashes, and uploading missing content when originating new data. Clients may forward admission tokens when provided, but must tolerate slow-path validation. |
 | Commit validation | Authoritative | Supplies preconditions and commit ids where needed. |
 | Namespace visibility | Authoritative | Observes committed sequence receipts and change-feed deltas. |
 | Long-running transfer progress | Authoritative for sessions that affect correctness | Responsible for local temp files, local progress, retry behavior, and any higher-level orchestration outside the core model. |

@@ -1,4 +1,5 @@
-//! Fork installation copies pinned source runs into a new namespace.
+//! Fork installation pins a source manifest and lists its run references in
+//! a new namespace's first manifest; no segment or content object is copied.
 
 use super::control::load_current_manifest_if_present;
 use super::create::publish_namespace;

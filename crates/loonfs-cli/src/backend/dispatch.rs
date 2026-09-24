@@ -834,8 +834,8 @@ impl ResolvedTarget {
 
     // --- maintenance API group (`maintenance/v0`) ---
 
-    /// Creates or reuses a named, user-owned checkpoint pinning the
-    /// namespace's current view.
+    /// Creates a new user-owned checkpoint pinning the namespace's current
+    /// view; the name is a label, so every call creates a separate checkpoint.
     pub(crate) async fn create_checkpoint(
         &self,
         namespace_id: &NamespaceId,
@@ -855,7 +855,8 @@ impl ResolvedTarget {
         }
     }
 
-    /// Lists one page of the namespace's active checkpoint pins.
+    /// Lists one page of the namespace's existing checkpoint pins, including
+    /// expired pins that collection has not yet deleted.
     pub(crate) async fn list_checkpoints_page(
         &self,
         namespace_id: &NamespaceId,

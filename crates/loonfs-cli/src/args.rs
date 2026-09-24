@@ -751,7 +751,11 @@ pub(crate) enum NamespaceCommand {
     Show(NamespaceShowArgs),
     /// Permanently delete a namespace and retire its id.
     Delete(NamespaceDeleteArgs),
-    /// Fork a namespace into a new one; O(1), no bytes copied.
+    /// Fork a namespace into a new one.
+    ///
+    /// The fork shares the source's existing content and metadata objects
+    /// without copying the filesystem. Forking the current head may first
+    /// flush the source's outstanding WAL tail.
     Fork(NamespaceForkArgs),
 }
 
@@ -1283,7 +1287,12 @@ pub(crate) enum MaintenanceCommand {
     Metadata(MaintenanceMetadataArgs),
     /// Flush the WAL tail into a durable segment.
     Flush(MaintenanceNamespaceArgs),
-    /// Run one full metadata compaction.
+    /// Run one metadata compaction unit.
+    ///
+    /// A unit is one bounded merge or one streaming compaction of a family
+    /// group. Repeat the command while it publishes to compact every eligible
+    /// group, or drain the metadata-compaction job with `maintenance loop`
+    /// on an embedded profile.
     Compact(MaintenanceNamespaceArgs),
     /// Create, list, or delete checkpoint pins.
     Checkpoint {
@@ -1321,9 +1330,13 @@ pub(crate) struct MaintenanceRecoverAdministratorArgs {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum MaintenanceCheckpointCommand {
-    /// Pin the namespace's current state under a named checkpoint.
+    /// Pin the namespace's current state in a new checkpoint.
+    ///
+    /// Every call creates a new checkpoint; the name is a label, not a key.
     Create(MaintenanceCheckpointArgs),
-    /// List active checkpoint pins in checkpoint-id order.
+    /// List existing checkpoint pins in checkpoint-id order.
+    ///
+    /// Expired pins remain listed until garbage collection deletes them.
     List(MaintenanceCheckpointListArgs),
     /// Delete the checkpoint record. A second call returns not found.
     Delete(MaintenanceCheckpointDeleteArgs),
@@ -1394,7 +1407,7 @@ pub(crate) enum MaintenanceJobArg {
     /// Flush the WAL tail past its threshold and fold one reorganization
     /// unit per step.
     Metadata,
-    /// Run one full metadata compaction.
+    /// Run one metadata compaction unit per step.
     MetadataCompaction,
     /// Run one bounded collection call per step.
     Gc,

@@ -721,7 +721,7 @@
       },
       "ContentRef": {
         "additionalProperties": false,
-        "description": "A reference to one immutable content object.\n\nThe object must be durable before the reference is published.",
+        "description": "Identifies one piece of immutable file content.\n\nThe owner namespace and content id name the content object that holds the\nbytes. A reference is not proof that the object exists: content committed\ninline has no object until a flush writes it.",
         "properties": {
           "checksum": {
             "$ref": "#/components/schemas/Checksum",
@@ -729,11 +729,11 @@
           },
           "content_id": {
             "$ref": "#/components/schemas/ContentId",
-            "description": "Immutable identity of the referenced object."
+            "description": "Immutable identity of the content; with the owner, it determines the object key."
           },
           "kind": {
             "$ref": "#/components/schemas/ContentRefKind",
-            "description": "Content strategy used by the referenced object."
+            "description": "Content strategy used by the referenced content."
           },
           "owner_namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
@@ -790,7 +790,7 @@
             "type": "string"
           },
           "ttl_ms": {
-            "description": "The checkpoint lifetime in milliseconds, or `None` for an explicit deletion only.",
+            "description": "The checkpoint lifetime in milliseconds, or `None` to keep the checkpoint until it is deleted.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
@@ -2603,10 +2603,10 @@
         "type": "object"
       },
       "ListCheckpointsResponse": {
-        "description": "One page of active checkpoint records.",
+        "description": "One page of existing checkpoint records, including expired records that\ncollection has not yet deleted.",
         "properties": {
           "checkpoints": {
-            "description": "The active records in ascending checkpoint ID order.",
+            "description": "The records in ascending checkpoint ID order.",
             "items": {
               "$ref": "#/components/schemas/Checkpoint"
             },
@@ -3725,7 +3725,7 @@
         "type": "object"
       },
       "RunMaintenanceRequestMetadataCompaction": {
-        "description": "Runs one full metadata compaction.",
+        "description": "Runs one metadata compaction unit: one bounded merge, or one streaming\ncompaction of a family group.",
         "properties": {
           "kind": {
             "enum": [
@@ -3882,7 +3882,7 @@
         "type": "object"
       },
       "RunMaintenanceResponseMetadataCompaction": {
-        "description": "Result of one full metadata compaction.",
+        "description": "Result of one metadata compaction unit.",
         "properties": {
           "compaction": {
             "$ref": "#/components/schemas/MetadataCompactionOutcome",
@@ -4725,7 +4725,7 @@
                 }
               }
             },
-            "description": "Active checkpoint objects"
+            "description": "Existing checkpoint objects"
           },
           "400": {
             "content": {
@@ -4779,7 +4779,7 @@
         "x-loonfs-retry": "idempotent"
       },
       "post": {
-        "description": "Creates a named, user-owned checkpoint record pinning the current namespace view. Every call mints a new record under a new id; the name is a label, not a key. The record is a garbage-collection root until it is deleted, so routine maintenance should flush the WAL instead. This is a maintenance operation, not a file mutation.",
+        "description": "Creates a user-owned checkpoint record pinning the current namespace view. It first folds any WAL tail after the current manifest. Every call creates a new record under a new id; the name is a label, not a key. The record retains its manifest until it is deleted, either explicitly or by collection after expiry plus grace, so routine maintenance should flush the WAL instead. This is a maintenance operation, not a file mutation.",
         "operationId": "create_checkpoint",
         "parameters": [
           {

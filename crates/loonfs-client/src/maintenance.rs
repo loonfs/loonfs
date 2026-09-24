@@ -4,7 +4,7 @@ use super::*;
 use crate::transport::{QueryBuilder, SendPolicy};
 use loonfs_api::ActorId;
 
-/// A pager over active checkpoints.
+/// A pager over existing checkpoints.
 pub type CheckpointsPager = loonfs_api::Pager<ListCheckpointsResponse, ClientError>;
 
 impl Client {
@@ -21,12 +21,14 @@ impl Client {
             .await
     }
 
-    /// Creates a named, user-owned checkpoint pinning the namespace's
-    /// current view (maintenance API group). Every call creates a new checkpoint; the
-    /// name is a label, not a key. This is a maintenance operation, not a
-    /// file mutation. The record is a garbage-collection root until deleted
-    /// or expired.
-    /// Retrying this request starts a distinct attempt.
+    /// Creates a user-owned checkpoint pinning the namespace's current view
+    /// (maintenance API group).
+    ///
+    /// Every call creates a new checkpoint; the name is a label, not a key.
+    /// This is a maintenance operation, not a file mutation. The record keeps
+    /// its manifest retained until it is deleted, either explicitly or by
+    /// garbage collection after expiry plus grace. Retrying this request
+    /// starts a distinct attempt.
     pub async fn create_checkpoint(
         &self,
         namespace_id: &NamespaceId,
@@ -60,7 +62,8 @@ impl Client {
         })
     }
 
-    /// Lists one bounded page of active pins (maintenance API group).
+    /// Lists one bounded page of existing pins, including expired pins that
+    /// garbage collection has not yet deleted (maintenance API group).
     pub async fn list_checkpoints_page(
         &self,
         namespace_id: &NamespaceId,
@@ -138,8 +141,10 @@ impl Client {
             .await
     }
 
-    /// Enables the namespace's grep manifest (maintenance API group); embedded mode starts
-    /// that namespace's event-driven backfill. Idempotent.
+    /// Enables the namespace's grep index (maintenance API group).
+    ///
+    /// The server asks its maintenance runner to start the backfill; this call
+    /// does not wait for it. Idempotent.
     pub async fn enable_grep_index(&self, namespace_id: &NamespaceId) -> Result<GrepIndex> {
         let url = format!(
             "{}/v0/maintenance/namespaces/{namespace_id}/grep/index/enable",

@@ -154,7 +154,9 @@ Namespace management
     Show the selected namespace's status and creator
 
   loonfs namespace fork <source> <new-namespace> [--snapshot <id>] [--actor-id <stable-id>]
-    Fork a namespace into a new one; O(1), no bytes copied
+    Fork a namespace into a new one. The fork shares the source's existing
+    content and metadata objects without copying the filesystem. Forking the
+    current head may first flush the source's outstanding WAL tail.
     Use --snapshot to fork from a live snapshot instead of the current head.
 
   loonfs namespace delete <namespace> [--expected-head-seq <seq>] [--yes]
@@ -232,8 +234,8 @@ Writing
   --principal-scope <scope>, and --principals <a,b>. The flags override
   LOONFS_SUBJECT_ID, LOONFS_PRINCIPAL_SCOPE, and LOONFS_PRINCIPALS, then the
   matching profile fields. Scope and principals are required together.
-  Without them the CLI acts as the token holder, and the subject id defaults
-  to the actor id.
+  Without them the CLI acts as the token holder. With them, the subject id
+  defaults to the actor id.
 
   loonfs put <local-path|-> [remote-path] [-r] [--force]
              [--expected-inode-id <id>] [--expected-revision <n>]
@@ -353,7 +355,10 @@ Maintenance
     Flush the current WAL tail regardless of its length.
 
   loonfs maintenance compact
-    Run one full metadata compaction for the namespace.
+    Run one metadata compaction unit: one bounded merge or one streaming
+    compaction of a family group. Repeat the command while it publishes to
+    compact every eligible group, or drain the metadata-compaction job with
+    maintenance loop on an embedded profile.
 
   loonfs maintenance retention advance
     Advance the retention floor. This removes change-feed replay history
@@ -367,8 +372,8 @@ Maintenance
     --json includes every retention reason.
     Repeated GC runs reclaim a deleted namespace's own content once it retires,
     with deleted.content_objects counting completed-session reclamation and
-    deleted.retired_content_objects counting deletion attempts through its
-    publication rows, which repeat on every pass.
+    deleted.retired_content_objects counting listed content objects that were
+    deleted. A pass with nothing left under the content prefix reports zero.
 
   loonfs maintenance store probe
     Test the object-store operations LoonFS requires. The command creates
@@ -376,12 +381,13 @@ Maintenance
     any check fails.
 
   loonfs maintenance checkpoint create --name <label> [--ttl-ms <ms>]
-    Pin the namespace's current state. --ttl-ms sets an expiry; without it,
-    the checkpoint remains until deletion.
+    Pin the namespace's current state in a new checkpoint. Every call creates
+    a new checkpoint; the name is a label, not a key. --ttl-ms sets an expiry;
+    without it, the checkpoint remains until deletion.
 
   loonfs maintenance checkpoint list [--limit <n>] [--page-size <n>]
                                [--cursor <cursor>] [--all] [--jsonl]
-    List active checkpoints in ID order. Expired checkpoints remain visible
+    List existing checkpoints in ID order. Expired checkpoints remain visible
     until garbage collection removes them.
 
   loonfs maintenance checkpoint delete <checkpoint-id>

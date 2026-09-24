@@ -579,9 +579,7 @@ async fn run_maintenance_index_status(
     Ok(context.output(kind, CommandData::GrepIndexStatus(response)))
 }
 
-/// Collects the namespace's grep keyspace, looping the cursor exactly like
-/// Grep collection runs bounded passes through completion, unless `--max-objects`
-/// asks for one pass and its resume token.
+/// Runs one complete grep index garbage-collection pass for the namespace.
 async fn run_maintenance_index_gc(
     kind: CommandKind,
     config_path: &Path,

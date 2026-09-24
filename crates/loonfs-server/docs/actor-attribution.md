@@ -1,7 +1,10 @@
 # Actor attribution
 
-A commit, a namespace creation, and a namespace fork each carry an actor id
-in the `Loonfs-Actor` request header, such as `Loonfs-Actor: usr_8f3c`.
+A commit, a namespace creation, a namespace fork, and an administrator
+recovery each carry an actor id in the `Loonfs-Actor` request header, such as
+`Loonfs-Actor: usr_8f3c`. The API specification's
+[identity header table](../../../docs/specs/api.md#identity-headers) lists
+every operation's header requirements.
 
 Your backend authenticates and authorizes the request. LoonFS records the
 header value exactly as sent; it does not verify or manage identities. Use

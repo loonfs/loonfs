@@ -6,7 +6,7 @@ Namespace assignment belongs to the hosting layer. The maintenance runner schedu
 
 Hosts assign namespace/job pairs explicitly. The runner can deduplicate pending work, limit concurrency, back off failed jobs, and check assignments periodically. It does not discover every namespace by listing storage.
 
-Metadata probes inspect the WAL and manifest descriptors using the same thresholds and compaction policy as execution. An assigned namespace can be checked again after a restart. Losing an in-memory scheduling hint can delay work, but cannot change committed filesystem state.
+Metadata probes inspect the unfolded WAL segment count and the manifest descriptors. An assigned namespace can be checked again after a restart. Losing an in-memory scheduling hint can delay work, but cannot change committed filesystem state.
 
 | Work | Durable basis after restart |
 | --- | --- |
@@ -20,13 +20,7 @@ A grep build has durable progress in its manifest. A core compaction or GC pass 
 
 ## Compaction after a worker stops
 
-Compaction writes new segment objects and publishes them only after the selected merge completes and validates. If the process stops first, readers continue using the previous manifest.
-
-A replacement runtime plans from the current file set and claims a newer compactor epoch when eligible work requires it. That claim fences publications from earlier runtimes. The replacement repeats the merge rather than resuming partially written segments.
-
-Unreferenced segments remain protected until their provider age is strictly greater than 24 hours. Streaming publication must begin within the shorter bound that reserves the minimum GC grace inside that day. Cancelled and abandoned output follows the same collection rule.
-
-The built-in `metadata_compaction` job defaults to two concurrent compactions. An embedding application can change this through `MetadataCompactionJob::max_concurrent`. This process-local limit controls resource use; the manifest epoch controls publication authority. Concurrent family groups in one runtime share its epoch claim.
+Compaction publishes new segment objects only after the selected merge completes and validates. If the process stops first, readers continue using the previous manifest. A replacement runtime plans from the current file set, claims a newer compactor epoch when eligible work requires it, and repeats the merge rather than resuming partially written segments. Unreferenced output follows the ordinary segment age rule. [Streaming compaction](metadata-streaming-compaction.md#publication-and-restart) describes the epoch, the process-local concurrency limit, and restart in more detail.
 
 ## Garbage collection after a worker stops
 
