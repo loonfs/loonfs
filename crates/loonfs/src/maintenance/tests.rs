@@ -685,6 +685,38 @@ async fn shutdown_clears_pending_work_and_refuses_later_nudges() {
 }
 
 #[tokio::test]
+async fn dispatch_on_a_stopped_runtime_returns_its_permit() {
+    let (send, receive) = tokio::sync::oneshot::channel();
+    let thread = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime");
+        let job = TestJob::idle();
+        let runner = {
+            let _entered = runtime.enter();
+            enabled_runner(job.clone())
+        };
+        drop(runtime);
+        let namespace_id = namespace_id("stopped-runtime");
+        runner.handle().nudge(TEST_JOB, &namespace_id);
+        let _ = send.send((runner, job, namespace_id));
+    });
+    let (runner, job, namespace_id) =
+        tokio::time::timeout(std::time::Duration::from_secs(2), receive)
+            .await
+            .expect("dispatch must return after inline cancellation")
+            .expect("dispatch thread");
+    thread.join().expect("dispatch thread returns");
+    assert_eq!(runner.running_steps(), 0);
+    assert!(!runner.is_pending(TEST_JOB, &namespace_id));
+    assert!(job.stepped().is_empty());
+    runner
+        .shutdown()
+        .await
+        .expect("shutdown drains cancelled tasks");
+}
+
+#[tokio::test]
 async fn drain_surfaces_a_panicked_step() {
     let job = TestJob::scripted(
         [ScriptedStep::Panic],

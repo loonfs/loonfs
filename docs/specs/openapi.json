@@ -1286,6 +1286,10 @@
             "minimum": 0,
             "type": "integer"
           },
+          "namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "The deleted namespace that caused the operation to fail."
+          },
           "operation_index": {
             "description": "The index of the failed operation in the request.",
             "format": "int32",
@@ -4943,12 +4947,15 @@
           "maintenance"
         ],
         "x-fern-request-name": "DeleteCheckpointRequest",
+        "x-fern-retries": {
+          "disabled": true
+        },
         "x-fern-sdk-group-name": [
           "maintenance",
           "checkpoints"
         ],
         "x-fern-sdk-method-name": "delete",
-        "x-loonfs-retry": "idempotent"
+        "x-loonfs-retry": "not_idempotent"
       }
     },
     "/v0/maintenance/namespaces/{namespace_id}/diagnostics": {
@@ -5633,6 +5640,16 @@
             },
             "description": "Namespace already exists"
           },
+          "410": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Namespace id permanently deleted (namespace_deleted)"
+          },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
           }
@@ -5654,7 +5671,7 @@
     },
     "/v0/namespaces/{namespace_id}": {
       "delete": {
-        "description": "Marks a namespace as deleted.",
+        "description": "Marks a namespace as deleted. The id can never be created or forked into again.",
         "operationId": "delete_namespace",
         "parameters": [
           {
@@ -6854,7 +6871,7 @@
                 }
               }
             },
-            "description": "Source namespace deleted or snapshot gone"
+            "description": "Source or target namespace id permanently deleted (namespace_deleted), or snapshot gone"
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
@@ -7967,11 +7984,14 @@
           "namespaces"
         ],
         "x-fern-request-name": "DeleteSnapshotRequest",
+        "x-fern-retries": {
+          "disabled": true
+        },
         "x-fern-sdk-group-name": [
           "snapshots"
         ],
         "x-fern-sdk-method-name": "delete",
-        "x-loonfs-retry": "idempotent"
+        "x-loonfs-retry": "not_idempotent"
       }
     },
     "/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}/extend": {

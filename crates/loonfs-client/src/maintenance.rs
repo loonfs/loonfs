@@ -88,12 +88,8 @@ impl Client {
             "{}/v0/maintenance/namespaces/{namespace_id}/checkpoints/{checkpoint_id}",
             self.base_url
         );
-        self.request_json::<(), DeleteCheckpointResponse>(
-            self.delete(&url),
-            None,
-            SendPolicy::Retry,
-        )
-        .await
+        self.request_json::<(), DeleteCheckpointResponse>(self.delete(&url), None, SendPolicy::Once)
+            .await
     }
 
     /// Runs one maintenance job against a namespace (maintenance API group).

@@ -121,7 +121,7 @@ impl Client {
             "{}/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}",
             self.base_url
         );
-        self.request_json::<(), DeleteSnapshotResponse>(self.delete(&url), None, SendPolicy::Retry)
+        self.request_json::<(), DeleteSnapshotResponse>(self.delete(&url), None, SendPolicy::Once)
             .await
     }
 

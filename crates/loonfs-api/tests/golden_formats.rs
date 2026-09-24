@@ -2851,6 +2851,18 @@ fn commit_precondition_wire_shapes_match_golden() {
 }
 
 #[test]
+fn deleted_namespace_error_details_match_golden() {
+    let details = loonfs_api::ErrorDetails {
+        namespace_id: Some(NamespaceId::parse("deleted").expect("namespace id")),
+        ..Default::default()
+    };
+    let bytes = serde_json::to_vec_pretty(&details).expect("error details");
+    assert_matches_golden("namespace_deleted_details.v1.json", &bytes);
+    let decoded: loonfs_api::ErrorDetails = serde_json::from_slice(&bytes).expect("details");
+    assert_eq!(decoded, details);
+}
+
+#[test]
 fn name_folding_matches_the_fixed_unicode_corpus() {
     let display_names = [
         "Cafe\u{301}.TXT",

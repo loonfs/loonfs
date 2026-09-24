@@ -215,12 +215,16 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
             &CoreError::Internal("publication time overflow".to_owned()),
         );
     };
-    for (candidate, slot) in candidates.iter().zip(&slots) {
+    for (candidate, slot) in candidates.iter().zip(&mut slots) {
         if matches!(slot, BatchOutcomeSlot::Accepted) {
             if let Err(error) =
                 validate_candidate_content_references(candidate, namespace_id, publication_now_ms)
             {
-                return abort_batch(slots, &error);
+                *slot = BatchOutcomeSlot::Settled {
+                    outcome: Err(error),
+                    depends_on_batch: false,
+                };
+                return abort_batch(slots, &CoreError::WalPublish(WalPublishError::StaleHead));
             }
         }
     }
@@ -348,6 +352,97 @@ mod tests {
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_objectstore::ObjectStore;
     use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn one_expired_candidate_replans_the_other_without_writing() {
+        use crate::storage::content_admission::PreparedContent;
+        use loonfs_test_support::clock::ManualClock;
+        use loonfs_test_support::stores::{KeyPredicate, OperationClass, RecordingStore};
+
+        let directory = tempdir().expect("directory");
+        let store = RecordingStore::new(
+            LocalFsStore::new(directory.path()).expect("store"),
+            KeyPredicate::any(),
+        );
+        let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+        let context = MutationContext {
+            writer_id: loonfs_api::WriterId::parse("writer").expect("writer id"),
+            now_ms: 1_000,
+        };
+        bootstrap_namespace(
+            &store,
+            &namespace_id,
+            &context,
+            &loonfs_test_support::test_actor(),
+            &loonfs_api::NamespaceAccess::unrestricted(),
+            false,
+        )
+        .await
+        .expect("bootstrap");
+        let acquired = acquire_writer_epoch(&store, &namespace_id, &context)
+            .await
+            .expect("acquire writer");
+        let (view, _projection) =
+            load_publish_metadata_view(&store, None, &namespace_id, acquired, None)
+                .await
+                .expect("publish view");
+        let candidates = [("expired", 1_000), ("valid", 2_000)].map(|(name, expires_at_ms)| {
+            let content_ref = PreparedContent::inline(
+                namespace_id.clone(),
+                bytes::Bytes::from_static(b"content"),
+            )
+            .content_ref()
+            .clone();
+            CommitCandidate::prepared(
+                CommitRequest::single(
+                    CommitId::parse(name).expect("commit id"),
+                    loonfs_test_support::test_actor(),
+                    None,
+                    FilesystemOperation::PutFile {
+                        path: AbsolutePath::parse(format!("/{name}")).expect("path"),
+                        content_ref: Some(content_ref.clone()),
+                        inline_content: None,
+                        behavior: loonfs_api::DestinationBehavior::NoReplace,
+                        expected_inode_id: None,
+                        expected_revision_no: None,
+                    },
+                ),
+                vec![PreparedContent::for_completed_upload(
+                    content_ref,
+                    expires_at_ms,
+                )],
+            )
+        });
+        store.reset();
+        let result = publish_namespace_commits_batch_against_publish_view(
+            &store,
+            &namespace_id,
+            &candidates,
+            &context,
+            &view,
+            PublicationClock {
+                timer: &ManualClock::new(1),
+                attempt_started_ms: 0,
+                tip_observed_ms: 0,
+            },
+        )
+        .await;
+
+        assert_eq!(
+            result.results[0]
+                .as_ref()
+                .expect_err("expired content")
+                .code(),
+            loonfs_api::ErrorCode::ContentNotPrepared
+        );
+        assert!(matches!(
+            result.results[1],
+            Err(CoreError::WalPublish(WalPublishError::StaleHead))
+        ));
+        assert_eq!(store.count(OperationClass::Put), 0);
+        assert_eq!(store.count(OperationClass::CompareAndSwap), 0);
+        assert_eq!(store.count(OperationClass::Delete), 0);
+    }
 
     #[tokio::test]
     async fn sequence_exhaustion_writes_neither_wal_nor_hint() {

@@ -217,6 +217,7 @@ pub(super) async fn get_capabilities(
             (status = 400, description = "Invalid namespace id", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 409, description = "Namespace already exists", body = ApiError),
+            (status = 410, description = "Namespace id permanently deleted (namespace_deleted)", body = ApiError),
             crate::http::openapi::UnavailableResponses
         )
     )
@@ -333,7 +334,7 @@ pub(super) async fn get_namespace_diagnostics(
         path = "/v0/namespaces/{namespace_id}",
         tag = "namespaces",
         summary = "Delete namespace",
-        description = "Marks a namespace as deleted.",
+        description = "Marks a namespace as deleted. The id can never be created or forked into again.",
         params(
             ("namespace_id" = String, Path, description = "Namespace id"),
             ("expected_head_seq" = Option<ChangeSeq>, Query, description = "Delete only if the namespace head is still at this sequence")
@@ -397,7 +398,7 @@ fn parse_expected_head_seq(value: &str) -> Result<ChangeSeq, ApiResponseError> {
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Source namespace or snapshot not found", body = ApiError),
             (status = 409, description = "Fork conflict", body = ApiError),
-            (status = 410, description = "Source namespace deleted or snapshot gone", body = ApiError),
+            (status = 410, description = "Source or target namespace id permanently deleted (namespace_deleted), or snapshot gone", body = ApiError),
             crate::http::openapi::UnavailableResponses
         )
     )
@@ -592,7 +593,10 @@ pub(super) async fn extend_snapshot(
     utoipa::path(
         delete,
         operation_id = "delete_snapshot",
-        extensions(("x-loonfs-retry" = json!("idempotent"))),
+        extensions(
+            ("x-loonfs-retry" = json!("not_idempotent")),
+            ("x-fern-retries" = json!({"disabled": true})),
+        ),
         path = "/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}",
         tag = "namespaces",
         summary = "Delete snapshot",
@@ -764,7 +768,10 @@ pub(super) async fn list_checkpoints(
     utoipa::path(
         delete,
         operation_id = "delete_checkpoint",
-        extensions(("x-loonfs-retry" = json!("idempotent"))),
+        extensions(
+            ("x-loonfs-retry" = json!("not_idempotent")),
+            ("x-fern-retries" = json!({"disabled": true})),
+        ),
         path = "/v0/maintenance/namespaces/{namespace_id}/checkpoints/{checkpoint_id}",
         tag = "maintenance",
         summary = "Delete checkpoint",

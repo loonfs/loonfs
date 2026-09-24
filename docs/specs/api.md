@@ -249,6 +249,7 @@ The codes that populate it:
 
 | Code | Detail fields |
 | --- | --- |
+| `namespace_deleted` | `namespace_id` identifies the deleted namespace, including a fork's source or target |
 | `writer_fenced` | `fenced_writer_epoch`, `active_writer_epoch`, plus `active_writer` and `active_acquired_at_ms` when the current manifest records a writer block. Writer ids are process labels, so two runs on one machine can share one; the acquisition stamp is what tells them apart |
 | `writer_capacity_exceeded` | `max_writer_sessions` |
 | `path_conflict` | `expected_inode_id`, `actual_inode_id` (absent when unbound); `precondition_index` for a failed request precondition |
@@ -281,7 +282,7 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | `route_not_found` | 404 | No route matches the request path. |
 | `method_not_allowed` | 405 | The path exists but does not serve this HTTP method. |
 | `namespace_not_found` | 404 | The namespace has no installed manifest, so it does not exist. |
-| `namespace_deleted` | 410 | The namespace's current manifest is deleted. Ordinary operations fail. A create or fork into the deleted id also fails. |
+| `namespace_deleted` | 410 | The namespace id is permanently deleted and can never be created or forked into again. Ordinary operations fail. The response's details identify the deleted namespace. |
 | `checkpoint_not_found` | 404 | The checkpoint id names no existing pin. |
 | `snapshot_not_found` | 404 | The snapshot id names no pin. Refresh state or choose another snapshot. |
 | `snapshot_gone` | 410 | The snapshot has expired, or was deleted while a fork was verifying its selected snapshot. |
@@ -458,6 +459,8 @@ remote upload tokens (section 6.3; format spec, "Garbage collection", rule 11)
 and prevents publication from referring to content that may have been reclaimed.
 Prepared inline bytes have no expiry.
 
+If the final deadline check rejects a candidate, that candidate receives its own error. Other accepted candidates receive `stale_head` so the publisher plans them again. The rejected batch writes nothing.
+
 Prepared content belongs to one namespace. Two namespaces cannot share a
 prepared value: uploads and garbage collection are tracked separately for each
 namespace. Use
@@ -465,7 +468,7 @@ namespace. Use
 refers to the new copy owned by that namespace. A subject must be an
 administrator of the reference's owner namespace to import it.
 
-An import checks authorization against the owner’s current head. A reference that matches the owner’s resident content may read those bytes. Otherwise, the reference’s owner namespace and content ID determine its object key. Once retirement deletes the object, an import returns `namespace_corrupt`, as for any missing content object.
+An import checks authorization against the owner’s current head. A reference that matches the owner’s resident content may read those bytes. Otherwise, the reference’s owner namespace and content ID determine its object key. A missing object returns `namespace_deleted` for a deleted owner and `namespace_corrupt` for an active owner.
 
 ### 5.1 Commit identity and preconditions
 
@@ -895,7 +898,7 @@ The table below lists the retry class for every v0 operation.
 | Create a snapshot | `create_snapshot` | `not_idempotent` | `POST /v0/namespaces/{ns}/snapshots`; requires `name` and `ttl_ms`. |
 | List snapshots | `list_snapshots` | `idempotent` | `GET /v0/namespaces/{ns}/snapshots?limit=100&cursor=...`. |
 | Extend a snapshot | `extend_snapshot` | `idempotent` | `POST /v0/namespaces/{ns}/snapshots/{snapshot_id}/extend`; requires `ttl_ms` and clamps to the lifetime ceiling. |
-| Delete a snapshot | `delete_snapshot` | `idempotent` | `DELETE /v0/namespaces/{ns}/snapshots/{snapshot_id}` (deletes the pin; a missing id returns `snapshot_not_found`) |
+| Delete a snapshot | `delete_snapshot` | `not_idempotent` | `DELETE /v0/namespaces/{ns}/snapshots/{snapshot_id}` (deletes the pin; a missing id returns `snapshot_not_found`) |
 
 In an ACL namespace every snapshot operation requires an administrator subject; a request with no subject headers acts as the token holder.
 | Fork a namespace | `fork_namespace` | `not_idempotent` | `POST /v0/namespaces/{source_ns}/forks`; requires the `Loonfs-Actor` header |
@@ -903,7 +906,7 @@ In an ACL namespace every snapshot operation requires an administrator subject; 
 | Read namespace diagnostics | `get_namespace_diagnostics` | `idempotent` | `GET /v0/maintenance/namespaces/{ns}/diagnostics` |
 | Create a checkpoint | `create_checkpoint` | `not_idempotent` | `POST /v0/maintenance/namespaces/{ns}/checkpoints`; requires `name` and accepts `ttl_ms` |
 | List checkpoints | `list_checkpoints` | `idempotent` | `GET /v0/maintenance/namespaces/{ns}/checkpoints?limit=100&cursor=...` |
-| Delete a checkpoint | `delete_checkpoint` | `idempotent` | `DELETE /v0/maintenance/namespaces/{ns}/checkpoints/{checkpoint_id}` (deletes the pin; a missing id returns `checkpoint_not_found`; other owners are rejected) |
+| Delete a checkpoint | `delete_checkpoint` | `not_idempotent` | `DELETE /v0/maintenance/namespaces/{ns}/checkpoints/{checkpoint_id}` (deletes the pin; a missing id returns `checkpoint_not_found`; other owners are rejected) |
 | Run one maintenance job | `run_maintenance` | `not_idempotent` | `POST /v0/maintenance/namespaces/{ns}/runs`; the body names one job with `kind` |
 | Search file contents | `grep` | `idempotent` | `GET /v0/namespaces/{ns}/grep?pattern=needle&case_insensitive=false&path_prefix=%2Fsrc&allow_scan=false&allow_stale=false&limit=100&cursor=...`; requires the `query.grep` feature and an active index |
 | Read grep index status | `get_grep_index` | `idempotent` | `GET /v0/maintenance/namespaces/{ns}/grep/index` |
@@ -1195,6 +1198,8 @@ namespaces explicitly with `loonfs maintenance loop --namespaces <id>`. The
 command runs until stopped, or performs one bounded pass with `--drain`.
 Retirement also prompts the runner to schedule GC for a fork's source. A
 missed prompt delays reclamation and never permits deletion.
+
+A maintenance job that cannot start because the process is shutting down releases its claim without running. Shutdown waits for every job that did start.
 
 Keep the provider's lifecycle rule for incomplete multipart uploads. Provider
 upload state can exist outside object listings, so deleting a namespace's
@@ -1505,6 +1510,8 @@ only path parameter names for the same namespace id value; v0 does not accept
 or emit a namespace `name` alias.
 
 Create and fork install hint and manifest 1 in order. The conditional put of manifest 1 decides existence ([format: namespace lifecycle](format.md#9-namespace-lifecycle-and-forks)). A create or fork that loses that write to another active namespace answers `namespace_exists` (409). A create or fork into a deleted id answers `namespace_deleted` (410) before writing anything. There is no partially created namespace.
+
+A namespace id identifies one lifetime and cannot be reused after deletion. Applications that reuse a human name must keep their own name-to-id map and mint a fresh namespace id for each lifetime.
 
 A new request after a lost creation acknowledgement returns
 `namespace_exists`, unless it explicitly allows an existing namespace.
@@ -2928,6 +2935,8 @@ resumes strictly after the last candidate the issuing page finished
 scanning and is bound to that request — replaying it with different
 criteria is rejected as `invalid_request`.
 
+An active index remains enabled when its watermark is ahead of the reader's pinned head. The query pins the head again once and continues with the loaded index.
+
 Grep cursors tolerate head drift with the same forward-only rule as every
 other cursor in the API (section 6.5). A grep cursor minted at an older
 head is accepted, and the resumed page evaluates at the then-current head
@@ -3065,6 +3074,8 @@ Implementations may still keep durable local state such as auth/session
 state, retry journals, pinned snapshot ids, or inode context learned from
 prior responses when that improves usability, restart safety, or
 resumability.
+
+The reference CLI loads defaults only when reading its config metadata returns a not-found error. Any other metadata error returns an invalid-config error naming the path and leaves the file unchanged.
 
 ### 8.2 Sync client
 

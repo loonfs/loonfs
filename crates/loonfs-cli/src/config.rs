@@ -511,10 +511,15 @@ fn unusable_config(problem: String) -> CliError {
 }
 
 pub(crate) fn load_config_if_exists(path: &Path) -> Result<Option<CliConfig>, CliError> {
-    if !path.exists() {
-        return Ok(None);
+    // A broken symlink is a file the user put there, not an absent config.
+    match fs::symlink_metadata(path) {
+        Ok(_) => load_config(path).map(Some),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(unusable_config(format!(
+            "failed to read config metadata {}: {error}",
+            path.display()
+        ))),
     }
-    load_config(path).map(Some)
 }
 
 pub(crate) fn load_or_default_config(path: &Path) -> Result<CliConfig, CliError> {
@@ -1156,6 +1161,35 @@ secret_access_key = "secret"
     }
 
     #[test]
+    #[cfg(unix)]
+    fn unreadable_config_parent_is_not_treated_as_absence() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().expect("directory");
+        let path = directory.path().join("config.toml");
+        let contents = "config_version = 1\n";
+        std::fs::write(&path, contents).expect("write config");
+        let permissions = std::fs::metadata(directory.path())
+            .expect("directory metadata")
+            .permissions();
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o000))
+            .expect("make parent unreadable");
+        let result = super::load_or_default_config(&path);
+        std::fs::set_permissions(directory.path(), permissions).expect("restore permissions");
+
+        let error = result.expect_err("unreadable parent must fail");
+        assert_eq!(
+            error.code,
+            crate::error::CliErrorCode::InvalidConfig.as_str()
+        );
+        assert!(error.message.contains(&path.display().to_string()));
+        assert_eq!(
+            std::fs::read_to_string(path).expect("read config"),
+            contents
+        );
+    }
+
+    #[test]
     fn mutate_config_creates_an_owner_only_file() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("nested").join("config.toml");
@@ -1174,6 +1208,18 @@ secret_access_key = "secret"
                 & 0o777;
             assert_eq!(mode, 0o600);
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_broken_config_symlink_is_not_absence() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::os::unix::fs::symlink(dir.path().join("missing.toml"), &path).expect("symlink");
+
+        assert!(super::load_config_if_exists(&path).is_err());
+        assert!(super::mutate_config(&path, |_| Ok(())).is_err());
+        assert!(!dir.path().join("missing.toml").exists());
     }
 
     #[test]

@@ -409,13 +409,8 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
 
     /// Returns the grep index's state and maintenance progress.
     pub async fn get_grep_index(&self, namespace_id: &NamespaceId) -> Result<GrepIndex> {
-        let head = self.reads(namespace_id).head().await?;
-        let manifest = self.manifest_state(namespace_id).await?.filter(|manifest| {
-            manifest
-                .status()
-                .active_watermark()
-                .is_none_or(|resume| resume.built_through_seq() <= head.head_seq)
-        });
+        self.reads(namespace_id).head().await?;
+        let manifest = self.manifest_state(namespace_id).await?;
         let (lifecycle, next_run_no, reorganize_pending) = match &manifest {
             Some(manifest) => (
                 GrepIndexLifecycle::from(manifest.status()),

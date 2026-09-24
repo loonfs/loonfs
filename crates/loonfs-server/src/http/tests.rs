@@ -371,6 +371,7 @@ fn error_detail_fields_match_the_api_spec_table() {
         .collect();
 
     let populated = ErrorDetails {
+        namespace_id: Some(NamespaceId::parse("deleted").expect("namespace id")),
         precondition_index: Some(0),
         commit_id: Some(CommitId::parse("commit").expect("valid commit id")),
         committed_seq: Some(ChangeSeq::from(1)),
