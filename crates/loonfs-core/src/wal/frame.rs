@@ -64,7 +64,7 @@ pub(crate) struct ValidatedWalSegment {
 }
 
 impl ValidatedWalSegment {
-    pub(crate) fn new(object_key: String, envelope: WalSegmentEnvelope) -> Self {
+    pub(super) fn new(object_key: String, envelope: WalSegmentEnvelope) -> Self {
         Self {
             object_key,
             envelope,

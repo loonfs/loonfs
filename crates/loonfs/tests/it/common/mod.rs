@@ -699,7 +699,6 @@ pub(crate) fn assert_core_error_kind<T>(result: loonfs::Result<T>, expected: Err
 pub(crate) struct RuntimeStoreProbe {
     pub(crate) store: SharedObjectStore,
     pub(crate) fail_wal_publish: Arc<FailStore<SharedObjectStore>>,
-    pub(crate) fail_manifest_publish: Arc<FailStore<SharedObjectStore>>,
     pub(crate) wal_gets: Arc<RecordingStore<SharedObjectStore>>,
     pub(crate) manifest_gets: Arc<RecordingStore<SharedObjectStore>>,
     pub(crate) hint_gets: Arc<RecordingStore<SharedObjectStore>>,
@@ -727,16 +726,9 @@ impl RuntimeStoreProbe {
             OperationClass::PutCreateIfAbsent,
             InjectedError::PreconditionFailed,
         ));
-        let fail_manifest_publish = Arc::new(FailStore::new(
-            fail_wal_publish.clone() as SharedObjectStore,
-            KeyPredicate::manifest(namespace_id),
-            OperationClass::Put,
-            InjectedError::PreconditionFailed,
-        ));
         Self {
-            store: fail_manifest_publish.clone(),
+            store: fail_wal_publish.clone(),
             fail_wal_publish,
-            fail_manifest_publish,
             wal_gets,
             manifest_gets,
             hint_gets,
@@ -753,10 +745,6 @@ impl RuntimeStoreProbe {
 
     pub(crate) fn allow_wal_publish(&self) {
         self.fail_wal_publish.clear();
-    }
-
-    pub(crate) fn fail_manifest_publish(&self) {
-        self.fail_manifest_publish.fail_all();
     }
 
     pub(crate) fn reset_wal_get_count(&self) {

@@ -129,7 +129,7 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
     let anchor = load_read_anchor(store, namespace_id)
         .await
         .map_err(CoreError::ControlObjectLoad)?;
-    let floor_seq = anchor.retention_floor_seq;
+    let floor_seq = anchor.retention_floor_seq();
     let current_manifest = anchor.manifest.state;
     if current_manifest.compactor_epoch != compactor_epoch {
         return Ok(MetadataReorganizeOutcome::Fenced);
@@ -210,16 +210,7 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
 
     ensure_metadata_publication_budget(timer, publication_started_ms, namespace_id)?;
     let manifest_no = manifest.envelope().payload().manifest_no;
-    match publish_manifest(
-        store,
-        namespace_id,
-        manifest,
-        Some(current_manifest.manifest.manifest_no),
-        timer,
-        publication_started_ms,
-    )
-    .await?
-    {
+    match publish_manifest(store, manifest, timer, publication_started_ms).await? {
         ManifestPublicationOutcome::Published(_) => Ok(MetadataReorganizeOutcome::UnitPublished {
             group,
             merged_delta_rows: input.merged_delta_rows,
@@ -236,8 +227,9 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
             Ok(MetadataReorganizeOutcome::Fenced)
         }
         ManifestPublicationOutcome::CoveredByCurrent(_)
-        | ManifestPublicationOutcome::PredecessorChanged(_)
-        | ManifestPublicationOutcome::Installable => Ok(MetadataReorganizeOutcome::Superseded),
+        | ManifestPublicationOutcome::PredecessorChanged(_) => {
+            Ok(MetadataReorganizeOutcome::Superseded)
+        }
     }
 }
 
@@ -789,7 +781,6 @@ pub(super) fn build_replacement_manifest(
         namespace_id: namespace_id.clone(),
         manifest_no,
         head_seq: previous.payload().head_seq,
-        head_commit_id: previous.payload().head_commit_id.clone(),
         base_seq,
         writer_epoch: previous.payload().writer_epoch,
         next_inode_id: previous.payload().next_inode_id,

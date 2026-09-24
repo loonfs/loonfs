@@ -15,7 +15,7 @@ use super::scan::VerifiedMetadataSegments;
 use super::validate::{validate_manifest, validate_namespace_manifest};
 use crate::error::{CoreError, MetadataProjectionLoadError};
 use crate::metadata::MetadataState;
-use crate::namespace::basis::{MetadataBasis, MetadataBasisIdentity};
+use crate::namespace::basis::MetadataBasis;
 use crate::namespace::bootstrap::bootstrap_metadata_state;
 use crate::namespace::state::NamespaceReadState;
 use loonfs_api::wire::control::ManifestRef;
@@ -90,7 +90,6 @@ pub(crate) fn ensure_manifest_reference_matches(
 
 /// A verified basis with its identity, segments, and in-memory base rows.
 pub(crate) struct LoadedMetadataBasis<'a, S: ObjectStore + ?Sized> {
-    pub(crate) identity: MetadataBasisIdentity,
     pub(crate) segments: VerifiedMetadataSegments<'a, S>,
     /// The root inode contributed by an empty manifest.
     pub(crate) base_state: MetadataState,
@@ -110,9 +109,7 @@ pub(crate) async fn load_basis_metadata_segments<'a, S: ObjectStore + ?Sized>(
 ) -> crate::error::Result<LoadedMetadataBasis<'a, S>> {
     let manifest = basis.manifest();
     let segments = load_manifest_segments(store, segment_cache, manifest).await?;
-    let head_seq = segments.manifest().payload().head_seq;
     Ok(LoadedMetadataBasis {
-        identity: MetadataBasisIdentity::from_verified_basis(basis.clone(), head_seq),
         base_state: if segments.manifest().payload().runs.is_empty() {
             bootstrap_metadata_state(
                 segments.manifest().payload().created_at_ms,
@@ -227,23 +224,6 @@ pub(crate) async fn load_manifest_segments_for_inspection<'a, S: ObjectStore + ?
         scan_runs,
         block_memo: SessionBlockMemo::default(),
     };
-    Ok(segments)
-}
-
-pub(crate) async fn load_owned_manifest_segments_for_inspection<'a, S: ObjectStore + ?Sized>(
-    store: &'a S,
-    namespace_id: &NamespaceId,
-    manifest_no: &ManifestNo,
-) -> Result<VerifiedMetadataSegments<'a, S>, ManifestLoadError> {
-    let mut segments =
-        load_manifest_segments_for_inspection(store, None, namespace_id, manifest_no).await?;
-    for run in Arc::make_mut(&mut segments.scan_runs) {
-        for family in &mut run.segments {
-            family
-                .segments
-                .retain(|segment| &segment.owner_namespace_id == namespace_id);
-        }
-    }
     Ok(segments)
 }
 

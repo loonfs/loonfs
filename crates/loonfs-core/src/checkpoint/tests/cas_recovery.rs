@@ -4,6 +4,52 @@ use super::*;
 use loonfs_api::wire::control::{encode_control_state, ControlObjectKind, HintPayload};
 
 #[tokio::test]
+async fn identical_compactor_claims_report_the_loser_as_covered() {
+    for race_at_put in [false, true] {
+        let directory = tempdir().expect("directory");
+        let namespace_id = NamespaceId::parse("demo").expect("namespace");
+        let store = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
+        bootstrap_namespace(&store, &namespace_id, &test_context())
+            .await
+            .expect("bootstrap");
+        let current = load_current_manifest(&store, &namespace_id)
+            .await
+            .expect("current");
+        let mut payload = current.envelope.payload().clone();
+        payload.manifest_no = payload.manifest_no.successor().expect("next manifest");
+        payload.compactor_epoch += 1;
+        let claim = encode_manifest(payload).expect("claim");
+        let blocked = BlockingStore::new(
+            store.clone(),
+            KeyPredicate::manifest(&namespace_id),
+            OperationClass::Put,
+        );
+        let (losing, winning) = if race_at_put {
+            blocked.block_next();
+            let losing = publish_manifest(&blocked, claim.clone());
+            let winning = async {
+                blocked.wait_until_blocked().await;
+                let outcome = publish_manifest(&store, claim.clone()).await;
+                blocked.release();
+                outcome
+            };
+            futures::join!(losing, winning)
+        } else {
+            let winning = publish_manifest(&store, claim.clone()).await;
+            (publish_manifest(&store, claim).await, winning)
+        };
+        assert!(matches!(
+            winning.expect("winner"),
+            ManifestPublicationOutcome::Published(_)
+        ));
+        assert!(matches!(
+            losing.expect("loser"),
+            ManifestPublicationOutcome::CoveredByCurrent(_)
+        ));
+    }
+}
+
+#[tokio::test]
 async fn publishers_racing_one_number_load_the_winner_and_retry_when_needed() {
     for newer_head in [false, true] {
         let directory = tempdir().expect("directory");
@@ -33,7 +79,6 @@ async fn publishers_racing_one_number_load_the_winner_and_retry_when_needed() {
         let mut payload = current.envelope.payload().clone();
         payload.manifest_no = predecessor.successor().expect("next number");
         let first = encode_manifest(payload.clone()).expect("candidate");
-        let first_manifest_no = first.envelope().payload().manifest_no;
         if newer_head {
             let session = Arc::new(std::sync::Mutex::new(
                 crate::commit_engine::WriterSessionState::Acquired(
@@ -99,10 +144,10 @@ async fn publishers_racing_one_number_load_the_winner_and_retry_when_needed() {
             OperationClass::Put,
         );
         blocked.block_next();
-        let losing = publish_manifest(&blocked, &namespace_id, second.clone(), Some(predecessor));
+        let losing = publish_manifest(&blocked, second.clone());
         let winning = async {
             blocked.wait_until_blocked().await;
-            let result = publish_manifest(&store, &namespace_id, first, Some(predecessor)).await;
+            let result = publish_manifest(&store, first).await;
             blocked.release();
             result
         };
@@ -130,14 +175,9 @@ async fn publishers_racing_one_number_load_the_winner_and_retry_when_needed() {
             let mut retry = second.into_parts().0.into_payload();
             retry.manifest_no = retry.manifest_no.successor().expect("next number");
             assert!(matches!(
-                publish_manifest(
-                    &store,
-                    &namespace_id,
-                    encode_manifest(retry).expect("retry"),
-                    Some(first_manifest_no)
-                )
-                .await
-                .expect("publish retry"),
+                publish_manifest(&store, encode_manifest(retry).expect("retry"))
+                    .await
+                    .expect("publish retry"),
                 ManifestPublicationOutcome::Published(_)
             ));
         } else {
@@ -261,11 +301,10 @@ async fn retention_publishes_only_a_number_and_floor_change_and_writers_read_it(
     expected.retention_floor_seq = expected.head_seq;
     assert_eq!(after.envelope.payload(), &expected);
     assert_eq!(advanced.retention_floor_seq, expected.head_seq);
-    let (_, writer_floor) =
-        crate::namespace::read_anchor::load_head_and_retention_floor(&store, &namespace_id)
-            .await
-            .expect("writer floor");
-    assert_eq!(writer_floor, expected.head_seq);
+    let anchor = crate::namespace::read_anchor::load_read_anchor(&store, &namespace_id)
+        .await
+        .expect("writer floor");
+    assert_eq!(anchor.retention_floor_seq(), expected.head_seq);
     store.reset();
     advance_retention_floor(&store, &namespace_id)
         .await
@@ -311,14 +350,9 @@ async fn manifest_publication_recovers_an_ambiguous_put_and_tolerates_a_failed_h
         .apply_then_fail();
         store.fail_next(1);
         assert!(matches!(
-            publish_manifest(
-                &store,
-                &namespace_id,
-                candidate,
-                Some(current.state.manifest.manifest_no)
-            )
-            .await
-            .expect("published"),
+            publish_manifest(&store, candidate)
+                .await
+                .expect("published"),
             ManifestPublicationOutcome::Published(_)
         ));
         assert_eq!(

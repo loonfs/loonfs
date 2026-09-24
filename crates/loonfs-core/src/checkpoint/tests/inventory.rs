@@ -8,9 +8,7 @@
 use super::*;
 use crate::checkpoint::list::list_checkpoints_page;
 use loonfs_api::wire::control::PinOwner;
-use loonfs_api::{
-    CheckpointOwnerSummary, ErrorCode, ListCheckpointsResponse, NamespaceCursor, PageRequest,
-};
+use loonfs_api::{CheckpointOwnerSummary, ErrorCode, ListCheckpointsResponse, PageRequest};
 use loonfs_test_support::ids::page_limit;
 
 async fn list_all_checkpoints<S: ObjectStore + ?Sized>(
@@ -53,6 +51,7 @@ async fn pin_named<S: ObjectStore + ?Sized>(
         context,
     )
     .await
+    .map(crate::checkpoint::checkpoint_summary)
     .expect("create checkpoint")
     .checkpoint_id
 }
@@ -256,7 +255,7 @@ async fn deleted_pins_are_absent_from_later_pages() {
         second
             .next_cursor
             .as_ref()
-            .and_then(NamespaceCursor::last_key),
+            .map(|cursor| cursor.last_key.as_str()),
         Some(loonfs_objectstore::keys::checkpoint_record(&namespace_id, &ids[6]).as_str())
     );
 
@@ -472,6 +471,7 @@ async fn a_snapshot_lists_with_its_owner_and_its_required_expiry() {
         &context,
     )
     .await
+    .map(crate::checkpoint::checkpoint_summary)
     .expect("create snapshot");
 
     let listed = list_all_checkpoints(&store, &namespace_id)
@@ -515,6 +515,7 @@ async fn a_refused_owner_writes_no_record_to_find() {
     for owner in refused {
         let error = create::create_checkpoint(&store, &namespace_id, owner.clone(), &context)
             .await
+            .map(crate::checkpoint::checkpoint_summary)
             .expect_err("the owner is not creatable");
         assert_eq!(error.code(), ErrorCode::InvalidRequest, "owner: {owner:?}");
     }

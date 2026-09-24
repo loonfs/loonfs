@@ -5,7 +5,7 @@ use crate::control_object::ControlObjectLoadError;
 use crate::error::{CoreError, Result};
 use crate::namespace::control::load_namespace_read_state;
 use futures::StreamExt;
-use loonfs_api::{Checkpoint, NamespaceCursor, NamespaceId, Page, PageCursor, PageRequest};
+use loonfs_api::{Checkpoint, NamespaceId, Page, PageCursor, PageRequest};
 use loonfs_objectstore::keys::checkpoint_prefix;
 use loonfs_objectstore::ObjectStore;
 use serde::{Deserialize, Serialize};
@@ -14,25 +14,11 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CheckpointPageCursor {
     namespace_id: NamespaceId,
-    last_key: String,
+    pub(super) last_key: String,
 }
 
 impl PageCursor for CheckpointPageCursor {
     const KIND: &'static str = "checkpoint_inventory";
-}
-
-impl NamespaceCursor for CheckpointPageCursor {
-    fn namespace_id(&self) -> &NamespaceId {
-        &self.namespace_id
-    }
-
-    fn last_key(&self) -> Option<&str> {
-        Some(&self.last_key)
-    }
-
-    fn key_prefix(&self) -> String {
-        checkpoint_prefix(&self.namespace_id)
-    }
 }
 
 impl CheckpointPageCursor {
@@ -129,11 +115,10 @@ pub(crate) async fn list_checkpoints_page<S: ObjectStore + ?Sized>(
 #[cfg(test)]
 mod cursor_tests {
     use super::*;
-    use loonfs_api::{decode_namespace_cursor, encode_cursor, DirectoryPageCursor, NameKey};
+    use loonfs_api::{decode_cursor, encode_cursor, DirectoryPageCursor, NameKey};
 
     #[test]
     fn cursor_decode_tolerates_additive_fields() {
-        let namespace_id = NamespaceId::parse("demo").expect("namespace id");
         let token = loonfs_api::wire::hex::hex_encode_bytes(
             &serde_json::to_vec(&serde_json::json!({
                 "format_version": 1,
@@ -145,17 +130,16 @@ mod cursor_tests {
             .expect("encode cursor"),
         );
 
-        let cursor = decode_namespace_cursor::<CheckpointPageCursor>(&token, &namespace_id)
+        let cursor = decode_cursor::<CheckpointPageCursor>(&token)
             .expect("decode cursor with additive field");
         assert_eq!(
-            cursor.last_key(),
-            Some("namespaces/demo/pins/pin_00000000000000000001-0000000000000001.json")
+            cursor.last_key,
+            "namespaces/demo/pins/pin_00000000000000000001-0000000000000001.json"
         );
     }
 
     #[test]
     fn cursor_is_operation_bound() {
-        let namespace_id = NamespaceId::parse("demo").expect("namespace id");
         let directory = DirectoryPageCursor {
             head_seq: loonfs_api::ChangeSeq(1),
             snapshot_id: None,
@@ -164,6 +148,6 @@ mod cursor_tests {
         };
         let token = encode_cursor(&directory).expect("encode directory cursor");
 
-        assert!(decode_namespace_cursor::<CheckpointPageCursor>(&token, &namespace_id).is_err());
+        assert!(decode_cursor::<CheckpointPageCursor>(&token).is_err());
     }
 }

@@ -80,9 +80,7 @@ pub(crate) fn checkpoint_key_ids(
             reason: format!("the key belongs to durable family `{:?}`", parsed.family()),
         });
     }
-    let namespace = parsed
-        .owner_namespace_id()
-        .expect("pin keys carry a namespace identifier");
+    let namespace = parsed.owner_namespace_id();
     let checkpoint = parsed
         .identifier()
         .expect("pin keys carry a checkpoint identifier");

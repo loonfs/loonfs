@@ -2,9 +2,7 @@
 use super::families::CandidateFamily;
 use super::live_set::LiveSet;
 use super::reap::{grace_age, sweep_checkpoint_record, CheckpointSweep, GraceAge};
-use super::uploads::{
-    sweep_upload_session, PublicationView, UploadSessionSweep, UploadSweepContext,
-};
+use super::uploads::{sweep_upload_session, PublicationView, UploadSessionSweep};
 use crate::context::MutationContext;
 use crate::control_update::load_upload_session_state;
 use crate::error::{CoreError, Result};
@@ -20,7 +18,6 @@ pub(super) struct Sweep<'a, 'store, S: ObjectStore + ?Sized> {
     pub(super) mutation: &'a MutationContext,
     pub(super) live: &'a LiveSet,
     pub(super) view: &'a PublicationView<'a, 'store, S>,
-    pub(super) upload_sweep: UploadSweepContext<'a, S>,
     pub(super) report: &'a mut GcResponse,
 }
 
@@ -143,7 +140,7 @@ impl<S: ObjectStore + ?Sized> Sweep<'_, '_, S> {
             }
             Err(error) => return Err(error),
         };
-        match sweep_upload_session(&self.upload_sweep, &state, self.view).await? {
+        match sweep_upload_session(self, &state).await? {
             UploadSessionSweep::Delete { reclaimed_content } => {
                 self.delete_key(key).await?;
                 self.report.deleted.upload_sessions += 1;

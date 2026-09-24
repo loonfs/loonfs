@@ -117,8 +117,8 @@ pub mod cache {
         DEFAULT_WAL_TAIL_PROJECTION_DECODED_BYTES, DEFAULT_WAL_TAIL_PROJECTION_ROWS,
     };
     pub use crate::namespace::status::{
-        load_deleted_namespace_diagnostics, load_namespace, load_namespace_diagnostics,
-        load_namespace_flush_basis, NamespaceFlushBasis, NamespaceStorageDiagnostics,
+        load_namespace, load_namespace_diagnostics, load_namespace_flush_basis,
+        NamespaceFlushBasis, NamespaceStorageDiagnostics,
     };
     #[cfg(any(test, feature = "test-support"))]
     pub use crate::namespace::status::{load_namespace_wal_tail_usage, NamespaceWalTailUsage};
@@ -137,8 +137,11 @@ pub mod control {
     };
     pub use crate::namespace::control::{
         load_namespace_checkpoint_record_control, load_namespace_current_manifest,
-        load_namespace_read_anchor, load_namespace_read_state, raise_namespace_hint,
-        CurrentManifest, LoadedHint, LoadedManifest,
+        load_namespace_read_state, raise_namespace_hint, CurrentManifest, LoadedHint,
+        LoadedManifest,
+    };
+    pub use crate::namespace::read_anchor::{
+        load_read_anchor, manifest_has_successor, NamespaceReadAnchor,
     };
     pub use crate::namespace::state::NamespaceReadState;
     pub use crate::namespace::MetadataBasis;
@@ -181,7 +184,6 @@ pub use error::{
     WriterFence,
 };
 pub use gc::{delete_if_aged, gc_namespace, GcConfig, GraceAge};
-pub use namespace::BootstrapNamespaceError;
 pub use options::{BootstrapOptions, DeleteNamespaceOptions};
 pub use path::read::{
     CurrentFileState, DirectDownloadByInodeTarget, DirectDownloadTarget, MAX_RESOLVE_CURRENT_FILES,

@@ -69,6 +69,16 @@ impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
 }
 
 impl<S: ObjectStore + ?Sized> VerifiedMetadataSegments<'_, S> {
+    pub(crate) fn retain_owned_segments(&mut self, namespace_id: &loonfs_api::NamespaceId) {
+        for run in Arc::make_mut(&mut self.scan_runs) {
+            for family in &mut run.segments {
+                family
+                    .segments
+                    .retain(|segment| &segment.owner_namespace_id == namespace_id);
+            }
+        }
+    }
+
     pub(crate) fn manifest(&self) -> &NamespaceManifestEnvelope {
         self.manifest
             .as_deref()

@@ -25,10 +25,9 @@ use crate::limits::{
 use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
 use crate::namespace::control::load_current_manifest;
 use crate::storage::content::{
-    abort_unpublished_multipart_upload, complete_content_multipart_upload,
-    create_content_multipart_upload, delete_unpublished_content_object, identify_streamed_payload,
-    stage_bytes_under_content_id, stage_streamed_under_content_id, verify_durable_content_checksum,
-    DurableContentValidationError, StreamedPayloadKind,
+    abort_unpublished_multipart_upload, delete_unpublished_content_object,
+    identify_streamed_payload, stage_bytes_under_content_id, stage_streamed_under_content_id,
+    verify_durable_content_checksum, DurableContentValidationError, StreamedPayloadKind,
 };
 use crate::storage::content_admission::{CompletedUploadReceipt, PreparedContent};
 use bytes::Bytes;
@@ -179,9 +178,10 @@ pub(crate) async fn begin_direct_multipart_upload_target<S: ObjectStore + ?Sized
     let recorded = recorded_subject(namespace_id, catalog.access(), subject)?;
     let content_id = ContentId::generate();
     let object_key = content_blob(namespace_id, &content_id);
-
-    let provider_upload_id =
-        create_content_multipart_upload(store, namespace_id, &content_id).await?;
+    let provider_upload_id = store
+        .create_multipart_upload(&object_key)
+        .await
+        .map_err(|error| CoreError::store(&object_key, &error))?;
     let session = NewUploadSession::direct_multipart(
         content_id.clone(),
         &provider_upload_id,
@@ -1254,7 +1254,7 @@ pub(crate) async fn get_upload_status<S: ObjectStore + ?Sized>(
         UploadSessionRecordStatus::Completed {
             completed_at_ms,
             content_ref,
-        } => receipt_within_window(namespace_id, content_ref, *completed_at_ms, now_ms),
+        } => receipt_within_window(content_ref, *completed_at_ms, now_ms),
         UploadSessionRecordStatus::Open { .. } | UploadSessionRecordStatus::Aborted { .. } => None,
     };
     let direct_put_object_key = if matches!(loaded.status, UploadSessionRecordStatus::Open { .. })
@@ -1337,11 +1337,10 @@ fn completed_upload(
             status: completed_status(content_ref, completed_at_ms),
         },
         prepared: PreparedContent::for_completed_upload(
-            namespace_id.clone(),
             content_ref.clone(),
             completed_at_ms.saturating_add(COMPLETED_UPLOAD_ADMISSION_WINDOW_MS),
         ),
-        receipt: receipt_within_window(namespace_id, content_ref, completed_at_ms, now_ms),
+        receipt: receipt_within_window(content_ref, completed_at_ms, now_ms),
     }
 }
 
@@ -1360,17 +1359,12 @@ fn completed_status(content_ref: &ContentRef, completed_at_ms: u64) -> UploadSes
 /// receipt exists, so no new metadata reference to this content can appear
 /// (`limits::CONTENT_RECLAMATION_GRACE_MS`).
 fn receipt_within_window(
-    namespace_id: &NamespaceId,
     content_ref: &ContentRef,
     completed_at_ms: u64,
     now_ms: u64,
 ) -> Option<CompletedUploadReceipt> {
     (now_ms.saturating_sub(completed_at_ms) < COMPLETED_UPLOAD_RECEIPT_WINDOW_MS).then(|| {
-        CompletedUploadReceipt::for_completed_session(
-            namespace_id.clone(),
-            content_ref.clone(),
-            completed_at_ms,
-        )
+        CompletedUploadReceipt::for_completed_session(content_ref.clone(), completed_at_ms)
     })
 }
 
@@ -1576,8 +1570,11 @@ async fn assemble_multipart_upload<S: ObjectStore + ?Sized>(
     expected: &ContentRef,
 ) -> Result<CompletionOutcome> {
     let parts = multipart_parts(parts, checksum_algorithm)?;
-    let completion =
-        complete_content_multipart_upload(store, expected, provider_upload_id, &parts).await?;
+    let object_key = content_blob(&expected.owner_namespace_id, &expected.content_id);
+    let completion = store
+        .complete_multipart_upload(&object_key, provider_upload_id, &parts, &expected.checksum)
+        .await
+        .map_err(|error| CoreError::store(&object_key, &error))?;
 
     match verify_durable_content_checksum(store, expected).await {
         Ok(()) => Ok(CompletionOutcome::Verified(expected.clone())),

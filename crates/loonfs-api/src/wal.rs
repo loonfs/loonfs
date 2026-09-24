@@ -45,10 +45,6 @@ pub const WAL_SEGMENT_OVERHEAD_BYTES: usize = cbor_map_bytes(&[
     ("writer_epoch", 9),
     ("prior_head_seq", 9),
     ("head_seq", 9),
-    (
-        "head_commit_id",
-        cbor_string_bytes(crate::ids::MAX_ID_BYTES),
-    ),
     ("next_inode_id", 9),
     ("records", 9),
 ]);
@@ -297,8 +293,6 @@ pub struct WalSegmentPayload {
     pub prior_head_seq: ChangeSeq,
     /// Visible sequence after this segment.
     pub head_seq: ChangeSeq,
-    /// Head commit ID after this segment; a fence repeats the one it received.
-    pub head_commit_id: CommitId,
     /// Allocation high-water mark after this segment.
     pub next_inode_id: InodeId,
     /// Logical commits in contiguous ascending sequence order.
@@ -517,18 +511,13 @@ mod tests {
                 }
             })
             .collect();
-        let head_commit_id = records
-            .last()
-            .expect("inline segment should contain a record")
-            .commit_id
-            .clone();
+
         WalSegmentPayload {
             namespace_id,
             wal_no: WalNo(1),
             writer_epoch: WriterEpoch(1),
             prior_head_seq: ChangeSeq(0),
             head_seq: ChangeSeq(lengths.len() as u64),
-            head_commit_id,
             next_inode_id: InodeId(3),
             records,
         }
@@ -682,7 +671,6 @@ mod tests {
             writer_epoch: WriterEpoch(1),
             prior_head_seq: ChangeSeq(0),
             head_seq: ChangeSeq(0),
-            head_commit_id: crate::control::genesis_commit_id(),
             next_inode_id: InodeId(2),
             records: Vec::new(),
         })

@@ -194,13 +194,10 @@ pub struct WalTailProjectionCacheStats {
     pub cached_decoded_bytes: usize,
 }
 
-// Within a namespace, numbered immutable manifests and WAL fix the state between
-// manifest_head_seq and head_seq. Writer fences publish a new manifest number.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct WalTailProjectionCacheKey {
     pub namespace_id: NamespaceId,
     pub manifest_no: ManifestNo,
-    pub manifest_head_seq: ChangeSeq,
     pub head_seq: ChangeSeq,
 }
 
@@ -358,7 +355,6 @@ mod tests {
         let key = WalTailProjectionCacheKey {
             namespace_id: NamespaceId::parse("demo").expect("namespace id"),
             manifest_no: ManifestNo(7),
-            manifest_head_seq: ChangeSeq(11),
             head_seq: ChangeSeq(12),
         };
         let actors = [

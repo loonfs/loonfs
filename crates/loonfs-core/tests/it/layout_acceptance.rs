@@ -222,6 +222,5 @@ async fn maintenance_preserves_namespace_identity_and_writer() {
     assert_eq!(after.writer_epoch, before.writer_epoch);
     assert_eq!(after.writer, before.writer);
     assert_eq!(after.seq, before.seq);
-    assert_eq!(after.head_commit_id, before.head_commit_id);
     assert_eq!(after.next_inode_id, before.next_inode_id);
 }

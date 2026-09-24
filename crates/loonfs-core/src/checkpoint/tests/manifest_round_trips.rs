@@ -75,7 +75,6 @@ async fn a_publish_projection_fold_writes_the_replayed_tail_rows() {
         &namespace_id,
         acquired_writer,
         None,
-        &PublishTailOptions::default(),
     )
     .await
     .expect("load publish projection");
@@ -84,7 +83,6 @@ async fn a_publish_projection_fold_writes_the_replayed_tail_rows() {
         wal_tail_inline_bytes: 0,
         head: projection.head.clone(),
         basis: projection.basis().clone(),
-        retention_floor_seq: projection.retention_floor_seq,
         tail_state: Arc::clone(&projection.tail_state),
         wal_tail_segments: projection.wal_tail_segments,
     };
@@ -826,7 +824,6 @@ async fn manifest_run_rejects_rows_after_run_seq() {
         manifest_no: manifest_no(materialization.head.seq),
 
         head_seq: materialization.head.seq,
-        head_commit_id: materialization.head.head_commit_id.clone(),
         base_seq: first,
         writer_epoch: materialization.head.writer_epoch,
         next_inode_id: materialization.head.next_inode_id,
@@ -968,9 +965,7 @@ async fn create_checkpoint_pins_a_current_basis_without_building_a_new_manifest(
     let manifest_checksum = manifest_without_checkpoint.payload_checksum().to_owned();
     publish_manifest(
         &store,
-        &namespace_id,
         encode_manifest(manifest_without_checkpoint.into_payload()).expect("encode manifest"),
-        Some(materialization.manifest.manifest.manifest_no),
     )
     .await
     .expect("publish manifest");
@@ -990,54 +985,4 @@ async fn create_checkpoint_pins_a_current_basis_without_building_a_new_manifest(
         .state;
     assert_eq!(record.pin_id.manifest_no(), covering_manifest_no);
     assert_eq!(record.payload_checksum, manifest_checksum);
-}
-
-#[tokio::test]
-async fn manifest_without_checkpoint_record_reconstructs_manifest_head_commit() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context)
-        .await
-        .expect("bootstrap");
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/docs/hello.txt",
-        b"hello\n",
-        &context,
-        None,
-    )
-    .await
-    .expect("write hello");
-
-    let materialization = load_current_projection(&store, &namespace_id)
-        .await
-        .expect("materialization");
-    let manifest = build_namespace_manifest_from_metadata_state(
-        &store,
-        &namespace_id,
-        ManifestMetadataSource {
-            head: &materialization.head,
-            basis_manifest_no: Some(materialization.manifest.manifest.manifest_no),
-            retention_floor_seq: read_floor_seq(&store, &namespace_id).await,
-            metadata_state: &materialization.metadata_state,
-        },
-        MetadataLsmPolicy::default(),
-        ManifestNo(1),
-    )
-    .await
-    .expect("build manifest without checkpoint");
-    let mut newer_live_head = materialization.head.clone();
-    newer_live_head.head_commit_id =
-        CommitId::parse("c_00000000000000000000000000000099").expect("commit id");
-
-    let reconstructed = head_from_manifest(&newer_live_head, &manifest);
-
-    assert_eq!(
-        reconstructed.head_commit_id,
-        manifest.payload().head_commit_id
-    );
-    assert_ne!(reconstructed.head_commit_id, newer_live_head.head_commit_id);
 }

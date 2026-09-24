@@ -8,12 +8,6 @@ use loonfs_api::wire::control::{ForkBasis, PinPayload};
 use loonfs_api::NamespaceId;
 use loonfs_objectstore::ObjectStore;
 
-#[derive(Debug)]
-pub(super) enum ForkCheckpointReachability {
-    Reclaimable,
-    Retained { reason: &'static str },
-}
-
 pub(super) async fn delete_source_checkpoint<S: ObjectStore + ?Sized>(
     store: &S,
     basis: &ForkBasis,
@@ -36,51 +30,39 @@ pub(super) async fn delete_source_checkpoint<S: ObjectStore + ?Sized>(
     Ok(present)
 }
 
-pub(super) async fn classify_fork_checkpoint<S: ObjectStore + ?Sized>(
+pub(super) async fn fork_checkpoint_is_retained<S: ObjectStore + ?Sized>(
     store: &S,
     record: &PinPayload,
     target_namespace_id: &NamespaceId,
     grace_window_ms: u64,
     context: &MutationContext,
-) -> Result<ForkCheckpointReachability> {
+) -> Result<bool> {
     if context.now_ms.saturating_sub(record.created_at_ms) < grace_window_ms {
-        return Ok(ForkCheckpointReachability::Retained {
-            reason: "target_creation_in_flight",
-        });
+        return Ok(true);
     }
-    match classify_target(store, record, target_namespace_id).await {
+    match target_retains_checkpoint(store, record, target_namespace_id).await {
         Err(CoreError::ControlObjectLoad(error @ ControlObjectLoadError::Store { .. })) => {
             tracing::warn!(
                 namespace_id = %target_namespace_id,
                 error = %error,
                 "the fork target did not read; retaining its source pin"
             );
-            Ok(ForkCheckpointReachability::Retained {
-                reason: "target_head_unreadable",
-            })
+            Ok(true)
         }
         result => result,
     }
 }
 
-async fn classify_target<S: ObjectStore + ?Sized>(
+async fn target_retains_checkpoint<S: ObjectStore + ?Sized>(
     store: &S,
     record: &PinPayload,
     target_namespace_id: &NamespaceId,
-) -> Result<ForkCheckpointReachability> {
+) -> Result<bool> {
     let Some(target) = load_current_manifest_if_present(store, target_namespace_id).await? else {
-        return Ok(ForkCheckpointReachability::Reclaimable);
+        return Ok(false);
     };
     let basis = target.envelope.payload().fork_basis.as_ref();
-    Ok(
-        if basis.is_some_and(|basis| {
-            basis.source_pin_id == record.pin_id && basis.manifest == record.manifest()
-        }) {
-            ForkCheckpointReachability::Retained {
-                reason: "referenced_by_target",
-            }
-        } else {
-            ForkCheckpointReachability::Reclaimable
-        },
-    )
+    Ok(basis.is_some_and(|basis| {
+        basis.source_pin_id == record.pin_id && basis.manifest == record.manifest()
+    }))
 }

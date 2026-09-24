@@ -27,7 +27,7 @@ pub enum DurableObjectFamily {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedObjectKey<'a> {
     family: DurableObjectFamily,
-    owner_namespace_id: Option<&'a str>,
+    owner_namespace_id: &'a str,
     identifier: Option<&'a str>,
 }
 
@@ -38,7 +38,7 @@ impl<'a> ParsedObjectKey<'a> {
     }
 
     /// Returns the namespace path component.
-    pub fn owner_namespace_id(&self) -> Option<&'a str> {
+    pub fn owner_namespace_id(&self) -> &'a str {
         self.owner_namespace_id
     }
 
@@ -57,27 +57,21 @@ pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
     match segments.as_slice() {
         ["namespaces", owner_namespace_id, "content", content_id] => Some(parsed(
             DurableObjectFamily::ContentBlob,
-            Some(owner_namespace_id),
+            owner_namespace_id,
             Some(content_id),
         )),
         ["namespaces", namespace, "wal", segment] => segment
             .strip_suffix(".wal.zst")
             .filter(|identifier| parse_wal_no(identifier).is_some())
-            .map(|identifier| {
-                parsed(
-                    DurableObjectFamily::WalSegment,
-                    Some(namespace),
-                    Some(identifier),
-                )
-            }),
+            .map(|identifier| parsed(DurableObjectFamily::WalSegment, namespace, Some(identifier))),
         ["namespaces", namespace, "hint.json"] => {
-            Some(parsed(DurableObjectFamily::Hint, Some(namespace), None))
+            Some(parsed(DurableObjectFamily::Hint, namespace, None))
         }
         ["namespaces", namespace, "manifests", manifest] => {
             manifest.strip_suffix(".json").map(|identifier| {
                 parsed(
                     DurableObjectFamily::MetadataManifest,
-                    Some(namespace),
+                    namespace,
                     Some(identifier),
                 )
             })
@@ -86,7 +80,7 @@ pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
             segment.strip_suffix(".sst.zst").map(|identifier| {
                 parsed(
                     DurableObjectFamily::MetadataSegment,
-                    Some(namespace),
+                    namespace,
                     Some(identifier),
                 )
             })
@@ -95,7 +89,7 @@ pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
             checkpoint.strip_suffix(".json").map(|identifier| {
                 parsed(
                     DurableObjectFamily::CheckpointRecord,
-                    Some(namespace),
+                    namespace,
                     Some(identifier),
                 )
             })
@@ -104,7 +98,7 @@ pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
             upload.strip_suffix(".json").map(|identifier| {
                 parsed(
                     DurableObjectFamily::UploadSession,
-                    Some(namespace),
+                    namespace,
                     Some(identifier),
                 )
             })
@@ -153,7 +147,7 @@ pub fn upload_id_of(key: &str) -> Option<UploadId> {
 
 fn parsed<'a>(
     family: DurableObjectFamily,
-    owner_namespace_id: Option<&'a str>,
+    owner_namespace_id: &'a str,
     identifier: Option<&'a str>,
 ) -> ParsedObjectKey<'a> {
     ParsedObjectKey {
@@ -225,7 +219,7 @@ mod tests {
         for (key, family, identifier) in cases {
             let parsed = parse_object_key(&key).expect("built key should parse");
             assert_eq!(parsed.family(), family);
-            assert_eq!(parsed.owner_namespace_id(), Some("ns-1"));
+            assert_eq!(parsed.owner_namespace_id(), "ns-1");
             assert_eq!(parsed.identifier(), identifier);
         }
         for owner in ["a", "ab"] {
@@ -236,7 +230,7 @@ mod tests {
                 parse_object_key(&key)
                     .expect("content key")
                     .owner_namespace_id(),
-                Some(owner.as_str())
+                owner.as_str()
             );
         }
         assert!(parse_object_key(&format!("namespaces/ab/content/7/{content_id}")).is_none());

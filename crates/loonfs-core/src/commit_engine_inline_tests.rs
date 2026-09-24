@@ -214,10 +214,7 @@ async fn inline_retry_identity_uses_bytes_and_distinguishes_staged_content() {
     let staged = store_bytes_as_content(&store, &engine.namespace_id, b"hello")
         .await
         .expect("stage");
-    let proof = PreparedContent::for_durable_content_write(
-        engine.namespace_id.clone(),
-        staged.content_ref().clone(),
-    );
+    let proof = PreparedContent::for_durable_content_write(staged.content_ref().clone());
     let inline = InlineContent::new(
         engine.namespace_id.clone(),
         staged.content_ref().content_id.clone(),
@@ -285,7 +282,6 @@ async fn invalid_inline_candidates_write_nothing() {
         .push(put("/staged", staged.content_ref()));
     mismatched.content =
         ContentPreparation::Ready(vec![PreparedContent::for_durable_content_write(
-            engine.namespace_id.clone(),
             staged.content_ref().clone(),
         )]);
     let mut wrong_checksum = mismatched.clone();
@@ -396,6 +392,13 @@ async fn inline_tail_replay_matches_publication_and_materializes_before_metadata
                     value.bytes().as_ref()
                 );
             }
+        } else if index == 1 {
+            assert_eq!(flushed.outcome, FlushWalOutcome::ManifestAdvanced);
+            fold_tests::assert_content_before_metadata(&store, values.len());
+            assert!(!store.snapshot().iter().any(|operation| {
+                matches!(operation, RecordedOperation::Put { key, .. }
+                    if loonfs_objectstore::layout::manifest_no_of(key).is_some())
+            }));
         } else {
             assert_eq!(flushed.outcome, FlushWalOutcome::AlreadyCurrent);
             assert_no_writes(&store);

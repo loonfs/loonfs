@@ -341,7 +341,7 @@ mod tests {
     use crate::namespace::bootstrap::bootstrap_namespace;
     use crate::namespace::writer_epoch::acquire_writer_epoch;
     use crate::path::write::{CommitRequest, FilesystemOperation};
-    use crate::protocol::{load_publish_metadata_view, PublishTailOptions};
+    use crate::protocol::load_publish_metadata_view;
     use crate::time::StdMonotonicTimer;
     use loonfs_api::{AbsolutePath, ChangeSeq, CommitId, MAX_PUBLIC_INTEGER};
     use loonfs_objectstore::keys::{hint, wal_segment_prefix};
@@ -371,16 +371,10 @@ mod tests {
         let acquired_writer = acquire_writer_epoch(&store, &namespace_id, &context)
             .await
             .expect("acquire writer");
-        let (mut view, _projection) = load_publish_metadata_view(
-            &store,
-            None,
-            &namespace_id,
-            acquired_writer,
-            None,
-            &PublishTailOptions::default(),
-        )
-        .await
-        .expect("load publish view");
+        let (mut view, _projection) =
+            load_publish_metadata_view(&store, None, &namespace_id, acquired_writer, None)
+                .await
+                .expect("load publish view");
 
         let hint_key = hint(&namespace_id);
         let hint_before = store

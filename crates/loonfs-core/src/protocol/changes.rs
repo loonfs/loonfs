@@ -153,7 +153,7 @@ fn event_from_op_deltas(
             inode_id: *inode_id,
             parent_inode_id: *parent_inode_id,
             display_name: display_name.clone(),
-            binding_generation: binding_generation(namespace_id, committed_seq, *delta_index)?,
+            binding_generation: binding_generation(namespace_id, committed_seq, *delta_index),
         },
         // CreateFile (and copy-file): allocate + bind + first revision.
         [WalDelta::CreateInode {
@@ -176,7 +176,7 @@ fn event_from_op_deltas(
                 inode_id: *inode_id,
                 parent_inode_id: *parent_inode_id,
                 display_name: display_name.clone(),
-                binding_generation: binding_generation(namespace_id, committed_seq, *delta_index)?,
+                binding_generation: binding_generation(namespace_id, committed_seq, *delta_index),
                 revision_no: *revision_no,
                 content_ref: content_ref.clone(),
             }
@@ -210,7 +210,7 @@ fn event_from_op_deltas(
             source_display_name: from_name.clone(),
             destination_parent_inode_id: *destination_parent_inode_id,
             destination_display_name: to_name.clone(),
-            binding_generation: binding_generation(namespace_id, committed_seq, *delta_index)?,
+            binding_generation: binding_generation(namespace_id, committed_seq, *delta_index),
         },
         // DeleteFile / DeleteSubtree: retire the binding, hide the subtree.
         [WalDelta::UnbindDirentry { child_inode_id, .. }, WalDelta::TombstoneSubtree {
@@ -236,7 +236,7 @@ fn event_from_op_deltas(
             inode_id: *root_inode_id,
             parent_inode_id: *parent_inode_id,
             display_name: display_name.clone(),
-            binding_generation: binding_generation(namespace_id, committed_seq, *delta_index)?,
+            binding_generation: binding_generation(namespace_id, committed_seq, *delta_index),
         },
         // UpdateAttributes, including the copy that carries a source's
         // attributes onto the inode it just created. The delta already holds
@@ -278,13 +278,12 @@ fn binding_generation(
     namespace_id: &NamespaceId,
     bind_seq: ChangeSeq,
     bind_delta_index: u32,
-) -> Result<loonfs_api::BindingGeneration> {
+) -> loonfs_api::BindingGeneration {
     BindingGeneration {
         bind_seq,
         bind_delta_index,
     }
     .encode(namespace_id)
-    .map_err(|error| CoreError::Internal(format!("failed to encode a binding generation: {error}")))
 }
 
 #[cfg(test)]
@@ -296,7 +295,7 @@ mod tests {
     use crate::context::MutationContext;
     use crate::error::CoreError;
     use crate::namespace::bootstrap::bootstrap_namespace;
-    use crate::namespace::read_anchor::load_head_and_metadata_basis;
+    use crate::namespace::read_anchor::load_read_anchor;
     use crate::{NamespaceEngine, RuntimeReadContext};
     use loonfs_api::v0::FilesystemChange;
     use loonfs_api::wire::wal::WalDelta;
@@ -349,12 +348,12 @@ mod tests {
         .await
         .expect("bootstrap");
         let limit = EffectiveLimit::new(NonZeroU32::MIN);
-        let loaded = load_head_and_metadata_basis(&store, &namespace_id)
+        let loaded = load_read_anchor(&store, &namespace_id)
             .await
             .expect("load read basis");
         let context = RuntimeReadContext {
-            head: loaded.head,
-            basis: loaded.basis,
+            basis: loaded.basis(),
+            head: loaded.read_state,
             segment_cache: Arc::new(MetadataSegmentCache::new(Default::default())),
             tail_cache: Arc::new(WalTailProjectionCache::new(
                 WalTailProjectionCacheConfig {

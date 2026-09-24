@@ -8,7 +8,7 @@ use loonfs_core::cache::{
     WalTailProjectionCacheConfig, DEFAULT_WAL_TAIL_PROJECTION_DECODED_BYTES,
     DEFAULT_WAL_TAIL_PROJECTION_ROWS,
 };
-use loonfs_core::control::load_namespace_read_anchor;
+use loonfs_core::control::load_read_anchor;
 use loonfs_core::{MutationContext, NamespaceWriterEngine, RuntimeReadContext};
 use loonfs_objectstore::ObjectStore;
 use std::sync::Arc;
@@ -32,12 +32,12 @@ pub(crate) async fn read_context<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> RuntimeReadContext {
-    let (head, basis) = load_namespace_read_anchor(store, namespace_id)
+    let anchor = load_read_anchor(store, namespace_id)
         .await
         .expect("load read anchor");
     RuntimeReadContext {
-        head,
-        basis,
+        basis: anchor.basis(),
+        head: anchor.read_state,
         segment_cache: Arc::new(MetadataSegmentCache::new(
             MetadataSegmentCacheConfig::default(),
         )),
@@ -83,7 +83,7 @@ pub(crate) mod commit_split_support {
         store: &S,
         namespace_id: &NamespaceId,
         context: &MutationContext,
-    ) -> Result<loonfs_api::Namespace, loonfs_core::BootstrapNamespaceError> {
+    ) -> Result<loonfs_api::Namespace, CoreError> {
         namespace_engine(store, namespace_id, context)
             .bootstrap_namespace(BootstrapOptions {
                 actor_id: loonfs_test_support::test_actor(),
@@ -97,7 +97,7 @@ pub(crate) mod commit_split_support {
         store: &S,
         namespace_id: &NamespaceId,
         context: &MutationContext,
-    ) -> Result<loonfs_api::Namespace, loonfs_core::BootstrapNamespaceError> {
+    ) -> Result<loonfs_api::Namespace, CoreError> {
         namespace_engine(store, namespace_id, context)
             .bootstrap_namespace(BootstrapOptions {
                 actor_id: loonfs_test_support::test_actor(),

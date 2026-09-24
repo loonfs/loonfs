@@ -18,10 +18,14 @@ use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ManifestPublicationOutcome {
-    Installable,
     Published(CurrentManifest),
     CoveredByCurrent(CurrentManifest),
     PredecessorChanged(CurrentManifest),
+}
+
+enum ManifestClassification {
+    Installable,
+    Settled(ManifestPublicationOutcome),
 }
 
 pub(crate) fn encode_manifest(
@@ -43,12 +47,20 @@ pub(crate) fn encode_manifest(
 )]
 pub(crate) async fn publish_manifest<S: ObjectStore + ?Sized>(
     store: &S,
-    namespace_id: &NamespaceId,
     manifest: EncodedEnvelope<NamespaceManifestPayload>,
-    expected_predecessor: Option<ManifestNo>,
     timer: &dyn MonotonicTimer,
     started_ms: u64,
 ) -> Result<ManifestPublicationOutcome> {
+    let namespace_id = manifest.envelope().payload().namespace_id.clone();
+    let namespace_id = &namespace_id;
+    let expected_predecessor = manifest
+        .envelope()
+        .payload()
+        .manifest_no
+        .0
+        .checked_sub(1)
+        .filter(|number| *number > 0)
+        .map(ManifestNo);
     let plain_create = manifest.envelope().payload().manifest_no == loonfs_api::ManifestNo(1)
         && manifest.envelope().payload().fork_basis.is_none();
     let candidate = CurrentManifest {
@@ -74,21 +86,13 @@ pub(crate) async fn publish_manifest<S: ObjectStore + ?Sized>(
                 current.state.clone(),
             ));
         }
-        match classify_current(
-            &current.state,
-            &candidate,
-            expected_predecessor,
-            plain_create,
-        ) {
-            ManifestPublicationOutcome::Installable => {}
-            outcome => return Ok(outcome),
+        match classify_current(&current.state, &candidate, expected_predecessor, false) {
+            ManifestClassification::Installable => {}
+            ManifestClassification::Settled(outcome) => return Ok(outcome),
         }
     }
     let payload = manifest.envelope().payload();
     let legal = match &current {
-        _ if payload.namespace_id != *namespace_id => {
-            Err("belongs to another namespace".to_owned())
-        }
         Some(current) => current
             .envelope
             .payload()
@@ -113,14 +117,9 @@ pub(crate) async fn publish_manifest<S: ObjectStore + ?Sized>(
     {
         Ok(_) => ManifestPublicationOutcome::Published(candidate.clone()),
         Err(ObjectStoreError::PreconditionFailed { .. }) => {
-            classify_current_manifest(
-                store,
-                namespace_id,
-                &candidate,
-                expected_predecessor,
-                plain_create,
-            )
-            .await?
+            classify_current_manifest(store, namespace_id, &candidate, expected_predecessor, false)
+                .await?
+                .settled_after_conflict(namespace_id)?
         }
         Err(error @ ObjectStoreError::Transport { .. }) => {
             settle_control_write::<_, CoreError, (), CoreError, _, _>(
@@ -140,7 +139,7 @@ pub(crate) async fn publish_manifest<S: ObjectStore + ?Sized>(
                             &landed.state,
                             &candidate,
                             expected_predecessor,
-                            plain_create,
+                            !plain_create,
                         ),
                         None => {
                             classify_current_manifest(
@@ -148,14 +147,16 @@ pub(crate) async fn publish_manifest<S: ObjectStore + ?Sized>(
                                 namespace_id,
                                 &candidate,
                                 expected_predecessor,
-                                plain_create,
+                                !plain_create,
                             )
                             .await?
                         }
                     };
                     match outcome {
-                        ManifestPublicationOutcome::Installable => Ok(WriteEvidence::Unknown),
-                        outcome => Ok(WriteEvidence::Landed(outcome)),
+                        ManifestClassification::Installable => Ok(WriteEvidence::Unknown),
+                        ManifestClassification::Settled(outcome) => {
+                            Ok(WriteEvidence::Landed(outcome))
+                        }
                     }
                 },
             )
@@ -187,14 +188,13 @@ fn classify_current(
     current: &CurrentManifest,
     candidate: &CurrentManifest,
     expected_predecessor: Option<ManifestNo>,
-    plain_create: bool,
-) -> ManifestPublicationOutcome {
-    if current.manifest == candidate.manifest {
-        // Plain creates can have identical payloads; fork source pins are unique.
-        if plain_create {
-            ManifestPublicationOutcome::CoveredByCurrent(current.clone())
-        } else {
+    confirm_authorship: bool,
+) -> ManifestClassification {
+    let outcome = if current.manifest == candidate.manifest {
+        if confirm_authorship {
             ManifestPublicationOutcome::Published(current.clone())
+        } else {
+            ManifestPublicationOutcome::CoveredByCurrent(current.clone())
         }
     } else if current.compactor_epoch > candidate.compactor_epoch {
         ManifestPublicationOutcome::PredecessorChanged(current.clone())
@@ -203,9 +203,24 @@ fn classify_current(
     {
         ManifestPublicationOutcome::CoveredByCurrent(current.clone())
     } else if Some(current.manifest.manifest_no) == expected_predecessor {
-        ManifestPublicationOutcome::Installable
+        return ManifestClassification::Installable;
     } else {
         ManifestPublicationOutcome::PredecessorChanged(current.clone())
+    };
+    ManifestClassification::Settled(outcome)
+}
+
+impl ManifestClassification {
+    fn settled_after_conflict(
+        self,
+        namespace_id: &NamespaceId,
+    ) -> Result<ManifestPublicationOutcome> {
+        match self {
+            Self::Settled(outcome) => Ok(outcome),
+            Self::Installable => Err(CoreError::NamespaceCorrupt(format!(
+                "namespace `{namespace_id}` has no current manifest covering a taken manifest number"
+            ))),
+        }
     }
 }
 
@@ -214,13 +229,18 @@ async fn classify_current_manifest<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     candidate: &CurrentManifest,
     expected_predecessor: Option<ManifestNo>,
-    plain_create: bool,
-) -> Result<ManifestPublicationOutcome> {
+    confirm_authorship: bool,
+) -> Result<ManifestClassification> {
     Ok(load_current_manifest_if_present(store, namespace_id)
         .await
         .map_err(CoreError::ControlObjectLoad)?
-        .map_or(ManifestPublicationOutcome::Installable, |loaded| {
-            classify_current(&loaded.state, candidate, expected_predecessor, plain_create)
+        .map_or(ManifestClassification::Installable, |loaded| {
+            classify_current(
+                &loaded.state,
+                candidate,
+                expected_predecessor,
+                confirm_authorship,
+            )
         }))
 }
 

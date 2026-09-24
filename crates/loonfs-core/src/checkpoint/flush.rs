@@ -15,7 +15,6 @@ use crate::error::Result;
 use crate::limits::METADATA_PUBLICATION_BUDGET_MS;
 use crate::metadata::{MetadataState, MetadataView};
 use crate::namespace::basis::MetadataBasis;
-use crate::namespace::control::load_current_manifest;
 use crate::namespace::read_anchor::load_read_anchor;
 use crate::namespace::state::NamespaceReadState;
 use crate::storage::content::{
@@ -145,28 +144,19 @@ async fn try_flush_wal_projection<S: ObjectStore + ?Sized>(
     let manifest = encode_manifest(manifest)?;
     // Written segments may outlive the GC grace if publication exceeds its budget.
     ensure_metadata_publication_budget(timer, publication_started_ms, namespace_id)?;
-    let (outcome, current) = match publish_manifest(
-        store,
-        namespace_id,
-        manifest,
-        Some(basis_manifest_no),
-        timer,
-        publication_started_ms,
-    )
-    .await?
-    {
-        ManifestPublicationOutcome::Published(current) => (FlushWalOutcome::Published, current),
-        ManifestPublicationOutcome::CoveredByCurrent(current) => {
-            (FlushWalOutcome::ManifestAdvanced, current)
-        }
-        // A same-sequence reorganization can replace the predecessor without
-        // covering the newer WAL head. That manifest wins, but it has not
-        // satisfied the flush: reload its runs, replay the tail, try again.
-        ManifestPublicationOutcome::PredecessorChanged(_) => {
-            return Ok(TryFlushWal::RaceLost);
-        }
-        ManifestPublicationOutcome::Installable => return Ok(TryFlushWal::RaceLost),
-    };
+    let (outcome, current) =
+        match publish_manifest(store, manifest, timer, publication_started_ms).await? {
+            ManifestPublicationOutcome::Published(current) => (FlushWalOutcome::Published, current),
+            ManifestPublicationOutcome::CoveredByCurrent(current) => {
+                (FlushWalOutcome::ManifestAdvanced, current)
+            }
+            // A same-sequence reorganization can replace the predecessor without
+            // covering the newer WAL head. That manifest wins, but it has not
+            // satisfied the flush: reload its runs, replay the tail, try again.
+            ManifestPublicationOutcome::PredecessorChanged(_) => {
+                return Ok(TryFlushWal::RaceLost);
+            }
+        };
     Ok(TryFlushWal::Settled(Box::new(FlushedBasis {
         current_manifest_no: current.manifest.manifest_no,
         current_manifest_head_seq: current.manifest.head_seq,
@@ -208,17 +198,9 @@ pub async fn fold_wal_tail<S: ObjectStore + ?Sized>(
         return flush_wal(store, namespace_id).await;
     };
     let loaded_basis = load_basis_metadata_segments(store, segment_cache, &input.basis).await?;
-    let current_manifest = load_current_manifest(store, namespace_id)
-        .await
-        .map_err(CoreError::ControlObjectLoad)?;
-    let current_basis = MetadataBasis(current_manifest.state.manifest);
-    if current_basis != input.basis {
-        return flush_wal(store, namespace_id).await;
-    }
     let manifest_projection = ManifestProjection {
         head: input.head,
         basis: input.basis,
-        floor_seq: input.retention_floor_seq,
         manifest_segments: loaded_basis.segments,
         tail_state: input.tail_state,
     };
@@ -242,7 +224,6 @@ fn flush_wal_response(namespace_id: &NamespaceId, basis: FlushedBasis) -> FlushW
 pub(super) struct ManifestProjection<'a, S: ObjectStore + ?Sized> {
     pub(super) head: NamespaceReadState,
     pub(super) basis: MetadataBasis,
-    pub(super) floor_seq: ChangeSeq,
     pub(super) manifest_segments: VerifiedMetadataSegments<'a, S>,
     /// Rows that are not in any segment yet: the genesis root inode when the
     /// basis is genesis, plus the replayed WAL tail.
@@ -289,7 +270,6 @@ pub(super) async fn load_manifest_projection<'a, S: ObjectStore + ?Sized>(
         .await
         .map_err(CoreError::ControlObjectLoad)?;
     let basis = anchor.basis();
-    let floor_seq = anchor.retention_floor_seq;
     let head = anchor.read_state;
     if head.status.is_deleted() {
         return Err(CoreError::MetadataProjection(
@@ -301,19 +281,12 @@ pub(super) async fn load_manifest_projection<'a, S: ObjectStore + ?Sized>(
     let loaded_basis = load_basis_metadata_segments(store, None, &basis).await?;
     let manifest_head = loaded_basis.replay_head(&head);
     let manifest_segments = loaded_basis.segments;
-    let replayed = load_replayed_wal_tail(
-        store,
-        &manifest_head,
-        &head,
-        &loaded_basis.base_state,
-        Some(head.writer_epoch),
-    )
-    .await
-    .map_err(CoreError::MetadataProjection)?;
+    let replayed = load_replayed_wal_tail(store, &manifest_head, &head, &loaded_basis.base_state)
+        .await
+        .map_err(CoreError::MetadataProjection)?;
     Ok(ManifestProjection {
         head,
         basis,
-        floor_seq,
         manifest_segments,
         tail_state: Arc::new(replayed.projected_tail),
     })
@@ -440,12 +413,10 @@ async fn build_namespace_manifest_for_projection<S: ObjectStore + ?Sized>(
         activity,
         manifest_no,
         head_seq,
-        head_commit_id: projection.head.head_commit_id.clone(),
         base_seq,
         writer_epoch: projection.head.writer_epoch,
         next_inode_id: projection.head.next_inode_id,
         next_run_no,
-        retention_floor_seq: projection.floor_seq,
         folded_wal_no: projection.head.wal_no,
         runs,
         ..projection.manifest_segments.manifest().payload().clone()

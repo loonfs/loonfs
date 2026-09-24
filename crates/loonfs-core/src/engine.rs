@@ -11,7 +11,7 @@ use crate::metadata::access::is_administrator;
 use crate::namespace::basis::MetadataBasis;
 use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
 use crate::namespace::state::NamespaceReadState;
-use crate::namespace::{bootstrap, fork, BootstrapNamespaceError};
+use crate::namespace::{bootstrap, fork};
 use crate::options::{BootstrapOptions, DeleteNamespaceOptions};
 use crate::path::read::{
     load_metadata_view, load_metadata_view_for_authorization, CurrentFileState,
@@ -396,10 +396,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     ///
     /// Use this before normal reads and writes for a new namespace. Returns
     /// the namespace's status after manifest 1 is installed.
-    pub async fn bootstrap_namespace(
-        &self,
-        options: BootstrapOptions,
-    ) -> std::result::Result<Namespace, BootstrapNamespaceError> {
+    pub async fn bootstrap_namespace(&self, options: BootstrapOptions) -> Result<Namespace> {
         bootstrap::bootstrap_namespace(
             &self.store,
             &self.namespace_id,
@@ -539,10 +536,10 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
                 size_bytes: content_ref.size_bytes,
             });
         }
-        Ok(FileContentStream::open(
+        Ok(FileContentStream::open_inner(
             self.store.clone(),
             view.resolve_content_location(&content_ref)?,
-            entry,
+            Some(entry),
             content_ref,
             chunk_bytes,
             start_offset,
@@ -1032,8 +1029,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     {
         let catalog = self.own_catalog(catalog)?;
         let context = self.mutation_context()?;
-        let (_object_key, body) =
-            open_content_import_reader(self.store.clone(), content_ref).await?;
+        let body = open_content_import_reader(self.store.clone(), content_ref).await?;
         crate::protocol::stage_owned_stream(
             &self.store,
             catalog,
@@ -1144,6 +1140,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             &context,
         )
         .await
+        .map(crate::checkpoint::checkpoint_summary)
     }
 
     /// Creates a snapshot of the current namespace state.
@@ -1159,6 +1156,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             &context,
         )
         .await
+        .map(crate::checkpoint::checkpoint_summary)
     }
 }
 
@@ -1315,15 +1313,12 @@ mod tests {
             LocalFsStore::new(temp_dir.path()).expect("store"),
             namespace_id.clone(),
         );
-        let loaded = crate::namespace::read_anchor::load_head_and_metadata_basis(
-            &reader.store,
-            &namespace_id,
-        )
-        .await
-        .expect("read basis");
+        let loaded = crate::namespace::read_anchor::load_read_anchor(&reader.store, &namespace_id)
+            .await
+            .expect("read basis");
         let context = RuntimeReadContext {
-            head: loaded.head,
-            basis: loaded.basis,
+            basis: loaded.basis(),
+            head: loaded.read_state,
             segment_cache: Arc::new(MetadataSegmentCache::new(Default::default())),
             tail_cache: Arc::new(WalTailProjectionCache::new(
                 WalTailProjectionCacheConfig {

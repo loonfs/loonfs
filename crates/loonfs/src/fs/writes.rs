@@ -923,20 +923,8 @@ pub(crate) async fn publish_batch_with_engine(
     }
     {
         let _span = phase_span!(core, "batch_update_cache", namespace_id, batch_size).entered();
-        match publish.resulting_read_state.take() {
-            // A landed publish hands the caches exactly the state a
-            // rebuild would recompute; use it instead of dropping.
-            Some(state) => {
-                core.seed_namespace_read_cache(namespace_id, state);
-            }
-            _ => {
-                let runtime_results = publish
-                    .results
-                    .iter()
-                    .map(|result| result.clone().map_err(RuntimeError::Core))
-                    .collect::<Vec<_>>();
-                core.invalidate_read_cache_after_batch(namespace_id, &runtime_results);
-            }
+        if let Some(state) = publish.resulting_read_state.take() {
+            core.seed_namespace_read_cache(namespace_id, state);
         }
     }
     let wal_tail_segments = publish.wal_tail_segments;

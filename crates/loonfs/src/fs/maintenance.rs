@@ -181,7 +181,7 @@ impl FsMaintenance {
             fork_basis: diagnostics.fork_basis,
             head_seq: diagnostics.head_seq,
             retention_floor_seq: diagnostics.retention_floor_seq,
-            current_manifest_no: diagnostics.current_manifest_no,
+            current_manifest_no: Some(diagnostics.current_manifest_no),
             wal_tail_segments: diagnostics.wal_tail_segments,
             live_snapshots,
             live_checkpoints,
@@ -191,23 +191,9 @@ impl FsMaintenance {
     async fn load_maintenance_status(
         &self,
         namespace_id: &NamespaceId,
-        collects_only: bool,
     ) -> Result<NamespaceDiagnostics> {
         let diagnostics =
-            match loonfs_core::cache::load_namespace_diagnostics(self.core.store(), namespace_id)
-                .await
-            {
-                Ok(diagnostics) => diagnostics,
-                Err(error) if error.code() == ErrorCode::NamespaceDeleted && collects_only => {
-                    // These control objects survive deleted-namespace reclamation.
-                    loonfs_core::cache::load_deleted_namespace_diagnostics(
-                        self.core.store(),
-                        namespace_id,
-                    )
-                    .await?
-                }
-                Err(error) => return Err(error.into()),
-            };
+            loonfs_core::cache::load_namespace_diagnostics(self.core.store(), namespace_id).await?;
         Ok(Self::namespace_diagnostics(diagnostics, 0, 0))
     }
 
@@ -255,14 +241,16 @@ impl FsMaintenance {
                 .await
                 .map(RunMaintenanceResponse::MetadataCompaction),
             RunMaintenanceRequest::Gc(request) => {
-                self.load_maintenance_status(namespace_id, true).await?;
+                loonfs_core::control::load_namespace_read_state(self.core.store(), namespace_id)
+                    .await
+                    .map_err(crate::CoreError::ControlObjectLoad)?;
                 let config = crate::options::gc_config_from_request(request);
                 self.gc_namespace(namespace_id, &config)
                     .await
                     .map(RunMaintenanceResponse::Gc)
             }
             RunMaintenanceRequest::Retention(_) => {
-                self.load_maintenance_status(namespace_id, false).await?;
+                self.load_maintenance_status(namespace_id).await?;
                 self.run_retention(namespace_id)
                     .await
                     .map(RunMaintenanceResponse::Retention)
@@ -277,7 +265,7 @@ impl FsMaintenance {
         namespace_id: &NamespaceId,
         options: MetadataMaintenanceOptions,
     ) -> Result<MetadataMaintenanceResponse> {
-        let status = self.load_maintenance_status(namespace_id, false).await?;
+        let status = self.load_maintenance_status(namespace_id).await?;
         let inline_bytes = match &self.publisher {
             Some(publisher) if status.wal_tail_segments > 0 => publisher
                 .wal_tail_inline_bytes(namespace_id)
@@ -838,7 +826,7 @@ impl FsMaintenance {
         namespace_id: &NamespaceId,
     ) -> Result<AdvanceRetentionResponse> {
         self.core.record_trace_context(&tracing::Span::current());
-        self.load_maintenance_status(namespace_id, false).await?;
+        self.load_maintenance_status(namespace_id).await?;
         self.run_retention(namespace_id).await
     }
 

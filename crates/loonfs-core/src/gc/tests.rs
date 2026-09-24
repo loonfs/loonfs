@@ -1684,6 +1684,7 @@ async fn gc_keeps_a_basis_pinned_by_another_owner_after_one_release() {
         &setup,
     )
     .await
+    .map(crate::checkpoint::checkpoint_summary)
     .expect("first owner");
     let second = crate::checkpoint::create_checkpoint(
         &store,
@@ -1695,6 +1696,7 @@ async fn gc_keeps_a_basis_pinned_by_another_owner_after_one_release() {
         &setup,
     )
     .await
+    .map(crate::checkpoint::checkpoint_summary)
     .expect("second owner");
     assert_ne!(first.checkpoint_id, second.checkpoint_id);
     assert_eq!(first.manifest_no, second.manifest_no);
@@ -2094,6 +2096,7 @@ async fn a_fork_retry_keeps_young_pins_and_reclaims_the_abandoned_one_after_grac
         &setup,
     )
     .await
+    .map(crate::checkpoint::checkpoint_summary)
     .expect("fork pin from the abandoned attempt");
 
     fork_namespace(
@@ -2906,6 +2909,7 @@ async fn expiry_and_creation_grace_delete_pins_without_a_released_state() {
         pins.push(
             crate::checkpoint::create_checkpoint(&store, &namespace_id, owner, &setup)
                 .await
+                .map(crate::checkpoint::checkpoint_summary)
                 .expect("pin"),
         );
     }
@@ -3001,6 +3005,7 @@ async fn a_pin_naming_an_absent_manifest_is_corruption_before_sweeping() {
         &setup,
     )
     .await
+    .map(crate::checkpoint::checkpoint_summary)
     .expect("pin");
     write_test_file(&store, &namespace_id, "/file", "new", &setup).await;
     crate::checkpoint::flush_wal(&store, &namespace_id)

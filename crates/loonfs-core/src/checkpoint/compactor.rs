@@ -34,15 +34,7 @@ pub(crate) async fn claim_compactor<S: ObjectStore + ?Sized>(
         let epoch = payload.compactor_epoch;
         let manifest = encode_manifest(payload)?;
         if matches!(
-            publish_manifest(
-                store,
-                namespace_id,
-                manifest,
-                Some(current.state.manifest.manifest_no),
-                &timer,
-                started_ms
-            )
-            .await?,
+            publish_manifest(store, manifest, &timer, started_ms).await?,
             ManifestPublicationOutcome::Published(_)
         ) {
             return Ok(epoch);

@@ -1,6 +1,6 @@
 //! Fork installation copies pinned source runs into a new namespace.
 
-use super::install::{publish_namespace, NamespacePublication};
+use super::install::publish_namespace;
 use crate::checkpoint::record::{delete_checkpoint_record, write_checkpoint_record};
 use crate::checkpoint::{
     classify_live_snapshot, create_checkpoint, load_checkpoint_record,
@@ -45,16 +45,7 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
         create_snapshot_fork_checkpoint(store, source_namespace_id, snapshot_id, owner, context)
             .await?
     } else {
-        let checkpoint = create_checkpoint(store, source_namespace_id, owner, context).await?;
-        load_checkpoint_record(store, source_namespace_id, &checkpoint.checkpoint_id)
-            .await?
-            .ok_or_else(|| {
-                CoreError::NamespaceCorrupt(format!(
-                    "source checkpoint `{}` disappeared during fork",
-                    checkpoint.checkpoint_id
-                ))
-            })?
-            .state
+        create_checkpoint(store, source_namespace_id, owner, context).await?
     };
     let source_manifest = load_namespace_manifest_envelope(
         store,
@@ -89,13 +80,7 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
         activity: Default::default(),
         ..source_manifest.payload().clone()
     };
-    if publish_namespace(store, &manifest, &timer, started_ms).await?
-        == NamespacePublication::Exists
-    {
-        return Err(CoreError::NamespaceExists {
-            namespace_id: new_namespace_id.clone(),
-        });
-    }
+    publish_namespace(store, &manifest, &timer, started_ms).await?;
     crate::namespace::status::load_namespace(store, new_namespace_id).await
 }
 

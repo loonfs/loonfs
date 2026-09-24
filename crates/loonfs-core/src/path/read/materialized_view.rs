@@ -17,7 +17,7 @@ use crate::metadata::{
 };
 use crate::namespace::basis::MetadataBasis;
 #[cfg(test)]
-use crate::namespace::read_anchor::load_head_and_metadata_basis;
+use crate::namespace::read_anchor::load_read_anchor;
 use crate::namespace::state::NamespaceReadState;
 use crate::path::mutation_path::{map_path_error_to_core, parse_absolute_path_for_core};
 use crate::storage::content::ContentLocation;
@@ -109,10 +109,11 @@ pub(crate) async fn load_current_metadata_view<'a, S: ObjectStore + ?Sized>(
     store: &'a S,
     namespace_id: &NamespaceId,
 ) -> Result<LoadedMetadataView<'a, S>> {
-    let loaded = load_head_and_metadata_basis(store, namespace_id)
+    let loaded = load_read_anchor(store, namespace_id)
         .await
         .map_err(MetadataProjectionLoadError::LoadHead)?;
-    let context = ReadLoadContext::pinned_head(&loaded.head, &loaded.basis, None, None);
+    let basis = loaded.basis();
+    let context = ReadLoadContext::pinned_head(&loaded.read_state, &basis, None, None);
     load_metadata_view(store, namespace_id, context).await
 }
 
@@ -200,7 +201,6 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         let cache_key = WalTailProjectionCacheKey {
             namespace_id: namespace_id.clone(),
             manifest_no,
-            manifest_head_seq: manifest_head.seq,
             head_seq: head.seq,
         };
         if let Some(cache) = load_context.tail_cache {
@@ -214,15 +214,10 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 });
             }
         }
-        let replayed = load_replayed_wal_tail(
-            store,
-            &manifest_head,
-            &head,
-            &loaded_basis.base_state,
-            Some(head.writer_epoch),
-        )
-        .await
-        .map_err(CoreError::MetadataProjection)?;
+        let replayed =
+            load_replayed_wal_tail(store, &manifest_head, &head, &loaded_basis.base_state)
+                .await
+                .map_err(CoreError::MetadataProjection)?;
         let wal_tail = Arc::new(replayed.projected_tail);
         if let Some(cache) = load_context.tail_cache {
             cache.insert(cache_key, Arc::clone(&wal_tail));
@@ -1025,14 +1020,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             .transpose()?;
         let binding_generation = resolved
             .binding_generation
-            .map(|generation| generation.encode(&self.namespace_id))
-            .transpose()
-            .map_err(|error| {
-                CoreError::Internal(format!(
-                    "failed to encode the binding generation of inode `{}`: {error}",
-                    resolved.inode_id
-                ))
-            })?;
+            .map(|generation| generation.encode(&self.namespace_id));
         Ok(PathEntry {
             namespace_id: self.namespace_id.clone(),
             path: absolute_path,

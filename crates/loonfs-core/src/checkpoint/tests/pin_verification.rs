@@ -350,6 +350,7 @@ async fn snapshot_owned_checkpoints_reject_user_release() {
         &setup,
     )
     .await
+    .map(crate::checkpoint::checkpoint_summary)
     .expect("snapshot checkpoint");
 
     let error =

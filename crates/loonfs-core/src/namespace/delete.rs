@@ -51,15 +51,7 @@ pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
         };
         let manifest = encode_manifest(payload)?;
         if matches!(
-            publish_manifest(
-                store,
-                namespace_id,
-                manifest,
-                Some(anchor.manifest.state.manifest.manifest_no),
-                timer,
-                started_ms
-            )
-            .await?,
+            publish_manifest(store, manifest, timer, started_ms).await?,
             ManifestPublicationOutcome::Published(_)
         ) {
             return Ok(DeleteNamespaceResponse {

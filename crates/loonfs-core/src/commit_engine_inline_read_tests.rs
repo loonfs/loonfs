@@ -8,7 +8,7 @@ use crate::cache::{
     MetadataSegmentCache, WalTailProjectionCache, WalTailProjectionCacheConfig,
     WalTailProjectionCacheKey,
 };
-use crate::namespace::read_anchor::load_head_and_metadata_basis;
+use crate::namespace::read_anchor::load_read_anchor;
 use crate::storage::content::{ContentLocation, DurableContentValidationError};
 use crate::{NamespaceEngine, RuntimeReadContext};
 use loonfs_api::{DestinationPrecondition, RevisionNo, WalNo};
@@ -36,17 +36,17 @@ async fn fresh_context(
     store: &RecordingStore<LocalFsStore>,
     namespace_id: &NamespaceId,
 ) -> RuntimeReadContext {
-    let loaded = load_head_and_metadata_basis(store, namespace_id)
+    let loaded = load_read_anchor(store, namespace_id)
         .await
         .expect("read basis");
-    read_context(loaded.head, loaded.basis)
+    let basis = loaded.basis();
+    read_context(loaded.read_state, basis)
 }
 
 fn cache_key(context: &RuntimeReadContext) -> WalTailProjectionCacheKey {
     WalTailProjectionCacheKey {
         namespace_id: context.head.namespace_id.clone(),
         manifest_no: context.basis.manifest_no(),
-        manifest_head_seq: context.basis.manifest().head_seq,
         head_seq: context.head.seq,
     }
 }
@@ -388,7 +388,6 @@ async fn foreign_references_resolve_to_objects_and_object_downloads_do_not_write
             put("/object", stored.content_ref()),
         ),
         vec![PreparedContent::for_durable_content_write(
-            publisher.namespace_id.clone(),
             stored.content_ref().clone(),
         )],
     );
@@ -577,7 +576,6 @@ async fn inline_checksum_failures_match_object_validation() {
     }
     record.inline_content[0].content_id = corrupt_ref.content_id.clone();
     record.inline_content[0].bytes = b"wrong".to_vec();
-    payload.head_commit_id = payload.records[0].commit_id.clone();
     let key = wal_segment(&publisher.namespace_id, &payload.wal_no);
     let bytes = loonfs_api::wire::wal::encode_wal_segment_envelope_zstd(payload)
         .expect("codec does not hash")

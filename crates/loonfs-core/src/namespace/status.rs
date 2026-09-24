@@ -1,7 +1,9 @@
 //! Reads namespace state and storage diagnostics.
 
-use crate::error::{CoreError, Result};
-use crate::namespace::read_anchor::{load_head_and_retention_floor, load_read_anchor};
+#[cfg(any(test, feature = "test-support"))]
+use crate::error::CoreError;
+use crate::error::Result;
+use crate::namespace::read_anchor::load_read_anchor;
 use crate::namespace::state::NamespaceReadState;
 use loonfs_api::wire::control::ForkBasis;
 use loonfs_api::{ActorId, ChangeSeq, ManifestNo, Namespace, NamespaceForkBasis, NamespaceId};
@@ -29,23 +31,23 @@ pub async fn load_namespace_wal_tail_usage<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> Result<NamespaceWalTailUsage> {
-    let loaded = crate::namespace::read_anchor::load_head_and_metadata_basis(store, namespace_id)
+    let loaded = crate::namespace::read_anchor::load_read_anchor(store, namespace_id)
         .await
         .map_err(CoreError::ControlObjectLoad)?;
-    super::control::ensure_namespace_live(&loaded.head)?;
-    let basis = crate::checkpoint::load_basis_metadata_segments(store, None, &loaded.basis).await?;
+    super::control::ensure_namespace_live(&loaded.read_state)?;
+    let basis =
+        crate::checkpoint::load_basis_metadata_segments(store, None, &loaded.basis()).await?;
     let tail = crate::wal::load_replayed_wal_tail(
         store,
-        &basis.replay_head(&loaded.head),
-        &loaded.head,
+        &basis.replay_head(&loaded.read_state),
+        &loaded.read_state,
         &basis.base_state,
-        Some(loaded.head.writer_epoch),
     )
     .await
     .map_err(CoreError::MetadataProjection)?;
     Ok(NamespaceWalTailUsage {
-        head_seq: loaded.head.seq,
-        wal_tail_segments: loaded.head.unfolded_wal_segments(),
+        head_seq: loaded.read_state.seq,
+        wal_tail_segments: loaded.read_state.unfolded_wal_segments(),
         wal_tail_inline_bytes: tail.projected_tail.inline_bytes(),
     })
 }
@@ -59,7 +61,7 @@ pub struct NamespaceStorageDiagnostics {
     pub fork_basis: Option<NamespaceForkBasis>,
     pub head_seq: ChangeSeq,
     pub retention_floor_seq: ChangeSeq,
-    pub current_manifest_no: Option<ManifestNo>,
+    pub current_manifest_no: ManifestNo,
     pub wal_tail_segments: u64,
 }
 
@@ -67,7 +69,7 @@ impl NamespaceStorageDiagnostics {
     fn new(
         head: NamespaceReadState,
         retention_floor_seq: ChangeSeq,
-        current_manifest_no: Option<ManifestNo>,
+        current_manifest_no: ManifestNo,
         wal_tail_segments: u64,
     ) -> Self {
         Self {
@@ -90,41 +92,14 @@ fn fork_basis(basis: Option<ForkBasis>) -> Option<NamespaceForkBasis> {
     })
 }
 
-/// Namespace head state needed for storage diagnostics.
-struct LoadedHeadBasis {
-    head: NamespaceReadState,
-    current_manifest_no: Option<ManifestNo>,
-    /// Sequence the basis manifest covers; the visible tail sits above it.
-    retention_floor_seq: ChangeSeq,
-}
-
-async fn load_namespace_head_basis<S: ObjectStore + ?Sized>(
-    store: &S,
-    expected_namespace_id: &NamespaceId,
-) -> Result<LoadedHeadBasis> {
-    let anchor = load_read_anchor(store, expected_namespace_id)
-        .await
-        .map_err(CoreError::ControlObjectLoad)?;
-    let basis = anchor.basis();
-    let retention_floor_seq = anchor.retention_floor_seq;
-    let head = anchor.read_state;
-    super::control::ensure_namespace_live(&head)?;
-    let current_manifest_no = Some(basis.manifest_no());
-    Ok(LoadedHeadBasis {
-        head,
-        current_manifest_no,
-        retention_floor_seq,
-    })
-}
-
 /// Loads the current state of a live namespace.
 pub async fn load_namespace<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace_id: &NamespaceId,
 ) -> Result<Namespace> {
-    let (head, retention_floor_seq) = load_head_and_retention_floor(store, expected_namespace_id)
-        .await
-        .map_err(CoreError::ControlObjectLoad)?;
+    let anchor = load_read_anchor(store, expected_namespace_id).await?;
+    let retention_floor_seq = anchor.retention_floor_seq();
+    let head = anchor.read_state;
     super::control::ensure_namespace_live(&head)?;
     Ok(Namespace {
         access: (&head.access).into(),
@@ -141,12 +116,15 @@ pub async fn load_namespace_diagnostics<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace_id: &NamespaceId,
 ) -> Result<NamespaceStorageDiagnostics> {
-    let loaded = load_namespace_head_basis(store, expected_namespace_id).await?;
-    let wal_tail_segments = loaded.head.unfolded_wal_segments();
+    let loaded = load_read_anchor(store, expected_namespace_id).await?;
+    super::control::ensure_namespace_live(&loaded.read_state)?;
+    let wal_tail_segments = loaded.read_state.unfolded_wal_segments();
+    let retention_floor_seq = loaded.retention_floor_seq();
+    let manifest_no = loaded.manifest.state.manifest.manifest_no;
     Ok(NamespaceStorageDiagnostics::new(
-        loaded.head,
-        loaded.retention_floor_seq,
-        loaded.current_manifest_no,
+        loaded.read_state,
+        retention_floor_seq,
+        manifest_no,
         wal_tail_segments,
     ))
 }
@@ -155,34 +133,10 @@ pub async fn load_namespace_flush_basis<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace_id: &NamespaceId,
 ) -> Result<NamespaceFlushBasis> {
-    let loaded = load_namespace_head_basis(store, expected_namespace_id).await?;
+    let loaded = load_read_anchor(store, expected_namespace_id).await?;
+    super::control::ensure_namespace_live(&loaded.read_state)?;
     Ok(NamespaceFlushBasis {
-        head_seq: loaded.head.seq,
-        has_unflushed_wal_tail: loaded.head.folded_wal_no < loaded.head.wal_no,
+        head_seq: loaded.read_state.seq,
+        has_unflushed_wal_tail: loaded.read_state.folded_wal_no < loaded.read_state.wal_no,
     })
-}
-
-/// Loads diagnostics for a deleted namespace.
-///
-/// Garbage collection may already have removed the manifest and WAL, so this
-/// reads only the head and WAL floor. Call this only after
-/// [`load_namespace_diagnostics`] reports that the namespace is deleted.
-pub async fn load_deleted_namespace_diagnostics<S: ObjectStore + ?Sized>(
-    store: &S,
-    expected_namespace_id: &NamespaceId,
-) -> Result<NamespaceStorageDiagnostics> {
-    let (head, retention_floor_seq) = load_head_and_retention_floor(store, expected_namespace_id)
-        .await
-        .map_err(CoreError::ControlObjectLoad)?;
-    if !head.status.is_deleted() {
-        return Err(CoreError::Internal(format!(
-            "namespace `{expected_namespace_id}` is live; deleted diagnostics require a deleted namespace"
-        )));
-    }
-    Ok(NamespaceStorageDiagnostics::new(
-        head,
-        retention_floor_seq,
-        None,
-        0,
-    ))
 }
