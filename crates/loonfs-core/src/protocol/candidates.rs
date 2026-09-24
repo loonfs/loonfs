@@ -23,6 +23,12 @@ pub(super) struct PreparedCandidateCommit {
     pub(super) allocation: CandidateAllocation,
 }
 
+/// Keeps the commit timestamp fixed while content evidence ages across retries.
+pub(super) struct CandidateTime {
+    pub(super) committed_at_ms: u64,
+    pub(super) admission_now_ms: u64,
+}
+
 /// How one batch candidate resolved during admission.
 pub(super) enum CandidateAdmission {
     /// A new request ready for content validation and materialization.
@@ -93,7 +99,7 @@ pub(super) async fn prepare_candidate_request<S: ObjectStore + ?Sized>(
     session: &PublishPlanningSession,
     candidate: &CommitCandidate,
     index: usize,
-    committed_at_ms: u64,
+    time: CandidateTime,
     dedup: &mut BatchDedup,
 ) -> CandidateAdmission {
     if let Err(error) =
@@ -128,7 +134,7 @@ pub(super) async fn prepare_candidate_request<S: ObjectStore + ?Sized>(
         return CandidateAdmission::independent(Err(error));
     }
     if let Err(error) =
-        validate_candidate_content_references(candidate, namespace_id, committed_at_ms)
+        validate_candidate_content_references(candidate, namespace_id, time.admission_now_ms)
     {
         return CandidateAdmission::independent(Err(error));
     }
@@ -138,7 +144,7 @@ pub(super) async fn prepare_candidate_request<S: ObjectStore + ?Sized>(
             candidate,
             semantic_identity,
             view.metadata_view(),
-            committed_at_ms,
+            time.committed_at_ms,
             &mut allocation,
         )
         .await

@@ -249,6 +249,126 @@ async fn content_reclaimed_during_view_load_cannot_be_published() {
 }
 
 #[tokio::test]
+async fn publication_retry_does_not_refresh_expired_content_evidence() {
+    assert_expired_content_stays_rejected_on_retry(2).await;
+}
+
+#[tokio::test]
+async fn publication_retry_uses_a_fresh_tip_budget() {
+    assert_expired_content_stays_rejected_on_retry(crate::limits::WAL_PUBLISH_BUDGET_MS + 1).await;
+}
+
+async fn assert_expired_content_stays_rejected_on_retry(elapsed_ms: u64) {
+    let directory = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("retry-expiry").expect("namespace id");
+    let store = BlockingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::exact(hint(&namespace_id)),
+        OperationClass::Read,
+    );
+    let setup = context(1_000);
+    bootstrap_namespace(
+        &store,
+        &namespace_id,
+        &setup,
+        &loonfs_test_support::test_actor(),
+        &loonfs_api::NamespaceAccess::Unrestricted {},
+        false,
+    )
+    .await
+    .expect("bootstrap");
+    let completed = completed_upload(&store, &namespace_id, &setup).await;
+    let timer = Arc::new(PublicationTimer::default());
+    let mut engine =
+        NamespaceCommitEngine::new(namespace_id.clone()).monotonic_timer(timer.clone());
+    let options = PublishTailOptions::default();
+    let replay = CommitCandidate::new(directory_request("original", "original"));
+    let original = engine
+        .publish_batch(&store, vec![replay.clone()], &setup, &options)
+        .await
+        .results
+        .remove(0)
+        .expect("original commit");
+    let head_before = load_namespace_read_state(&store, &namespace_id)
+        .await
+        .expect("head");
+    engine.invalidate_projection();
+    let publication = context(setup.now_ms + COMPLETED_UPLOAD_ADMISSION_WINDOW_MS - 1);
+    let primary = put_candidate(&completed);
+    let alias = CommitCandidate::new(primary.request().clone());
+    let later = CommitCandidate::new(directory_request("later", "later"));
+    store.block_next();
+    let publish = engine.publish_batch(
+        &store,
+        vec![primary, alias, later, replay],
+        &publication,
+        &options,
+    );
+    let advance = async {
+        store.wait_until_blocked().await;
+        // Cross the inclusive proof deadline during the first view load only.
+        // Retrying the other candidate must not make this evidence valid again.
+        timer.0.store(elapsed_ms, Ordering::SeqCst);
+        store.release();
+    };
+    let (result, ()) = futures::join!(publish, advance);
+    for outcome in &result.results[..2] {
+        assert_eq!(
+            outcome.as_ref().expect_err("expired evidence").code(),
+            loonfs_api::ErrorCode::ContentNotPrepared
+        );
+    }
+    assert_eq!(
+        result.results[2]
+            .as_ref()
+            .expect("valid peer")
+            .committed_seq,
+        ChangeSeq(2)
+    );
+    assert_eq!(
+        result.results[2]
+            .as_ref()
+            .expect("valid peer")
+            .committed_at_ms,
+        publication.now_ms
+    );
+    assert_eq!(result.results[3].as_ref().expect("replay"), &original);
+    let head_after = load_namespace_read_state(&store, &namespace_id)
+        .await
+        .expect("head");
+    assert_eq!(head_after.seq, ChangeSeq(2));
+    assert_eq!(
+        head_after.wal_no,
+        head_before.wal_no.successor().expect("next")
+    );
+    assert_eq!(
+        store
+            .list_prefix(&wal_segment_prefix(&namespace_id))
+            .await
+            .expect("WAL")
+            .len(),
+        3
+    );
+    drop(engine);
+    let reopened = crate::path::read::load_current_metadata_view(&store, &namespace_id)
+        .await
+        .expect("reopen");
+    let access = crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted);
+    assert_eq!(
+        reopened
+            .resolve_path("/content", loonfs_api::AttributeInclusion::Omit, &access)
+            .await
+            .expect_err("expired content was not published")
+            .code(),
+        loonfs_api::ErrorCode::PathNotFound
+    );
+    reopened
+        .resolve_path("/later", loonfs_api::AttributeInclusion::Omit, &access)
+        .await
+        .expect("valid peer published");
+}
+
+#[tokio::test]
 async fn content_expiring_after_the_put_starts_does_not_undo_the_commit() {
     let directory = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
