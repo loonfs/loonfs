@@ -1,4 +1,4 @@
-//! Durable recovery records for file-backed remote PUT attempts.
+//! Durable recovery records for file-backed PUT attempts.
 
 use crate::config::absolute_env_path;
 use loonfs_api::v0::{CommitRequest, CompletedUploadPart, FilesystemOperation};
@@ -18,6 +18,7 @@ const UPLOADS_SUBDIR: &str = "uploads";
 struct UploadState {
     source: SourceIdentity,
     options: PutFileOptions,
+    subject: Option<loonfs_api::Subject>,
     progress: UploadProgress,
 }
 
@@ -30,6 +31,7 @@ enum UploadProgress {
     Prepared {
         actor_id: ActorId,
         request: Box<CommitRequest>,
+        upload_id: Option<UploadId>,
     },
 }
 
@@ -71,15 +73,16 @@ pub(crate) struct UploadJournal {
 impl UploadJournal {
     pub(crate) fn for_upload(
         profile: &str,
-        server_url: &str,
+        target: &str,
         spec: &NamespacePath,
         local_path: &Path,
         source: SourceIdentity,
         options: &PutFileOptions,
+        subject: Option<&loonfs_api::Subject>,
     ) -> io::Result<Self> {
         let key = journal_key(
             profile,
-            server_url,
+            target,
             spec,
             local_path,
             options.commit.commit_id.as_ref(),
@@ -90,13 +93,14 @@ impl UploadJournal {
                 "upload journals require an absolute XDG_STATE_HOME or HOME",
             )
         })?;
-        Self::open_at(dir.join(format!("{key}.json")), source, options)
+        Self::open_at(dir.join(format!("{key}.json")), source, options, subject)
     }
 
     fn open_at(
         path: PathBuf,
         source: SourceIdentity,
         options: &PutFileOptions,
+        subject: Option<&loonfs_api::Subject>,
     ) -> io::Result<Self> {
         let parent = path.parent().expect("journal has a directory");
         std::fs::create_dir_all(parent).map_err(|error| journal_error(&path, error))?;
@@ -140,10 +144,13 @@ impl UploadJournal {
                     .ok_or_else(|| journal_error(&path, "record has no commit ID"))?;
                 let mut requested = options.clone();
                 requested.commit.commit_id.get_or_insert(commit_id);
-                if requested != recorded.options {
+                if requested != recorded.options || subject != recorded.subject.as_ref() {
                     return Err(journal_error(&path, "PUT options changed; resume with the original options or use a new --commit-id for another attempt"));
                 }
-                if let UploadProgress::Prepared { request, actor_id } = &recorded.progress {
+                if let UploadProgress::Prepared {
+                    request, actor_id, ..
+                } = &recorded.progress
+                {
                     if !request_matches_options(request, actor_id, &recorded.options) {
                         return Err(journal_error(
                             &path,
@@ -162,6 +169,7 @@ impl UploadJournal {
                 UploadState {
                     source,
                     options,
+                    subject: subject.cloned(),
                     progress: UploadProgress::Uploading { multipart: None },
                 }
             }
@@ -285,6 +293,24 @@ impl PutFileJournal for UploadJournal {
     }
 
     fn commit_prepared(&self, request: &CommitRequest, actor_id: &ActorId) -> io::Result<()> {
+        self.record_prepared(request, actor_id, None)
+    }
+}
+
+impl UploadJournal {
+    pub(crate) fn prepared_upload_id(&self) -> Option<UploadId> {
+        match &self.lock().progress {
+            UploadProgress::Prepared { upload_id, .. } => upload_id.clone(),
+            UploadProgress::Uploading { .. } => None,
+        }
+    }
+
+    pub(crate) fn record_prepared(
+        &self,
+        request: &CommitRequest,
+        actor_id: &ActorId,
+        upload_id: Option<&UploadId>,
+    ) -> io::Result<()> {
         if !request_matches_options(request, actor_id, &self.options()) {
             return Err(self.error("prepared request does not match its PUT options"));
         }
@@ -293,13 +319,20 @@ impl PutFileJournal for UploadJournal {
                 *progress = UploadProgress::Prepared {
                     actor_id: actor_id.clone(),
                     request: Box::new(request.clone()),
+                    upload_id: upload_id.cloned(),
                 };
                 Ok(())
             }
             UploadProgress::Prepared {
                 request: saved,
                 actor_id: saved_actor,
-            } if **saved == *request && saved_actor == actor_id => Ok(()),
+                upload_id: saved_upload,
+            } if **saved == *request
+                && saved_actor == actor_id
+                && saved_upload.as_ref() == upload_id =>
+            {
+                Ok(())
+            }
             UploadProgress::Prepared { .. } => {
                 Err(self.error("the prepared commit request cannot change"))
             }
@@ -329,7 +362,7 @@ fn journal_error(path: &Path, error: impl std::fmt::Display) -> io::Error {
 
 fn journal_key(
     profile: &str,
-    server_url: &str,
+    target: &str,
     spec: &NamespacePath,
     local_path: &Path,
     commit_id: Option<&CommitId>,
@@ -337,7 +370,7 @@ fn journal_key(
     let local_path = local_path.canonicalize()?;
     Ok(Checksum::sha256(&serde_json::to_vec(&(
         profile,
-        server_url,
+        target,
         spec.namespace(),
         spec.absolute_path(),
         local_path.as_os_str().as_encoded_bytes(),
@@ -375,7 +408,8 @@ mod tests {
         PutFileOptions::new(loonfs_test_support::test_actor())
     }
     fn open(path: &Path) -> UploadJournal {
-        UploadJournal::open_at(path.to_owned(), source(1024), &options()).expect("open journal")
+        UploadJournal::open_at(path.to_owned(), source(1024), &options(), None)
+            .expect("open journal")
     }
     fn begin(journal: &UploadJournal) {
         journal
@@ -461,7 +495,7 @@ mod tests {
         let mut options = options();
         options.commit.commit_id = Some(CommitId::generate());
         let journal =
-            UploadJournal::open_at(path.clone(), source(1024), &options).expect("journal");
+            UploadJournal::open_at(path.clone(), source(1024), &options, None).expect("journal");
         let expected = request(&journal);
         journal
             .commit_prepared(&expected, &journal.options().commit.actor_id)
@@ -470,7 +504,7 @@ mod tests {
         drop(journal);
         assert!(path.exists());
         assert_eq!(
-            UploadJournal::open_at(path, source(1024), &options)
+            UploadJournal::open_at(path, source(1024), &options, None)
                 .expect("reopen")
                 .prepared_request(),
             Some(expected)
@@ -487,7 +521,7 @@ mod tests {
                 journal.acknowledge().expect("remove record");
             }
             assert!(
-                UploadJournal::open_at(path.clone(), source(1024), &options())
+                UploadJournal::open_at(path.clone(), source(1024), &options(), None)
                     .expect_err("owned")
                     .to_string()
                     .contains("another command")
@@ -503,28 +537,30 @@ mod tests {
         let dir = tempfile::tempdir().expect("directory");
         let path = dir.path().join("upload.json");
         std::fs::write(&path, b"{").expect("corrupt record");
-        assert!(UploadJournal::open_at(path.clone(), source(1024), &options()).is_err());
+        assert!(UploadJournal::open_at(path.clone(), source(1024), &options(), None).is_err());
         assert_eq!(std::fs::read(&path).expect("preserved"), b"{");
         std::fs::remove_file(&path).expect("remove fixture");
         std::fs::create_dir(&path).expect("unreadable record");
-        assert!(UploadJournal::open_at(path.clone(), source(1024), &options()).is_err());
+        assert!(UploadJournal::open_at(path.clone(), source(1024), &options(), None).is_err());
         std::fs::remove_dir(&path).expect("remove fixture");
         let original = open(&path).options();
         assert!(
-            UploadJournal::open_at(path.clone(), source(2048), &options())
+            UploadJournal::open_at(path.clone(), source(2048), &options(), None)
                 .expect_err("changed file")
                 .to_string()
                 .contains("source file changed")
         );
         let mut changed = options();
         changed.commit.message = Some("different".to_owned());
-        assert!(UploadJournal::open_at(path.clone(), source(1024), &changed)
-            .expect_err("changed options")
-            .to_string()
-            .contains("PUT options changed"));
+        assert!(
+            UploadJournal::open_at(path.clone(), source(1024), &changed, None)
+                .expect_err("changed options")
+                .to_string()
+                .contains("PUT options changed")
+        );
         changed = options();
         changed.commit.commit_id = Some(CommitId::generate());
-        assert!(UploadJournal::open_at(path.clone(), source(1024), &changed).is_err());
+        assert!(UploadJournal::open_at(path.clone(), source(1024), &changed, None).is_err());
         assert_eq!(open(&path).options(), original);
     }
 
@@ -532,8 +568,8 @@ mod tests {
     fn a_journal_resumes_with_the_same_subject_and_refuses_a_different_subject() {
         let dir = tempfile::tempdir().expect("directory");
         let path = dir.path().join("upload.json");
-        let mut options = options();
-        options.commit.subject = Some(loonfs_api::Subject {
+        let options = options();
+        let mut subject = loonfs_api::Subject {
             principal_scope: loonfs_api::PrincipalScope::parse("demo").expect("scope"),
             subject_id: loonfs_api::SubjectId::parse("alice").expect("subject id"),
             principals: loonfs_api::PrincipalSet::new(
@@ -542,26 +578,27 @@ mod tests {
                     .collect(),
             )
             .expect("principal set"),
-        });
-        let first = UploadJournal::open_at(path.clone(), source(1024), &options)
+        };
+        let first = UploadJournal::open_at(path.clone(), source(1024), &options, Some(&subject))
             .expect("open with subject");
         let recorded = first.options();
         begin(&first);
         drop(first);
 
-        let resumed = UploadJournal::open_at(path.clone(), source(1024), &options)
+        let resumed = UploadJournal::open_at(path.clone(), source(1024), &options, Some(&subject))
             .expect("resume with same subject");
         assert_eq!(resumed.options(), recorded);
         assert!(resumed.resume().is_some());
         drop(resumed);
 
-        options.commit.subject.as_mut().expect("subject").subject_id =
-            loonfs_api::SubjectId::parse("bob").expect("different subject id");
+        subject.subject_id = loonfs_api::SubjectId::parse("bob").expect("different subject id");
         let saved = std::fs::read(&path).expect("saved record");
-        assert!(UploadJournal::open_at(path.clone(), source(1024), &options)
-            .expect_err("changed subject")
-            .to_string()
-            .contains("PUT options changed"));
+        assert!(
+            UploadJournal::open_at(path.clone(), source(1024), &options, Some(&subject))
+                .expect_err("changed subject")
+                .to_string()
+                .contains("PUT options changed")
+        );
         assert_eq!(std::fs::read(&path).expect("preserved record"), saved);
     }
 
@@ -595,7 +632,7 @@ mod tests {
     }
 
     #[test]
-    fn keys_include_the_server_paths_profile_and_explicit_commit_id() {
+    fn keys_include_the_target_paths_profile_and_explicit_commit_id() {
         let dir = tempfile::tempdir().expect("directory");
         let first = dir.path().join("file");
         let other = dir.path().join("other");

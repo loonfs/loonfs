@@ -641,6 +641,12 @@ from another subject answers `commit_id_reuse_conflict`. The scope is not part
 of the fingerprint or upload ownership: a namespace has one scope and refuses
 subjects from every other scope.
 
+Embedded callers set the subject once on the handle they act through. The
+handle then acts as that subject for every read, commit, and upload, and a
+commit carries no subject of its own. A CLI upload journal records the
+handle's subject beside the request and refuses to resume under a different
+subject.
+
 ### Identity headers
 
 Four request headers carry identity. `Loonfs-Actor` is attribution: an actor
@@ -1101,6 +1107,9 @@ inode children listing, file content, download, and change-feed requests accept 
 `snapshot_id`; the download request carries it in its body. File content and download requests cannot combine `snapshot_id`
 with `revision_no`; the snapshot selects the revision. A snapshot change feed
 ends at the captured sequence, and `after_seq` cannot exceed that sequence.
+
+Embedded read options with `snapshot_id` pin that snapshot for the read, just
+as HTTP requests do.
 
 Snapshot reads require a live snapshot. Missing snapshots return
 `snapshot_not_found`, including after deletion. Expired snapshots return

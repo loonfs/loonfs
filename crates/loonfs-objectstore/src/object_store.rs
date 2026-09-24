@@ -191,6 +191,16 @@ pub enum ObjectStoreError {
     },
 }
 
+/// Requires the conditional-write token returned for a control object.
+pub fn required_etag(object_key: &str, etag: Option<String>) -> Result<String> {
+    etag.ok_or_else(|| {
+        ObjectStoreError::transport(
+            object_key,
+            "object store omitted the required control-object etag",
+        )
+    })
+}
+
 /// A provider-independent category for an object-store error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ObjectStoreErrorClass {

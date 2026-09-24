@@ -290,15 +290,15 @@ fn default_max_download_bytes() -> u64 {
 }
 
 fn default_snapshot_max_ttl_ms() -> u64 {
-    86_400_000
+    loonfs::SnapshotPolicy::default().max_ttl_ms
 }
 
 fn default_snapshot_max_lifetime_ms() -> u64 {
-    604_800_000
+    loonfs::SnapshotPolicy::default().max_lifetime_ms
 }
 
 fn default_snapshot_max_live_per_namespace() -> usize {
-    16
+    loonfs::SnapshotPolicy::default().max_live_per_namespace
 }
 
 fn default_max_concurrent_uploads() -> usize {

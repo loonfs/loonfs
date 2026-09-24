@@ -32,7 +32,6 @@ enum ControlLoadFailure {
     Absent,
     Decode(EnvelopeCodecError),
     EmbeddedIdentity(EmbeddedIdentityMismatch),
-    MissingEtag,
     Store(ObjectStoreError),
 }
 
@@ -52,10 +51,14 @@ where
         .await
         .map_err(|error| classify(&object_key, ControlLoadFailure::Store(error)))?
         .ok_or_else(|| classify(&object_key, ControlLoadFailure::Absent))?;
-    let etag = body
-        .metadata
-        .etag
-        .ok_or_else(|| classify(&object_key, ControlLoadFailure::MissingEtag))?;
+    let etag =
+        loonfs_objectstore::required_etag(&object_key, body.metadata.etag).map_err(|error| {
+            ControlObjectLoadError::Store {
+                object_key: object_key.clone(),
+                message: error.to_string(),
+                class: StoreFailureClass::of(&error),
+            }
+        })?;
     let envelope = decode_control_object(&body.bytes, kind)
         .map_err(|error| classify(&object_key, ControlLoadFailure::Decode(error)))?;
     validate_identity(envelope.payload())
@@ -128,11 +131,6 @@ fn classify(object_key: &str, failure: ControlLoadFailure) -> ControlObjectLoadE
             field: field.to_owned(),
             expected,
             actual,
-        },
-        ControlLoadFailure::MissingEtag => ControlObjectLoadError::Store {
-            object_key: object_key.to_owned(),
-            message: "object store omitted the required control-object etag".to_owned(),
-            class: StoreFailureClass::Other,
         },
         ControlLoadFailure::Store(error) => ControlObjectLoadError::Store {
             object_key: object_key.to_owned(),

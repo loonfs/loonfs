@@ -73,6 +73,18 @@ fn rejected_token_reasons(rejections: &[(ContentId, ContentTokenError)]) -> Stri
 }
 
 impl CommitCandidate {
+    /// Uses the handle subject to authorize this publication.
+    pub fn with_subject(mut self, subject: loonfs_api::Subject) -> Self {
+        self.request.subject = Some(subject);
+        self.maintenance = false;
+        self
+    }
+
+    /// Supplies the subject used to own content staged for this candidate.
+    pub fn subject(&self) -> Option<&loonfs_api::Subject> {
+        self.request.subject.as_ref()
+    }
+
     /// A commit no subject check applies to. Only maintenance builds one.
     pub fn maintenance(request: CommitRequest) -> Self {
         Self {

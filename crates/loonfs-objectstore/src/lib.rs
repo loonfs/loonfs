@@ -41,9 +41,9 @@ mod transfer_timeouts;
 pub use configured::{ConfiguredObjectStore, ConfiguredObjectStoreKind};
 pub use immutable_write::ImmutableWriteError;
 pub use object_store::{
-    ByteRange, ByteStream, MultipartCompletion, MultipartPart, ObjectBody, ObjectMetadata,
-    ObjectStore, ObjectStoreError, ObjectStoreErrorClass, PutMode, Result, SharedObjectStore,
-    StoredObjectChecksum,
+    required_etag, ByteRange, ByteStream, MultipartCompletion, MultipartPart, ObjectBody,
+    ObjectMetadata, ObjectStore, ObjectStoreError, ObjectStoreErrorClass, PutMode, Result,
+    SharedObjectStore, StoredObjectChecksum,
 };
 pub use probe::{run_store_contract_probe, StoreProbeCheck, StoreProbeOutcome, StoreProbeReport};
 pub use provider_object_store::{

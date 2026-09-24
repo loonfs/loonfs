@@ -403,6 +403,7 @@ mod tests {
                 vec![PreparedContent::for_completed_upload(
                     content_ref,
                     expires_at_ms,
+                    None,
                 )],
             )
         });

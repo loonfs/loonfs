@@ -219,6 +219,7 @@ pub(crate) enum ResolvedTarget {
 }
 
 pub(crate) struct EmbeddedTarget {
+    pub(crate) journal_identity: String,
     pub(super) backend: EmbeddedBackend,
 }
 
@@ -267,13 +268,19 @@ impl EmbeddedTarget {
             .configured_object_store()
             .map_err(|err| CliError::invalid_config(err.public_message().into_owned()))?
             .into_shared();
-        Self::over_store(
+        let mut target = Self::over_store(
             store,
             writer_id,
             TraceStoreKind::from(store_config.kind()),
             loonfs::InlineContentOptions::default(),
         )
-        .await
+        .await?;
+        target.journal_identity = loonfs_api::Checksum::sha256(
+            &serde_json::to_vec(store_config)
+                .map_err(|error| CliError::invalid_config(error.to_string()))?,
+        )
+        .value;
+        Ok(target)
     }
 
     /// Opens the runtime handles over a store the caller already holds.
@@ -338,7 +345,6 @@ impl EmbeddedTarget {
         let backend = EmbeddedBackend {
             writer,
             service_reader: reader.clone(),
-            subject: None,
             reader,
             maintenance,
             jobs,
@@ -348,7 +354,10 @@ impl EmbeddedTarget {
             grep: GrepService::new(Arc::clone(&grep_block_cache)),
             grep_block_cache,
         };
-        Ok(Self { backend })
+        Ok(Self {
+            backend,
+            journal_identity: String::new(),
+        })
     }
 }
 

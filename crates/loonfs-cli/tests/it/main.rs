@@ -3,6 +3,7 @@
 mod access;
 mod common;
 mod completions;
+mod contract;
 mod filesystem;
 mod inspection;
 mod maintenance;

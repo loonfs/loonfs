@@ -29,18 +29,6 @@ use loonfs_client::{
 };
 use std::sync::Arc;
 
-/// Returns errors for commands that require a different profile type.
-///
-/// Remote profiles cannot host local maintenance because the server already
-/// schedules it. Embedded profiles do not expose upload sessions because
-/// they stage content directly in-process.
-fn upload_sessions_need_a_remote_profile() -> CliError {
-    CliError::new(
-        loonfs_api::ErrorCode::NotSupported.as_str(),
-        "upload sessions belong to a server; an embedded profile stages content itself",
-    )
-}
-
 fn default_actor() -> ActorId {
     ActorId::parse("loonfs-cli").expect("the CLI actor id should be valid")
 }
@@ -60,12 +48,24 @@ fn maintenance_host_needs_an_embedded_profile() -> CliError {
 /// target requires handling both transports. Both paths normalize failures to
 /// the same error-code registry, which keeps command output consistent.
 impl ResolvedTarget {
-    /// Reads, namespace operations, and snapshots act as `subject` from here
-    /// on. Commits carry it through their options.
+    pub(crate) fn subject(&self) -> Option<&Subject> {
+        match self {
+            Self::Embedded(target) => target.backend.writer.subject(),
+            Self::Remote(target) => target.client.subject(),
+        }
+    }
+
+    pub(crate) fn journal_identity(&self) -> &str {
+        match self {
+            Self::Embedded(target) => &target.journal_identity,
+            Self::Remote(target) => target.client.server_url(),
+        }
+    }
+
+    /// Scopes operations to the selected subject.
     pub(crate) fn scope_to_subject(&mut self, subject: &Subject) {
         match self {
             Self::Embedded(target) => {
-                target.backend.subject = Some(subject.clone());
                 target.backend.writer = target.backend.writer.as_subject(subject.clone());
                 target.backend.reader = target.backend.service_reader.as_subject(subject.clone());
             }
@@ -516,25 +516,7 @@ impl ResolvedTarget {
     }
 
     /// Writes a file; `behavior` selects create-only or replace semantics.
-    /// An explicit `commit_id` makes the call retryable by resubmission;
-    /// absent, one is generated and returned in the response.
-    pub(crate) async fn put_file_bytes(
-        &self,
-        spec: &NamespacePath,
-        bytes: &[u8],
-        options: &PutFileOptions,
-    ) -> Result<Commit, CliError> {
-        match self {
-            Self::Embedded(target) => target.backend.put_file_bytes(spec, bytes, options).await,
-            Self::Remote(target) => Ok(target.client.put_file_bytes(spec, bytes, options).await?),
-        }
-    }
-
-    /// Writes a file from a source stream with bounded memory use.
-    ///
-    /// Each profile opens the source in the form its transport requires.
-    /// `progress` counts bytes read from the source. Remote file uploads use
-    /// `journal` to retain their final commit request and any multipart progress.
+    /// Opens the source and records its prepared request when a journal is present.
     pub(crate) async fn put_file_stream(
         &self,
         spec: &NamespacePath,
@@ -546,7 +528,10 @@ impl ResolvedTarget {
         match self {
             Self::Embedded(target) => {
                 let body = payload.open_byte_stream(progress).await?;
-                target.backend.put_file_stream(spec, body, options).await
+                target
+                    .backend
+                    .put_file_stream_journaled(spec, body, options, journal)
+                    .await
             }
             Self::Remote(target) => {
                 let source = payload.open_source(progress).await?;
@@ -569,20 +554,32 @@ impl ResolvedTarget {
         upload_id: &UploadId,
     ) -> Result<UploadSession, CliError> {
         match self {
-            Self::Embedded(_) => Err(upload_sessions_need_a_remote_profile()),
+            Self::Embedded(target) => target
+                .backend
+                .writer
+                .get_upload(namespace_id, upload_id, None)
+                .await
+                .scoped(namespace_id)
+                .map(|view| view.session),
             Self::Remote(target) => Ok(target.client.get_upload(namespace_id, upload_id).await?),
         }
     }
 
-    /// Replays the exact request retained before an interrupted remote PUT.
+    /// Replays the exact request retained before an interrupted PUT.
     pub(crate) async fn replay_file_commit(
         &self,
         namespace_id: &NamespaceId,
         request: &loonfs_api::v0::CommitRequest,
         actor_id: &loonfs_api::ActorId,
+        journal: &UploadJournal,
     ) -> Result<Commit, CliError> {
         match self {
-            Self::Embedded(_) => Err(upload_sessions_need_a_remote_profile()),
+            Self::Embedded(target) => {
+                target
+                    .backend
+                    .replay_file_commit(namespace_id, request, actor_id, journal)
+                    .await
+            }
             Self::Remote(target) => Ok(target
                 .client
                 .create_commit(namespace_id, request, actor_id)
@@ -594,13 +591,19 @@ impl ResolvedTarget {
     pub(crate) async fn commit_completed_upload(
         &self,
         spec: &NamespacePath,
+        upload_id: &UploadId,
         content_ref: ContentRef,
         content_token: Option<loonfs_api::v0::ContentToken>,
         options: &PutFileOptions,
         journal: &UploadJournal,
     ) -> Result<Commit, CliError> {
         match self {
-            Self::Embedded(_) => Err(upload_sessions_need_a_remote_profile()),
+            Self::Embedded(target) => {
+                target
+                    .backend
+                    .commit_completed_upload(spec, upload_id, options, journal)
+                    .await
+            }
             Self::Remote(target) => Ok(target
                 .client
                 .commit_completed_upload(spec, content_ref, content_token, options, Some(journal))

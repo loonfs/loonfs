@@ -17,9 +17,6 @@ use loonfs_api::{
 };
 use loonfs_grep::{GrepDisableOutcome, GrepEnableOutcome, GrepError, NamespaceReads};
 
-/// Maximum grep pattern length in UTF-8 bytes.
-const MAX_GREP_PATTERN_BYTES: usize = 1024;
-
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct GrepQuery {
@@ -104,16 +101,6 @@ pub(super) async fn grep(
 
 fn grep_request(query: GrepQuery) -> Result<GrepRequest, ApiResponseError> {
     let pattern = required_query_param(query.pattern, "pattern")?;
-    if pattern.len() > MAX_GREP_PATTERN_BYTES {
-        return Err(ApiResponseError::new(
-            loonfs_api::ErrorCode::InvalidRequest,
-            &format!(
-                "grep pattern is {} bytes; the maximum is {MAX_GREP_PATTERN_BYTES} bytes",
-                pattern.len()
-            ),
-        )
-        .with_param("pattern"));
-    }
     let path_prefix = query
         .path_prefix
         .map(|value| {
@@ -337,26 +324,10 @@ pub(super) async fn gc_grep_index(
 }
 
 fn map_grep_error(namespace_id: &loonfs_api::NamespaceId, error: GrepError) -> ApiResponseError {
-    let code = error.code();
-    match error {
-        // Both cases mean the advertised query.grep capability is unavailable.
-        error @ (GrepError::NotEnabled | GrepError::Backfilling) => {
-            ApiResponseError::not_supported(FEATURE_QUERY_GREP, &error.public_message())
-        }
-        GrepError::Runtime(error) => {
-            let cursor_is_invalid = matches!(
-                &error,
-                loonfs::RuntimeError::Core(loonfs::CoreError::InvalidCursor(_))
-            );
-            let response = ApiResponseError::runtime_for_namespace(namespace_id, error);
-            if cursor_is_invalid {
-                response.with_param("cursor")
-            } else {
-                response
-            }
-        }
-        error => ApiResponseError::new(code, &error.public_message()),
+    if let GrepError::Runtime(error) = error {
+        return ApiResponseError::runtime_for_namespace(namespace_id, error);
     }
+    ApiResponseError::from_api_error(error.code(), error.to_api_error())
 }
 
 fn grep_publication_conflict() -> ApiResponseError {

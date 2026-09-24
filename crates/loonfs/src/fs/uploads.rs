@@ -24,6 +24,11 @@ use loonfs_api::v0::UploadPartChecksumClaim;
 use loonfs_api::{Subject, UploadId};
 
 impl FsWriter {
+    /// A scoped handle acts as its own subject; only an unscoped handle acts as the caller's.
+    fn scoped_subject<'a>(&'a self, subject: Option<&'a Subject>) -> Option<&'a Subject> {
+        self.core.subject.as_ref().or(subject)
+    }
+
     /// Plants the deadline a durable upload session just created.
     ///
     /// The clock is read after the session is durable, so the scheduled time
@@ -87,6 +92,7 @@ impl FsWriter {
         namespace_id: &NamespaceId,
         subject: Option<&Subject>,
     ) -> Result<UploadSession> {
+        let subject = self.scoped_subject(subject);
         self.core.record_trace_context(&tracing::Span::current());
         let response = self.engine(namespace_id).begin_upload(subject).await?;
         self.schedule_upload_session_reclamation(namespace_id);
@@ -114,6 +120,7 @@ impl FsWriter {
         subject: Option<&Subject>,
         checksum_algorithm: ChecksumAlgorithm,
     ) -> Result<BeginDirectPutUploadTargetResponse> {
+        let subject = self.scoped_subject(subject);
         self.core.record_trace_context(&tracing::Span::current());
         let response = self
             .engine(namespace_id)
@@ -145,6 +152,7 @@ impl FsWriter {
         subject: Option<&Subject>,
         options: DirectMultipartUploadOptions,
     ) -> Result<BeginDirectMultipartUploadTargetResponse> {
+        let subject = self.scoped_subject(subject);
         self.core.record_trace_context(&tracing::Span::current());
         let response = self
             .engine(namespace_id)
@@ -174,6 +182,7 @@ impl FsWriter {
         subject: Option<&Subject>,
         requested: &[UploadPartChecksumClaim],
     ) -> Result<MultipartPartTargets> {
+        let subject = self.scoped_subject(subject);
         self.core.record_trace_context(&tracing::Span::current());
         Ok(self
             .engine(namespace_id)
@@ -203,6 +212,7 @@ impl FsWriter {
         subject: Option<&Subject>,
         bytes: &[u8],
     ) -> Result<UploadSession> {
+        let subject = self.scoped_subject(subject);
         let span = tracing::Span::current();
         self.core.record_trace_context(&span);
         span.record("payload_class", crate::trace::payload_class(bytes.len()));
@@ -241,6 +251,7 @@ impl FsWriter {
         subject: Option<&Subject>,
         body: ByteStream,
     ) -> Result<UploadSession> {
+        let subject = self.scoped_subject(subject);
         self.core.record_trace_context(&tracing::Span::current());
         Ok(self
             .engine(namespace_id)
@@ -269,6 +280,7 @@ impl FsWriter {
         subject: Option<&Subject>,
         completion: ResolvedUploadCompletion,
     ) -> Result<CompletedUpload> {
+        let subject = self.scoped_subject(subject);
         self.core.record_trace_context(&tracing::Span::current());
         let catalog = self
             .load_namespace_catalog_for_content_preparation(namespace_id)
@@ -307,6 +319,7 @@ impl FsWriter {
             UploadMode,
         ) -> std::result::Result<crate::uploads::ResolvedUploadCompletion, String>,
     {
+        let subject = self.scoped_subject(subject);
         self.core.record_trace_context(&tracing::Span::current());
         let catalog = self
             .load_namespace_catalog_for_content_preparation(namespace_id)
@@ -338,6 +351,7 @@ impl FsWriter {
         upload_id: &UploadId,
         subject: Option<&Subject>,
     ) -> Result<UploadSession> {
+        let subject = self.scoped_subject(subject);
         self.core.record_trace_context(&tracing::Span::current());
         Ok(self
             .engine(namespace_id)
@@ -364,6 +378,7 @@ impl FsWriter {
         upload_id: &UploadId,
         subject: Option<&Subject>,
     ) -> Result<UploadSessionView> {
+        let subject = self.scoped_subject(subject);
         self.core.record_trace_context(&tracing::Span::current());
         Ok(self
             .engine(namespace_id)

@@ -70,25 +70,7 @@ impl From<ClientError> for CliError {
 }
 
 pub(crate) fn map_runtime_error(error: RuntimeError) -> CliError {
-    let public_message = error.public_message().into_owned();
-    match error {
-        RuntimeError::Config(_) => CliError::invalid_config(public_message),
-        RuntimeError::RuntimeTask(_) => CliError::runtime_error(public_message),
-        RuntimeError::Core(loonfs::CoreError::SubjectRequired { .. }) => {
-            CliError::invalid_request(public_message).with_param("Loonfs-Principals")
-        }
-        // The embedded surface reports the same structured details a server
-        // puts in its error envelope for the same condition, so `--json`
-        // consumers read one contract from both backends.
-        error => CliError {
-            code: error.code().as_str().to_owned(),
-            feature: None,
-            message: public_message,
-            param: None,
-            request_id: None,
-            details: error.details().map(Box::new),
-        },
-    }
+    error.to_api_error().into()
 }
 
 pub(crate) fn map_namespace_scoped_runtime_error(
@@ -105,29 +87,25 @@ pub(crate) fn map_namespace_scoped_runtime_error(
     map_runtime_error(error)
 }
 
-/// Grep's own failures carry registry codes of their own; everything it
-/// surfaces from the filesystem handles is shaped like any other runtime
-/// error, so embedded and remote report one code per condition.
 pub(crate) fn map_namespace_scoped_grep_error(
     namespace_id: &NamespaceId,
     error: GrepError,
 ) -> CliError {
     match error {
-        GrepError::Runtime(error) => {
-            let cursor_is_invalid = matches!(
-                &error,
-                RuntimeError::Core(loonfs::CoreError::InvalidCursor(_))
-            );
-            let response = map_namespace_scoped_runtime_error(namespace_id, error);
-            if cursor_is_invalid {
-                response.with_param("/cursor")
-            } else {
-                response
-            }
-        }
-        error => {
-            let message = error.public_message().into_owned();
-            CliError::new(error.code().as_str(), message)
+        GrepError::Runtime(error) => map_namespace_scoped_runtime_error(namespace_id, error),
+        error => error.to_api_error().into(),
+    }
+}
+
+impl From<loonfs_api::ApiError> for CliError {
+    fn from(error: loonfs_api::ApiError) -> Self {
+        Self {
+            code: error.code,
+            message: error.message,
+            param: error.param,
+            feature: error.feature,
+            request_id: error.request_id,
+            details: error.details,
         }
     }
 }

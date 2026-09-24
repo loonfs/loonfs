@@ -4,7 +4,7 @@ use crate::error::CliError;
 use crate::progress::ProgressReporter;
 use futures::stream::StreamExt;
 use loonfs::{ByteStream, ObjectStoreError};
-use loonfs_client::{PayloadSource, STREAMING_PUT_MIN_BYTES};
+use loonfs_client::PayloadSource;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -26,14 +26,6 @@ impl LocalPayload {
         Self::File {
             path: path.into(),
             size_bytes,
-        }
-    }
-
-    /// Returns the file when it is small enough to buffer completely.
-    pub(crate) fn holdable_file(&self) -> Option<&Path> {
-        match self {
-            Self::File { path, size_bytes } if *size_bytes < STREAMING_PUT_MIN_BYTES => Some(path),
-            _ => None,
         }
     }
 
@@ -102,35 +94,4 @@ fn as_object_store_stream(source: PayloadSource) -> ByteStream {
             chunk.map_err(|error| ObjectStoreError::transport("upload body", error.to_string()))
         })
         .boxed()
-}
-
-/// Bytes of a payload the caller decided to hold whole.
-pub(crate) async fn read_whole_file(path: &Path) -> Result<Vec<u8>, CliError> {
-    tokio::fs::read(path)
-        .await
-        .map_err(|error| CliError::io_for_path(path, error))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn only_large_or_unmeasured_payloads_stream() {
-        assert!(LocalPayload::file("/tmp/small", 0)
-            .holdable_file()
-            .is_some());
-        assert!(
-            LocalPayload::file("/tmp/small", STREAMING_PUT_MIN_BYTES - 1)
-                .holdable_file()
-                .is_some()
-        );
-        assert!(LocalPayload::file("/tmp/big", STREAMING_PUT_MIN_BYTES)
-            .holdable_file()
-            .is_none());
-        assert!(
-            LocalPayload::Stdin.holdable_file().is_none(),
-            "a source of unknown length can never be held"
-        );
-    }
 }

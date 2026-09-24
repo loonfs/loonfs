@@ -9,6 +9,7 @@ mod dispatch;
 mod download;
 mod embedded;
 mod step_budget;
+mod uploads;
 
 pub(crate) use download::FileDownload;
 pub(crate) use embedded::EmbeddedBackend;

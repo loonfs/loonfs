@@ -475,12 +475,13 @@ async fn snapshot_pins_serve_captured_state_and_enforce_release() {
         snapshot_id: Some(snapshot.checkpoint_id.clone()),
         ..Default::default()
     };
-    assert_core_error_kind(
+    assert_eq!(
         runtime
             .reader
             .get_path_entry(&namespace_id, "/pinned.txt", snapshot_options.clone())
-            .await,
-        ErrorCode::InvalidRequest,
+            .await
+            .expect("read with snapshot options"),
+        captured,
     );
 
     runtime
@@ -500,9 +501,12 @@ async fn snapshot_pins_serve_captured_state_and_enforce_release() {
         .pin_namespace_at_snapshot(&namespace_id, &snapshot.checkpoint_id)
         .await
         .expect("pin live snapshot");
-    assert_core_error_kind(
-        pinned.get_path_entry("/pinned.txt", snapshot_options).await,
-        ErrorCode::InvalidRequest,
+    assert_eq!(
+        pinned
+            .get_path_entry("/pinned.txt", snapshot_options)
+            .await
+            .expect("read pinned entry with snapshot options"),
+        captured,
     );
     assert_eq!(pinned.head_seq(), snapshot.captured_seq);
     assert_eq!(
@@ -537,5 +541,123 @@ async fn snapshot_pins_serve_captured_state_and_enforce_release() {
             .pin_namespace_at_snapshot(&namespace_id, &snapshot.checkpoint_id)
             .await,
         ErrorCode::SnapshotNotFound,
+    );
+}
+
+#[tokio::test]
+async fn a_pinned_reader_rejects_options_naming_another_snapshot() {
+    let temp_dir = tempdir().expect("tempdir");
+    let runtime = open_runtime_async(store(temp_dir.path()), "snapshot-mismatch-read-test").await;
+    let namespace_id = NamespaceId::parse("snapshot-mismatch-reads").expect("namespace id");
+    runtime
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("create namespace");
+    runtime
+        .put_file_bytes(
+            &namespace_id,
+            "/pinned.txt",
+            b"captured",
+            PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("create captured file");
+    let now_ms = loonfs::current_time_ms().expect("current time");
+    let mut snapshots = Vec::new();
+    for name in ["first", "second"] {
+        snapshots.push(
+            runtime
+                .writer
+                .create_snapshot(
+                    &namespace_id,
+                    CreateSnapshotOptions {
+                        name: name.to_owned(),
+                        expires_at_ms: now_ms + 60_000,
+                    },
+                )
+                .await
+                .expect("create snapshot"),
+        );
+    }
+    let pinned = runtime
+        .reader
+        .pin_namespace_at_snapshot(&namespace_id, &snapshots[0].checkpoint_id)
+        .await
+        .expect("pin the first snapshot");
+    let other = snapshots[1].checkpoint_id.clone();
+    let limit = PaginationPolicy::default()
+        .resolve_limit(None)
+        .expect("limit");
+    let root = pinned
+        .get_path_entry("/", Default::default())
+        .await
+        .expect("root entry")
+        .inode_id;
+
+    let assert_rejected = |result: loonfs::Result<()>| {
+        let error = result
+            .expect_err("naming another snapshot is rejected")
+            .to_api_error();
+        assert_eq!(error.code, "invalid_request");
+        assert_eq!(error.param.as_deref(), Some("snapshot_id"));
+    };
+    assert_rejected(
+        pinned
+            .get_path_entry(
+                "/pinned.txt",
+                loonfs::StatPathOptions {
+                    snapshot_id: Some(other.clone()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .map(drop),
+    );
+    assert_rejected(
+        pinned
+            .get_inode(
+                root,
+                loonfs::StatPathOptions {
+                    snapshot_id: Some(other.clone()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .map(drop),
+    );
+    assert_rejected(
+        pinned
+            .list_path_entries_page(
+                "/",
+                PageRequest {
+                    limit,
+                    cursor: None,
+                },
+                loonfs::ListPathEntriesOptions {
+                    snapshot_id: Some(other.clone()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .map(drop),
+    );
+    assert_rejected(
+        pinned
+            .list_inode_children_page(
+                root,
+                PageRequest {
+                    limit,
+                    cursor: None,
+                },
+                loonfs::ListInodeChildrenOptions {
+                    snapshot_id: Some(other),
+                    ..Default::default()
+                },
+            )
+            .await
+            .map(drop),
     );
 }

@@ -14,7 +14,7 @@ pub use reads::{
     ChangesPager, FileRevisionsPager, FsReadSnapshot, InodeChildrenPager, PathEntriesPager,
     TrashPager,
 };
-pub use snapshots::SnapshotsPager;
+pub use snapshots::{SnapshotPolicy, SnapshotsPager};
 
 pub(crate) use core::{should_invalidate_after_result, ReadCore, WriterBits, WriterIdentity};
 pub(crate) use namespaces::delete_namespace_with_engine;

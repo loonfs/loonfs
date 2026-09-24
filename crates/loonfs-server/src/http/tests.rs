@@ -1637,7 +1637,6 @@ async fn runtime_created_state_is_readable_through_http() {
         PutFileOptions {
             behavior: DestinationBehavior::NoReplace,
             commit: loonfs_api::options::CommitOptions {
-                subject: None,
                 preconditions: Vec::new(),
                 actor_id: loonfs_test_support::test_actor(),
                 commit_id: Some(CommitId::parse("runtime-put").expect("valid commit id")),
@@ -1743,7 +1742,6 @@ async fn http_missing_namespace_mutations_return_namespace_not_found() {
                 &MoveOptions {
                     behavior: DestinationBehavior::NoReplace,
                     commit: loonfs_api::options::CommitOptions {
-                        subject: None,
                         preconditions: Vec::new(),
                         actor_id: loonfs_test_support::test_actor(),
                         commit_id: None,
@@ -1860,7 +1858,6 @@ async fn http_put_over_directory_and_move_into_existing_target_return_path_confl
                 &MoveOptions {
                     behavior: DestinationBehavior::NoReplace,
                     commit: loonfs_api::options::CommitOptions {
-                        subject: None,
                         preconditions: Vec::new(),
                         actor_id: loonfs_test_support::test_actor(),
                         commit_id: None,
@@ -2062,7 +2059,6 @@ async fn http_put_and_move_under_deleted_ancestor_create_fresh_subtrees() {
             &MoveOptions {
                 behavior: DestinationBehavior::NoReplace,
                 commit: loonfs_api::options::CommitOptions {
-                    subject: None,
                     preconditions: Vec::new(),
                     actor_id: loonfs_test_support::test_actor(),
                     commit_id: None,
@@ -3745,7 +3741,6 @@ async fn write_file_bytes(
         PutFileOptions {
             behavior: DestinationBehavior::Replace,
             commit: loonfs_api::options::CommitOptions {
-                subject: None,
                 preconditions: Vec::new(),
                 actor_id: loonfs_test_support::test_actor(),
                 commit_id: Some(CommitId::parse(commit_id).expect("valid test commit id")),
@@ -3771,7 +3766,6 @@ async fn delete_path_recursive(
         DeleteOptions {
             behavior: DeleteDirectoryBehavior::Recursive,
             commit: loonfs_api::options::CommitOptions {
-                subject: None,
                 preconditions: Vec::new(),
                 actor_id: loonfs_test_support::test_actor(),
                 commit_id: Some(CommitId::parse(commit_id).expect("valid test commit id")),

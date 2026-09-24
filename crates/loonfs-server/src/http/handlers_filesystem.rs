@@ -664,20 +664,10 @@ pub(super) async fn list_changes(
     let snapshot_id = parse_optional_snapshot_id(query.snapshot_id)?;
     let target = pin_requested_snapshot(reader, &namespace_id, snapshot_id).await?;
     let response = match target {
-        ReadTarget::Snapshot(snapshot) => {
-            let captured_seq = snapshot.head_seq();
-            if after_seq > captured_seq {
-                return Err(ApiResponseError::new(
-                    ErrorCode::InvalidRequest,
-                    &format!("after_seq `{after_seq}` is above snapshot sequence `{captured_seq}`"),
-                )
-                .with_param("after_seq"));
-            }
-            snapshot
-                .list_changes(after_seq, limit)
-                .await
-                .map_err(ApiResponseError::for_namespace(&namespace_id))?
-        }
+        ReadTarget::Snapshot(snapshot) => snapshot
+            .list_changes(after_seq, limit)
+            .await
+            .map_err(ApiResponseError::for_namespace(&namespace_id))?,
         ReadTarget::Live {
             reader,
             namespace_id,

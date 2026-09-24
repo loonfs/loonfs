@@ -315,6 +315,8 @@ fn recursive_transfers_roundtrip_a_tree() {
         rerun_data["failures"][0]["error"]["code"], "path_conflict",
         "{rerun_data}"
     );
+    fs::remove_dir_all(harness.home_dir.join(".local/state/loonfs/uploads"))
+        .expect("discard failed upload journals before changing options");
     let forced = harness.run(&[
         "--json",
         "put",

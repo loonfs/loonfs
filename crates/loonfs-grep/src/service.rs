@@ -164,6 +164,17 @@ impl GrepService {
         namespace_reads: &NamespaceReads<'a>,
         store: &S,
     ) -> Result<QueryPlan<'a>> {
+        const MAX_GREP_PATTERN_BYTES: usize = 1024;
+        if request.pattern.len() > MAX_GREP_PATTERN_BYTES {
+            return Err(loonfs::RuntimeError::InvalidRequest {
+                message: format!(
+                    "grep pattern is {} bytes; the maximum is {MAX_GREP_PATTERN_BYTES} bytes",
+                    request.pattern.len()
+                ),
+                param: "pattern",
+            }
+            .into());
+        }
         let mut reads = namespace_reads.pin().await?;
         let snapshot = self
             .load_index_snapshot(store, reads.namespace_id())

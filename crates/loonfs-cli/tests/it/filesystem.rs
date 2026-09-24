@@ -628,7 +628,6 @@ fn large_and_piped_puts_round_trip_through_an_embedded_profile() {
     assert_success(&first);
     assert_eq!(download(&harness, "/big.bin", "big-back.bin"), payload);
 
-    // A second embedded upload creates another object and must conflict.
     let rerun = harness.run(&[
         "--json",
         "put",
@@ -638,12 +637,11 @@ fn large_and_piped_puts_round_trip_through_an_embedded_profile() {
         "pinned-big",
         "--force",
     ]);
-    assert_failure(&rerun);
-    assert_eq!(json_error(&rerun)["code"], "commit_id_reuse_conflict");
+    assert_success(&rerun);
     assert_eq!(
-        json_error(&rerun)["details"]["committed_seq"],
+        json_data(&rerun)["committed_seq"],
         json_data(&first)["committed_seq"],
-        "the conflict identifies the original publication"
+        "the journal replays the original publication"
     );
 
     let mut changed = payload.clone();

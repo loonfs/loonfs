@@ -25,16 +25,15 @@ use crate::args::{
 use crate::backend::FileDownload;
 use crate::config::ConfigLocation;
 use crate::error::CliError;
-use crate::payload::{read_whole_file, LocalPayload, STDIN_PATH};
+use crate::payload::{LocalPayload, STDIN_PATH};
 use crate::progress::{ProgressOp, ProgressReporter};
-use crate::resolve::ResolvedTarget;
 use crate::uploads::{SourceIdentity, UploadJournal};
 use loonfs_api::v0::UploadSessionStatus;
 use loonfs_api::PinId;
 use loonfs_api::{
     AbsolutePath, ActorId, AttributeKey, AttributeValue, AttributesRevisionNo, ChangeSeq, Commit,
     CommitId, DeleteDirectoryBehavior, DestinationBehavior, InodeKind, ListPathEntriesResponse,
-    NamespaceId, RevisionNo, Subject,
+    NamespaceId, RevisionNo,
 };
 use loonfs_client::{
     CommitOptions, CreateDirectoryOptions, DeleteOptions, NamespacePath, PutFileOptions,
@@ -61,11 +60,9 @@ fn parse_commit_id_arg(commit_id: Option<&str>) -> Result<Option<CommitId>, CliE
 
 pub(crate) fn commit_options(
     actor: &ActorId,
-    subject: Option<&Subject>,
     args: &CommitArgs,
 ) -> Result<CommitOptions, CliError> {
     Ok(CommitOptions {
-        subject: subject.cloned(),
         preconditions: Vec::new(),
         actor_id: actor.clone(),
         commit_id: parse_commit_id_arg(args.commit_id.as_deref())?,
@@ -273,7 +270,6 @@ struct AttributeUpdateJson {
 fn update_attributes_options(
     args: &FilesystemAnnotateArgs,
     actor: &ActorId,
-    subject: Option<&Subject>,
 ) -> Result<UpdateAttributesOptions, CliError> {
     let (set, remove) = match args.attributes_json.as_deref() {
         Some(document) => {
@@ -299,7 +295,7 @@ fn update_attributes_options(
     Ok(UpdateAttributesOptions {
         set,
         remove,
-        commit: commit_options(actor, subject, &args.commit)?,
+        commit: commit_options(actor, &args.commit)?,
         expected_inode_id: args.expected_inode_id,
         expected_attributes_revision_no: args
             .expected_attributes_revision
@@ -323,7 +319,7 @@ pub(crate) async fn run_filesystem_annotate(
     let allow_root = true;
     let spec = namespace_path(context.namespace(), "path", &args.path, allow_root)
         .map_err(|error| context.fail(kind, error))?;
-    let options = update_attributes_options(&args, context.actor(), context.subject.as_ref())
+    let options = update_attributes_options(&args, context.actor())
         .map_err(|error| context.fail(kind, error))?;
     let result = context
         .target
@@ -931,8 +927,8 @@ pub(crate) async fn run_filesystem_put(
     .map_err(|error| context.fail(kind, error))?;
     let spec = NamespacePath::new(context.namespace().clone(), remote_path);
     let payload = LocalPayload::file(&local_path, metadata.len());
-    let options = put_file_options(&args, context.actor(), context.subject.as_ref())
-        .map_err(|error| context.fail(kind, error))?;
+    let options =
+        put_file_options(&args, context.actor()).map_err(|error| context.fail(kind, error))?;
     commit_put(
         kind,
         &context,
@@ -976,8 +972,8 @@ async fn run_filesystem_put_stdin(
     let remote_path = parse_user_path_arg("remote_path", remote_path, false)
         .map_err(|error| context.fail(kind, error))?;
     let spec = NamespacePath::new(context.namespace().clone(), remote_path);
-    let options = put_file_options(&args, context.actor(), context.subject.as_ref())
-        .map_err(|error| context.fail(kind, error))?;
+    let options =
+        put_file_options(&args, context.actor()).map_err(|error| context.fail(kind, error))?;
     // A pipe cannot say how long it is, so there is a byte count but never a
     // total, a percentage, or an estimate.
     commit_put(
@@ -1031,8 +1027,7 @@ async fn commit_put(
 
 /// Uploads one file and commits it at `spec`.
 ///
-/// Remote files retain their upload progress and final commit request. Embedded
-/// writes buffer small files and stream large files with bounded memory.
+/// File uploads retain their options and prepared request across interruptions.
 ///
 /// Recursive uploads share `progress` across their files.
 pub(super) async fn put_payload(
@@ -1042,17 +1037,10 @@ pub(super) async fn put_payload(
     options: &PutFileOptions,
     progress: &Arc<ProgressReporter>,
 ) -> Result<Commit, CliError> {
-    // File-backed remote PUTs retain their exact request across interruptions.
-    let journal = match (&context.target, payload.file_path()) {
-        (ResolvedTarget::Remote(remote), Some(path)) => Some(resume_journal(
-            context,
-            remote.client.server_url(),
-            spec,
-            path,
-            options,
-        )?),
-        _ => None,
-    };
+    let journal = payload
+        .file_path()
+        .map(|path| resume_journal(context, spec, path, options))
+        .transpose()?;
     let retained_options = journal.as_ref().map(UploadJournal::options);
     let options = retained_options.as_ref().unwrap_or(options);
     if let Some(journal) = journal.as_ref() {
@@ -1060,7 +1048,12 @@ pub(super) async fn put_payload(
             progress.phase("committing");
             let committed = context
                 .target
-                .replay_file_commit(context.namespace(), &request, &options.commit.actor_id)
+                .replay_file_commit(
+                    context.namespace(),
+                    &request,
+                    &options.commit.actor_id,
+                    journal,
+                )
                 .await?;
             acknowledge_committed_upload(journal, &committed)?;
             return Ok(committed);
@@ -1071,23 +1064,10 @@ pub(super) async fn put_payload(
             return Ok(committed);
         }
     }
-    let result = match payload.holdable_file() {
-        // A payload small enough to hold travels as one request, so there is
-        // no midpoint to report: it is read, and then the commit is all
-        // that is left.
-        Some(path) if journal.is_none() => {
-            let bytes = read_whole_file(path).await?;
-            progress.advance(bytes.len() as u64);
-            progress.phase("committing");
-            context.target.put_file_bytes(spec, &bytes, options).await
-        }
-        _ => {
-            context
-                .target
-                .put_file_stream(spec, payload, options, progress, journal.as_ref())
-                .await
-        }
-    };
+    let result = context
+        .target
+        .put_file_stream(spec, payload, options, progress, journal.as_ref())
+        .await;
     if let Ok(committed) = &result {
         if let Some(journal) = journal.as_ref() {
             acknowledge_committed_upload(journal, committed)?;
@@ -1096,10 +1076,9 @@ pub(super) async fn put_payload(
     result
 }
 
-/// Opens the journal for a resumable remote file upload.
+/// Opens the journal for a resumable file upload.
 fn resume_journal(
     context: &CommandContext,
-    server_url: &str,
     spec: &NamespacePath,
     local_path: &Path,
     options: &PutFileOptions,
@@ -1108,11 +1087,12 @@ fn resume_journal(
         SourceIdentity::of(local_path).map_err(|error| CliError::io_for_path(local_path, error))?;
     UploadJournal::for_upload(
         &context.profile_name,
-        server_url,
+        context.target.journal_identity(),
         spec,
         local_path,
         source,
         options,
+        context.target.subject(),
     )
     .map_err(CliError::io)
 }
@@ -1152,7 +1132,14 @@ async fn commit_a_finished_upload(
     progress.phase("committing");
     let result = context
         .target
-        .commit_completed_upload(spec, content_ref, content_token, options, journal)
+        .commit_completed_upload(
+            spec,
+            &resume.upload_id,
+            content_ref,
+            content_token,
+            options,
+            journal,
+        )
         .await;
     let committed = result?;
     acknowledge_committed_upload(journal, &committed)?;
@@ -1171,11 +1158,7 @@ fn acknowledge_committed_upload(
     })
 }
 
-fn put_file_options(
-    args: &FilesystemPutArgs,
-    actor: &ActorId,
-    subject: Option<&Subject>,
-) -> Result<PutFileOptions, CliError> {
+fn put_file_options(args: &FilesystemPutArgs, actor: &ActorId) -> Result<PutFileOptions, CliError> {
     let expected_revision_no = args
         .expected_revision
         .map(|value| parse_public_ordinal_arg("--expected-revision", value, RevisionNo::parse))
@@ -1188,7 +1171,7 @@ fn put_file_options(
         };
     Ok(PutFileOptions {
         behavior,
-        commit: commit_options(actor, subject, &args.commit)?,
+        commit: commit_options(actor, &args.commit)?,
         expected_inode_id: args.expected_inode_id,
         expected_revision_no,
     })
@@ -1203,8 +1186,8 @@ pub(crate) async fn run_filesystem_rm(
     let allow_root = false;
     let spec = namespace_path(context.namespace(), "path", &args.path, allow_root)
         .map_err(|error| context.fail(kind, error))?;
-    let commit = commit_options(context.actor(), context.subject.as_ref(), &args.commit)
-        .map_err(|error| context.fail(kind, error))?;
+    let commit =
+        commit_options(context.actor(), &args.commit).map_err(|error| context.fail(kind, error))?;
     // Resolve the inode before deleting: the id is half of the recovery
     // handle `loonfs undelete` needs. The delete then carries it as an
     // expectation, so a rebinding racing this command fails the delete
@@ -1260,8 +1243,8 @@ pub(crate) async fn run_filesystem_restore(
     let allow_root = false;
     let spec = namespace_path(context.namespace(), "path", &args.path, allow_root)
         .map_err(|error| context.fail(kind, error))?;
-    let commit = commit_options(context.actor(), context.subject.as_ref(), &args.commit)
-        .map_err(|error| context.fail(kind, error))?;
+    let commit =
+        commit_options(context.actor(), &args.commit).map_err(|error| context.fail(kind, error))?;
     let revision_no = parse_public_ordinal_arg("--revision", args.revision, RevisionNo::parse)
         .map_err(|error| context.fail(kind, error))?;
     let result = context
@@ -1301,8 +1284,8 @@ pub(crate) async fn run_filesystem_undelete(
         .map(|path| namespace_path(context.namespace(), "destination_path", path, allow_root))
         .transpose()
         .map_err(|error| context.fail(kind, error))?;
-    let commit = commit_options(context.actor(), context.subject.as_ref(), &args.commit)
-        .map_err(|error| context.fail(kind, error))?;
+    let commit =
+        commit_options(context.actor(), &args.commit).map_err(|error| context.fail(kind, error))?;
     let deletion_seq =
         parse_public_ordinal_arg("--deletion-seq", args.deletion_seq, ChangeSeq::parse)
             .map_err(|error| context.fail(kind, error))?;
@@ -1343,8 +1326,8 @@ pub(crate) async fn run_filesystem_mkdir(
     let allow_root = false;
     let spec = namespace_path(context.namespace(), "path", &args.path, allow_root)
         .map_err(|error| context.fail(kind, error))?;
-    let commit = commit_options(context.actor(), context.subject.as_ref(), &args.commit)
-        .map_err(|error| context.fail(kind, error))?;
+    let commit =
+        commit_options(context.actor(), &args.commit).map_err(|error| context.fail(kind, error))?;
     let options = CreateDirectoryOptions {
         parents: args.parents,
         commit,
@@ -1501,8 +1484,8 @@ async fn run_filesystem_transfer(
             .map_err(|error| context.fail(kind, error))?
     };
 
-    let commit = commit_options(context.actor(), context.subject.as_ref(), &args.commit)
-        .map_err(|error| context.fail(kind, error))?;
+    let commit =
+        commit_options(context.actor(), &args.commit).map_err(|error| context.fail(kind, error))?;
     let expected_destination_revision_no = args
         .expected_destination_revision
         .map(|value| {

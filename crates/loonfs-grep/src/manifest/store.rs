@@ -61,7 +61,8 @@ pub(crate) async fn load_grep_hint<S: ObjectStore + ?Sized>(
     }
     Ok(Some(LoadedGrepHint {
         state: state.clone(),
-        etag: body.metadata.etag.unwrap_or_default(),
+        etag: loonfs_objectstore::required_etag(&object_key, body.metadata.etag)
+            .map_err(|error| store_error(&object_key, &error))?,
     }))
 }
 
@@ -102,27 +103,46 @@ pub async fn load_current_grep_manifest<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> Result<Option<LoadedGrepManifest>> {
-    let Some(hint) = load_grep_hint(store, namespace_id).await? else {
+    let Some(mut hint) = load_grep_hint(store, namespace_id).await? else {
         return Ok(None);
     };
-    let Some(mut manifest) =
-        load_grep_manifest(store, namespace_id, hint.state.manifest_no).await?
-    else {
-        if hint.state.manifest_no == ManifestNo(1) {
-            return Ok(None);
+    let mut manifest_no = hint.state.manifest_no;
+    let mut current = load_grep_manifest(store, namespace_id, manifest_no).await?;
+    loop {
+        if let Some(previous) = &current {
+            if let Ok(next) = manifest_no.successor() {
+                if let Some(successor) = load_grep_manifest(store, namespace_id, next).await? {
+                    previous
+                        .payload()
+                        .ensure_successor(successor.payload())
+                        .map_err(|error| corrupt(&manifest_key(namespace_id, &next), error))?;
+                    current = Some(successor);
+                    manifest_no = next;
+                    continue;
+                }
+            }
         }
-        return Err(corrupt(
-            &hint_key(namespace_id),
-            format!("hinted manifest `{}` is missing", hint.state.manifest_no),
-        ));
-    };
-    while let Ok(next) = manifest.payload().manifest_no().successor() {
-        let Some(successor) = load_grep_manifest(store, namespace_id, next).await? else {
-            break;
-        };
-        manifest = successor;
+        // GC may remove the old discovery path after another publisher raises the hint.
+        let refreshed = load_grep_hint(store, namespace_id).await?.ok_or_else(|| {
+            corrupt(
+                &hint_key(namespace_id),
+                "grep hint disappeared during discovery",
+            )
+        })?;
+        if refreshed.state.manifest_no > manifest_no {
+            hint = refreshed;
+            manifest_no = hint.state.manifest_no;
+            current = load_grep_manifest(store, namespace_id, manifest_no).await?;
+            continue;
+        }
+        if current.is_none() && manifest_no != ManifestNo(1) {
+            return Err(corrupt(
+                &hint_key(namespace_id),
+                format!("hinted manifest `{manifest_no}` is missing"),
+            ));
+        }
+        return Ok(current.map(|manifest| LoadedGrepManifest { hint, manifest }));
     }
-    Ok(Some(LoadedGrepManifest { hint, manifest }))
 }
 
 pub async fn publish_grep_manifest<S: ObjectStore + ?Sized>(
@@ -160,6 +180,12 @@ pub async fn publish_grep_manifest<S: ObjectStore + ?Sized>(
         )
         .into());
     }
+    if let Some(current) = current {
+        current
+            .manifest_state()
+            .ensure_successor(next)
+            .map_err(|error| corrupt(&object_key, error))?;
+    }
     let (manifest, bytes) = encode_grep_manifest(next.clone())
         .map_err(|error| corrupt(&object_key, error))?
         .into_parts();
@@ -173,6 +199,24 @@ pub async fn publish_grep_manifest<S: ObjectStore + ?Sized>(
         Ok(_) => {}
         Err(ObjectStoreError::PreconditionFailed { .. }) => {
             return Err(GrepManifestError::Conflict { object_key }.into())
+        }
+        Err(ObjectStoreError::Transport { .. }) => {
+            let current = load_current_grep_manifest(store, namespace_id).await?;
+            let landed = match &current {
+                Some(current) if current.manifest_no() == next.manifest_no() => {
+                    Some(current.manifest.clone())
+                }
+                _ => load_grep_manifest(store, namespace_id, next.manifest_no()).await?,
+            };
+            // New segments and backfill pins have fresh ids, so an identical payload
+            // cannot claim a competing publisher's new output. Core successors can
+            // encode identical changes to shared inputs.
+            if landed
+                .as_ref()
+                .is_none_or(|landed| landed.payload() != next)
+            {
+                return Err(GrepManifestError::Conflict { object_key }.into());
+            }
         }
         Err(error) => return Err(store_error(&object_key, &error).into()),
     }
@@ -210,7 +254,8 @@ async fn create_grep_hint<S: ObjectStore + ?Sized>(
     match store.put_if_absent(&object_key, Bytes::from(bytes)).await {
         Ok(metadata) => Ok(LoadedGrepHint {
             state,
-            etag: metadata.etag.unwrap_or_default(),
+            etag: loonfs_objectstore::required_etag(&object_key, metadata.etag)
+                .map_err(|error| store_error(&object_key, &error))?,
         }),
         Err(ObjectStoreError::PreconditionFailed { .. }) => load_grep_hint(store, namespace_id)
             .await?
@@ -246,7 +291,8 @@ pub async fn raise_grep_hint<S: ObjectStore + ?Sized>(
             Ok(metadata) => {
                 return Ok(LoadedGrepHint {
                     state: raised,
-                    etag: metadata.etag.unwrap_or_default(),
+                    etag: loonfs_objectstore::required_etag(&object_key, metadata.etag)
+                        .map_err(|error| store_error(&object_key, &error))?,
                 })
             }
             Err(ObjectStoreError::PreconditionFailed { .. }) => {

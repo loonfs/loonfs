@@ -11,7 +11,7 @@ use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
 use crate::storage::inline_content::InlineContent;
 use base64::Engine as _;
 use loonfs_api::v0::ContentToken;
-use loonfs_api::{ContentId, ContentRef, NamespaceId};
+use loonfs_api::{ContentId, ContentRef, NamespaceId, UploadId};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -54,6 +54,7 @@ enum PreparedContentKind {
     Staged {
         content_ref: ContentRef,
         expires_at_ms: u64,
+        upload_id: Option<UploadId>,
     },
 }
 
@@ -69,7 +70,8 @@ impl PreparedContent {
         }
     }
 
-    pub(crate) fn inline_content(&self) -> Option<&InlineContent> {
+    /// Returns the bytes needed to retain an inline request for replay.
+    pub fn inline_content(&self) -> Option<&InlineContent> {
         match &self.kind {
             PreparedContentKind::Inline(value) => Some(value),
             PreparedContentKind::Staged { .. } => None,
@@ -105,15 +107,28 @@ impl PreparedContent {
 
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn for_durable_content_write(content_ref: ContentRef) -> Self {
-        Self::for_completed_upload(content_ref, u64::MAX)
+        Self::for_completed_upload(content_ref, u64::MAX, None)
     }
 
-    pub(crate) fn for_completed_upload(content_ref: ContentRef, expires_at_ms: u64) -> Self {
+    pub(crate) fn for_completed_upload(
+        content_ref: ContentRef,
+        expires_at_ms: u64,
+        upload_id: Option<UploadId>,
+    ) -> Self {
         Self {
             kind: PreparedContentKind::Staged {
                 content_ref,
                 expires_at_ms,
+                upload_id,
             },
+        }
+    }
+
+    /// Identifies the completed upload that can restore a staged preparation.
+    pub fn upload_id(&self) -> Option<&UploadId> {
+        match &self.kind {
+            PreparedContentKind::Staged { upload_id, .. } => upload_id.as_ref(),
+            PreparedContentKind::Inline(_) => None,
         }
     }
 
@@ -128,6 +143,7 @@ impl PreparedContent {
             PreparedContentKind::Staged {
                 content_ref: expected_content_ref,
                 expires_at_ms,
+                ..
             } => {
                 &expected_content_ref.owner_namespace_id == namespace_id
                     && expected_content_ref == content_ref
@@ -251,6 +267,7 @@ pub fn verify_content_token(
     Ok(PreparedContent::for_completed_upload(
         payload.content_ref,
         payload.expires_at_ms,
+        None,
     ))
 }
 

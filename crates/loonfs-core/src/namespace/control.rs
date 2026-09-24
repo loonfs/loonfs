@@ -113,8 +113,9 @@ pub(crate) async fn raise_hint<S: ObjectStore + ?Sized>(
         {
             Ok(metadata) => {
                 return Ok(LoadedControl {
+                    etag: loonfs_objectstore::required_etag(&object_key, metadata.etag)
+                        .map_err(|error| CoreError::store(&object_key, &error))?,
                     object_key,
-                    etag: metadata.etag.unwrap_or_default(),
                     state: raised,
                 })
             }
@@ -302,4 +303,50 @@ pub async fn raise_namespace_hint<S: ObjectStore + ?Sized>(
         known,
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use loonfs_api::{ManifestNo, WalNo};
+    use loonfs_test_support::stores::{
+        KeyPredicate, MetadataMapStore, RecordedOperation, RecordingStore,
+    };
+
+    #[tokio::test]
+    async fn a_hint_raise_requires_the_returned_etag() {
+        let directory = tempfile::tempdir().expect("directory");
+        let store =
+            loonfs_objectstore::local_fs_store::LocalFsStore::new(directory.path()).expect("store");
+        let namespace_id = loonfs_test_support::ids::namespace_id("etag");
+        let state = HintPayload {
+            namespace_id: namespace_id.clone(),
+            manifest_no: ManifestNo(1),
+            wal_no: WalNo(0),
+        };
+        let bytes =
+            loonfs_api::wire::control::encode_control_state(ControlObjectKind::Hint, &state)
+                .expect("hint");
+        store
+            .put_if_absent(&hint(&namespace_id), bytes.into())
+            .await
+            .expect("create hint");
+        let known = load_hint(&store, &namespace_id).await.expect("hint");
+        let store = RecordingStore::new(
+            MetadataMapStore::without_etag(store, KeyPredicate::any()),
+            KeyPredicate::any(),
+        );
+        let error = raise_hint(&store, &namespace_id, ManifestNo(2), WalNo(0), Some(known))
+            .await
+            .expect_err("etag required");
+        assert!(matches!(error, CoreError::Store { .. }));
+        assert_eq!(
+            store
+                .take()
+                .iter()
+                .filter(|operation| matches!(operation, RecordedOperation::CompareAndSwap { .. }))
+                .count(),
+            1
+        );
+    }
 }

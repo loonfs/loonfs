@@ -9,7 +9,7 @@ use crate::resolve::{
 };
 use loonfs_api::{
     AbsolutePath, ActorId, ChangeSeq, Commit, ErrorCode, InodeId, InodeKind, NamespaceId, PinId,
-    PublicOrdinalRangeError, Subject,
+    PublicOrdinalRangeError,
 };
 use loonfs_client::{CreateDirectoryOptions, NamespacePath};
 use std::path::{Path, PathBuf};
@@ -19,7 +19,6 @@ pub(crate) struct CommandContext {
     pub(crate) mode: String,
     pub(crate) namespace: Option<NamespaceId>,
     pub(crate) actor_id: Option<ActorId>,
-    pub(crate) subject: Option<Subject>,
     pub(crate) target: ResolvedTarget,
 }
 
@@ -194,7 +193,6 @@ pub(crate) async fn resolve_profile_context_from_config<'a>(
             mode,
             namespace: None,
             actor_id: None,
-            subject,
             target,
         },
         profile,
@@ -258,7 +256,6 @@ async fn resolve_command_context_with_actor(
         mode,
         namespace: Some(namespace),
         actor_id: Some(actor),
-        subject,
         target: resolved_target,
     })
 }

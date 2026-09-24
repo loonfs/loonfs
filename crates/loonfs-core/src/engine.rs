@@ -1000,11 +1000,13 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     pub async fn stage_owned_bytes(
         &self,
         catalog: &VerifiedNamespaceCatalogEntry,
+        subject_id: Option<&loonfs_api::SubjectId>,
         bytes: &[u8],
     ) -> Result<PreparedContent> {
         crate::protocol::stage_owned_bytes(
             &self.store,
             self.own_catalog(catalog)?,
+            subject_id,
             bytes,
             &self.mutation_context()?,
         )
@@ -1022,6 +1024,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     pub async fn import_content_ref(
         &self,
         catalog: &VerifiedNamespaceCatalogEntry,
+        subject_id: Option<&loonfs_api::SubjectId>,
         content_ref: &ContentRef,
     ) -> Result<PreparedContent>
     where
@@ -1033,6 +1036,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         crate::protocol::stage_owned_stream(
             &self.store,
             catalog,
+            subject_id,
             body,
             StreamedPayloadKind::ContentImport,
             &context,
@@ -1048,11 +1052,13 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     pub async fn stage_owned_stream(
         &self,
         catalog: &VerifiedNamespaceCatalogEntry,
+        subject_id: Option<&loonfs_api::SubjectId>,
         body: ByteStream,
     ) -> Result<PreparedContent> {
         crate::protocol::stage_owned_stream(
             &self.store,
             self.own_catalog(catalog)?,
+            subject_id,
             body,
             StreamedPayloadKind::Request,
             &self.mutation_context()?,

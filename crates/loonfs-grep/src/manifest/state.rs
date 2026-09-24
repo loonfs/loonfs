@@ -263,6 +263,78 @@ impl GrepManifestState {
         &self.segments
     }
 
+    pub(super) fn ensure_successor(
+        &self,
+        successor: &Self,
+    ) -> Result<(), loonfs_api::wire::manifest::ManifestChainError> {
+        let invalid = |field: &str| {
+            Err(loonfs_api::wire::manifest::ManifestChainError {
+                field: field.to_owned(),
+            })
+        };
+        if successor.namespace_id != self.namespace_id {
+            return invalid("namespace_id");
+        }
+        if self.manifest_no.successor().ok() != Some(successor.manifest_no) {
+            return invalid("manifest_no");
+        }
+        if successor.index.next_run_no < self.index.next_run_no {
+            return invalid("next_run_no");
+        }
+        match (&self.status, &successor.status) {
+            (
+                GrepIndexStatus::Active {
+                    built_through_seq: before,
+                    next_event_index: before_event,
+                },
+                GrepIndexStatus::Active {
+                    built_through_seq: after,
+                    next_event_index: after_event,
+                },
+            ) => {
+                if after < before
+                    || (after == before && *before_event == 0 && *after_event != 0)
+                    || (after == before && *after_event != 0 && after_event < before_event)
+                {
+                    return invalid("status");
+                }
+            }
+            (
+                GrepIndexStatus::Backfilling {
+                    target_seq,
+                    checkpoint_id,
+                    cursor_inode_id,
+                },
+                GrepIndexStatus::Backfilling {
+                    target_seq: next_target,
+                    checkpoint_id: next_checkpoint,
+                    cursor_inode_id: next_cursor,
+                },
+            ) => {
+                if next_target < target_seq
+                    || (next_checkpoint == checkpoint_id
+                        && (next_target != target_seq || next_cursor < cursor_inode_id))
+                {
+                    return invalid("status");
+                }
+            }
+            (
+                GrepIndexStatus::Backfilling { target_seq, .. },
+                GrepIndexStatus::Active {
+                    built_through_seq, ..
+                },
+            ) if built_through_seq < target_seq => return invalid("status"),
+            (
+                GrepIndexStatus::Active {
+                    built_through_seq, ..
+                },
+                GrepIndexStatus::Backfilling { target_seq, .. },
+            ) if target_seq < built_through_seq => return invalid("status"),
+            _ => {}
+        }
+        Ok(())
+    }
+
     pub(super) fn validate(&self) -> Result<(), GrepManifestStateError> {
         if matches!(self.status, GrepIndexStatus::Disabled {}) {
             if !self.segments.is_empty() {
