@@ -354,7 +354,7 @@ pub enum SegmentBlockKind {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SegmentCacheKey {
-    /// The immutable checksum or object key that identifies the cached object.
+    /// The immutable segment id or object key that identifies the cached object.
     pub identity: String,
     pub block_kind: SegmentBlockKind,
     pub block_offset: u64,

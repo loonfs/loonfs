@@ -419,7 +419,6 @@ fn sample_manifest_payload() -> NamespaceManifestPayload {
                 // Only small filters are inlined; this descriptor's filter
                 // is read through its handle, so the field is omitted.
                 filter_inline: None,
-                object_checksum: sha256_digest(b"sst payload"),
             }],
         }],
     };

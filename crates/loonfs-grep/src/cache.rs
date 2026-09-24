@@ -107,9 +107,9 @@ mod tests {
         }
     }
 
-    fn key(checksum: &str) -> GrepBlockCacheKey {
+    fn key(identity: &str) -> GrepBlockCacheKey {
         GrepBlockCacheKey {
-            identity: checksum.to_owned(),
+            identity: identity.to_owned(),
             block_kind: GrepBlockKind::Data,
             block_offset: 0,
         }

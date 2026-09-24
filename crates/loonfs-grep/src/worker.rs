@@ -32,8 +32,8 @@ use loonfs_api::wire::sst_blocks::{
     DEFAULT_MAX_REORGANIZATION_INPUT_ROWS, DEFAULT_MAX_ROWS_PER_SEGMENT,
 };
 use loonfs_api::{
-    sha256_digest, ChangeSeq, ContentRef, ErrorCode, IndexSegmentId, InodeId, ManifestNo,
-    NamespaceId, PinId, RevisionNo, RunNo,
+    ChangeSeq, ContentRef, ErrorCode, IndexSegmentId, InodeId, ManifestNo, NamespaceId, PinId,
+    RevisionNo, RunNo,
 };
 use loonfs_objectstore::timing::StdMonotonicTimer;
 use loonfs_objectstore::{ImmutableWriteError, ObjectStore, ObjectStoreError};
@@ -972,7 +972,7 @@ async fn write_index_segment<S: ObjectStore + ?Sized>(
     })?;
     let filter_inline = built.inline_filter_hex();
     store
-        .put_immutable_verified(&object_key, bytes::Bytes::from(built.bytes.clone()))
+        .put_immutable_verified(&object_key, bytes::Bytes::from(built.bytes))
         .await
         .map_err(grep_immutable_write_error)?;
     Ok(GrepSegmentRef {
@@ -987,7 +987,6 @@ async fn write_index_segment<S: ObjectStore + ?Sized>(
         index_block: built.index,
         filter_block: built.filter,
         filter_inline,
-        object_checksum: sha256_digest(&built.bytes),
     })
 }
 
@@ -1277,13 +1276,13 @@ impl<S: ObjectStore + ?Sized> SegmentBlockLoader<IndexRow, GrepSegmentRef>
     ) -> Result<Vec<Arc<DecodedDataBlock<IndexRow>>>> {
         let object_key = segment_key(self.namespace_id, &segment.segment_id);
         let object_key = &object_key;
-        let object_checksum = &segment.object_checksum;
+        let segment_id = &segment.segment_id;
         try_join_all(entries.into_iter().map(|entry| async move {
             load_data_block(
                 self.store,
                 self.block_cache,
                 object_key,
-                object_checksum,
+                segment_id,
                 &entry.block,
             )
             .await

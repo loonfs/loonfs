@@ -209,8 +209,6 @@ pub(crate) fn segment_ref(number: u8, run_no: u64, level: u32) -> GrepSegmentRef
             crc32c: 2_591_069_104,
         },
         filter_inline: (number == 1).then(|| "00112233445566778899aabbccddeeff".to_owned()),
-        object_checksum: "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
-            .to_owned(),
     }
 }
 

@@ -509,7 +509,7 @@ async fn segment_postings_for_gram<S: ObjectStore + ?Sized>(
                 store,
                 block_cache,
                 &object_key,
-                &descriptor.object_checksum,
+                &descriptor.segment_id,
                 &entry.block,
             )
         }))

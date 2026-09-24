@@ -9,6 +9,7 @@ use loonfs_api::wire::sst_blocks::{
     decode_data_block_rows, decode_filter_block, decode_index_block, BlockHandle, DecodedDataBlock,
     SegmentFilter, SegmentIndexEntry,
 };
+use loonfs_api::IndexSegmentId;
 use loonfs_objectstore::{ByteRange, ObjectStore};
 use std::sync::Arc;
 
@@ -25,12 +26,12 @@ pub(crate) fn index_segment_corrupt(
 }
 
 fn cache_key(
-    object_checksum: &str,
+    segment_id: &IndexSegmentId,
     block_kind: GrepBlockKind,
     handle: &BlockHandle,
 ) -> GrepBlockCacheKey {
     GrepBlockCacheKey {
-        identity: object_checksum.to_owned(),
+        identity: segment_id.to_string(),
         block_kind,
         block_offset: handle.offset,
     }
@@ -140,11 +141,7 @@ async fn load_and_publish_segment_sections<S: ObjectStore + ?Sized>(
                 .map_err(|error| index_segment_corrupt(object_key, "data block", &error))?,
         );
         cache.insert(
-            cache_key(
-                &descriptor.object_checksum,
-                GrepBlockKind::Data,
-                &entry.block,
-            ),
+            cache_key(&descriptor.segment_id, GrepBlockKind::Data, &entry.block),
             DecodedGrepBlock::Data {
                 block,
                 decoded_bytes: entry.block.decoded_bytes as usize,
@@ -161,7 +158,7 @@ pub(crate) async fn load_filter_block<S: ObjectStore + ?Sized>(
     descriptor: &GrepSegmentRef,
 ) -> Result<Arc<SegmentFilter>> {
     let handle = &descriptor.filter_block;
-    let key = cache_key(&descriptor.object_checksum, GrepBlockKind::Filter, handle);
+    let key = cache_key(&descriptor.segment_id, GrepBlockKind::Filter, handle);
     let decoded = cache
         .get_or_load(&key, || async {
             let object_len = segment_object_len(object_key, descriptor)?;
@@ -172,7 +169,7 @@ pub(crate) async fn load_filter_block<S: ObjectStore + ?Sized>(
                 .await?;
                 cache.insert(
                     cache_key(
-                        &descriptor.object_checksum,
+                        &descriptor.segment_id,
                         GrepBlockKind::Index,
                         &descriptor.index_block,
                     ),
@@ -209,7 +206,7 @@ pub(crate) async fn load_index_block<S: ObjectStore + ?Sized>(
     descriptor: &GrepSegmentRef,
 ) -> Result<Arc<Vec<SegmentIndexEntry>>> {
     let handle = &descriptor.index_block;
-    let key = cache_key(&descriptor.object_checksum, GrepBlockKind::Index, handle);
+    let key = cache_key(&descriptor.segment_id, GrepBlockKind::Index, handle);
     let decoded = cache
         .get_or_load(&key, || async {
             let object_len = segment_object_len(object_key, descriptor)?;
@@ -220,7 +217,7 @@ pub(crate) async fn load_index_block<S: ObjectStore + ?Sized>(
                 .await?;
                 cache.insert(
                     cache_key(
-                        &descriptor.object_checksum,
+                        &descriptor.segment_id,
                         GrepBlockKind::Filter,
                         &descriptor.filter_block,
                     ),
@@ -254,10 +251,10 @@ pub(crate) async fn load_data_block<S: ObjectStore + ?Sized>(
     store: &S,
     cache: &GrepBlockCache,
     object_key: &str,
-    object_checksum: &str,
+    segment_id: &IndexSegmentId,
     handle: &BlockHandle,
 ) -> Result<Arc<DecodedDataBlock<IndexRow>>> {
-    let key = cache_key(object_checksum, GrepBlockKind::Data, handle);
+    let key = cache_key(segment_id, GrepBlockKind::Data, handle);
     let decoded = cache
         .get_or_load(&key, || async {
             let bytes = load_index_section_bytes(store, object_key, handle).await?;
