@@ -5,12 +5,12 @@ use crate::gc::{gc_namespace, GcConfig};
 use crate::limits::{
     COMPLETED_UPLOAD_ADMISSION_WINDOW_MS, CONTENT_RECLAMATION_GRACE_MS, GC_MIN_GRACE_WINDOW_MS,
 };
-use crate::namespace::bootstrap::bootstrap_namespace;
 use crate::namespace::control::load_namespace_read_state;
 use crate::protocol::{
     begin_service_proxied_upload, complete_upload, upload_content, CompletedUpload,
     ResolvedUploadCompletion,
 };
+use crate::test_support::ops::create;
 use loonfs_api::{AbsolutePath, DestinationBehavior, WriterId};
 use loonfs_objectstore::keys::{content_blob, hint, wal_segment_prefix};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -110,16 +110,9 @@ async fn a_completed_upload_token_cannot_publish_after_namespace_deletion() {
     );
     let clock = Arc::new(ManualClock::new(1_000));
     let setup = context(clock.now_ms());
-    bootstrap_namespace(
-        &store,
-        &namespace_id,
-        &setup,
-        &loonfs_test_support::test_actor(),
-        &loonfs_api::NamespaceAccess::Unrestricted {},
-        false,
-    )
-    .await
-    .expect("bootstrap");
+    create(&store, &namespace_id, &setup)
+        .await
+        .expect("bootstrap");
     let completed = completed_upload(&store, &namespace_id, &setup).await;
     let catalog = load_namespace_catalog_entry(&store, &namespace_id)
         .await
@@ -170,16 +163,9 @@ async fn content_reclaimed_during_view_load_cannot_be_published() {
         OperationClass::Read,
     );
     let setup = context(1_000);
-    bootstrap_namespace(
-        &store,
-        &namespace_id,
-        &setup,
-        &loonfs_test_support::test_actor(),
-        &loonfs_api::NamespaceAccess::Unrestricted {},
-        false,
-    )
-    .await
-    .expect("bootstrap");
+    create(&store, &namespace_id, &setup)
+        .await
+        .expect("bootstrap");
     let completed = completed_upload(&store, &namespace_id, &setup).await;
     let content_key = content_blob(&namespace_id, &completed.prepared.content_ref().content_id);
     let publication = context(setup.now_ms + COMPLETED_UPLOAD_ADMISSION_WINDOW_MS - 1);
@@ -267,16 +253,9 @@ async fn assert_expired_content_stays_rejected_on_retry(elapsed_ms: u64) {
         OperationClass::Read,
     );
     let setup = context(1_000);
-    bootstrap_namespace(
-        &store,
-        &namespace_id,
-        &setup,
-        &loonfs_test_support::test_actor(),
-        &loonfs_api::NamespaceAccess::Unrestricted {},
-        false,
-    )
-    .await
-    .expect("bootstrap");
+    create(&store, &namespace_id, &setup)
+        .await
+        .expect("bootstrap");
     let completed = completed_upload(&store, &namespace_id, &setup).await;
     let timer = Arc::new(PublicationTimer::default());
     let mut engine =
@@ -394,16 +373,9 @@ async fn content_expiring_after_the_put_starts_does_not_undo_the_commit() {
         OperationClass::Put,
     );
     let setup = context(1_000);
-    bootstrap_namespace(
-        &store,
-        &namespace_id,
-        &setup,
-        &loonfs_test_support::test_actor(),
-        &loonfs_api::NamespaceAccess::Unrestricted {},
-        false,
-    )
-    .await
-    .expect("bootstrap");
+    create(&store, &namespace_id, &setup)
+        .await
+        .expect("bootstrap");
     let completed = completed_upload(&store, &namespace_id, &setup).await;
     let timer = Arc::new(PublicationTimer::default());
     let mut engine =
@@ -511,16 +483,9 @@ async fn swap_accepts_any_valid_matching_proof_and_expired_receipt_replays_witho
         KeyPredicate::any(),
     );
     let setup = context(1_000);
-    bootstrap_namespace(
-        &store,
-        &namespace_id,
-        &setup,
-        &loonfs_test_support::test_actor(),
-        &loonfs_api::NamespaceAccess::Unrestricted {},
-        false,
-    )
-    .await
-    .expect("bootstrap");
+    create(&store, &namespace_id, &setup)
+        .await
+        .expect("bootstrap");
     let completed = completed_upload(&store, &namespace_id, &setup).await;
     let unused = completed_upload(&store, &namespace_id, &setup).await;
     let catalog = load_namespace_catalog_entry(&store, &namespace_id)
@@ -647,16 +612,9 @@ async fn retained_receipt_minting_stops_at_the_upload_issuance_deadline() {
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let store = LocalFsStore::new(directory.path()).expect("store");
     let setup = context(1_000);
-    bootstrap_namespace(
-        &store,
-        &namespace_id,
-        &setup,
-        &loonfs_test_support::test_actor(),
-        &loonfs_api::NamespaceAccess::Unrestricted {},
-        false,
-    )
-    .await
-    .expect("bootstrap");
+    create(&store, &namespace_id, &setup)
+        .await
+        .expect("bootstrap");
     let completed = completed_upload(&store, &namespace_id, &setup).await;
     let receipt = completed.receipt.expect("eligible receipt");
     let deadline_ms = setup.now_ms + COMPLETED_UPLOAD_RECEIPT_WINDOW_MS;

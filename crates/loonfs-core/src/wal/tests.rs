@@ -5,12 +5,10 @@
 
 use crate::commit_engine::{CommitCandidate, NamespaceCommitEngine};
 use crate::context::MutationContext;
-use crate::namespace::{
-    bootstrap::bootstrap_namespace, control::load_current_manifest,
-    writer_epoch::acquire_writer_epoch,
-};
+use crate::namespace::{control::load_current_manifest, writer_epoch::acquire_writer_epoch};
 use crate::path::read::load_current_metadata_view;
 use crate::protocol::PublishTailOptions;
+use crate::test_support::ops::create;
 use loonfs_api::wire::wal::{decode_wal_segment_envelope_zstd, encode_wal_segment_envelope_zstd};
 use loonfs_api::{
     AbsolutePath, AttributeInclusion, ChangeSeq, CommitId, ErrorCode, InodeId, ManifestNo,
@@ -35,16 +33,9 @@ async fn readers_reject_invalid_numbers_epochs_sequences_and_allocation_summarie
     let directory = tempfile::tempdir().expect("directory");
     let store = LocalFsStore::new(directory.path()).expect("store");
     let namespace_id = NamespaceId::parse("verification").expect("namespace");
-    bootstrap_namespace(
-        &store,
-        &namespace_id,
-        &context(1_000),
-        &loonfs_test_support::test_actor(),
-        &loonfs_api::NamespaceAccess::Unrestricted {},
-        false,
-    )
-    .await
-    .expect("create");
+    create(&store, &namespace_id, &context(1_000))
+        .await
+        .expect("create");
     for _ in 0..2 {
         acquire_writer_epoch(&store, &namespace_id, &context(1_000))
             .await
@@ -92,16 +83,9 @@ async fn hinted_fences_carry_the_head_without_reading_earlier_wal() {
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::prefix(wal_segment_prefix(&namespace_id)),
     );
-    bootstrap_namespace(
-        &store,
-        &namespace_id,
-        &context(1_000),
-        &loonfs_test_support::test_actor(),
-        &loonfs_api::NamespaceAccess::Unrestricted {},
-        false,
-    )
-    .await
-    .expect("create");
+    create(&store, &namespace_id, &context(1_000))
+        .await
+        .expect("create");
     let mut engine = NamespaceCommitEngine::new(namespace_id.clone());
     let committed = publish(&mut engine, &store, "data")
         .await
@@ -141,16 +125,7 @@ async fn fences_fold_and_are_reclaimed_at_the_folded_boundary() {
     );
     let namespace_id = NamespaceId::parse("fences").expect("namespace");
     let setup = context(1_000);
-    bootstrap_namespace(
-        &store,
-        &namespace_id,
-        &setup,
-        &loonfs_test_support::test_actor(),
-        &loonfs_api::NamespaceAccess::Unrestricted {},
-        false,
-    )
-    .await
-    .expect("create");
+    create(&store, &namespace_id, &setup).await.expect("create");
     acquire_writer_epoch(&store, &namespace_id, &setup)
         .await
         .expect("first fence");
@@ -202,16 +177,7 @@ async fn a_same_sequence_writer_acquisition_does_not_cover_a_fence_flush() {
         OperationClass::PutCreateIfAbsent,
     );
     let setup = context(1_000);
-    bootstrap_namespace(
-        &store,
-        &namespace_id,
-        &setup,
-        &loonfs_test_support::test_actor(),
-        &loonfs_api::NamespaceAccess::Unrestricted {},
-        false,
-    )
-    .await
-    .expect("create");
+    create(&store, &namespace_id, &setup).await.expect("create");
     acquire_writer_epoch(&store, &namespace_id, &setup)
         .await
         .expect("first fence");
@@ -269,16 +235,9 @@ async fn a_number_collision_returns_after_one_attempt_and_a_retry_commits_the_ne
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::any(),
     ));
-    bootstrap_namespace(
-        &store,
-        &namespace_id,
-        &context(1_000),
-        &loonfs_test_support::test_actor(),
-        &loonfs_api::NamespaceAccess::Unrestricted {},
-        false,
-    )
-    .await
-    .expect("create");
+    create(&store, &namespace_id, &context(1_000))
+        .await
+        .expect("create");
     let mut first = NamespaceCommitEngine::new(namespace_id.clone());
     publish(&mut first, &store, "seed").await.expect("seed");
     let mut second = first.clone();
@@ -329,16 +288,9 @@ async fn a_stale_writer_collides_with_the_fence_and_writes_nothing_else() {
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::any(),
     );
-    bootstrap_namespace(
-        &store,
-        &namespace_id,
-        &context(1_000),
-        &loonfs_test_support::test_actor(),
-        &loonfs_api::NamespaceAccess::Unrestricted {},
-        false,
-    )
-    .await
-    .expect("create");
+    create(&store, &namespace_id, &context(1_000))
+        .await
+        .expect("create");
     let mut stale = NamespaceCommitEngine::new(namespace_id.clone());
     publish(&mut stale, &store, "old")
         .await
@@ -384,16 +336,9 @@ async fn cold_open_probes_past_a_lagging_hint_and_reads_a_missing_hint_as_absent
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::any(),
     );
-    bootstrap_namespace(
-        &store,
-        &namespace_id,
-        &context(1_000),
-        &loonfs_test_support::test_actor(),
-        &loonfs_api::NamespaceAccess::Unrestricted {},
-        false,
-    )
-    .await
-    .expect("create");
+    create(&store, &namespace_id, &context(1_000))
+        .await
+        .expect("create");
     let mut engine = NamespaceCommitEngine::new(namespace_id.clone());
     publish(&mut engine, &store, "one").await.expect("one");
     publish(&mut engine, &store, "two").await.expect("two");
@@ -446,16 +391,9 @@ async fn a_bounded_tail_load_names_the_missing_segment() {
     let directory = tempdir().expect("directory");
     let store = LocalFsStore::new(directory.path()).expect("store");
     let namespace_id = NamespaceId::parse("gap").expect("namespace");
-    bootstrap_namespace(
-        &store,
-        &namespace_id,
-        &context(1_000),
-        &loonfs_test_support::test_actor(),
-        &loonfs_api::NamespaceAccess::Unrestricted {},
-        false,
-    )
-    .await
-    .expect("create");
+    create(&store, &namespace_id, &context(1_000))
+        .await
+        .expect("create");
     let mut engine = NamespaceCommitEngine::new(namespace_id.clone());
     for name in ["one", "two", "three"] {
         publish(&mut engine, &store, name).await.expect(name);
@@ -515,16 +453,9 @@ async fn a_flush_and_collection_during_tip_discovery_cannot_reuse_a_wal_number()
         KeyPredicate::exact(wal_segment(&namespace_id, &WalNo(1))),
         OperationClass::Read,
     );
-    bootstrap_namespace(
-        &store,
-        &namespace_id,
-        &context(1_000),
-        &loonfs_test_support::test_actor(),
-        &loonfs_api::NamespaceAccess::Unrestricted {},
-        false,
-    )
-    .await
-    .expect("create");
+    create(&store, &namespace_id, &context(1_000))
+        .await
+        .expect("create");
     let mut engine = NamespaceCommitEngine::new(namespace_id.clone());
     publish(&mut engine, &store, "seed").await.expect("seed");
     engine.invalidate_projection();
@@ -587,16 +518,9 @@ async fn a_warm_probe_reports_a_broken_chain_at_its_own_epoch_as_corruption() {
     let directory = tempdir().expect("directory");
     let store = LocalFsStore::new(directory.path()).expect("store");
     let namespace_id = NamespaceId::parse("warm-probe").expect("namespace");
-    bootstrap_namespace(
-        &store,
-        &namespace_id,
-        &context(1_000),
-        &loonfs_test_support::test_actor(),
-        &loonfs_api::NamespaceAccess::Unrestricted {},
-        false,
-    )
-    .await
-    .expect("create");
+    create(&store, &namespace_id, &context(1_000))
+        .await
+        .expect("create");
     acquire_writer_epoch(&store, &namespace_id, &context(1_000))
         .await
         .expect("fence");

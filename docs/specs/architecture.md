@@ -2,6 +2,8 @@
 
 LoonFS stores file bytes and filesystem metadata in object storage. The metadata describes directory bindings, file revisions, retained views, and committed changes. A reader can recover the filesystem without the process that originally wrote it.
 
+A namespace id names one lifetime; deletion is terminal and a create or fork into that id returns `namespace_deleted` ([format section 1.1](format.md#11-namespaces-and-identity)).
+
 ## Stored state
 
 The main objects have separate roles:
@@ -78,6 +80,6 @@ User checkpoints and snapshots use the same pin representation with different ow
 
 A file deletion records a recoverable subtree tombstone. A namespace deletion publishes terminal deleted status in its next manifest. Neither immediately removes shared content.
 
-Collection derives the retirement deadline from the deletion stamp and the configured grace. User and snapshot pins become eligible for deletion by that deadline. Only a fork pin can remain required afterward. Once the deadline passes and a complete pin listing is empty, collection lists and deletes the namespace's content prefix and releases its source pin. It stores no retirement deadline and scans no content-publication rows. The deleted manifest and hint remain to prevent ID reuse.
+Retirement follows [format section 9.5](format.md#95-retirement). An eligible pass reclaims the namespace’s own content and releases its source pin under [section 11.8](format.md#118-sweeping-a-retired-owners-content).
 
 Hosts choose when maintenance runs and which namespaces it covers. The storage protocols determine what each operation can publish or delete. Derived extensions such as grep have separate manifests and collection rules; core collection never sweeps their objects.

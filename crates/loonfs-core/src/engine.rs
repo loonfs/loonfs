@@ -1301,12 +1301,16 @@ mod tests {
     async fn reader_engine_still_serves_reads() {
         let temp_dir = tempdir().expect("tempdir");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        NamespaceEngine::writer(
+        let writer = NamespaceEngine::writer(
             LocalFsStore::new(temp_dir.path()).expect("store"),
             namespace_id.clone(),
             WriterId::parse("writer-a").expect("writer id"),
+        );
+        crate::test_support::ops::create(
+            &writer.store,
+            &namespace_id,
+            &writer.mutation_context().expect("context"),
         )
-        .bootstrap_namespace(BootstrapOptions::new(loonfs_test_support::test_actor()))
         .await
         .expect("bootstrap namespace");
 
@@ -1352,10 +1356,13 @@ mod tests {
             namespace_id.clone(),
             WriterId::parse("writer-a").expect("writer id"),
         );
-        writer
-            .bootstrap_namespace(BootstrapOptions::new(loonfs_test_support::test_actor()))
-            .await
-            .expect("bootstrap namespace");
+        crate::test_support::ops::create(
+            &writer.store,
+            &namespace_id,
+            &writer.mutation_context().expect("context"),
+        )
+        .await
+        .expect("bootstrap namespace");
         let begun = writer.begin_upload(None).await.expect("begin upload");
 
         let reader = NamespaceEngine::reader(

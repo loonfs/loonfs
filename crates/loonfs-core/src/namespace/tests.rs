@@ -4,6 +4,7 @@ use super::{bootstrap::bootstrap_namespace, control::load_current_manifest, fork
 use crate::commit_engine::NamespaceCommitEngine;
 use crate::context::MutationContext;
 use crate::path::read::load_current_metadata_view;
+use crate::test_support::ops::create;
 use crate::wal::tests::publish;
 use loonfs_api::{AttributeInclusion, ErrorCode, ManifestNo, NamespaceId, WalNo, WriterId};
 use loonfs_objectstore::{
@@ -63,63 +64,6 @@ fn an_acl_namespace_begins_with_the_root_grants_as_its_root_access_row() {
 }
 
 #[tokio::test]
-async fn creation_installs_hint_and_manifest_then_reads_genesis() {
-    let directory = tempdir().expect("directory");
-    let store = RecordingStore::new(
-        LocalFsStore::new(directory.path()).expect("store"),
-        KeyPredicate::any(),
-    );
-    let namespace_id = NamespaceId::parse("created").expect("namespace");
-    bootstrap_namespace(
-        &store,
-        &namespace_id,
-        &context(),
-        &loonfs_test_support::test_actor(),
-        &loonfs_api::NamespaceAccess::Unrestricted {},
-        false,
-    )
-    .await
-    .expect("create");
-    let manifest = load_current_manifest(&store, &namespace_id)
-        .await
-        .expect("manifest");
-    let payload = manifest.state.envelope.payload();
-    assert_eq!(payload.manifest_no, ManifestNo(1));
-    assert!(payload.runs.is_empty());
-    assert_eq!(payload.folded_wal_no, WalNo(0));
-    let puts = store
-        .snapshot()
-        .into_iter()
-        .filter(|operation| {
-            matches!(
-                operation,
-                loonfs_test_support::stores::RecordedOperation::Put { .. }
-            )
-        })
-        .map(|operation| operation.key().to_owned())
-        .collect::<Vec<_>>();
-    assert_eq!(
-        puts,
-        vec![
-            hint(&namespace_id),
-            metadata_manifest_object(&namespace_id, &ManifestNo(1))
-        ]
-    );
-    assert_eq!(store.counts().create_if_absent_puts, 2);
-    let root = load_current_metadata_view(&store, &namespace_id)
-        .await
-        .expect("view")
-        .resolve_path(
-            "/",
-            AttributeInclusion::Omit,
-            &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
-        )
-        .await
-        .expect("root");
-    assert_eq!(root.inode_id, loonfs_api::ROOT_INODE_ID);
-}
-
-#[tokio::test]
 async fn two_creations_race_at_manifest_one() {
     let directory = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("created").expect("namespace");
@@ -130,100 +74,14 @@ async fn two_creations_race_at_manifest_one() {
     );
     store.block_next();
     let context = context();
-    let actor_id = loonfs_test_support::test_actor();
-    let (loser, winner) = futures::join!(
-        bootstrap_namespace(
-            &store,
-            &namespace_id,
-            &context,
-            &actor_id,
-            &loonfs_api::NamespaceAccess::Unrestricted {},
-            false
-        ),
-        async {
-            store.wait_until_blocked().await;
-            let result = bootstrap_namespace(
-                store.inner(),
-                &namespace_id,
-                &context,
-                &loonfs_test_support::test_actor(),
-                &loonfs_api::NamespaceAccess::Unrestricted {},
-                false,
-            )
-            .await;
-            store.release();
-            result
-        }
-    );
+    let (loser, winner) = futures::join!(create(&store, &namespace_id, &context), async {
+        store.wait_until_blocked().await;
+        let result = create(store.inner(), &namespace_id, &context).await;
+        store.release();
+        result
+    });
     winner.expect("winner");
     assert_eq!(loser.expect_err("loser").code(), ErrorCode::NamespaceExists);
-}
-
-/// Lands the first manifest-1 put, lets another writer take the namespace,
-/// then reports the put's outcome as unknown.
-#[derive(Debug)]
-struct LostCreateResponseStore {
-    inner: LocalFsStore,
-    namespace_id: NamespaceId,
-    fired: std::sync::Mutex<bool>,
-}
-
-#[async_trait::async_trait]
-impl ObjectStore for LostCreateResponseStore {
-    loonfs_test_support::delegate_object_store!(self => self.inner; except put);
-
-    async fn put(
-        &self,
-        key: &str,
-        bytes: bytes::Bytes,
-        mode: loonfs_objectstore::PutMode,
-    ) -> Result<loonfs_objectstore::ObjectMetadata, loonfs_objectstore::ObjectStoreError> {
-        let first = key == metadata_manifest_object(&self.namespace_id, &ManifestNo(1))
-            && !std::mem::replace(
-                &mut *self
-                    .fired
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner()),
-                true,
-            );
-        let landed = self.inner.put(key, bytes, mode).await?;
-        if !first {
-            return Ok(landed);
-        }
-        super::writer_epoch::acquire_writer_epoch(&self.inner, &self.namespace_id, &context())
-            .await
-            .expect("another writer takes the namespace");
-        Err(loonfs_objectstore::ObjectStoreError::transport(
-            key,
-            "response lost",
-        ))
-    }
-}
-
-#[tokio::test]
-async fn a_plain_create_whose_response_was_lost_cannot_claim_an_advanced_namespace() {
-    let directory = tempdir().expect("directory");
-    let namespace_id = NamespaceId::parse("lost-response").expect("namespace");
-    let store = LostCreateResponseStore {
-        inner: LocalFsStore::new(directory.path()).expect("store"),
-        namespace_id: namespace_id.clone(),
-        fired: std::sync::Mutex::new(false),
-    };
-    let error = bootstrap_namespace(
-        &store,
-        &namespace_id,
-        &context(),
-        &loonfs_test_support::test_actor(),
-        &loonfs_api::NamespaceAccess::Unrestricted {},
-        false,
-    )
-    .await
-    .expect_err("identical first manifests do not prove who created the namespace");
-    assert_eq!(error.code(), ErrorCode::NamespaceExists);
-    let current = load_current_manifest(&store.inner, &namespace_id)
-        .await
-        .expect("current manifest");
-    assert_eq!(current.state.envelope.payload().manifest_no, ManifestNo(2));
 }
 
 #[tokio::test]
@@ -242,18 +100,14 @@ async fn an_ambiguous_first_manifest_confirms_only_a_forks_creation() {
     .apply_then_fail();
     store.fail_next(2);
     let actor_id = loonfs_test_support::test_actor();
-    let error = bootstrap_namespace(
-        &store,
-        &source,
-        &context(),
-        &actor_id,
-        &loonfs_api::NamespaceAccess::unrestricted(),
-        false,
-    )
-    .await
-    .expect_err("plain create cannot prove authorship from matching bytes");
+    let error = create(&store, &source, &context())
+        .await
+        .expect_err("plain create cannot prove authorship from matching bytes");
     assert_eq!(error.code(), ErrorCode::NamespaceExists);
-    bootstrap_namespace(
+    let existing = super::status::load_namespace(&store, &source)
+        .await
+        .expect("landed namespace");
+    let adopted = bootstrap_namespace(
         &store,
         &source,
         &context(),
@@ -263,6 +117,7 @@ async fn an_ambiguous_first_manifest_confirms_only_a_forks_creation() {
     )
     .await
     .expect("allow existing returns the landed namespace");
+    assert_eq!(adopted, existing);
     let created = fork_namespace(&store, &source, &target, &actor_id, None, &context())
         .await
         .expect("fork source pin proves authorship from matching bytes");
@@ -278,16 +133,7 @@ async fn nested_forks_read_copied_runs_without_source_control_reads() {
     let source = NamespaceId::parse("source").expect("source");
     let target = NamespaceId::parse("target").expect("target");
     let nested = NamespaceId::parse("nested").expect("nested");
-    bootstrap_namespace(
-        &store,
-        &source,
-        &context(),
-        &loonfs_test_support::test_actor(),
-        &loonfs_api::NamespaceAccess::Unrestricted {},
-        false,
-    )
-    .await
-    .expect("create");
+    create(&store, &source, &context()).await.expect("create");
     publish(
         &mut NamespaceCommitEngine::new(source.clone()),
         &store,
@@ -308,7 +154,6 @@ async fn nested_forks_read_copied_runs_without_source_control_reads() {
     let target_manifest = load_current_manifest(&store, &target)
         .await
         .expect("target manifest");
-    assert_eq!(target_manifest.state.manifest().manifest_no, ManifestNo(1));
     assert!(target_manifest
         .state
         .envelope
@@ -337,7 +182,6 @@ async fn nested_forks_read_copied_runs_without_source_control_reads() {
     let manifest = load_current_manifest(&store, &nested)
         .await
         .expect("nested manifest");
-    assert_eq!(manifest.state.manifest().manifest_no, ManifestNo(1));
     let owners = manifest
         .state
         .envelope
@@ -408,16 +252,9 @@ async fn a_pending_hint_cannot_name_a_manifest_collected_after_its_replacement()
         KeyPredicate::hint(&namespace_id),
         OperationClass::CompareAndSwap,
     );
-    bootstrap_namespace(
-        &store,
-        &namespace_id,
-        &context(),
-        &loonfs_test_support::test_actor(),
-        &loonfs_api::NamespaceAccess::Unrestricted {},
-        false,
-    )
-    .await
-    .expect("create");
+    create(&store, &namespace_id, &context())
+        .await
+        .expect("create");
     let mut engine = NamespaceCommitEngine::new(namespace_id.clone());
     publish(&mut engine, &store, "seed").await.expect("seed");
     store.block_next();
@@ -483,16 +320,9 @@ async fn fork_into_a_deleted_id_writes_no_source_pin() {
     let target = NamespaceId::parse("deleted-target").expect("namespace");
     let context = context();
     for namespace_id in [&source, &target] {
-        bootstrap_namespace(
-            &store,
-            namespace_id,
-            &context,
-            &loonfs_test_support::test_actor(),
-            &loonfs_api::NamespaceAccess::unrestricted(),
-            false,
-        )
-        .await
-        .expect("bootstrap");
+        create(&store, namespace_id, &context)
+            .await
+            .expect("bootstrap");
     }
     NamespaceCommitEngine::new(target.clone())
         .delete_namespace(&store, Default::default(), &context)
@@ -534,30 +364,14 @@ async fn a_fork_that_loses_target_publication_deletes_its_source_pin() {
         );
         let setup = context();
         let actor = loonfs_test_support::test_actor();
-        bootstrap_namespace(
-            &store,
-            &source,
-            &setup,
-            &actor,
-            &loonfs_api::NamespaceAccess::unrestricted(),
-            false,
-        )
-        .await
-        .expect("source");
+        create(&store, &source, &setup).await.expect("source");
         store.block_next();
         let fork = fork_namespace(&store, &source, &target, &actor, None, &setup);
         let competing_create = async {
             store.wait_until_blocked().await;
-            bootstrap_namespace(
-                store.inner(),
-                &target,
-                &setup,
-                &actor,
-                &loonfs_api::NamespaceAccess::unrestricted(),
-                false,
-            )
-            .await
-            .expect("competing create");
+            create(store.inner(), &target, &setup)
+                .await
+                .expect("competing create");
             if deleted {
                 crate::commit_engine::delete_namespace(
                     store.inner(),

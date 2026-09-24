@@ -273,16 +273,7 @@ async fn fork_owned_checkpoints_reject_user_release() {
     let source = NamespaceId::parse("source").expect("namespace id");
     let clone = NamespaceId::parse("clone").expect("namespace id");
     let setup = mutation_context("gc-test", 1_000);
-    crate::namespace::bootstrap::bootstrap_namespace(
-        &store,
-        &source,
-        &setup,
-        &loonfs_test_support::test_actor(),
-        &loonfs_api::NamespaceAccess::Unrestricted {},
-        false,
-    )
-    .await
-    .expect("bootstrap");
+    create(&store, &source, &setup).await.expect("bootstrap");
     write_test_file(&store, &source, "/docs/one.txt", "gc-one", &setup).await;
     crate::namespace::fork::fork_namespace(
         &store,
@@ -330,16 +321,9 @@ async fn snapshot_owned_checkpoints_reject_user_release() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let setup = mutation_context("gc-test", 1_000);
-    crate::namespace::bootstrap::bootstrap_namespace(
-        &store,
-        &namespace_id,
-        &setup,
-        &loonfs_test_support::test_actor(),
-        &loonfs_api::NamespaceAccess::Unrestricted {},
-        false,
-    )
-    .await
-    .expect("bootstrap");
+    create(&store, &namespace_id, &setup)
+        .await
+        .expect("bootstrap");
     write_test_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
     let snapshot = crate::checkpoint::create_checkpoint(
         &store,

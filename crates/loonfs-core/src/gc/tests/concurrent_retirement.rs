@@ -11,16 +11,9 @@ async fn overlapping_retirement_retries_lost_delete_ack_and_preserves_a_live_sib
     let target = NamespaceId::parse("target").expect("target");
     let sibling = NamespaceId::parse("sibling").expect("sibling");
     let setup = context(1_000);
-    bootstrap_namespace(
-        &inner,
-        &source,
-        &setup,
-        &loonfs_test_support::test_actor(),
-        &loonfs_api::NamespaceAccess::unrestricted(),
-        false,
-    )
-    .await
-    .expect("bootstrap source");
+    create(&inner, &source, &setup)
+        .await
+        .expect("bootstrap source");
     let source_keys = publish_owned_content(&inner, &source, 2).await;
     for fork in [&target, &sibling] {
         fork_namespace(

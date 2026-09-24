@@ -12,16 +12,9 @@ async fn discover_during_collection(start: ManifestNo, block_next_manifest: bool
         KeyPredicate::manifest(&namespace_id),
     );
     let context = test_context();
-    crate::namespace::bootstrap::bootstrap_namespace(
-        &store,
-        &namespace_id,
-        &context,
-        &loonfs_test_support::test_actor(),
-        &loonfs_api::NamespaceAccess::Unrestricted {},
-        false,
-    )
-    .await
-    .expect("bootstrap");
+    create(&store, &namespace_id, &context)
+        .await
+        .expect("bootstrap");
     if start == ManifestNo(2) {
         acquire_writer_epoch(&store, &namespace_id, &context)
             .await

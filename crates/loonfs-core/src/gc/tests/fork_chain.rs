@@ -78,16 +78,9 @@ async fn live_grandchild_keeps_deleted_ancestors_pinned_until_retirement_runs_le
     let mut keys = Vec::new();
     for (index, namespace_id) in namespaces.iter().enumerate() {
         if index == 0 {
-            bootstrap_namespace(
-                &store,
-                namespace_id,
-                &setup,
-                &loonfs_test_support::test_actor(),
-                &loonfs_api::NamespaceAccess::Unrestricted {},
-                false,
-            )
-            .await
-            .expect("bootstrap root");
+            create(&store, namespace_id, &setup)
+                .await
+                .expect("bootstrap root");
         } else {
             fork_namespace(
                 &store,

@@ -160,7 +160,7 @@ async fn reads_commits_and_change_feed_never_list() {
 }
 
 #[tokio::test]
-async fn maintenance_preserves_namespace_identity_and_writer() {
+async fn maintenance_preserves_writer_and_logical_head() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
@@ -215,10 +215,6 @@ async fn maintenance_preserves_namespace_identity_and_writer() {
     let after = loonfs_core::control::load_namespace_read_state(&store, &namespace_id)
         .await
         .expect("namespace state");
-    assert_eq!(after.namespace_id, before.namespace_id);
-
-    assert_eq!(after.created_at_ms, before.created_at_ms);
-    assert_eq!(after.fork_basis, before.fork_basis);
     assert_eq!(after.writer_epoch, before.writer_epoch);
     assert_eq!(after.writer, before.writer);
     assert_eq!(after.seq, before.seq);

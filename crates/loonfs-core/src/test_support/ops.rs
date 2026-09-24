@@ -1,5 +1,4 @@
-//! Test-support wrappers that publish one path mutation at a time through
-//! the same pipeline production batches use.
+//! Namespace creation and individual path mutations for tests.
 
 use super::content_write::store_file_bytes_before_metadata_publish;
 use crate::commit_engine::CommitCandidate;
@@ -12,6 +11,22 @@ use loonfs_api::{
     Commit, CommitId, DeleteDirectoryBehavior, DestinationBehavior, NamespaceId, RevisionNo,
 };
 use loonfs_objectstore::ObjectStore;
+
+pub(crate) async fn create<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    context: &MutationContext,
+) -> Result<loonfs_api::Namespace> {
+    crate::namespace::bootstrap::bootstrap_namespace(
+        store,
+        namespace_id,
+        context,
+        &loonfs_test_support::test_actor(),
+        &loonfs_api::NamespaceAccess::unrestricted(),
+        false,
+    )
+    .await
+}
 
 fn normalized_commit_id(commit_id: Option<&CommitId>) -> CommitId {
     commit_id.cloned().unwrap_or_else(CommitId::generate)

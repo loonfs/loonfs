@@ -326,9 +326,9 @@ mod tests {
     use super::*;
     use crate::commit::{CandidateAllocation, InodeAllocator};
     use crate::context::MutationContext;
-    use crate::namespace::bootstrap::bootstrap_namespace;
     use crate::path::read::load_current_metadata_view;
     use crate::storage::content::store_bytes_as_content;
+    use crate::test_support::ops::create;
     use crate::test_support::ops::{delete_path, put_file_bytes};
     use loonfs_api::{
         AbsolutePath, CommitId, DeleteDirectoryBehavior, DestinationBehavior, InodeId,
@@ -430,16 +430,9 @@ mod tests {
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let context = test_context();
-        bootstrap_namespace(
-            &store,
-            &namespace_id,
-            &context,
-            &loonfs_test_support::test_actor(),
-            &loonfs_api::NamespaceAccess::Unrestricted {},
-            false,
-        )
-        .await
-        .expect("bootstrap");
+        create(&store, &namespace_id, &context)
+            .await
+            .expect("bootstrap");
         (temp_dir, store, namespace_id, context)
     }
 

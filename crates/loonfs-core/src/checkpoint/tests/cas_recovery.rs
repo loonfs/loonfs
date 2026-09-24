@@ -59,16 +59,9 @@ async fn publishers_racing_one_number_load_the_winner_and_retry_when_needed() {
             KeyPredicate::manifest(&namespace_id),
         ));
         let context = test_context();
-        crate::namespace::bootstrap::bootstrap_namespace(
-            &store,
-            &namespace_id,
-            &context,
-            &loonfs_test_support::test_actor(),
-            &loonfs_api::NamespaceAccess::Unrestricted {},
-            false,
-        )
-        .await
-        .expect("bootstrap");
+        create(&store, &namespace_id, &context)
+            .await
+            .expect("bootstrap");
         crate::namespace::writer_epoch::acquire_writer_epoch(&store, &namespace_id, &context)
             .await
             .expect("acquire");
@@ -198,16 +191,9 @@ async fn a_lagging_hint_probes_forward_and_a_missing_hint_reads_as_absent() {
         KeyPredicate::any(),
     );
     let context = test_context();
-    crate::namespace::bootstrap::bootstrap_namespace(
-        &store,
-        &namespace_id,
-        &context,
-        &loonfs_test_support::test_actor(),
-        &loonfs_api::NamespaceAccess::Unrestricted {},
-        false,
-    )
-    .await
-    .expect("bootstrap");
+    create(&store, &namespace_id, &context)
+        .await
+        .expect("bootstrap");
     write_file_bytes(&store, &namespace_id, "/file", b"data", &context, None)
         .await
         .expect("write");
@@ -267,16 +253,9 @@ async fn retention_publishes_only_a_number_and_floor_change_and_writers_read_it(
         KeyPredicate::any(),
     );
     let context = test_context();
-    crate::namespace::bootstrap::bootstrap_namespace(
-        &store,
-        &namespace_id,
-        &context,
-        &loonfs_test_support::test_actor(),
-        &loonfs_api::NamespaceAccess::Unrestricted {},
-        false,
-    )
-    .await
-    .expect("bootstrap");
+    create(&store, &namespace_id, &context)
+        .await
+        .expect("bootstrap");
     write_file_bytes(&store, &namespace_id, "/file", b"data", &context, None)
         .await
         .expect("write");
@@ -319,16 +298,9 @@ async fn manifest_publication_recovers_an_ambiguous_put_and_tolerates_a_failed_h
         let namespace_id = NamespaceId::parse("demo").expect("namespace");
         let store = LocalFsStore::new(directory.path()).expect("store");
         let context = test_context();
-        crate::namespace::bootstrap::bootstrap_namespace(
-            &store,
-            &namespace_id,
-            &context,
-            &loonfs_test_support::test_actor(),
-            &loonfs_api::NamespaceAccess::Unrestricted {},
-            false,
-        )
-        .await
-        .expect("bootstrap");
+        create(&store, &namespace_id, &context)
+            .await
+            .expect("bootstrap");
         let current = load_current_manifest(&store, &namespace_id)
             .await
             .expect("current");
@@ -380,16 +352,9 @@ async fn a_checkpoint_losing_manifest_publication_pins_the_winner() {
     let namespace_id = NamespaceId::parse("demo").expect("namespace");
     let store = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
     let context = test_context();
-    crate::namespace::bootstrap::bootstrap_namespace(
-        &store,
-        &namespace_id,
-        &context,
-        &loonfs_test_support::test_actor(),
-        &loonfs_api::NamespaceAccess::Unrestricted {},
-        false,
-    )
-    .await
-    .expect("bootstrap");
+    create(&store, &namespace_id, &context)
+        .await
+        .expect("bootstrap");
     write_file_bytes(&store, &namespace_id, "/file", b"data", &context, None)
         .await
         .expect("write");
@@ -492,16 +457,9 @@ async fn read_anchor_reloads_the_head_when_the_manifest_is_ahead() {
     let inner = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
-    crate::namespace::bootstrap::bootstrap_namespace(
-        &inner,
-        &namespace_id,
-        &context,
-        &loonfs_test_support::test_actor(),
-        &loonfs_api::NamespaceAccess::Unrestricted {},
-        false,
-    )
-    .await
-    .expect("bootstrap");
+    create(&inner, &namespace_id, &context)
+        .await
+        .expect("bootstrap");
     let stale_head = inner
         .get_with_metadata(&hint(&namespace_id))
         .await
@@ -542,16 +500,9 @@ async fn namespace_status_and_change_feed_reload_a_head_behind_the_floor() {
     let inner = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
-    crate::namespace::bootstrap::bootstrap_namespace(
-        &inner,
-        &namespace_id,
-        &context,
-        &loonfs_test_support::test_actor(),
-        &loonfs_api::NamespaceAccess::Unrestricted {},
-        false,
-    )
-    .await
-    .expect("bootstrap");
+    create(&inner, &namespace_id, &context)
+        .await
+        .expect("bootstrap");
     let stale_head = inner
         .get_with_metadata(&hint(&namespace_id))
         .await
@@ -620,16 +571,9 @@ async fn an_ambiguous_compactor_claim_retries_instead_of_confirming() {
     )
     .apply_then_fail();
     store.fail_next(1);
-    crate::namespace::bootstrap::bootstrap_namespace(
-        &store,
-        &namespace_id,
-        &test_context(),
-        &loonfs_test_support::test_actor(),
-        &loonfs_api::NamespaceAccess::unrestricted(),
-        false,
-    )
-    .await
-    .expect("create");
+    create(&store, &namespace_id, &test_context())
+        .await
+        .expect("create");
     // The claim landed, but a rival could have written the same bytes, so the
     // claimant reads it as the rival's and takes the next epoch.
     let epoch = super::super::compactor::claim_compactor(&store, &namespace_id)
