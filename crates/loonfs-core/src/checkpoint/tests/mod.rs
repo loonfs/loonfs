@@ -14,6 +14,7 @@ pub(crate) mod inspection_materialization;
 mod inventory;
 mod manifest_gc_races;
 mod manifest_round_trips;
+mod pin_cleanup;
 mod pin_verification;
 mod retention;
 mod snapshot_fork_gc;

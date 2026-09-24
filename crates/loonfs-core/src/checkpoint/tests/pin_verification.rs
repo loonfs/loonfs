@@ -85,7 +85,7 @@ async fn pin_creation_retries_after_compaction_and_collection() {
     }
 }
 
-async fn compact_and_collect_replaced_segments<S: ObjectStore>(
+pub(super) async fn compact_and_collect_replaced_segments<S: ObjectStore>(
     store: &S,
     namespace_id: &NamespaceId,
     selected: &crate::namespace::control::LoadedManifest,
