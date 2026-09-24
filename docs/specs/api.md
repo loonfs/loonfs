@@ -641,11 +641,11 @@ from another subject answers `commit_id_reuse_conflict`. The scope is not part
 of the fingerprint or upload ownership: a namespace has one scope and refuses
 subjects from every other scope.
 
-Embedded callers set the subject once on the handle they act through. The
-handle then acts as that subject for every read, commit, and upload, and a
-commit carries no subject of its own. A CLI upload journal records the
-handle's subject beside the request and refuses to resume under a different
-subject.
+Embedded callers set the subject once, on the handle they use. Every read,
+commit, and upload through that handle acts as that subject. A commit does not
+carry its own subject. The CLI records the handle's subject in its upload
+journal beside the request, and it refuses to resume the upload under a
+different subject.
 
 ### Identity headers
 
@@ -1108,8 +1108,10 @@ inode children listing, file content, download, and change-feed requests accept 
 with `revision_no`; the snapshot selects the revision. A snapshot change feed
 ends at the captured sequence, and `after_seq` cannot exceed that sequence.
 
-Embedded read options with `snapshot_id` pin that snapshot for the read, just
-as HTTP requests do.
+When an embedded read sets `snapshot_id` in its options, the read pins that
+snapshot, as the HTTP request does. A reader that is already pinned at a
+snapshot accepts options that name that snapshot and rejects any other
+snapshot id as `invalid_request`.
 
 Snapshot reads require a live snapshot. Missing snapshots return
 `snapshot_not_found`, including after deletion. Expired snapshots return

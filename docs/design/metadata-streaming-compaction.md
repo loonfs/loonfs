@@ -25,7 +25,7 @@ If an eligible prefix fits the step budgets, the bounded path executes it. Other
 
 A large backlog can require several publications. Explicit compaction performs one window per call, so a caller repeats it while it publishes. Automatic size-tiering reduces repeated base rewrites, but obsolete metadata can remain until enough newer data accumulates.
 
-A merge that starts at the group's oldest run produces a base run and can remove rows under the format's retention rules. A merge that starts above it produces a delta run and keeps every row, because an excluded older run may contain versions hidden by a tombstone in the selected window. A lone oldest delta can be promoted to establish a base.
+A merge that starts at the group's oldest run produces a base run and can remove rows under the format's retention rules. A merge that starts above it produces a delta run and keeps every row, because an excluded older run may hold rows that a row in the window supersedes: an older binding version below an unbound one, or a listed deletion whose removal row is in the window. A lone oldest delta can be promoted to establish a base.
 
 ## Reading and writing incrementally
 
@@ -52,9 +52,9 @@ Output uses fresh IDs under `namespaces/{namespace_id}/segments/`. Published des
 
 ## Binding retention
 
-The slot and child indexes each contain bound and unbound versions. A rebuild that includes the oldest run groups rows by slot or child and retains all versions above the floor. It also retains the newest value at or below the floor when that value is bound. An unbound value is a tombstone. Only this rebuild can remove it together with the older values it hides. A rebuild above the oldest run keeps every row.
+The slot and child indexes each hold bound and unbound versions. A rebuild that includes the oldest run groups rows by slot or child. It keeps every version above the floor, and it keeps the newest version at or below the floor when that version is bound. An unbound version is a tombstone. Only this kind of rebuild can remove it, together with the older versions it hides. A rebuild above the oldest run keeps every row.
 
-Binding keys order positions oldest first. The operator holds at most one floor value until the group ends or a row above the floor arrives. Both execution paths read each index as a sorted stream and apply the same rule independently.
+Binding keys sort positions oldest first. The retention operator holds at most one floor version until its slot or child ends or a row above the floor arrives. Both execution paths read each index as a separate sorted stream and apply the same rule to each.
 
 ## Validating a merge
 
