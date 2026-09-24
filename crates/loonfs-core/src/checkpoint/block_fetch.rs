@@ -33,24 +33,20 @@ pub(super) fn segment_block_cache_key(
     block_offset: u64,
 ) -> MetadataSegmentCacheKey {
     MetadataSegmentCacheKey {
-        identity: descriptor.object_checksum.clone(),
+        identity: metadata_segment_object_key(descriptor),
         block_kind,
         block_offset,
     }
 }
 
-/// The local stored-block cache's key for one section of a segment.
-///
-/// The identity is the segment's object checksum, the same immutable bytes
-/// the decoded cache keys by, and the handle's offset locates the section
-/// inside the object.
 fn stored_block_key(
     descriptor: &MetadataSegmentRef,
     kind: StoredMetadataBlockKind,
     handle: &BlockHandle,
 ) -> StoredMetadataBlockKey {
     StoredMetadataBlockKey {
-        object_checksum: descriptor.object_checksum.clone(),
+        owner_namespace_id: descriptor.owner_namespace_id.clone(),
+        segment_id: descriptor.segment_id.clone(),
         kind,
         offset: handle.offset,
     }

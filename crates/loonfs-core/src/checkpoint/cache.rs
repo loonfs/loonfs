@@ -1,5 +1,5 @@
-//! Shared caches for decoded manifest state: SST blocks keyed by content
-//! digest, validated manifests, and bounded WAL-tail projections.
+//! Shared caches for decoded manifest state: SST blocks keyed by owner and
+//! segment id, validated manifests, and bounded WAL-tail projections.
 //!
 //! The decoded block cache also carries the handle to the optional
 //! node-local cache of the same blocks in their encoded form; see
@@ -334,9 +334,9 @@ mod tests {
         }
     }
 
-    fn key(digest: &str) -> MetadataSegmentCacheKey {
+    fn key(identity: &str) -> MetadataSegmentCacheKey {
         MetadataSegmentCacheKey {
-            identity: digest.to_owned(),
+            identity: identity.to_owned(),
             block_kind: MetadataSegmentBlockKind::Data,
             block_offset: 0,
         }

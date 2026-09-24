@@ -8,22 +8,18 @@
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use loonfs_api::{MetadataSegmentId, NamespaceId};
 use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
 use thiserror::Error;
 
 /// Identifies one encoded section of an immutable metadata segment.
 ///
-/// `object_checksum` identifies the complete segment. `kind` and `offset`
-/// identify one section within it. The decoder validates lengths and CRCs, so
-/// the cache key does not include them.
-///
-/// Implementations may version their own on-disk format. Namespace manifests
-/// are excluded because they are keyed by object path rather than content
-/// digest.
+/// The decoder validates lengths and CRCs, so the cache key excludes them.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct StoredMetadataBlockKey {
-    pub object_checksum: String,
+    pub owner_namespace_id: NamespaceId,
+    pub segment_id: MetadataSegmentId,
     pub kind: StoredMetadataBlockKind,
     pub offset: u64,
 }

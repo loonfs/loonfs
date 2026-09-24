@@ -13,6 +13,7 @@ use loonfs::metrics::{
     RESULT_MISS, RESULT_OK,
 };
 use loonfs::{StoredMetadataBlockCache, StoredMetadataBlockKey, StoredMetadataBlockKind};
+use loonfs_api::{MetadataSegmentId, NamespaceId};
 use mixtrics::metrics::RegistryOps;
 use std::path::Path;
 use std::sync::atomic::Ordering;
@@ -87,7 +88,9 @@ fn geometry(root: &Path) -> DiskGeometry {
 
 fn key(offset: u64) -> StoredMetadataBlockKey {
     StoredMetadataBlockKey {
-        object_checksum: "sha256:00112233445566778899aabbccddeeff".to_owned(),
+        owner_namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
+        segment_id: MetadataSegmentId::parse("seg_0123456789abcdef0123456789abcdef")
+            .expect("valid segment id"),
         kind: StoredMetadataBlockKind::Data,
         offset,
     }
@@ -128,6 +131,12 @@ async fn a_kept_block_survives_a_reopen() {
         Some(bytes),
         "a reopened cache serves what the closed one wrote"
     );
+    let mut other_owner = key(0);
+    other_owner.owner_namespace_id = NamespaceId::parse("other").expect("valid namespace id");
+    assert_eq!(reopened.get(&other_owner).await, None);
+    let mut other_segment = key(0);
+    other_segment.segment_id = MetadataSegmentId::generate();
+    assert_eq!(reopened.get(&other_segment).await, None);
     reopened.close().await.expect("close reopened cache");
 }
 

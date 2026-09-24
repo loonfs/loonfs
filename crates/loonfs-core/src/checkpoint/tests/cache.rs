@@ -783,7 +783,8 @@ fn stored_key(
     offset: u64,
 ) -> StoredMetadataBlockKey {
     StoredMetadataBlockKey {
-        object_checksum: descriptor.object_checksum.clone(),
+        owner_namespace_id: descriptor.owner_namespace_id.clone(),
+        segment_id: descriptor.segment_id.clone(),
         kind,
         offset,
     }
@@ -881,7 +882,7 @@ async fn a_cold_local_block_cache_takes_every_section_one_fetch_produced() {
 }
 
 #[tokio::test]
-async fn a_warm_local_block_cache_answers_index_and_filter_without_the_store() {
+async fn warm_block_caches_reuse_only_the_same_owner_and_segment() {
     let (_temp_dir, store, descriptor) = checkpointed_direntry_segment().await;
     let blocks = Arc::new(RecordingStoredMetadataBlockCache::new());
     let cold_index = warm_local_block_cache(&store, &descriptor, &blocks).await;
@@ -922,6 +923,33 @@ async fn a_warm_local_block_cache_answers_index_and_filter_without_the_store() {
             "the {kind:?} section should have been served by the local cache"
         );
     }
+
+    let mut other_owner = descriptor.clone();
+    other_owner.owner_namespace_id = NamespaceId::parse("other").expect("valid namespace id");
+    let mut other_segment = descriptor.clone();
+    other_segment.segment_id = loonfs_api::MetadataSegmentId::generate();
+    for missing in [other_owner, other_segment] {
+        let error = block_fetch::load_segment_index(&store, Some(&cache), &memo, &missing)
+            .await
+            .expect_err("another object should miss every cache");
+        match error {
+            ManifestLoadError::MissingSegment { object_key } => {
+                assert_eq!(object_key, metadata_segment_object_key(&missing));
+            }
+            other => panic!("expected a missing segment, got {other:?}"),
+        }
+        assert!(blocks
+            .calls()
+            .contains(&RecordedStoredMetadataBlockCall::Get {
+                key: stored_key(
+                    &missing,
+                    StoredMetadataBlockKind::Index,
+                    missing.index_block.offset,
+                ),
+                hit: false,
+            }));
+    }
+    assert_eq!(store.count(OperationClass::Read), 2);
 }
 
 #[tokio::test]
@@ -1056,7 +1084,6 @@ async fn multi_block_direntry_segment() -> (
     descriptor.max_row_key = built.max_row_key;
     descriptor.index_block = built.index;
     descriptor.filter_block = built.filter;
-    descriptor.object_checksum = loonfs_api::sha256_digest(&built.bytes);
     // A one-byte target closes every row's block, including the last. The
     // segment's max key must still name that row so keyed scans can find it.
     assert_eq!(

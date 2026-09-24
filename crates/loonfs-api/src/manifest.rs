@@ -210,10 +210,6 @@ pub struct MetadataSegmentRef {
     /// identical (same length and CRC32C) or the manifest is corrupt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub filter_inline: Option<String>,
-    /// SHA-256 of the complete stored segment, formatted as
-    /// `sha256:<64 lowercase hex>`. Caches and offline verification use this
-    /// value. Ranged reads verify each block with its CRC32C instead.
-    pub object_checksum: String,
 }
 
 /// One materialized metadata row stored in a segment.
@@ -2093,7 +2089,6 @@ mod tests {
                 crc32c: 0,
             },
             filter_inline: None,
-            object_checksum: "sha256:unused".to_owned(),
         }
     }
 }

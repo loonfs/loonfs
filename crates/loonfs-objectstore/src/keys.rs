@@ -238,7 +238,6 @@ mod tests {
                 crc32c: 0,
             },
             filter_inline: None,
-            object_checksum: "sha256:unused".to_owned(),
         }
     }
 

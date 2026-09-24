@@ -10,7 +10,7 @@ use loonfs_api::wire::manifest::{MetadataRow, MetadataRowFamily, MetadataSegment
 #[cfg(test)]
 pub(super) use loonfs_api::wire::sst_blocks::DEFAULT_INLINE_FILTER_MAX_BYTES as INLINE_SEGMENT_FILTER_MAX_BYTES;
 use loonfs_api::wire::sst_blocks::{BuiltSegmentBlocks, SegmentBlocksBuilder};
-use loonfs_api::{sha256_digest, ChangeSeq, MetadataSegmentId, NamespaceId};
+use loonfs_api::{ChangeSeq, MetadataSegmentId, NamespaceId};
 use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::ObjectStore;
 
@@ -121,7 +121,6 @@ pub(super) async fn write_manifest_segment<S: ObjectStore + ?Sized>(
         index_block: built.index,
         filter_block: built.filter,
         filter_inline,
-        object_checksum: sha256_digest(&built.bytes),
     };
     store
         .put_immutable_verified(

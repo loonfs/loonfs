@@ -1158,7 +1158,6 @@ A run contains `run_no`, `run_seq`, `tier`, and `segments`. Tier is `delta` or `
 | `min_row_key`, `max_row_key` | Inclusive key range. |
 | `index_block`, `filter_block` | Index and filter handles. |
 | `filter_inline?` | Exact stored filter bytes as lowercase hexadecimal. |
-| `object_checksum` | SHA-256 of the complete stored segment. |
 
 The oldest non-empty run sequence defines `base_seq`; with no such run, it equals `head_seq`. It is not stored. Segments follow their list order within each family.
 
@@ -1302,6 +1301,8 @@ Each handle is an encoded object with the following fields:
 | `decoded_bytes` | `u32` | Expected length after decompression, or the uncompressed length for a filter. |
 | `crc32c` | `u32` | CRC32C of the exact stored section bytes. |
 
+The verified put checks the whole object at write time.
+
 For each section, the returned byte count must match `stored_bytes`, the stored-byte CRC must match `crc32c`, and the decoded length must match `decoded_bytes`. Both lengths fit in `u32`. Readers stop decompression after at most `decoded_bytes + 1` bytes. The extra byte reports a decoded-length mismatch without expanding the rest of an invalid section. This caps decompressed output, not vector capacity or the total memory of decoded rows and parser state. Appendix C.4 describes initial allocation sizing.
 
 #### Data blocks
@@ -1356,8 +1357,6 @@ The decoded index is a CBOR list. Each entry contains `last_row_key` and `block`
 Index entries are ordered by their last keys. Data-block byte ranges are contiguous and must not overflow. The filter immediately follows the data region, and the index immediately follows the filter at the end of the object. The descriptor's handles must agree with that layout.
 
 A range lookup uses the last keys to identify candidate blocks. Readers verify each fetched section before decoding its rows and apply the descriptor's family and key-range constraints.
-
-The complete segment's `object_checksum` is SHA-256 over all stored sections. Normal ranged reads use their per-section CRCs instead of downloading the entire segment to recompute that digest. Full-object verification and publication conflict checks can use the complete digest.
 
 ### A.8 Object keys
 
@@ -1615,7 +1614,7 @@ Backfill's `target_seq` is the pinned checkpoint's sequence. Its cursor resumes 
 
 The nested `index` contains `next_run_no` and optional `reorganize`. Reorganization contains `snapshot_segment_ids`, `output_segment_ids`, `row_key_cursor`, `output_level`, and `run_no`. Its cursor is inclusive. Input and output segment IDs must be unique, disjoint, and present in the manifest's segment list. Each output must have the recorded level and run number. The extension can rebuild its state from a fresh core checkpoint.
 
-Grep segments follow list order. Each descriptor carries a positive row count. The complete descriptor fields are `segment_id`, `run_no`, `level`, `row_count`, `min_row_key`, `max_row_key`, `index_block`, `filter_block`, optional `filter_inline`, and `object_checksum`. The block handles and checksums have the same representation as metadata segment descriptors.
+Grep segments follow list order. Each descriptor carries a positive row count. The complete descriptor fields are `segment_id`, `run_no`, `level`, `row_count`, `min_row_key`, `max_row_key`, `index_block`, `filter_block`, and optional `filter_inline`. The block handles and checksums have the same representation as metadata segment descriptors.
 
 Grep uses a numeric `level` rather than the core's base/delta tier. Level 0 is delta output, level 1 is an intermediate merge, and level 2 is the base. In-progress reorganization records the output level and run number so resumed steps continue the same run. Every descriptor and in-progress output run number must be below `next_run_no`.
 
@@ -1648,7 +1647,7 @@ next_revision_no
 
 Revision numbers are unsigned 32-bit absolute values; inode IDs are unsigned 64-bit values, delta-encoded after the first. Empty batches, unordered postings, and trailing bytes after the declared batch are invalid.
 
-The segment framing is exactly the data/filter/index format in Appendix A, with grep CBOR rows instead of metadata rows. Per-block CRCs verify ranged reads. `object_checksum` is the SHA-256 of the complete stored object.
+The segment framing is exactly the data/filter/index format in Appendix A, with grep CBOR rows instead of metadata rows. Per-block CRCs verify ranged reads.
 
 The tokenizer, posting representation, and row-key meaning are governed by grep manifest version 1. They are not implementation-only choices that can change while an existing index is interpreted under the same version.
 
