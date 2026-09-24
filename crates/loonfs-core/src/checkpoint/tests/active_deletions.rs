@@ -241,6 +241,7 @@ async fn submit_operation_for_test<S: ObjectStore + ?Sized>(
             )],
             context,
             &PublishTailOptions::default(),
+            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
         )
         .await
         .results

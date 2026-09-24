@@ -9,6 +9,7 @@ use crate::namespace::{control::load_current_manifest, writer_epoch::acquire_wri
 use crate::path::read::load_current_metadata_view;
 use crate::protocol::PublishTailOptions;
 use crate::test_support::ops::create;
+use crate::time::{Deadline, StdMonotonicTimer};
 use loonfs_api::wire::wal::{decode_wal_segment_envelope_zstd, encode_wal_segment_envelope_zstd};
 use loonfs_api::{
     AbsolutePath, AttributeInclusion, ChangeSeq, CommitId, ErrorCode, InodeId, ManifestNo,
@@ -19,6 +20,7 @@ use loonfs_objectstore::{local_fs_store::LocalFsStore, ObjectStore};
 use loonfs_test_support::stores::{
     BlockingStore, KeyPredicate, MetadataMapStore, OperationClass, RecordingStore,
 };
+use std::sync::Arc;
 use tempfile::tempdir;
 
 fn context(now_ms: u64) -> crate::MutationContext {
@@ -221,6 +223,7 @@ pub(crate) async fn publish<S: ObjectStore>(
             vec![directory(name)],
             &context(1_000),
             &PublishTailOptions::default(),
+            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
         )
         .await
         .results

@@ -9,6 +9,7 @@ use loonfs_core::control::{
 use loonfs_core::publish::{
     CommitRequest, FilesystemOperation, NamespaceCommitEngine, PublishTailOptions,
 };
+use loonfs_core::time::Deadline;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::timing::StdMonotonicTimer;
 use loonfs_objectstore::ObjectStore;
@@ -16,6 +17,7 @@ use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{
     FailStore, InjectedError, KeyPredicate, OperationClass, RecordedOperation, RecordingStore,
 };
+use std::sync::Arc;
 use tempfile::tempdir;
 
 #[tokio::test]
@@ -90,6 +92,7 @@ async fn cached_and_replayed_folds_count_commits_once_and_reads_use_only_manifes
                     vec![candidate.clone()],
                     &context,
                     &PublishTailOptions::default(),
+                    &Deadline::start(Arc::new(StdMonotonicTimer::default())),
                 )
                 .await
                 .results
@@ -101,6 +104,7 @@ async fn cached_and_replayed_folds_count_commits_once_and_reads_use_only_manifes
                     vec![candidate],
                     &context,
                     &PublishTailOptions::default(),
+                    &Deadline::start(Arc::new(StdMonotonicTimer::default())),
                 )
                 .await
                 .results

@@ -87,7 +87,13 @@ async fn publish(
     candidate: CommitCandidate,
 ) -> Result<Commit> {
     engine
-        .publish_batch(store, [candidate], context, &PublishTailOptions::default())
+        .publish_batch(
+            store,
+            [candidate],
+            context,
+            &PublishTailOptions::default(),
+            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+        )
         .await
         .results
         .pop()

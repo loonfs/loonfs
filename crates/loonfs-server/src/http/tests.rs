@@ -32,10 +32,12 @@ use loonfs_api::{
     API_GROUP_QUERY_V0, FEATURE_QUERY_GREP,
 };
 use loonfs_client::{Client, ClientConfig, ClientError, MoveOptions, NamespacePath};
+use loonfs_core::time::Deadline;
 use loonfs_grep::keyspace::{hint_key as grep_hint_key, manifest_key as grep_manifest_key};
 use loonfs_grep::manifest::{encode_grep_hint, load_current_grep_manifest, GrepHint};
 use loonfs_grep::{GrepWorker, NamespaceReads};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
+use loonfs_objectstore::timing::StdMonotonicTimer;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError, PutMode};
 use std::path::Path;
 
@@ -3900,6 +3902,7 @@ mod direct_download {
                     now_ms: 1_000,
                 },
                 &PublishTailOptions::default(),
+                &Deadline::start(Arc::new(StdMonotonicTimer::default())),
             )
             .await
             .results

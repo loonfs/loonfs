@@ -68,6 +68,7 @@ use crate::test_support::ops::{
     create, delete_path, move_path, put_file_bytes, restore_file_revision, write_file_bytes,
 };
 use crate::test_support::{RecordedStoredMetadataBlockCall, RecordingStoredMetadataBlockCache};
+use crate::time::{Deadline, StdMonotonicTimer};
 use crate::MutationContext;
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -195,6 +196,7 @@ pub(crate) async fn write_test_file<S: ObjectStore>(
             )],
             context,
             &PublishTailOptions::default(),
+            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
         )
         .await
         .results
@@ -918,7 +920,6 @@ async fn publish_manifest<S: ObjectStore + ?Sized>(
     store: &S,
     manifest: loonfs_api::wire::envelope::EncodedEnvelope<NamespaceManifestPayload>,
 ) -> Result<ManifestPublicationOutcome, CoreError> {
-    use crate::time::{Deadline, StdMonotonicTimer};
     let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
     super::publish::publish_manifest(store, manifest, &deadline).await
 }

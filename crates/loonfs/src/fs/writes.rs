@@ -925,8 +925,7 @@ pub(crate) async fn publish_batch_with_engine(
     // it, callers awaiting a put or commit (CLI, server, embedding
     // crates) exceed rustc's type-recursion depth.
     let mut publish =
-        Box::pin(engine.publish_batch_attempt(&store, candidates, &context, &tail_options, batch))
-            .await;
+        Box::pin(engine.publish_batch(&store, candidates, &context, &tail_options, batch)).await;
     if let Some(state) = &publish.resulting_read_state {
         writer
             .hint_raise

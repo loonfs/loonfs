@@ -14,9 +14,11 @@ use loonfs_core::publish::{
     CommitCandidate, CommitRequest, FilesystemOperation, InlineContent, NamespaceCommitEngine,
     PublishTailOptions,
 };
+use loonfs_core::time::Deadline;
 use loonfs_core::{MutationContext, NamespaceEngine};
 use loonfs_objectstore::keys::content_blob;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
+use loonfs_objectstore::timing::StdMonotonicTimer;
 use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::stores::{
     KeyPredicate, OperationClass, RecordedOperation, RecordingStore,
@@ -61,6 +63,7 @@ async fn publish_inline(
                 now_ms: 1_000,
             },
             &PublishTailOptions::default(),
+            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
         )
         .await
         .results

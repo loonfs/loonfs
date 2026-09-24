@@ -16,6 +16,9 @@
 //!     FilesystemOperation, CommitRequest, NamespaceCommitEngine, CommitCandidate,
 //!     PublishTailOptions,
 //! };
+//! use loonfs_core::time::Deadline;
+//! use loonfs_objectstore::timing::StdMonotonicTimer;
+//! use std::sync::Arc;
 //! use loonfs_core::{BootstrapOptions, MutationContext, NamespaceEngine};
 //! use loonfs_api::WriterId;
 //! use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -49,6 +52,7 @@
 //!     ))],
 //!     &context,
 //!     &PublishTailOptions::default(),
+//!     &Deadline::start(Arc::new(StdMonotonicTimer::default())),
 //! );
 //! ```
 

@@ -6,7 +6,9 @@ use loonfs::{
     CreateNamespaceOptions, DestinationBehavior, FsMaintenance, FsReader, FsWriter,
     MetadataSegmentCacheConfig, NamespaceId, PutFileOptions, RuntimeCacheConfig,
 };
+use loonfs_core::time::Deadline;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
+use loonfs_objectstore::timing::StdMonotonicTimer;
 use loonfs_test_support::stores::{OperationClass, RecordingStore};
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -209,6 +211,7 @@ async fn buffered_inline_reads_request_no_content_object_on_either_branch() {
                 now_ms: 1_000,
             },
             &PublishTailOptions::default(),
+            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
         )
         .await;
     assert!(result.results[0].is_ok());

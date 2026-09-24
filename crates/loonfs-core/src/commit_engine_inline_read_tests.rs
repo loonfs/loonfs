@@ -204,6 +204,7 @@ async fn published_projection_reads_without_replay_and_counts_inline_bytes() {
             [candidate("owned", vec![value.clone()])],
             &mutation_context,
             &PublishTailOptions::default(),
+            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
         )
         .await;
     assert!(result.results[0].is_ok());

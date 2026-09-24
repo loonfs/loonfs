@@ -19,6 +19,7 @@ use crate::limits::{
 };
 use crate::path::write::{CommitRequest, FilesystemOperation};
 use crate::test_support::ops::create;
+use crate::time::{Deadline, StdMonotonicTimer};
 use loonfs_api::v0::GcResponse;
 use loonfs_api::wire::control::{
     decode_control_object, ControlObjectKind, PinOwner, PinPayload, ProxiedStaging,
@@ -32,6 +33,7 @@ use loonfs_objectstore::keys::{
 use loonfs_objectstore::ObjectStore;
 use std::collections::BTreeSet;
 use std::num::NonZeroUsize;
+use std::sync::Arc;
 
 use crate::commit_engine::delete_namespace;
 use crate::namespace::bootstrap::bootstrap_namespace;
@@ -893,6 +895,7 @@ async fn publish_completed_content<S: ObjectStore>(
             )],
             context,
             &crate::protocol::PublishTailOptions::default(),
+            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
         )
         .await
         .results

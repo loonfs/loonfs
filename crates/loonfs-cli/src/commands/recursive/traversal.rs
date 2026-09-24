@@ -2,7 +2,7 @@
 //! remote frames retain at most one small listing page. Neither retains a list
 //! of every sibling directory or every file in the tree.
 
-use super::{parse_remote, relative_remote, CommandContext, FileJob};
+use super::{joined_remote, parse_remote, relative_remote, CommandContext, FileJob};
 use crate::error::CliError;
 use futures::Stream;
 use loonfs_api::PinId;
@@ -14,13 +14,14 @@ const TREE_LIST_PAGE_SIZE: u32 = 64;
 
 pub(super) enum TreeEntry {
     File(FileJob),
-    Directory(PathBuf),
+    Directory(String),
     Head(ChangeSeq),
     Failure(String, CliError),
 }
 
 struct LocalFrame {
     path: PathBuf,
+    relative_remote: String,
     entries: ReadDir,
     has_children: bool,
 }
@@ -40,6 +41,7 @@ pub(super) fn local_tree(root: &Path, remote_root: &str) -> Result<LocalTree, Cl
         remote_root: remote_root.to_owned(),
         stack: vec![LocalFrame {
             path: root.to_owned(),
+            relative_remote: String::new(),
             entries,
             has_children: false,
         }],
@@ -64,13 +66,7 @@ impl Iterator for LocalTree {
                 None => {
                     let frame = self.stack.pop().expect("a frame is open");
                     if !frame.has_children {
-                        return Some(TreeEntry::Directory(
-                            frame
-                                .path
-                                .strip_prefix(&self.root)
-                                .expect("a descendant of the root")
-                                .to_owned(),
-                        ));
+                        return Some(TreeEntry::Directory(frame.relative_remote));
                     }
                     continue;
                 }
@@ -82,14 +78,19 @@ impl Iterator for LocalTree {
             let relative = path
                 .strip_prefix(&self.root)
                 .expect("a descendant of the root");
-            if let Err(error) = relative_remote(&self.remote_root, relative).and_then(|remote| {
-                loonfs_api::AbsolutePath::parse(remote).map_err(|error| {
-                    CliError::invalid_request(error.to_string()).with_param("local_path")
-                })
+            let relative_remote = match relative_remote(relative).and_then(|relative| {
+                loonfs_api::AbsolutePath::parse(joined_remote(&self.remote_root, &relative))
+                    .map_err(|error| {
+                        CliError::invalid_request(error.to_string()).with_param("local_path")
+                    })?;
+                Ok(relative)
             }) {
-                frame.has_children = true;
-                return Some(failure(error));
-            }
+                Ok(relative) => relative,
+                Err(error) => {
+                    frame.has_children = true;
+                    return Some(failure(error));
+                }
+            };
             let file_type = match entry.file_type() {
                 Ok(file_type) => file_type,
                 Err(error) => {
@@ -102,6 +103,7 @@ impl Iterator for LocalTree {
                 match std::fs::read_dir(&path) {
                     Ok(entries) => self.stack.push(LocalFrame {
                         path,
+                        relative_remote,
                         entries,
                         has_children: false,
                     }),
@@ -109,15 +111,8 @@ impl Iterator for LocalTree {
                 }
             } else if file_type.is_file() {
                 frame.has_children = true;
-                let relative = path
-                    .strip_prefix(&self.root)
-                    .expect("a descendant of the root");
-                let remote = match relative_remote("", relative) {
-                    Ok(remote) => remote.trim_start_matches('/').to_owned(),
-                    Err(error) => return Some(failure(error)),
-                };
                 return Some(TreeEntry::File(FileJob {
-                    remote,
+                    relative_remote,
                     size_bytes: entry.metadata().ok().map(|metadata| metadata.len()),
                     local: path,
                 }));
@@ -129,14 +124,14 @@ impl Iterator for LocalTree {
 }
 
 struct RemoteFrame {
-    relative: PathBuf,
+    relative: String,
     entries: std::vec::IntoIter<PathEntry>,
     cursor: Option<String>,
     needs_page: bool,
 }
 
 impl RemoteFrame {
-    fn new(relative: PathBuf) -> Self {
+    fn new(relative: String) -> Self {
         Self {
             relative,
             entries: Vec::new().into_iter(),
@@ -173,7 +168,7 @@ pub(super) async fn remote_tree<'a>(
         .target
         .list_path_entries_page(&spec, Some(TREE_LIST_PAGE_SIZE), None, snapshot_id)
         .await?;
-    let mut frame = RemoteFrame::new(PathBuf::new());
+    let mut frame = RemoteFrame::new(String::new());
     let first_head = Some(frame.set_page(page));
     let state = RemoteTree {
         context,
@@ -200,7 +195,11 @@ impl RemoteTree<'_> {
                 let Some(name) = entry.display_name else {
                     continue;
                 };
-                let relative = frame.relative.join(name.as_str());
+                let relative = if frame.relative.is_empty() {
+                    name.as_str().to_owned()
+                } else {
+                    format!("{}/{name}", frame.relative)
+                };
                 match entry.kind {
                     PathEntryKind::Directory {} => {
                         self.stack.push(RemoteFrame::new(relative.clone()));
@@ -208,17 +207,15 @@ impl RemoteTree<'_> {
                     }
                     PathEntryKind::File { size_bytes, .. } => {
                         return Some(TreeEntry::File(FileJob {
-                            remote: relative_remote(self.root, &relative)
-                                .expect("remote names should be valid UTF-8"),
-                            local: relative,
+                            local: PathBuf::from(&relative),
+                            relative_remote: relative,
                             size_bytes: Some(size_bytes),
                         }))
                     }
                 }
             }
             if frame.needs_page {
-                let remote = relative_remote(self.root, &frame.relative)
-                    .expect("remote names should be valid UTF-8");
+                let remote = joined_remote(self.root, &frame.relative);
                 let page = async {
                     let spec = parse_remote(self.context, &remote, self.param)?;
                     self.context
@@ -259,7 +256,7 @@ mod tests {
             let path = Path::new(std::ffi::OsStr::from_bytes(bytes));
             for result in [
                 crate::commands::context::default_remote_put_path(path).map(|_| ()),
-                relative_remote("/destination", path).map(|_| ()),
+                relative_remote(path).map(|_| ()),
             ] {
                 let error = result.expect_err("invalid name");
                 assert_eq!(error.code, loonfs_api::ErrorCode::InvalidRequest.as_str());
@@ -287,16 +284,20 @@ mod tests {
     fn local_discovery_creates_only_empty_leaves_and_handles_an_empty_root() {
         let root = tempfile::tempdir().expect("tempdir");
         let mut empty = local_tree(root.path(), "/up").expect("walk");
-        assert!(
-            matches!(empty.next(), Some(TreeEntry::Directory(path)) if path.as_os_str().is_empty())
-        );
+        assert!(matches!(empty.next(), Some(TreeEntry::Directory(path)) if path.is_empty()));
         assert!(empty.next().is_none());
         std::fs::create_dir_all(root.path().join("empty/leaf")).expect("empty chain");
         std::fs::create_dir_all(root.path().join("full")).expect("nonempty directory");
         std::fs::write(root.path().join("full/file"), b"body").expect("file");
         let entries: Vec<_> = local_tree(root.path(), "/up").expect("walk").collect();
         assert_eq!(entries.len(), 2);
-        assert_eq!(entries.iter().filter(|entry| matches!(entry, TreeEntry::Directory(path) if path == Path::new("empty/leaf"))).count(), 1);
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|entry| matches!(entry, TreeEntry::Directory(path) if path == "empty/leaf"))
+                .count(),
+            1
+        );
         assert_eq!(
             entries
                 .iter()

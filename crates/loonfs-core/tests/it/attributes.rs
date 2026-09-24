@@ -16,12 +16,15 @@ use loonfs_core::content::store_bytes_as_content;
 use loonfs_core::publish::{
     CommitCandidate, CommitRequest, FilesystemOperation, NamespaceCommitEngine, PublishTailOptions,
 };
+use loonfs_core::time::Deadline;
 use loonfs_core::{Error as CoreError, ErrorCode, MutationContext};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
+use loonfs_objectstore::timing::StdMonotonicTimer;
 use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{KeyPredicate, RecordingStore};
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use tempfile::tempdir;
 
 fn mutation_context() -> MutationContext {
@@ -125,6 +128,7 @@ async fn publish_request<S: ObjectStore + ?Sized>(
             vec![CommitCandidate::new(request)],
             context,
             &PublishTailOptions::default(),
+            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
         )
         .await
         .results

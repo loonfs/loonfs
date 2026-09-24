@@ -18,12 +18,15 @@ use loonfs_core::control::load_namespace_read_state;
 use loonfs_core::publish::{
     CommitCandidate, CommitRequest, FilesystemOperation, NamespaceCommitEngine, PublishTailOptions,
 };
+use loonfs_core::time::Deadline;
 use loonfs_core::{Error as CoreError, ErrorCode, MutationContext};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
+use loonfs_objectstore::timing::StdMonotonicTimer;
 use loonfs_objectstore::{ObjectStore, PutMode};
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{FailStore, InjectedError, OperationContext, OperationKind};
 use std::path::Path;
+use std::sync::Arc;
 use tempfile::tempdir;
 
 async fn delete_path_non_recursive_expecting<S: ObjectStore + ?Sized>(
@@ -1787,6 +1790,7 @@ async fn mixed_preconditions_report_the_first_failure_and_write_nothing() {
             vec![CommitCandidate::new(scoped_directory("seed", vec![]))],
             &context,
             &PublishTailOptions::default(),
+            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
         )
         .await
         .results
@@ -1820,6 +1824,7 @@ async fn mixed_preconditions_report_the_first_failure_and_write_nothing() {
                 ))],
                 &context,
                 &PublishTailOptions::default(),
+                &Deadline::start(Arc::new(StdMonotonicTimer::default())),
             )
             .await
             .results
@@ -1857,6 +1862,7 @@ async fn precondition_limit_rejects_before_planning_and_writes_nothing() {
             ))],
             &context,
             &PublishTailOptions::default(),
+            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
         )
         .await
         .results
@@ -1876,6 +1882,7 @@ async fn precondition_limit_rejects_before_planning_and_writes_nothing() {
             vec![CommitCandidate::new(request)],
             &context,
             &PublishTailOptions::default(),
+            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
         )
         .await
         .results

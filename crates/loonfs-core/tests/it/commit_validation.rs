@@ -17,11 +17,14 @@ use loonfs_core::content::{
 };
 use loonfs_core::limits::{COMPLETED_UPLOAD_ADMISSION_WINDOW_MS, CONTENT_RECEIPT_TTL_MS};
 use loonfs_core::publish::{CommitCandidate, CommitRequest, FilesystemOperation};
+use loonfs_core::time::Deadline;
 use loonfs_core::{Error as CoreError, ErrorCode, ResolvedUploadCompletion};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
+use loonfs_objectstore::timing::StdMonotonicTimer;
 use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{KeyPredicate, OperationClass, RecordingStore};
+use std::sync::Arc;
 use tempfile::tempdir;
 
 fn put_file(absolute_path: &str, content_ref: loonfs_api::ContentRef) -> FilesystemOperation {
@@ -195,6 +198,7 @@ async fn valid_content_admission_skips_durable_content_validation() {
             )],
             &context,
             &loonfs_core::publish::PublishTailOptions::default(),
+            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
         )
         .await
         .results;
@@ -234,6 +238,7 @@ async fn valid_content_admission_skips_durable_content_validation() {
             )],
             &context,
             &loonfs_core::publish::PublishTailOptions::default(),
+            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
         )
         .await
         .results;
