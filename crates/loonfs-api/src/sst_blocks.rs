@@ -267,7 +267,7 @@ impl SegmentBlocksBuilder {
         }
         self.filter_hashes.push(filter_key_hashes(filter_key));
 
-        let restart = self.entry_count % RESTART_INTERVAL == 0;
+        let restart = self.entry_count.is_multiple_of(RESTART_INTERVAL);
         if restart {
             self.restarts.push(self.entries.len() as u32);
         }
@@ -437,22 +437,17 @@ pub fn decode_data_block_rows<R: serde::de::DeserializeOwned>(
         .filter(|len| *len <= body.len())
         .ok_or_else(|| SstBlockCodecError::Malformed("restart array exceeds block".to_owned()))?;
     let (entries, restarts) = body.split_at(body.len() - restarts_len);
-    let mut restarts = restarts.chunks_exact(4);
+    let (restarts, _) = restarts.as_chunks::<4>();
+    let mut restarts = restarts.iter();
 
     let mut row_keys = Vec::new();
     let mut rows = Vec::new();
     let mut cursor = 0usize;
     let mut previous_key = String::new();
     while cursor < entries.len() {
-        let restart = rows.len() % RESTART_INTERVAL == 0;
+        let restart = rows.len().is_multiple_of(RESTART_INTERVAL);
         if restart {
-            let offset = restarts.next().map(|bytes| {
-                u32::from_le_bytes(
-                    bytes
-                        .try_into()
-                        .expect("restart offsets should have four bytes"),
-                )
-            });
+            let offset = restarts.next().map(|bytes| u32::from_le_bytes(*bytes));
             if offset.map(u64::from) != Some(cursor as u64) {
                 return Err(SstBlockCodecError::Malformed(
                     "restart offset disagrees with its entry".to_owned(),
@@ -1153,7 +1148,7 @@ mod tests {
         let mut payload = Vec::new();
         let mut restart_offsets = Vec::new();
         for index in 0..=RESTART_INTERVAL {
-            if index % RESTART_INTERVAL == 0 {
+            if index.is_multiple_of(RESTART_INTERVAL) {
                 restart_offsets.push(payload.len() as u32);
             }
             write_varint(&mut payload, u64::from(index != 0));

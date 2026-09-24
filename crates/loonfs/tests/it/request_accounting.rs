@@ -198,7 +198,7 @@ async fn warm_phase_request_accounting() {
             index += 1;
         }
         publish_candidates(&writer, &namespace_id, candidates).await;
-        if (index / BATCH) % STEP_EVERY_BATCHES == 0 {
+        if (index / BATCH).is_multiple_of(STEP_EVERY_BATCHES) {
             maintenance
                 .maintain_metadata(
                     &namespace_id,

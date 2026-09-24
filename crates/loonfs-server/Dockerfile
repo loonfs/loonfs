@@ -11,7 +11,7 @@
 # The tag names no version on purpose. `rust-toolchain.toml` pins
 # `channel = "stable"`, and the rustup in this image honors that file, so the
 # toolchain file picks the compiler whatever version the tag installed. The
-# CI `msrv` job is what enforces the 1.85 floor.
+# CI `msrv` job is what enforces the 1.88 floor.
 FROM rust:bookworm AS builder
 
 WORKDIR /src

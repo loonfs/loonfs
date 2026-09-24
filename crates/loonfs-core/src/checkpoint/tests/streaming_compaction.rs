@@ -2220,7 +2220,7 @@ async fn an_over_budget_group_is_rebuilt_by_a_job_while_maintenance_carries_on()
         // manifest that holds the job's whole input.
         if let Some(spec) = active.clone() {
             steps_with_a_job_running += 1;
-            if steps_with_a_job_running % 3 == 0 {
+            if steps_with_a_job_running.is_multiple_of(3) {
                 publish_planned_compaction(&store, &namespace_id, &context, policy, &spec).await;
                 published_jobs += 1;
                 active = None;

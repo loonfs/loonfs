@@ -46,14 +46,15 @@ pub(crate) fn is_lower_hex_byte(byte: u8) -> bool {
 /// field they were decoding.
 pub fn hex_decode_bytes(encoded: &str) -> Result<Vec<u8>, HexDecodeError> {
     let bytes = encoded.as_bytes();
-    if bytes.len() % 2 != 0 {
+    if !bytes.len().is_multiple_of(2) {
         return Err(HexDecodeError::OddLength {
             length: bytes.len(),
         });
     }
-    let mut decoded = Vec::with_capacity(bytes.len() / 2);
-    for pair in bytes.chunks_exact(2) {
-        decoded.push((nibble(pair[0])? << 4) | nibble(pair[1])?);
+    let (pairs, _) = bytes.as_chunks::<2>();
+    let mut decoded = Vec::with_capacity(pairs.len());
+    for [high, low] in pairs {
+        decoded.push((nibble(*high)? << 4) | nibble(*low)?);
     }
     Ok(decoded)
 }
