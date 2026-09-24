@@ -423,3 +423,6 @@ mod read_tests;
 
 #[path = "commit_engine_inline_fold_tests.rs"]
 mod fold_tests;
+
+#[path = "commit_engine_inline_gc_tests.rs"]
+mod gc_tests;
