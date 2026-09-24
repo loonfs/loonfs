@@ -136,33 +136,27 @@ pub(crate) async fn load_current_manifest_if_present<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
 ) -> Result<Option<LoadedManifest>, ControlObjectLoadError> {
     let object_key = hint(namespace_id);
-    let hint = match load_hint(store, namespace_id).await {
+    let mut hint = match load_hint(store, namespace_id).await {
         Ok(hint) => hint,
         Err(ControlObjectLoadError::MissingObject { .. }) => return Ok(None),
         Err(error) => return Err(error),
     };
-    let mut manifest_no = hint.state.manifest_no;
-    if manifest_no == loonfs_api::ManifestNo(0) {
-        return Err(ControlObjectLoadError::Codec {
-            object_key,
-            message: "manifest hint must be at least one".to_owned(),
-        });
-    }
-    let mut current = load_discovered_manifest(store, namespace_id, manifest_no).await?;
-    if current.is_none() {
-        if manifest_no == loonfs_api::ManifestNo(1) {
-            return Ok(None);
+    loop {
+        let mut manifest_no = hint.state.manifest_no;
+        if manifest_no == loonfs_api::ManifestNo(0) {
+            return Err(ControlObjectLoadError::Codec {
+                object_key,
+                message: "manifest hint must be at least one".to_owned(),
+            });
         }
-        return Err(ControlObjectLoadError::Codec {
-            object_key,
-            message: format!("hinted manifest `{manifest_no}` is missing"),
-        });
-    }
-    while let Ok(next) = manifest_no.successor() {
-        let Some(manifest) = load_discovered_manifest(store, namespace_id, next).await? else {
-            break;
-        };
-        if let Some(previous) = &current {
+        let mut current = load_discovered_manifest(store, namespace_id, manifest_no).await?;
+        while let Some(previous) = &current {
+            let Ok(next) = manifest_no.successor() else {
+                break;
+            };
+            let Some(manifest) = load_discovered_manifest(store, namespace_id, next).await? else {
+                break;
+            };
             previous
                 .envelope
                 .payload()
@@ -171,15 +165,29 @@ pub(crate) async fn load_current_manifest_if_present<S: ObjectStore + ?Sized>(
                     object_key: manifest.object_key.clone(),
                     message: error.to_string(),
                 })?;
+            current = Some(manifest);
+            manifest_no = next;
         }
-        current = Some(manifest);
-        manifest_no = next;
+
+        // A newer hint lets GC remove an old discovery path. Recheck after a
+        // missing object before treating it as either absence or the tip.
+        let refreshed = load_hint(store, namespace_id).await?;
+        if refreshed.state.manifest_no > manifest_no {
+            hint = refreshed;
+            continue;
+        }
+        if current.is_none() && manifest_no != loonfs_api::ManifestNo(1) {
+            return Err(ControlObjectLoadError::Codec {
+                object_key,
+                message: format!("hinted manifest `{manifest_no}` is missing"),
+            });
+        }
+        if let Some(current) = &mut current {
+            current.discovery_start_manifest_no = hint.state.manifest_no;
+            current.hinted_wal_no = hint.state.wal_no;
+        }
+        return Ok(current);
     }
-    if let Some(current) = &mut current {
-        current.discovery_start_manifest_no = hint.state.manifest_no;
-        current.hinted_wal_no = hint.state.wal_no;
-    }
-    Ok(current)
 }
 
 pub(crate) async fn load_discovered_manifest<S: ObjectStore + ?Sized>(

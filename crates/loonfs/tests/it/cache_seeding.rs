@@ -757,7 +757,8 @@ fn control_cache_eviction_reloads_head_for_materialization_validation() {
     fs.stat_path_blocking(&namespace_id, "/docs")
         .expect("reload first namespace materialization and head cache");
 
-    assert_eq!(raw_store.hint_get_count(), 1);
+    // Discovery reads the starting hint and rechecks it after the final gap.
+    assert_eq!(raw_store.hint_get_count(), 2);
 }
 
 #[test]
