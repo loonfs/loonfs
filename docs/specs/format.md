@@ -132,7 +132,7 @@ Two separate uploads of identical bytes create two objects. There is no cross-up
 
 Deleting an item removes its current binding and records a subtree tombstone. A tombstone at a directory hides that directory and its descendants without requiring a separate tombstone for every descendant.
 
-Tombstone rows carry their own position as `committed_seq` and `delta_index`. Events are ordered by that pair. A `set` event starts a deletion. A `revoke` event identifies the exact `set` position it cancels as a `DeltaPosition` value `{seq, delta_index}`. At a given sequence, the latest event for the deletion root determines whether the tombstone is active. A later `set` is a new deletion, even if an earlier deletion of the same inode was revoked.
+Each tombstone row stores its own position in namespace history as `committed_seq` and `delta_index`. Tombstone events are ordered by `(committed_seq, delta_index)`. A `set` event starts a deletion. A `revoke` event identifies the exact `set` event it cancels. It names that event by position, as a `DeltaPosition` value `{seq, delta_index}`. At a given sequence, the latest event for the deletion root determines whether the tombstone is active. A later `set` is a new deletion, even if an earlier deletion of the same inode was revoked.
 
 An undelete request identifies the deletion by inode and committed deletion sequence. Validation must confirm the currently active deletion. A request for a deletion that is no longer active returns `not_deleted`; it must not cancel a later deletion. A deletion created earlier in the same uncommitted request cannot yet be addressed by its committed deletion sequence. Only the root of a deletion can be undeleted independently; descendants hidden by that root do not each have a separate deletion to revoke.
 
@@ -533,7 +533,7 @@ Suppose request A creates `/reports` and request B also tries to create `/report
 
 Every WAL commit and `commit` row stores a `semantic_commit_fingerprint`. It represents the logical request: `namespace_id`, `actor_id`, ordered operations with their inline preconditions, request-level preconditions, and optional message. It excludes publication details such as the writer epoch and timestamp. Appendix B specifies the exact canonical bytes.
 
-The materialized file set also stores each retained commit's record in the `commits` family, keyed by sequence. A receipt stores only `commit_id` and `committed_seq`. Commit-id reuse resolution reads the commit row at that sequence and compares its fingerprint. A replay rebuilds its response from that row. The `commits` and `commit_receipts` families share one family group and one floor rule, so the commit row remains whenever its receipt does.
+The materialized file set also stores each retained commit's record in the `commits` family, keyed by sequence. A commit receipt stores only `commit_id` and `committed_seq`. When a request reuses a commit ID, the writer reads the commit row at the receipt's sequence and compares that row's fingerprint with the request's fingerprint. A replay rebuilds its response from that row. The `commits` and `commit_receipts` families form one family group and follow the same retention rule, so a commit row is retained for as long as its receipt.
 
 While the receipt is retained, an equal fingerprint under the same `commit_id` identifies a replay of the original commit. A different fingerprint returns `commit_id_reuse_conflict`. A replay does not execute the mutation again or reevaluate its original preconditions against current state.
 
@@ -1144,7 +1144,7 @@ A namespace manifest contains:
 | `writer?` | Diagnostic writer block. |
 | `folded_wal_no` | Highest local WAL number incorporated into the file set. |
 | `manifest_no` | Positive number matching the object key. |
-| `compactor_epoch` | Current compaction authority, a `CompactorEpoch` integer. |
+| `compactor_epoch` | Current compaction authority. |
 | `head_seq` | Materialized head sequence; on deletion, the final namespace sequence. |
 | `activity` | Required cumulative activity counters defined in section 7.4. |
 | `writer_epoch` | Current writer authority. |
@@ -1227,7 +1227,7 @@ A `commit` row is the WAL commit record of A.5 without its inline content. The `
 
 For a directory binding, `state` is `{"kind":"bound","display_name":...}` or `{"kind":"unbound"}`. Both indexes contain that complete row.
 
-A tombstone stores its own position in the flat fields `committed_seq` and `delta_index`. A revoke target is a `DeltaPosition` value `{seq, delta_index}`. A set action is `{"kind":"set","deleted_binding":...}`. A revoke action is `{"kind":"revoke","target":...}`.
+For a tombstone, the top-level `committed_seq` and `delta_index` fields store the row's own position. A revoke target is a `DeltaPosition` value `{seq, delta_index}`. A set action is `{"kind":"set","deleted_binding":...}`. A revoke action is `{"kind":"revoke","target":...}`.
 
 An active-deletion `listed` action contains `inode_kind`, `deleted_at_ms`, `deleted_by`, and `deleted_binding`. A `removed` action contains `revocation_seq`. These are nested action fields, not additional top-level fields on every active-deletion row. The `inode_kind` is copied from the deleted root inode. A `listed` action without it fails decoding.
 

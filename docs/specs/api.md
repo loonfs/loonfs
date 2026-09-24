@@ -253,7 +253,7 @@ The codes that populate it:
 | `stale_attributes` | `inode_id`, `expected_attributes_revision_no` (absent when the caller stated no expectation), `actual_attributes_revision_no` (absent when the inode is not visible); `precondition_index` for a failed request precondition |
 | `stale_access` | `inode_id`, `expected_access_revision_no` (absent when the caller stated no expectation), `actual_access_revision_no` (absent when the inode is not visible); `precondition_index` for a failed request precondition |
 | `binding_version_mismatch` | `inode_id`, `expected_binding_version` (the request's token as supplied), `actual_binding_version` (the current binding's token, absent for the root); `precondition_index` for a failed request precondition. Clients must not parse or order the tokens |
-| `commit_id_reuse_conflict` | `commit_id`, plus `committed_seq` and `committed_fingerprint` when the conflict was decided against a durable commit receipt — the sequence that `commit_id` already landed at, and the semantic identity of what landed there (section 5.1). The sequence comes from the receipt and the fingerprint from its retained commit row, so both are present or neither is; both are absent when nothing has committed under the id yet and two live requests are claiming it at once |
+| `commit_id_reuse_conflict` | `commit_id`, plus `committed_seq` and `committed_fingerprint` when the conflict was decided against a durable commit receipt: the sequence that `commit_id` already landed at, and the semantic identity of what landed there (section 5.1). The sequence comes from the receipt and the fingerprint comes from the retained commit row at that sequence, so both are present or neither is; both are absent when nothing has committed under the id yet and two live requests are claiming it at once |
 | `rebootstrap_required` | `after_seq`, `retention_floor_seq` |
 | `stale_head` | `expected_head_seq`, `actual_head_seq` for a caller-supplied head precondition; `precondition_index` identifies a failed request precondition. |
 | `forbidden` | `inode_id` |
@@ -296,7 +296,7 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | `stale_attributes` | 409 | The inode's attribute revision moved while the update was being decided. Two things raise it: a caller-supplied expected attribute revision that is no longer current, and the revision precondition every attribute update carries even when the caller states no expectation. Re-read the attributes and retry. |
 | `stale_access` | 409 | The inode's access revision moved while the update was being decided. Re-read the access row and retry. |
 | `namespace_unrestricted` | 409 | The namespace's access mode is unrestricted, so it holds no access rows. |
-| `binding_version_mismatch` | 409 | The binding version supplied for an inode move or delete is not the entry's current version. Re-read the entry before retrying. |
+| `binding_version_mismatch` | 409 | The binding version supplied for an inode move or delete is not the entry's current binding version. Re-read the entry before retrying. |
 | `not_deleted` | 409 | The undelete target is not the root of a live deletion; nothing to recover. |
 | `writer_fenced` | 409 | The writer epoch was superseded by another session. |
 | `would_cycle` | 409 | The rename would create a directory cycle. |
@@ -519,7 +519,7 @@ Commit bodies reject unknown fields so a misspelled precondition cannot be ignor
 
 Every named entry includes a `binding_version`, an opaque token identifying its current parent/name binding. Creating, moving, or undeleting an entry produces a new token; content and attribute writes do not. Clients must not parse or order these tokens. A token is valid only for the namespace that issued it.
 
-Inode-addressed moves and deletes require the token as `expected_binding_version`. A valid token that no longer matches returns `binding_version_mismatch`; a malformed token or one from another namespace returns `invalid_request`. The precondition is part of the commit's identity and is evaluated after any earlier operations in the same request.
+Inode-addressed moves and deletes require the token as `expected_binding_version`. A valid token that does not match the entry's current binding returns `binding_version_mismatch`; a malformed token or one from another namespace returns `invalid_request`. The precondition is part of the commit's identity and is evaluated after any earlier operations in the same request.
 
 The server validates each request against authoritative namespace state and
 may reject it immediately. A tentatively accepted request becomes one
@@ -583,7 +583,7 @@ equals `expected_access_revision_no`. Any access update invalidates it.
 Failure returns `stale_access`; `actual_access_revision_no` is absent when
 the inode is not visible.
 
-Receipt resolution comes first: an identical landed request returns its original commit even when its precondition is now stale.
+Receipt resolution comes first: an identical landed request returns its original commit even when its precondition is stale.
 Reusing that commit ID with different preconditions returns `commit_id_reuse_conflict`.
 Preconditions run in order before operations; the first failure returns its kind's error with zero-based `precondition_index`.
 A failed precondition reserves no sequence or inode and leaves the planning view unchanged.
@@ -803,7 +803,7 @@ resend it after a process restart. If a helper call omits `commit_id`, each
 call generates a new one. The actor can be configured once on the client.
 
 At the WAL write-stop threshold, new commits return `maintenance_required`.
-Retries of retained commits can still return their receipts, including after
+Retries of retained commits can still return their original commits, including after
 `commit_outcome_unknown` or `deadline_exceeded`. Writer-session, availability,
 and corruption checks still apply.
 
@@ -2269,7 +2269,7 @@ An accepted update advances the attribute revision even when the resulting
 map is unchanged. The revision counts accepted updates, matching puts of
 identical content. The update writes the complete resulting map and produces
 an attributes event in the change feed. Replaying the same request with the
-same `commit_id` returns its original receipt without advancing the revision
+same `commit_id` returns its original commit without advancing the revision
 again; a new `commit_id` is a new update.
 
 The resulting map is checked against every limit in the format spec,

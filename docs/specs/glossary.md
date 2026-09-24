@@ -7,7 +7,7 @@
 | **Sequence (`seq`)** | A namespace-local position assigned to one committed mutation request. |
 | **Commit** | One successfully published mutation request whose operations share a sequence. |
 | **Commit ID** | A caller-supplied identifier used to recognize retries while the corresponding receipt remains retained. |
-| **Commit receipt** | A durable index from a commit ID to its committed sequence. The commit row at that sequence stores the semantic fingerprint. |
+| **Commit receipt** | A durable row that maps a commit ID to its committed sequence. The commit row at that sequence stores the semantic fingerprint. |
 | **Semantic fingerprint** | A digest of the canonical logical request, used to detect conflicting reuse of a commit ID. |
 | **WAL** | The ordered log of immutable, consecutively numbered WAL objects. |
 | **WAL segment** | A numbered immutable object containing contiguous commits, or no commits when fencing a writer. |
