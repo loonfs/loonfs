@@ -66,10 +66,10 @@ impl MaintenanceJob for MetadataCompactionJob {
                 Some((MaintenanceJobId::METADATA, namespace_id.clone())),
             ),
             MetadataCompactionOutcome::NotNeeded => (MaintenanceConclusion::Idle, None),
-            MetadataCompactionOutcome::Abandoned | MetadataCompactionOutcome::Fenced => {
-                (MaintenanceConclusion::Superseded, None)
+            MetadataCompactionOutcome::Abandoned => (MaintenanceConclusion::Superseded, None),
+            MetadataCompactionOutcome::Cancelled | MetadataCompactionOutcome::Fenced => {
+                (MaintenanceConclusion::Blocked, None)
             }
-            MetadataCompactionOutcome::Cancelled => (MaintenanceConclusion::Blocked, None),
         };
         Ok(MaintenanceRunReport {
             conclusion,

@@ -43,7 +43,8 @@ string_id! {
 }
 
 /// Who a request acts as: a principal scope, stable id, and applicable principals.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Subject {
     /// Identity domain for the subject's principals.
     ///
@@ -419,7 +420,8 @@ pub const MAX_SUBJECT_PRINCIPALS: usize = 64;
 
 /// The principals a request acts as: distinct ids, at most
 /// [`MAX_SUBJECT_PRINCIPALS`] of them.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(try_from = "BTreeSet<PrincipalId>")]
 pub struct PrincipalSet(BTreeSet<PrincipalId>);
 
 impl PrincipalSet {
@@ -451,6 +453,14 @@ impl PrincipalSet {
     /// Whether the request acts as no principal.
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
+    }
+}
+
+impl TryFrom<BTreeSet<PrincipalId>> for PrincipalSet {
+    type Error = PrincipalSetError;
+
+    fn try_from(principals: BTreeSet<PrincipalId>) -> Result<Self, Self::Error> {
+        Self::new(principals)
     }
 }
 

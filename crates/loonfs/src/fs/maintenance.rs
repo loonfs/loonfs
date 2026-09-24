@@ -460,7 +460,8 @@ impl FsMaintenance {
                 return Ok(ReorganizationStep::CompactionPlanned(spec))
             }
             loonfs_core::MetadataReorganizeOutcome::Fenced => {
-                return Ok(ReorganizationStep::Fenced)
+                self.compactor_epochs.lock().await.remove(namespace_id);
+                return Ok(ReorganizationStep::Fenced);
             }
             loonfs_core::MetadataReorganizeOutcome::Superseded => {
                 tracing::info!(
@@ -553,6 +554,12 @@ impl FsMaintenance {
             .run_metadata_compaction(spec, compactor_epoch, cancellation)
             .await
             .map_err(RuntimeError::Core);
+        if matches!(
+            outcome,
+            Ok(loonfs_core::MetadataCompactionJobOutcome::Fenced)
+        ) {
+            self.compactor_epochs.lock().await.remove(namespace_id);
+        }
         let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         self.core
             .instruments()

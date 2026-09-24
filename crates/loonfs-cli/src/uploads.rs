@@ -529,6 +529,43 @@ mod tests {
     }
 
     #[test]
+    fn a_journal_resumes_with_the_same_subject_and_refuses_a_different_subject() {
+        let dir = tempfile::tempdir().expect("directory");
+        let path = dir.path().join("upload.json");
+        let mut options = options();
+        options.commit.subject = Some(loonfs_api::Subject {
+            principal_scope: loonfs_api::PrincipalScope::parse("demo").expect("scope"),
+            subject_id: loonfs_api::SubjectId::parse("alice").expect("subject id"),
+            principals: loonfs_api::PrincipalSet::new(
+                [loonfs_api::PrincipalId::parse("writers").expect("principal id")]
+                    .into_iter()
+                    .collect(),
+            )
+            .expect("principal set"),
+        });
+        let first = UploadJournal::open_at(path.clone(), source(1024), &options)
+            .expect("open with subject");
+        let recorded = first.options();
+        begin(&first);
+        drop(first);
+
+        let resumed = UploadJournal::open_at(path.clone(), source(1024), &options)
+            .expect("resume with same subject");
+        assert_eq!(resumed.options(), recorded);
+        assert!(resumed.resume().is_some());
+        drop(resumed);
+
+        options.commit.subject.as_mut().expect("subject").subject_id =
+            loonfs_api::SubjectId::parse("bob").expect("different subject id");
+        let saved = std::fs::read(&path).expect("saved record");
+        assert!(UploadJournal::open_at(path.clone(), source(1024), &options)
+            .expect_err("changed subject")
+            .to_string()
+            .contains("PUT options changed"));
+        assert_eq!(std::fs::read(&path).expect("preserved record"), saved);
+    }
+
+    #[test]
     fn failed_updates_preserve_the_last_durable_state() {
         let dir = tempfile::tempdir().expect("directory");
         let parent = dir.path().join("uploads");

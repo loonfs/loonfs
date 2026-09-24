@@ -570,6 +570,103 @@ fn create_directory_request(commit_id: &str, absolute_path: &str) -> CommitReque
     )
 }
 
+#[tokio::test]
+async fn fenced_compaction_blocks_until_a_new_request_claims_and_publishes() {
+    use loonfs::{
+        MaintenanceCancellation, MaintenanceConclusion, MaintenanceJob, MetadataCompactionJob,
+    };
+
+    for run_job in [false, true] {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = store(temp_dir.path());
+        let first = open_runtime_async(store.clone(), "first").await;
+        let second = open_runtime_async(store.clone(), "second").await;
+        let namespace_id = namespace_id("demo");
+        first
+            .writer
+            .create_namespace(
+                &namespace_id,
+                CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+            )
+            .await
+            .expect("create namespace");
+        for index in 0..2 {
+            first
+                .put_file_bytes(
+                    &namespace_id,
+                    &format!("/file-{index}"),
+                    b"data",
+                    PutFileOptions::new(loonfs_test_support::test_actor()),
+                )
+                .await
+                .expect("put file");
+            first
+                .maintenance
+                .flush_wal(&namespace_id)
+                .await
+                .expect("flush WAL");
+        }
+        for runtime in [&first, &second] {
+            assert_eq!(
+                runtime
+                    .maintenance
+                    .compact_metadata(&namespace_id)
+                    .await
+                    .expect("claim and compact")
+                    .compaction,
+                MetadataCompactionOutcome::BoundedMergePublished
+            );
+        }
+        let before =
+            loonfs_core::control::load_namespace_current_manifest(store.as_ref(), &namespace_id)
+                .await
+                .expect("manifest before fencing");
+        assert_eq!(before.state.compactor_epoch(), 2);
+
+        if run_job {
+            let job = MetadataCompactionJob::new(first.maintenance.clone());
+            assert_eq!(
+                job.run(&namespace_id, &MaintenanceCancellation::new())
+                    .await
+                    .expect("fenced job")
+                    .conclusion,
+                MaintenanceConclusion::Blocked
+            );
+        } else {
+            assert_eq!(
+                first
+                    .maintenance
+                    .compact_metadata(&namespace_id)
+                    .await
+                    .expect("fenced step")
+                    .compaction,
+                MetadataCompactionOutcome::Fenced
+            );
+        }
+        let fenced =
+            loonfs_core::control::load_namespace_current_manifest(store.as_ref(), &namespace_id)
+                .await
+                .expect("manifest after fencing");
+        assert_eq!(fenced.state.manifest(), before.state.manifest());
+
+        assert_eq!(
+            first
+                .maintenance
+                .compact_metadata(&namespace_id)
+                .await
+                .expect("claim again and compact")
+                .compaction,
+            MetadataCompactionOutcome::BoundedMergePublished
+        );
+        let published =
+            loonfs_core::control::load_namespace_current_manifest(store.as_ref(), &namespace_id)
+                .await
+                .expect("manifest after publication");
+        assert_eq!(published.state.compactor_epoch(), 3);
+        assert!(published.state.manifest().manifest_no > before.state.manifest().manifest_no);
+    }
+}
+
 #[test]
 fn maintenance_step_counts_segments_not_commits() {
     let temp_dir = tempdir().expect("tempdir");

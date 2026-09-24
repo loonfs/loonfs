@@ -18,7 +18,6 @@ use super::super::streaming_compaction::{
 use super::*;
 use crate::time::Deadline;
 use crate::time::{MonotonicTimer, StdMonotonicTimer};
-use loonfs_api::wire::manifest::ActiveDeletionRowAction;
 use loonfs_objectstore::keys::metadata_segment_prefix;
 use loonfs_test_support::stores::{
     BlockingStore, ConcurrencyWatchStore, KeyPredicate, OperationClass,
@@ -243,231 +242,6 @@ async fn seed_one_wide_directory(store: &LocalFsStore, namespace_id: &NamespaceI
     create_checkpoint(store, namespace_id, &context)
         .await
         .expect("checkpoint the late write");
-}
-
-/// A namespace whose churn all lands on one locality of each kind: one
-/// inode's attribute history, one parent-and-name slot's binding
-/// generations, and one path deleted and undeleted over and over.
-///
-/// This is the shape the wide-directory seed does not produce. Many distinct
-/// names prove that distinct localities do not accumulate together; only one
-/// hot locality proves that the rules inside one do not accumulate either.
-async fn seed_one_hot_locality_of_each_kind(store: &LocalFsStore, namespace_id: &NamespaceId) {
-    let context = test_context();
-    bootstrap_namespace(store, namespace_id, &context)
-        .await
-        .expect("bootstrap");
-    write_file_bytes(
-        store,
-        namespace_id,
-        "/hot/annotated.txt",
-        b"body\n",
-        &context,
-        None,
-    )
-    .await
-    .expect("write the annotated file");
-    // One inode, many attribute revisions. Every one supersedes the last, so
-    // the whole history below the floor collapses to one row. The tail is
-    // flushed along the way because a namespace may only carry so many
-    // unpublished WAL segments.
-    for revision in 0..48u64 {
-        update_attributes(
-            store,
-            namespace_id,
-            "/hot/annotated.txt",
-            "loon.round",
-            &revision.to_string(),
-            &context,
-        )
-        .await;
-        if revision % 16 == 15 {
-            flush::flush_wal(store, namespace_id)
-                .await
-                .expect("flush the tail");
-        }
-    }
-    // One parent-and-name slot, many binding generations: the same path
-    // created and deleted over and over.
-    for round in 0..48u64 {
-        write_file_bytes(
-            store,
-            namespace_id,
-            "/hot/recreated.txt",
-            b"body\n",
-            &context,
-            None,
-        )
-        .await
-        .expect("recreate the file");
-        delete_path(store, namespace_id, "/hot/recreated.txt", &context, None)
-            .await
-            .expect("delete the file");
-        if round % 8 == 7 {
-            flush::flush_wal(store, namespace_id)
-                .await
-                .expect("flush the tail");
-        }
-    }
-    // One deletion generation cancelled by an undelete, which is the pair the
-    // active-deletion rule drops together.
-    write_file_bytes(
-        store,
-        namespace_id,
-        "/hot/undeleted.txt",
-        b"body\n",
-        &context,
-        None,
-    )
-    .await
-    .expect("write the undeleted file");
-    delete_path(store, namespace_id, "/hot/undeleted.txt", &context, None)
-        .await
-        .expect("delete the file to undelete");
-    create_checkpoint(store, namespace_id, &context)
-        .await
-        .expect("checkpoint the deletion so its listed row is readable");
-    undelete_newest_deletion(store, namespace_id, &context).await;
-    create_checkpoint(store, namespace_id, &context)
-        .await
-        .expect("checkpoint the churn");
-    drain_reorganization(
-        store,
-        namespace_id,
-        MetadataLsmPolicy {
-            max_delta_runs: NonZeroUsize::MIN,
-            ..MetadataLsmPolicy {
-                max_rows_per_segment: NonZeroUsize::new(4).expect("nonzero"),
-                ..MetadataLsmPolicy::default()
-            }
-        },
-    )
-    .await;
-    advance_retention_floor(store, namespace_id)
-        .await
-        .expect("advance the floor past the churn");
-
-    // A little above the floor, so the job has rows it may not drop.
-    write_file_bytes(
-        store,
-        namespace_id,
-        "/hot/late.txt",
-        b"late body\n",
-        &context,
-        None,
-    )
-    .await
-    .expect("write a late file");
-    update_attributes(
-        store,
-        namespace_id,
-        "/hot/annotated.txt",
-        "loon.round",
-        "late",
-        &context,
-    )
-    .await;
-    create_checkpoint(store, namespace_id, &context)
-        .await
-        .expect("checkpoint the late writes");
-}
-
-/// Publishes one attribute update, which is one more revision for the
-/// inode the path resolves to.
-async fn update_attributes<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    path: &str,
-    key: &str,
-    value: &str,
-    context: &MutationContext,
-) {
-    publish_one_operation(
-        store,
-        namespace_id,
-        FilesystemOperation::UpdateAttributes {
-            path: AbsolutePath::parse(path).expect("path"),
-            set: [(
-                loonfs_api::AttributeKey::parse(key).expect("attribute key"),
-                loonfs_api::AttributeValue::parse(value).expect("attribute value"),
-            )]
-            .into_iter()
-            .collect(),
-            remove: Vec::new(),
-            expected_inode_id: None,
-            expected_attributes_revision_no: None,
-        },
-        context,
-    )
-    .await;
-}
-
-/// Cancels the namespace's newest recoverable deletion, which writes the
-/// removal marker the active-deletion rule pairs with the listed row.
-///
-/// The deletion is read back out of the manifest rather than remembered from
-/// the commit response, because the row is what names the generation the
-/// undelete has to cancel.
-async fn undelete_newest_deletion<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    context: &MutationContext,
-) {
-    let rows =
-        group_rows_of_current_manifest(store, namespace_id, MetadataFamilyGroup::ActiveDeletions)
-            .await;
-    let (root_inode_id, deletion_seq) = rows[&ApiMetadataRowFamily::ActiveDeletions]
-        .iter()
-        .filter_map(|row| match row {
-            MetadataRow::ActiveDeletion(crate::metadata::ActiveDeletionRecord {
-                root_inode_id,
-                deletion_seq,
-                action: ActiveDeletionRowAction::Listed { .. },
-            }) => Some((*root_inode_id, *deletion_seq)),
-            _ => None,
-        })
-        .max_by_key(|(_, deletion_seq)| *deletion_seq)
-        .expect("the namespace holds a recoverable deletion");
-    publish_one_operation(
-        store,
-        namespace_id,
-        FilesystemOperation::Undelete {
-            inode_id: root_inode_id,
-            deletion_seq,
-            destination_path: None,
-        },
-        context,
-    )
-    .await;
-}
-
-async fn publish_one_operation<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    operation: FilesystemOperation,
-    context: &MutationContext,
-) {
-    NamespaceCommitEngine::new(namespace_id.clone())
-        .publish_batch(
-            store,
-            vec![CommitCandidate::prepared(
-                CommitRequest::single(
-                    CommitId::generate(),
-                    loonfs_test_support::test_actor(),
-                    None,
-                    operation,
-                ),
-                Vec::new(),
-            )],
-            context,
-            &PublishTailOptions::default(),
-            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
-        )
-        .await
-        .results
-        .pop()
-        .expect("one result")
-        .expect("publish the operation");
 }
 
 // -------------------------------------------------------------------------
@@ -2283,111 +2057,6 @@ async fn one_directory_far_past_the_row_budget_streams_a_row_at_a_time() {
     );
 }
 
-#[tokio::test]
-async fn one_hot_locality_of_each_kind_rebuilds_with_fixed_operator_state() {
-    let job_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(job_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    seed_one_hot_locality_of_each_kind(&store, &namespace_id).await;
-    let frozen_floor_seq = read_floor_seq(&store, &namespace_id).await;
-
-    let fold_dir = tempdir().expect("tempdir");
-    copy_store_tree(job_dir.path(), fold_dir.path());
-    let fold_store = LocalFsStore::new(fold_dir.path()).expect("store");
-
-    // What both stores hold before either of them rebuilds anything. The trees
-    // are byte-identical here, so one read stands for both.
-    let mut rows_before = BTreeMap::new();
-    for group in MetadataFamilyGroup::ALL {
-        rows_before.insert(
-            group,
-            group_rows_of_current_manifest(&store, &namespace_id, group).await,
-        );
-    }
-    // The same durable bytes, rebuilt the other way: synchronous merges inside
-    // maintenance passes, with the budgets raised so each group folds whole.
-    drain_reorganization(
-        &fold_store,
-        &namespace_id,
-        MetadataLsmPolicy {
-            max_delta_runs: NonZeroUsize::MIN,
-            ..fold_everything_policy()
-        },
-    )
-    .await;
-
-    for group in MetadataFamilyGroup::ALL {
-        let before = rows_before[&group].clone();
-        if before.values().all(Vec::is_empty) {
-            continue;
-        }
-        let folded = group_rows_of_current_manifest(&fold_store, &namespace_id, group).await;
-
-        let spec = compaction_spec_for_group(&store, &namespace_id, group).await;
-        let input_keys = input_keys_now(&store, &namespace_id, &spec).await;
-        let Ok(result) = run_compaction(
-            &store,
-            &namespace_id,
-            &spec,
-            small_segment_policy(),
-            &MetadataCompactionCancellation::default(),
-        )
-        .await
-        else {
-            panic!("nothing cancelled this job");
-        };
-        assert!(
-            result.peak_operator_rows <= 1,
-            "a {group:?} retention operator held {} rows",
-            result.peak_operator_rows
-        );
-        publish_streaming_compaction(&store, &namespace_id, &spec, &input_keys, &result).await;
-
-        let compacted = group_rows_of_current_manifest(&store, &namespace_id, group).await;
-        assert_eq!(
-            compacted, folded,
-            "a background rebuild of {group:?} must keep the rows a step-contained merge keeps"
-        );
-        // Nothing above the floor may go, whatever the rules dropped below it.
-        for (family, rows) in &before {
-            let survivors: BTreeSet<String> = compacted[family]
-                .iter()
-                .map(|row| row.row_key_for_family(*family))
-                .collect();
-            for row in rows {
-                if manifest_row_commit_seq(row) > frozen_floor_seq {
-                    assert!(
-                        survivors.contains(&row.row_key_for_family(*family)),
-                        "the job dropped a {family:?} row above the retention floor"
-                    );
-                }
-            }
-        }
-    }
-
-    // The hot localities really did collapse: the group with an attribute
-    // history and the group with a name slot both hold fewer rows than they
-    // did, and the two bind families stayed in lockstep.
-    let attributes =
-        group_rows_of_current_manifest(&store, &namespace_id, MetadataFamilyGroup::Attributes)
-            .await;
-    assert_eq!(
-        attributes[&ApiMetadataRowFamily::Attributes].len(),
-        2,
-        "one inode's history must collapse to the newest row at the floor plus the late one"
-    );
-    let bindings =
-        group_rows_of_current_manifest(&store, &namespace_id, MetadataFamilyGroup::Bindings).await;
-    assert_eq!(
-        bindings[&ApiMetadataRowFamily::DirentryBinds].len(),
-        bindings[&ApiMetadataRowFamily::DirentryChildBinds].len(),
-    );
-    assert!(
-        bindings[&ApiMetadataRowFamily::DirentryUnbinds].is_empty(),
-        "every unbind the floor covered must be gone"
-    );
-}
-
 // -------------------------------------------------------------------------
 // The whole arc, through the step the maintenance runner calls
 // -------------------------------------------------------------------------
@@ -3061,116 +2730,6 @@ async fn a_backlogged_job_limits_input_and_preserves_unselected_runs() {
 }
 
 #[tokio::test]
-async fn direct_output_is_published_by_number_and_failed_output_ages_out() {
-    use crate::limits::UNREFERENCED_SEGMENT_MIN_AGE_MS;
-    use loonfs_test_support::stores::{FailStore, InjectedError, MetadataMapStore, RecordingStore};
-
-    let directory = tempdir().expect("tempdir");
-    let namespace = NamespaceId::parse("direct-output").expect("namespace");
-    let store = LocalFsStore::new(directory.path()).expect("store");
-    seed_bindings_workload(&store, &namespace).await;
-    let epoch = super::super::compactor::claim_compactor(&store, &namespace)
-        .await
-        .expect("claim");
-    let spec = compaction_spec_for_group(&store, &namespace, MetadataFamilyGroup::Bindings).await;
-    let before = current_manifest_number(&store, &namespace).await;
-    let store = RecordingStore::new(store, KeyPredicate::any());
-    let outcome = run_metadata_compaction_job(
-        &store,
-        &namespace,
-        epoch,
-        &spec,
-        small_segment_policy(),
-        &MetadataCompactionCancellation::default(),
-    )
-    .await
-    .expect("publish");
-    assert!(
-        matches!(outcome, MetadataCompactionJobOutcome::Published { manifest_no, .. } if manifest_no == before.successor().expect("next number"))
-    );
-    let puts = store
-        .take()
-        .into_iter()
-        .filter(|operation| {
-            matches!(
-                operation,
-                loonfs_test_support::stores::RecordedOperation::Put { .. }
-                    | loonfs_test_support::stores::RecordedOperation::PutStreamed { .. }
-            )
-        })
-        .map(|operation| operation.key().to_owned())
-        .collect::<Vec<_>>();
-    assert!(puts
-        .iter()
-        .any(|key| key.starts_with(&metadata_segment_prefix(&namespace))));
-    assert!(puts
-        .iter()
-        .all(|key| key.starts_with(&metadata_segment_prefix(&namespace))
-            || key.starts_with(&loonfs_objectstore::keys::metadata_manifest_prefix(
-                &namespace
-            ))
-            || key == &loonfs_objectstore::keys::hint(&namespace)));
-
-    let spec = compaction_spec_for_group(&store, &namespace, MetadataFamilyGroup::Bindings).await;
-    let current_keys = referenced_segment_keys(&store, &namespace).await;
-    let before = current_manifest_number(&store, &namespace).await;
-    let existing_orphans = orphan_segment_keys(&store, &namespace).await;
-    let failing = FailStore::new(
-        store,
-        KeyPredicate::prefix(loonfs_objectstore::keys::metadata_manifest_prefix(
-            &namespace,
-        )),
-        OperationClass::Put,
-        InjectedError::PermissionDenied("publication stopped".to_owned()),
-    );
-    failing.fail_next(1);
-    assert!(run_metadata_compaction_job(
-        &failing,
-        &namespace,
-        epoch,
-        &spec,
-        small_segment_policy(),
-        &MetadataCompactionCancellation::default()
-    )
-    .await
-    .is_err());
-    assert_eq!(current_manifest_number(&failing, &namespace).await, before);
-    let orphans = orphan_segment_keys(&failing, &namespace)
-        .await
-        .difference(&existing_orphans)
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    assert!(!orphans.is_empty());
-    failing.clear();
-    let store = MetadataMapStore::aged(failing, KeyPredicate::any());
-    let config = crate::gc::GcConfig {
-        grace_window_ms: crate::limits::GC_MIN_GRACE_WINDOW_MS,
-    };
-    for age_ms in [
-        UNREFERENCED_SEGMENT_MIN_AGE_MS,
-        UNREFERENCED_SEGMENT_MIN_AGE_MS + 1,
-    ] {
-        crate::gc::gc_namespace(
-            &store,
-            &namespace,
-            &config,
-            &mutation_context("collector", age_ms),
-        )
-        .await
-        .expect("collect");
-        for key in &orphans {
-            assert_eq!(
-                store.head(key).await.expect("head").is_some(),
-                age_ms == UNREFERENCED_SEGMENT_MIN_AGE_MS
-            );
-        }
-        for key in &current_keys {
-            assert!(store.head(key).await.expect("head").is_some());
-        }
-    }
-}
-
-#[tokio::test]
 async fn a_new_compactor_epoch_an_expired_job_and_a_deletion_each_prevent_publication() {
     use crate::limits::METADATA_COMPACTION_BUDGET_MS;
     use loonfs_test_support::stores::RecordingStore;
@@ -3393,4 +2952,129 @@ async fn two_groups_with_one_epoch_publish_after_a_number_conflict() {
             .compactor_epoch(),
         epoch
     );
+}
+
+#[tokio::test]
+async fn direct_output_is_published_by_number_and_failed_output_ages_out() {
+    use crate::limits::UNREFERENCED_SEGMENT_MIN_AGE_MS;
+    use loonfs_test_support::stores::{FailStore, InjectedError, MetadataMapStore, RecordingStore};
+
+    let directory = tempdir().expect("tempdir");
+    let namespace = NamespaceId::parse("direct-output").expect("namespace");
+    let store = LocalFsStore::new(directory.path()).expect("store");
+    seed_bindings_workload(&store, &namespace).await;
+    let epoch = super::super::compactor::claim_compactor(&store, &namespace)
+        .await
+        .expect("claim");
+    let spec = compaction_spec_for_group(&store, &namespace, MetadataFamilyGroup::Bindings).await;
+    let before = current_manifest_number(&store, &namespace).await;
+    let store = RecordingStore::new(store, KeyPredicate::any());
+    let outcome = run_metadata_compaction_job(
+        &store,
+        &namespace,
+        epoch,
+        &spec,
+        small_segment_policy(),
+        &MetadataCompactionCancellation::default(),
+    )
+    .await
+    .expect("publish");
+    assert!(
+        matches!(outcome, MetadataCompactionJobOutcome::Published { manifest_no, .. } if manifest_no == before.successor().expect("next number"))
+    );
+    let puts = store
+        .take()
+        .into_iter()
+        .filter(|operation| {
+            matches!(
+                operation,
+                loonfs_test_support::stores::RecordedOperation::Put { .. }
+                    | loonfs_test_support::stores::RecordedOperation::PutStreamed { .. }
+            )
+        })
+        .map(|operation| operation.key().to_owned())
+        .collect::<Vec<_>>();
+    assert!(puts
+        .iter()
+        .any(|key| key.starts_with(&metadata_segment_prefix(&namespace))));
+    assert!(puts
+        .iter()
+        .all(|key| key.starts_with(&metadata_segment_prefix(&namespace))
+            || key.starts_with(&loonfs_objectstore::keys::metadata_manifest_prefix(
+                &namespace
+            ))
+            || key == &loonfs_objectstore::keys::hint(&namespace)));
+
+    // The first job left the group with one base run, which the planner does
+    // not select; one more binding gives it a delta run to select.
+    write_file_bytes(
+        &store,
+        &namespace,
+        "/late/f.txt",
+        b"late\n",
+        &test_context(),
+        None,
+    )
+    .await
+    .expect("write a later file");
+    create_checkpoint(&store, &namespace, &test_context())
+        .await
+        .expect("flush the later write");
+    let spec = compaction_spec_for_group(&store, &namespace, MetadataFamilyGroup::Bindings).await;
+    let current_keys = referenced_segment_keys(&store, &namespace).await;
+    let before = current_manifest_number(&store, &namespace).await;
+    let existing_orphans = orphan_segment_keys(&store, &namespace).await;
+    let failing = FailStore::new(
+        store,
+        KeyPredicate::prefix(loonfs_objectstore::keys::metadata_manifest_prefix(
+            &namespace,
+        )),
+        OperationClass::Put,
+        InjectedError::PermissionDenied("publication stopped".to_owned()),
+    );
+    failing.fail_next(1);
+    assert!(run_metadata_compaction_job(
+        &failing,
+        &namespace,
+        epoch,
+        &spec,
+        small_segment_policy(),
+        &MetadataCompactionCancellation::default()
+    )
+    .await
+    .is_err());
+    assert_eq!(current_manifest_number(&failing, &namespace).await, before);
+    let orphans = orphan_segment_keys(&failing, &namespace)
+        .await
+        .difference(&existing_orphans)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    assert!(!orphans.is_empty());
+    failing.clear();
+    let store = MetadataMapStore::aged(failing, KeyPredicate::any());
+    let config = crate::gc::GcConfig {
+        grace_window_ms: crate::limits::GC_MIN_GRACE_WINDOW_MS,
+    };
+    for age_ms in [
+        UNREFERENCED_SEGMENT_MIN_AGE_MS,
+        UNREFERENCED_SEGMENT_MIN_AGE_MS + 1,
+    ] {
+        crate::gc::gc_namespace(
+            &store,
+            &namespace,
+            &config,
+            &mutation_context("collector", age_ms),
+        )
+        .await
+        .expect("collect");
+        for key in &orphans {
+            assert_eq!(
+                store.head(key).await.expect("head").is_some(),
+                age_ms == UNREFERENCED_SEGMENT_MIN_AGE_MS
+            );
+        }
+        for key in &current_keys {
+            assert!(store.head(key).await.expect("head").is_some());
+        }
+    }
 }

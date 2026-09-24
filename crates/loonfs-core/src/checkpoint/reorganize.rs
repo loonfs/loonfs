@@ -423,10 +423,8 @@ fn window_is_eligible(
     };
     if newer.is_empty() {
         // Promoting the only delta establishes a base without rewriting it later
-        // just to change its tier. A lone base has nothing to merge.
-        return bottom_anchored
-            && (oldest.tier == RunTier::Delta
-                || policy == MetadataCompactionPolicy::CompactImmediately);
+        // just to change its tier.
+        return bottom_anchored && oldest.tier == RunTier::Delta;
     }
     let stored_bytes = |run: &&MetadataRunManifest| {
         group_run_descriptors(run, group)
@@ -835,6 +833,28 @@ mod planning_tests {
             policy,
             8 * 1024 * 1024,
         )
+    }
+
+    #[test]
+    fn a_lone_delta_is_promoted_but_a_lone_base_is_not_selected() {
+        let mut runs = runs(&[1024]);
+        for policy in [
+            MetadataCompactionPolicy::SizeTiered,
+            MetadataCompactionPolicy::CompactImmediately,
+        ] {
+            for (tier, expected) in [(RunTier::Base, None), (RunTier::Delta, Some(0..1))] {
+                runs[0].tier = tier;
+                assert_eq!(
+                    select_merge_window(
+                        &runs.iter().collect::<Vec<_>>(),
+                        MetadataFamilyGroup::Inodes,
+                        policy,
+                        8 * 1024 * 1024,
+                    ),
+                    expected
+                );
+            }
+        }
     }
 
     #[test]
