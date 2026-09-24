@@ -1,5 +1,8 @@
 //! Inline publication, retry identity, admission, and flush contracts.
 
+#[path = "commit_engine_inline_retention_tests.rs"]
+mod retention;
+
 use super::*;
 use crate::checkpoint::{flush_wal, fold_wal_tail};
 use crate::namespace::bootstrap::bootstrap_namespace;
