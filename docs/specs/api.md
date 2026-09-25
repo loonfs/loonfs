@@ -94,7 +94,7 @@ either way.
     "commit.max_message_bytes": 4096,
     "commit.max_operations": 4096,
     "commit.max_preconditions": 1024,
-    "maintenance.gc.min_grace_window_ms": 1230000,
+    "maintenance.gc.min_grace_window_ms": 1335000,
     "pagination.default_limit": 1000,
     "pagination.max_limit": 1000,
     "query.grep.default_limit": 1000,
