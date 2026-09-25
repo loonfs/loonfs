@@ -301,35 +301,35 @@ impl GrepManifestState {
             }
             (
                 GrepIndexStatus::Backfilling {
-                    target_seq,
+                    captured_seq,
                     checkpoint_id,
                     cursor_inode_id,
                 },
                 GrepIndexStatus::Backfilling {
-                    target_seq: next_target,
+                    captured_seq: next_target,
                     checkpoint_id: next_checkpoint,
                     cursor_inode_id: next_cursor,
                 },
             ) => {
-                if next_target < target_seq
+                if next_target < captured_seq
                     || (next_checkpoint == checkpoint_id
-                        && (next_target != target_seq || next_cursor < cursor_inode_id))
+                        && (next_target != captured_seq || next_cursor < cursor_inode_id))
                 {
                     return invalid("status");
                 }
             }
             (
-                GrepIndexStatus::Backfilling { target_seq, .. },
+                GrepIndexStatus::Backfilling { captured_seq, .. },
                 GrepIndexStatus::Active {
                     built_through_seq, ..
                 },
-            ) if built_through_seq < target_seq => return invalid("status"),
+            ) if built_through_seq < captured_seq => return invalid("status"),
             (
                 GrepIndexStatus::Active {
                     built_through_seq, ..
                 },
-                GrepIndexStatus::Backfilling { target_seq, .. },
-            ) if target_seq < built_through_seq => return invalid("status"),
+                GrepIndexStatus::Backfilling { captured_seq, .. },
+            ) if captured_seq < built_through_seq => return invalid("status"),
             _ => {}
         }
         Ok(())
