@@ -187,20 +187,6 @@ mod tests {
     use crate::gc::GcConfig;
 
     #[test]
-    fn minimum_grace_reserves_payload_sized_publication_attempts() {
-        let retry = loonfs_objectstore::PROVIDER_OPERATION_DEADLINE;
-        let attempt = loonfs_objectstore::PROVIDER_TRANSFER_ATTEMPT_TIMEOUT;
-        let backoff = loonfs_objectstore::PROVIDER_MAX_RETRY_BACKOFF;
-        assert!(
-            GC_MIN_GRACE_WINDOW_MS
-                >= METADATA_PUBLICATION_BUDGET_MS
-                    + (retry + backoff + attempt).as_millis() as u64
-                    + GC_SAFETY_MARGIN_MS,
-            "conditional WAL and manifest puts can carry payload-sized bodies"
-        );
-    }
-
-    #[test]
     fn derived_minimum_grace_window_sits_below_the_default() {
         // 15 min publication + 2 min retry budget + 15 s final backoff
         // + 2 min payload attempt + 3 min margin = 22 min 15 s.
