@@ -98,34 +98,6 @@ impl ClientConfig {
         }
         Ok(())
     }
-
-    /// Reads the configured CA bundle into the certificates reqwest adds to
-    /// the trust store. A path that cannot be read or does not hold PEM
-    /// certificates fails here, before any request: a client that silently
-    /// fell back to the platform roots would fail later and somewhere else.
-    pub(crate) fn extra_root_certificates(&self) -> Result<Vec<reqwest::Certificate>> {
-        let Some(path) = &self.ca_cert_path else {
-            return Ok(Vec::new());
-        };
-        let path = path.trim();
-        let pem = fs::read(path).map_err(|err| ClientError::ConfigValidation {
-            field: "ca_cert_path",
-            reason: format!("failed to read `{path}`: {err}"),
-        })?;
-        let certificates = reqwest::Certificate::from_pem_bundle(&pem).map_err(|err| {
-            ClientError::ConfigValidation {
-                field: "ca_cert_path",
-                reason: format!("`{path}` is not a PEM certificate bundle: {err}"),
-            }
-        })?;
-        if certificates.is_empty() {
-            return Err(ClientError::ConfigValidation {
-                field: "ca_cert_path",
-                reason: format!("`{path}` holds no CERTIFICATE section"),
-            });
-        }
-        Ok(certificates)
-    }
 }
 
 fn validate_absolute_http_url(field: &'static str, value: &str) -> Result<Uri> {

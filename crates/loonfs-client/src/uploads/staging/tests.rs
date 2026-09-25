@@ -8,7 +8,7 @@
 // diagnostics.
 
 use super::*;
-use crate::transport::test_transport::{self, Outcome};
+use crate::scripted_transport::{self, Outcome};
 use futures::stream::StreamExt;
 use loonfs_api::v0::UploadMode;
 use loonfs_api::{
@@ -120,27 +120,33 @@ fn upload_id() -> UploadId {
     UploadId::parse("upl_00000000000000000000000000000001").expect("valid upload id")
 }
 
-fn client() -> Client {
-    Client::new(ClientConfig {
-        server_url: "http://example.invalid".to_owned(),
-        auth_token: None,
-        request_timeout_ms: None,
-        disable_transient_retry: false,
-        ca_cert_path: None,
-    })
+fn client(transport: &crate::scripted_transport::ScriptedTransport) -> Client {
+    Client::with_transport(
+        ClientConfig {
+            server_url: "http://example.invalid".to_owned(),
+            auth_token: None,
+            request_timeout_ms: None,
+            disable_transient_retry: false,
+            ca_cert_path: None,
+        },
+        transport.clone(),
+    )
     .expect("valid client config")
 }
 
 /// A client whose failures are the test's own, not the retry policy's, so a
 /// scripted conversation is exactly as long as it reads.
-fn client_without_retry() -> Client {
-    Client::new(ClientConfig {
-        server_url: "http://example.invalid".to_owned(),
-        auth_token: None,
-        request_timeout_ms: None,
-        disable_transient_retry: true,
-        ca_cert_path: None,
-    })
+fn client_without_retry(transport: &crate::scripted_transport::ScriptedTransport) -> Client {
+    Client::with_transport(
+        ClientConfig {
+            server_url: "http://example.invalid".to_owned(),
+            auth_token: None,
+            request_timeout_ms: None,
+            disable_transient_retry: true,
+            ca_cert_path: None,
+        },
+        transport.clone(),
+    )
     .expect("valid client config")
 }
 
@@ -444,8 +450,8 @@ async fn a_resumed_multipart_put_uploads_only_the_parts_that_are_missing() {
     }
     // A failed signing request leaves the session open. No abort is sent.
     first.push(Outcome::TransportFailure);
-    let transport = test_transport::script(first);
-    let interrupted = client_without_retry()
+    let transport = scripted_transport::script(first);
+    let interrupted = client_without_retry(&transport)
         .put_file_stream_resumable(
             &spec(),
             PayloadSource::stream(
@@ -468,14 +474,13 @@ async fn a_resumed_multipart_put_uploads_only_the_parts_that_are_missing() {
     );
     let resume = journal.resume();
     assert_eq!(resume.part_size_bytes, TEST_PART_BYTES);
-    drop(transport);
 
     // The rerun sends only parts 9 onward.
     let missing: Vec<u32> = (landed + 1..=TEST_PAYLOAD_PARTS).collect();
     let (source, retention) = watched_source(&payload, TEST_PART_BYTES as usize);
-    let transport = test_transport::script(resumed_script(&missing, uploaded));
+    let transport = scripted_transport::script(resumed_script(&missing, uploaded));
     let resumed_journal = RecordingJournal::default();
-    client()
+    client(&transport)
         .put_file_stream_resumable(
             &spec(),
             source,
@@ -512,7 +517,7 @@ async fn a_resumed_multipart_put_uses_the_recorded_checksum_algorithm() {
         checksum: Checksum::crc32c(&payload),
     };
     let missing: Vec<u32> = (1..=TEST_PAYLOAD_PARTS).collect();
-    let transport = test_transport::script(resumed_script(&missing, uploaded));
+    let transport = scripted_transport::script(resumed_script(&missing, uploaded));
     let resume = MultipartUploadResume {
         upload_id: upload_id(),
         part_size_bytes: TEST_PART_BYTES,
@@ -522,7 +527,7 @@ async fn a_resumed_multipart_put_uses_the_recorded_checksum_algorithm() {
     let (source, retention) = watched_source(&payload, TEST_PART_BYTES as usize);
     let journal = RecordingJournal::default();
 
-    client()
+    client(&transport)
         .put_file_stream_resumable(
             &spec(),
             source,
@@ -550,10 +555,10 @@ async fn a_resumed_multipart_put_uses_the_recorded_checksum_algorithm() {
 async fn a_direct_multipart_put_holds_only_its_window() {
     let payload = payload(TEST_PAYLOAD_BYTES);
     let (source, retention) = watched_source(&payload, TEST_PART_BYTES as usize);
-    let _transport =
-        test_transport::script(multipart_script(TEST_PAYLOAD_PARTS, content_ref(&payload)));
+    let transport =
+        scripted_transport::script(multipart_script(TEST_PAYLOAD_PARTS, content_ref(&payload)));
 
-    client()
+    client(&transport)
         .put_file_stream(
             &spec(),
             source,
@@ -586,7 +591,7 @@ async fn a_proxied_put_streams_its_body() {
     let chunk_bytes = 16 * 1024;
     let (source, retention) = watched_source(&payload, chunk_bytes);
     let uploaded = content_ref(&payload);
-    let _transport = test_transport::script(vec![
+    let transport = scripted_transport::script(vec![
         capabilities(false),
         begin_proxied(),
         json(&UploadSession {
@@ -605,7 +610,7 @@ async fn a_proxied_put_streams_its_body() {
         commit_landed(),
     ]);
 
-    client()
+    client(&transport)
         .put_file_stream(
             &spec(),
             source,
@@ -631,7 +636,7 @@ async fn a_small_streamed_source_proxies_against_the_advertised_cap() {
     let payload = payload(1_000);
     let uploaded = content_ref(&payload);
     let (source, _) = watched_source(&payload, 512);
-    let transport = test_transport::script(vec![
+    let transport = scripted_transport::script(vec![
         capabilities_for(Advertised {
             proxy_max_bytes: Some(4_096),
             ..Advertised::default()
@@ -653,7 +658,7 @@ async fn a_small_streamed_source_proxies_against_the_advertised_cap() {
         commit_landed(),
     ]);
 
-    let client = client();
+    let client = client(&transport);
     client
         .put_file_stream(
             &spec(),
@@ -679,7 +684,7 @@ async fn a_small_payload_past_the_proxy_cap_takes_direct_put() {
     let payload = payload(1_025);
     let uploaded = content_ref(&payload);
     let (source, _) = watched_source(&payload, 512);
-    let transport = test_transport::script(vec![
+    let transport = scripted_transport::script(vec![
         capabilities_for(Advertised {
             direct_put: true,
             proxy_max_bytes: Some(1_024),
@@ -692,7 +697,7 @@ async fn a_small_payload_past_the_proxy_cap_takes_direct_put() {
         commit_landed(),
     ]);
 
-    client()
+    client(&transport)
         .put_file_stream(
             &spec(),
             source,
@@ -716,7 +721,7 @@ async fn an_unknown_length_payload_past_the_proxy_cap_takes_direct_put() {
     let (source, retention) = watched_source(&payload, 4 * 1024);
     assert_eq!(source.size_bytes(), None);
 
-    let transport = test_transport::script(vec![
+    let transport = scripted_transport::script(vec![
         // GCS supports CRC-32C direct PUTs but not multipart uploads.
         capabilities_for(Advertised {
             direct_put: true,
@@ -730,7 +735,7 @@ async fn an_unknown_length_payload_past_the_proxy_cap_takes_direct_put() {
         commit_landed(),
     ]);
 
-    client()
+    client(&transport)
         .put_file_stream(
             &spec(),
             source,
@@ -760,7 +765,7 @@ async fn an_unknown_length_payload_takes_direct_put_without_a_preflight_read() {
     let (source, _) = watched_source(&payload, 512);
     assert_eq!(source.size_bytes(), None);
 
-    let transport = test_transport::script(vec![
+    let transport = scripted_transport::script(vec![
         capabilities_for(Advertised {
             direct_put: true,
             direct_multipart: false,
@@ -773,7 +778,7 @@ async fn an_unknown_length_payload_takes_direct_put_without_a_preflight_read() {
         commit_landed(),
     ]);
 
-    client()
+    client(&transport)
         .put_file_stream(
             &spec(),
             source,
@@ -795,7 +800,7 @@ async fn a_direct_put_streams_its_payload_without_ever_holding_it() {
     let payload = payload(TEST_PAYLOAD_BYTES);
     let uploaded = content_ref(&payload);
     let (source, retention) = watched_source(&payload, TEST_PART_BYTES as usize);
-    let transport = test_transport::script(vec![
+    let transport = scripted_transport::script(vec![
         capabilities_for(Advertised {
             direct_put: true,
             proxy_max_bytes: Some(1_024),
@@ -808,7 +813,7 @@ async fn a_direct_put_streams_its_payload_without_ever_holding_it() {
         commit_landed(),
     ]);
 
-    client()
+    client(&transport)
         .put_file_stream(
             &spec(),
             source,
@@ -843,9 +848,9 @@ async fn a_direct_put_streams_its_payload_without_ever_holding_it() {
 
 #[tokio::test]
 async fn a_capability_failure_does_not_downgrade_a_measured_upload_to_the_proxy() {
-    let transport = test_transport::script([Outcome::Success(b"not json".to_vec())]);
+    let transport = scripted_transport::script([Outcome::Success(b"not json".to_vec())]);
 
-    let error = client()
+    let error = client(&transport)
         .put_file_bytes(
             &spec(),
             b"payload",
@@ -867,7 +872,7 @@ async fn a_file_backed_direct_put_reads_the_file_once_without_spooling_it() {
     std::fs::write(&path, &payload).expect("write the payload");
     let source = PayloadSource::open_file(&path).await.expect("open payload");
 
-    let transport = test_transport::script(vec![
+    let transport = scripted_transport::script(vec![
         capabilities_for(Advertised {
             direct_put: true,
             proxy_max_bytes: Some(1_024),
@@ -880,7 +885,7 @@ async fn a_file_backed_direct_put_reads_the_file_once_without_spooling_it() {
         commit_landed(),
     ]);
 
-    client()
+    client(&transport)
         .put_file_stream(
             &spec(),
             source,
@@ -993,9 +998,9 @@ async fn journal_failures_stop_uploads_without_aborting_the_resumable_session() 
             }
         }
         let expected_attempts = script.len();
-        let transport = test_transport::script(script);
+        let transport = scripted_transport::script(script);
         let bytes = vec![0; TEST_PART_BYTES as usize * 5];
-        let error = client_without_retry()
+        let error = client_without_retry(&transport)
             .put_file_stream_resumable(
                 &spec(),
                 PayloadSource::stream(
@@ -1025,7 +1030,7 @@ async fn a_lost_commit_ack_replays_the_saved_request_without_reopening_the_uploa
         token: "saved-proof".to_owned(),
     };
     let (source, _) = watched_source(&bytes, 512);
-    let transport = test_transport::script(vec![
+    let transport = scripted_transport::script(vec![
         capabilities(false),
         begin_proxied(),
         json(&UploadSession {
@@ -1059,7 +1064,7 @@ async fn a_lost_commit_ack_replays_the_saved_request_without_reopening_the_uploa
     options.behavior = loonfs_api::DestinationBehavior::Replace;
     options.expected_inode_id = Some(loonfs_api::InodeId(7));
     options.expected_revision_no = Some(loonfs_api::RevisionNo(9));
-    client_without_retry()
+    client_without_retry(&transport)
         .put_file_stream_resumable(&spec(), source, &options, &journal, None)
         .await
         .expect_err("lost acknowledgement");
@@ -1091,9 +1096,8 @@ async fn a_lost_commit_ack_replays_the_saved_request_without_reopening_the_uploa
         }]
     );
     assert_eq!(saved.content_tokens, vec![proof]);
-    drop(transport);
-    let transport = test_transport::script(vec![commit_landed()]);
-    client_without_retry()
+    let transport = scripted_transport::script(vec![commit_landed()]);
+    client_without_retry(&transport)
         .create_commit(&namespace_id(), &saved, &saved_actor)
         .await
         .expect("replay exact request");
@@ -1103,8 +1107,8 @@ async fn a_lost_commit_ack_replays_the_saved_request_without_reopening_the_uploa
 
 #[tokio::test]
 async fn a_commit_journal_failure_prevents_submission_of_completed_content() {
-    let transport = test_transport::script(Vec::new());
-    let error = client_without_retry()
+    let transport = scripted_transport::script(Vec::new());
+    let error = client_without_retry(&transport)
         .commit_completed_upload(
             &spec(),
             content_ref(b"data"),
@@ -1136,13 +1140,13 @@ fn inline_capabilities() -> Outcome {
 #[tokio::test]
 async fn inline_preparation_sends_only_the_commit_and_journals_every_byte() {
     for bytes in [b"".as_slice(), b"same".as_slice()] {
-        let transport = test_transport::script([
+        let transport = scripted_transport::script([
             inline_capabilities(),
             commit_landed(),
             commit_landed(),
             commit_landed(),
         ]);
-        let client = client_without_retry();
+        let client = client_without_retry(&transport);
         client.get_capabilities().await.expect("capabilities");
         let prepared = client
             .prepare_file_bytes(&namespace_id(), bytes)
@@ -1190,9 +1194,8 @@ async fn inline_preparation_sends_only_the_commit_and_journals_every_byte() {
         let saved = serde_json::to_vec(&request).expect("encode journal");
         let recovered: CommitRequest = serde_json::from_slice(&saved).expect("decode journal");
         assert_eq!(recovered, request);
-        drop(transport);
-        let transport = test_transport::script([commit_landed()]);
-        client_without_retry()
+        let transport = scripted_transport::script([commit_landed()]);
+        client_without_retry(&transport)
             .create_commit(&namespace_id(), &recovered, &options.commit.actor_id)
             .await
             .expect("recover");
@@ -1203,7 +1206,7 @@ async fn inline_preparation_sends_only_the_commit_and_journals_every_byte() {
 #[tokio::test]
 async fn streams_over_the_inline_limit_upload_the_buffered_prefix_and_remainder() {
     let bytes = b"larger than the inline limit";
-    let transport = test_transport::script([
+    let transport = scripted_transport::script([
         inline_capabilities(),
         begin_proxied(),
         completed(content_ref(bytes)),
@@ -1211,7 +1214,7 @@ async fn streams_over_the_inline_limit_upload_the_buffered_prefix_and_remainder(
         commit_landed(),
     ]);
     let (source, _) = watched_source(bytes, 11);
-    client_without_retry()
+    client_without_retry(&transport)
         .put_file_stream(
             &spec(),
             source,

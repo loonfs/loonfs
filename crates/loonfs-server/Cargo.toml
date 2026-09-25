@@ -50,6 +50,7 @@ utoipa = { workspace = true, optional = true }
 
 [dev-dependencies]
 base64.workspace = true
+http-body-util.workspace = true
 loonfs-client.workspace = true
 loonfs-core.workspace = true
 loonfs-test-support.workspace = true

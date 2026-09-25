@@ -40,6 +40,7 @@ crc32c = "0.6"
 crc64fast-nvme = "1.2"
 http = "1"
 http-body = "1"
+http-body-util = "0.1"
 icu_casemap = "=2.1.1"
 icu_normalizer = "=2.1.1"
 indexmap = { version = "2", features = ["serde"] }
@@ -98,6 +99,7 @@ thiserror = "2"
 tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
 toml = "0.8"
+tower = { version = "0.5", features = ["util"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 ureq = { version = "2.10", features = ["json"] }

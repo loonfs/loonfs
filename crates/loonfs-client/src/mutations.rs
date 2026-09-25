@@ -598,14 +598,17 @@ mod tests {
     async fn transport_failures_resend_up_to_the_attempt_cap() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let max_attempts = DEFAULT.max_retries as usize + 1;
-        let transport = crate::transport::test_transport::failures(max_attempts);
-        let retrying = Client::new(ClientConfig {
-            server_url: "http://example.invalid".to_owned(),
-            auth_token: None,
-            request_timeout_ms: None,
-            disable_transient_retry: false,
-            ca_cert_path: None,
-        })
+        let transport = crate::scripted_transport::failures(max_attempts);
+        let retrying = Client::with_transport(
+            ClientConfig {
+                server_url: "http://example.invalid".to_owned(),
+                auth_token: None,
+                request_timeout_ms: None,
+                disable_transient_retry: false,
+                ca_cert_path: None,
+            },
+            transport.clone(),
+        )
         .expect("valid client config");
         let error = retrying
             .get_namespace(&namespace_id)
@@ -613,16 +616,18 @@ mod tests {
             .expect_err("dropped connections must fail");
         assert!(matches!(error, ClientError::Http(_)), "{error:?}");
         assert_eq!(transport.attempts(), max_attempts);
-        drop(transport);
 
-        let transport = crate::transport::test_transport::failures(1);
-        let single_shot = Client::new(ClientConfig {
-            server_url: "http://example.invalid".to_owned(),
-            auth_token: None,
-            request_timeout_ms: None,
-            disable_transient_retry: true,
-            ca_cert_path: None,
-        })
+        let transport = crate::scripted_transport::failures(1);
+        let single_shot = Client::with_transport(
+            ClientConfig {
+                server_url: "http://example.invalid".to_owned(),
+                auth_token: None,
+                request_timeout_ms: None,
+                disable_transient_retry: true,
+                ca_cert_path: None,
+            },
+            transport.clone(),
+        )
         .expect("valid client config");
         single_shot
             .get_namespace(&namespace_id)
@@ -631,30 +636,29 @@ mod tests {
         assert_eq!(transport.attempts(), 1);
     }
 
-    fn retry_policy_client() -> Client {
-        Client::new(ClientConfig {
-            server_url: "http://example.invalid".to_owned(),
-            auth_token: None,
-            request_timeout_ms: None,
-            disable_transient_retry: false,
-            ca_cert_path: None,
-        })
+    fn retry_policy_client(transport: &crate::scripted_transport::ScriptedTransport) -> Client {
+        Client::with_transport(
+            ClientConfig {
+                server_url: "http://example.invalid".to_owned(),
+                auth_token: None,
+                request_timeout_ms: None,
+                disable_transient_retry: false,
+                ca_cert_path: None,
+            },
+            transport.clone(),
+        )
         .expect("valid client config")
     }
 
-    /// Installs a transport that fails once then succeeds, so a call that
-    /// stops after one attempt surfaces the failure and a call that retries
-    /// would succeed instead.
-    fn single_attempt_probe() -> (crate::transport::test_transport::Guard, Client) {
-        (
-            crate::transport::test_transport::failure_then_success(b"{}".to_vec()),
-            retry_policy_client(),
-        )
+    fn single_attempt_probe() -> (crate::scripted_transport::ScriptedTransport, Client) {
+        let transport = crate::scripted_transport::failure_then_success(b"{}".to_vec());
+        let client = retry_policy_client(&transport);
+        (transport, client)
     }
 
     fn assert_single_attempt<T>(
         result: Result<T>,
-        transport: &crate::transport::test_transport::Guard,
+        transport: &crate::scripted_transport::ScriptedTransport,
     ) {
         assert!(
             matches!(result, Err(ClientError::Http(_))),
@@ -679,7 +683,6 @@ mod tests {
                 .await,
             &transport,
         );
-        drop(transport);
 
         let (transport, client) = single_attempt_probe();
         assert_single_attempt(
@@ -692,7 +695,6 @@ mod tests {
                 .await,
             &transport,
         );
-        drop(transport);
 
         let (transport, client) = single_attempt_probe();
         assert_single_attempt(
@@ -714,7 +716,6 @@ mod tests {
                 .await,
             &transport,
         );
-        drop(transport);
 
         let (transport, client) = single_attempt_probe();
         assert_single_attempt(
@@ -729,7 +730,6 @@ mod tests {
                 .await,
             &transport,
         );
-        drop(transport);
 
         let response = NamespaceDiagnostics {
             created_at_ms: 1_000,
@@ -743,10 +743,10 @@ mod tests {
             live_snapshots: 3,
             live_checkpoints: 4,
         };
-        let transport = crate::transport::test_transport::failure_then_success(
+        let transport = crate::scripted_transport::failure_then_success(
             serde_json::to_vec(&response).expect("serialize response"),
         );
-        let client = retry_policy_client();
+        let client = retry_policy_client(&transport);
 
         let actual = client
             .get_namespace_diagnostics(&namespace_id)
@@ -770,10 +770,10 @@ mod tests {
             message: None,
             events: Vec::new(),
         };
-        let transport = crate::transport::test_transport::failure_then_success(
+        let transport = crate::scripted_transport::failure_then_success(
             serde_json::to_vec(&response).expect("serialize response"),
         );
-        let client = retry_policy_client();
+        let client = retry_policy_client(&transport);
         let spec = NamespacePath::parse("demo", "/docs").expect("valid namespace path");
 
         let actual = client
@@ -800,10 +800,10 @@ mod tests {
             head_seq: ChangeSeq(0),
             retention_floor_seq: ChangeSeq(0),
         };
-        let transport = crate::transport::test_transport::failure_then_success(
+        let transport = crate::scripted_transport::failure_then_success(
             serde_json::to_vec(&response).expect("serialize response"),
         );
-        let client = retry_policy_client();
+        let client = retry_policy_client(&transport);
 
         let actual = client
             .get_namespace(&namespace_id)
@@ -824,7 +824,6 @@ mod tests {
                 .await,
             &transport,
         );
-        drop(transport);
 
         let (transport, client) = single_attempt_probe();
         assert_single_attempt(
@@ -837,8 +836,8 @@ mod tests {
 
     #[tokio::test]
     async fn retry_policy_presigned_upload_is_single_attempt() {
-        let transport = crate::transport::test_transport::failure_then_success(Vec::new());
-        let client = retry_policy_client();
+        let transport = crate::scripted_transport::failure_then_success(Vec::new());
+        let client = retry_policy_client(&transport);
         let access = ObjectTransferAccess::PresignedUrl {
             method: "PUT".to_owned(),
             url: "http://example.invalid/upload".to_owned(),
@@ -869,10 +868,10 @@ mod tests {
                 content_ref: Some(test_content_ref(b"content")),
             },
         };
-        let transport = crate::transport::test_transport::failure_then_success(
+        let transport = crate::scripted_transport::failure_then_success(
             serde_json::to_vec(&response).expect("serialize response"),
         );
-        let client = retry_policy_client();
+        let client = retry_policy_client(&transport);
 
         let actual = client
             .put_upload_content(&namespace_id, &upload_id, b"content")
@@ -898,10 +897,10 @@ mod tests {
                 content_token: None,
             },
         };
-        let transport = crate::transport::test_transport::failure_then_success(
+        let transport = crate::scripted_transport::failure_then_success(
             serde_json::to_vec(&response).expect("serialize response"),
         );
-        let client = retry_policy_client();
+        let client = retry_policy_client(&transport);
 
         let actual = client
             .complete_upload(
@@ -946,12 +945,11 @@ mod tests {
                 mode: loonfs_api::v0::UploadMode::ServiceProxied,
                 status,
             };
-            let transport = crate::transport::test_transport::script([
-                crate::transport::test_transport::Outcome::Success(
+            let transport =
+                crate::scripted_transport::script([crate::scripted_transport::Outcome::Success(
                     serde_json::to_vec(&response).expect("serialize response"),
-                ),
-            ]);
-            let client = retry_policy_client();
+                )]);
+            let client = retry_policy_client(&transport);
 
             let error = client
                 .complete_staged(&namespace_id, &upload_id)

@@ -11,6 +11,8 @@ repository.workspace = true
 bytes.workspace = true
 futures.workspace = true
 http.workspace = true
+http-body.workspace = true
+http-body-util.workspace = true
 loonfs-api.workspace = true
 reqwest.workspace = true
 serde.workspace = true
@@ -18,13 +20,14 @@ serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 toml.workspace = true
+tower.workspace = true
 tracing.workspace = true
 urlencoding.workspace = true
 
 [dev-dependencies]
 loonfs-test-support.workspace = true
 tempfile.workspace = true
-tokio = { workspace = true, features = ["macros", "rt"] }
+tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
 
 [lints]
 workspace = true
