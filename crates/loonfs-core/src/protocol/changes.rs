@@ -96,11 +96,8 @@ pub(super) fn committed_change_from_wal_record(
 /// event. The deltas carry the request-operation index they came from, so the
 /// events stay in request order whatever their count.
 ///
-/// The reducer materializes every internal operation as one fixed delta
-/// pattern (`materialize_validated_op`), so this match is total over
-/// well-formed commits; an unmatched pattern means the feed mapper and the
-/// reducer have drifted and is reported as a server error rather than
-/// guessed at.
+/// Validation emits one fixed delta pattern per internal operation. An
+/// unmatched pattern means validation and the feed mapper disagree.
 ///
 /// `committed_seq` is also the bind sequence for bindings created by this
 /// commit.

@@ -1,7 +1,7 @@
 //! Assembles and validates data and fence segments before publication.
 
 use super::{PreparedWalSegment, WalSegmentError};
-use crate::commit::{wal_payload_from_materialized_commit, MaterializedCommit};
+use crate::commit::{wal_payload_from_prepared_commit, PreparedCommit};
 use crate::namespace::state::NamespaceReadState;
 use loonfs_api::wire::wal::{encode_wal_segment_envelope_zstd, WalSegmentPayload};
 use loonfs_api::{NamespaceId, WriterEpoch};
@@ -10,7 +10,7 @@ pub(crate) fn prepare_segment(
     namespace_id: NamespaceId,
     writer_epoch: WriterEpoch,
     head: &NamespaceReadState,
-    records: &[MaterializedCommit],
+    records: &[PreparedCommit],
 ) -> Result<PreparedWalSegment, WalSegmentError> {
     for record in records {
         if record.commit.namespace_id != namespace_id {
@@ -22,7 +22,7 @@ pub(crate) fn prepare_segment(
     }
     let payload_records: Vec<_> = records
         .iter()
-        .map(wal_payload_from_materialized_commit)
+        .map(wal_payload_from_prepared_commit)
         .collect();
     let payload = WalSegmentPayload {
         namespace_id,

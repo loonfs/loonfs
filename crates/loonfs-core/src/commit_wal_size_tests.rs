@@ -1,7 +1,7 @@
 //! WAL size estimates checked against planned requests at the API limits.
 
 use super::*;
-use crate::commit::materialize_commit;
+use crate::commit::PreparedCommit;
 use crate::commit_engine::CommitCandidate;
 use crate::limits::{MAX_COMMIT_MESSAGE_BYTES, MAX_COMMIT_OPERATIONS};
 use crate::metadata::{InMemoryMetadataView, MetadataState};
@@ -185,18 +185,13 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
             .await
             .expect("plan");
         let next_inode_id = session.commit_candidate(allocation).expect("allocation");
-        let materialized = materialize_commit(
-            plan.finish(next_inode_id),
-            u64::MAX,
-            candidate.inline_content(),
-        );
-        let encoded = prepare_segment(
-            namespace_id.clone(),
-            head.writer_epoch,
-            &head,
-            &[materialized],
-        )
-        .expect("encode");
+        let prepared = PreparedCommit {
+            commit: plan.finish(next_inode_id),
+            committed_at_ms: u64::MAX,
+            inline_content: candidate.inline_content().to_vec(),
+        };
+        let encoded = prepare_segment(namespace_id.clone(), head.writer_epoch, &head, &[prepared])
+            .expect("encode");
         assert!(
             encoded.document_len() <= estimate,
             "{kind}: {} > {estimate}",

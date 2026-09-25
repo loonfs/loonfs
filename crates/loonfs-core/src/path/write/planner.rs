@@ -16,7 +16,7 @@ use super::publish_path_planning::{CompiledFilesystemOperation, PublishPathPlann
 use crate::authorize::Authorizer;
 use crate::commit::{
     validate_ops, CandidateAllocation, CommitFingerprint, CommitNumbering, PublishValidationView,
-    ValidatedCommitPlan, ValidatedOp,
+    ValidatedCommitPlan,
 };
 use crate::commit_engine::CommitCandidate;
 use crate::error::{CoreError, Result};
@@ -91,7 +91,7 @@ pub(crate) async fn prepare_commit_against_publish_view<S: ObjectStore + ?Sized>
         Authorizer::for_request(&head.namespace_id, &head.access, candidate.authority())?;
     let mut resolved = PublishValidationView::new(base_view, accepted_rows, committed_seq);
     let mut numbering = CommitNumbering::default();
-    let mut validated_ops: Vec<ValidatedOp> = Vec::new();
+    let mut deltas = Vec::new();
     for (index, operation) in request.operations.iter().enumerate() {
         let unit = {
             let resolution_view = resolved.view();
@@ -106,7 +106,7 @@ pub(crate) async fn prepare_commit_against_publish_view<S: ObjectStore + ?Sized>
                 .map_err(|error| error.at_operation(index))?
         };
         let unit_ops = unit.ops;
-        let validated_unit = validate_ops(
+        let unit_deltas = validate_ops(
             &unit_ops,
             &mut resolved,
             &mut numbering,
@@ -116,7 +116,7 @@ pub(crate) async fn prepare_commit_against_publish_view<S: ObjectStore + ?Sized>
         )
         .await
         .map_err(|error| error.at_operation(index))?;
-        validated_ops.extend(validated_unit);
+        deltas.extend(unit_deltas);
     }
 
     Ok(ValidatedCommitPlan {
@@ -128,7 +128,7 @@ pub(crate) async fn prepare_commit_against_publish_view<S: ObjectStore + ?Sized>
         semantic_identity,
         apply_after_seq: head.seq,
         assigned_seq: committed_seq,
-        validated_ops,
+        deltas,
     })
 }
 
@@ -330,6 +330,7 @@ mod tests {
     use crate::storage::content::store_bytes_as_content;
     use crate::test_support::ops::create;
     use crate::test_support::ops::{delete_path, put_file_bytes};
+    use loonfs_api::wire::wal::{WalCommitDelta, WalDelta};
     use loonfs_api::{
         AbsolutePath, CommitId, DeleteDirectoryBehavior, DestinationBehavior, InodeId,
     };
@@ -338,7 +339,7 @@ mod tests {
 
     #[derive(Debug)]
     struct TestPreparedCommit {
-        ops: Vec<ValidatedOp>,
+        deltas: Vec<WalCommitDelta>,
         allocation: CandidateAllocation,
     }
 
@@ -458,7 +459,7 @@ mod tests {
         )
         .await?;
         Ok(TestPreparedCommit {
-            ops: validated.validated_ops,
+            deltas: validated.deltas,
             allocation,
         })
     }
@@ -615,26 +616,41 @@ mod tests {
         )
         .await;
 
-        assert_eq!(planned.ops.len(), 2);
         assert!(matches!(
-            &planned.ops[0],
-            ValidatedOp::CreateDir {
-                child_inode_id: InodeId(2),
-                parent_inode_id: InodeId(1),
-                ..
-            }
-        ));
-        // The put binds under the directory the create allocated rather than
-        // re-creating it, and validation receives the exact ID planning
-        // assigned to the file.
-        assert!(matches!(
-            &planned.ops[1],
-            ValidatedOp::CreateFile {
-                child_inode_id: InodeId(3),
-                parent_inode_id,
-                display_name,
-                ..
-            } if *parent_inode_id == InodeId(2) && display_name.as_str() == "a.txt"
+            planned.deltas.as_slice(),
+            [
+                WalCommitDelta {
+                    semantic_operation_index: 0,
+                    delta: WalDelta::CreateInode { delta_index: 0, inode_id: InodeId(2), .. },
+                },
+                WalCommitDelta {
+                    semantic_operation_index: 0,
+                    delta: WalDelta::BindDirentry {
+                        delta_index: 1,
+                        parent_inode_id: InodeId(1),
+                        child_inode_id: InodeId(2),
+                        ..
+                    },
+                },
+                WalCommitDelta {
+                    semantic_operation_index: 1,
+                    delta: WalDelta::CreateInode { delta_index: 2, inode_id: InodeId(3), .. },
+                },
+                WalCommitDelta {
+                    semantic_operation_index: 1,
+                    delta: WalDelta::BindDirentry {
+                        delta_index: 3,
+                        parent_inode_id: InodeId(2),
+                        child_inode_id: InodeId(3),
+                        display_name,
+                        ..
+                    },
+                },
+                WalCommitDelta {
+                    semantic_operation_index: 1,
+                    delta: WalDelta::AppendFileRevision { delta_index: 4, inode_id: InodeId(3), .. },
+                },
+            ] if display_name.as_str() == "a.txt"
         ));
         assert_eq!(planned.allocation.resulting_next_inode_id(), InodeId(4));
     }
@@ -685,12 +701,21 @@ mod tests {
         )
         .await;
 
-        // The name is free once the delete is applied, so the put creates a
-        // fresh file rather than failing with a destination conflict.
-        assert!(matches!(planned.ops[0], ValidatedOp::DeleteFile { .. }));
         assert!(matches!(
-            &planned.ops[1],
-            ValidatedOp::CreateFile { display_name, .. } if display_name.as_str() == "tmp.txt"
+            planned.deltas[0].delta,
+            WalDelta::UnbindDirentry { .. }
+        ));
+        assert!(matches!(
+            planned.deltas[1].delta,
+            WalDelta::TombstoneSubtree { .. }
+        ));
+        assert!(matches!(
+            planned.deltas[2].delta,
+            WalDelta::CreateInode { .. }
+        ));
+        assert!(matches!(
+            &planned.deltas[3].delta,
+            WalDelta::BindDirentry { display_name, .. } if display_name.as_str() == "tmp.txt"
         ));
     }
 

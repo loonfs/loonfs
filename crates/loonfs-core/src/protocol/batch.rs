@@ -8,7 +8,7 @@ use super::candidates::{
 };
 use super::changes::committed_change_from_wal_record;
 use super::publish_view::PublishMetadataView;
-use crate::commit::{materialize_commit, wal_payload_from_materialized_commit, WalPublishError};
+use crate::commit::{wal_payload_from_prepared_commit, PreparedCommit, WalPublishError};
 use crate::commit_engine::CommitCandidate;
 use crate::context::MutationContext;
 use crate::error::{CoreError, Result};
@@ -172,24 +172,24 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
                     tracing::debug_span!("loonfs.phase", phase = "finish_commit_plan").entered();
                 validated.finish(resulting_next_inode_id)
             };
-            let materialized = {
-                let _span =
-                    tracing::debug_span!("loonfs.phase", phase = "materialize_commit").entered();
-                materialize_commit(plan, context.now_ms, candidate.inline_content())
+            let prepared = PreparedCommit {
+                commit: plan,
+                committed_at_ms: context.now_ms,
+                inline_content: candidate.inline_content().to_vec(),
             };
             let preview = {
                 let _span =
                     tracing::debug_span!("loonfs.phase", phase = "build_wal_payload").entered();
-                wal_payload_from_materialized_commit(&materialized)
+                wal_payload_from_prepared_commit(&prepared)
             };
             {
                 let _span =
                     tracing::debug_span!("loonfs.phase", phase = "apply_committed_wal_record")
                         .entered();
-                session.apply_accepted_commit(&preview, &materialized.commit);
+                session.apply_accepted_commit(&preview, &prepared.commit);
             }
             slots.push(BatchOutcomeSlot::Accepted);
-            accepted_commits.push(materialized);
+            accepted_commits.push(prepared);
         }
     }
     .instrument(prepare_span.clone())

@@ -1,10 +1,12 @@
 //! Operation validation for one commit.
 
-use super::super::{CommitOp, CommitValidationError, ResolvedBinding, ValidatedOp};
+use super::super::{CommitOp, CommitValidationError, ResolvedBinding};
 use super::error::CommitOperand;
 use super::view::PublishValidationView;
 use crate::error::CoreError;
 use crate::metadata::{InodeRecord, RevisionRecord, SubtreeTombstoneRecord};
+use loonfs_api::wire::manifest::DeletedBinding;
+use loonfs_api::wire::wal::{WalCommitDelta, WalDelta};
 use loonfs_api::{
     next_public_ordinal, AccessGrants, AccessRevisionNo, ActorId, Attributes, AttributesRevisionNo,
     ChangeSeq, CommitId, ContentRef, DisplayName, InodeId, InodeKind, NameKey, RevisionNo,
@@ -44,12 +46,12 @@ pub(crate) async fn validate_ops<S: ObjectStore + ?Sized>(
     commit_id: &CommitId,
     actor: &ActorId,
     committed_at_ms: u64,
-) -> Result<Vec<ValidatedOp>, CoreError> {
-    let mut validated_ops = Vec::with_capacity(ops.len());
+) -> Result<Vec<WalCommitDelta>, CoreError> {
+    let mut deltas = Vec::new();
 
     for op in ops {
         let op_index = numbering.reserve_op_index()?;
-        let validated_op = match op {
+        let operation_deltas = match op {
             CommitOp::CreateDirectory {
                 child_inode_id,
                 parent_inode_id,
@@ -58,7 +60,6 @@ pub(crate) async fn validate_ops<S: ObjectStore + ?Sized>(
                 validate_create_directory(
                     view,
                     numbering,
-                    op_index,
                     *child_inode_id,
                     *parent_inode_id,
                     display_name,
@@ -74,7 +75,6 @@ pub(crate) async fn validate_ops<S: ObjectStore + ?Sized>(
                 validate_create_file(
                     view,
                     numbering,
-                    op_index,
                     *child_inode_id,
                     *parent_inode_id,
                     display_name,
@@ -87,15 +87,8 @@ pub(crate) async fn validate_ops<S: ObjectStore + ?Sized>(
                 base_revision_no,
                 content_ref,
             } => {
-                validate_replace_file(
-                    view,
-                    numbering,
-                    op_index,
-                    *inode_id,
-                    *base_revision_no,
-                    content_ref,
-                )
-                .await?
+                validate_replace_file(view, numbering, *inode_id, *base_revision_no, content_ref)
+                    .await?
             }
             CommitOp::RestoreRevision {
                 inode_id,
@@ -105,7 +98,6 @@ pub(crate) async fn validate_ops<S: ObjectStore + ?Sized>(
                 validate_restore_revision(
                     view,
                     numbering,
-                    op_index,
                     *inode_id,
                     *source_revision_no,
                     *base_revision_no,
@@ -115,7 +107,7 @@ pub(crate) async fn validate_ops<S: ObjectStore + ?Sized>(
             CommitOp::DeleteFile {
                 inode_id,
                 source_binding,
-            } => validate_delete_file(view, numbering, op_index, *inode_id, source_binding).await?,
+            } => validate_delete_file(view, numbering, *inode_id, source_binding).await?,
             CommitOp::Rename {
                 inode_id,
                 source_binding,
@@ -125,7 +117,6 @@ pub(crate) async fn validate_ops<S: ObjectStore + ?Sized>(
                 validate_rename(
                     view,
                     numbering,
-                    op_index,
                     *inode_id,
                     source_binding,
                     *new_parent_inode_id,
@@ -141,7 +132,6 @@ pub(crate) async fn validate_ops<S: ObjectStore + ?Sized>(
                 validate_delete_subtree(
                     view,
                     numbering,
-                    op_index,
                     *root_inode_id,
                     source_binding,
                     *require_empty,
@@ -157,7 +147,6 @@ pub(crate) async fn validate_ops<S: ObjectStore + ?Sized>(
                 validate_undelete(
                     view,
                     numbering,
-                    op_index,
                     *inode_id,
                     *deletion_seq,
                     *parent_inode_id,
@@ -173,7 +162,6 @@ pub(crate) async fn validate_ops<S: ObjectStore + ?Sized>(
                 validate_update_attributes(
                     view,
                     numbering,
-                    op_index,
                     *inode_id,
                     *base_attributes_revision_no,
                     attributes,
@@ -189,7 +177,6 @@ pub(crate) async fn validate_ops<S: ObjectStore + ?Sized>(
                 validate_update_access(
                     view,
                     numbering,
-                    op_index,
                     *inode_id,
                     *base_access_revision_no,
                     *boundary,
@@ -198,21 +185,23 @@ pub(crate) async fn validate_ops<S: ObjectStore + ?Sized>(
                 .await?
             }
         };
-        view.apply_validated_op_mut(commit_id, actor, committed_at_ms, &validated_op);
-        validated_ops.push(validated_op);
+        view.apply_deltas_mut(commit_id, actor, committed_at_ms, &operation_deltas);
+        deltas.extend(operation_deltas.into_iter().map(|delta| WalCommitDelta {
+            semantic_operation_index: op_index,
+            delta,
+        }));
     }
 
-    Ok(validated_ops)
+    Ok(deltas)
 }
 
 async fn validate_create_directory<S: ObjectStore + ?Sized>(
     view: &PublishValidationView<'_, S>,
     numbering: &mut CommitNumbering,
-    op_index: u32,
     child_inode_id: InodeId,
     parent_inode_id: InodeId,
     display_name: &DisplayName,
-) -> Result<ValidatedOp, CoreError> {
+) -> Result<Vec<WalDelta>, CoreError> {
     let name_key = validate_name_absent(
         view,
         parent_inode_id,
@@ -222,26 +211,30 @@ async fn validate_create_directory<S: ObjectStore + ?Sized>(
     )
     .await?;
     validate_not_covered_by_tombstone(view, parent_inode_id, CommitOperand::CreateParent).await?;
-    Ok(ValidatedOp::CreateDir {
-        op_index,
-        parent_inode_id,
-        display_name: display_name.clone(),
-        name_key,
-        child_inode_id,
-        create_inode_delta_index: numbering.reserve_delta_index()?,
-        bind_delta_index: numbering.reserve_delta_index()?,
-    })
+    Ok(vec![
+        WalDelta::CreateInode {
+            delta_index: numbering.reserve_delta_index()?,
+            inode_id: child_inode_id,
+            inode_kind: InodeKind::Directory,
+        },
+        WalDelta::BindDirentry {
+            delta_index: numbering.reserve_delta_index()?,
+            parent_inode_id,
+            name_key,
+            display_name: display_name.clone(),
+            child_inode_id,
+        },
+    ])
 }
 
 async fn validate_create_file<S: ObjectStore + ?Sized>(
     view: &PublishValidationView<'_, S>,
     numbering: &mut CommitNumbering,
-    op_index: u32,
     child_inode_id: InodeId,
     parent_inode_id: InodeId,
     display_name: &DisplayName,
     content_ref: &ContentRef,
-) -> Result<ValidatedOp, CoreError> {
+) -> Result<Vec<WalDelta>, CoreError> {
     let name_key = validate_name_absent(
         view,
         parent_inode_id,
@@ -251,27 +244,35 @@ async fn validate_create_file<S: ObjectStore + ?Sized>(
     )
     .await?;
     validate_not_covered_by_tombstone(view, parent_inode_id, CommitOperand::CreateParent).await?;
-    Ok(ValidatedOp::CreateFile {
-        op_index,
-        parent_inode_id,
-        display_name: display_name.clone(),
-        name_key,
-        child_inode_id,
-        content_ref: content_ref.clone(),
-        create_inode_delta_index: numbering.reserve_delta_index()?,
-        bind_delta_index: numbering.reserve_delta_index()?,
-        revision_delta_index: numbering.reserve_delta_index()?,
-    })
+    Ok(vec![
+        WalDelta::CreateInode {
+            delta_index: numbering.reserve_delta_index()?,
+            inode_id: child_inode_id,
+            inode_kind: InodeKind::File,
+        },
+        WalDelta::BindDirentry {
+            delta_index: numbering.reserve_delta_index()?,
+            parent_inode_id,
+            name_key,
+            display_name: display_name.clone(),
+            child_inode_id,
+        },
+        WalDelta::AppendFileRevision {
+            delta_index: numbering.reserve_delta_index()?,
+            inode_id: child_inode_id,
+            revision_no: RevisionNo(1),
+            content_ref: content_ref.clone(),
+        },
+    ])
 }
 
 async fn validate_replace_file<S: ObjectStore + ?Sized>(
     view: &PublishValidationView<'_, S>,
     numbering: &mut CommitNumbering,
-    op_index: u32,
     inode_id: InodeId,
     base_revision_no: RevisionNo,
     content_ref: &ContentRef,
-) -> Result<ValidatedOp, CoreError> {
+) -> Result<Vec<WalDelta>, CoreError> {
     validate_file_base_revision_is(
         view,
         inode_id,
@@ -287,23 +288,21 @@ async fn validate_replace_file<S: ObjectStore + ?Sized>(
             }
         })?;
     validate_not_covered_by_tombstone(view, inode_id, CommitOperand::ReplaceTarget).await?;
-    Ok(ValidatedOp::ReplaceFile {
-        op_index,
+    Ok(vec![WalDelta::AppendFileRevision {
+        delta_index: numbering.reserve_delta_index()?,
         inode_id,
         revision_no,
         content_ref: content_ref.clone(),
-        revision_delta_index: numbering.reserve_delta_index()?,
-    })
+    }])
 }
 
 async fn validate_restore_revision<S: ObjectStore + ?Sized>(
     view: &PublishValidationView<'_, S>,
     numbering: &mut CommitNumbering,
-    op_index: u32,
     inode_id: InodeId,
     source_revision_no: RevisionNo,
     base_revision_no: RevisionNo,
-) -> Result<ValidatedOp, CoreError> {
+) -> Result<Vec<WalDelta>, CoreError> {
     validate_file_base_revision_is(
         view,
         inode_id,
@@ -321,44 +320,34 @@ async fn validate_restore_revision<S: ObjectStore + ?Sized>(
             }
         })?;
     validate_not_covered_by_tombstone(view, inode_id, CommitOperand::RestoreTarget).await?;
-    Ok(ValidatedOp::RestoreRevision {
-        op_index,
+    Ok(vec![WalDelta::AppendFileRevision {
+        delta_index: numbering.reserve_delta_index()?,
         inode_id,
-        source_revision_no,
         revision_no,
         content_ref: source_revision.content_ref,
-        revision_delta_index: numbering.reserve_delta_index()?,
-    })
+    }])
 }
 
 async fn validate_delete_file<S: ObjectStore + ?Sized>(
     view: &PublishValidationView<'_, S>,
     numbering: &mut CommitNumbering,
-    op_index: u32,
     inode_id: InodeId,
     source_binding: &ResolvedBinding,
-) -> Result<ValidatedOp, CoreError> {
+) -> Result<Vec<WalDelta>, CoreError> {
     validate_source_binding(view, source_binding).await?;
     validate_inode_kind(view, inode_id, InodeKind::File, CommitOperand::DeleteTarget).await?;
     validate_not_covered_by_tombstone(view, inode_id, CommitOperand::DeleteTarget).await?;
-    Ok(ValidatedOp::DeleteFile {
-        op_index,
-        inode_id,
-        source_binding: source_binding.clone(),
-        unbind_delta_index: numbering.reserve_delta_index()?,
-        tombstone_delta_index: numbering.reserve_delta_index()?,
-    })
+    delete_deltas(numbering, inode_id, source_binding)
 }
 
 async fn validate_rename<S: ObjectStore + ?Sized>(
     view: &PublishValidationView<'_, S>,
     numbering: &mut CommitNumbering,
-    op_index: u32,
     inode_id: InodeId,
     source_binding: &ResolvedBinding,
     new_parent_inode_id: InodeId,
     new_display_name: &DisplayName,
-) -> Result<ValidatedOp, CoreError> {
+) -> Result<Vec<WalDelta>, CoreError> {
     validate_source_binding(view, source_binding).await?;
     let inode =
         view.view()
@@ -380,26 +369,25 @@ async fn validate_rename<S: ObjectStore + ?Sized>(
     validate_not_covered_by_tombstone(view, inode_id, CommitOperand::RenameSource).await?;
     validate_not_covered_by_tombstone(view, new_parent_inode_id, CommitOperand::RenameTargetParent)
         .await?;
-    Ok(ValidatedOp::Rename {
-        op_index,
-        inode_id,
-        source_binding: source_binding.clone(),
-        new_parent_inode_id,
-        new_display_name: new_display_name.clone(),
-        new_name_key,
-        unbind_delta_index: numbering.reserve_delta_index()?,
-        bind_delta_index: numbering.reserve_delta_index()?,
-    })
+    Ok(vec![
+        unbind_delta(numbering, source_binding)?,
+        WalDelta::BindDirentry {
+            delta_index: numbering.reserve_delta_index()?,
+            parent_inode_id: new_parent_inode_id,
+            name_key: new_name_key,
+            display_name: new_display_name.clone(),
+            child_inode_id: inode_id,
+        },
+    ])
 }
 
 async fn validate_delete_subtree<S: ObjectStore + ?Sized>(
     view: &PublishValidationView<'_, S>,
     numbering: &mut CommitNumbering,
-    op_index: u32,
     root_inode_id: InodeId,
     source_binding: &ResolvedBinding,
     require_empty: bool,
-) -> Result<ValidatedOp, CoreError> {
+) -> Result<Vec<WalDelta>, CoreError> {
     validate_source_binding(view, source_binding).await?;
     let operand = if require_empty {
         CommitOperand::EmptyDirectoryTarget
@@ -414,24 +402,17 @@ async fn validate_delete_subtree<S: ObjectStore + ?Sized>(
         .into());
     }
     validate_not_covered_by_tombstone(view, root_inode_id, CommitOperand::SubtreeRoot).await?;
-    Ok(ValidatedOp::DeleteSubtree {
-        op_index,
-        root_inode_id,
-        source_binding: source_binding.clone(),
-        unbind_delta_index: numbering.reserve_delta_index()?,
-        tombstone_delta_index: numbering.reserve_delta_index()?,
-    })
+    delete_deltas(numbering, root_inode_id, source_binding)
 }
 
 async fn validate_undelete<S: ObjectStore + ?Sized>(
     view: &PublishValidationView<'_, S>,
     numbering: &mut CommitNumbering,
-    op_index: u32,
     inode_id: InodeId,
     deletion_seq: ChangeSeq,
     parent_inode_id: InodeId,
     display_name: &DisplayName,
-) -> Result<ValidatedOp, CoreError> {
+) -> Result<Vec<WalDelta>, CoreError> {
     let active = validate_undelete_target(view, inode_id, deletion_seq).await?;
     let name_key = validate_name_absent(
         view,
@@ -442,61 +423,94 @@ async fn validate_undelete<S: ObjectStore + ?Sized>(
     )
     .await?;
     validate_not_covered_by_tombstone(view, parent_inode_id, CommitOperand::UndeleteTarget).await?;
-    Ok(ValidatedOp::Undelete {
-        op_index,
-        inode_id,
-        parent_inode_id,
-        display_name: display_name.clone(),
-        name_key,
-        target: active.position(),
-        revoke_tombstone_delta_index: numbering.reserve_delta_index()?,
-        bind_delta_index: numbering.reserve_delta_index()?,
-    })
+    Ok(vec![
+        WalDelta::RevokeSubtreeTombstone {
+            delta_index: numbering.reserve_delta_index()?,
+            root_inode_id: inode_id,
+            target: active.position(),
+        },
+        WalDelta::BindDirentry {
+            delta_index: numbering.reserve_delta_index()?,
+            parent_inode_id,
+            name_key,
+            display_name: display_name.clone(),
+            child_inode_id: inode_id,
+        },
+    ])
 }
 
 async fn validate_update_attributes<S: ObjectStore + ?Sized>(
     view: &PublishValidationView<'_, S>,
     numbering: &mut CommitNumbering,
-    op_index: u32,
     inode_id: InodeId,
     base_attributes_revision_no: AttributesRevisionNo,
     attributes: &Attributes,
-) -> Result<ValidatedOp, CoreError> {
+) -> Result<Vec<WalDelta>, CoreError> {
     validate_attributes_target_visible(view, inode_id).await?;
     validate_inode_attributes_revision_is(view, inode_id, base_attributes_revision_no).await?;
     let attributes_revision_no =
         next_attributes_revision_no(inode_id, base_attributes_revision_no)?;
     validate_not_covered_by_tombstone(view, inode_id, CommitOperand::AttributeTarget).await?;
-    Ok(ValidatedOp::UpdateAttributes {
-        op_index,
+    Ok(vec![WalDelta::AppendAttributesRevision {
+        delta_index: numbering.reserve_delta_index()?,
         inode_id,
         attributes_revision_no,
         attributes: attributes.clone(),
-        attributes_delta_index: numbering.reserve_delta_index()?,
-    })
+    }])
 }
 
 async fn validate_update_access<S: ObjectStore + ?Sized>(
     view: &PublishValidationView<'_, S>,
     numbering: &mut CommitNumbering,
-    op_index: u32,
     inode_id: InodeId,
     base_access_revision_no: AccessRevisionNo,
     boundary: bool,
     grants: &AccessGrants,
-) -> Result<ValidatedOp, CoreError> {
+) -> Result<Vec<WalDelta>, CoreError> {
     validate_access_target_visible(view, inode_id).await?;
     validate_inode_access_revision_is(view, inode_id, base_access_revision_no).await?;
     let access_revision_no = next_access_revision_no(inode_id, base_access_revision_no)?;
     validate_not_covered_by_tombstone(view, inode_id, CommitOperand::AccessTarget).await?;
-    Ok(ValidatedOp::UpdateAccess {
-        op_index,
+    Ok(vec![WalDelta::AppendAccessRevision {
+        delta_index: numbering.reserve_delta_index()?,
         inode_id,
         access_revision_no,
         boundary,
         grants: grants.clone(),
-        access_delta_index: numbering.reserve_delta_index()?,
+    }])
+}
+
+fn unbind_delta(
+    numbering: &mut CommitNumbering,
+    binding: &ResolvedBinding,
+) -> Result<WalDelta, CommitValidationError> {
+    Ok(WalDelta::UnbindDirentry {
+        delta_index: numbering.reserve_delta_index()?,
+        parent_inode_id: binding.parent_inode_id,
+        name_key: binding.name_key.clone(),
+        display_name: binding.display_name.clone(),
+        child_inode_id: binding.child_inode_id,
+        target: binding.position,
     })
+}
+
+fn delete_deltas(
+    numbering: &mut CommitNumbering,
+    root_inode_id: InodeId,
+    binding: &ResolvedBinding,
+) -> Result<Vec<WalDelta>, CoreError> {
+    Ok(vec![
+        unbind_delta(numbering, binding)?,
+        WalDelta::TombstoneSubtree {
+            delta_index: numbering.reserve_delta_index()?,
+            root_inode_id,
+            deleted_binding: DeletedBinding {
+                parent_inode_id: binding.parent_inode_id,
+                name_key: binding.name_key.clone(),
+                display_name: binding.display_name.clone(),
+            },
+        },
+    ])
 }
 
 fn next_access_revision_no(
