@@ -635,6 +635,30 @@ async fn read_open_proxied_session<S: ObjectStore + ?Sized>(
     Ok(session)
 }
 
+async fn check_staging_ownership<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    upload_id: &UploadId,
+    content_id: &ContentId,
+    expected_staging: ProxiedStaging,
+) -> Result<()> {
+    let session = load_upload_session_state(store, namespace_id, upload_id).await?;
+    if let Some(error) = terminal_session_error(&session.status, upload_id.clone()) {
+        return Err(error);
+    }
+    if session.content_id != *content_id
+        || session.mode
+            != (UploadSessionMode::ServiceProxied {
+                staging: expected_staging,
+            })
+    {
+        return Err(CoreError::UploadContentConflict {
+            upload_id: upload_id.clone(),
+        });
+    }
+    Ok(())
+}
+
 pub(crate) enum ProxiedPayload<'a> {
     Bytes(&'a [u8]),
     Stream(ByteStream),
@@ -722,6 +746,7 @@ pub(crate) async fn upload_proxied_content<S: ObjectStore + ?Sized>(
         StagingSlot::Claimed => {}
     }
 
+    let mut release_claim = true;
     let staged = match payload {
         ProxiedPayload::Bytes(bytes) => stage_bytes_under_content_id(
             store,
@@ -737,6 +762,18 @@ pub(crate) async fn upload_proxied_content<S: ObjectStore + ?Sized>(
             loaded.content_id.clone(),
             body,
             StreamedPayloadKind::Request,
+            async {
+                let checked = check_staging_ownership(
+                    store,
+                    namespace_id,
+                    upload_id,
+                    &loaded.content_id,
+                    ProxiedStaging::Claimed,
+                )
+                .await;
+                release_claim = checked.is_ok();
+                checked
+            },
         )
         .await
         .map(|staged| (staged.content_ref, staged.already_present)),
@@ -744,7 +781,9 @@ pub(crate) async fn upload_proxied_content<S: ObjectStore + ?Sized>(
     let (content_ref, already_present) = match staged {
         Ok(staged) => staged,
         Err(error) => {
-            release_staging_claim(store, namespace_id, upload_id).await;
+            if release_claim {
+                release_staging_claim(store, namespace_id, upload_id).await;
+            }
             return Err(error);
         }
     };
@@ -1021,9 +1060,16 @@ pub(crate) async fn stage_owned_stream<S: ObjectStore + ?Sized>(
     let staged = stage_streamed_under_content_id(
         store,
         catalog.namespace_id().clone(),
-        session.content_id,
+        session.content_id.clone(),
         body,
         payload_kind,
+        check_staging_ownership(
+            store,
+            catalog.namespace_id(),
+            &session.upload_id,
+            &session.content_id,
+            ProxiedStaging::Idle,
+        ),
     )
     .await?;
     if staged.already_present {
@@ -1620,6 +1666,70 @@ mod tests {
     use tempfile::tempdir;
 
     const BYTES: &[u8] = b"terminal states\n";
+
+    #[tokio::test]
+    async fn a_failed_final_session_read_keeps_the_claim_without_publishing_content() {
+        use futures::StreamExt;
+        use std::sync::Arc;
+
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let namespace_id = NamespaceId::parse("failed-session-check").expect("namespace id");
+        let context = context(1_000);
+        create(&store, &namespace_id, &context)
+            .await
+            .expect("bootstrap");
+        let session = begin_service_proxied_upload(&store, &namespace_id, None, &context)
+            .await
+            .expect("begin upload");
+        let loaded = load_upload_session_state(&store, &namespace_id, &session.upload_id)
+            .await
+            .expect("load session");
+        let session_key = upload_session(&namespace_id, &session.upload_id);
+        let failing = Arc::new(FailStore::new(
+            store,
+            KeyPredicate::exact(&session_key),
+            OperationClass::Read,
+            InjectedError::Transport("session read failed".to_owned()),
+        ));
+        let recording = Arc::new(RecordingStore::new(
+            Arc::clone(&failing),
+            KeyPredicate::exact(session_key),
+        ));
+        let body = {
+            let failing = Arc::clone(&failing);
+            let recording = Arc::clone(&recording);
+            futures::stream::once(async move {
+                recording.reset();
+                failing.fail_next(1);
+                Ok(Bytes::from_static(BYTES))
+            })
+            .boxed()
+        };
+
+        let error =
+            upload_streamed_content(&recording, &namespace_id, &session.upload_id, None, body)
+                .await
+                .expect_err("the final session read must succeed");
+
+        assert!(matches!(error, CoreError::ControlObjectLoad(_)));
+        assert_eq!(recording.count(OperationClass::Read), 1);
+        assert_eq!(recording.counts().puts, 0);
+        assert!(recording
+            .get(&content_blob(&namespace_id, &loaded.content_id), None)
+            .await
+            .expect("get content")
+            .is_none());
+        let loaded = load_upload_session_state(&recording, &namespace_id, &session.upload_id)
+            .await
+            .expect("load retained claim");
+        assert!(matches!(
+            loaded.mode,
+            UploadSessionMode::ServiceProxied {
+                staging: ProxiedStaging::Claimed
+            }
+        ));
+    }
 
     fn context(now_ms: u64) -> MutationContext {
         MutationContext {

@@ -18,9 +18,11 @@ use loonfs_objectstore::{
     ByteRange, ByteStream, ImmutableWriteError, ObjectStore, ObjectStoreError, PutMode,
 };
 use serde::{Deserialize, Serialize};
+use std::future::Future;
 use std::num::NonZeroU64;
 use std::sync::{Arc, Mutex};
 use thiserror::Error;
+use tokio::sync::oneshot;
 
 /// Confirms that LoonFS durably stored the content described by this reference.
 #[allow(unreachable_pub)]
@@ -658,24 +660,57 @@ pub(crate) async fn stage_streamed_under_content_id<S: ObjectStore + ?Sized>(
     content_id: ContentId,
     body: ByteStream,
     payload_kind: StreamedPayloadKind,
+    check_ownership: impl Future<Output = Result<(), CoreError>>,
 ) -> Result<StagedStream, CoreError> {
     let object_key = content_blob(&owner_namespace_id, &content_id);
     let observed = Arc::new(Mutex::new(StreamedPayload::default()));
+    let (request_check, check_requested) = oneshot::channel();
+    let (allow_completion, completion_allowed) = oneshot::channel();
     let hashed = {
         let observed = Arc::clone(&observed);
-        body.map(move |chunk| {
-            let chunk = chunk?;
-            let mut observed = observed.lock().unwrap_or_else(|err| err.into_inner());
-            observed.digest.update(&chunk);
-            observed.size_bytes += chunk.len() as u64;
-            Ok(chunk)
-        })
+        let object_key = object_key.clone();
+        futures::stream::try_unfold(
+            (body, request_check, completion_allowed),
+            move |(mut body, request_check, completion_allowed)| {
+                let observed = Arc::clone(&observed);
+                let object_key = object_key.clone();
+                async move {
+                    if let Some(chunk) = body.next().await {
+                        let chunk = chunk?;
+                        let mut observed = observed.lock().unwrap_or_else(|err| err.into_inner());
+                        observed.digest.update(&chunk);
+                        observed.size_bytes += chunk.len() as u64;
+                        return Ok(Some((chunk, (body, request_check, completion_allowed))));
+                    }
+                    // No caller bytes remain. PROVIDER_OPERATION_DEADLINE,
+                    // PROVIDER_MAX_RETRY_BACKOFF, and PROVIDER_TRANSFER_ATTEMPT_TIMEOUT
+                    // bound the remaining part, precondition, and completion requests.
+                    // PROVIDER_MULTIPART_PART_WINDOW bounds pending parts. These bounds
+                    // fit within GC_MIN_GRACE_WINDOW_MS before the aborted record is removed.
+                    let _ = request_check.send(());
+                    completion_allowed.await.map_err(|_| {
+                        ObjectStoreError::transport(&object_key, "upload session check failed")
+                    })?;
+                    Ok(None)
+                }
+            },
+        )
         .boxed()
     };
 
-    let stored = store
-        .put_streamed(&object_key, hashed, PutMode::CreateIfAbsent)
-        .await;
+    // ByteStream is 'static; the session check borrows the caller's store.
+    let check = async {
+        if check_requested.await.is_ok() {
+            check_ownership.await?;
+            let _ = allow_completion.send(());
+        }
+        Ok::<_, CoreError>(())
+    };
+    let (stored, checked) = futures::join!(
+        store.put_streamed(&object_key, hashed, PutMode::CreateIfAbsent),
+        check,
+    );
+    checked?;
     let observed = std::mem::take(&mut *observed.lock().unwrap_or_else(|err| err.into_inner()));
     let already_present = match stored {
         Ok(stored_bytes) if stored_bytes != observed.size_bytes => {
