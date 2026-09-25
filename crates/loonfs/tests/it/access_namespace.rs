@@ -416,3 +416,137 @@ async fn a_scoped_writer_uses_its_subject_for_commits_and_upload_ownership() {
         .await
         .is_err());
 }
+
+async fn snapshot_after_administrator_change() -> (
+    tempfile::TempDir,
+    loonfs::FsReader,
+    NamespaceId,
+    loonfs_api::PinId,
+    loonfs_api::ContentRef,
+) {
+    let (directory, writer, namespace) = create_namespace().await;
+    let root = writer.as_subject(subject("root", "prn_root"));
+    root.put_file_bytes(
+        &namespace,
+        "/file",
+        b"snapshot payload",
+        loonfs::PutFileOptions::new(loonfs_test_support::test_actor()),
+    )
+    .await
+    .expect("seed snapshot content");
+    let content = root
+        .reader()
+        .get_path_entry(&namespace, "/file", StatPathOptions::default())
+        .await
+        .expect("file")
+        .content_ref()
+        .expect("content reference")
+        .clone();
+    let snapshot = root
+        .create_snapshot(
+            &namespace,
+            CreateSnapshotOptions {
+                name: "old-admin".to_owned(),
+                expires_at_ms: loonfs_core::time::current_time_ms().expect("clock") + 60_000,
+            },
+        )
+        .await
+        .expect("snapshot");
+    commit_as(
+        &writer,
+        &namespace,
+        subject("root", "prn_root"),
+        FilesystemOperation::UpdateAccess {
+            path: AbsolutePath::root(),
+            boundary: false,
+            grants: AccessGrants::new(BTreeMap::from([(
+                PrincipalId::parse("prn_new_root").expect("principal"),
+                AccessRights::from_iter([AccessRight::Admin]),
+            )]))
+            .expect("grants"),
+            expected_inode_id: None,
+            expected_access_revision_no: None,
+        },
+    )
+    .await
+    .expect("replace administrator");
+    // A new runtime rules out stale-cache permission checks. The old ACL is
+    // available only through the deliberately historical snapshot context.
+    let reader = loonfs::FsReader::builder_with_store(writer.object_store())
+        .build()
+        .await
+        .expect("fresh reader");
+    writer.shutdown().await.expect("shutdown writer");
+    (
+        directory,
+        reader,
+        namespace,
+        snapshot.checkpoint_id,
+        content,
+    )
+}
+
+#[tokio::test]
+async fn snapshot_admin_reads_reject_a_revoked_administrator() {
+    let (_directory, reader, namespace, snapshot_id, content) =
+        snapshot_after_administrator_change().await;
+    let revoked = reader.as_subject(subject("root", "prn_root"));
+    assert_eq!(
+        revoked
+            .list_changes(&namespace, ChangeSeq(0), ListChangesOptions::default())
+            .await
+            .expect_err("live feed rejects the old administrator")
+            .code(),
+        ErrorCode::Forbidden
+    );
+    let snapshot = revoked
+        .pin_namespace_at_snapshot(&namespace, &snapshot_id)
+        .await
+        .expect("load historical view");
+    assert_eq!(
+        snapshot
+            .get_file_bytes("/file")
+            .await
+            .expect_err("ordinary snapshot reads use current authority")
+            .code(),
+        ErrorCode::PathNotFound
+    );
+    let changes = snapshot
+        .list_changes(
+            ChangeSeq(0),
+            loonfs_api::EffectiveLimit::new(std::num::NonZeroU32::new(10).expect("limit")),
+        )
+        .await;
+    let bytes = snapshot.read_content_ref(&content, 100).await;
+    assert!(
+        matches!(&changes, Err(error) if error.code() == ErrorCode::Forbidden)
+            && matches!(&bytes, Err(error) if error.code() == ErrorCode::Forbidden),
+        "revoked snapshot administrator: changes={changes:?}, bytes={bytes:?}"
+    );
+}
+
+#[tokio::test]
+async fn snapshot_admin_reads_accept_the_current_administrator() {
+    let (_directory, reader, namespace, snapshot_id, content) =
+        snapshot_after_administrator_change().await;
+    let snapshot = reader
+        .as_subject(subject("new-root", "prn_new_root"))
+        .pin_namespace_at_snapshot(&namespace, &snapshot_id)
+        .await
+        .expect("load historical view");
+    let changes = snapshot
+        .list_changes(
+            ChangeSeq(0),
+            loonfs_api::EffectiveLimit::new(std::num::NonZeroU32::new(10).expect("limit")),
+        )
+        .await
+        .expect("current administrator can read historical changes");
+    assert_eq!(changes.changes.len(), 1);
+    assert_eq!(
+        snapshot
+            .read_content_ref(&content, 100)
+            .await
+            .expect("current administrator can read historical content"),
+        b"snapshot payload"
+    );
+}
