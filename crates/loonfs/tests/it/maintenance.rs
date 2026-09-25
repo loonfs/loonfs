@@ -673,6 +673,119 @@ async fn fenced_compaction_blocks_until_a_new_request_claims_and_publishes() {
     }
 }
 
+#[tokio::test]
+async fn a_delayed_fenced_compaction_does_not_forget_a_newer_claim() {
+    let directory = tempdir().expect("directory");
+    let namespace_id = namespace_id("delayed-fencing");
+    let shared = store(directory.path());
+    let blocked = Arc::new(BlockingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::prefix(loonfs_objectstore::keys::metadata_manifest_prefix(
+            &namespace_id,
+        )),
+        OperationClass::Get,
+    ));
+    let first = open_runtime_async(blocked.clone(), "first").await;
+    let second = open_runtime_async(shared.clone(), "second").await;
+    first
+        .writer
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("namespace");
+    for index in 0..2 {
+        first
+            .put_file_bytes(
+                &namespace_id,
+                &format!("/file-{index}"),
+                b"content",
+                PutFileOptions::new(loonfs_test_support::test_actor()),
+            )
+            .await
+            .expect("put file");
+        first
+            .maintenance
+            .flush_wal(&namespace_id)
+            .await
+            .expect("flush");
+    }
+    for runtime in [&first, &second] {
+        assert_eq!(
+            runtime
+                .maintenance
+                .compact_metadata(&namespace_id)
+                .await
+                .expect("claim")
+                .compaction,
+            MetadataCompactionOutcome::BoundedMergePublished,
+        );
+    }
+
+    blocked.block_next();
+    let delayed = first.maintenance.compact_metadata(&namespace_id);
+    let reclaim = async {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            blocked.wait_until_blocked(),
+        )
+        .await
+        .expect("old epoch attempt reached its manifest read");
+        assert_eq!(
+            first
+                .maintenance
+                .compact_metadata(&namespace_id)
+                .await
+                .expect("fenced")
+                .compaction,
+            MetadataCompactionOutcome::Fenced,
+        );
+        assert_eq!(
+            first
+                .maintenance
+                .compact_metadata(&namespace_id)
+                .await
+                .expect("claim again")
+                .compaction,
+            MetadataCompactionOutcome::BoundedMergePublished,
+        );
+        let current =
+            loonfs_core::control::load_namespace_current_manifest(shared.as_ref(), &namespace_id)
+                .await
+                .expect("new claim");
+        assert_eq!(
+            current.state.compactor_epoch(),
+            loonfs_api::CompactorEpoch(3)
+        );
+        blocked.release();
+    };
+    let (delayed, ()) = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        tokio::join!(delayed, reclaim)
+    })
+    .await
+    .expect("concurrent compaction attempts finish");
+    assert_eq!(
+        delayed.expect("delayed result").compaction,
+        MetadataCompactionOutcome::Fenced
+    );
+
+    first
+        .maintenance
+        .compact_metadata(&namespace_id)
+        .await
+        .expect("use the current claim");
+    let current =
+        loonfs_core::control::load_namespace_current_manifest(shared.as_ref(), &namespace_id)
+            .await
+            .expect("current epoch");
+    assert_eq!(
+        current.state.compactor_epoch(),
+        loonfs_api::CompactorEpoch(3),
+        "a delayed result for epoch 1 must not evict epoch 3 and force another claim",
+    );
+}
+
 #[test]
 fn maintenance_step_counts_segments_not_commits() {
     let temp_dir = tempdir().expect("tempdir");
