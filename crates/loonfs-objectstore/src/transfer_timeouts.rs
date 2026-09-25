@@ -272,6 +272,93 @@ mod tests {
             .expect("request")
     }
 
+    #[derive(Debug)]
+    struct RetriedPublicationConnector;
+
+    impl HttpConnector for RetriedPublicationConnector {
+        fn connect(&self, _options: &ClientOptions) -> object_store::Result<HttpClient> {
+            Ok(HttpClient::new(TransferTimeoutService {
+                inner: HttpClient::new(RetriedPublicationService {
+                    statuses: Mutex::new(
+                        [http::StatusCode::SERVICE_UNAVAILABLE, http::StatusCode::OK].into(),
+                    ),
+                }),
+            }))
+        }
+    }
+
+    #[derive(Debug)]
+    struct RetriedPublicationService {
+        statuses: Mutex<VecDeque<http::StatusCode>>,
+    }
+
+    #[async_trait]
+    impl HttpService for RetriedPublicationService {
+        async fn call(&self, req: HttpRequest) -> Result<HttpResponse, HttpError> {
+            assert_eq!(req.method(), http::Method::PUT);
+            assert_eq!(req.headers()[http::header::IF_NONE_MATCH], "*");
+            assert!(req.body().content_length() as u64 >= PROVIDER_TRANSFER_BODY_MIN_BYTES);
+            let status = self
+                .statuses
+                .lock()
+                .expect("script lock")
+                .pop_front()
+                .expect("two attempts");
+            #[allow(clippy::disallowed_methods)]
+            tokio::time::sleep(Duration::from_secs(115)).await;
+            Ok(Response::builder()
+                .status(status)
+                .header(http::header::ETAG, "\"published\"")
+                .body(HttpResponseBody::from(Bytes::new()))
+                .expect("script response"))
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[allow(clippy::disallowed_methods)]
+    async fn conditional_payload_retry_can_outlast_the_control_attempt_allowance() {
+        use crate::provider_object_store::{
+            provider_retry_config, PROVIDER_MAX_RETRY_BACKOFF, PROVIDER_OPERATION_DEADLINE,
+            PROVIDER_PUBLICATION_REQUEST_BOUND,
+        };
+        use object_store::ObjectStore;
+
+        assert_eq!(
+            provider_retry_config().backoff.max_backoff,
+            PROVIDER_MAX_RETRY_BACKOFF
+        );
+        let store = object_store::aws::AmazonS3Builder::new()
+            .with_bucket_name("test-bucket")
+            .with_region("us-east-1")
+            .with_access_key_id("test-access")
+            .with_secret_access_key("test-secret")
+            .with_endpoint("http://provider.invalid")
+            .with_allow_http(true)
+            .with_http_connector(RetriedPublicationConnector)
+            .with_retry(provider_retry_config())
+            .build()
+            .expect("scripted store");
+        let started = tokio::time::Instant::now();
+        store
+            .put_opts(
+                &object_store::path::Path::from("wal/0000000001"),
+                vec![0u8; PROVIDER_TRANSFER_BODY_MIN_BYTES as usize].into(),
+                object_store::PutOptions {
+                    mode: object_store::PutMode::Create,
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("second conditional attempt publishes");
+
+        // The first retry is admitted after 115s, before the 120s retry budget.
+        // Upstream uses std::Instant, unlike this paused test clock, but both
+        // clocks admit this one retry; no second retry decision is exercised.
+        assert!(started.elapsed() >= Duration::from_secs(230));
+        assert!(started.elapsed() > PROVIDER_OPERATION_DEADLINE + PROVIDER_ATTEMPT_TIMEOUT);
+        assert!(started.elapsed() <= PROVIDER_PUBLICATION_REQUEST_BOUND);
+    }
+
     #[tokio::test(start_paused = true)]
     async fn small_request_is_bounded_by_the_base_attempt_timeout() {
         let service = service_with(
