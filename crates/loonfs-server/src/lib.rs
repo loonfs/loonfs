@@ -16,8 +16,8 @@ pub use config::{
     ServerConfigError, StoreConfig, TlsServerConfig,
 };
 pub use http::{
-    app, check_config, filesystem_app, probe_store, serve, serve_with_shutdown, AppOptions,
-    AppState, ServeError, TlsConfigError,
+    app, check_config, probe_store, serve, serve_with_shutdown, AppOptions, AppState, ServeError,
+    TlsConfigError,
 };
 pub use local_cache::FoyerStoredMetadataBlockCache;
 pub use trace::{init_tracing_from_env, TraceInitError};

@@ -3,7 +3,7 @@
 
 use super::router;
 use super::tls::{self, TlsConfigError, TlsListener};
-use crate::config::{MaintenanceMode, ServerConfig, ServerConfigError};
+use crate::config::{ServerConfig, ServerConfigError};
 use crate::local_cache::FoyerStoredMetadataBlockCache;
 use axum::body::Body;
 use axum::extract::{Request, State};
@@ -21,9 +21,7 @@ use loonfs_grep::{
     new_grep_block_cache, GrepGcJob, GrepMaintenanceJob, GrepService, GrepWorker,
     DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
 };
-use loonfs_http::{
-    AuthPolicy, BindingOptions, BindingState, GrepMaintenance, HttpMetrics, RouterSurface,
-};
+use loonfs_http::{AuthPolicy, BindingOptions, BindingState, GrepMaintenance, HttpMetrics};
 use loonfs_objectstore::presign::DirectTransferIssuers;
 use loonfs_objectstore::{run_store_contract_probe, StoreProbeReport};
 use std::ffi::OsString;
@@ -153,37 +151,6 @@ pub struct AppOptions {
 pub async fn app(
     config: ServerConfig,
     options: AppOptions,
-) -> Result<(Router, AppState), ServerConfigError> {
-    build_app(config, options, RouterSurface::Standalone).await
-}
-
-/// Builds the filesystem and query API for composition into another server.
-///
-/// Uses the same handlers, authentication, limits, and error contract as [`app`],
-/// but registers no health, readiness, metrics, or maintenance routes (including
-/// the disabled-maintenance wildcard). The host owns those operational surfaces.
-/// Capabilities describe only the served API groups. Configured background
-/// maintenance is preserved; its HTTP serving flag is ignored.
-///
-/// The host must drain requests and shut down the returned handles as described
-/// by [`app`]. This constructor does not supply tenant admission or isolation;
-/// callers remain responsible for selecting the store and trusted request context.
-pub async fn filesystem_app(
-    mut config: ServerConfig,
-    options: AppOptions,
-) -> Result<(Router, AppState), ServerConfigError> {
-    config.maintenance = if config.maintenance.maintains() {
-        MaintenanceMode::MaintainOnly
-    } else {
-        MaintenanceMode::Disabled
-    };
-    build_app(config, options, RouterSurface::Filesystem).await
-}
-
-async fn build_app(
-    config: ServerConfig,
-    options: AppOptions,
-    surface: RouterSurface,
 ) -> Result<(Router, AppState), ServerConfigError> {
     // The one unavoidable validation point: configs that skipped
     // `load_server_config` (direct Rust construction) fail here exactly as
@@ -349,7 +316,7 @@ async fn build_app(
         runner,
         local_cache,
     };
-    Ok((router(state.clone(), surface), state))
+    Ok((router(state.clone()), state))
 }
 
 fn maintenance_config_error(error: impl std::fmt::Display) -> ServerConfigError {

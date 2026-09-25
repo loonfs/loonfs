@@ -2,7 +2,7 @@
 
 #![allow(clippy::panic)]
 
-mod filesystem_app;
+mod composition;
 
 use super::serve::{build_handles, serve_on};
 use super::{app, AppOptions, AppState};

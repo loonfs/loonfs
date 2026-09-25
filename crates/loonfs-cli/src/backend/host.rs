@@ -8,7 +8,7 @@ use loonfs::InlineContentOptions;
 use loonfs_api::SecretString;
 use loonfs_client::{Body, Client, ClientConfig, TransportError};
 use loonfs_grep::GrepService;
-use loonfs_http::{AuthPolicy, BindingOptions, BindingState, HttpMetrics, RouterSurface};
+use loonfs_http::{AuthPolicy, BindingOptions, BindingState, HttpMetrics};
 use loonfs_objectstore::ConfiguredObjectStoreKind;
 use std::sync::{Arc, OnceLock};
 use tokio::sync::Semaphore;
@@ -55,7 +55,7 @@ pub(crate) fn client(
         grep_maintenance: None,
         metrics: HttpMetrics::new(),
     };
-    let router = loonfs_http::router(state, RouterSurface::Standalone);
+    let router = loonfs_http::router(state);
     let runner = host.runner.clone();
     let service = tower::service_fn(move |request: http::Request<Body>| {
         let router = router.clone();

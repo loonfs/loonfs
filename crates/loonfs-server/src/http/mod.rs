@@ -1,4 +1,4 @@
-//! HTTP composition for the standalone server and embedded hosts.
+//! HTTP composition for the standalone server.
 
 mod metrics;
 mod serve;
@@ -7,8 +7,7 @@ mod tests;
 mod tls;
 
 pub use serve::{
-    app, check_config, filesystem_app, probe_store, serve, serve_with_shutdown, AppOptions,
-    AppState, ServeError,
+    app, check_config, probe_store, serve, serve_with_shutdown, AppOptions, AppState, ServeError,
 };
 pub use tls::TlsConfigError;
 
@@ -18,13 +17,10 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
 use loonfs_api::{ApiError, ErrorCode};
-use loonfs_http::{api_error_response, authenticate_routes, observe_routes, RouterSurface};
+use loonfs_http::{api_error_response, authenticate_routes, observe_routes};
 
-fn router(state: AppState, surface: RouterSurface) -> Router {
-    let binding = loonfs_http::router(state.binding.clone(), surface);
-    if surface == RouterSurface::Filesystem {
-        return binding;
-    }
+fn router(state: AppState) -> Router {
+    let binding = loonfs_http::router(state.binding.clone());
     let public = Router::new()
         .route("/health", get(get_health))
         .route("/readiness", get(get_readiness))
