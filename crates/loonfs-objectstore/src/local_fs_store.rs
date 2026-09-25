@@ -835,9 +835,40 @@ mod tests {
     use super::{ByteRange, ObjectStore, ObjectStoreError, PutMode};
     use crate::keys::{hint, upload_session};
     use bytes::Bytes;
+    use futures::{stream, StreamExt};
     use std::fs;
     use std::sync::Arc;
     use tokio::sync::Barrier;
+
+    #[tokio::test]
+    async fn a_failed_stream_removes_its_temporary_file_without_publishing() {
+        let temp_dir = test_dir("failed-stream");
+        let store = LocalFsStore::new(temp_dir.path()).expect("create local fs store");
+        let key = "content/failed-stream";
+        let body = stream::iter([
+            Ok(Bytes::from_static(b"partial content")),
+            Err(ObjectStoreError::transport(
+                key,
+                "upload session check failed",
+            )),
+        ])
+        .boxed();
+
+        let error = store
+            .put_streamed(key, body, PutMode::CreateIfAbsent)
+            .await
+            .expect_err("a failed body cannot publish content");
+
+        assert!(matches!(error, ObjectStoreError::Transport { .. }));
+        assert!(store.get(key, None).await.expect("get content").is_none());
+        assert_eq!(
+            fs::read_dir(temp_dir.path().join("content"))
+                .expect("read content directory")
+                .count(),
+            0,
+            "temporary files must be removed, not just hidden from store listings"
+        );
+    }
 
     #[cfg(unix)]
     #[tokio::test]

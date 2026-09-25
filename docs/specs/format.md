@@ -425,7 +425,7 @@ A retry against already staged content compares the incoming content with the st
 
 Completion clears service-proxied staging to `idle` in the same CAS that records the terminal completed reference. Abort also clears staging to `idle`. A terminal record must not retain a second staged content description, even if the two references would agree.
 
-Service-proxied staging calculates SHA-256 while streaming the bytes. The exclusive staging claim prevents a second request from writing the same content object, including during multipart completion.
+Service-proxied staging calculates SHA-256 while streaming the bytes. When the body ends, the request reads the session record again and lets the object store finish the write only if the session is still open and this request still owns staging. The exclusive staging claim prevents a second request from writing the same content object, including during multipart completion.
 
 ### 5.4 Direct uploads
 
@@ -925,7 +925,7 @@ Uploads are collected through their session records. Retirement under section 9.
 | Session in a deleted namespace ineligible under section 9.5 | Retain; report a future retirement deadline, if any. |
 | Completed session in an eligible deleted namespace | Delete the session's exact content key, then the record; no publication lookup or additional completion grace is required. |
 
-Before completion, a session owns its random content identity exclusively and cannot issue admission evidence. In active namespaces or eligible tombstones, cleanup first wins the terminal transition, then removes content and any provider transfer. A failed cleanup leaves the record for another attempt. Open and aborted sessions still require provider cleanup after namespace retirement because provider upload state can exist outside object listings.
+Before completion, a session owns its random content identity exclusively and cannot issue admission evidence. In active namespaces or eligible tombstones, cleanup first wins the terminal transition, then removes content and any provider transfer. Cleanup keeps the aborted record until abort time plus `T`, so a streamed write that passed its final ownership check before the abort still has a record when it finishes, and a later cleanup attempt can remove its object. A failed cleanup leaves the record for another attempt. Open and aborted sessions still require provider cleanup after namespace retirement because provider upload state can exist outside object listings.
 
 Cleanup derives every content key and provider cleanup target from the namespace and content ID recorded when the session opened.
 

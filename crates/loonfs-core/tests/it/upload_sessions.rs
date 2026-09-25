@@ -235,6 +235,218 @@ mod streamed_content {
     use futures::StreamExt;
     use loonfs_objectstore::keys::content_blob;
 
+    #[tokio::test]
+    async fn slow_upload_cannot_outlive_its_durable_cleanup_record() {
+        staging_cleanup_schedule(true).await;
+    }
+
+    #[tokio::test]
+    async fn aborted_upload_finishing_before_final_gc_is_reclaimed() {
+        staging_cleanup_schedule(false).await;
+    }
+
+    async fn staging_cleanup_schedule(forget_before_resume: bool) {
+        use loonfs_api::v0::UploadSessionStatus;
+        use loonfs_api::wire::control::decode_control_object;
+
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let context = mutation_context();
+        let namespace_id = NamespaceId::parse("slow-upload").expect("namespace");
+        bootstrap_namespace(&store, &namespace_id, &context)
+            .await
+            .expect("bootstrap");
+        let begin = begin_upload(&store, &namespace_id, &context)
+            .await
+            .expect("begin");
+        let session_key = upload_session(&namespace_id, &begin.upload_id);
+        let encoded = store
+            .get(&session_key, None)
+            .await
+            .expect("get")
+            .expect("session");
+        let session = decode_control_object::<UploadSessionPayload>(
+            &encoded,
+            ControlObjectKind::UploadSession,
+        )
+        .expect("decode")
+        .into_payload();
+        let content_key = content_blob(&namespace_id, &session.content_id);
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
+        let stream = futures::stream::once(async move {
+            started_tx.send(()).expect("signal body poll after claim");
+            resume_rx.await.expect("resume body");
+            Ok(Bytes::from_static(b"late bytes"))
+        })
+        .boxed();
+        let engine = namespace_engine(&store, &namespace_id, &context);
+        let uploading = engine.upload_streamed_content(&begin.upload_id, None, stream);
+        let collecting = async {
+            started_rx
+                .await
+                .expect("staging claimed and waiting for body");
+            let aborted = engine
+                .abort_upload(&begin.upload_id, None)
+                .await
+                .expect("abort");
+            let UploadSessionStatus::Aborted { aborted_at_ms } = aborted.status else {
+                panic!("expected aborted");
+            };
+            let config = loonfs_core::GcConfig::default();
+            // Model the body staying open across the post-abort grace interval.
+            // No provider operation is suspended; the caller has not supplied its bytes.
+            let aged = MutationContext {
+                now_ms: aborted_at_ms + config.grace_window_ms + 1,
+                ..context.clone()
+            };
+            if forget_before_resume {
+                loonfs_core::gc_namespace(&store, &namespace_id, &config, &aged)
+                    .await
+                    .expect("collect aborted session");
+                assert!(store.get(&session_key, None).await.expect("get").is_none());
+            }
+            assert!(store.get(&content_key, None).await.expect("get").is_none());
+            resume_tx.send(()).expect("finish slow body after GC");
+            aged
+        };
+        let (result, aged) = tokio::join!(uploading, collecting);
+        assert_eq!(
+            result.expect_err("aborted session cannot stage").code(),
+            ErrorCode::UploadNotFound
+        );
+        loonfs_core::gc_namespace(
+            &store,
+            &namespace_id,
+            &loonfs_core::GcConfig::default(),
+            &aged,
+        )
+        .await
+        .expect("repeat GC after late content write");
+        assert!(store.get(&session_key, None).await.expect("get").is_none());
+        assert!(
+            store.get(&content_key, None).await.expect("get").is_none(),
+            "late content must not survive without a session that lets active-namespace GC find it"
+        );
+    }
+
+    #[tokio::test]
+    async fn slow_owned_stream_cannot_outlive_its_cleanup_record() {
+        owned_stream_expiry_schedule(true).await;
+    }
+
+    #[tokio::test]
+    async fn expired_owned_stream_finishing_before_final_gc_is_reclaimed() {
+        owned_stream_expiry_schedule(false).await;
+    }
+
+    async fn owned_stream_expiry_schedule(forget_before_resume: bool) {
+        use loonfs_api::wire::control::{decode_control_object, UploadSessionRecordStatus};
+        use loonfs_objectstore::keys::upload_session_prefix;
+
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let context = mutation_context();
+        let namespace_id = NamespaceId::parse("slow-owned-stream").expect("namespace");
+        bootstrap_namespace(&store, &namespace_id, &context)
+            .await
+            .expect("bootstrap");
+        let catalog = loonfs_core::control::load_namespace_catalog_entry(&store, &namespace_id)
+            .await
+            .expect("catalog");
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
+        let body = futures::stream::once(async move {
+            started_tx.send(()).expect("signal implicit session exists");
+            resume_rx.await.expect("resume input");
+            Ok(Bytes::from_static(b"late owned bytes"))
+        })
+        .boxed();
+        let engine = namespace_engine(&store, &namespace_id, &context);
+        let staging = engine.stage_owned_stream(&catalog, None, body);
+        let collecting = async {
+            started_rx.await.expect("owned staging waiting for input");
+            let sessions = store
+                .list_prefix(&upload_session_prefix(&namespace_id))
+                .await
+                .expect("list implicit owner");
+            assert_eq!(sessions.len(), 1, "one in-process staging session");
+            let session_key = sessions.into_iter().next().expect("session key");
+            let encoded = store
+                .get(&session_key, None)
+                .await
+                .expect("get")
+                .expect("open session");
+            let session = decode_control_object::<UploadSessionPayload>(
+                &encoded,
+                ControlObjectKind::UploadSession,
+            )
+            .expect("decode")
+            .into_payload();
+            let UploadSessionRecordStatus::Open { expires_at_ms } = session.status else {
+                panic!("expected open");
+            };
+            let content_key = content_blob(&namespace_id, &session.content_id);
+            let config = loonfs_core::GcConfig::default();
+            // Model a source stalled past its lease and both collection graces.
+            // GC, not a caller's explicit abort, moves the implicit session terminal.
+            let expired = MutationContext {
+                now_ms: expires_at_ms + config.grace_window_ms + 1,
+                ..context.clone()
+            };
+            loonfs_core::gc_namespace(&store, &namespace_id, &config, &expired)
+                .await
+                .expect("GC aborts expired implicit session");
+            let encoded = store
+                .get(&session_key, None)
+                .await
+                .expect("get")
+                .expect("first GC retains aborted owner");
+            let aborted = decode_control_object::<UploadSessionPayload>(
+                &encoded,
+                ControlObjectKind::UploadSession,
+            )
+            .expect("decode")
+            .into_payload();
+            assert!(matches!(
+                aborted.status,
+                UploadSessionRecordStatus::Aborted { aborted_at_ms }
+                    if aborted_at_ms == expired.now_ms
+            ));
+            let aged = MutationContext {
+                now_ms: expired.now_ms + config.grace_window_ms + 1,
+                ..context.clone()
+            };
+            if forget_before_resume {
+                loonfs_core::gc_namespace(&store, &namespace_id, &config, &aged)
+                    .await
+                    .expect("forget expired implicit owner");
+                assert!(store.get(&session_key, None).await.expect("get").is_none());
+            }
+            assert!(store.get(&content_key, None).await.expect("get").is_none());
+            resume_tx.send(()).expect("release late input");
+            (session_key, content_key, aged)
+        };
+        let (result, (session_key, content_key, aged)) = tokio::join!(staging, collecting);
+        assert_eq!(
+            result.expect_err("expired owner cannot complete").code(),
+            ErrorCode::UploadNotFound
+        );
+        loonfs_core::gc_namespace(
+            &store,
+            &namespace_id,
+            &loonfs_core::GcConfig::default(),
+            &aged,
+        )
+        .await
+        .expect("GC after failed late completion");
+        assert!(store.get(&session_key, None).await.expect("get").is_none());
+        assert!(
+            store.get(&content_key, None).await.expect("get").is_none(),
+            "implicit staging must not leave content without a durable cleanup owner"
+        );
+    }
+
     /// A payload larger than one transfer part, cut into stream chunks whose
     /// boundaries have nothing to do with the store's.
     fn payload() -> Vec<u8> {

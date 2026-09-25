@@ -468,6 +468,7 @@ pub trait ObjectStore: Send + Sync + Debug {
 
     /// Writes a stream and returns the number of bytes stored.
     ///
+    /// The object must not become visible until the complete body ends without error.
     /// Implementations consume the complete stream before reporting a failed
     /// precondition, allowing callers to finish checksums. Multipart providers
     /// may check `mode` immediately before assembly rather than atomically with
