@@ -3,15 +3,14 @@
 use super::plan_delete::plan_delete;
 use super::plan_transfer::plan_move;
 use super::publish_path_planning::{
-    check_binding_generation, child_display_path, classify_replace_destination,
-    resolve_visible_child, resolve_visible_inode, CompiledFilesystemOperation,
-    PublishPathPlanningView,
+    check_binding_version, child_display_path, classify_replace_destination, resolve_visible_child,
+    resolve_visible_inode, CompiledFilesystemOperation, PublishPathPlanningView,
 };
 use crate::authorize::{Absence, Replacement};
 use crate::commit::{CandidateAllocation, CommitOp};
 use crate::error::{CoreError, Result};
 use loonfs_api::{
-    AccessRight, AccessRights, BindingGeneration, ContentRef, DeleteDirectoryBehavior,
+    AccessRight, AccessRights, BindingVersion, ContentRef, DeleteDirectoryBehavior,
     DestinationBehavior, DisplayName, ExpectedFileState, InodeId, InodeKind, RevisionNo,
 };
 use loonfs_objectstore::ObjectStore;
@@ -94,7 +93,7 @@ pub(super) async fn plan_put_file_revision_by_inode<S: ObjectStore + ?Sized>(
 
 pub(super) async fn plan_move_by_inode<S: ObjectStore + ?Sized>(
     inode_id: InodeId,
-    expected_binding_generation: &BindingGeneration,
+    expected_binding_version: &BindingVersion,
     to_parent_inode_id: InodeId,
     to_display_name: &DisplayName,
     behavior: DestinationBehavior,
@@ -134,7 +133,7 @@ pub(super) async fn plan_move_by_inode<S: ObjectStore + ?Sized>(
         Absence::Inode,
     )
     .await?;
-    check_binding_generation(view, &source, expected_binding_generation)?;
+    check_binding_version(view, &source, expected_binding_version)?;
     let replaced = classify_replace_destination(occupant, behavior, inode_id, &destination_path)?;
     plan_move(
         view,
@@ -150,13 +149,13 @@ pub(super) async fn plan_move_by_inode<S: ObjectStore + ?Sized>(
 
 pub(super) async fn plan_delete_by_inode<S: ObjectStore + ?Sized>(
     inode_id: InodeId,
-    expected_binding_generation: &BindingGeneration,
+    expected_binding_version: &BindingVersion,
     behavior: DeleteDirectoryBehavior,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
 ) -> Result<CompiledFilesystemOperation> {
     let target = resolve_visible_inode(view, inode_id).await?;
     plan_delete(view, &target, behavior, Absence::Inode, || {
-        check_binding_generation(view, &target, expected_binding_generation)
+        check_binding_version(view, &target, expected_binding_version)
     })
     .await
 }

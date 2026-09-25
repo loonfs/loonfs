@@ -24,7 +24,7 @@ pub struct ResolvedVisiblePath {
     pub created_at_ms: u64,
     pub parent_inode_id: Option<InodeId>,
     pub display_name: String,
-    pub binding_generation: Option<DeltaPosition>,
+    pub binding_version: Option<DeltaPosition>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]

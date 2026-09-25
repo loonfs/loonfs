@@ -11,7 +11,7 @@ use loonfs_api::v0::{
     UploadPartChecksumClaim, UploadSessionStatus,
 };
 use loonfs_api::{
-    ActorId, ApiError, BindingGeneration, ChangeSeq, Checksum, CommitId, CommitRequest, ContentRef,
+    ActorId, ApiError, BindingVersion, ChangeSeq, Checksum, CommitId, CommitRequest, ContentRef,
     DeleteDirectoryBehavior, DestinationBehavior, DisplayName, FilesystemOperation, NamespaceId,
     PathEntry,
 };
@@ -904,7 +904,7 @@ struct InodeMutationsRequest {
     moved_file_name: String,
     content_utf8: String,
     revised_content_utf8: String,
-    malformed_binding_generation: String,
+    malformed_binding_version: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -914,8 +914,8 @@ struct InodeMutationsExpected {
     revised_revision_no: u64,
     moved_committed_seq: u64,
     deleted_committed_seq: u64,
-    stale_binding_generation: ErrorStatusExpected,
-    malformed_binding_generation: ErrorStatusExpected,
+    stale_binding_version: ErrorStatusExpected,
+    malformed_binding_version: ErrorStatusExpected,
 }
 
 async fn run_inode_mutations(harness: &Harness, case: &Case) {
@@ -1015,18 +1015,18 @@ async fn run_inode_mutations(harness: &Harness, case: &Case) {
         .expect("list inode-mutations directory");
     let names: Vec<String> = listing.entries.iter().map(listed_name).collect();
     assert_eq!(names, expected.entry_names);
-    let generations: HashSet<&str> = listing
+    let versions: HashSet<&str> = listing
         .entries
         .iter()
         .map(|entry| {
             entry
-                .binding_generation
+                .binding_version
                 .as_ref()
-                .map(BindingGeneration::as_str)
-                .expect("listed binding generation")
+                .map(BindingVersion::as_str)
+                .expect("listed binding version")
         })
         .collect();
-    assert_eq!(generations.len(), listing.entries.len());
+    assert_eq!(versions.len(), listing.entries.len());
     let entry_named = |name: &str| {
         listing
             .entries
@@ -1092,9 +1092,7 @@ async fn run_inode_mutations(harness: &Harness, case: &Case) {
             .expect("read revised file"),
         request.revised_content_utf8.as_bytes()
     );
-    let stale_generation = revised
-        .binding_generation
-        .expect("revised binding generation");
+    let stale_version = revised.binding_version.expect("revised binding version");
 
     let renamed_file = child_path(&request.renamed_file_name);
     let mut rename_options = MoveOptions::new(request.actor_id.clone());
@@ -1105,13 +1103,13 @@ async fn run_inode_mutations(harness: &Harness, case: &Case) {
         .await
         .expect("rename file by path");
 
-    let move_by_inode = |id: &str, expected_binding_generation: BindingGeneration| {
+    let move_by_inode = |id: &str, expected_binding_version: BindingVersion| {
         CommitRequest::single(
             commit_id(id),
             None,
             FilesystemOperation::MoveByInode {
                 inode_id: file_inode_id,
-                expected_binding_generation,
+                expected_binding_version,
                 destination_parent_inode_id: inode_directory_id,
                 destination_display_name: display_name(&request.moved_file_name),
                 precondition: loonfs_api::DestinationPrecondition {
@@ -1126,12 +1124,12 @@ async fn run_inode_mutations(harness: &Harness, case: &Case) {
         .client
         .create_commit(
             &namespace,
-            &move_by_inode("conf-inode-mutations-stale-move", stale_generation),
+            &move_by_inode("conf-inode-mutations-stale-move", stale_version),
             &request.actor_id,
         )
         .await
-        .expect_err("stale binding generation must fail");
-    assert_api_error(&stale, &expected.stale_binding_generation);
+        .expect_err("stale binding version must fail");
+    assert_api_error(&stale, &expected.stale_binding_version);
     let malformed = harness
         .raw_client
         .post(format!(
@@ -1145,7 +1143,7 @@ async fn run_inode_mutations(harness: &Harness, case: &Case) {
             "operations": [{
                 "kind": "move_by_inode",
                 "inode_id": file_inode_id,
-                "expected_binding_generation": request.malformed_binding_generation,
+                "expected_binding_version": request.malformed_binding_version,
                 "destination_parent_inode_id": inode_directory_id,
                 "destination_display_name": request.moved_file_name,
                 "behavior": "no_replace",
@@ -1153,21 +1151,21 @@ async fn run_inode_mutations(harness: &Harness, case: &Case) {
         }))
         .send()
         .await
-        .expect("send malformed binding generation");
-    assert_raw_status_error(malformed, &expected.malformed_binding_generation).await;
+        .expect("send malformed binding version");
+    assert_raw_status_error(malformed, &expected.malformed_binding_version).await;
 
-    let fresh_generation = harness
+    let fresh_version = harness
         .client
         .get_path_entry(&renamed_file, &StatPathOptions::default())
         .await
         .expect("stat renamed file")
-        .binding_generation
-        .expect("renamed binding generation");
+        .binding_version
+        .expect("renamed binding version");
     let moved = harness
         .client
         .create_commit(
             &namespace,
-            &move_by_inode("conf-inode-mutations-move", fresh_generation.clone()),
+            &move_by_inode("conf-inode-mutations-move", fresh_version.clone()),
             &request.actor_id,
         )
         .await
@@ -1188,10 +1186,8 @@ async fn run_inode_mutations(harness: &Harness, case: &Case) {
         .await
         .expect("stat moved file");
     assert_eq!(moved_entry.inode_id, file_inode_id);
-    let moved_generation = moved_entry
-        .binding_generation
-        .expect("moved binding generation");
-    assert_ne!(moved_generation, fresh_generation);
+    let moved_version = moved_entry.binding_version.expect("moved binding version");
+    assert_ne!(moved_version, fresh_version);
 
     let feed = harness
         .client
@@ -1213,8 +1209,8 @@ async fn run_inode_mutations(harness: &Harness, case: &Case) {
         .as_slice()
     {
         [FilesystemChange::Moved {
-            binding_generation, ..
-        }] => assert_eq!(binding_generation, &moved_generation),
+            binding_version, ..
+        }] => assert_eq!(binding_version, &moved_version),
         other => panic!("expected one moved event, found {other:?}"),
     }
 
@@ -1227,7 +1223,7 @@ async fn run_inode_mutations(harness: &Harness, case: &Case) {
                 None,
                 FilesystemOperation::DeleteByInode {
                     inode_id: file_inode_id,
-                    expected_binding_generation: moved_generation,
+                    expected_binding_version: moved_version,
                     behavior: DeleteDirectoryBehavior::NonRecursive,
                 },
             ),

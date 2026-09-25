@@ -117,7 +117,7 @@ interface InodeMutationsRequest {
     moved_file_name: string;
     content_utf8: string;
     revised_content_utf8: string;
-    malformed_binding_generation: string;
+    malformed_binding_version: string;
 }
 
 interface InodeMutationsExpected {
@@ -125,8 +125,8 @@ interface InodeMutationsExpected {
     revised_revision_no: number;
     moved_committed_seq: number;
     deleted_committed_seq: number;
-    stale_binding_generation: ErrorStatusExpected;
-    malformed_binding_generation: ErrorStatusExpected;
+    stale_binding_version: ErrorStatusExpected;
+    malformed_binding_version: ErrorStatusExpected;
 }
 
 interface SnapshotsRequest {
@@ -411,15 +411,15 @@ const INODE_MUTATIONS_REQUEST_FIELDS = [
     "moved_file_name",
     "content_utf8",
     "revised_content_utf8",
-    "malformed_binding_generation",
+    "malformed_binding_version",
 ] as const;
 const INODE_MUTATIONS_EXPECTED_FIELDS = [
     "entry_names",
     "revised_revision_no",
     "moved_committed_seq",
     "deleted_committed_seq",
-    "stale_binding_generation",
-    "malformed_binding_generation",
+    "stale_binding_version",
+    "malformed_binding_version",
 ] as const;
 const SNAPSHOTS_REQUEST_FIELDS = [
     "namespace_id",
@@ -1618,13 +1618,13 @@ conformanceTest("inode_mutations", async (activeHarness, testCase) => {
     });
     const entries = listing.data;
     assert.deepEqual(listedNames(entries), expected.entry_names);
-    const generations = new Set(
+    const versions = new Set(
         entries.map((entry) => {
-            assert.ok(entry.binding_generation != null, "listed entry has no binding_generation");
-            return entry.binding_generation;
+            assert.ok(entry.binding_version != null, "listed entry has no binding_version");
+            return entry.binding_version;
         }),
     );
-    assert.equal(generations.size, entries.length);
+    assert.equal(versions.size, entries.length);
     const entryNamed = (name: string): LoonFS.PathEntry => {
         const entry = entries.find((candidate) => candidate.display_name === name);
         assert.ok(entry != null, `listed entry ${name} is missing`);
@@ -1678,14 +1678,14 @@ conformanceTest("inode_mutations", async (activeHarness, testCase) => {
         ),
         { headers: { "Loonfs-Actor": request.actor_id } },
     );
-    const moveByInode = (commitId: string, generation: string): LoonFS.CommitRequest => ({
+    const moveByInode = (commitId: string, version: string): LoonFS.CommitRequest => ({
         namespace_id: namespaceId,
         commit_id: commitId,
         operations: [
             {
                 kind: "move_by_inode",
                 inode_id: inodeFile.inode_id,
-                expected_binding_generation: generation,
+                expected_binding_version: version,
                 destination_parent_inode_id: entryNamed(request.inode_directory_name).inode_id,
                 destination_display_name: request.moved_file_name,
                 behavior: "no_replace",
@@ -1693,16 +1693,16 @@ conformanceTest("inode_mutations", async (activeHarness, testCase) => {
         ],
     });
 
-    assert.ok(revised.binding_generation != null, "revised entry has no binding_generation");
+    assert.ok(revised.binding_version != null, "revised entry has no binding_version");
     await assert.rejects(
         client.commits.create(
-            moveByInode("conf-inode-mutations-stale-move", revised.binding_generation),
+            moveByInode("conf-inode-mutations-stale-move", revised.binding_version),
             { headers: { "Loonfs-Actor": request.actor_id } },
         ),
         (error: unknown) => {
             assert.ok(error instanceof LoonFS.ConflictError);
-            assert.equal(error.statusCode, expected.stale_binding_generation.status);
-            assert.equal(error.body.code, expected.stale_binding_generation.code);
+            assert.equal(error.statusCode, expected.stale_binding_version.status);
+            assert.equal(error.body.code, expected.stale_binding_version.code);
             return true;
         },
     );
@@ -1710,14 +1710,14 @@ conformanceTest("inode_mutations", async (activeHarness, testCase) => {
         client.commits.create(
             moveByInode(
                 "conf-inode-mutations-malformed-move",
-                request.malformed_binding_generation,
+                request.malformed_binding_version,
             ),
             { headers: { "Loonfs-Actor": request.actor_id } },
         ),
         (error: unknown) => {
             assert.ok(error instanceof LoonFS.BadRequestError);
-            assert.equal(error.statusCode, expected.malformed_binding_generation.status);
-            assert.equal(error.body.code, expected.malformed_binding_generation.code);
+            assert.equal(error.statusCode, expected.malformed_binding_version.status);
+            assert.equal(error.body.code, expected.malformed_binding_version.code);
             return true;
         },
     );
@@ -1726,9 +1726,9 @@ conformanceTest("inode_mutations", async (activeHarness, testCase) => {
         namespace_id: namespaceId,
         path: childPath(request.renamed_file_name),
     });
-    assert.ok(renamed.binding_generation != null, "renamed entry has no binding_generation");
+    assert.ok(renamed.binding_version != null, "renamed entry has no binding_version");
     const moved = await client.commits.create(
-        moveByInode("conf-inode-mutations-move", renamed.binding_generation),
+        moveByInode("conf-inode-mutations-move", renamed.binding_version),
         { headers: { "Loonfs-Actor": request.actor_id } },
     );
     assert.equal(moved.committed_seq, expected.moved_committed_seq);
@@ -1737,8 +1737,8 @@ conformanceTest("inode_mutations", async (activeHarness, testCase) => {
         path: `${childPath(request.inode_directory_name)}/${request.moved_file_name}`,
     });
     assert.equal(movedEntry.inode_id, inodeFile.inode_id);
-    assert.ok(movedEntry.binding_generation != null, "moved entry has no binding_generation");
-    assert.notEqual(movedEntry.binding_generation, renamed.binding_generation);
+    assert.ok(movedEntry.binding_version != null, "moved entry has no binding_version");
+    assert.notEqual(movedEntry.binding_version, renamed.binding_version);
 
     const feed = await client.changes.list({
         namespace_id: namespaceId,
@@ -1750,7 +1750,7 @@ conformanceTest("inode_mutations", async (activeHarness, testCase) => {
     assert.equal(events.length, 1);
     const movedEvent = events[0];
     assert.ok(movedEvent?.kind === "moved");
-    assert.equal(movedEvent.binding_generation, movedEntry.binding_generation);
+    assert.equal(movedEvent.binding_version, movedEntry.binding_version);
 
     const deleted = await client.commits.create(
         {
@@ -1760,7 +1760,7 @@ conformanceTest("inode_mutations", async (activeHarness, testCase) => {
                 {
                     kind: "delete_by_inode",
                     inode_id: inodeFile.inode_id,
-                    expected_binding_generation: movedEntry.binding_generation,
+                    expected_binding_version: movedEntry.binding_version,
                     behavior: "non_recursive",
                 },
             ],

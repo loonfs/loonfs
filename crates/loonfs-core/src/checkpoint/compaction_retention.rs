@@ -114,7 +114,7 @@ fn keep_commit_history_row(row: MetadataRow, floor_seq: ChangeSeq) -> Option<Met
         MetadataRow::CommitReceipt(crate::metadata::CommitReceiptRecord {
             committed_seq, ..
         }) if *committed_seq < floor_seq => None,
-        MetadataRow::Commit(record) if record.seq < floor_seq => None,
+        MetadataRow::Commit(record) if record.committed_seq < floor_seq => None,
         _ => Some(row),
     }
 }

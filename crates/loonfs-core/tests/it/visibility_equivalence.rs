@@ -758,7 +758,7 @@ async fn undelete_preserves_later_interior_mutations_and_nested_deletions() {
     harness
         .undelete(tree, second_deletion.committed_seq, "/again")
         .await
-        .expect("undelete newer generation");
+        .expect("undelete newer position");
     let second_restored_snapshot = harness.read_context().await;
     harness
         .assert_equivalence(
@@ -920,7 +920,10 @@ async fn drain_reorganization(
     for _ in 0..16 {
         let report = harness
             .engine
-            .reorganize_metadata(loonfs_core::MetadataCompactionPolicy::default(), 0)
+            .reorganize_metadata(
+                loonfs_core::MetadataCompactionPolicy::default(),
+                loonfs_api::CompactorEpoch(0),
+            )
             .await
             .expect("reorganize metadata");
         match report {

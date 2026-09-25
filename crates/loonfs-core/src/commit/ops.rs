@@ -94,13 +94,13 @@ pub(crate) enum CommitOp {
     /// Recover a deleted file or subtree: revoke the deletion recorded at
     /// `deletion_seq` (the delete's committed sequence, reported by the
     /// delete and by the change feed) and re-bind the inode under a visible
-    /// parent directory. Scoping recovery to the observed generation keeps
+    /// parent directory. Scoping recovery to the observed position keeps
     /// a stale request from cancelling a later deletion of the same inode.
     Undelete {
         /// Deleted inode to make reachable again.
         inode_id: InodeId,
         /// Observed deletion sequence, which prevents cancelling a newer
-        /// tombstone generation.
+        /// tombstone position.
         deletion_seq: ChangeSeq,
         /// Visible directory that will own the recovered binding.
         parent_inode_id: InodeId,

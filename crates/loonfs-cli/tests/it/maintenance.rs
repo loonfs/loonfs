@@ -355,7 +355,7 @@ fn index_status_reports_each_lifecycle_status_in_its_own_terms() {
     assert_success(&enabled);
     let data = json_data(&enabled);
     assert_eq!(data["status"], "backfilling");
-    assert_eq!(data["target_seq"], 0);
+    assert_eq!(data["captured_seq"], 0);
     assert!(data.get("built_through_seq").is_none());
     assert!(json_data(&enabled).get("waited_for_seq").is_none());
     assert_eq!(json_data(&enabled)["steps"], 0);
@@ -372,7 +372,7 @@ fn index_status_reports_each_lifecycle_status_in_its_own_terms() {
     assert_success(&active);
     assert_eq!(json_data(&active)["status"], "active");
     assert_eq!(json_data(&active)["built_through_seq"], 0);
-    assert!(json_data(&active).get("target_seq").is_none());
+    assert!(json_data(&active).get("captured_seq").is_none());
 
     let disabled = harness.run(&["--json", "maintenance", "index", "disable"]);
     assert_success(&disabled);

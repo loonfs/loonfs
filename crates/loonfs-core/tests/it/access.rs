@@ -484,7 +484,7 @@ async fn rights_gate_operations_and_absence_hides_the_inode() {
             "stranger",
             FilesystemOperation::DeleteByInode {
                 inode_id: kept.inode_id,
-                expected_binding_generation: kept.binding_generation.expect("binding"),
+                expected_binding_version: kept.binding_version.expect("binding"),
                 behavior: loonfs_api::DeleteDirectoryBehavior::NonRecursive,
             },
             Some(ErrorCode::InodeNotFound),
@@ -527,7 +527,7 @@ async fn rights_gate_operations_and_absence_hides_the_inode() {
             "stranger",
             FilesystemOperation::DeleteByInode {
                 inode_id: kept.inode_id,
-                expected_binding_generation: deleted.binding_generation.expect("binding"),
+                expected_binding_version: deleted.binding_version.expect("binding"),
                 behavior: loonfs_api::DeleteDirectoryBehavior::NonRecursive,
             },
             Some(ErrorCode::InodeNotFound),
@@ -1522,14 +1522,14 @@ async fn inode_move_authorizes_the_destination_before_state_errors() {
     let hidden_file = resolve_path(&store, &namespace_id, "/team/secret/file")
         .await
         .expect("hidden file");
-    for (destination_parent_inode_id, expected_binding_generation) in [
+    for (destination_parent_inode_id, expected_binding_version) in [
         (
             hidden_file.inode_id,
-            source.binding_generation.clone().expect("source binding"),
+            source.binding_version.clone().expect("source binding"),
         ),
         (
             hidden_directory.inode_id,
-            other.binding_generation.expect("other binding"),
+            other.binding_version.expect("other binding"),
         ),
     ] {
         let error = commit_as(
@@ -1539,7 +1539,7 @@ async fn inode_move_authorizes_the_destination_before_state_errors() {
             subject("team", &["team"]),
             FilesystemOperation::MoveByInode {
                 inode_id: source.inode_id,
-                expected_binding_generation,
+                expected_binding_version,
                 destination_parent_inode_id,
                 destination_display_name: DisplayName::parse("moved").expect("display name"),
                 precondition: loonfs_api::DestinationPrecondition::default(),

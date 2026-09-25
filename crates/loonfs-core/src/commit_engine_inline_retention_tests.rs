@@ -44,7 +44,7 @@ async fn compact_and_check_pair(
         let outcome = reorganize_metadata_step(
             store,
             namespace_id,
-            0,
+            loonfs_api::CompactorEpoch(0),
             MetadataLsmPolicy::default(),
             MetadataCompactionPolicy::CompactImmediately,
         )

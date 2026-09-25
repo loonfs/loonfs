@@ -108,9 +108,9 @@ impl GrepHost {
                 })
             }
         };
-        let target_seq = match &lifecycle {
+        let captured_seq = match &lifecycle {
             GrepIndexStatus::Disabled {} => None,
-            GrepIndexStatus::Backfilling { target_seq, .. } => Some(*target_seq),
+            GrepIndexStatus::Backfilling { captured_seq, .. } => Some(*captured_seq),
             GrepIndexStatus::Active { .. } => Some(
                 NamespaceReads::new(&self.reader, namespace_id)
                     .head()
@@ -118,23 +118,23 @@ impl GrepHost {
                     .head_seq,
             ),
         };
-        if let Some(target_seq) = target_seq {
-            self.catch_up_grep_index(namespace_id, target_seq).await?;
+        if let Some(captured_seq) = captured_seq {
+            self.catch_up_grep_index(namespace_id, captured_seq).await?;
         }
         self.get_grep_index(namespace_id).await
     }
 
     /// Runs the index job's bounded steps until the index has built through
-    /// `target_seq`, or until a step settles short of it.
+    /// `captured_seq`, or until a step settles short of it.
     pub(crate) async fn catch_up_grep_index(
         &self,
         namespace_id: &NamespaceId,
-        target_seq: ChangeSeq,
+        captured_seq: ChangeSeq,
     ) -> Result<GrepIndexStatus, GrepError> {
         let job = GrepMaintenanceJob::new(self.worker.clone(), GramIndexBuildPolicy::default());
         loop {
             let lifecycle = self.worker.lifecycle(namespace_id).await?;
-            if GrepIndexLifecycle::from(&lifecycle).is_built_through(target_seq) {
+            if GrepIndexLifecycle::from(&lifecycle).is_built_through(captured_seq) {
                 return Ok(lifecycle);
             }
             match job

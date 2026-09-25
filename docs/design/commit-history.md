@@ -18,7 +18,7 @@ A commit is one conditional put of the next numbered WAL object, and no row is w
 
 A change-feed page reads through the same pinned view as every other read: the basis manifest, its segments, and the replayed tail. The durable side is one range scan over the `commits` family from the cursor. The tail side is the projected tail's commit rows above the cursor. Every manifest row is at or below the basis head and every tail row is above it, so the page is the durable rows followed by the tail rows, cut at the limit.
 
-A retried commit finds its receipt by commit ID, compares the fingerprint, and reads the commit row at the receipt's sequence. The response is rebuilt from that row. Because the two rows share a run and a retention rule, a receipt whose commit row is missing is corruption, not a retired record.
+A retried commit finds its receipt by commit ID, reads the commit row at the receipt's sequence, and compares that row's fingerprint. The response is rebuilt from that row. Because the two rows share a run and a retention rule, a receipt whose commit row is missing is corruption, not a retired record.
 
 A snapshot feed reads its pinned manifest's `commits` family and nothing later, so the page ends at the captured sequence without reading live history.
 

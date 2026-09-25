@@ -25,7 +25,7 @@ pub enum GrepIndexStatus {
     Backfilling {
         /// Namespace sequence the pinned checkpoint captured. The walk ends
         /// at exactly this state however far the namespace has moved since.
-        target_seq: ChangeSeq,
+        captured_seq: ChangeSeq,
         /// Inode the next backfill step resumes strictly after; absent means
         /// the start. Checkpoint file enumeration is ordered by ascending
         /// inode id, so one id is the whole resume position.
@@ -76,11 +76,11 @@ impl From<&GrepIndexStatus> for loonfs_api::v0::GrepIndexLifecycle {
         match status {
             GrepIndexStatus::Disabled {} => Self::Disabled,
             GrepIndexStatus::Backfilling {
-                target_seq,
+                captured_seq,
                 cursor_inode_id,
                 checkpoint_id,
             } => Self::Backfilling {
-                target_seq: *target_seq,
+                captured_seq: *captured_seq,
                 cursor_inode_id: *cursor_inode_id,
                 checkpoint_id: checkpoint_id.clone(),
             },
@@ -301,35 +301,35 @@ impl GrepManifestState {
             }
             (
                 GrepIndexStatus::Backfilling {
-                    target_seq,
+                    captured_seq,
                     checkpoint_id,
                     cursor_inode_id,
                 },
                 GrepIndexStatus::Backfilling {
-                    target_seq: next_target,
+                    captured_seq: next_target,
                     checkpoint_id: next_checkpoint,
                     cursor_inode_id: next_cursor,
                 },
             ) => {
-                if next_target < target_seq
+                if next_target < captured_seq
                     || (next_checkpoint == checkpoint_id
-                        && (next_target != target_seq || next_cursor < cursor_inode_id))
+                        && (next_target != captured_seq || next_cursor < cursor_inode_id))
                 {
                     return invalid("status");
                 }
             }
             (
-                GrepIndexStatus::Backfilling { target_seq, .. },
+                GrepIndexStatus::Backfilling { captured_seq, .. },
                 GrepIndexStatus::Active {
                     built_through_seq, ..
                 },
-            ) if built_through_seq < target_seq => return invalid("status"),
+            ) if built_through_seq < captured_seq => return invalid("status"),
             (
                 GrepIndexStatus::Active {
                     built_through_seq, ..
                 },
-                GrepIndexStatus::Backfilling { target_seq, .. },
-            ) if target_seq < built_through_seq => return invalid("status"),
+                GrepIndexStatus::Backfilling { captured_seq, .. },
+            ) if captured_seq < built_through_seq => return invalid("status"),
             _ => {}
         }
         Ok(())

@@ -6,7 +6,7 @@ use super::*;
 
 const FAMILY: ApiMetadataRowFamily = ApiMetadataRowFamily::DirentryBinds;
 
-fn rows(start: usize, count: usize, generation: u64) -> Vec<MetadataRow> {
+fn rows(start: usize, count: usize, sequence: u64) -> Vec<MetadataRow> {
     (start..start + count)
         .map(|index| {
             // Long, valid names ensure this fixture exceeds the eager-object
@@ -28,7 +28,7 @@ fn rows(start: usize, count: usize, generation: u64) -> Vec<MetadataRow> {
                     display_name: loonfs_api::DisplayName::parse(&name).expect("display name"),
                 },
                 child_inode_id: InodeId(index as u64 + 2),
-                committed_seq: ChangeSeq(generation),
+                committed_seq: ChangeSeq(sequence),
                 delta_index: 0,
             })
         })
@@ -118,7 +118,7 @@ async fn bounded_pages_match_full_rows_across_windows_ranges_and_eviction() {
 }
 
 #[tokio::test]
-async fn bounded_pages_merge_overlapping_runs_and_binding_generations() {
+async fn bounded_pages_merge_overlapping_runs_and_binding_versions() {
     let temp = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp.path()).expect("store");
     let first = rows(0, 1024, 1);

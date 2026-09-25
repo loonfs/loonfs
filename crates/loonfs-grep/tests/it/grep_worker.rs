@@ -873,12 +873,12 @@ async fn retention_passing_a_backfill_checkpoint_never_serves_a_partial_query() 
     .await
     .worker;
     worker.enable(&namespace_id).await.expect("enable");
-    let target_seq = match worker
+    let captured_seq = match worker
         .lifecycle(&namespace_id)
         .await
         .expect("backfill lifecycle")
     {
-        GrepIndexStatus::Backfilling { target_seq, .. } => target_seq,
+        GrepIndexStatus::Backfilling { captured_seq, .. } => captured_seq,
         status => panic!("newly enabled grep must be backfilling, got {status:?}"),
     };
     let policy = GramIndexBuildPolicy {
@@ -907,7 +907,7 @@ async fn retention_passing_a_backfill_checkpoint_never_serves_a_partial_query() 
         .await
         .expect("write during backfill");
     let retention_floor_seq = flush_wal_and_advance_retention(&maintenance, &namespace_id).await;
-    assert!(retention_floor_seq > target_seq);
+    assert!(retention_floor_seq > captured_seq);
 
     // Checkpoint pages remain readable after retention passes their basis,
     // so the final page may still publish the snapshot watermark as active.
@@ -922,7 +922,7 @@ async fn retention_passing_a_backfill_checkpoint_never_serves_a_partial_query() 
         GrepBuildOutcome::Published {
             built_through_seq,
             ..
-        } if built_through_seq == target_seq
+        } if built_through_seq == captured_seq
     ));
     let error = new_query(&store, &namespace_id, &request("handoff needle"))
         .await
@@ -1641,10 +1641,10 @@ async fn a_backfill_checkpoint_mismatch_is_corruption_without_writes() {
         .expect("load")
         .expect("manifest");
     let mut status = current.manifest_state().status().clone();
-    let GrepIndexStatus::Backfilling { target_seq, .. } = &mut status else {
+    let GrepIndexStatus::Backfilling { captured_seq, .. } = &mut status else {
         panic!("backfill")
     };
-    *target_seq = ChangeSeq(1);
+    *captured_seq = ChangeSeq(1);
     let next = GrepManifestState::new(
         namespace_id.clone(),
         current.manifest_no().successor().expect("next"),
@@ -2234,7 +2234,7 @@ async fn a_backfilling_manifest_never_reports_a_built_through_sequence() {
     assert_eq!(
         backfilling,
         loonfs_api::v0::GrepIndexLifecycle::Backfilling {
-            target_seq: ChangeSeq(1),
+            captured_seq: ChangeSeq(1),
             cursor_inode_id: None,
             checkpoint_id: match &state {
                 GrepIndexStatus::Backfilling { checkpoint_id, .. } => checkpoint_id.clone(),
@@ -2285,7 +2285,7 @@ async fn a_backfilling_manifest_never_reports_a_built_through_sequence() {
     );
     assert!(!serde_json::to_string(&active)
         .expect("serialize the active API lifecycle")
-        .contains("target_seq"));
+        .contains("captured_seq"));
     writer.shutdown().await.expect("shutdown");
 }
 

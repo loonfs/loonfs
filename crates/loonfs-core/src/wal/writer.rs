@@ -31,7 +31,9 @@ pub(crate) fn prepare_segment(
             .successor()
             .map_err(|_| WalSegmentError::NumberOverflow)?,
         writer_epoch,
-        head_seq: payload_records.last().map_or(head.seq, |record| record.seq),
+        head_seq: payload_records
+            .last()
+            .map_or(head.seq, |record| record.committed_seq),
         next_inode_id: records.last().map_or(head.next_inode_id, |record| {
             record.commit.resulting_next_inode_id
         }),

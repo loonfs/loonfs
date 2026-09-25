@@ -82,7 +82,7 @@ impl MaintenanceJob for GarbageCollectionJob {
                 "maintenance GC returned a non-GC response".to_owned(),
             )));
         };
-        let follow_up = if gc.reclaim_after_ms.is_some() {
+        let follow_up = if gc.reclaimable_at_ms.is_some() {
             loonfs_core::control::load_namespace_read_state(
                 self.maintenance.core.store(),
                 namespace_id,
@@ -122,7 +122,7 @@ fn reclaimed_anything(gc: &GcResponse) -> bool {
         || gc.deleted.retired_content_objects > 0
         || gc.deleted.upload_sessions > 0
         || gc.deleted_checkpoints_by_owner.fork > 0
-        || gc.deleted_checkpoints_by_owner.expired > 0
+        || gc.deleted_checkpoints_by_owner.user > 0
         || gc.deleted_checkpoints_by_owner.snapshot > 0
 }
 

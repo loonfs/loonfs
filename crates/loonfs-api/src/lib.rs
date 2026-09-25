@@ -114,8 +114,8 @@ pub use content::{
 pub use digest::sha256_digest;
 pub use error::{ErrorCode, ErrorKind};
 pub use ids::{
-    generated_id, next_public_ordinal, BindingGeneration, BindingGenerationValidationError,
-    ChangeSeq, CommitId, CommitIdValidationError, ContentId, GeneratedIdValidationError,
+    generated_id, next_public_ordinal, BindingVersion, BindingVersionValidationError, ChangeSeq,
+    CommitId, CommitIdValidationError, CompactorEpoch, ContentId, GeneratedIdValidationError,
     IndexSegmentId, InodeId, InodeKind, ManifestNo, MetadataCompactionId, MetadataSegmentId,
     NameKey, NameKeyValidationError, NamespaceId, NamespaceIdValidationError, PinId,
     PublicOrdinalRangeError, RevisionNo, RunNo, UploadId, WalNo, WriterEpoch, WriterId,

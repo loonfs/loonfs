@@ -411,8 +411,6 @@ pub struct UploadSessionPayload {
     /// reference the record holds names this object; see `validate` below,
     /// which refuses a record that disagrees with itself.
     pub content_id: ContentId,
-    /// Unix-millisecond creation stamp.
-    pub created_at_ms: u64,
     /// The subject that opened the session, recorded in an ACL namespace.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subject_id: Option<SubjectId>,
@@ -483,7 +481,6 @@ struct StrictUploadSessionPayload {
     namespace_id: NamespaceId,
     upload_id: UploadId,
     content_id: ContentId,
-    created_at_ms: u64,
     #[serde(default)]
     subject_id: Option<SubjectId>,
     mode: StrictUploadSessionMode,
@@ -593,7 +590,6 @@ impl<'de> Deserialize<'de> for UploadSessionPayload {
             namespace_id: record.namespace_id,
             upload_id: record.upload_id,
             content_id: record.content_id,
-            created_at_ms: record.created_at_ms,
             subject_id: record.subject_id,
             mode: record.mode.into(),
             status: record.status.into(),
@@ -668,7 +664,6 @@ mod tests {
             namespace_id: NamespaceId::parse("demo").expect("namespace id"),
             upload_id: UploadId::parse("upl_0123456789abcdef0123456789abcdef").expect("upload id"),
             content_id: content_ref.content_id.clone(),
-            created_at_ms: 1_000,
             subject_id: None,
             mode: UploadSessionMode::ServiceProxied {
                 staging: ProxiedStaging::Staged(staged),
@@ -733,7 +728,6 @@ mod tests {
                     upload_id: UploadId::parse("upl_0123456789abcdef0123456789abcdef")
                         .expect("upload id"),
                     content_id: content_ref.content_id.clone(),
-                    created_at_ms: 1_000,
                     subject_id: None,
                     mode: mode.clone(),
                     status,

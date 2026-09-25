@@ -235,7 +235,10 @@ async fn fenced_session_cannot_delete_namespace() {
         "a fenced session must not delete the namespace",
     );
     assert_eq!(
-        fence.active_writer.as_ref().map(|writer| writer.as_str()),
+        fence
+            .active_writer_id
+            .as_ref()
+            .map(|writer| writer.as_str()),
         Some("writer-b")
     );
     assert_eq!(fence.active_epoch, head_after_fencing.writer_epoch);
@@ -354,7 +357,10 @@ async fn fenced_writer_stays_fenced_after_its_tail_projection_is_evicted() {
     let head_after_fencing = head_state(&store, &ns_fence).await;
     assert_eq!(fence.active_epoch, head_after_fencing.writer_epoch);
     assert_eq!(
-        fence.active_writer.as_ref().map(|writer| writer.as_str()),
+        fence
+            .active_writer_id
+            .as_ref()
+            .map(|writer| writer.as_str()),
         Some("writer-b")
     );
 

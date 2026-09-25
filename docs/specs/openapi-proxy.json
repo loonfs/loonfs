@@ -120,8 +120,8 @@
         "minimum": 0,
         "type": "integer"
       },
-      "BindingGeneration": {
-        "description": "Opaque token identifying one parent and name binding generation.",
+      "BindingVersion": {
+        "description": "Opaque token identifying one parent and name binding version.",
         "pattern": "^[0-9a-f]+$",
         "type": "string"
       },
@@ -158,7 +158,7 @@
             "type": "object"
           },
           "protocol_version": {
-            "description": "The protocol generation, currently `v0`.",
+            "description": "The protocol version, `v0`.",
             "type": "string"
           }
         },
@@ -408,8 +408,8 @@
       "CommitPreconditionPathBinding": {
         "description": "Requires the path to retain the binding the caller read.",
         "properties": {
-          "expected_binding_generation": {
-            "$ref": "#/components/schemas/BindingGeneration",
+          "expected_binding_version": {
+            "$ref": "#/components/schemas/BindingVersion",
             "description": "Detects moves away and back."
           },
           "expected_inode_id": {
@@ -879,13 +879,13 @@
             "minimum": 0,
             "type": "integer"
           },
-          "active_writer": {
-            "$ref": "#/components/schemas/WriterId",
-            "description": "The writer ID recorded for the current epoch, when available."
-          },
           "active_writer_epoch": {
             "$ref": "#/components/schemas/WriterEpoch",
             "description": "Epoch that currently owns the namespace."
+          },
+          "active_writer_id": {
+            "$ref": "#/components/schemas/WriterId",
+            "description": "The writer ID recorded for the current epoch, when available."
           },
           "actual_access_revision_no": {
             "$ref": "#/components/schemas/AccessRevisionNo",
@@ -895,13 +895,13 @@
             "$ref": "#/components/schemas/AttributesRevisionNo",
             "description": "Attribute revision that is actually current for the inode."
           },
-          "actual_binding_generation": {
-            "$ref": "#/components/schemas/BindingGeneration",
+          "actual_binding_version": {
+            "$ref": "#/components/schemas/BindingVersion",
             "description": "Current binding token; absent for the root, which has no binding."
           },
           "actual_deletion_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
-            "description": "Deletion generation actually active for the inode."
+            "description": "Deletion sequence actually active for the inode."
           },
           "actual_head_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
@@ -939,13 +939,13 @@
             "$ref": "#/components/schemas/AttributesRevisionNo",
             "description": "Attribute revision the request expected to be current."
           },
-          "expected_binding_generation": {
-            "$ref": "#/components/schemas/BindingGeneration",
+          "expected_binding_version": {
+            "$ref": "#/components/schemas/BindingVersion",
             "description": "Opaque binding token supplied by the request."
           },
           "expected_deletion_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
-            "description": "Deletion generation the undelete expected to be active."
+            "description": "Deletion sequence the undelete expected to be active."
           },
           "expected_head_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
@@ -1255,8 +1255,8 @@
       "FilesystemChangeDirectoryCreated": {
         "description": "A directory was created.",
         "properties": {
-          "binding_generation": {
-            "$ref": "#/components/schemas/BindingGeneration",
+          "binding_version": {
+            "$ref": "#/components/schemas/BindingVersion",
             "description": "Opaque identifier for the binding created by this event."
           },
           "display_name": {
@@ -1282,7 +1282,7 @@
           "inode_id",
           "parent_inode_id",
           "display_name",
-          "binding_generation",
+          "binding_version",
           "kind"
         ],
         "type": "object"
@@ -1290,8 +1290,8 @@
       "FilesystemChangeFileCreated": {
         "description": "A file and its first revision were created.",
         "properties": {
-          "binding_generation": {
-            "$ref": "#/components/schemas/BindingGeneration",
+          "binding_version": {
+            "$ref": "#/components/schemas/BindingVersion",
             "description": "Opaque identifier for the binding created by this event."
           },
           "content_ref": {
@@ -1325,7 +1325,7 @@
           "inode_id",
           "parent_inode_id",
           "display_name",
-          "binding_generation",
+          "binding_version",
           "revision_no",
           "content_ref",
           "kind"
@@ -1335,8 +1335,8 @@
       "FilesystemChangeMoved": {
         "description": "An inode moved to a new parent directory or name.",
         "properties": {
-          "binding_generation": {
-            "$ref": "#/components/schemas/BindingGeneration",
+          "binding_version": {
+            "$ref": "#/components/schemas/BindingVersion",
             "description": "Opaque identifier for the binding created by this event."
           },
           "destination_display_name": {
@@ -1372,7 +1372,7 @@
           "source_display_name",
           "destination_parent_inode_id",
           "destination_display_name",
-          "binding_generation",
+          "binding_version",
           "kind"
         ],
         "type": "object"
@@ -1380,8 +1380,8 @@
       "FilesystemChangeUndeleted": {
         "description": "A deleted inode was recovered and re-bound.",
         "properties": {
-          "binding_generation": {
-            "$ref": "#/components/schemas/BindingGeneration",
+          "binding_version": {
+            "$ref": "#/components/schemas/BindingVersion",
             "description": "Opaque identifier for the binding created by this event."
           },
           "display_name": {
@@ -1407,7 +1407,7 @@
           "inode_id",
           "parent_inode_id",
           "display_name",
-          "binding_generation",
+          "binding_version",
           "kind"
         ],
         "type": "object"
@@ -1605,9 +1605,9 @@
             "$ref": "#/components/schemas/DeleteDirectoryBehavior",
             "description": "Whether a non-empty directory may be tombstoned recursively."
           },
-          "expected_binding_generation": {
-            "$ref": "#/components/schemas/BindingGeneration",
-            "description": "Binding generation required for the delete."
+          "expected_binding_version": {
+            "$ref": "#/components/schemas/BindingVersion",
+            "description": "Binding version required for the delete."
           },
           "inode_id": {
             "$ref": "#/components/schemas/InodeId",
@@ -1622,7 +1622,7 @@
         },
         "required": [
           "inode_id",
-          "expected_binding_generation",
+          "expected_binding_version",
           "kind"
         ],
         "type": "object"
@@ -1670,9 +1670,9 @@
             "$ref": "#/components/schemas/InodeId",
             "description": "Destination directory."
           },
-          "expected_binding_generation": {
-            "$ref": "#/components/schemas/BindingGeneration",
-            "description": "Binding generation required for the move."
+          "expected_binding_version": {
+            "$ref": "#/components/schemas/BindingVersion",
+            "description": "Binding version required for the move."
           },
           "expected_destination_inode_id": {
             "$ref": "#/components/schemas/InodeId",
@@ -1695,7 +1695,7 @@
         },
         "required": [
           "inode_id",
-          "expected_binding_generation",
+          "expected_binding_version",
           "destination_parent_inode_id",
           "destination_display_name",
           "kind"
@@ -1844,7 +1844,7 @@
         "properties": {
           "deletion_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
-            "description": "Observed deletion sequence, which prevents cancelling a newer tombstone generation."
+            "description": "Observed deletion sequence, which prevents cancelling a newer tombstone sequence."
           },
           "destination_path": {
             "$ref": "#/components/schemas/AbsolutePath",
@@ -2320,8 +2320,8 @@
             "$ref": "#/components/schemas/ActorId",
             "description": "The actor responsible for the latest attribute update, or `None` for the\ninitial empty state."
           },
-          "binding_generation": {
-            "$ref": "#/components/schemas/BindingGeneration",
+          "binding_version": {
+            "$ref": "#/components/schemas/BindingVersion",
             "description": "The opaque ID for the current parent and name binding, or `None` for the namespace root."
           },
           "created_at_ms": {
@@ -2398,8 +2398,8 @@
             "$ref": "#/components/schemas/ActorId",
             "description": "The actor responsible for the latest attribute update, or `None` for the\ninitial empty state."
           },
-          "binding_generation": {
-            "$ref": "#/components/schemas/BindingGeneration",
+          "binding_version": {
+            "$ref": "#/components/schemas/BindingVersion",
             "description": "The opaque ID for the current parent and name binding, or `None` for the namespace root."
           },
           "content_ref": {

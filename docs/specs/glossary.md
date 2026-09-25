@@ -7,7 +7,7 @@
 | **Sequence (`seq`)** | A namespace-local position assigned to one committed mutation request. |
 | **Commit** | One successfully published mutation request whose operations share a sequence. |
 | **Commit ID** | A caller-supplied identifier used to recognize retries while the corresponding receipt remains retained. |
-| **Commit receipt** | The durable result and semantic fingerprint of a committed request. |
+| **Commit receipt** | A durable row that maps a commit ID to its committed sequence. The commit row at that sequence stores the semantic fingerprint. |
 | **Semantic fingerprint** | A digest of the canonical logical request, used to detect conflicting reuse of a commit ID. |
 | **WAL** | The ordered log of immutable, consecutively numbered WAL objects. |
 | **WAL segment** | A numbered immutable object containing contiguous commits, or no commits when fencing a writer. |
@@ -16,7 +16,7 @@
 | **Flush / WAL fold** | Materializing committed WAL into metadata segments and publishing a manifest so later readers replay less history. |
 | **Inode** | The identity and creation metadata of a filesystem item. Its ID remains unchanged when the item is renamed or moved within a namespace. |
 | **Directory binding / direntry** | A parent inode, name, and child inode association that places an item in the tree. |
-| **Binding generation** | The sequence and delta position of a particular bind. The API represents this pair as an opaque token. |
+| **Binding version** | The sequence and delta position of a particular bind. The API represents this pair as an opaque token. |
 | **Path** | An absolute name resolved by following visible directory bindings from the root. |
 | **Display name** | The stored spelling of a directory entry's name. |
 | **Name key** | The normalized and case-folded value used for sibling-name comparison and lookup. |

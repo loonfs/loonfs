@@ -968,7 +968,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn concurrent_readers_observe_complete_replacement_generations() {
+    async fn concurrent_readers_observe_complete_replacement_versions() {
         const PAYLOAD_BYTES: usize = 16 * 1024;
         const READER_COUNT: usize = 4;
         const REPLACEMENT_COUNT: u8 = 32;
@@ -1002,20 +1002,20 @@ mod tests {
                         .expect("read during replacement")
                         .expect("replacement key remains present");
                     assert_eq!(bytes.len(), PAYLOAD_BYTES);
-                    let generation = bytes[0];
-                    assert!(generation <= REPLACEMENT_COUNT);
-                    assert!(bytes.iter().all(|byte| *byte == generation));
+                    let version = bytes[0];
+                    assert!(version <= REPLACEMENT_COUNT);
+                    assert!(bytes.iter().all(|byte| *byte == version));
                     reader_barrier.wait().await;
                 }
             }));
         }
 
-        for generation in 1..=REPLACEMENT_COUNT {
+        for version in 1..=REPLACEMENT_COUNT {
             round_barrier.wait().await;
             store
                 .put(
                     &key,
-                    Bytes::from(vec![generation; PAYLOAD_BYTES]),
+                    Bytes::from(vec![version; PAYLOAD_BYTES]),
                     PutMode::Overwrite,
                 )
                 .await

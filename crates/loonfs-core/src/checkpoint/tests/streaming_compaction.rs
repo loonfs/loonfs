@@ -434,7 +434,7 @@ async fn finalize_streaming_compaction_under<S: ObjectStore + ?Sized>(
 ) -> MetadataCompactionJobOutcome {
     let timer = Arc::new(StdMonotonicTimer::default());
     let publication = CompactionPublication {
-        compactor_epoch: 0,
+        compactor_epoch: loonfs_api::CompactorEpoch(0),
         compaction: Deadline::start(timer.clone()),
         publication: Deadline::start(timer.clone()),
     };
@@ -550,7 +550,7 @@ async fn fold_group_whole<S: ObjectStore + ?Sized>(
     let report = super::super::reorganize_metadata_step(
         store,
         namespace_id,
-        0,
+        loonfs_api::CompactorEpoch(0),
         fold_everything_policy(),
         MetadataCompactionPolicy::default(),
     )
@@ -640,7 +640,7 @@ async fn a_step_that_plans_a_compaction_publishes_nothing_itself() {
     let report = super::super::reorganize_metadata_step(
         &store,
         &namespace_id,
-        0,
+        loonfs_api::CompactorEpoch(0),
         starving_policy(),
         MetadataCompactionPolicy::default(),
     )
@@ -691,7 +691,7 @@ async fn a_small_group_over_the_step_budget_starts_a_job_without_counting_merges
         let report = super::super::reorganize_metadata_step(
             &store,
             &namespace_id,
-            0,
+            loonfs_api::CompactorEpoch(0),
             policy,
             MetadataCompactionPolicy::SizeTiered,
         )
@@ -751,7 +751,7 @@ async fn small_delta_batches_are_consolidated_by_merges_rather_than_by_jobs() {
         let report = super::super::reorganize_metadata_step(
             &store,
             &namespace_id,
-            0,
+            loonfs_api::CompactorEpoch(0),
             policy,
             MetadataCompactionPolicy::default(),
         )
@@ -798,7 +798,7 @@ async fn small_delta_batches_are_consolidated_by_merges_rather_than_by_jobs() {
         let report = super::super::reorganize_metadata_step(
             &store,
             &namespace_id,
-            0,
+            loonfs_api::CompactorEpoch(0),
             policy,
             MetadataCompactionPolicy::default(),
         )
@@ -2048,7 +2048,7 @@ async fn an_over_budget_group_is_rebuilt_by_a_job_while_maintenance_carries_on()
         let report = super::super::reorganize_metadata_step(
             &store,
             &namespace_id,
-            0,
+            loonfs_api::CompactorEpoch(0),
             policy,
             MetadataCompactionPolicy::default(),
         )
@@ -2183,7 +2183,7 @@ async fn step_until_a_compaction_is_planned<S: ObjectStore + ?Sized>(
         let report = super::super::reorganize_metadata_step(
             store,
             namespace_id,
-            0,
+            loonfs_api::CompactorEpoch(0),
             policy,
             MetadataCompactionPolicy::default(),
         )
@@ -2233,7 +2233,7 @@ async fn a_job_that_dies_mid_run_leaves_orphans_and_the_next_step_plans_it_again
         let outcome = run_metadata_compaction_job(
             &dying_store,
             &namespace_id,
-            0,
+            loonfs_api::CompactorEpoch(0),
             &spec,
             policy,
             &cancellation,
@@ -2667,7 +2667,7 @@ async fn a_new_compactor_epoch_an_expired_job_and_a_deletion_each_prevent_public
     let next_epoch = super::super::compactor::claim_compactor(&store, &namespace)
         .await
         .expect("another claim");
-    assert_eq!(next_epoch, epoch + 1);
+    assert_eq!(next_epoch, loonfs_api::CompactorEpoch(epoch.0 + 1));
     let store = RecordingStore::new(store, KeyPredicate::any());
     let outcome = finalize_metadata_compaction(
         &store,

@@ -101,7 +101,7 @@ pub enum GrepIndexLifecycle {
     /// An initial scan of a pinned checkpoint that is not yet searchable.
     Backfilling {
         /// The namespace sequence that completes the backfill when reached.
-        target_seq: ChangeSeq,
+        captured_seq: ChangeSeq,
         /// The inode after which the scan resumes, or `None` before the first page.
         #[serde(
             default,
@@ -217,7 +217,7 @@ mod tests {
     #[test]
     fn lifecycle_statuses_never_share_a_sequence_field() {
         let backfilling = GrepIndexLifecycle::Backfilling {
-            target_seq: ChangeSeq(9),
+            captured_seq: ChangeSeq(9),
             cursor_inode_id: Some(InodeId(4)),
             checkpoint_id: PinId::parse("pin_00000000000000000001-0000000000000009")
                 .expect("checkpoint id"),
@@ -226,7 +226,7 @@ mod tests {
             serde_json::to_value(&backfilling).expect("serialize backfilling"),
             serde_json::json!({
                 "status": "backfilling",
-                "target_seq": 9,
+                "captured_seq": 9,
                 "cursor_inode_id": "ino_4",
                 "checkpoint_id": "pin_00000000000000000001-0000000000000009"
             }),
@@ -252,7 +252,7 @@ mod tests {
     #[test]
     fn only_an_active_index_has_built_through_a_sequence() {
         let backfilling = GrepIndexLifecycle::Backfilling {
-            target_seq: ChangeSeq(9),
+            captured_seq: ChangeSeq(9),
             cursor_inode_id: None,
             checkpoint_id: PinId::parse("pin_00000000000000000001-0000000000000009")
                 .expect("checkpoint id"),
@@ -302,7 +302,7 @@ mod tests {
             serde_json::to_value(GrepIndex {
                 namespace_id: NamespaceId::parse("demo").expect("namespace id"),
                 lifecycle: GrepIndexLifecycle::Backfilling {
-                    target_seq: ChangeSeq(12),
+                    captured_seq: ChangeSeq(12),
                     cursor_inode_id: Some(InodeId(4)),
                     checkpoint_id: PinId::parse("pin_00000000000000000001-0000000000000009")
                         .expect("checkpoint id"),
@@ -314,7 +314,7 @@ mod tests {
             serde_json::json!({
                 "namespace_id": "demo",
                 "status": "backfilling",
-                "target_seq": 12,
+                "captured_seq": 12,
                 "cursor_inode_id": "ino_4",
                 "checkpoint_id": "pin_00000000000000000001-0000000000000009",
                 "next_run_no": 1,

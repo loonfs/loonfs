@@ -133,7 +133,7 @@ pub(crate) async fn resolve_visible_inode<S: ObjectStore + ?Sized>(
                     .to_string()
             })
             .unwrap_or_default(),
-        binding_generation: current_binding
+        binding_version: current_binding
             .as_ref()
             .map(DirentryBindingRecord::position),
     }))

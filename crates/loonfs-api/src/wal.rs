@@ -123,10 +123,8 @@ pub enum WalDelta {
         display_name: DisplayName,
         /// Child identity expected on the targeted binding.
         child_inode_id: InodeId,
-        /// Commit sequence that created the exact binding being removed.
-        bind_seq: ChangeSeq,
-        /// Delta position that disambiguates the binding within `bind_seq`.
-        bind_delta_index: u32,
+        /// The exact bind event this delta retires.
+        target: DeltaPosition,
     },
     /// Publishes the next immutable content revision of a file inode.
     AppendFileRevision {
@@ -160,7 +158,7 @@ pub enum WalDelta {
         delta_index: u32,
         /// Root inode whose selected tombstone is being revoked.
         root_inode_id: InodeId,
-        /// The exact tombstone generation this delta compensates.
+        /// The exact tombstone position this delta compensates.
         target: DeltaPosition,
     },
     /// Publishes the next attribute revision of one inode, as complete state.
@@ -256,7 +254,7 @@ pub struct WalInlineContent {
 #[serde(deny_unknown_fields)]
 pub struct WalCommitPayload {
     /// Namespace-wide commit position; segment records must cover their range contiguously.
-    pub seq: ChangeSeq,
+    pub committed_seq: ChangeSeq,
     /// Caller idempotency key whose reuse must retain the same semantic fingerprint.
     pub commit_id: CommitId,
     /// Actor that committed the change, as supplied by the application.
@@ -265,7 +263,7 @@ pub struct WalCommitPayload {
     pub semantic_commit_fingerprint: CommitFingerprint,
     /// Wall-clock stamp from the publishing writer's request context, in
     /// Unix milliseconds. Observational only: never a validity or ordering
-    /// input — `seq` is the order — and excluded from the semantic commit
+    /// input — `committed_seq` is the order — and excluded from the semantic commit
     /// fingerprint, so replay identity is untouched by clocks.
     pub committed_at_ms: u64,
     /// Caller-supplied annotation, omitted when absent and excluded from filesystem semantics.
@@ -302,7 +300,7 @@ impl WalSegmentPayload {
     /// Returns the preceding head, rejecting a data segment that starts at zero.
     pub fn prior_head_seq(&self) -> Option<ChangeSeq> {
         self.records.first().map_or(Some(self.head_seq), |record| {
-            record.seq.0.checked_sub(1).map(ChangeSeq)
+            record.committed_seq.0.checked_sub(1).map(ChangeSeq)
         })
     }
 }
@@ -426,7 +424,7 @@ fn validate_wal_inline_content(payload: &WalSegmentPayload) -> Result<(), Envelo
         let mut content_ids = BTreeSet::new();
         for entry in &record.inline_content {
             let invalid = |reason| EnvelopeCodecError::InvalidWalInlineContent {
-                seq: record.seq,
+                seq: record.committed_seq,
                 content_id: entry.content_id.clone(),
                 reason,
             };
@@ -495,7 +493,7 @@ mod tests {
                 let content_id =
                     ContentId::parse("con_0123456789abcdef0123456789abcdef").expect("content id");
                 WalCommitPayload {
-                    seq: ChangeSeq(index as u64 + 1),
+                    committed_seq: ChangeSeq(index as u64 + 1),
                     commit_id: CommitId::parse(format!("c_{index:032x}")).expect("commit id"),
                     committed_by: crate::ActorId::parse("test").expect("actor"),
                     semantic_commit_fingerprint: serde_json::from_str(r#""v1:sha256:test""#)
@@ -549,7 +547,7 @@ mod tests {
         record_index: usize,
         expected_reason: &str,
     ) {
-        let expected_seq = payload.records[record_index].seq;
+        let expected_seq = payload.records[record_index].committed_seq;
         let expected_content_id = payload.records[record_index].inline_content[0]
             .content_id
             .clone();

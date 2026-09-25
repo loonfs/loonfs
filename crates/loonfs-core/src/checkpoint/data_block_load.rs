@@ -403,9 +403,7 @@ impl DecodedRowWeight for ContentPublicationRecord {
 
 impl DecodedRowWeight for CommitReceiptRecord {
     fn decoded_weight(&self) -> usize {
-        ALLOCATED_ROW_OVERHEAD
-            + self.commit_id.as_str().len()
-            + self.semantic_commit_fingerprint.as_str().len()
+        ALLOCATED_ROW_OVERHEAD + self.commit_id.as_str().len()
     }
 }
 

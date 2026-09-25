@@ -1016,9 +1016,9 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 })
             })
             .transpose()?;
-        let binding_generation = resolved
-            .binding_generation
-            .map(|position| crate::binding_generation::encode(position, &self.namespace_id));
+        let binding_version = resolved
+            .binding_version
+            .map(|position| crate::binding_version::encode(position, &self.namespace_id));
         Ok(PathEntry {
             namespace_id: self.namespace_id.clone(),
             path: absolute_path,
@@ -1029,7 +1029,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             head_seq: self.head.seq,
             parent_inode_id: resolved.parent_inode_id,
             display_name,
-            binding_generation,
+            binding_version,
             attributes,
         })
     }
@@ -1063,7 +1063,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                     .display_name()
                     .expect("visible binding should be bound")
                     .to_string(),
-                binding_generation: Some(child.binding.position()),
+                binding_version: Some(child.binding.position()),
             },
             attributes,
         )

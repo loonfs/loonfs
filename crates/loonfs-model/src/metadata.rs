@@ -75,8 +75,8 @@ pub struct RevisionRecord {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubtreeTombstoneRecord {
     pub root_inode_id: InodeId,
-    pub tombstone_seq: ChangeSeq,
-    pub tombstone_delta_index: u32,
+    pub committed_seq: ChangeSeq,
+    pub delta_index: u32,
     pub commit_id: CommitId,
     pub committed_at_ms: u64,
     pub committed_by: ActorId,
@@ -135,7 +135,7 @@ pub struct GrantEntry {
 /// Commit position of a deletion event. A revoke uses this value to identify
 /// the exact deletion it cancels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DeletionGeneration {
+pub struct DeltaPosition {
     pub seq: ChangeSeq,
     pub delta_index: u32,
 }
@@ -155,7 +155,7 @@ pub enum SubtreeTombstoneAction {
     /// removed binding.
     Set { deleted_binding: DeletedBinding },
     /// Cancels exactly the deletion recorded at `target`.
-    Revoke { target: DeletionGeneration },
+    Revoke { target: DeltaPosition },
 }
 
 impl MetadataState {
@@ -257,8 +257,8 @@ impl MetadataState {
                         .subtree_tombstones
                         .push(SubtreeTombstoneRecord {
                             root_inode_id: *root_inode_id,
-                            tombstone_seq: committed_seq,
-                            tombstone_delta_index: *delta_index,
+                            committed_seq,
+                            delta_index: *delta_index,
                             commit_id: commit_id.clone(),
                             committed_at_ms,
                             committed_by: actor.clone(),
@@ -280,13 +280,13 @@ impl MetadataState {
                         .subtree_tombstones
                         .push(SubtreeTombstoneRecord {
                             root_inode_id: *root_inode_id,
-                            tombstone_seq: committed_seq,
-                            tombstone_delta_index: *delta_index,
+                            committed_seq,
+                            delta_index: *delta_index,
                             commit_id: commit_id.clone(),
                             committed_at_ms,
                             committed_by: actor.clone(),
                             action: SubtreeTombstoneAction::Revoke {
-                                target: DeletionGeneration {
+                                target: DeltaPosition {
                                     seq: target.seq,
                                     delta_index: target.delta_index,
                                 },
@@ -385,7 +385,7 @@ mod tests {
     }
 
     #[test]
-    fn tombstone_replay_restates_the_deleted_binding_and_the_revoked_generation() {
+    fn tombstone_replay_restates_the_deleted_binding_and_the_revoked_position() {
         let applied = MetadataState::default().apply_committed_wal_deltas(
             ChangeSeq(9),
             &commit_id(),
@@ -428,7 +428,7 @@ mod tests {
                     },
                 },
                 SubtreeTombstoneAction::Revoke {
-                    target: DeletionGeneration {
+                    target: super::DeltaPosition {
                         seq: ChangeSeq(4),
                         delta_index: 3,
                     },

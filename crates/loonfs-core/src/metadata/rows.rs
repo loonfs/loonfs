@@ -44,12 +44,12 @@ impl Default for MetadataState {
 }
 
 /// The newest-event-wins active-tombstone rule, shared by every aggregation
-/// site: among records at or below `visible_seq`, the newest generation
+/// site: among records at or below `visible_seq`, the newest position
 /// speaks for the root — a `Set` newest means that deletion is active, a
 /// `Revoke` newest means none is.
 /// The newest event is authoritative WITHOUT consulting the revoke's
 /// target: commit validation guarantees a revoke only ever lands against
-/// the generation that was active, so for valid histories the two rules
+/// the position that was active, so for valid histories the two rules
 /// agree, and the recorded target serves as audit metadata and the
 /// projection contract (change-feed consumers reduce with it and can flag
 /// a mismatch as corruption). Keep every reader on this helper — a site
@@ -61,17 +61,17 @@ pub(crate) fn active_tombstone_from_records(
 ) -> Option<SubtreeTombstoneRecord> {
     records
         .into_iter()
-        .filter(|tombstone| tombstone.generation.seq <= visible_seq)
-        .max_by_key(|tombstone| tombstone.generation)
+        .filter(|tombstone| tombstone.committed_seq <= visible_seq)
+        .max_by_key(|tombstone| tombstone.position())
         .filter(|tombstone| matches!(tombstone.action, TombstoneRowAction::Set { .. }))
 }
 
 /// Converts a tombstone event into its derived `ActiveDeletions` row. A `set`
-/// adds a deletion to the listing, and a `revoke` removes that generation.
+/// adds a deletion to the listing, and a `revoke` removes that position.
 ///
 /// It reduces target-aware where the newest-event-wins rule in
 /// [`active_tombstone_from_records`] reduces target-blind. Commit validation
-/// only ever lands a revoke against the generation that was active, so the two
+/// only ever lands a revoke against the position that was active, so the two
 /// agree on every history a writer can produce; the target is what lets a
 /// removal be derived one event at a time instead of by re-reading a root's
 /// whole history.
@@ -82,7 +82,7 @@ pub(crate) fn active_deletion_from_tombstone(
     match &tombstone.action {
         TombstoneRowAction::Set { deleted_binding } => ActiveDeletionRecord {
             root_inode_id: tombstone.root_inode_id,
-            deletion_seq: tombstone.generation.seq,
+            deletion_seq: tombstone.committed_seq,
             action: ActiveDeletionRowAction::Listed {
                 inode_kind,
                 deleted_at_ms: tombstone.committed_at_ms,
@@ -94,7 +94,7 @@ pub(crate) fn active_deletion_from_tombstone(
             root_inode_id: tombstone.root_inode_id,
             deletion_seq: target.seq,
             action: ActiveDeletionRowAction::Removed {
-                revocation_seq: tombstone.generation.seq,
+                revocation_seq: tombstone.committed_seq,
             },
         },
     }

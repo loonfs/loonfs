@@ -17,6 +17,7 @@ use crate::{
     WalFlushStepOutcome,
 };
 use crate::{ChangeSeq, Result, RuntimeError};
+use loonfs_api::CompactorEpoch;
 use loonfs_api::PageRequest;
 use loonfs_core::cache::{load_namespace_flush_basis, NamespaceStorageDiagnostics};
 use loonfs_core::CheckpointPageCursor;
@@ -385,7 +386,7 @@ impl FsMaintenance {
         )
     }
 
-    async fn compactor_epoch(&self, namespace_id: &NamespaceId) -> Result<u64> {
+    async fn compactor_epoch(&self, namespace_id: &NamespaceId) -> Result<CompactorEpoch> {
         // Hold the claim lock across publication so concurrent groups share one epoch.
         let mut epochs = self.compactor_epochs.lock().await;
         if let Some(epoch) = epochs.get(namespace_id) {

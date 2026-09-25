@@ -1,7 +1,7 @@
 //! Shared path-planning checks and visible-ancestor walks.
 
 use crate::authorize::{Absence, Authorizer, Replacement};
-use crate::binding_generation;
+use crate::binding_version;
 use crate::commit::{CandidateAllocation, CommitOp, ResolvedBinding};
 use crate::error::{CoreError, Result};
 use crate::metadata::access::{access_chain, effective_rights, is_administrator};
@@ -9,8 +9,8 @@ use crate::metadata::MetadataVisibilityReads;
 use crate::metadata::{MetadataView, ResolvedVisiblePath, VisiblePathError};
 use crate::path::read;
 use loonfs_api::{
-    AbsolutePath, BindingGeneration as BindingGenerationToken, DestinationBehavior, DisplayName,
-    InodeId, InodeKind, NameKey, NamespaceAccess, NamespaceId, ROOT_INODE_ID,
+    AbsolutePath, BindingVersion as BindingVersionToken, DestinationBehavior, DisplayName, InodeId,
+    InodeKind, NameKey, NamespaceAccess, NamespaceId, ROOT_INODE_ID,
 };
 use loonfs_api::{AccessGrants, AccessRight, AccessRights, PrincipalId};
 use loonfs_objectstore::ObjectStore;
@@ -109,26 +109,28 @@ pub(super) fn child_display_path(parent_path: &str, display_name: &DisplayName) 
         .to_owned()
 }
 
-/// Requires the binding generation supplied by the caller to still be current.
-pub(super) fn check_binding_generation<S: ObjectStore + ?Sized>(
+/// Requires the binding version supplied by the caller to still be current.
+pub(super) fn check_binding_version<S: ObjectStore + ?Sized>(
     view: &PublishPathPlanningView<'_, '_, '_, S>,
     resolved: &ResolvedVisiblePath,
-    expected_binding_generation: &BindingGenerationToken,
+    expected_binding_version: &BindingVersionToken,
 ) -> Result<()> {
-    let expected = binding_generation::decode(expected_binding_generation, view.namespace_id)
-        .map_err(|error| CoreError::InvalidCommitField {
-            field: "expected_binding_generation",
-            message: format!("invalid expected binding generation: {error}"),
-            precondition_index: None,
+    let expected =
+        binding_version::decode(expected_binding_version, view.namespace_id).map_err(|error| {
+            CoreError::InvalidCommitField {
+                field: "expected_binding_version",
+                message: format!("invalid expected binding version: {error}"),
+                precondition_index: None,
+            }
         })?;
-    let Some(current) = resolved.binding_generation else {
+    let Some(current) = resolved.binding_version else {
         return Err(CoreError::RootMutationForbidden);
     };
     if current != expected {
-        return Err(CoreError::BindingGenerationMismatch {
+        return Err(CoreError::BindingVersionMismatch {
             inode_id: resolved.inode_id,
-            expected_binding_generation: expected_binding_generation.clone(),
-            actual_binding_generation: Some(binding_generation::encode(current, view.namespace_id)),
+            expected_binding_version: expected_binding_version.clone(),
+            actual_binding_version: Some(binding_version::encode(current, view.namespace_id)),
             precondition_index: None,
         });
     }
@@ -201,7 +203,7 @@ pub(super) async fn reject_tombstoned_path_ancestor<S: ObjectStore + ?Sized>(
                  `{}` from seq `{}`",
                 visible_path.as_str(),
                 tombstone.root_inode_id,
-                tombstone.generation.seq,
+                tombstone.committed_seq,
             )));
         }
         current_inode = bound_child.child_inode_id;

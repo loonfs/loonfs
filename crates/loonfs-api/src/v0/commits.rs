@@ -1,7 +1,7 @@
 //! Commit responses and change-feed shapes for the v0 HTTP API.
 
 use crate::{
-    AccessGrants, AccessRevisionNo, Attributes, AttributesRevisionNo, BindingGeneration, ChangeSeq,
+    AccessGrants, AccessRevisionNo, Attributes, AttributesRevisionNo, BindingVersion, ChangeSeq,
     CommitId, ContentRef, DisplayName, InodeId, NameKey, NamespaceId, RevisionNo,
 };
 use serde::{Deserialize, Serialize};
@@ -63,7 +63,7 @@ pub enum FilesystemChange {
         /// User-facing spelling of the new entry.
         display_name: DisplayName,
         /// Opaque identifier for the binding created by this event.
-        binding_generation: BindingGeneration,
+        binding_version: BindingVersion,
     },
     /// A file and its first revision were created.
     #[cfg_attr(feature = "openapi", schema(title = "FilesystemChangeFileCreated"))]
@@ -77,7 +77,7 @@ pub enum FilesystemChange {
         /// User-facing spelling of the new entry.
         display_name: DisplayName,
         /// Opaque identifier for the binding created by this event.
-        binding_generation: BindingGeneration,
+        binding_version: BindingVersion,
         /// First revision number.
         revision_no: RevisionNo,
         /// Content of the first revision.
@@ -111,7 +111,7 @@ pub enum FilesystemChange {
         /// Spelling of the new binding.
         destination_display_name: DisplayName,
         /// Opaque identifier for the binding created by this event.
-        binding_generation: BindingGeneration,
+        binding_version: BindingVersion,
     },
     /// A file or directory subtree was deleted.
     #[cfg_attr(feature = "openapi", schema(title = "FilesystemChangeDeleted"))]
@@ -134,7 +134,7 @@ pub enum FilesystemChange {
         /// Spelling of the recovered binding.
         display_name: DisplayName,
         /// Opaque identifier for the binding created by this event.
-        binding_generation: BindingGeneration,
+        binding_version: BindingVersion,
     },
     /// An inode's attributes changed.
     #[cfg_attr(
@@ -190,8 +190,8 @@ mod tests {
     use super::{Commit, FilesystemChange};
     use crate::{AccessRevisionNo, InodeId};
 
-    fn binding_generation() -> crate::BindingGeneration {
-        crate::BindingGeneration::parse("abcdef").expect("binding generation")
+    fn binding_version() -> crate::BindingVersion {
+        crate::BindingVersion::parse("abcdef").expect("binding version")
     }
 
     #[test]
@@ -232,7 +232,7 @@ mod tests {
                 inode_id: InodeId(43),
                 parent_inode_id: InodeId(1),
                 display_name: crate::DisplayName::parse("docs").expect("valid display name"),
-                binding_generation: binding_generation(),
+                binding_version: binding_version(),
             }],
         };
 
@@ -250,7 +250,7 @@ mod tests {
                     "inode_id": "ino_43",
                     "parent_inode_id": "ino_1",
                     "display_name": "docs",
-                    "binding_generation": binding_generation(),
+                    "binding_version": binding_version(),
                 }],
             })
         );
@@ -269,7 +269,7 @@ mod tests {
                 inode_id: InodeId(43),
                 parent_inode_id: InodeId(1),
                 display_name: crate::DisplayName::parse("docs").expect("valid display name"),
-                binding_generation: binding_generation(),
+                binding_version: binding_version(),
             }],
         };
 
@@ -286,7 +286,7 @@ mod tests {
                     "inode_id": "ino_43",
                     "parent_inode_id": "ino_1",
                     "display_name": "docs",
-                    "binding_generation": binding_generation(),
+                    "binding_version": binding_version(),
                 }],
             })
         );
@@ -302,17 +302,17 @@ mod tests {
         );
         let sample_content_ref_json = r#"{"kind":"blob_v1","owner_namespace_id":"demo","content_id":"con_0123456789abcdef0123456789abcdef","size_bytes":5,"checksum":{"algorithm":"sha256","value":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"}}"#;
 
-        let generation = binding_generation();
+        let version = binding_version();
         let directory_created = FilesystemChange::DirectoryCreated {
             inode_id: InodeId(2),
             parent_inode_id: InodeId(1),
             display_name: crate::DisplayName::parse("Docs").expect("valid display name"),
-            binding_generation: generation.clone(),
+            binding_version: version.clone(),
         };
         assert_eq!(
             serde_json::to_string(&directory_created).expect("serialize directory-created event"),
             format!(
-                r#"{{"kind":"directory_created","inode_id":"ino_2","parent_inode_id":"ino_1","display_name":"Docs","binding_generation":"{generation}"}}"#
+                r#"{{"kind":"directory_created","inode_id":"ino_2","parent_inode_id":"ino_1","display_name":"Docs","binding_version":"{version}"}}"#
             )
         );
 
@@ -320,14 +320,14 @@ mod tests {
             inode_id: InodeId(2),
             parent_inode_id: InodeId(1),
             display_name: crate::DisplayName::parse("a.txt").expect("valid display name"),
-            binding_generation: generation.clone(),
+            binding_version: version.clone(),
             revision_no: crate::RevisionNo(1),
             content_ref: sample_content_ref.clone(),
         };
         assert_eq!(
             serde_json::to_string(&file_created).expect("serialize file-created event"),
             format!(
-                r#"{{"kind":"file_created","inode_id":"ino_2","parent_inode_id":"ino_1","display_name":"a.txt","binding_generation":"{generation}","revision_no":1,"content_ref":{sample_content_ref_json}}}"#
+                r#"{{"kind":"file_created","inode_id":"ino_2","parent_inode_id":"ino_1","display_name":"a.txt","binding_version":"{version}","revision_no":1,"content_ref":{sample_content_ref_json}}}"#
             )
         );
 
@@ -353,7 +353,7 @@ mod tests {
             destination_parent_inode_id: InodeId(3),
             destination_display_name: crate::DisplayName::parse("b.txt")
                 .expect("valid display name"),
-            binding_generation: generation.clone(),
+            binding_version: version.clone(),
         };
         assert_eq!(
             serde_json::from_value::<FilesystemChange>(serde_json::json!({
@@ -363,7 +363,7 @@ mod tests {
                 "source_display_name": "a.txt",
                 "destination_parent_inode_id": "ino_3",
                 "destination_display_name": "b.txt",
-                "binding_generation": generation
+                "binding_version": version
             }))
             .expect("decode moved event"),
             moved
@@ -371,7 +371,7 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&moved).expect("serialize moved event"),
             format!(
-                r#"{{"kind":"moved","inode_id":"ino_2","source_parent_inode_id":"ino_1","source_display_name":"a.txt","destination_parent_inode_id":"ino_3","destination_display_name":"b.txt","binding_generation":"{generation}"}}"#
+                r#"{{"kind":"moved","inode_id":"ino_2","source_parent_inode_id":"ino_1","source_display_name":"a.txt","destination_parent_inode_id":"ino_3","destination_display_name":"b.txt","binding_version":"{version}"}}"#
             )
         );
 
@@ -392,12 +392,12 @@ mod tests {
             inode_id: InodeId(2),
             parent_inode_id: InodeId(1),
             display_name: crate::DisplayName::parse("a.txt").expect("valid display name"),
-            binding_generation: generation.clone(),
+            binding_version: version.clone(),
         };
         assert_eq!(
             serde_json::to_string(&undeleted).expect("serialize undeleted event"),
             format!(
-                r#"{{"kind":"undeleted","inode_id":"ino_2","parent_inode_id":"ino_1","display_name":"a.txt","binding_generation":"{generation}"}}"#
+                r#"{{"kind":"undeleted","inode_id":"ino_2","parent_inode_id":"ino_1","display_name":"a.txt","binding_version":"{version}"}}"#
             )
         );
 

@@ -1,8 +1,7 @@
 //! Request preconditions against the candidate pre-state.
 
 use super::publish_path_planning::{
-    check_binding_generation, is_missing_visible_path, resolve_visible_inode,
-    PublishPathPlanningView,
+    check_binding_version, is_missing_visible_path, resolve_visible_inode, PublishPathPlanningView,
 };
 use crate::authorize::{Absence, Authorizer, CommitAuthority};
 use crate::commit::CommitValidationError;
@@ -10,8 +9,8 @@ use crate::error::{CoreError, Result};
 use crate::metadata::{MetadataView, VisiblePathError};
 use crate::namespace::state::NamespaceReadState;
 use loonfs_api::{
-    AbsolutePath, AccessRevisionNo, AccessRight, AccessRights, BindingGeneration,
-    CommitPrecondition, InodeId, InodeKind,
+    AbsolutePath, AccessRevisionNo, AccessRight, AccessRights, BindingVersion, CommitPrecondition,
+    InodeId, InodeKind,
 };
 use loonfs_objectstore::ObjectStore;
 
@@ -71,13 +70,13 @@ pub(super) async fn evaluate_preconditions<S: ObjectStore + ?Sized>(
             CommitPrecondition::PathBinding {
                 path,
                 expected_inode_id,
-                expected_binding_generation,
+                expected_binding_version,
             } => {
                 evaluate_binding(
                     &view,
                     path,
                     Some(*expected_inode_id),
-                    expected_binding_generation.as_ref(),
+                    expected_binding_version.as_ref(),
                     precondition_index,
                 )
                 .await?;
@@ -190,7 +189,7 @@ async fn evaluate_binding<S: ObjectStore + ?Sized>(
     view: &PublishPathPlanningView<'_, '_, '_, S>,
     path: &AbsolutePath,
     expected_inode_id: Option<InodeId>,
-    expected_binding_generation: Option<&BindingGeneration>,
+    expected_binding_version: Option<&BindingVersion>,
     precondition_index: Option<u32>,
 ) -> Result<()> {
     let actual = match view.view.resolve_visible_path(path).await {
@@ -219,23 +218,23 @@ async fn evaluate_binding<S: ObjectStore + ?Sized>(
         }
         .into());
     }
-    if let (Some(binding), Some(expected)) = (actual, expected_binding_generation) {
-        check_binding_generation(view, &binding, expected).map_err(|error| match error {
-            CoreError::BindingGenerationMismatch {
+    if let (Some(binding), Some(expected)) = (actual, expected_binding_version) {
+        check_binding_version(view, &binding, expected).map_err(|error| match error {
+            CoreError::BindingVersionMismatch {
                 inode_id,
-                expected_binding_generation,
-                actual_binding_generation,
+                expected_binding_version,
+                actual_binding_version,
                 ..
-            } => CoreError::BindingGenerationMismatch {
+            } => CoreError::BindingVersionMismatch {
                 inode_id,
-                expected_binding_generation,
-                actual_binding_generation,
+                expected_binding_version,
+                actual_binding_version,
                 precondition_index,
             },
-            CoreError::RootMutationForbidden => CoreError::BindingGenerationMismatch {
+            CoreError::RootMutationForbidden => CoreError::BindingVersionMismatch {
                 inode_id: binding.inode_id,
-                expected_binding_generation: expected.clone(),
-                actual_binding_generation: None,
+                expected_binding_version: expected.clone(),
+                actual_binding_version: None,
                 precondition_index,
             },
             CoreError::InvalidCommitField { field, message, .. } => CoreError::InvalidCommitField {

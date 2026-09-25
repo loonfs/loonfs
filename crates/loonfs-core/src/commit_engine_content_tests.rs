@@ -569,7 +569,7 @@ async fn swap_accepts_any_valid_matching_proof_and_expired_receipt_replays_witho
         let outcome = crate::checkpoint::reorganize_metadata_step(
             &store,
             &namespace_id,
-            0,
+            loonfs_api::CompactorEpoch(0),
             MetadataLsmPolicy {
                 max_delta_runs: NonZeroUsize::MIN,
                 ..MetadataLsmPolicy::default()

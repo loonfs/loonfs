@@ -66,8 +66,8 @@ struct NormalizedAccessRevision {
     grants: Vec<(String, Vec<String>)>,
 }
 
-/// One tombstone event, whole: the generation, what the event did, and the
-/// binding a delete recorded. Comparing only the generation would let a
+/// One tombstone event, whole: the position, what the event did, and the
+/// binding a delete recorded. Comparing only the position would let a
 /// dropped or mangled deleted binding through, so both sides reduce to
 /// every field; the fields are named rather than positional so a divergence
 /// prints which one differs.
@@ -251,7 +251,7 @@ fn update_access(
 }
 
 /// Undelete as the commit path materializes it: revoke the exact deletion
-/// generation, then re-bind the recovered inode.
+/// position, then re-bind the recovered inode.
 fn undelete(
     delta_index: u32,
     inode_id: InodeId,
@@ -374,7 +374,7 @@ fn metadata_apply_matches_model_for_undelete() {
             content_ref("content-1"),
         ),
         tombstone(1, InodeId(3), InodeId(2), "Readme.TXT"),
-        // The revoke names the delete's own generation — the third commit,
+        // The revoke names the delete's own position — the third commit,
         // second delta — which differs from where the revoke itself lands.
         undelete(
             0,
@@ -616,8 +616,8 @@ fn normalize_core(state: &CoreMetadataState) -> NormalizedMetadata {
             .iter()
             .map(|tombstone| NormalizedTombstone {
                 root_inode_id: tombstone.root_inode_id.0,
-                tombstone_seq: tombstone.generation.seq.0,
-                tombstone_delta_index: tombstone.generation.delta_index,
+                tombstone_seq: tombstone.committed_seq.0,
+                tombstone_delta_index: tombstone.delta_index,
                 commit_id: tombstone.commit_id.clone(),
                 committed_at_ms: tombstone.committed_at_ms,
                 committed_by: tombstone.committed_by.clone(),
@@ -746,8 +746,8 @@ fn normalize_model(state: &ModelMetadataState) -> NormalizedMetadata {
             .iter()
             .map(|tombstone| NormalizedTombstone {
                 root_inode_id: tombstone.root_inode_id.0,
-                tombstone_seq: tombstone.tombstone_seq.0,
-                tombstone_delta_index: tombstone.tombstone_delta_index,
+                tombstone_seq: tombstone.committed_seq.0,
+                tombstone_delta_index: tombstone.delta_index,
                 commit_id: tombstone.commit_id.clone(),
                 committed_at_ms: tombstone.committed_at_ms,
                 committed_by: tombstone.committed_by.clone(),

@@ -110,7 +110,7 @@ impl<S: ObjectStore + ?Sized> Sweep<'_, '_, S> {
         .await?;
         let count = match decision {
             CheckpointSweep::DeleteFork => &mut self.report.deleted_checkpoints_by_owner.fork,
-            CheckpointSweep::DeleteUser => &mut self.report.deleted_checkpoints_by_owner.expired,
+            CheckpointSweep::DeleteUser => &mut self.report.deleted_checkpoints_by_owner.user,
             CheckpointSweep::DeleteSnapshot => {
                 &mut self.report.deleted_checkpoints_by_owner.snapshot
             }

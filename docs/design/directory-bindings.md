@@ -47,7 +47,7 @@ Subtree deletion unbinds the deleted root and records a subtree tombstone. Desce
 
 Fork rebuilds apply the same retention rule to inherited and local runs. Inherited rows retain their owners. Pins continue to protect their captured manifests and runs.
 
-WAL deltas, semantic fingerprints, and change-feed events keep their existing shapes. The API's `binding_generation` token represents the bound event's position. Creating, moving, and undeleting an entry changes that token. Content and attribute writes do not. Binding preconditions compare the same positions as reads return.
+WAL deltas, semantic fingerprints, and change-feed events keep their existing shapes. The API's `binding_version` token represents the bound event's position. Creating, moving, and undeleting an entry changes that token. Content and attribute writes do not. Binding preconditions compare the same positions as reads return.
 
 ## Costs and alternatives
 

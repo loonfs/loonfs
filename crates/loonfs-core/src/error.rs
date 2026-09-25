@@ -14,7 +14,7 @@ use crate::namespace::state::NamespaceReadState;
 use crate::storage::content::DurableContentValidationError;
 use crate::wal::{WalSegmentError, WalTailLoadError};
 use loonfs_api::{
-    BindingGeneration, ChangeSeq, CommitId, ErrorDetails, InodeId, InodeKind, NamespaceId,
+    BindingVersion, ChangeSeq, CommitId, ErrorDetails, InodeId, InodeKind, NamespaceId,
     PrincipalScope, RevisionNo, UploadId, WriterEpoch, WriterId,
 };
 use loonfs_objectstore::{ImmutableWriteError, ObjectStoreError};
@@ -121,12 +121,12 @@ pub enum CoreError {
         /// supplied by the caller.
         existing_display_name: Option<String>,
     },
-    /// The requested binding generation is no longer current.
-    #[error("inode `{inode_id}` is no longer bound at the generation the request named")]
-    BindingGenerationMismatch {
+    /// The requested binding version is no longer current.
+    #[error("inode `{inode_id}` is no longer bound at the version the request named")]
+    BindingVersionMismatch {
         inode_id: InodeId,
-        expected_binding_generation: BindingGeneration,
-        actual_binding_generation: Option<BindingGeneration>,
+        expected_binding_version: BindingVersion,
+        actual_binding_version: Option<BindingVersion>,
         precondition_index: Option<u32>,
     },
     #[error("commit id conflict for `{commit_id}`")]
@@ -433,7 +433,7 @@ impl CoreError {
                 ErrorCode::Forbidden
             }
             CoreError::StaleHeadPrecondition { .. } => ErrorCode::StaleHead,
-            CoreError::BindingGenerationMismatch { .. } => ErrorCode::BindingGenerationMismatch,
+            CoreError::BindingVersionMismatch { .. } => ErrorCode::BindingVersionMismatch,
             CoreError::CommitIdReuseConflict { .. } => ErrorCode::CommitIdReuseConflict,
             CoreError::ContentPreparation(_) => ErrorCode::ContentNotPrepared,
             CoreError::CommitQueueFull => ErrorCode::CommitQueueFull,
@@ -522,7 +522,7 @@ impl CoreError {
             | CoreError::ExpectedDirectory { .. }
             | CoreError::RootMutationForbidden
             | CoreError::DestinationExists { .. }
-            | CoreError::BindingGenerationMismatch { .. }
+            | CoreError::BindingVersionMismatch { .. }
             | CoreError::CommitIdReuseConflict { .. }
             | CoreError::ContentPreparation(_)
             | CoreError::CommitQueueFull
@@ -577,7 +577,7 @@ impl CoreError {
             CoreError::WriterFenced(fence) => Some(ErrorDetails {
                 fenced_writer_epoch: Some(fence.fenced_epoch),
                 active_writer_epoch: Some(fence.active_epoch),
-                active_writer: fence.active_writer.clone(),
+                active_writer_id: fence.active_writer_id.clone(),
                 active_acquired_at_ms: fence.active_acquired_at_ms,
                 ..ErrorDetails::default()
             }),
@@ -615,15 +615,15 @@ impl CoreError {
                 actual_head_seq: Some(*actual),
                 ..ErrorDetails::default()
             }),
-            CoreError::BindingGenerationMismatch {
+            CoreError::BindingVersionMismatch {
                 inode_id,
-                expected_binding_generation,
-                actual_binding_generation,
+                expected_binding_version,
+                actual_binding_version,
                 precondition_index,
             } => Some(ErrorDetails {
                 inode_id: Some(*inode_id),
-                expected_binding_generation: Some(expected_binding_generation.clone()),
-                actual_binding_generation: actual_binding_generation.clone(),
+                expected_binding_version: Some(expected_binding_version.clone()),
+                actual_binding_version: actual_binding_version.clone(),
                 precondition_index: *precondition_index,
                 ..ErrorDetails::default()
             }),
@@ -689,7 +689,7 @@ pub struct WriterFence {
     /// Epoch that owns the namespace now.
     pub active_epoch: WriterEpoch,
     /// Writer label recorded by the winning acquirer, when known.
-    pub active_writer: Option<WriterId>,
+    pub active_writer_id: Option<WriterId>,
     /// When the winning acquirer took the epoch, in Unix milliseconds, when
     /// known.
     pub active_acquired_at_ms: Option<u64>,
@@ -715,7 +715,7 @@ impl std::fmt::Display for WriterFence {
         )?;
         // These fields normally appear together, but format a useful message when
         // only one is available.
-        match (self.active_writer.as_ref(), self.active_acquired_at_ms) {
+        match (self.active_writer_id.as_ref(), self.active_acquired_at_ms) {
             (Some(writer), Some(acquired_at_ms)) => {
                 write!(f, " (writer `{writer}`, acquired at {acquired_at_ms} ms)")
             }
@@ -848,14 +848,17 @@ mod tests {
         let fenced = CoreError::WriterFenced(WriterFence {
             fenced_epoch: WriterEpoch(3),
             active_epoch: WriterEpoch(4),
-            active_writer: Some(loonfs_api::WriterId::parse("writer-b").expect("writer id")),
+            active_writer_id: Some(loonfs_api::WriterId::parse("writer-b").expect("writer id")),
             active_acquired_at_ms: Some(2_000),
         });
         let details = fenced.details().expect("fence details");
         assert_eq!(details.fenced_writer_epoch, Some(WriterEpoch(3)));
         assert_eq!(details.active_writer_epoch, Some(WriterEpoch(4)));
         assert_eq!(
-            details.active_writer.as_ref().map(|writer| writer.as_str()),
+            details
+                .active_writer_id
+                .as_ref()
+                .map(|writer| writer.as_str()),
             Some("writer-b")
         );
         assert_eq!(details.active_acquired_at_ms, Some(2_000));
@@ -863,13 +866,13 @@ mod tests {
         let anonymous = CoreError::WriterFenced(WriterFence {
             fenced_epoch: WriterEpoch(3),
             active_epoch: WriterEpoch(4),
-            active_writer: None,
+            active_writer_id: None,
             active_acquired_at_ms: None,
         });
         let details = anonymous.details().expect("fence details");
         assert_eq!(details.fenced_writer_epoch, Some(WriterEpoch(3)));
         assert_eq!(details.active_writer_epoch, Some(WriterEpoch(4)));
-        assert_eq!(details.active_writer, None);
+        assert_eq!(details.active_writer_id, None);
         assert_eq!(details.active_acquired_at_ms, None);
 
         let capacity = CoreError::WriterCapacityExceeded {

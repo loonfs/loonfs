@@ -140,7 +140,7 @@ async fn a_maintenance_gc_step_records_the_pass_counters_once() {
         ),
         (
             "deleted_expired_checkpoints",
-            gc.deleted_checkpoints_by_owner.expired,
+            gc.deleted_checkpoints_by_owner.user,
         ),
         ("deleted_upload_sessions", gc.deleted.upload_sessions),
         ("deleted_content_objects", gc.deleted.content_objects),
@@ -588,7 +588,7 @@ async fn maintenance_clones_share_one_claim_and_never_reclaim_after_fencing() {
     assert_eq!(store.counts().create_if_absent_puts, 1);
     let mut expected = before.clone();
     expected.manifest_no = before.manifest_no.successor().expect("next manifest");
-    expected.compactor_epoch = before.compactor_epoch + 1;
+    expected.compactor_epoch = loonfs_api::CompactorEpoch(before.compactor_epoch.0 + 1);
     assert_eq!(
         current_manifest_payload(store.as_ref(), &namespace).await,
         expected
@@ -600,7 +600,7 @@ async fn maintenance_clones_share_one_claim_and_never_reclaim_after_fencing() {
         .expect("other process");
     assert_eq!(
         other.compactor_epoch(&namespace).await.expect("new claim"),
-        epoch + 1
+        loonfs_api::CompactorEpoch(epoch.0 + 1)
     );
     store.reset();
     assert_eq!(

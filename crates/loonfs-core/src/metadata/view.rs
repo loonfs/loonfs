@@ -581,7 +581,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         if let Some(record) = self
             .row_states()
             .flat_map(MetadataState::commits)
-            .find(|record| record.seq == seq)
+            .find(|record| record.committed_seq == seq)
         {
             return Ok(Some(record.clone()));
         }
@@ -604,7 +604,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
             manifest_index::commits_after_page(segments, after_seq, limit)
                 .await?
                 .into_iter()
-                .filter(|record| record.seq <= visible_seq)
+                .filter(|record| record.committed_seq <= visible_seq)
                 .collect()
         } else {
             Vec::new()
@@ -616,9 +616,11 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         let mut tail: Vec<&WalCommitPayload> = self
             .row_states()
             .flat_map(MetadataState::commits)
-            .filter(|record| after_seq < record.seq && record.seq <= visible_seq)
+            .filter(|record| {
+                after_seq < record.committed_seq && record.committed_seq <= visible_seq
+            })
             .collect();
-        tail.sort_by_key(|record| record.seq);
+        tail.sort_by_key(|record| record.committed_seq);
         // Every manifest row is at or below the basis head and every tail or overlay row is
         // above it, so no sort across the two sides is needed.
         page.extend(tail.into_iter().take(remaining).cloned());
@@ -786,7 +788,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     /// committed seconds ago lists like a fresh file appears in `ls`. Both
     /// sides arrive in row-key order and a removal marker sorts ahead of the
     /// row it removes, so one ascending walk decides the page: a marker hides
-    /// the generation whose key it repeats, and every other listed row is an
+    /// the position whose key it repeats, and every other listed row is an
     /// entry. Reads stop as soon as `limit` entries are in hand.
     pub(super) async fn active_deletions_page(
         &self,
@@ -809,7 +811,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         for tombstone in self
             .row_states()
             .flat_map(|state| state.subtree_tombstones())
-            .filter(|tombstone| tombstone.generation.seq <= visible_seq)
+            .filter(|tombstone| tombstone.committed_seq <= visible_seq)
         {
             let inode = self
                 .inode_at_seq(tombstone.root_inode_id)
@@ -831,7 +833,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         let mut durable = ActiveDeletionScan::new(lower_bound, self.manifest_segments().is_none());
         let mut tail_index = 0usize;
         let mut entries = Vec::with_capacity(limit);
-        let mut removed_generation: Option<(ChangeSeq, InodeId)> = None;
+        let mut removed_position: Option<(ChangeSeq, InodeId)> = None;
         let mut last_row_key: Option<String> = None;
         while entries.len() < limit {
             if durable.buffered.is_empty() && !durable.exhausted {
@@ -871,10 +873,10 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
                 continue;
             }
             last_row_key = Some(row_key);
-            let generation = (record.deletion_seq, record.root_inode_id);
+            let position = (record.deletion_seq, record.root_inode_id);
             match recoverable_deletion_from_active_record(record) {
-                None => removed_generation = Some(generation),
-                Some(deletion) if removed_generation != Some(generation) => entries.push(deletion),
+                None => removed_position = Some(position),
+                Some(deletion) if removed_position != Some(position) => entries.push(deletion),
                 Some(_) => {}
             }
         }

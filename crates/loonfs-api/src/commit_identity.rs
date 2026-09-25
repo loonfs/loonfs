@@ -3,12 +3,11 @@
 //! whether two requests that use the same commit ID describe the same
 //! mutation.
 //!
-//! The publisher stores this fingerprint in the commit receipt and compares
+//! The publisher stores this fingerprint in the commit row and compares
 //! it when the same commit ID is submitted again.
 //!
 //! The commit ID is not part of the fingerprint input. The commit ID selects
-//! a receipt, while the fingerprint describes the mutation stored in that
-//! receipt.
+//! a receipt, which identifies the commit row containing the fingerprint.
 
 use crate::{
     AbsolutePath, AccessRevisionNo, AccessRight, ActorId, AttributesRevisionNo, ChangeSeq,
@@ -112,7 +111,7 @@ enum OperationFingerprintInput<'a> {
     },
     MoveByInode {
         inode_id: InodeId,
-        expected_binding_generation: &'a str,
+        expected_binding_version: &'a str,
         destination_parent_inode_id: InodeId,
         destination_display_name: &'a str,
         behavior: DestinationBehavior,
@@ -121,7 +120,7 @@ enum OperationFingerprintInput<'a> {
     },
     DeleteByInode {
         inode_id: InodeId,
-        expected_binding_generation: &'a str,
+        expected_binding_version: &'a str,
         behavior: DeleteDirectoryBehavior,
     },
     // Identity covers the complete caller-visible logical request. A changed
@@ -189,7 +188,7 @@ enum PreconditionFingerprintInput<'a> {
     PathBinding {
         path: &'a str,
         expected_inode_id: InodeId,
-        expected_binding_generation: Option<&'a str>,
+        expected_binding_version: Option<&'a str>,
     },
     PathAbsence {
         path: &'a str,
@@ -223,11 +222,11 @@ fn precondition_fingerprint_input(
         CommitPrecondition::PathBinding {
             path,
             expected_inode_id,
-            expected_binding_generation,
+            expected_binding_version,
         } => PreconditionFingerprintInput::PathBinding {
             path: path.as_str(),
             expected_inode_id: *expected_inode_id,
-            expected_binding_generation: expected_binding_generation
+            expected_binding_version: expected_binding_version
                 .as_ref()
                 .map(|value| value.as_str()),
         },
@@ -388,13 +387,13 @@ fn operation_fingerprint_input<'a>(
         },
         FilesystemOperation::MoveByInode {
             inode_id,
-            expected_binding_generation,
+            expected_binding_version,
             destination_parent_inode_id,
             destination_display_name,
             precondition,
         } => OperationFingerprintInput::MoveByInode {
             inode_id: *inode_id,
-            expected_binding_generation: expected_binding_generation.as_str(),
+            expected_binding_version: expected_binding_version.as_str(),
             destination_parent_inode_id: *destination_parent_inode_id,
             destination_display_name: destination_display_name.as_str(),
             behavior: precondition.behavior,
@@ -403,11 +402,11 @@ fn operation_fingerprint_input<'a>(
         },
         FilesystemOperation::DeleteByInode {
             inode_id,
-            expected_binding_generation,
+            expected_binding_version,
             behavior,
         } => OperationFingerprintInput::DeleteByInode {
             inode_id: *inode_id,
-            expected_binding_generation: expected_binding_generation.as_str(),
+            expected_binding_version: expected_binding_version.as_str(),
             behavior: *behavior,
         },
         FilesystemOperation::DeletePath {
@@ -888,14 +887,12 @@ mod tests {
     }
 
     #[test]
-    fn binding_generation_changes_inode_mutation_identity() {
+    fn binding_version_changes_inode_mutation_identity() {
         let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-        let operation = |expected_binding_generation: &str| FilesystemOperation::MoveByInode {
+        let operation = |expected_binding_version: &str| FilesystemOperation::MoveByInode {
             inode_id: InodeId(42),
-            expected_binding_generation: crate::BindingGeneration::parse(
-                expected_binding_generation,
-            )
-            .expect("binding generation"),
+            expected_binding_version: crate::BindingVersion::parse(expected_binding_version)
+                .expect("binding version"),
             destination_parent_inode_id: InodeId(7),
             destination_display_name: DisplayName::parse("report.txt").expect("display name"),
             precondition: crate::DestinationPrecondition {
@@ -905,13 +902,13 @@ mod tests {
             },
         };
 
-        let fingerprint = |generation| {
+        let fingerprint = |version| {
             semantic_commit_fingerprint(
                 &namespace_id,
                 &test_actor(),
                 None,
                 None,
-                &[operation(generation)],
+                &[operation(version)],
                 &[],
                 &BTreeSet::new(),
             )

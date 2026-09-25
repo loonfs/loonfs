@@ -1,4 +1,4 @@
-//! Undelete generations, delete preconditions, and restored visibility.
+//! Undelete positions, delete preconditions, and restored visibility.
 
 #![allow(clippy::panic)]
 // Runtime integration tests use panic in helper assertions for precise diagnostics.
@@ -68,7 +68,7 @@ fn delete_options_select_recursive_behavior() {
 }
 
 #[test]
-fn undelete_recovers_a_deleted_file_and_generations_stay_scoped() {
+fn undelete_recovers_a_deleted_file_and_positions_stay_scoped() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "undelete-test");
     let namespace_id = namespace_id("demo");
@@ -161,8 +161,8 @@ fn undelete_recovers_a_deleted_file_and_generations_stay_scoped() {
         RuntimeError::Core(error) if error.code() == ErrorCode::NotDeleted
     ));
 
-    // Delete again: the old generation handle must not cancel the new
-    // deletion, and the failure names both generations.
+    // Delete again: the old position handle must not cancel the new
+    // deletion, and the failure names both positions.
     let second_deletion = fs
         .delete_path_blocking(
             &namespace_id,
@@ -178,11 +178,11 @@ fn undelete_recovers_a_deleted_file_and_generations_stay_scoped() {
         Some("/docs/stale.txt"),
         loonfs::UndeleteOptions::new(loonfs_test_support::test_actor()),
     ))
-    .expect_err("stale generation handle must not clear the newer deletion");
+    .expect_err("stale position handle must not clear the newer deletion");
     match &error {
         RuntimeError::Core(error) => {
             assert_eq!(error.code(), ErrorCode::NotDeleted);
-            let details = error.details().expect("generation mismatch details");
+            let details = error.details().expect("position mismatch details");
             assert_eq!(details.expected_deletion_seq, Some(first_deletion));
             assert_eq!(details.actual_deletion_seq, Some(second_deletion));
         }
@@ -191,7 +191,7 @@ fn undelete_recovers_a_deleted_file_and_generations_stay_scoped() {
     let still_gone = fs.stat_path_blocking(&namespace_id, "/docs/stale.txt");
     assert!(still_gone.is_err(), "stale undelete must not bind anything");
 
-    // The current generation's handle recovers to the original path.
+    // The current position's handle recovers to the original path.
     block_on(fs.writer.undelete(
         &namespace_id,
         inode_id,
@@ -199,7 +199,7 @@ fn undelete_recovers_a_deleted_file_and_generations_stay_scoped() {
         Some("/docs/report.txt"),
         loonfs::UndeleteOptions::new(loonfs_test_support::test_actor()),
     ))
-    .expect("undelete the active generation");
+    .expect("undelete the active position");
     assert_eq!(
         fs.stat_path_blocking(&namespace_id, "/docs/report.txt")
             .expect("stat restored original path")
@@ -479,7 +479,7 @@ fn undelete_survives_checkpoints_and_reopen_in_both_orders() {
 }
 
 #[test]
-fn change_feed_reports_the_deletion_generation_an_undelete_takes() {
+fn change_feed_reports_the_deletion_position_an_undelete_takes() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "undelete-feed-test");
     let namespace_id = namespace_id("demo");
@@ -618,7 +618,7 @@ fn undelete_rejects_deletions_from_the_same_commit() {
 
     // Assigned sequences are head + 1 and therefore guessable: without the
     // earlier-commit bound, one commit could delete, undelete, and
-    // re-delete the inode, minting two deletion generations that share a
+    // re-delete the inode, minting two deletion positions that share a
     // sequence. The undelete must refuse a target in its own commit.
     let guessed_seq = ChangeSeq(entry.head_seq.0 + 1);
     let error = fs

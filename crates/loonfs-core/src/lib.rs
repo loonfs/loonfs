@@ -57,7 +57,7 @@
 //! ```
 
 pub(crate) mod authorize;
-mod binding_generation;
+mod binding_version;
 mod block_cache;
 mod checkpoint;
 mod commit_engine;

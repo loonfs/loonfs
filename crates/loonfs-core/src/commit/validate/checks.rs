@@ -448,7 +448,7 @@ async fn validate_undelete<S: ObjectStore + ?Sized>(
         parent_inode_id,
         display_name: display_name.clone(),
         name_key,
-        target: active.generation,
+        target: active.position(),
         revoke_tombstone_delta_index: numbering.reserve_delta_index()?,
         bind_delta_index: numbering.reserve_delta_index()?,
     })
@@ -556,11 +556,11 @@ async fn validate_undelete_target<S: ObjectStore + ?Sized>(
     let Some(active) = view.view().active_subtree_tombstone(inode_id).await? else {
         return Err(CommitValidationError::UndeleteTargetNotDeleted { inode_id }.into());
     };
-    if active.generation.seq != deletion_seq {
-        return Err(CommitValidationError::UndeleteGenerationMismatch {
+    if active.committed_seq != deletion_seq {
+        return Err(CommitValidationError::UndeleteSequenceMismatch {
             inode_id,
             requested_seq: deletion_seq,
-            active_seq: active.generation.seq,
+            active_seq: active.committed_seq,
         }
         .into());
     }
@@ -671,7 +671,7 @@ async fn validate_not_covered_by_tombstone<S: ObjectStore + ?Sized>(
             operand,
             inode_id,
             root_inode_id: tombstone.root_inode_id,
-            tombstone_seq: tombstone.generation.seq,
+            tombstone_seq: tombstone.committed_seq,
         }
         .into());
     }

@@ -49,7 +49,7 @@ pub(super) fn manifest_rows_for_family(
             .iter()
             .map(|tombstone| {
                 let inode = metadata_state
-                    .inode_at_seq(tombstone.root_inode_id, tombstone.generation.seq)
+                    .inode_at_seq(tombstone.root_inode_id, tombstone.committed_seq)
                     .expect("checkpoint projection should include deletion root inodes");
                 active_deletion_from_tombstone(tombstone, inode.inode_kind)
             })
@@ -106,7 +106,7 @@ pub(super) fn manifest_row_commit_seq(row: &MetadataRow) -> ChangeSeq {
         MetadataRow::Inode(record) => record.committed_seq,
         MetadataRow::DirentryBinding(record) => record.committed_seq,
         MetadataRow::FileRevision(record) => record.committed_seq,
-        MetadataRow::Tombstone(record) => record.generation.seq,
+        MetadataRow::Tombstone(record) => record.committed_seq,
         // A removal marker belongs to the run of the undelete that produced
         // it, not to the run of the deletion whose key it repeats.
         MetadataRow::ActiveDeletion(record) => match &record.action {
@@ -114,7 +114,7 @@ pub(super) fn manifest_row_commit_seq(row: &MetadataRow) -> ChangeSeq {
             ActiveDeletionRowAction::Removed { revocation_seq } => *revocation_seq,
         },
         MetadataRow::CommitReceipt(record) => record.committed_seq,
-        MetadataRow::Commit(record) => record.seq,
+        MetadataRow::Commit(record) => record.committed_seq,
         MetadataRow::ContentPublication(record) => record.committed_seq,
         MetadataRow::AttributesRevision(record) => record.committed_seq,
         MetadataRow::AccessRevision(record) => record.committed_seq,

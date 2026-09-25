@@ -9,7 +9,7 @@ mod access_namespace;
 mod access_reads;
 mod attributes;
 mod attribution_rows;
-mod binding_generation;
+mod binding_version;
 mod bulk_file_reads;
 mod cache_seeding;
 mod capability_conformance;

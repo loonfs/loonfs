@@ -6,7 +6,7 @@ use super::{
     DirentryBindingRecord, InodeRecord, MetadataState, RevisionRecord, SubtreeTombstoneRecord,
     TombstoneRowAction,
 };
-use loonfs_api::wire::manifest::{DeltaPosition, DirentryBindingState};
+use loonfs_api::wire::manifest::DirentryBindingState;
 use loonfs_api::wire::wal::{WalCommitPayload, WalDelta};
 use loonfs_api::{ActorId, ChangeSeq, CommitId};
 
@@ -144,10 +144,8 @@ impl MetadataState {
             } => {
                 self.push_subtree_tombstone_record(SubtreeTombstoneRecord {
                     root_inode_id: *root_inode_id,
-                    generation: DeltaPosition {
-                        seq: committed_seq,
-                        delta_index: *delta_index,
-                    },
+                    committed_seq,
+                    delta_index: *delta_index,
                     commit_id: commit_id.clone(),
                     committed_at_ms,
                     committed_by: actor.clone(),
@@ -163,10 +161,8 @@ impl MetadataState {
             } => {
                 self.push_subtree_tombstone_record(SubtreeTombstoneRecord {
                     root_inode_id: *root_inode_id,
-                    generation: DeltaPosition {
-                        seq: committed_seq,
-                        delta_index: *delta_index,
-                    },
+                    committed_seq,
+                    delta_index: *delta_index,
                     commit_id: commit_id.clone(),
                     committed_at_ms,
                     committed_by: actor.clone(),
@@ -215,7 +211,7 @@ impl MetadataState {
     pub fn apply_committed_wal_record_mut(&mut self, record: &WalCommitPayload) {
         for delta in &record.deltas {
             self.apply_committed_wal_delta_mut(
-                record.seq,
+                record.committed_seq,
                 &record.commit_id,
                 &record.committed_by,
                 record.committed_at_ms,
@@ -223,7 +219,7 @@ impl MetadataState {
             );
         }
         self.push_commit_record(WalCommitPayload {
-            seq: record.seq,
+            committed_seq: record.committed_seq,
             commit_id: record.commit_id.clone(),
             committed_by: record.committed_by.clone(),
             semantic_commit_fingerprint: record.semantic_commit_fingerprint.clone(),
@@ -234,8 +230,7 @@ impl MetadataState {
         });
         self.push_commit_receipt_record(CommitReceiptRecord {
             commit_id: record.commit_id.clone(),
-            committed_seq: record.seq,
-            semantic_commit_fingerprint: record.semantic_commit_fingerprint.clone(),
+            committed_seq: record.committed_seq,
         });
     }
 }

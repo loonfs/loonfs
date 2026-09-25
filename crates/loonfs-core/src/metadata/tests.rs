@@ -39,7 +39,7 @@ fn deleted_binding(parent_inode_id: InodeId, display_name: &str) -> DeletedBindi
 #[test]
 fn commit_rows_reject_inline_content_and_decode_without_it() {
     let record = WalCommitPayload {
-        seq: ChangeSeq(9),
+        committed_seq: ChangeSeq(9),
         commit_id: commit_id(9),
         committed_by: actor(),
         semantic_commit_fingerprint: fingerprint("v1:sha256:commit-row"),
@@ -115,7 +115,7 @@ fn every_provenance_row_copies_the_wal_payload_commit_id() {
     })
     .collect();
     let payload = WalCommitPayload {
-        seq: ChangeSeq(9),
+        committed_seq: ChangeSeq(9),
         commit_id: owning_commit_id.clone(),
         committed_by: actor(),
         semantic_commit_fingerprint: fingerprint("v1:sha256:test"),
@@ -310,8 +310,10 @@ fn maintained_indexes_track_bind_unbind_rename_and_tombstone() {
             name_key: NameKey::parse("docs").expect("valid name key"),
             display_name: loonfs_api::DisplayName::parse("docs").expect("valid display name"),
             child_inode_id: InodeId(2),
-            bind_seq: ChangeSeq(1),
-            bind_delta_index: 0,
+            target: loonfs_api::wire::manifest::DeltaPosition {
+                seq: ChangeSeq(1),
+                delta_index: 0,
+            },
         }],
     );
     assert!(metadata_state
@@ -527,17 +529,14 @@ fn find_commit_receipt_returns_latest_matching_receipt() {
             CommitReceiptRecord {
                 commit_id: commit_id.clone(),
                 committed_seq: ChangeSeq(1),
-                semantic_commit_fingerprint: fingerprint("old"),
             },
             CommitReceiptRecord {
                 commit_id: CommitId::parse("other-commit").expect("valid commit id"),
                 committed_seq: ChangeSeq(3),
-                semantic_commit_fingerprint: fingerprint("other"),
             },
             CommitReceiptRecord {
                 commit_id: commit_id.clone(),
                 committed_seq: ChangeSeq(2),
-                semantic_commit_fingerprint: fingerprint("new"),
             },
         ],
         Vec::new(),
@@ -550,7 +549,6 @@ fn find_commit_receipt_returns_latest_matching_receipt() {
         .find_commit_receipt(&commit_id)
         .expect("receipt");
     assert_eq!(receipt.committed_seq, ChangeSeq(2));
-    assert_eq!(receipt.semantic_commit_fingerprint.as_str(), "new");
 }
 
 #[test]
@@ -598,7 +596,6 @@ fn metadata_builder_tracks_the_highest_row_sequence() {
     builder.push_commit_receipt(CommitReceiptRecord {
         commit_id: CommitId::parse("indexed-commit").expect("valid commit id"),
         committed_seq: ChangeSeq(3),
-        semantic_commit_fingerprint: fingerprint("fingerprint"),
     });
     let metadata_state = builder.finish();
 
@@ -834,8 +831,10 @@ fn churned_binding_state() -> MetadataState {
                 display_name: loonfs_api::DisplayName::parse("contested")
                     .expect("valid display name"),
                 child_inode_id: InodeId(2),
-                bind_seq: ChangeSeq(1),
-                bind_delta_index: 1,
+                target: loonfs_api::wire::manifest::DeltaPosition {
+                    seq: ChangeSeq(1),
+                    delta_index: 1,
+                },
             },
             WalDelta::BindDirentry {
                 delta_index: 1,
@@ -852,8 +851,10 @@ fn churned_binding_state() -> MetadataState {
                 display_name: loonfs_api::DisplayName::parse("deleted")
                     .expect("valid display name"),
                 child_inode_id: InodeId(4),
-                bind_seq: ChangeSeq(1),
-                bind_delta_index: 3,
+                target: loonfs_api::wire::manifest::DeltaPosition {
+                    seq: ChangeSeq(1),
+                    delta_index: 3,
+                },
             },
         ],
     );

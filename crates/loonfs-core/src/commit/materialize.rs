@@ -226,7 +226,7 @@ pub(super) fn materialize_validated_op(op: &ValidatedOp) -> Vec<MaterializedComm
             bind_delta_index,
         } => {
             // The mirror of delete's unbind-plus-tombstone: revoke the
-            // exact deletion generation validation resolved, then bind the
+            // exact deletion position validation resolved, then bind the
             // recovered inode at its new home.
             push_delta(
                 &mut deltas,
@@ -294,7 +294,7 @@ pub(super) fn materialize_validated_op(op: &ValidatedOp) -> Vec<MaterializedComm
 
 /// The binding a delete retires, as the tombstone records it: the same
 /// three fields the unbind delta carries, minus the ones that identify the
-/// exact bind generation being retired.
+/// exact bind position being retired.
 fn deleted_binding(binding: &ResolvedBinding) -> DeletedBinding {
     DeletedBinding {
         parent_inode_id: binding.parent_inode_id,
@@ -318,8 +318,7 @@ fn push_unbind_delta(
             name_key: binding.name_key.clone(),
             display_name: binding.display_name.clone(),
             child_inode_id: binding.child_inode_id,
-            bind_seq: binding.position.seq,
-            bind_delta_index: binding.position.delta_index,
+            target: binding.position,
         },
     )
 }

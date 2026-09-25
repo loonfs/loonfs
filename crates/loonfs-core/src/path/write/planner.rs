@@ -213,19 +213,19 @@ async fn plan_operation<S: ObjectStore + ?Sized>(
         } => plan_delete_path(path, *behavior, *expected_inode_id, view).await,
         FilesystemOperation::DeleteByInode {
             inode_id,
-            expected_binding_generation,
+            expected_binding_version,
             behavior,
-        } => plan_delete_by_inode(*inode_id, expected_binding_generation, *behavior, view).await,
+        } => plan_delete_by_inode(*inode_id, expected_binding_version, *behavior, view).await,
         FilesystemOperation::MoveByInode {
             inode_id,
-            expected_binding_generation,
+            expected_binding_version,
             destination_parent_inode_id,
             destination_display_name,
             precondition,
         } => {
             plan_move_by_inode(
                 *inode_id,
-                expected_binding_generation,
+                expected_binding_version,
                 *destination_parent_inode_id,
                 destination_display_name,
                 precondition.behavior,

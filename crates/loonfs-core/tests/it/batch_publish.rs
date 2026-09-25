@@ -1610,14 +1610,14 @@ async fn binding_preconditions_track_identity_absence_and_moves() {
     let binding = CommitPrecondition::PathBinding {
         path: AbsolutePath::parse("/input").expect("path"),
         expected_inode_id: input.inode_id,
-        expected_binding_generation: None,
+        expected_binding_version: None,
     };
-    let generation = CommitPrecondition::PathBinding {
+    let version = CommitPrecondition::PathBinding {
         path: AbsolutePath::parse("/input").expect("path"),
         expected_inode_id: input.inode_id,
-        expected_binding_generation: input.binding_generation.clone(),
+        expected_binding_version: input.binding_version.clone(),
     };
-    assert!(input.binding_generation.is_some());
+    assert!(input.binding_version.is_some());
     let absent = CommitPrecondition::PathAbsence {
         path: AbsolutePath::parse("/vacant").expect("path"),
     };
@@ -1638,7 +1638,7 @@ async fn binding_preconditions_track_identity_absence_and_moves() {
                 "holds",
                 vec![
                     binding.clone(),
-                    generation.clone(),
+                    version.clone(),
                     absent.clone(),
                     CommitPrecondition::PathAbsence {
                         path: AbsolutePath::parse("/missing/child").expect("path"),
@@ -1649,13 +1649,13 @@ async fn binding_preconditions_track_identity_absence_and_moves() {
                     CommitPrecondition::PathBinding {
                         path: AbsolutePath::root(),
                         expected_inode_id: InodeId(1),
-                        expected_binding_generation: None,
+                        expected_binding_version: None,
                     },
                 ],
             ),
             commit_request("away", move_file("/input", "/away")),
             commit_request("back", move_file("/away", "/input")),
-            scoped_directory("moved", vec![generation]),
+            scoped_directory("moved", vec![version]),
             scoped_directory("same-inode", vec![binding.clone()]),
             commit_request("rebind", move_file("/other", "/input")),
             scoped_directory("rebound", vec![binding]),
@@ -1674,7 +1674,7 @@ async fn binding_preconditions_track_identity_absence_and_moves() {
     for index in [0, 1, 2, 3, 5, 6, 8] {
         results[index].as_ref().expect("admitted candidate");
     }
-    let moved = precondition_details(&results[4], ErrorCode::BindingGenerationMismatch, 0);
+    let moved = precondition_details(&results[4], ErrorCode::BindingVersionMismatch, 0);
     assert_eq!(moved.inode_id, Some(input.inode_id));
     let rebound = precondition_details(&results[7], ErrorCode::PathConflict, 0);
     assert_eq!(rebound.expected_inode_id, Some(input.inode_id));

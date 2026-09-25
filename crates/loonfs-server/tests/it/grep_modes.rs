@@ -201,7 +201,7 @@ async fn serving_and_maintaining_enables_queries_nudges_and_disables_per_namespa
         matches!(
             &enabled.lifecycle,
             GrepIndexLifecycle::Backfilling {
-                target_seq: ChangeSeq(0),
+                captured_seq: ChangeSeq(0),
                 cursor_inode_id: None,
                 ..
             }

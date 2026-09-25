@@ -261,8 +261,10 @@ fn sample_wal_payload() -> WalSegmentPayload {
                 display_name: loonfs_api::DisplayName::parse("Old.txt")
                     .expect("valid display name"),
                 child_inode_id: InodeId(5),
-                bind_seq: ChangeSeq(1),
-                bind_delta_index: 0,
+                target: loonfs_api::wire::manifest::DeltaPosition {
+                    seq: ChangeSeq(1),
+                    delta_index: 0,
+                },
             },
         },
         WalCommitDelta {
@@ -314,7 +316,7 @@ fn sample_wal_payload() -> WalSegmentPayload {
         head_seq: ChangeSeq(2),
         next_inode_id: InodeId(10),
         records: vec![WalCommitPayload {
-            seq: ChangeSeq(2),
+            committed_seq: ChangeSeq(2),
             commit_id: commit_id(),
             committed_by: actor(),
             semantic_commit_fingerprint: serde_json::from_str(
@@ -332,7 +334,7 @@ fn sample_wal_payload() -> WalSegmentPayload {
 fn sample_wal_inline_content_payload() -> WalSegmentPayload {
     let mut payload = sample_wal_payload();
     let mut without_inline_content = payload.records[0].clone();
-    without_inline_content.seq = ChangeSeq(3);
+    without_inline_content.committed_seq = ChangeSeq(3);
     without_inline_content.commit_id =
         CommitId::parse("c_00000000000000000000000000000043").expect("valid commit id");
     payload.records[0].inline_content = vec![
@@ -384,7 +386,7 @@ fn sample_manifest_payload() -> NamespaceManifestPayload {
             acquired_at_ms: 2_000,
         }),
         folded_wal_no: WalNo(2),
-        compactor_epoch: 0,
+        compactor_epoch: loonfs_api::CompactorEpoch(0),
         namespace_id: namespace_id(),
         manifest_no: ManifestNo(2),
 
@@ -718,7 +720,6 @@ fn control_objects_match_golden_bytes() {
             upload_id: UploadId::parse("upl_0123456789abcdef0123456789abcdef")
                 .expect("valid upload id"),
             content_id: content_id("con_0123456789abcdef0123456789abcdef"),
-            created_at_ms: 1_000,
             subject_id: None,
             mode: UploadSessionMode::ServiceProxied {
                 staging: ProxiedStaging::Idle,
@@ -737,7 +738,6 @@ fn control_objects_match_golden_bytes() {
             upload_id: UploadId::parse("upl_abcdef0123456789abcdef0123456789")
                 .expect("valid upload id"),
             content_id: content_id("con_0123456789abcdef0123456789abcdef"),
-            created_at_ms: 1_000,
             subject_id: None,
             mode: UploadSessionMode::DirectPut {
                 checksum_algorithm: ChecksumAlgorithm::Sha256,
@@ -759,7 +759,6 @@ fn control_objects_match_golden_bytes() {
             upload_id: UploadId::parse("upl_22222222222222222222222222222222")
                 .expect("valid upload id"),
             content_id: content_id("con_22222222222222222222222222222222"),
-            created_at_ms: 1_000,
             subject_id: None,
             mode: UploadSessionMode::DirectMultipart {
                 provider_upload_id: "provider-upload-id".to_owned(),
@@ -781,7 +780,6 @@ fn control_objects_match_golden_bytes() {
             upload_id: UploadId::parse("upl_33333333333333333333333333333333")
                 .expect("valid upload id"),
             content_id: content_id("con_0123456789abcdef0123456789abcdef"),
-            created_at_ms: 1_000,
             subject_id: None,
             mode: UploadSessionMode::ServiceProxied {
                 staging: ProxiedStaging::Staged(sample_content_ref()),
@@ -799,7 +797,6 @@ fn control_objects_match_golden_bytes() {
             upload_id: UploadId::parse("upl_33333333333333333333333333333333")
                 .expect("valid upload id"),
             content_id: content_id("con_0123456789abcdef0123456789abcdef"),
-            created_at_ms: 1_000,
             subject_id: Some(loonfs_api::SubjectId::parse("usr_ada").expect("subject id")),
             mode: UploadSessionMode::ServiceProxied {
                 staging: ProxiedStaging::Staged(sample_content_ref()),
@@ -817,7 +814,6 @@ fn control_objects_match_golden_bytes() {
             upload_id: UploadId::parse("upl_44444444444444444444444444444444")
                 .expect("valid upload id"),
             content_id: content_id("con_44444444444444444444444444444444"),
-            created_at_ms: 1_000,
             subject_id: None,
             mode: UploadSessionMode::ServiceProxied {
                 staging: ProxiedStaging::Claimed,
@@ -835,7 +831,6 @@ fn control_objects_match_golden_bytes() {
             upload_id: UploadId::parse("upl_11111111111111111111111111111111")
                 .expect("valid upload id"),
             content_id: content_id("con_11111111111111111111111111111111"),
-            created_at_ms: 1_000,
             subject_id: None,
             mode: UploadSessionMode::ServiceProxied {
                 staging: ProxiedStaging::Idle,
@@ -1187,7 +1182,6 @@ fn control_object_decoders_reject_wrong_format_version_without_fallback() {
                 upload_id: UploadId::parse("upl_11111111111111111111111111111111")
                     .expect("valid upload id"),
                 content_id: content_id("con_11111111111111111111111111111111"),
-                created_at_ms: 1_000,
                 subject_id: None,
                 mode: UploadSessionMode::ServiceProxied {
                     staging: ProxiedStaging::Idle,
@@ -1688,8 +1682,10 @@ fn wal_delta_wire_tags_match_spec_names() {
                 name_key: NameKey::parse("a").expect("valid name key"),
                 display_name: loonfs_api::DisplayName::parse("a").expect("valid display name"),
                 child_inode_id: InodeId(2),
-                bind_seq: ChangeSeq(1),
-                bind_delta_index: 0,
+                target: loonfs_api::wire::manifest::DeltaPosition {
+                    seq: ChangeSeq(1),
+                    delta_index: 0,
+                },
             }),
             "unbind_direntry",
         ),
@@ -1759,10 +1755,8 @@ fn wal_delta_wire_tags_match_spec_names() {
 fn sample_tombstone_set_row() -> MetadataRow {
     MetadataRow::Tombstone(loonfs_api::wire::manifest::SubtreeTombstoneRecord {
         root_inode_id: InodeId(5),
-        generation: DeltaPosition {
-            seq: ChangeSeq(8),
-            delta_index: 0,
-        },
+        committed_seq: ChangeSeq(8),
+        delta_index: 0,
         commit_id: commit_id(),
         action: TombstoneRowAction::Set {
             deleted_binding: DeletedBinding {
@@ -1777,14 +1771,12 @@ fn sample_tombstone_set_row() -> MetadataRow {
     })
 }
 
-/// The undelete that cancels it, naming the exact generation it revokes.
+/// The undelete that cancels it, naming the exact position it revokes.
 fn sample_tombstone_revoke_row() -> MetadataRow {
     MetadataRow::Tombstone(loonfs_api::wire::manifest::SubtreeTombstoneRecord {
         root_inode_id: InodeId(5),
-        generation: DeltaPosition {
-            seq: ChangeSeq(9),
-            delta_index: 0,
-        },
+        committed_seq: ChangeSeq(9),
+        delta_index: 0,
         commit_id: commit_id(),
         action: TombstoneRowAction::Revoke {
             target: DeltaPosition {
@@ -1892,13 +1884,12 @@ fn sample_commit_receipt_row() -> MetadataRow {
     MetadataRow::CommitReceipt(loonfs_api::wire::manifest::CommitReceiptRecord {
         commit_id: commit_id(),
         committed_seq: ChangeSeq(9),
-        semantic_commit_fingerprint: serde_json::from_str(r#""fp:golden""#).expect("fingerprint"),
     })
 }
 
 fn sample_commit_row() -> MetadataRow {
     MetadataRow::Commit(WalCommitPayload {
-        seq: ChangeSeq(9),
+        committed_seq: ChangeSeq(9),
         commit_id: commit_id(),
         committed_by: actor(),
         semantic_commit_fingerprint: serde_json::from_str(r#""fp:golden""#).expect("fingerprint"),
@@ -2334,7 +2325,7 @@ fn tombstone_rows_reject_a_partial_deleted_binding() {
 #[test]
 fn tombstone_rows_reject_unknown_fields_at_every_level() {
     let expected = sample_tombstone_set_row();
-    let paths: [&[&str]; 3] = [&["generation"], &["action"], &["action", "deleted_binding"]];
+    let paths: [&[&str]; 3] = [&[], &["action"], &["action", "deleted_binding"]];
 
     for path in paths {
         let mut row = row_cbor(&expected);
@@ -2367,21 +2358,6 @@ fn tombstone_revoke_rows_reject_a_deleted_binding() {
 #[test]
 fn tombstone_rows_reject_flat_binding_fields() {
     let row = row_cbor(&sample_tombstone_set_row());
-    assert_row_is_corrupt(
-        &with_flat_binding(with_flat_generation(row.clone())),
-        "flat binding fields are not a tombstone row",
-    );
-
-    // Each half of that encoding on its own, over a row that is otherwise
-    // current: neither is a spelling this row accepts.
-    let refusal = assert_row_is_corrupt(
-        &with_flat_generation(row.clone()),
-        "a tombstone states its generation as one value",
-    );
-    assert!(
-        refusal.contains("unknown field `tombstone_seq`"),
-        "unexpected refusal: {refusal}"
-    );
     let refusal = assert_row_is_corrupt(
         &with_flat_binding(row),
         "a `set` states its binding, even when it has none",
@@ -2514,18 +2490,6 @@ fn attribute_rows_reject_a_map_over_its_limits() {
 fn sample_deleted_binding_cbor() -> ciborium::Value {
     let mut set = row_cbor(&sample_tombstone_set_row());
     cbor_entry(cbor_entry(&mut set, "action"), "deleted_binding").clone()
-}
-
-/// Moves generation fields out of their required nested object.
-fn with_flat_generation(mut row: ciborium::Value) -> ciborium::Value {
-    let mut generation = cbor_entry(&mut row, "generation").clone();
-    let seq = cbor_entry(&mut generation, "seq").clone();
-    let delta_index = cbor_entry(&mut generation, "delta_index").clone();
-    let entries = cbor_map_of(&mut row);
-    entries.retain(|(key, _)| key.as_text() != Some("generation"));
-    entries.push((ciborium::Value::from("tombstone_seq"), seq));
-    entries.push((ciborium::Value::from("tombstone_delta_index"), delta_index));
-    row
 }
 
 /// Moves binding fields out of `set` to test rejection of a malformed action.
@@ -2740,8 +2704,8 @@ fn commit_precondition_wire_shapes_match_golden() {
         CommitPrecondition::PathBinding {
             path: AbsolutePath::parse("/docs/input").expect("path"),
             expected_inode_id: InodeId(42),
-            expected_binding_generation: Some(
-                loonfs_api::BindingGeneration::parse("aaaa").expect("generation"),
+            expected_binding_version: Some(
+                loonfs_api::BindingVersion::parse("aaaa").expect("version"),
             ),
         },
         CommitPrecondition::PathAbsence {
@@ -2756,12 +2720,8 @@ fn commit_precondition_wire_shapes_match_golden() {
         precondition_index: Some(0),
         expected_head_seq: Some(ChangeSeq(42)),
         actual_head_seq: Some(ChangeSeq(43)),
-        expected_binding_generation: Some(
-            loonfs_api::BindingGeneration::parse("aaaa").expect("generation"),
-        ),
-        actual_binding_generation: Some(
-            loonfs_api::BindingGeneration::parse("bbbb").expect("generation"),
-        ),
+        expected_binding_version: Some(loonfs_api::BindingVersion::parse("aaaa").expect("version")),
+        actual_binding_version: Some(loonfs_api::BindingVersion::parse("bbbb").expect("version")),
         ..ErrorDetails::default()
     };
     let bytes =

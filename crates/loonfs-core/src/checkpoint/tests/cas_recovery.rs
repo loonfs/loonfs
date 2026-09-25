@@ -17,7 +17,7 @@ async fn identical_compactor_claims_report_the_loser_as_covered() {
             .expect("current");
         let mut payload = current.state.envelope.payload().clone();
         payload.manifest_no = payload.manifest_no.successor().expect("next manifest");
-        payload.compactor_epoch += 1;
+        payload.compactor_epoch.0 += 1;
         let claim = encode_manifest(payload).expect("claim");
         let blocked = BlockingStore::new(
             store.clone(),
@@ -580,10 +580,13 @@ async fn an_ambiguous_compactor_claim_retries_instead_of_confirming() {
     let epoch = super::super::compactor::claim_compactor(&store, &namespace_id)
         .await
         .expect("claim");
-    assert_eq!(epoch, 2);
+    assert_eq!(epoch, loonfs_api::CompactorEpoch(2));
     let current = load_current_manifest(&store, &namespace_id)
         .await
         .expect("current manifest");
     assert_eq!(current.state.envelope.payload().manifest_no, ManifestNo(3));
-    assert_eq!(current.state.envelope.payload().compactor_epoch, 2);
+    assert_eq!(
+        current.state.envelope.payload().compactor_epoch,
+        loonfs_api::CompactorEpoch(2)
+    );
 }

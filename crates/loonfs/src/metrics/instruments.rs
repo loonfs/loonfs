@@ -146,7 +146,7 @@ const GC_CATEGORIES: [GcCategory; 8] = [
         gc.deleted_checkpoints_by_owner.fork
     }),
     ("deleted_expired_checkpoints", |gc| {
-        gc.deleted_checkpoints_by_owner.expired
+        gc.deleted_checkpoints_by_owner.user
     }),
     ("deleted_upload_sessions", |gc| gc.deleted.upload_sessions),
     ("deleted_content_objects", |gc| gc.deleted.content_objects),
@@ -1620,7 +1620,7 @@ mod tests {
             },
             deleted_checkpoints_by_owner: loonfs_api::DeletedCheckpointsByOwner {
                 fork: 2,
-                expired: 3,
+                user: 3,
                 snapshot: 7,
             },
             retained: loonfs_api::RetainedCandidates {
@@ -1628,7 +1628,7 @@ mod tests {
                 ..loonfs_api::RetainedCandidates::default()
             },
             next_reclamation_at_ms: None,
-            reclaim_after_ms: None,
+            reclaimable_at_ms: None,
         };
 
         instruments.gc_pass(&gc);
