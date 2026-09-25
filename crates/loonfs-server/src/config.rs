@@ -109,13 +109,6 @@ impl PublicationLimitsOverrides {
     }
 }
 
-/// The only request-authentication decisions exposed to HTTP helpers.
-#[derive(Debug, Clone, Copy)]
-pub(crate) enum AuthPolicy<'a> {
-    Unauthenticated,
-    BearerToken(&'a str),
-}
-
 /// The server config file.
 ///
 /// # Secret precedence
@@ -463,17 +456,6 @@ pub enum ServerConfigError {
 }
 
 impl ServerConfig {
-    pub(crate) fn auth_policy(&self) -> AuthPolicy<'_> {
-        match &self.auth_token {
-            Some(token) => AuthPolicy::BearerToken(token.expose()),
-            None => AuthPolicy::Unauthenticated,
-        }
-    }
-
-    pub(crate) fn content_token_secret(&self) -> &str {
-        self.content_token_secret.expose()
-    }
-
     /// Fills `auth_token` and `content_token_secret` from the environment
     /// when the file left them unset or blank. Non-blank file values win;
     /// blank environment values are ignored.
@@ -1558,7 +1540,10 @@ root = "/tmp/loonfs-server"
             config.auth_token.as_ref().map(|token| token.expose()),
             Some("file-auth-token")
         );
-        assert_eq!(config.content_token_secret(), "dev-content-token-secret");
+        assert_eq!(
+            config.content_token_secret.expose(),
+            "dev-content-token-secret"
+        );
 
         // The environment fills fields the file left unset.
         config.auth_token = None;
@@ -1571,7 +1556,10 @@ root = "/tmp/loonfs-server"
             config.auth_token.as_ref().map(|token| token.expose()),
             Some("env-auth-token")
         );
-        assert_eq!(config.content_token_secret(), "env-content-token-secret");
+        assert_eq!(
+            config.content_token_secret.expose(),
+            "env-content-token-secret"
+        );
 
         config.auth_token = Some(loonfs_api::SecretString::new("   ".to_owned()));
         config.content_token_secret = loonfs_api::SecretString::new("   ".to_owned());
@@ -1583,14 +1571,17 @@ root = "/tmp/loonfs-server"
             config.auth_token.as_ref().map(|token| token.expose()),
             Some("env-auth-token")
         );
-        assert_eq!(config.content_token_secret(), "env-content-token-secret");
+        assert_eq!(
+            config.content_token_secret.expose(),
+            "env-content-token-secret"
+        );
 
         // Blank environment values are ignored.
         config.auth_token = None;
         config.content_token_secret = loonfs_api::SecretString::default();
         config.apply_env_fallbacks(Some("   ".to_owned()), Some(String::new()));
         assert!(config.auth_token.is_none());
-        assert!(config.content_token_secret().is_empty());
+        assert!(config.content_token_secret.expose().is_empty());
     }
 
     #[test]
@@ -1725,10 +1716,13 @@ root = "/tmp/loonfs-server"
         let mut config: super::ServerConfig =
             toml::from_str(&std::fs::read_to_string(&path).expect("read config"))
                 .expect("config without content_token_secret parses");
-        assert!(config.content_token_secret().is_empty());
+        assert!(config.content_token_secret.expose().is_empty());
 
         config.apply_env_fallbacks(None, Some("env-content-token-secret".to_owned()));
-        assert_eq!(config.content_token_secret(), "env-content-token-secret");
+        assert_eq!(
+            config.content_token_secret.expose(),
+            "env-content-token-secret"
+        );
 
         // Without the env fallback the load path reports the missing field.
         let _content_token_secret = EnvGuard::unset(CONTENT_TOKEN_SECRET_ENV);

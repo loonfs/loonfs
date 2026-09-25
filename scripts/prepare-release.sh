@@ -89,8 +89,8 @@ sed "/^\[workspace\.package\]$/,/^\[/ s/^version = \"$current\"\$/version = \"$v
 mv Cargo.toml.tmp Cargo.toml
 
 bumped=$(grep -c "version = \"$version\"" Cargo.toml) || true
-if [ "$bumped" -ne 7 ]; then
-    die "expected 7 versions in Cargo.toml to read $version (workspace.package plus 6 pinned crates), found $bumped"
+if [ "$bumped" -ne 8 ]; then
+    die "expected 8 versions in Cargo.toml to read $version (workspace.package plus 7 pinned crates), found $bumped"
 fi
 
 sed "s/^version: .*\$/version: $version/
@@ -100,7 +100,7 @@ mv "$chart.tmp" "$chart"
 
 # Regenerate both documents because they include the release version.
 # Cargo also refreshes Cargo.lock while building the OpenAPI generator.
-cargo run -p loonfs-server --features openapi --bin loonfs-openapi -- \
+cargo run -p loonfs-http --features openapi --bin loonfs-openapi -- \
     "$spec" "$proxy_spec"
 
 # The workspace and chart versions must match the release tag.
@@ -121,7 +121,7 @@ grep -q "\"version\": \"$version\"" "$proxy_spec" \
     || die "regenerated proxy spec does not carry version $version"
 
 # Run the OpenAPI specification test with the same options used in CI.
-cargo test -p loonfs-server --features openapi --locked openapi
+cargo test -p loonfs-http --features openapi --locked openapi
 
 echo
 echo "prepared v$version:"

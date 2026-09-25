@@ -1,0 +1,4079 @@
+//! HTTP router and handler contracts.
+
+#![allow(clippy::panic)]
+// HTTP smoke helpers panic in unexpected match arms for precise diagnostics.
+
+mod attribution;
+mod hosted_content_ref_access;
+mod http_access;
+mod inline_commits;
+mod pin_deletion;
+mod surface;
+
+use super::error::{status_for_core_error_code, ServedErrorCode};
+use super::{request_log_severity, RequestLogSeverity};
+use crate::BindingState;
+use loonfs::SharedObjectStore;
+mod fixtures;
+use async_trait::async_trait;
+use axum::body::Bytes;
+use axum::http::StatusCode;
+use fixtures::{test_app, test_options, TestAppOptions, TestOptions};
+use futures::stream::StreamExt;
+use loonfs::{
+    CreateNamespaceOptions, DeleteOptions, FsMaintenance, FsReader, FsWriter, PutFileOptions,
+    TraceMode, TraceStoreKind,
+};
+use loonfs_api::{
+    AttributesRevisionNo, ErrorCode, ErrorDetails, InodeId, WriterEpoch, ALL_LIMIT_KEYS,
+};
+use loonfs_api::{
+    CapabilityDocument, ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior,
+    GrepRequest, NamespaceId, RevisionNo, FEATURE_QUERY_GREP,
+};
+use loonfs_client::{Client, ClientConfig, ClientError, MoveOptions, NamespacePath};
+use loonfs_grep::keyspace::{hint_key as grep_hint_key, manifest_key as grep_manifest_key};
+use loonfs_grep::manifest::{encode_grep_hint, GrepHint};
+use loonfs_grep::GrepWorker;
+use loonfs_objectstore::local_fs_store::LocalFsStore;
+use loonfs_objectstore::{ObjectStore, ObjectStoreError, PutMode};
+use std::path::Path;
+
+fn options_with_store(store: SharedObjectStore) -> TestAppOptions {
+    TestAppOptions {
+        store: Some(store),
+        direct_transfers: None,
+    }
+}
+
+const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
+    "aborted_at_ms",
+    "access_changed",
+    "access_revision",
+    "active_acquired_at_ms",
+    "active_writer_id",
+    "active_writer_epoch",
+    "actor_id",
+    "actual_attributes_revision_no",
+    "actual_deletion_seq",
+    "actual_head_seq",
+    "actual_revision_no",
+    "after_seq",
+    "allow_scan",
+    "allow_stale",
+    "already_published",
+    "attributes_changed",
+    "attributes_revision",
+    "attributes_revision_no",
+    "attributes_updated_at_ms",
+    "attributes_updated_by",
+    "bearer_auth",
+    "binding_version",
+    "bounded_merge_published",
+    "built_through_seq",
+    "captured_seq",
+    "checkpoint_id",
+    "checkpoint_not_deletable",
+    "checksum",
+    "checksum_algorithm",
+    "commit_id",
+    "committed_at_ms",
+    "committed_by",
+    "committed_fingerprint",
+    "committed_seq",
+    "compaction_required",
+    "complete_upload_prepared",
+    "completed_at_ms",
+    "content_changed",
+    "content_objects",
+    "content_ref",
+    "content_token",
+    "content_tokens",
+    "copy_path",
+    "create_directory_by_inode",
+    "create_file_by_inode",
+    "created_at_ms",
+    "created_by",
+    "current_manifest_no",
+    "cursor_inode_id",
+    "delete_by_inode",
+    "delete_path",
+    "deleted_at_ms",
+    "deleted_binding",
+    "deleted_by",
+    "deleted_checkpoints_by_owner",
+    "deletion_seq",
+    "destination_display_name",
+    "destination_exists",
+    "destination_parent_inode_id",
+    "destination_path",
+    "direct_multipart",
+    "direct_put",
+    "directory_created",
+    "display_name",
+    "expected_attributes_revision_no",
+    "expected_binding_version",
+    "expected_deletion_seq",
+    "expected_head_seq",
+    "expected_inode_id",
+    "expected_revision_no",
+    "expires_at_ms",
+    "fenced_writer_epoch",
+    "file_created",
+    "file_revision",
+    "grace_window_ms",
+    "grep_gc",
+    "head_drift",
+    "head_seq",
+    "include_attributes",
+    "inode_id",
+    "inode_kind",
+    "load_checkpoint_statistics",
+    "load_namespace_statistics",
+    "maintain_only",
+    "manifest_advanced",
+    "manifest_no",
+    "max_wal_tail_segments",
+    "metadata_compaction",
+    "recover_administrator",
+    "metadata_segments",
+    "move_by_inode",
+    "move_path",
+    "name_key",
+    "namespace_head",
+    "namespace_id",
+    "new_namespace_id",
+    "next_after_seq",
+    "next_cursor",
+    "next_event_index",
+    "next_reclamation_at_ms",
+    "next_run_no",
+    "no_provider_timestamp",
+    "no_replace",
+    "not_idempotent",
+    "not_needed",
+    "operation_id",
+    "operation_index",
+    "operation_kind",
+    "operation_part",
+    "parent_inode_id",
+    "part_size_bytes",
+    "path_absence",
+    "path_binding",
+    "path_prefix",
+    "prepare_content_ref",
+    "prepare_file_bytes",
+    "protocol_version",
+    "put_file",
+    "put_file_prepared",
+    "put_file_revision_by_inode",
+    "reorganize_pending",
+    "request_deadline_ms",
+    "request_id",
+    "retained_candidates",
+    "retention_floor_seq",
+    "retries_exhausted",
+    "revision_committed_at_ms",
+    "revision_committed_by",
+    "revision_no",
+    "root_grants",
+    "run_id",
+    "serve_and_maintain",
+    "serve_only",
+    "service_proxied",
+    "size_bytes",
+    "snapshot_id",
+    "source_display_name",
+    "source_head_seq",
+    "source_namespace_id",
+    "source_parent_inode_id",
+    "target_namespace_id",
+    "captured_seq",
+    "through_seq",
+    "ttl_ms",
+    "unit_published",
+    "unrecognized_key",
+    "update_access",
+    "update_attributes",
+    "updated_at_ms",
+    "updated_by",
+    "upload_id",
+    "upload_prepared",
+    "upload_session_undecided",
+    "upload_session_window",
+    "upload_sessions",
+    "wal_flush",
+    "wal_segments",
+    "wal_tail_segments",
+    "within_grace_window",
+];
+
+fn replace_file_options() -> PutFileOptions {
+    PutFileOptions {
+        behavior: DestinationBehavior::Replace,
+        ..PutFileOptions::new(loonfs_test_support::test_actor())
+    }
+}
+
+#[test]
+fn error_status_mapping_matches_the_api_spec_table() {
+    let spec = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../docs/specs/api.md"
+    ))
+    .expect("read docs/specs/api.md");
+    let table = spec
+        .split("The full registry")
+        .nth(1)
+        .expect("api.md error registry intro")
+        .split("Precondition failures surface")
+        .next()
+        .expect("api.md error registry end");
+
+    let mut documented = std::collections::BTreeMap::new();
+    for line in table.lines() {
+        let Some(rest) = line.strip_prefix("| `") else {
+            continue;
+        };
+        let mut cells = rest.split(" | ");
+        let code = cells
+            .next()
+            .expect("code cell")
+            .trim_end_matches('`')
+            .to_owned();
+        let status: u16 = cells
+            .next()
+            .expect("status cell")
+            .trim()
+            .parse()
+            .expect("numeric status cell");
+        documented.insert(code, status);
+    }
+
+    for code in ErrorCode::ALL {
+        let documented_status = documented.remove(code.as_str()).unwrap_or_else(|| {
+            panic!(
+                "`{}` is registered in loonfs-api but missing from the api.md error table",
+                code.as_str()
+            )
+        });
+        assert_eq!(
+            status_for_core_error_code(code).as_u16(),
+            documented_status,
+            "served status for `{}` disagrees with the api.md error table",
+            code.as_str()
+        );
+    }
+    assert!(
+        documented.is_empty(),
+        "api.md documents codes this build does not register: {documented:?}"
+    );
+    assert_api_spec_error_codes_are_registered(&spec);
+}
+
+#[test]
+fn request_log_severity_uses_typed_codes_and_status_only_as_a_fallback() {
+    for code in ErrorCode::ALL {
+        assert_eq!(
+            request_log_severity(StatusCode::OK, Some(ServedErrorCode(code))),
+            request_log_severity(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Some(ServedErrorCode(code)),
+            ),
+            "registered code `{code}` must not fall back to status-based severity"
+        );
+    }
+
+    assert_eq!(
+        request_log_severity(
+            StatusCode::NOT_IMPLEMENTED,
+            Some(ServedErrorCode(ErrorCode::NotSupported)),
+        ),
+        RequestLogSeverity::Debug
+    );
+    assert_eq!(
+        request_log_severity(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Some(ServedErrorCode(ErrorCode::ServerError)),
+        ),
+        RequestLogSeverity::Error
+    );
+    assert_eq!(
+        request_log_severity(
+            StatusCode::SERVICE_UNAVAILABLE,
+            Some(ServedErrorCode(ErrorCode::ServerBusy)),
+        ),
+        RequestLogSeverity::Warn
+    );
+    assert_eq!(
+        request_log_severity(StatusCode::NOT_IMPLEMENTED, None),
+        RequestLogSeverity::Error
+    );
+    assert_eq!(
+        request_log_severity(StatusCode::UNAUTHORIZED, None),
+        RequestLogSeverity::Warn
+    );
+    assert_eq!(
+        request_log_severity(StatusCode::FORBIDDEN, None),
+        RequestLogSeverity::Warn
+    );
+    assert_eq!(
+        request_log_severity(StatusCode::NOT_FOUND, None),
+        RequestLogSeverity::Debug
+    );
+}
+
+#[test]
+fn registered_limit_keys_match_the_api_spec_table() {
+    let spec = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../docs/specs/api.md"
+    ))
+    .expect("read docs/specs/api.md");
+    let table = spec
+        .split("Registered limit keys:")
+        .nth(1)
+        .expect("api.md registered-limit table intro")
+        .split("### 2.2 Feature registry")
+        .next()
+        .expect("api.md registered-limit table end");
+    let documented: std::collections::BTreeSet<_> = table
+        .lines()
+        .filter_map(|line| line.strip_prefix("| `"))
+        .filter_map(|line| line.split('`').next())
+        .map(ToOwned::to_owned)
+        .collect();
+
+    let registered = ALL_LIMIT_KEYS.iter().map(|key| (*key).to_owned()).collect();
+
+    assert_eq!(documented, registered);
+}
+
+#[test]
+fn error_detail_fields_match_the_api_spec_table() {
+    let spec = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../docs/specs/api.md"
+    ))
+    .expect("read docs/specs/api.md");
+    let table = spec
+        .split("The codes that populate it:")
+        .nth(1)
+        .expect("api.md error-details table intro")
+        .split("One code exists specifically")
+        .next()
+        .expect("api.md error-details table end");
+    let documented: std::collections::BTreeSet<_> = table
+        .lines()
+        .filter(|line| line.starts_with('|'))
+        .filter_map(|line| line.trim_matches('|').split('|').nth(1))
+        .flat_map(|fields| fields.split('`').skip(1).step_by(2))
+        .map(ToOwned::to_owned)
+        .collect();
+
+    let populated = ErrorDetails {
+        namespace_id: Some(NamespaceId::parse("deleted").expect("namespace id")),
+        precondition_index: Some(0),
+        commit_id: Some(CommitId::parse("commit").expect("valid commit id")),
+        committed_seq: Some(ChangeSeq::from(1)),
+        committed_fingerprint: Some("fingerprint".to_owned()),
+        operation_index: Some(0),
+        fenced_writer_epoch: Some(WriterEpoch::from(1)),
+        active_writer_epoch: Some(WriterEpoch::from(2)),
+        active_writer_id: Some(loonfs_api::WriterId::parse("writer").expect("writer id")),
+        active_acquired_at_ms: Some(1),
+        inode_id: Some(InodeId(1)),
+        expected_inode_id: Some(InodeId(2)),
+        actual_inode_id: Some(InodeId(3)),
+        expected_binding_version: Some(loonfs_api::BindingVersion::parse("aaaa").expect("version")),
+        actual_binding_version: Some(loonfs_api::BindingVersion::parse("bbbb").expect("version")),
+        expected_revision_no: Some(RevisionNo::from(1)),
+        actual_revision_no: Some(RevisionNo::from(2)),
+        expected_attributes_revision_no: Some(AttributesRevisionNo::from(1)),
+        actual_attributes_revision_no: Some(AttributesRevisionNo::from(2)),
+        expected_access_revision_no: Some(loonfs_api::AccessRevisionNo(1)),
+        actual_access_revision_no: Some(loonfs_api::AccessRevisionNo(2)),
+        after_seq: Some(ChangeSeq::from(2)),
+        retention_floor_seq: Some(ChangeSeq::from(3)),
+        expected_deletion_seq: Some(ChangeSeq::from(4)),
+        actual_deletion_seq: Some(ChangeSeq::from(5)),
+        expected_head_seq: Some(ChangeSeq::from(6)),
+        actual_head_seq: Some(ChangeSeq::from(7)),
+        max_writer_sessions: Some(10_000),
+    };
+    let serialized = serde_json::to_value(populated).expect("serialize populated error details");
+    let registered = serialized
+        .as_object()
+        .expect("populated error details serialize as an object")
+        .keys()
+        .cloned()
+        .collect();
+
+    assert_eq!(documented, registered);
+}
+
+fn assert_api_spec_error_codes_are_registered(spec: &str) {
+    let openapi: serde_json::Value = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../docs/specs/openapi.json"
+    )))
+    .expect("decode docs/specs/openapi.json");
+    let operation_ids: std::collections::BTreeSet<_> = openapi["paths"]
+        .as_object()
+        .expect("OpenAPI paths object")
+        .values()
+        .flat_map(|path| {
+            path.as_object()
+                .expect("OpenAPI path item")
+                .values()
+                .filter_map(|operation| operation.get("operationId")?.as_str())
+        })
+        .collect();
+    let schema_properties: std::collections::BTreeSet<_> = openapi["components"]["schemas"]
+        .as_object()
+        .expect("OpenAPI schemas object")
+        .values()
+        .filter_map(|schema| schema.get("properties")?.as_object())
+        .flat_map(|properties| properties.keys().map(String::as_str))
+        .collect();
+
+    for token in spec
+        .split('`')
+        .skip(1)
+        .step_by(2)
+        .filter(|token| is_snake_case_token(token))
+    {
+        if API_SPEC_NON_ERROR_CODE_TOKENS.contains(&token)
+            || operation_ids.contains(token)
+            || schema_properties.contains(token)
+        {
+            continue;
+        }
+        // Valid inode IDs are examples, not error codes.
+        if loonfs_api::public_inode_id::decode(token).is_ok() {
+            continue;
+        }
+        assert!(
+            ErrorCode::parse(token).is_some(),
+            "api.md uses unregistered error-code-shaped token `{token}`"
+        );
+    }
+}
+
+fn is_snake_case_token(token: &str) -> bool {
+    token.contains('_')
+        && token.starts_with(|character: char| character.is_ascii_lowercase())
+        && !token.ends_with('_')
+        && !token.contains("__")
+        && token
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+}
+use loonfs_test_support::http::{raw_agent, retry_on_macos_teardown_einval};
+use loonfs_test_support::ids::namespace_id;
+use loonfs_test_support::stores::{
+    delegate_object_store, BufferWatchStore, FailStore, InjectedError, KeyPredicate,
+    OperationClass, OperationContext, OperationKind,
+};
+use std::sync::Arc;
+use tempfile::tempdir;
+
+const POISON_PROVIDER_DETAIL: &str = "<Error>AccessDenied</Error> \
+    arn:aws:iam::123456789012:role/private-role private-bucket \
+    namespaces/customer-a/hint.json x-amz-request-id=provider-request \
+    x-amz-id-2=provider-host-id AKIAEXAMPLE";
+
+fn assert_provider_markers_absent(rendered: &str) {
+    for marker in [
+        "<Error>AccessDenied</Error>",
+        "arn:aws:iam::123456789012:role/private-role",
+        "private-bucket",
+        "namespaces/customer-a/hint.json",
+        "x-amz-request-id=provider-request",
+        "x-amz-id-2=provider-host-id",
+        "AKIAEXAMPLE",
+    ] {
+        assert!(
+            !rendered.contains(marker),
+            "API body leaked {marker}: {rendered}"
+        );
+    }
+}
+
+#[derive(Debug)]
+struct PoisonProviderStore;
+
+impl PoisonProviderStore {
+    fn denied(key: &str) -> ObjectStoreError {
+        ObjectStoreError::PermissionDenied {
+            object_key: key.to_owned(),
+            message: POISON_PROVIDER_DETAIL.to_owned(),
+        }
+    }
+}
+
+#[tokio::test]
+async fn provider_failure_is_projected_in_the_remote_api_envelope() {
+    use tower::ServiceExt;
+
+    let temp_dir = tempdir().expect("tempdir");
+    let store = FailStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("construct local store"),
+        KeyPredicate::any(),
+        OperationClass::Any,
+        InjectedError::PermissionDenied(POISON_PROVIDER_DETAIL.to_owned()),
+    );
+    store.fail_all();
+    let router = test_app(
+        test_options(temp_dir.path(), "provider-hygiene-writer"),
+        options_with_store(Arc::new(store)),
+    )
+    .await
+    .expect("build app")
+    .0;
+    let response = router
+        .oneshot(
+            axum::http::Request::builder()
+                .method(axum::http::Method::POST)
+                .uri("/v0/namespaces")
+                .header(axum::http::header::AUTHORIZATION, "Bearer test-token")
+                .header("Loonfs-Actor", "test-actor")
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(axum::body::Body::from(r#"{"namespace_id":"customer-a"}"#))
+                .expect("create namespace request"),
+        )
+        .await
+        .expect("create namespace response");
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let request_id = response
+        .headers()
+        .get(super::REQUEST_ID_HEADER)
+        .expect("request id header")
+        .to_str()
+        .expect("request id header is text")
+        .to_owned();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read provider failure body");
+    let rendered = String::from_utf8(body.to_vec()).expect("API body is UTF-8");
+
+    assert_provider_markers_absent(&rendered);
+    assert!(rendered.contains(
+        "object-store permission denied; verify that the selected credentials can access the configured bucket and key prefix"
+    ));
+    assert!(rendered.contains(&request_id), "{rendered}");
+}
+
+#[tokio::test]
+async fn provider_failure_is_projected_in_the_presign_api_envelope() {
+    use axum::response::IntoResponse;
+
+    let response = super::REQUEST_ID
+        .scope("req_presign_hygiene".to_owned(), async {
+            super::handlers_uploads::presign_issuer_error(PoisonProviderStore::denied(
+                "namespaces/customer-a/hint.json",
+            ))
+            .into_response()
+        })
+        .await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read presign failure body");
+    let rendered = String::from_utf8(body.to_vec()).expect("API body is UTF-8");
+
+    assert_provider_markers_absent(&rendered);
+    assert!(rendered.contains(
+        "object-store permission denied; verify that the selected credentials can access the configured bucket and key prefix"
+    ));
+    assert!(rendered.contains("req_presign_hygiene"), "{rendered}");
+}
+
+#[tokio::test]
+async fn invalid_presign_content_is_a_bad_request() {
+    use axum::response::IntoResponse;
+
+    let response = super::handlers_uploads::presign_issuer_error(
+        ObjectStoreError::InvalidContentRef("invalid checksum".to_owned()),
+    )
+    .into_response();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read presign error body");
+    let rendered = String::from_utf8(body.to_vec()).expect("API body is UTF-8");
+    assert!(rendered.contains("invalid_request"), "{rendered}");
+    assert!(rendered.contains("/content"), "{rendered}");
+}
+
+fn data_wal_put_for(
+    namespace_id: &NamespaceId,
+) -> impl Fn(&OperationContext<'_>) -> bool + Send + Sync + 'static {
+    let prefix = loonfs_objectstore::keys::wal_segment_prefix(namespace_id);
+    move |operation| match operation.kind() {
+        OperationKind::Put {
+            bytes,
+            mode: PutMode::CreateIfAbsent,
+        } if operation.key().starts_with(&prefix) => {
+            loonfs_api::wire::wal::decode_wal_segment_envelope_zstd(bytes)
+                .is_ok_and(|envelope| !envelope.payload().records.is_empty())
+        }
+        _ => false,
+    }
+}
+
+#[tokio::test]
+async fn maintenance_namespace_diagnostics_route_answers_storage_fields() {
+    use tower::ServiceExt;
+
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
+    let (router, state) = test_app(
+        test_options(temp_dir.path(), "namespace-diagnostics-route-writer"),
+        options_with_store(store),
+    )
+    .await
+    .expect("build app");
+    let namespace_id = namespace_id("diagnostics");
+    state
+        .writer
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("create namespace");
+    state
+        .writer
+        .put_file_bytes(
+            &namespace_id,
+            "/note.txt",
+            b"diagnostic tail",
+            PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("publish one WAL segment");
+
+    let response = router
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/v0/maintenance/namespaces/diagnostics/diagnostics")
+                .header(axum::http::header::AUTHORIZATION, "Bearer test-token")
+                .body(axum::body::Body::empty())
+                .expect("diagnostics request"),
+        )
+        .await
+        .expect("diagnostics response");
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("diagnostics body");
+    let diagnostics: loonfs_api::NamespaceDiagnostics =
+        serde_json::from_slice(&body).expect("namespace diagnostics response");
+    assert_eq!(diagnostics.namespace_id, namespace_id);
+    assert_eq!(diagnostics.head_seq, ChangeSeq(1));
+    assert_eq!(diagnostics.retention_floor_seq, ChangeSeq(0));
+    assert_eq!(
+        diagnostics.current_manifest_no,
+        Some(loonfs_api::ManifestNo(2))
+    );
+    assert_eq!(diagnostics.wal_tail_segments, 2);
+    assert_eq!(diagnostics.live_snapshots, 0);
+    assert_eq!(diagnostics.live_checkpoints, 0);
+
+    state.writer.shutdown().await.expect("shutdown writer");
+}
+
+#[tokio::test]
+#[allow(clippy::disallowed_methods)]
+// The sleeping handler is the controlled work the deadline cancels.
+async fn request_deadline_answers_503_and_leaves_fast_handlers_untouched() {
+    use tower::ServiceExt;
+
+    let request_deadline_ms = 10;
+    let router = axum::Router::new()
+        .route(
+            "/slow",
+            axum::routing::get(|| async {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                "slow"
+            }),
+        )
+        .route("/fast", axum::routing::get(|| async { "fast" }))
+        .route_layer(axum::middleware::from_fn(
+            move |request: axum::extract::Request, next: axum::middleware::Next| {
+                super::with_request_deadline(request_deadline_ms, request, next)
+            },
+        ))
+        .layer(axum::middleware::from_fn(super::with_request_id));
+
+    let slow = router
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/slow")
+                .body(axum::body::Body::empty())
+                .expect("slow request"),
+        )
+        .await
+        .expect("slow response");
+    assert_eq!(slow.status(), axum::http::StatusCode::SERVICE_UNAVAILABLE);
+    // Do not advertise an automatic retry when the cancelled work may still
+    // complete.
+    assert!(slow
+        .headers()
+        .get(axum::http::header::RETRY_AFTER)
+        .is_none());
+    let request_id = slow
+        .headers()
+        .get(super::REQUEST_ID_HEADER)
+        .expect("request id header")
+        .to_str()
+        .expect("request id header text")
+        .to_owned();
+    let body = axum::body::to_bytes(slow.into_body(), usize::MAX)
+        .await
+        .expect("deadline body");
+    let error: loonfs_api::ApiError = serde_json::from_slice(&body).expect("deadline envelope");
+    assert_eq!(error.code, ErrorCode::DeadlineExceeded.as_str());
+    assert_eq!(error.request_id.as_deref(), Some(request_id.as_str()));
+    assert!(error.message.contains("request_deadline_ms"));
+    assert!(error.message.contains("10"));
+
+    let fast = router
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/fast")
+                .body(axum::body::Body::empty())
+                .expect("fast request"),
+        )
+        .await
+        .expect("fast response");
+    assert_eq!(fast.status(), axum::http::StatusCode::OK);
+    let body = axum::body::to_bytes(fast.into_body(), usize::MAX)
+        .await
+        .expect("fast body");
+    assert_eq!(&body[..], b"fast");
+}
+
+#[tokio::test]
+async fn deadline_exemptions_name_served_routes_and_cover_both_content_spellings() {
+    use tower::ServiceExt;
+
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
+    let router = test_app(
+        test_options(temp_dir.path(), "deadline-exempt-route-writer"),
+        options_with_store(store),
+    )
+    .await
+    .expect("build app")
+    .0;
+
+    for content_route in [
+        "/v0/namespaces/{namespace_id}/filesystem/content",
+        "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/content",
+    ] {
+        assert!(
+            super::DEADLINE_EXEMPT_ROUTES.contains(&content_route),
+            "content route `{content_route}` is not deadline exempt"
+        );
+    }
+
+    for route in super::DEADLINE_EXEMPT_ROUTES {
+        let uri = route
+            .replace("{namespace_id}", "deadline-exempt")
+            .replace("{upload_id}", "upl_deadline_exempt")
+            .replace("{inode_id}", "ino_1")
+            .replace("{revision_no}", "1");
+        let response = router
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(&uri)
+                    .body(axum::body::Body::empty())
+                    .expect("route request"),
+            )
+            .await
+            .expect("route response");
+        assert_ne!(
+            response.status(),
+            axum::http::StatusCode::NOT_FOUND,
+            "deadline exemption `{route}` does not match a served route"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn grep_error_disabled_manifest_is_not_materialized_and_core_reads_survive() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
+    let namespace_id = namespace_id("grep-error-disabled");
+    let writer = seed_grep_error_namespace(&store, &namespace_id).await;
+    let worker = grep_error_worker(&store).await;
+    worker.enable(&namespace_id).await.expect("enable grep");
+    worker.disable(&namespace_id).await.expect("disable grep");
+    writer.shutdown().await.expect("shutdown writer");
+
+    let harness = start_grep_error_server(store, temp_dir.path(), "disabled-server").await;
+    let client = &harness.client;
+    let binding = grep_error_request();
+    let result = client.grep(&namespace_id, &binding, None);
+    assert_grep_api_error_and_core_read(
+        client,
+        &namespace_id,
+        result.await,
+        501,
+        ErrorCode::NotSupported,
+        "not enabled",
+    )
+    .await;
+    harness.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn grep_error_mid_backfill_is_not_materialized_and_core_reads_survive() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
+    let namespace_id = namespace_id("grep-error-backfill");
+    let writer = seed_grep_error_namespace(&store, &namespace_id).await;
+    grep_error_worker(&store)
+        .await
+        .enable(&namespace_id)
+        .await
+        .expect("leave grep backfilling");
+    writer.shutdown().await.expect("shutdown writer");
+
+    let harness = start_grep_error_server(store, temp_dir.path(), "backfill-server").await;
+    let client = &harness.client;
+    let binding = grep_error_request();
+    let result = client.grep(&namespace_id, &binding, None);
+    assert_grep_api_error_and_core_read(
+        client,
+        &namespace_id,
+        result.await,
+        501,
+        ErrorCode::NotSupported,
+        "backfill has not completed",
+    )
+    .await;
+    harness.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn grep_error_store_outage_is_provider_failure_and_core_reads_survive() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = namespace_id("grep-error-store");
+    let fault_store = Arc::new(FailStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("construct local store"),
+        KeyPredicate::exact(grep_hint_key(&namespace_id)),
+        OperationClass::GetWithMetadata,
+        InjectedError::Transport("injected grep manifest outage".to_owned()),
+    ));
+    let store = fault_store.clone() as SharedObjectStore;
+    let writer = seed_grep_error_namespace(&store, &namespace_id).await;
+    writer.shutdown().await.expect("shutdown writer");
+
+    let harness = start_grep_error_server(store, temp_dir.path(), "store-server").await;
+    fault_store.fail_next(1);
+    let client = &harness.client;
+    let binding = grep_error_request();
+    let result = client.grep(&namespace_id, &binding, None);
+    assert_grep_api_error_and_core_read(
+        client,
+        &namespace_id,
+        result.await,
+        500,
+        ErrorCode::ServerError,
+        "object-store request failed",
+    )
+    .await;
+    harness.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn grep_error_unreadable_manifests_are_index_corrupt_and_core_reads_survive() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
+    let corrupt_pointer = namespace_id("grep-error-pointer");
+    let missing_manifest = namespace_id("grep-error-missing-manifest");
+    let corrupt_manifest = namespace_id("grep-error-manifest");
+    let identity_mismatch = namespace_id("grep-error-identity");
+
+    let writer = test_runtime(store.clone(), "grep-error-seed").await;
+    for namespace_id in [
+        &corrupt_pointer,
+        &missing_manifest,
+        &corrupt_manifest,
+        &identity_mismatch,
+    ] {
+        seed_grep_error_namespace_on(&writer, namespace_id).await;
+    }
+
+    store
+        .put_overwrite(
+            &grep_hint_key(&corrupt_pointer),
+            Bytes::from_static(b"corrupt grep pointer"),
+        )
+        .await
+        .expect("write corrupt grep pointer");
+
+    write_grep_hint(
+        &*store,
+        &missing_manifest,
+        missing_manifest.clone(),
+        loonfs_api::ManifestNo(11),
+    )
+    .await;
+
+    let manifest_no = loonfs_api::ManifestNo(12);
+    store
+        .put_overwrite(
+            &grep_manifest_key(&corrupt_manifest, &manifest_no),
+            Bytes::from_static(b"corrupt grep manifest"),
+        )
+        .await
+        .expect("write corrupt grep manifest");
+    write_grep_hint(
+        &*store,
+        &corrupt_manifest,
+        corrupt_manifest.clone(),
+        manifest_no,
+    )
+    .await;
+
+    write_grep_hint(
+        &*store,
+        &identity_mismatch,
+        NamespaceId::parse("different-grep-identity").expect("different namespace id"),
+        loonfs_api::ManifestNo(13),
+    )
+    .await;
+
+    writer.shutdown().await.expect("shutdown writer");
+
+    let harness = start_grep_error_server(store, temp_dir.path(), "index-corrupt-server").await;
+    let client = &harness.client;
+    for namespace_id in [
+        corrupt_pointer,
+        missing_manifest,
+        corrupt_manifest,
+        identity_mismatch,
+    ] {
+        let result = client
+            .grep(&namespace_id, &grep_error_request(), None)
+            .await;
+        assert_grep_api_error_and_core_read(
+            client,
+            &namespace_id,
+            result,
+            500,
+            ErrorCode::IndexCorrupt,
+            "disable and re-enable grep to rebuild it",
+        )
+        .await;
+    }
+    harness.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn grep_error_publication_conflict_is_stale_head_and_core_reads_survive() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = namespace_id("grep-error-conflict");
+    let manifest_key = grep_manifest_key(&namespace_id, &loonfs_api::ManifestNo(1));
+    let fault_store = Arc::new(FailStore::matching(
+        LocalFsStore::new(temp_dir.path()).expect("construct local store"),
+        move |context: &OperationContext<'_>| {
+            context.key() == manifest_key
+                && matches!(
+                    context.kind(),
+                    OperationKind::Put {
+                        mode: PutMode::CreateIfAbsent,
+                        ..
+                    }
+                )
+        },
+        InjectedError::PreconditionFailed,
+    ));
+    let store = fault_store.clone() as SharedObjectStore;
+    let writer = seed_grep_error_namespace(&store, &namespace_id).await;
+    writer.shutdown().await.expect("shutdown writer");
+
+    let harness =
+        start_grep_maintenance_error_server(store, temp_dir.path(), "conflict-server").await;
+    fault_store.fail_next(1);
+    let client = &harness.client;
+    let result = client.enable_grep_index(&namespace_id);
+    assert_grep_api_error_and_core_read(
+        client,
+        &namespace_id,
+        result.await,
+        409,
+        ErrorCode::StaleHead,
+        "publication conflict",
+    )
+    .await;
+    harness.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn runtime_created_state_is_readable_through_http() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
+    let fs = test_runtime(store.clone(), "runtime-writer").await;
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    fs.create_namespace(
+        &namespace_id,
+        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+    )
+    .await
+    .expect("create namespace through runtime");
+    fs.put_file_bytes(
+        &namespace_id,
+        "/notes/hello.txt",
+        b"hello from runtime",
+        PutFileOptions {
+            behavior: DestinationBehavior::NoReplace,
+            commit: loonfs_api::options::CommitOptions {
+                preconditions: Vec::new(),
+                actor_id: loonfs_test_support::test_actor(),
+                commit_id: Some(CommitId::parse("runtime-put").expect("valid commit id")),
+                message: None,
+            },
+            expected_inode_id: None,
+            expected_revision_no: None,
+        },
+    )
+    .await
+    .expect("write file through runtime");
+
+    let harness = start_server(store, temp_dir.path(), "server-writer").await;
+    let target = NamespacePath::parse("demo", "/notes/hello.txt").expect("target");
+    let stat = harness
+        .client
+        .get_path_entry(&target, &Default::default())
+        .await
+        .expect("stat file");
+    assert_eq!(stat.path, "/notes/hello.txt");
+    assert_eq!(stat.size_bytes(), Some(18));
+    let bytes = harness
+        .client
+        .get_file_bytes(&target, &Default::default())
+        .await
+        .expect("read file");
+    assert_eq!(bytes, b"hello from runtime");
+
+    harness.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_created_state_is_readable_through_runtime() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
+    let fs = test_runtime(store.clone(), "runtime-reader").await;
+    let harness = start_server(store.clone(), temp_dir.path(), "server-writer").await;
+
+    harness
+        .client
+        .create_namespace(
+            &namespace_id("demo"),
+            &loonfs_test_support::test_actor(),
+            loonfs_api::NamespaceAccess::unrestricted(),
+        )
+        .await
+        .expect("create namespace through http");
+    let target = NamespacePath::parse("demo", "/notes/from-http.txt").expect("target");
+    harness
+        .client
+        .put_file_bytes(&target, b"hello from http", &replace_file_options())
+        .await
+        .expect("write file through http");
+
+    let file = fs
+        .reader()
+        .get_file_bytes(
+            &NamespaceId::parse("demo").expect("valid namespace id"),
+            "/notes/from-http.txt",
+        )
+        .await
+        .expect("read file through runtime");
+    assert_eq!(file.bytes, b"hello from http");
+
+    harness.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_missing_namespace_mutations_return_namespace_not_found() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
+    let harness = start_server(store, temp_dir.path(), "server-writer").await;
+
+    let target = NamespacePath::parse("missing", "/notes/hello.txt").expect("target");
+    assert_api_error(
+        harness
+            .client
+            .put_file_bytes(&target, b"hello", &replace_file_options())
+            .await,
+        404,
+        "namespace_not_found",
+        Some("namespace `missing` does not exist"),
+    );
+    assert_api_error(
+        harness
+            .client
+            .delete_path(
+                &target,
+                &DeleteOptions::new(loonfs_test_support::test_actor()),
+            )
+            .await,
+        404,
+        "namespace_not_found",
+        Some("namespace `missing` does not exist"),
+    );
+    let destination = NamespacePath::parse("missing", "/notes/renamed.txt").expect("target");
+    assert_api_error(
+        harness
+            .client
+            .move_path(
+                &target,
+                &destination,
+                &MoveOptions {
+                    behavior: DestinationBehavior::NoReplace,
+                    commit: loonfs_api::options::CommitOptions {
+                        preconditions: Vec::new(),
+                        actor_id: loonfs_test_support::test_actor(),
+                        commit_id: None,
+                        message: None,
+                    },
+                    expected_destination_inode_id: None,
+                    expected_destination_revision_no: None,
+                },
+            )
+            .await,
+        404,
+        "namespace_not_found",
+        Some("namespace `missing` does not exist"),
+    );
+
+    harness.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_missing_namespace_reads_return_namespace_not_found() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
+    let harness = start_server(store, temp_dir.path(), "server-writer").await;
+
+    let target = NamespacePath::parse("missing", "/").expect("target");
+    let mut pager =
+        harness
+            .client
+            .list_path_entries_pager(&target, None, None, &Default::default());
+    assert_api_error(
+        pager.next().await.expect("a fresh pager has one page"),
+        404,
+        "namespace_not_found",
+        Some("namespace `missing` does not exist"),
+    );
+
+    harness.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_delete_missing_path_returns_path_not_found() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
+    bootstrap_namespace(&store, "server-writer", &namespace_id("demo")).await;
+
+    let harness = start_server(store, temp_dir.path(), "server-writer").await;
+    let target = NamespacePath::parse("demo", "/missing.txt").expect("target");
+    assert_api_error(
+        harness
+            .client
+            .delete_path(
+                &target,
+                &DeleteOptions::new(loonfs_test_support::test_actor()),
+            )
+            .await,
+        404,
+        "path_not_found",
+        None,
+    );
+
+    harness.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_put_over_directory_and_move_into_existing_target_return_path_conflict() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
+    let seeder = bootstrap_namespace(&store, "server-writer", &namespace_id("demo")).await;
+    write_file_bytes(
+        &seeder,
+        &namespace_id("demo"),
+        "/docs/readme.txt",
+        b"readme",
+        "seed-docs",
+    )
+    .await;
+    write_file_bytes(
+        &seeder,
+        &namespace_id("demo"),
+        "/tmp/a.txt",
+        b"from tmp",
+        "seed-tmp",
+    )
+    .await;
+    write_file_bytes(
+        &seeder,
+        &namespace_id("demo"),
+        "/docs/a.txt",
+        b"in docs",
+        "seed-target",
+    )
+    .await;
+
+    let harness = start_server(store, temp_dir.path(), "server-writer").await;
+    let dir_target = NamespacePath::parse("demo", "/docs").expect("dir target");
+    assert_api_error(
+        harness
+            .client
+            .put_file_bytes(&dir_target, b"not a file", &replace_file_options())
+            .await,
+        409,
+        "path_conflict",
+        None,
+    );
+
+    let from = NamespacePath::parse("demo", "/tmp/a.txt").expect("from");
+    let to = NamespacePath::parse("demo", "/docs/a.txt").expect("to");
+    assert_api_error(
+        harness
+            .client
+            .move_path(
+                &from,
+                &to,
+                &MoveOptions {
+                    behavior: DestinationBehavior::NoReplace,
+                    commit: loonfs_api::options::CommitOptions {
+                        preconditions: Vec::new(),
+                        actor_id: loonfs_test_support::test_actor(),
+                        commit_id: None,
+                        message: None,
+                    },
+                    expected_destination_inode_id: None,
+                    expected_destination_revision_no: None,
+                },
+            )
+            .await,
+        409,
+        "path_conflict",
+        None,
+    );
+
+    harness.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_put_with_preconditions_rejects_a_delete_recreate_race() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
+    let seeder = bootstrap_namespace(&store, "server-writer", &namespace_id("demo")).await;
+    write_file_bytes(
+        &seeder,
+        &namespace_id("demo"),
+        "/docs/guarded.txt",
+        b"old inode",
+        "seed-guarded-put",
+    )
+    .await;
+
+    let harness = start_server(store, temp_dir.path(), "server-writer").await;
+    let target = NamespacePath::parse("demo", "/docs/guarded.txt").expect("target");
+    let observed = harness
+        .client
+        .get_path_entry(&target, &Default::default())
+        .await
+        .expect("observe file");
+    harness
+        .client
+        .delete_path(
+            &target,
+            &DeleteOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("delete observed file");
+    harness
+        .client
+        .put_file_bytes(
+            &target,
+            b"new inode",
+            &PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("recreate path");
+    let recreated = harness
+        .client
+        .get_path_entry(&target, &Default::default())
+        .await
+        .expect("observe recreated file");
+
+    let mut with_preconditions = replace_file_options();
+    with_preconditions.expected_inode_id = Some(observed.inode_id);
+    with_preconditions.expected_revision_no = Some(RevisionNo(1));
+    match harness
+        .client
+        .put_file_bytes(&target, b"must not land", &with_preconditions)
+        .await
+        .expect_err("the recreated inode must fail the precondition")
+    {
+        ClientError::Api {
+            status,
+            code,
+            details: Some(details),
+            ..
+        } => {
+            assert_eq!(status, 409);
+            assert_eq!(code, "path_conflict");
+            assert_eq!(details.expected_inode_id, Some(observed.inode_id));
+            assert_eq!(details.actual_inode_id, Some(recreated.inode_id));
+        }
+        other => panic!("expected structured path conflict, got {other:?}"),
+    }
+
+    harness.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_move_with_preconditions_rejects_a_bumped_destination_revision() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
+    let seeder = bootstrap_namespace(&store, "server-writer", &namespace_id("demo")).await;
+    write_file_bytes(
+        &seeder,
+        &namespace_id("demo"),
+        "/docs/source.txt",
+        b"source",
+        "seed-guarded-move-source",
+    )
+    .await;
+    write_file_bytes(
+        &seeder,
+        &namespace_id("demo"),
+        "/docs/destination.txt",
+        b"destination v1",
+        "seed-guarded-move-destination",
+    )
+    .await;
+
+    let harness = start_server(store, temp_dir.path(), "server-writer").await;
+    let from = NamespacePath::parse("demo", "/docs/source.txt").expect("source");
+    let to = NamespacePath::parse("demo", "/docs/destination.txt").expect("destination");
+    let observed = harness
+        .client
+        .get_path_entry(&to, &Default::default())
+        .await
+        .expect("observe destination");
+    harness
+        .client
+        .put_file_bytes(&to, b"destination v2", &replace_file_options())
+        .await
+        .expect("bump destination revision");
+
+    assert_api_error(
+        harness
+            .client
+            .move_path(
+                &from,
+                &to,
+                &MoveOptions {
+                    behavior: DestinationBehavior::Replace,
+                    commit: loonfs_api::options::CommitOptions::new(
+                        loonfs_test_support::test_actor(),
+                    ),
+                    expected_destination_inode_id: Some(observed.inode_id),
+                    expected_destination_revision_no: Some(RevisionNo(1)),
+                },
+            )
+            .await,
+        409,
+        "stale_revision",
+        None,
+    );
+
+    harness.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_put_and_move_under_deleted_ancestor_create_fresh_subtrees() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
+    let seeder = bootstrap_namespace(&store, "server-writer", &namespace_id("demo")).await;
+    write_file_bytes(
+        &seeder,
+        &namespace_id("demo"),
+        "/docs/old.txt",
+        b"old",
+        "seed-docs",
+    )
+    .await;
+    write_file_bytes(
+        &seeder,
+        &namespace_id("demo"),
+        "/tmp/source.txt",
+        b"source",
+        "seed-source",
+    )
+    .await;
+    delete_path_recursive(&seeder, &namespace_id("demo"), "/docs", "delete-docs").await;
+
+    let harness = start_server(store, temp_dir.path(), "server-writer").await;
+    // The deleted name is invisible and immediately reusable; the
+    // dead subtree's children stay dead.
+    let put_target = NamespacePath::parse("demo", "/docs/new.txt").expect("put target");
+    harness
+        .client
+        .put_file_bytes(&put_target, b"new", &replace_file_options())
+        .await
+        .expect("put recreates the subtree");
+    let old_child = NamespacePath::parse("demo", "/docs/old.txt").expect("old child");
+    assert_api_error(
+        harness
+            .client
+            .get_path_entry(&old_child, &Default::default())
+            .await,
+        404,
+        "path_not_found",
+        None,
+    );
+
+    let from = NamespacePath::parse("demo", "/tmp/source.txt").expect("from");
+    let to = NamespacePath::parse("demo", "/docs/source.txt").expect("to");
+    harness
+        .client
+        .move_path(
+            &from,
+            &to,
+            &MoveOptions {
+                behavior: DestinationBehavior::NoReplace,
+                commit: loonfs_api::options::CommitOptions {
+                    preconditions: Vec::new(),
+                    actor_id: loonfs_test_support::test_actor(),
+                    commit_id: None,
+                    message: None,
+                },
+                expected_destination_inode_id: None,
+                expected_destination_revision_no: None,
+            },
+        )
+        .await
+        .expect("move lands in the recreated subtree");
+
+    harness.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_path_mutation_retries_a_wal_put_collision() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = namespace_id("demo");
+    let failures = Arc::new(FailStore::matching(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        data_wal_put_for(&namespace_id),
+        InjectedError::PreconditionFailed,
+    ));
+    let store = failures.clone() as SharedObjectStore;
+    bootstrap_namespace(&store, "server-writer", &namespace_id).await;
+    failures.fail_next(1);
+
+    let harness = start_server(store, temp_dir.path(), "server-writer").await;
+    let target = NamespacePath::parse("demo", "/notes/race.txt").expect("target");
+    let result = harness
+        .client
+        .put_file_bytes(&target, b"race", &replace_file_options())
+        .await
+        .expect("path write retries the WAL collision");
+    assert_eq!(result.committed_seq, ChangeSeq(1));
+    assert_eq!(failures.attempts(), 2);
+
+    harness.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_first_write_takes_over_a_namespace_owned_by_another_writer() {
+    // With no lease, the server's first semantic write acquires the
+    // epoch immediately and fences the previous session.
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
+    bootstrap_namespace(&store, "other-writer", &namespace_id("demo")).await;
+    let store_for_check = store.clone();
+
+    let harness = start_server(store, temp_dir.path(), "server-writer").await;
+    let target = NamespacePath::parse("demo", "/notes/taken-over.txt").expect("target");
+    let result = harness
+        .client
+        .put_file_bytes(&target, b"taken over", &replace_file_options())
+        .await
+        .expect("first write takes over the namespace");
+    assert_eq!(result.committed_seq, ChangeSeq(1));
+
+    let head =
+        loonfs::control::load_namespace_read_state(store_for_check.as_ref(), &namespace_id("demo"))
+            .await
+            .expect("read head");
+    assert_eq!(
+        head.writer.expect("writer block").writer_id,
+        loonfs_api::WriterId::parse("server-writer").expect("writer id")
+    );
+
+    harness.server.abort();
+}
+
+struct TestHarness {
+    client: Client,
+    server: tokio::task::JoinHandle<()>,
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_answers_401_in_envelope_for_missing_and_wrong_tokens() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
+    let config = test_options(temp_dir.path(), "server-writer");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind listener");
+    let addr = listener.local_addr().expect("listener addr");
+    let router = test_app(config, options_with_store(store))
+        .await
+        .expect("build app")
+        .0;
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router).await.expect("serve app");
+    });
+
+    for auth_token in [None, Some("wrong-token".to_owned())] {
+        let client = Client::new(ClientConfig {
+            server_url: format!("http://{addr}"),
+            auth_token: auth_token.map(Into::into),
+            request_timeout_ms: None,
+            disable_transient_retry: false,
+            ca_cert_path: None,
+        })
+        .expect("valid client config");
+        assert_api_error(
+            client.get_namespace(&namespace_id("demo")).await,
+            401,
+            "unauthorized",
+            Some("missing or invalid bearer token"),
+        );
+        // The checkpoint inventory names this deployment's garbage-collection
+        // roots, so it answers behind the same token as everything else.
+        let mut pager = client.list_checkpoints_pager(&namespace_id("demo"), None, None);
+        assert_api_error(
+            pager.next().await.expect("a fresh pager has one page"),
+            401,
+            "unauthorized",
+            Some("missing or invalid bearer token"),
+        );
+    }
+
+    server.abort();
+}
+
+/// Sends a request and checks its JSON error response.
+///
+/// On macOS, ureq can hit EINVAL when the server rejects a request before
+/// reading its body. The retry helper handles only that socket error.
+fn expect_enveloped(
+    send: impl Fn() -> Result<ureq::Response, ureq::Error>,
+    expectation: &str,
+    status: u16,
+    code: &str,
+) -> serde_json::Value {
+    retry_on_macos_teardown_einval(|| {
+        let error = send().expect_err(expectation);
+        let ureq::Error::Status(actual_status, response) = error else {
+            panic!("expected a status error, got {error:?}");
+        };
+        assert_eq!(actual_status, status);
+        assert!(response.header("x-request-id").is_some());
+        let body = response.into_string().expect("read error body");
+        let body: serde_json::Value =
+            serde_json::from_str(&body).unwrap_or_else(|_| panic!("json body, got: {body}"));
+        assert_eq!(body["code"], code);
+        body
+    })
+}
+
+/// Checks that malformed requests return JSON API errors and that
+/// authentication runs before request parsing.
+// The request closures return ureq's large error type.
+#[allow(clippy::result_large_err)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
+    let config = test_options(temp_dir.path(), "server-writer");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind listener");
+    let addr = listener.local_addr().expect("listener addr");
+    let router = test_app(config, options_with_store(store))
+        .await
+        .expect("build app")
+        .0;
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router).await.expect("serve app");
+    });
+
+    // An invalid numeric query value returns invalid_request.
+    let changes_url = format!("http://{addr}/v0/namespaces/demo/changes?after_seq=abc");
+    let body = expect_enveloped(
+        || {
+            raw_agent()
+                .get(&changes_url)
+                .set("authorization", "Bearer test-token")
+                .call()
+        },
+        "malformed after_seq should answer 400",
+        400,
+        "invalid_request",
+    );
+    assert!(
+        body["message"]
+            .as_str()
+            .is_some_and(|message| message.starts_with("invalid after_seq `abc`:")),
+        "{body}"
+    );
+    assert_eq!(body["param"], "after_seq");
+
+    // The largest allowed value reaches namespace lookup. One higher is
+    // rejected while parsing the query.
+    expect_enveloped(
+        || {
+            raw_agent()
+                .get(&format!(
+                    "http://{addr}/v0/namespaces/demo/changes?after_seq=9007199254740991"
+                ))
+                .set("authorization", "Bearer test-token")
+                .call()
+        },
+        "valid sequence reaches the missing namespace",
+        404,
+        "namespace_not_found",
+    );
+
+    let body = expect_enveloped(
+        || {
+            raw_agent()
+                .get(&format!(
+                    "http://{addr}/v0/namespaces/demo/changes?after_seq=9007199254740992"
+                ))
+                .set("authorization", "Bearer test-token")
+                .call()
+        },
+        "out-of-range after_seq should return 400",
+        400,
+        "invalid_request",
+    );
+    assert_eq!(
+        body["message"],
+        "invalid after_seq `9007199254740992`: must be an integer from 0 through 9007199254740991"
+    );
+    assert_eq!(body["param"], "after_seq");
+
+    // Without credentials, authentication fails before the query is parsed.
+    expect_enveloped(
+        || raw_agent().get(&changes_url).call(),
+        "unauthorized should answer 401",
+        401,
+        "unauthorized",
+    );
+
+    // Optional numeric fields return a message that identifies the field.
+    let body = expect_enveloped(
+        || {
+            raw_agent()
+                .delete(&format!(
+                    "http://{addr}/v0/namespaces/demo?expected_head_seq=abc"
+                ))
+                .set("authorization", "Bearer test-token")
+                .call()
+        },
+        "malformed expected_head_seq should answer 400",
+        400,
+        "invalid_request",
+    );
+    assert!(
+        body["message"]
+            .as_str()
+            .is_some_and(|message| message.starts_with("invalid expected_head_seq `abc`:")),
+        "{body}"
+    );
+    assert_eq!(body["param"], "expected_head_seq");
+
+    // A missing required query parameter returns invalid_request.
+    let body = expect_enveloped(
+        || {
+            raw_agent()
+                .get(&format!(
+                    "http://{addr}/v0/namespaces/demo/filesystem/entry"
+                ))
+                .set("authorization", "Bearer test-token")
+                .call()
+        },
+        "missing path parameter should answer 400",
+        400,
+        "invalid_request",
+    );
+    assert_eq!(body["param"], "path");
+
+    // A malformed JSON body returns invalid_request after authentication.
+    // Without credentials, the server returns 401 before reading the body.
+    let create_url = format!("http://{addr}/v0/namespaces");
+    let body = expect_enveloped(
+        || {
+            raw_agent()
+                .post(&create_url)
+                .set("authorization", "Bearer test-token")
+                .set("Loonfs-Actor", "test-actor")
+                .set("content-type", "application/json")
+                .send_string(r#"{"namespace_id":"bad-actor","actor_id":7}"#)
+        },
+        "malformed actor should answer 400",
+        400,
+        "invalid_request",
+    );
+    assert_eq!(body["param"], "/actor_id");
+    let body = expect_enveloped(
+        || {
+            raw_agent()
+                .post(&create_url)
+                .set("authorization", "Bearer test-token")
+                .set("Loonfs-Actor", "test-actor")
+                .set("content-type", "application/json")
+                .send_string("{not json")
+        },
+        "malformed body should answer 400",
+        400,
+        "invalid_request",
+    );
+    assert!(body.get("param").is_none());
+    expect_enveloped(
+        || {
+            raw_agent()
+                .post(&create_url)
+                .set("content-type", "application/json")
+                .send_string("{not json")
+        },
+        "unauthorized malformed body should answer 401",
+        401,
+        "unauthorized",
+    );
+
+    // Invalid operation paths return invalid_request after authentication.
+    let commits_url = format!("http://{addr}/v0/namespaces/demo/commits");
+    let invalid_operation = r#"{
+        "commit_id":"invalid-path",
+        "operations":[{"kind":"create_directory","path":"relative"}]
+    }"#;
+    let body = expect_enveloped(
+        || {
+            raw_agent()
+                .post(&commits_url)
+                .set("authorization", "Bearer test-token")
+                .set("Loonfs-Actor", "test-actor")
+                .set("content-type", "application/json")
+                .send_string(invalid_operation)
+        },
+        "invalid operation path should answer 400",
+        400,
+        "invalid_request",
+    );
+    assert_eq!(body["param"], "/operations/0/path");
+    expect_enveloped(
+        || {
+            raw_agent()
+                .post(&commits_url)
+                .set("content-type", "application/json")
+                .send_string(invalid_operation)
+        },
+        "authorization should precede operation path decoding",
+        401,
+        "unauthorized",
+    );
+
+    let (body, description) = (
+        r#"{"commit_id":"unknown-field","unknown_field":true,"operations":[{"kind":"create_directory","path":"/docs"}]}"#,
+        "unknown body field",
+    );
+    let unknown = expect_enveloped(
+        || {
+            raw_agent()
+                .post(&commits_url)
+                .set("authorization", "Bearer test-token")
+                .set("Loonfs-Actor", "test-actor")
+                .set("content-type", "application/json")
+                .send_string(body)
+        },
+        description,
+        400,
+        "invalid_request",
+    );
+    assert_eq!(unknown["param"], "/unknown_field");
+    expect_enveloped(
+        || {
+            raw_agent()
+                .post(&commits_url)
+                .set("content-type", "application/json")
+                .send_string(body)
+        },
+        description,
+        401,
+        "unauthorized",
+    );
+    // Invalid grep path prefixes return invalid_request after authentication.
+    let grep_url =
+        format!("http://{addr}/v0/namespaces/demo/grep?pattern=needle&path_prefix=relative");
+    let body = expect_enveloped(
+        || {
+            raw_agent()
+                .get(&grep_url)
+                .set("authorization", "Bearer test-token")
+                .call()
+        },
+        "invalid grep path should answer 400",
+        400,
+        "invalid_request",
+    );
+    assert_eq!(body["param"], "path_prefix");
+    expect_enveloped(
+        || raw_agent().get(&grep_url).call(),
+        "authorization should precede grep path decoding",
+        401,
+        "unauthorized",
+    );
+
+    let runs_url = format!("http://{addr}/v0/maintenance/namespaces/demo/runs");
+    expect_enveloped(
+        || {
+            raw_agent()
+                .post(&runs_url)
+                .set("content-type", "application/json")
+                .send_string(r#"{"kind":"grep_gc"}"#)
+        },
+        "grep index collection should require authorization",
+        401,
+        "unauthorized",
+    );
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn http_namespace_json_body_over_the_limit_answers_content_too_large() {
+    use tower::ServiceExt;
+
+    let directory = tempdir().expect("temporary store");
+    let (router, state) = test_app(
+        test_options(directory.path(), "json-body-limit"),
+        TestAppOptions::default(),
+    )
+    .await
+    .expect("app");
+    let mut body = br#"{"namespace_id":"oversized-body"}"#.to_vec();
+    body.resize(super::MAX_JSON_BODY_BYTES + 1, b' ');
+
+    let response = router
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/v0/namespaces")
+                .header("authorization", "Bearer test-token")
+                .header("loonfs-actor", "test-actor")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(body))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    let body = axum::body::to_bytes(response.into_body(), 4096)
+        .await
+        .expect("response body");
+    let error: loonfs_api::ApiError = serde_json::from_slice(&body).expect("API error");
+    assert_eq!(error.code, ErrorCode::ContentTooLarge.as_str());
+    state.writer.shutdown().await.expect("writer shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_upload_body_over_the_limit_answers_content_too_large() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
+    bootstrap_namespace(&store, "runtime-writer", &namespace_id("demo")).await;
+    let mut config = test_options(temp_dir.path(), "server-writer");
+    config.binding.inline_content.inline_content_threshold_bytes = None;
+    config.binding.max_upload_bytes = 1024;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind listener");
+    let addr = listener.local_addr().expect("listener addr");
+    let router = test_app(config, options_with_store(store))
+        .await
+        .expect("build app")
+        .0;
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router).await.expect("serve app");
+    });
+
+    let client = Client::new(ClientConfig {
+        server_url: format!("http://{addr}"),
+        auth_token: Some("test-token".into()),
+        request_timeout_ms: None,
+        disable_transient_retry: false,
+        ca_cert_path: None,
+    })
+    .expect("valid client config");
+    let target = NamespacePath::parse("demo", "/big.bin").expect("target");
+    let namespace = namespace_id("demo");
+
+    // The cap is the server's, and it holds against any client: this drives
+    // the proxied content route directly, the way a client that never read
+    // the capability document would.
+    let session = client
+        .create_upload(
+            &namespace,
+            &loonfs_api::v0::CreateUploadBody::ServiceProxied {},
+        )
+        .await
+        .expect("begin a proxied upload session");
+    assert_api_error(
+        client
+            .put_upload_content(&namespace, &session.upload_id, &[0u8; 4096])
+            .await,
+        413,
+        "content_too_large",
+        None,
+    );
+
+    // A client that did read the document never sends it at all: with no
+    // direct transport on offer here, the payload has nowhere to go and the
+    // refusal comes before the bytes move.
+    match client
+        .put_file_bytes(&target, &[0u8; 4096], &replace_file_options())
+        .await
+    {
+        Err(ClientError::UploadTooLarge { size_bytes, .. }) => assert_eq!(size_bytes, 4096),
+        other => panic!("expected a client-side refusal, got {other:?}"),
+    }
+
+    // A body inside the limit still goes through on the same route.
+    client
+        .put_file_bytes(&target, &[0u8; 512], &replace_file_options())
+        .await
+        .expect("small upload fits under the limit");
+
+    server.abort();
+}
+
+/// A payload with a distinct byte at every offset, so bytes landing in the
+/// wrong order or twice cannot go unnoticed.
+fn distinct_bytes(len: usize) -> Vec<u8> {
+    (0..len).map(|offset| (offset % 251) as u8).collect()
+}
+
+/// What the write path is allowed to hold at once, and what it is asked to
+/// carry: three internal parts' worth, so a path that materializes its
+/// payload is caught by more than a rounding error.
+const MEMORY_BOUND_PART_BYTES: u64 = loonfs_objectstore::PROVIDER_MULTIPART_PART_BYTES;
+const MEMORY_BOUND_PAYLOAD_BYTES: usize = 3 * MEMORY_BOUND_PART_BYTES as usize + 4_096;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_proxied_upload_route_never_holds_the_whole_payload() {
+    let temp_dir = tempdir().expect("tempdir");
+    let watched = Arc::new(BufferWatchStore::watching_content(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+    ));
+    let store = Arc::clone(&watched) as SharedObjectStore;
+    bootstrap_namespace(&store, "runtime-writer", &namespace_id("demo")).await;
+    let harness = start_server(store, temp_dir.path(), "server-writer").await;
+
+    let payload = distinct_bytes(MEMORY_BOUND_PAYLOAD_BYTES);
+    let target = NamespacePath::parse("demo", "/streamed.bin").expect("target");
+    harness
+        .client
+        .put_file_bytes(&target, &payload, &replace_file_options())
+        .await
+        .expect("a multi-part payload uploads through the proxied route");
+
+    let peaks = watched.peaks();
+    assert_eq!(
+        peaks.total_bytes, MEMORY_BOUND_PAYLOAD_BYTES as u64,
+        "every payload byte crossed the store boundary exactly once"
+    );
+    assert!(
+        peaks.largest_buffer_bytes <= MEMORY_BOUND_PART_BYTES,
+        "no single buffer may exceed one part: largest was {}",
+        peaks.largest_buffer_bytes
+    );
+    assert!(
+        peaks.peak_live_bytes <= MEMORY_BOUND_PART_BYTES,
+        "the write path held {} bytes at once, past its one-part window",
+        peaks.peak_live_bytes
+    );
+
+    // And the bytes are the bytes.
+    let read_back = harness
+        .client
+        .get_file_bytes(&target, &Default::default())
+        .await
+        .expect("read the streamed object back");
+    assert_eq!(read_back, payload);
+
+    harness.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn put_streamed_writes_a_multi_part_payload_one_part_at_a_time() {
+    let temp_dir = tempdir().expect("tempdir");
+    let watched =
+        BufferWatchStore::watching_content(LocalFsStore::new(temp_dir.path()).expect("store"));
+
+    let payload = distinct_bytes(MEMORY_BOUND_PAYLOAD_BYTES);
+    let key = loonfs_objectstore::keys::content_blob(
+        &loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
+        &loonfs_api::ContentId::parse("con_0123456789abcdef0123456789abcdef").expect("content id"),
+    );
+    // Use HTTP-sized chunks so the store must regroup them.
+    let chunks: Vec<Bytes> = payload
+        .chunks(64 * 1024)
+        .map(Bytes::copy_from_slice)
+        .collect();
+    let stored = watched
+        .put_streamed(
+            &key,
+            futures::stream::iter(chunks.into_iter().map(Ok)).boxed(),
+            PutMode::CreateIfAbsent,
+        )
+        .await
+        .expect("stream a multi-part payload into the store");
+
+    assert_eq!(stored, MEMORY_BOUND_PAYLOAD_BYTES as u64);
+    let peaks = watched.peaks();
+    assert_eq!(peaks.total_bytes, MEMORY_BOUND_PAYLOAD_BYTES as u64);
+    assert!(
+        peaks.largest_buffer_bytes <= MEMORY_BOUND_PART_BYTES,
+        "no single buffer may exceed one part: largest was {}",
+        peaks.largest_buffer_bytes
+    );
+    assert!(
+        peaks.peak_live_bytes <= MEMORY_BOUND_PART_BYTES,
+        "the store held {} bytes at once, past its one-part window",
+        peaks.peak_live_bytes
+    );
+    assert_eq!(
+        watched
+            .get(&key, None)
+            .await
+            .expect("read back")
+            .expect("object exists"),
+        Bytes::from(payload)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_unknown_routes_and_methods_answer_in_envelope() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
+    let config = test_options(temp_dir.path(), "server-writer");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind listener");
+    let addr = listener.local_addr().expect("listener addr");
+    let router = test_app(config, options_with_store(store))
+        .await
+        .expect("build app")
+        .0;
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router).await.expect("serve app");
+    });
+
+    // Unknown path: in-envelope 404 instead of axum's empty body.
+    let error = raw_agent()
+        .get(&format!("http://{addr}/v0/nonexistent"))
+        .call()
+        .expect_err("unknown route should answer 404");
+    let ureq::Error::Status(status, response) = error else {
+        panic!("expected a status error for an unknown route");
+    };
+    assert_eq!(status, 404);
+    assert!(response.header("x-request-id").is_some());
+    let body = response.into_string().expect("read 404 body");
+    let body: serde_json::Value = serde_json::from_str(&body).expect("json 404 body");
+    assert_eq!(body["code"], "route_not_found");
+
+    // Served path, unserved method: in-envelope 405.
+    let error = raw_agent()
+        .delete(&format!("http://{addr}/v0/capabilities"))
+        .call()
+        .expect_err("wrong method should answer 405");
+    let ureq::Error::Status(status, response) = error else {
+        panic!("expected a status error for a wrong method");
+    };
+    assert_eq!(status, 405);
+    let body = response.into_string().expect("read 405 body");
+    let body: serde_json::Value = serde_json::from_str(&body).expect("json 405 body");
+    assert_eq!(body["code"], "method_not_allowed");
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_revisions_cursor_resumes_after_head_drift_and_rejects_the_future() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
+    let fs = bootstrap_namespace(&store, "runtime-writer", &namespace_id("demo")).await;
+    write_file_bytes(
+        &fs,
+        &namespace_id("demo"),
+        "/notes/file.txt",
+        b"one",
+        "c-rev1",
+    )
+    .await;
+    write_file_bytes(
+        &fs,
+        &namespace_id("demo"),
+        "/notes/file.txt",
+        b"two",
+        "c-rev2",
+    )
+    .await;
+
+    let config = test_options(temp_dir.path(), "server-writer");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind listener");
+    let addr = listener.local_addr().expect("listener addr");
+    let router = test_app(config, options_with_store(store))
+        .await
+        .expect("build app")
+        .0;
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router).await.expect("serve app");
+    });
+
+    let cursor = tokio::task::spawn_blocking({
+        move || {
+            let response = raw_agent()
+                .get(&format!(
+                    "http://{addr}/v0/namespaces/demo/filesystem/revisions"
+                ))
+                .set("authorization", "Bearer test-token")
+                .query("path", "/notes/file.txt")
+                .query("limit", "1")
+                .call()
+                .expect("first revisions page");
+            let body = response.into_string().expect("read revisions body");
+            let body: serde_json::Value = serde_json::from_str(&body).expect("json revisions");
+            body["next_cursor"]
+                .as_str()
+                .expect("two revisions produce a next_cursor")
+                .to_owned()
+        }
+    })
+    .await
+    .expect("join blocking task");
+
+    // A commit landing mid-listing does not retire the cursor: the resume
+    // continues after the last returned revision against the new head.
+    write_file_bytes(
+        &fs,
+        &namespace_id("demo"),
+        "/notes/other.txt",
+        b"x",
+        "c-rev3",
+    )
+    .await;
+
+    let resumed = tokio::task::spawn_blocking({
+        let cursor = cursor.clone();
+        move || {
+            let response = raw_agent()
+                .get(&format!(
+                    "http://{addr}/v0/namespaces/demo/filesystem/revisions"
+                ))
+                .set("authorization", "Bearer test-token")
+                .query("path", "/notes/file.txt")
+                .query("limit", "1")
+                .query("cursor", &cursor)
+                .call()
+                .expect("cursor resumes after head drift");
+            let body = response.into_string().expect("read resumed body");
+            serde_json::from_str::<serde_json::Value>(&body).expect("json resumed body")
+        }
+    })
+    .await
+    .expect("join blocking task");
+    assert_eq!(resumed["revisions"][0]["revision_no"], 1);
+    assert!(resumed["next_cursor"].is_null());
+
+    // A cursor from the future stays unanswerable.
+    let mut future_cursor: loonfs_api::FileRevisionsPageCursor =
+        loonfs_api::decode_cursor(&cursor).expect("decode revisions cursor");
+    future_cursor.head_seq = loonfs_api::ChangeSeq(future_cursor.head_seq.0 + 1000);
+    let future_cursor = loonfs_api::encode_cursor(&future_cursor).expect("encode future cursor");
+    let error = raw_agent()
+        .get(&format!(
+            "http://{addr}/v0/namespaces/demo/filesystem/revisions"
+        ))
+        .set("authorization", "Bearer test-token")
+        .query("path", "/notes/file.txt")
+        .query("limit", "1")
+        .query("cursor", &future_cursor)
+        .call()
+        .expect_err("future cursor should answer rebootstrap_required");
+    let ureq::Error::Status(status, response) = error else {
+        panic!("expected a status error for a future cursor");
+    };
+    assert_eq!(status, 409);
+    let body = response.into_string().expect("read future-cursor body");
+    let body: serde_json::Value = serde_json::from_str(&body).expect("json future-cursor body");
+    assert_eq!(body["code"], "rebootstrap_required");
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_uploads_answer_server_busy_at_the_concurrency_cap() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
+    bootstrap_namespace(&store, "runtime-writer", &namespace_id("demo")).await;
+    let mut config = test_options(temp_dir.path(), "server-writer");
+    config.binding.inline_content.inline_content_threshold_bytes = None;
+    config.binding.max_concurrent_uploads = 1;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind listener");
+    let addr = listener.local_addr().expect("listener addr");
+    let (router, state) = test_app(config, options_with_store(store))
+        .await
+        .expect("build app");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router).await.expect("serve app");
+    });
+
+    // Hold the only buffering slot, standing in for a slow concurrent
+    // upload; the next proxied body must be refused before buffering.
+    let held = state
+        .upload_permits
+        .clone()
+        .try_acquire_owned()
+        .expect("hold the only upload slot");
+
+    let client_config = ClientConfig {
+        server_url: format!("http://{addr}"),
+        auth_token: Some("test-token".into()),
+        request_timeout_ms: None,
+        // These tests assert the raw concurrency-cap answer; the client's
+        // transient retry would otherwise sleep through it.
+        disable_transient_retry: true,
+        ca_cert_path: None,
+    };
+    let config_for_busy = client_config.clone();
+    let client = Client::new(config_for_busy).expect("valid client config");
+    let target = NamespacePath::parse("demo", "/one.bin").expect("target");
+    assert_api_error(
+        client
+            .put_file_bytes(&target, &[0u8; 64], &replace_file_options())
+            .await,
+        503,
+        "server_busy",
+        Some("the server is at its concurrency limit for proxied uploads; retry shortly"),
+    );
+    // The refusal is countable: an operator sizing `max_concurrent_uploads`
+    // needs to know it is happening, not only that some clients saw 503.
+    assert!(state
+        .metrics
+        .snapshot()
+        .by_name("loonfs.server.busy_rejections")
+        .any(|entry| entry.labels == [("kind", "upload")]
+            && entry.value == loonfs::metrics::MetricValue::Counter(1)));
+
+    drop(held);
+    let client = Client::new(client_config).expect("valid client config");
+    let target = NamespacePath::parse("demo", "/one.bin").expect("target");
+    client
+        .put_file_bytes(&target, &[0u8; 64], &replace_file_options())
+        .await
+        .expect("a freed slot admits the upload");
+
+    server.abort();
+}
+
+// The request closures return ureq's large error type.
+#[allow(clippy::result_large_err)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_content_reads_answer_server_busy_at_the_concurrency_cap() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
+    let seed_writer = bootstrap_namespace(&store, "runtime-writer", &namespace_id("demo")).await;
+    write_file_bytes(
+        &seed_writer,
+        &namespace_id("demo"),
+        "/note.txt",
+        b"bounded",
+        "download-busy-seed-01",
+    )
+    .await;
+    let inode_id = seed_writer
+        .reader()
+        .get_path_entry(&namespace_id("demo"), "/note.txt", Default::default())
+        .await
+        .expect("stat seeded file")
+        .inode_id;
+    let mut config = test_options(temp_dir.path(), "server-writer");
+    config.binding.max_concurrent_downloads = 1;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind listener");
+    let addr = listener.local_addr().expect("listener addr");
+    let (router, state) = test_app(config, options_with_store(store))
+        .await
+        .expect("build app");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router).await.expect("serve app");
+    });
+
+    let held = state
+        .download_permits
+        .clone()
+        .try_acquire_owned()
+        .expect("hold the only download slot");
+
+    let client_config = ClientConfig {
+        server_url: format!("http://{addr}"),
+        auth_token: Some("test-token".into()),
+        request_timeout_ms: None,
+        // These tests assert the raw concurrency-cap answer; the client's
+        // transient retry would otherwise sleep through it.
+        disable_transient_retry: true,
+        ca_cert_path: None,
+    };
+    let config_for_busy = client_config.clone();
+    let client = Client::new(config_for_busy).expect("valid client config");
+    let target = NamespacePath::parse("demo", "/note.txt").expect("target");
+    assert_api_error(
+        client.get_file_bytes(&target, &Default::default()).await,
+        503,
+        "server_busy",
+        Some("the server is at its concurrency limit for proxied content reads; retry shortly"),
+    );
+    assert_api_error(
+        client
+            .get_file_revision_bytes_by_inode(
+                &namespace_id("demo"),
+                inode_id,
+                loonfs_api::RevisionNo(1),
+            )
+            .await,
+        503,
+        "server_busy",
+        Some("the server is at its concurrency limit for proxied content reads; retry shortly"),
+    );
+    expect_enveloped(
+        || {
+            raw_agent()
+                .get(&format!(
+                    "http://{addr}/v0/namespaces/demo/filesystem/content"
+                ))
+                .set("authorization", "Bearer test-token")
+                .call()
+        },
+        "a missing path should answer 400 at the concurrency cap",
+        400,
+        "invalid_request",
+    );
+    expect_enveloped(
+        || {
+            raw_agent()
+                .get(&format!(
+                    "http://{addr}/v0/namespaces/demo/inodes/not-an-inode/revisions/1/content"
+                ))
+                .set("authorization", "Bearer test-token")
+                .call()
+        },
+        "a malformed inode id should answer 400 at the concurrency cap",
+        400,
+        "invalid_request",
+    );
+    assert!(state
+        .metrics
+        .snapshot()
+        .by_name("loonfs.server.busy_rejections")
+        .any(|entry| entry.labels == [("kind", "download")]
+            && entry.value == loonfs::metrics::MetricValue::Counter(2)));
+
+    drop(held);
+    let client = Client::new(client_config).expect("valid client config");
+    let target = NamespacePath::parse("demo", "/note.txt").expect("target");
+    let bytes = client
+        .get_file_bytes(&target, &Default::default())
+        .await
+        .expect("a freed slot admits the read");
+    assert_eq!(bytes, b"bounded");
+    assert_eq!(
+        client
+            .get_file_revision_bytes_by_inode(
+                &namespace_id("demo"),
+                inode_id,
+                loonfs_api::RevisionNo(1),
+            )
+            .await
+            .expect("a freed slot admits the inode read"),
+        b"bounded"
+    );
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn download_admission_is_held_until_the_response_body_is_consumed() {
+    use tower::ServiceExt;
+
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
+    let seed_writer = bootstrap_namespace(&store, "runtime-writer", &namespace_id("demo")).await;
+    write_file_bytes(
+        &seed_writer,
+        &namespace_id("demo"),
+        "/note.txt",
+        b"bounded",
+        "download-body-permit-seed-01",
+    )
+    .await;
+    let mut config = test_options(temp_dir.path(), "server-writer");
+    config.binding.max_concurrent_downloads = 1;
+    let (router, state) = test_app(config, options_with_store(store))
+        .await
+        .expect("build app");
+
+    let response = router
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/v0/namespaces/demo/filesystem/content?path=%2Fnote.txt")
+                .header(axum::http::header::AUTHORIZATION, "Bearer test-token")
+                .header("Loonfs-Actor", "test-actor")
+                .body(axum::body::Body::empty())
+                .expect("download request"),
+        )
+        .await
+        .expect("download response");
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    assert_eq!(
+        response.headers().get(axum::http::header::CONTENT_TYPE),
+        Some(&axum::http::HeaderValue::from_static(
+            "application/octet-stream"
+        ))
+    );
+    assert_eq!(state.download_permits.available_permits(), 0);
+
+    let next_permit = state.download_permits.clone().acquire_owned();
+    tokio::pin!(next_permit);
+    assert!(matches!(
+        futures::poll!(next_permit.as_mut()),
+        std::task::Poll::Pending
+    ));
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("download body");
+    assert_eq!(&body[..], b"bounded");
+    let acquired = next_permit
+        .await
+        .expect("the next download is admitted after full consumption");
+    drop(acquired);
+    assert_eq!(state.download_permits.available_permits(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_content_read_over_the_download_limit_answers_content_too_large() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
+    let seed_writer = bootstrap_namespace(&store, "runtime-writer", &namespace_id("demo")).await;
+    write_file_bytes(
+        &seed_writer,
+        &namespace_id("demo"),
+        "/big.bin",
+        &[0u8; 64],
+        "download-limit-seed-01",
+    )
+    .await;
+    write_file_bytes(
+        &seed_writer,
+        &namespace_id("demo"),
+        "/small.bin",
+        &[0u8; 8],
+        "download-limit-seed-02",
+    )
+    .await;
+    let big_inode_id = seed_writer
+        .reader()
+        .get_path_entry(&namespace_id("demo"), "/big.bin", Default::default())
+        .await
+        .expect("stat big file")
+        .inode_id;
+    let small_inode_id = seed_writer
+        .reader()
+        .get_path_entry(&namespace_id("demo"), "/small.bin", Default::default())
+        .await
+        .expect("stat small file")
+        .inode_id;
+    let mut config = test_options(temp_dir.path(), "server-writer");
+    config.binding.max_download_bytes = 16;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind listener");
+    let addr = listener.local_addr().expect("listener addr");
+    let router = test_app(config, options_with_store(store))
+        .await
+        .expect("build app")
+        .0;
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router).await.expect("serve app");
+    });
+
+    let client = Client::new(ClientConfig {
+        server_url: format!("http://{addr}"),
+        auth_token: Some("test-token".into()),
+        request_timeout_ms: None,
+        disable_transient_retry: false,
+        ca_cert_path: None,
+    })
+    .expect("valid client config");
+    assert_api_error(
+        client
+            .get_file_bytes(
+                &NamespacePath::parse("demo", "/big.bin").expect("target"),
+                &Default::default(),
+            )
+            .await,
+        413,
+        "content_too_large",
+        None,
+    );
+    assert_api_error(
+        client
+            .get_file_revision_bytes_by_inode(
+                &namespace_id("demo"),
+                big_inode_id,
+                loonfs_api::RevisionNo(1),
+            )
+            .await,
+        413,
+        "content_too_large",
+        None,
+    );
+    // Content inside the limit still reads through the same route.
+    let bytes = client
+        .get_file_bytes(
+            &NamespacePath::parse("demo", "/small.bin").expect("target"),
+            &Default::default(),
+        )
+        .await
+        .expect("small content fits under the limit");
+    assert_eq!(bytes.len(), 8);
+    assert_eq!(
+        client
+            .get_file_revision_bytes_by_inode(
+                &namespace_id("demo"),
+                small_inode_id,
+                loonfs_api::RevisionNo(1),
+            )
+            .await
+            .expect("small inode content fits under the limit")
+            .len(),
+        8
+    );
+
+    server.abort();
+}
+
+async fn seed_grep_error_namespace(
+    store: &SharedObjectStore,
+    namespace_id: &NamespaceId,
+) -> FsWriter {
+    let writer = test_runtime(store.clone(), "grep-error-seed").await;
+    seed_grep_error_namespace_on(&writer, namespace_id).await;
+    writer
+}
+
+async fn seed_grep_error_namespace_on(writer: &FsWriter, namespace_id: &NamespaceId) {
+    writer
+        .create_namespace(
+            namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("create grep-error namespace");
+    writer
+        .put_file_bytes(
+            namespace_id,
+            "/core.txt",
+            b"core remains readable",
+            PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("write core isolation sentinel");
+}
+
+async fn grep_error_worker(store: &SharedObjectStore) -> GrepWorker<SharedObjectStore> {
+    grep_worker(store, "grep-error-worker").await
+}
+
+/// A worker composed the way the server composes its own: grep's keyspace
+/// on the given store, its filesystem reads and checkpoints on handles over
+/// the same store.
+async fn grep_worker(store: &SharedObjectStore, actor: &str) -> GrepWorker<SharedObjectStore> {
+    let reader = FsReader::builder_with_store(store.clone())
+        .build()
+        .await
+        .expect("build reader");
+    let maintenance = FsMaintenance::builder_with_store(store.clone())
+        .actor_id(actor)
+        .build()
+        .await
+        .expect("build maintenance");
+    GrepWorker::new(store.clone(), reader, maintenance)
+}
+
+fn grep_error_request() -> GrepRequest {
+    GrepRequest {
+        pattern: "needle".to_owned(),
+        case_insensitive: false,
+        path_prefix: None,
+        cursor: None,
+        allow_stale: false,
+        allow_scan: false,
+    }
+}
+
+async fn write_grep_hint(
+    store: &dyn ObjectStore,
+    stored_namespace_id: &NamespaceId,
+    hint_namespace_id: NamespaceId,
+    manifest_no: loonfs_api::ManifestNo,
+) {
+    let envelope = encode_grep_hint(GrepHint {
+        namespace_id: hint_namespace_id,
+        manifest_no,
+    })
+    .expect("build grep pointer");
+    store
+        .put_overwrite(
+            &grep_hint_key(stored_namespace_id),
+            Bytes::from(envelope.into_bytes()),
+        )
+        .await
+        .expect("write grep pointer");
+}
+
+/// A deployment that answers searches over an index it does not maintain:
+/// exactly the query error surface these tests are about, with no
+/// maintenance pass racing the fault they injected.
+async fn start_grep_error_server(
+    store: SharedObjectStore,
+    root: &Path,
+    writer_id: &str,
+) -> TestHarness {
+    let mut config = test_options(root, writer_id);
+    config.binding.maintains_grep_index = false;
+    start_server_with_config(store, config).await
+}
+
+/// Administering a grep manifest belongs to a deployment that maintains one.
+async fn start_grep_maintenance_error_server(
+    store: SharedObjectStore,
+    root: &Path,
+    writer_id: &str,
+) -> TestHarness {
+    let mut config = test_options(root, writer_id);
+    config.binding.maintains_grep_index = true;
+    start_server_with_config(store, config).await
+}
+
+async fn assert_grep_api_error_and_core_read<T: std::fmt::Debug>(
+    client: &Client,
+    namespace_id: &NamespaceId,
+    result: Result<T, ClientError>,
+    status: u16,
+    code: ErrorCode,
+    message_fragment: &str,
+) {
+    match result {
+        Err(ClientError::Api {
+            status: actual_status,
+            code: actual_code,
+            feature,
+            message,
+            ..
+        }) => {
+            assert_eq!(actual_status, status);
+            assert_eq!(actual_code, code.as_str());
+            assert!(
+                message.contains(message_fragment),
+                "expected `{message_fragment}` in `{message}`"
+            );
+            if code == ErrorCode::NotSupported {
+                // The reported feature is the capability key clients gate
+                // on, not a private name for the index.
+                assert_eq!(feature.as_deref(), Some(FEATURE_QUERY_GREP));
+            } else {
+                assert_eq!(feature, None);
+            }
+        }
+        other => panic!(
+            "expected grep api error {status} {}, got {other:?}",
+            code.as_str()
+        ),
+    }
+
+    let target = NamespacePath::parse(namespace_id.as_str(), "/core.txt").expect("core target");
+    let bytes = client
+        .get_file_bytes(&target, &Default::default())
+        .await
+        .expect("grep failure must not affect core reads");
+    assert_eq!(bytes, b"core remains readable");
+}
+
+async fn start_server(store: SharedObjectStore, root: &Path, writer_id: &str) -> TestHarness {
+    start_server_with_config(store, test_options(root, writer_id)).await
+}
+
+async fn start_server_with_config(store: SharedObjectStore, config: TestOptions) -> TestHarness {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind listener");
+    let addr = listener.local_addr().expect("listener addr");
+    let router = test_app(config, options_with_store(store))
+        .await
+        .expect("build app")
+        .0;
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router).await.expect("serve app");
+    });
+
+    TestHarness {
+        client: Client::new(ClientConfig {
+            server_url: format!("http://{}", addr),
+            auth_token: Some("test-token".into()),
+            request_timeout_ms: None,
+            disable_transient_retry: false,
+            ca_cert_path: None,
+        })
+        .expect("valid client config"),
+        server,
+    }
+}
+
+async fn test_runtime(store: SharedObjectStore, writer_id: &str) -> FsWriter {
+    FsWriter::builder_with_store(store)
+        .writer_id(writer_id)
+        .trace_mode(TraceMode::Remote)
+        .trace_store_kind(TraceStoreKind::LocalFs)
+        .build()
+        .await
+        .expect("build writer")
+}
+
+/// Bootstraps a namespace through a second embedded runtime — seeding
+/// durable state as `writer_id` would from another process — and returns
+/// that runtime for follow-up seed writes.
+async fn bootstrap_namespace(
+    store: &SharedObjectStore,
+    writer_id: &str,
+    namespace_id: &NamespaceId,
+) -> FsWriter {
+    let writer = test_runtime(store.clone(), writer_id).await;
+    writer
+        .create_namespace(
+            namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("bootstrap namespace");
+    writer
+}
+
+async fn write_file_bytes(
+    fs: &FsWriter,
+    namespace_id: &NamespaceId,
+    absolute_path: &str,
+    bytes: &[u8],
+    commit_id: &str,
+) {
+    fs.put_file_bytes(
+        namespace_id,
+        absolute_path,
+        bytes,
+        PutFileOptions {
+            behavior: DestinationBehavior::Replace,
+            commit: loonfs_api::options::CommitOptions {
+                preconditions: Vec::new(),
+                actor_id: loonfs_test_support::test_actor(),
+                commit_id: Some(CommitId::parse(commit_id).expect("valid test commit id")),
+                message: None,
+            },
+            expected_inode_id: None,
+            expected_revision_no: None,
+        },
+    )
+    .await
+    .unwrap_or_else(|error| panic!("seed `{absolute_path}`: {error}"));
+}
+
+async fn delete_path_recursive(
+    fs: &FsWriter,
+    namespace_id: &NamespaceId,
+    absolute_path: &str,
+    commit_id: &str,
+) {
+    fs.delete_path(
+        namespace_id,
+        absolute_path,
+        DeleteOptions {
+            behavior: DeleteDirectoryBehavior::Recursive,
+            commit: loonfs_api::options::CommitOptions {
+                preconditions: Vec::new(),
+                actor_id: loonfs_test_support::test_actor(),
+                commit_id: Some(CommitId::parse(commit_id).expect("valid test commit id")),
+                message: None,
+            },
+            expected_inode_id: None,
+        },
+    )
+    .await
+    .unwrap_or_else(|error| panic!("delete `{absolute_path}`: {error}"));
+}
+
+fn assert_api_error<T: std::fmt::Debug>(
+    result: Result<T, ClientError>,
+    status: u16,
+    code: &str,
+    message: Option<&str>,
+) {
+    match result {
+        Err(ClientError::Api {
+            status: actual_status,
+            code: actual_code,
+            message: actual_message,
+            ..
+        }) => {
+            assert_eq!(actual_status, status);
+            assert_eq!(actual_code, code);
+            if let Some(expected_message) = message {
+                assert_eq!(actual_message, expected_message);
+            }
+        }
+        other => panic!("expected api error {status} {code}, got {other:?}"),
+    }
+}
+
+/// A deployment that authorizes direct uploads has to be able to hand back
+/// what they wrote. These exercise that with a store double standing in for
+/// the provider: a loopback issuer that signs nothing, and a loopback
+/// object server reading the same store the deployment writes to — so the
+/// whole grant path (route, issuer adapter, presigned fetch, client
+/// verification) runs end to end without a real bucket.
+mod direct_download {
+    use super::*;
+    use loonfs_api::{
+        v0::UploadContentClaim, Checksum, ChecksumAlgorithm, RevisionNo,
+        FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT,
+        LIMIT_DOWNLOAD_SERVICE_PROXIED_MAX_CONTENT_BYTES,
+        LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES,
+    };
+    use loonfs_objectstore::presign::{
+        DirectGetIssuer, DirectPutIssuer, DirectTransferIssuers, PresignedGetRequest,
+        PresignedPutRequest, PresignedUrl,
+    };
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+    use std::time::SystemTime;
+
+    #[tokio::test]
+    async fn inline_download_grants_name_readable_objects_and_report_refused_writes() {
+        use loonfs_test_support::stores::{
+            FailStore, InjectedError, KeyPredicate, OperationClass, RecordingStore,
+        };
+
+        let directory = tempdir().expect("directory");
+        let recording = Arc::new(RecordingStore::new(
+            LocalFsStore::new(directory.path()).expect("store"),
+            KeyPredicate::content_blob(),
+        ));
+        let failing = Arc::new(FailStore::new(
+            recording.clone(),
+            KeyPredicate::content_blob(),
+            OperationClass::Put,
+            InjectedError::PermissionDenied("read-only credentials".to_owned()),
+        ));
+        let store: SharedObjectStore = failing.clone();
+        let namespace = namespace_id("inline-download");
+        let writer = test_runtime(store.clone(), "inline-writer").await;
+        writer
+            .create_namespace(
+                &namespace,
+                CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+            )
+            .await
+            .expect("namespace");
+        let values = [
+            ("/path", Bytes::from_static(b"inline download")),
+            ("/inode", Bytes::from_static(b"inline download")),
+        ];
+        for (path, bytes) in &values {
+            writer
+                .put_file_bytes(
+                    &namespace,
+                    path,
+                    bytes,
+                    PutFileOptions::new(loonfs_test_support::test_actor()),
+                )
+                .await
+                .expect("publish inline content");
+        }
+        writer.shutdown().await.expect("shutdown writer");
+        use tower::ServiceExt;
+        let objects = object_router(store.clone());
+        let transfers = DirectTransferIssuers {
+            get: LoopbackIssuer::at("http://objects"),
+            put: None,
+            multipart: None,
+        };
+        let (router, state) = test_app(
+            test_options(directory.path(), "download-server"),
+            TestAppOptions {
+                store: Some(store),
+                direct_transfers: Some(transfers),
+            },
+        )
+        .await
+        .expect("app");
+        for (index, (path, value)) in values.iter().enumerate() {
+            let entry = state
+                .reader
+                .get_path_entry(&namespace, path, Default::default())
+                .await
+                .expect("entry");
+            let (uri, body) = if index == 0 {
+                (
+                    format!("/v0/namespaces/{namespace}/filesystem/downloads"),
+                    serde_json::json!({"path": path}).to_string(),
+                )
+            } else {
+                (
+                    format!(
+                        "/v0/namespaces/{namespace}/inodes/ino_{}/revisions/1/downloads",
+                        entry.inode_id
+                    ),
+                    String::new(),
+                )
+            };
+            recording.reset();
+            for denied in [true, false, false] {
+                if denied {
+                    failing.fail_all();
+                } else {
+                    failing.clear();
+                }
+                let response = router
+                    .clone()
+                    .oneshot(
+                        axum::http::Request::builder()
+                            .method("POST")
+                            .uri(&uri)
+                            .header("authorization", "Bearer test-token")
+                            .header("content-type", "application/json")
+                            .body(axum::body::Body::from(body.clone()))
+                            .expect("request"),
+                    )
+                    .await
+                    .expect("response");
+                let status = response.status();
+                let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .expect("body");
+                assert_eq!(
+                    status,
+                    if denied {
+                        StatusCode::SERVICE_UNAVAILABLE
+                    } else {
+                        StatusCode::OK
+                    },
+                    "{}: {}",
+                    uri,
+                    String::from_utf8_lossy(&bytes)
+                );
+                if denied {
+                    let error: loonfs_api::ApiError =
+                        serde_json::from_slice(&bytes).expect("error");
+                    assert_eq!(error.code, ErrorCode::ContentNotMaterialized.as_str());
+                    assert_eq!(recording.count(OperationClass::Put), 0);
+                    assert_eq!(
+                        state
+                            .reader
+                            .get_file_bytes(&namespace, path)
+                            .await
+                            .expect("proxied read")
+                            .bytes,
+                        value.as_ref()
+                    );
+                    continue;
+                }
+                let grant: serde_json::Value = serde_json::from_slice(&bytes).expect("grant");
+                let access: loonfs_api::v0::ObjectTransferAccess =
+                    serde_json::from_value(grant["access"].clone()).expect("access");
+                let loonfs_api::v0::ObjectTransferAccess::PresignedUrl { method, url, .. } = access;
+                assert_eq!(method, "GET");
+                let response = objects
+                    .clone()
+                    .oneshot(
+                        axum::http::Request::builder()
+                            .method(method.as_str())
+                            .uri(url.strip_prefix("http://objects").expect("object URL"))
+                            .body(axum::body::Body::empty())
+                            .expect("object request"),
+                    )
+                    .await
+                    .expect("object response");
+                assert_eq!(response.status(), StatusCode::OK);
+                let received = axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .expect("object bytes");
+                assert_eq!(received, value.as_ref());
+                assert_eq!(recording.count(OperationClass::Put), 1);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn download_snapshot_selectors_use_the_body_and_exclude_revisions() {
+        use tower::ServiceExt;
+
+        let directory = tempdir().expect("tempdir");
+        let (router, _state) = test_app(
+            test_options(directory.path(), "download-selectors"),
+            TestAppOptions::default(),
+        )
+        .await
+        .expect("app");
+        let snapshot_id = "pin_00000000000000000001-0000000000000002";
+        let route = "/v0/namespaces/demo/filesystem/downloads";
+        for (uri, body, param) in [
+            (
+                format!("{route}?snapshot_id={snapshot_id}"),
+                serde_json::json!({"path": "/report.txt"}),
+                "snapshot_id",
+            ),
+            (
+                route.to_owned(),
+                serde_json::json!({"path": "/report.txt", "revision_no": 1, "snapshot_id": snapshot_id}),
+                "revision_no",
+            ),
+        ] {
+            let response = router
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri(uri)
+                        .header("authorization", "Bearer test-token")
+                        .header("Loonfs-Actor", "test-actor")
+                        .header("content-type", "application/json")
+                        .body(axum::body::Body::from(body.to_string()))
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("response body");
+            let error: loonfs_api::ApiError = serde_json::from_slice(&bytes).expect("API error");
+            assert_eq!(error.code, ErrorCode::InvalidRequest.as_str());
+            assert_eq!(error.param.as_deref(), Some(param));
+        }
+    }
+
+    /// The read cap these deployments are configured with.
+    ///
+    /// Small on purpose. The audit's case is a file the deployment refuses
+    /// to buffer, and what makes a file that is the cap rather than the
+    /// byte count — so the behavior under test is identical at a kilobyte
+    /// and at 256 MiB, and this suite does not move a gigabyte per run to
+    /// restate the same comparison. That the comparison itself picks the
+    /// grant for a 300 MiB file at the real default is pinned in the
+    /// client's own tests.
+    const PROXY_CAP_BYTES: u64 = 1024;
+
+    /// The whole-object ceiling the loopback put issuer reports.
+    ///
+    /// Above [`loonfs_client::STREAMING_PUT_MIN_BYTES`], because a payload
+    /// below that never asks what transports are on offer at all — so a
+    /// ceiling under it could never be the thing a put ran into.
+    const LOOPBACK_DIRECT_PUT_MAX_BYTES: u64 = 16 * 1024 * 1024;
+
+    /// An issuer that hands out unsigned loopback URLs.
+    ///
+    /// It stands in for the signing half only. What a real presigner adds —
+    /// that the capability expires, that `Range` stays outside the
+    /// signature, and that the provider enforces the digest — is pinned
+    /// where it is decided: in the S3-compatible presigner's own tests, and
+    /// against a live provider in the ignored suite.
+    ///
+    /// It implements the read and whole-object-write traits and not the
+    /// multipart one, which is exactly the provider shape this suite exists
+    /// to cover: each test composes the bundle it means to serve.
+    #[derive(Debug)]
+    struct LoopbackIssuer {
+        object_base_url: String,
+        /// The whole-object checksum this stand-in provider enforces.
+        ///
+        /// Providers do not agree on one -- the S3 family verifies SHA-256
+        /// and GCS verifies CRC-32C -- so the shape is a parameter here for
+        /// the same reason it is a trait method in the real issuers: the
+        /// client folds whichever the deployment names.
+        checksum_algorithm: ChecksumAlgorithm,
+    }
+
+    impl LoopbackIssuer {
+        /// The S3-compatible shape: a whole-object SHA-256.
+        fn at(object_base_url: impl Into<String>) -> Arc<Self> {
+            Self::with_checksum(object_base_url, ChecksumAlgorithm::Sha256)
+        }
+
+        /// The GCS shape: a whole-object CRC-32C. Callers pair it with a
+        /// bundle carrying no multipart signer, which is the rest of that
+        /// shape.
+        fn crc32c_at(object_base_url: impl Into<String>) -> Arc<Self> {
+            Self::with_checksum(object_base_url, ChecksumAlgorithm::Crc32c)
+        }
+
+        fn with_checksum(
+            object_base_url: impl Into<String>,
+            checksum_algorithm: ChecksumAlgorithm,
+        ) -> Arc<Self> {
+            Arc::new(Self {
+                object_base_url: object_base_url.into(),
+                checksum_algorithm,
+            })
+        }
+    }
+
+    #[async_trait]
+    impl DirectGetIssuer for LoopbackIssuer {
+        async fn presign_get(
+            &self,
+            request: PresignedGetRequest<'_>,
+            _now: SystemTime,
+        ) -> Result<PresignedUrl, ObjectStoreError> {
+            Ok(PresignedUrl {
+                method: "GET".to_owned(),
+                url: format!("{}/{}", self.object_base_url, request.object_key),
+                headers: BTreeMap::new(),
+                expires_at_ms: u64::MAX,
+            })
+        }
+    }
+
+    #[async_trait]
+    impl DirectPutIssuer for LoopbackIssuer {
+        fn stored_checksum_algorithm(&self) -> ChecksumAlgorithm {
+            self.checksum_algorithm
+        }
+
+        fn max_content_bytes(&self) -> u64 {
+            LOOPBACK_DIRECT_PUT_MAX_BYTES
+        }
+
+        async fn presign_put(
+            &self,
+            request: PresignedPutRequest<'_>,
+            _now: SystemTime,
+        ) -> Result<PresignedUrl, ObjectStoreError> {
+            Ok(PresignedUrl {
+                method: "PUT".to_owned(),
+                url: format!("{}/{}", self.object_base_url, request.object_key),
+                headers: BTreeMap::new(),
+                expires_at_ms: u64::MAX,
+            })
+        }
+    }
+
+    fn object_router(store: SharedObjectStore) -> axum::Router {
+        async fn read_object(
+            axum::extract::State(store): axum::extract::State<SharedObjectStore>,
+            axum::extract::Path(key): axum::extract::Path<String>,
+        ) -> axum::response::Response {
+            use axum::response::IntoResponse as _;
+            match store.get(&key, None).await {
+                Ok(Some(bytes)) => (axum::http::StatusCode::OK, bytes).into_response(),
+                Ok(None) => axum::http::StatusCode::NOT_FOUND.into_response(),
+                Err(error) => (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    error.to_string(),
+                )
+                    .into_response(),
+            }
+        }
+
+        async fn write_object(
+            axum::extract::State(store): axum::extract::State<SharedObjectStore>,
+            axum::extract::Path(key): axum::extract::Path<String>,
+            body: bytes::Bytes,
+        ) -> axum::response::Response {
+            use axum::response::IntoResponse as _;
+            match store.put_if_absent(&key, body).await {
+                Ok(_) => axum::http::StatusCode::OK.into_response(),
+                Err(error) => (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    error.to_string(),
+                )
+                    .into_response(),
+            }
+        }
+
+        axum::Router::new()
+            .route("/{*key}", axum::routing::get(read_object).put(write_object))
+            // A provider takes whatever the presigned write carries; this
+            // double must not impose a limit of its own on top.
+            .layer(axum::extract::DefaultBodyLimit::disable())
+            .with_state(store)
+    }
+
+    async fn serve_objects(store: SharedObjectStore) -> String {
+        let router = object_router(store);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind object listener");
+        let addr = listener.local_addr().expect("object listener addr");
+        tokio::spawn(async move {
+            axum::serve(listener, router).await.expect("serve objects");
+        });
+        format!("http://{addr}")
+    }
+
+    /// Starts a deployment whose read cap is [`PROXY_CAP_BYTES`], serving
+    /// whichever direct transfers the caller composed, and returns a client
+    /// pointed at it.
+    async fn start(
+        root: &Path,
+        writer_id: &str,
+        direct_transfers: Option<DirectTransferIssuers>,
+    ) -> Client {
+        start_with_upload_cap(root, writer_id, direct_transfers, None).await
+    }
+
+    /// The same deployment with its *write* cap narrowed too, for the cases
+    /// about which transport a payload the proxy will not take ends up on.
+    async fn start_with_upload_cap(
+        root: &Path,
+        writer_id: &str,
+        direct_transfers: Option<DirectTransferIssuers>,
+        max_upload_bytes: Option<u64>,
+    ) -> Client {
+        start_with_store(
+            Arc::new(LocalFsStore::new(root).expect("construct local store")),
+            root,
+            writer_id,
+            direct_transfers,
+            max_upload_bytes,
+        )
+        .await
+    }
+
+    /// The same deployment over a caller-supplied store, for the cases where
+    /// what the provider reports back about an object is the thing under
+    /// test.
+    async fn start_with_store(
+        store: SharedObjectStore,
+        root: &Path,
+        writer_id: &str,
+        direct_transfers: Option<DirectTransferIssuers>,
+        max_upload_bytes: Option<u64>,
+    ) -> Client {
+        let mut config = test_options(root, writer_id);
+        config.binding.max_download_bytes = PROXY_CAP_BYTES;
+        if let Some(max_upload_bytes) = max_upload_bytes {
+            config.binding.max_upload_bytes = max_upload_bytes;
+        }
+        let (router, _state) = test_app(
+            config,
+            TestAppOptions {
+                store: Some(store),
+                direct_transfers,
+            },
+        )
+        .await
+        .expect("build app");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+        tokio::spawn(async move {
+            axum::serve(listener, router).await.expect("serve app");
+        });
+        Client::new(ClientConfig {
+            server_url: format!("http://{addr}"),
+            auth_token: Some("test-token".into()),
+            request_timeout_ms: None,
+            disable_transient_retry: false,
+            ca_cert_path: None,
+        })
+        .expect("valid client config")
+    }
+
+    /// The store the deployment writes to, opened again for the object
+    /// double. Both see the same objects because both are the same root.
+    fn object_store_at(root: &Path) -> SharedObjectStore {
+        Arc::new(LocalFsStore::new(root).expect("construct local store for the object double"))
+    }
+
+    /// A store that reports an object's stored checksum as a CRC-32C, the way
+    /// a GCS provider answers.
+    ///
+    /// The reference local store reports SHA-256, which is the readback that
+    /// pairs with an S3-compatible issuer. A provider's readback algorithm
+    /// and its `direct_put` issuer's algorithm have to be the same one, or
+    /// completion compares two digests of different kinds and refuses every
+    /// upload — so a CRC-32C issuer needs a CRC-32C readback beneath it, and
+    /// this double supplies one.
+    #[derive(Debug)]
+    struct Crc32cReadbackStore {
+        inner: LocalFsStore,
+    }
+
+    #[async_trait::async_trait]
+    impl loonfs_objectstore::ObjectStore for Crc32cReadbackStore {
+        delegate_object_store!(self => self.inner; except head_stored_checksum);
+
+        async fn head_stored_checksum(
+            &self,
+            key: &str,
+        ) -> Result<Option<loonfs_objectstore::StoredObjectChecksum>, ObjectStoreError> {
+            let Some(bytes) = self.inner.get(key, None).await? else {
+                return Ok(None);
+            };
+            Ok(Some(loonfs_objectstore::StoredObjectChecksum {
+                size_bytes: bytes.len() as u64,
+                checksum: Checksum::crc32c(&bytes),
+            }))
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_file_past_the_proxy_cap_round_trips_through_a_download_grant() {
+        let temp_dir = tempdir().expect("tempdir");
+        let object_base_url = serve_objects(object_store_at(temp_dir.path())).await;
+        let transfers = DirectTransferIssuers {
+            get: LoopbackIssuer::at(object_base_url),
+            put: None,
+            multipart: None,
+        };
+        let client = start(temp_dir.path(), "direct-download", Some(transfers)).await;
+
+        let namespace = namespace_id("direct-download");
+        client
+            .create_namespace(
+                &namespace,
+                &loonfs_test_support::test_actor(),
+                loonfs_api::NamespaceAccess::unrestricted(),
+            )
+            .await
+            .expect("create namespace");
+        let target = NamespacePath::parse(namespace.as_str(), "/big.bin").expect("target");
+        // Past the cap by enough that a truncation would show, and cheap.
+        let payload: Vec<u8> = (0..PROXY_CAP_BYTES as usize * 3)
+            .map(|index| (index % 251) as u8)
+            .collect();
+        client
+            .put_file_bytes(&target, &payload, &replace_file_options())
+            .await
+            .expect("seed the oversized file");
+        let entry = client
+            .get_path_entry(&target, &Default::default())
+            .await
+            .expect("stat seeded file");
+
+        // The wall the audit found: this deployment let the file exist and
+        // will not proxy it back.
+        assert_api_error(
+            client.get_file_bytes(&target, &Default::default()).await,
+            413,
+            ErrorCode::ContentTooLarge.as_str(),
+            None,
+        );
+
+        let grant = client
+            .create_download(&target, &Default::default())
+            .await
+            .expect("download grant");
+        assert_eq!(grant.path.as_str(), "/big.bin");
+        assert_eq!(grant.content_ref.size_bytes, payload.len() as u64);
+        assert_eq!(Some(&grant.content_ref), entry.content_ref());
+
+        let mut received = Vec::new();
+        let written = client
+            .download_via_presigned_url(&grant, &mut received)
+            .await
+            .expect("stream the granted object");
+        assert_eq!(written, payload.len() as u64);
+        assert_eq!(received, payload);
+
+        client
+            .delete_path(
+                &target,
+                &DeleteOptions::new(loonfs_test_support::test_actor()),
+            )
+            .await
+            .expect("delete current binding");
+        let inode_grant = client
+            .create_download_by_inode(&namespace, entry.inode_id, RevisionNo(1))
+            .await
+            .expect("grant retained inode revision");
+        assert_eq!(inode_grant.inode_id, entry.inode_id);
+        assert_eq!(inode_grant.content_ref, grant.content_ref);
+        let mut stream = client
+            .open_direct_download_by_inode(&inode_grant)
+            .await
+            .expect("open inode grant");
+        let mut inode_received = Vec::new();
+        while let Some(chunk) = stream.next_chunk().await.expect("read inode grant") {
+            inode_received.extend_from_slice(&chunk);
+        }
+        assert_eq!(inode_received, payload);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_grant_keeps_reading_the_revision_it_was_issued_for() {
+        let temp_dir = tempdir().expect("tempdir");
+        let object_base_url = serve_objects(object_store_at(temp_dir.path())).await;
+        let transfers = DirectTransferIssuers {
+            get: LoopbackIssuer::at(object_base_url),
+            put: None,
+            multipart: None,
+        };
+        let client = start(temp_dir.path(), "grant-pins", Some(transfers)).await;
+
+        let namespace = namespace_id("grant-pins");
+        client
+            .create_namespace(
+                &namespace,
+                &loonfs_test_support::test_actor(),
+                loonfs_api::NamespaceAccess::unrestricted(),
+            )
+            .await
+            .expect("create namespace");
+        let target = NamespacePath::parse(namespace.as_str(), "/pinned.bin").expect("target");
+        let first = vec![b'a'; PROXY_CAP_BYTES as usize * 2];
+        let second = vec![b'b'; PROXY_CAP_BYTES as usize * 2];
+        client
+            .put_file_bytes(&target, &first, &replace_file_options())
+            .await
+            .expect("seed revision 1");
+
+        let grant = client
+            .create_download(&target, &Default::default())
+            .await
+            .expect("grant for revision 1");
+        assert_eq!(grant.revision_no, RevisionNo(1));
+
+        client
+            .put_file_bytes(&target, &second, &replace_file_options())
+            .await
+            .expect("replace with revision 2");
+
+        let mut received = Vec::new();
+        client
+            .download_via_presigned_url(&grant, &mut received)
+            .await
+            .expect("the already-issued grant still reads its own object");
+        assert_eq!(received, first);
+
+        // And asking for the old revision by number resolves to the same
+        // object the earlier grant named.
+        let pinned = client
+            .create_download(
+                &target,
+                &loonfs_client::DownloadOptions {
+                    revision_no: Some(RevisionNo(1)),
+                    snapshot_id: None,
+                },
+            )
+            .await
+            .expect("grant for a prior revision");
+        assert_eq!(pinned.revision_no, RevisionNo(1));
+        assert_eq!(pinned.content_ref, grant.content_ref);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_deployment_that_cannot_presign_refuses_the_grant_by_capability() {
+        let temp_dir = tempdir().expect("tempdir");
+        let client = start(temp_dir.path(), "no-issuer", None).await;
+
+        let namespace = namespace_id("no-issuer");
+        client
+            .create_namespace(
+                &namespace,
+                &loonfs_test_support::test_actor(),
+                loonfs_api::NamespaceAccess::unrestricted(),
+            )
+            .await
+            .expect("create namespace");
+        let target = NamespacePath::parse(namespace.as_str(), "/small.txt").expect("target");
+        client
+            .put_file_bytes(&target, b"small enough to proxy", &replace_file_options())
+            .await
+            .expect("seed a file");
+
+        let error = client
+            .create_download(&target, &Default::default())
+            .await
+            .expect_err("a deployment with no issuer cannot grant reads");
+        match &error {
+            ClientError::Api {
+                status,
+                code,
+                feature,
+                ..
+            } => {
+                assert_eq!(*status, 501);
+                assert_eq!(code, ErrorCode::NotSupported.as_str());
+                assert_eq!(feature.as_deref(), Some(FEATURE_DOWNLOADS_DIRECT_GET));
+            }
+            other => panic!("expected a typed not_supported, got {other:?}"),
+        }
+        let inode_id = client
+            .get_path_entry(&target, &Default::default())
+            .await
+            .expect("stat proxied file")
+            .inode_id;
+        let inode_error = client
+            .create_download_by_inode(&namespace, inode_id, RevisionNo(1))
+            .await
+            .expect_err("the inode route honors the same provider gate");
+        match inode_error {
+            ClientError::Api {
+                status,
+                code,
+                feature,
+                ..
+            } => {
+                assert_eq!(status, 501);
+                assert_eq!(code, ErrorCode::NotSupported.as_str());
+                assert_eq!(feature.as_deref(), Some(FEATURE_DOWNLOADS_DIRECT_GET));
+            }
+            other => panic!("expected a typed not_supported, got {other:?}"),
+        }
+
+        // The proxied read it does serve is untouched.
+        assert_eq!(
+            client
+                .get_file_bytes(&target, &Default::default())
+                .await
+                .expect("proxied read of a file under the cap"),
+            b"small enough to proxy"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_provider_without_multipart_advertises_put_and_get_and_denies_multipart() {
+        let temp_dir = tempdir().expect("tempdir");
+        let issuer = LoopbackIssuer::at("http://object.invalid");
+        let transfers = DirectTransferIssuers {
+            get: issuer.clone(),
+            put: Some(issuer),
+            multipart: None,
+        };
+        let advertised = start(temp_dir.path(), "put-without-multipart", Some(transfers))
+            .await
+            .get_capabilities()
+            .await
+            .expect("capabilities");
+
+        assert!(advertised.supports(FEATURE_UPLOADS_DIRECT_PUT));
+        assert!(advertised.supports(FEATURE_DOWNLOADS_DIRECT_GET));
+        assert!(
+            !advertised.supports(FEATURE_UPLOADS_DIRECT_MULTIPART),
+            "a provider with no multipart API must not advertise one"
+        );
+        assert_eq!(
+            advertised
+                .limits
+                .get(LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES),
+            Some(&LOOPBACK_DIRECT_PUT_MAX_BYTES),
+            "the provider's own single-request ceiling is advertised, not the proxy's"
+        );
+        assert_eq!(
+            advertised
+                .limits
+                .get(LIMIT_DOWNLOAD_SERVICE_PROXIED_MAX_CONTENT_BYTES),
+            Some(&PROXY_CAP_BYTES),
+            "the proxy cap stays advertised: it is what tells a client which reads need a grant"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_direct_put_session_rejects_multipart_completion_fields_precisely() {
+        let temp_dir = tempdir().expect("tempdir");
+        let issuer = LoopbackIssuer::at("http://object.invalid");
+        let transfers = DirectTransferIssuers {
+            get: issuer.clone(),
+            put: Some(issuer),
+            multipart: None,
+        };
+        let client = start(
+            temp_dir.path(),
+            "direct-put-completion-shape",
+            Some(transfers),
+        )
+        .await;
+        let namespace_id =
+            NamespaceId::parse("direct-put-completion-shape").expect("valid namespace id");
+        client
+            .create_namespace(
+                &namespace_id,
+                &loonfs_test_support::test_actor(),
+                loonfs_api::NamespaceAccess::unrestricted(),
+            )
+            .await
+            .expect("create namespace");
+        let begin = client
+            .create_direct_put_upload(&namespace_id, Some(5))
+            .await
+            .expect("begin direct put");
+
+        for _ in 0..2 {
+            let session = client
+                .get_upload(&namespace_id, &begin.upload_id)
+                .await
+                .expect("read open direct_put session");
+            assert_eq!(session.mode, loonfs_api::v0::UploadMode::DirectPut);
+            let loonfs_api::v0::UploadSessionStatus::Open {
+                access: Some(loonfs_api::v0::ObjectTransferAccess::PresignedUrl { method, .. }),
+                ..
+            } = session.status
+            else {
+                panic!("open direct_put session carries access");
+            };
+            assert_eq!(method, "PUT");
+        }
+
+        let error = client
+            .complete_upload(
+                &namespace_id,
+                &begin.upload_id,
+                &loonfs_api::v0::CompleteUploadBody::DirectMultipart {
+                    content: UploadContentClaim {
+                        size_bytes: 5,
+                        checksum: Checksum::sha256(b"hello"),
+                    },
+                    parts: Vec::new(),
+                },
+            )
+            .await
+            .expect_err("multipart completion body does not belong to direct put");
+        match error {
+            ClientError::Api {
+                status,
+                code,
+                message,
+                ..
+            } => {
+                assert_eq!(status, 400);
+                assert_eq!(code, ErrorCode::InvalidRequest.as_str());
+                assert_eq!(
+                    message,
+                    "invalid upload content: completion request mode `direct_multipart` does not \
+                     match stored upload mode `direct_put`"
+                );
+            }
+            other => panic!("expected a typed invalid_request, got {other:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_crc32c_provider_without_multipart_carries_a_file_end_to_end() {
+        let temp_dir = tempdir().expect("tempdir");
+        let object_base_url = serve_objects(object_store_at(temp_dir.path())).await;
+        let issuer = LoopbackIssuer::crc32c_at(object_base_url);
+        let transfers = DirectTransferIssuers {
+            get: issuer.clone(),
+            put: Some(issuer),
+            multipart: None,
+        };
+        let store: SharedObjectStore = Arc::new(Crc32cReadbackStore {
+            inner: LocalFsStore::new(temp_dir.path()).expect("construct local store"),
+        });
+        let client = start_with_store(
+            store,
+            temp_dir.path(),
+            "ladder-crc32c-put",
+            Some(transfers),
+            Some(PROXY_CAP_BYTES),
+        )
+        .await;
+
+        let namespace = namespace_id("ladder-crc32c-put");
+        client
+            .create_namespace(
+                &namespace,
+                &loonfs_test_support::test_actor(),
+                loonfs_api::NamespaceAccess::unrestricted(),
+            )
+            .await
+            .expect("create namespace");
+        let target = NamespacePath::parse(namespace.as_str(), "/large.bin").expect("target");
+        // Large enough that the client looks for a direct transport at all,
+        // and far past the proxy cap, so nothing else could carry it.
+        let payload: Vec<u8> = (0..loonfs_client::STREAMING_PUT_MIN_BYTES as usize)
+            .map(|index| (index % 251) as u8)
+            .collect();
+
+        client
+            .put_file_bytes(&target, &payload, &replace_file_options())
+            .await
+            .expect("a large file goes straight to object storage under a crc32c claim");
+
+        let grant = client
+            .create_download(&target, &Default::default())
+            .await
+            .expect("download grant");
+        assert_eq!(
+            grant.content_ref.checksum,
+            Checksum::crc32c(&payload),
+            "the recorded ref carries the digest the provider was made to enforce"
+        );
+
+        // And it comes home byte for byte through the read half of the same
+        // bundle, which is the symmetry the bundle type exists to guarantee.
+        let mut received = Vec::new();
+        client
+            .download_via_presigned_url(&grant, &mut received)
+            .await
+            .expect("stream the granted object");
+        assert_eq!(received, payload);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_large_file_takes_direct_put_where_multipart_is_not_offered() {
+        let temp_dir = tempdir().expect("tempdir");
+        let object_base_url = serve_objects(object_store_at(temp_dir.path())).await;
+        let issuer = LoopbackIssuer::at(object_base_url);
+        let transfers = DirectTransferIssuers {
+            get: issuer.clone(),
+            put: Some(issuer),
+            multipart: None,
+        };
+        let client = start_with_upload_cap(
+            temp_dir.path(),
+            "ladder-direct-put",
+            Some(transfers),
+            Some(PROXY_CAP_BYTES),
+        )
+        .await;
+
+        let namespace = namespace_id("ladder-direct-put");
+        client
+            .create_namespace(
+                &namespace,
+                &loonfs_test_support::test_actor(),
+                loonfs_api::NamespaceAccess::unrestricted(),
+            )
+            .await
+            .expect("create namespace");
+        let target = NamespacePath::parse(namespace.as_str(), "/large.bin").expect("target");
+        // Large enough that the client looks for a direct transport at all,
+        // and far past the proxy cap, so nothing else could carry it.
+        let payload: Vec<u8> = (0..loonfs_client::STREAMING_PUT_MIN_BYTES as usize)
+            .map(|index| (index % 251) as u8)
+            .collect();
+
+        client
+            .put_file_bytes(&target, &payload, &replace_file_options())
+            .await
+            .expect("a large file goes straight to object storage");
+
+        // It came home through the grant, byte for byte, which proves the
+        // object the presigned write created is the one the commit named.
+        let grant = client
+            .create_download(&target, &Default::default())
+            .await
+            .expect("download grant");
+        assert_eq!(grant.content_ref.size_bytes, payload.len() as u64);
+        let mut received = Vec::new();
+        client
+            .download_via_presigned_url(&grant, &mut received)
+            .await
+            .expect("stream the granted object");
+        assert_eq!(received, payload);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_payload_past_every_transport_is_refused_with_the_caps_named() {
+        let temp_dir = tempdir().expect("tempdir");
+        let object_base_url = serve_objects(object_store_at(temp_dir.path())).await;
+        // No direct upload transport is available. The proxy must enforce
+        // its size limit independently of the read transport.
+        let transfers = DirectTransferIssuers {
+            get: LoopbackIssuer::at(object_base_url),
+            put: None,
+            multipart: None,
+        };
+        let client = start_with_upload_cap(
+            temp_dir.path(),
+            "ladder-too-large",
+            Some(transfers),
+            Some(PROXY_CAP_BYTES),
+        )
+        .await;
+
+        let namespace = namespace_id("ladder-too-large");
+        client
+            .create_namespace(
+                &namespace,
+                &loonfs_test_support::test_actor(),
+                loonfs_api::NamespaceAccess::unrestricted(),
+            )
+            .await
+            .expect("create namespace");
+        let target = NamespacePath::parse(namespace.as_str(), "/enormous.bin").expect("target");
+        let payload = vec![7u8; loonfs_client::STREAMING_PUT_MIN_BYTES as usize];
+
+        let error = client
+            .put_file_bytes(&target, &payload, &replace_file_options())
+            .await
+            .expect_err("no transport can carry this payload");
+        match &error {
+            ClientError::UploadTooLarge { size_bytes, reason } => {
+                assert_eq!(*size_bytes, payload.len() as u64);
+                assert!(
+                    reason.contains(FEATURE_UPLOADS_DIRECT_MULTIPART),
+                    "the refusal names what was missing: {reason}"
+                );
+            }
+            other => panic!("expected an upload-too-large refusal, got {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn download_body_streams_one_chunk_and_aborts_on_late_corruption() {
+    use futures::StreamExt;
+    use tower::ServiceExt;
+
+    let temp_dir = tempdir().expect("tempdir");
+    let plain = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
+    let ns = namespace_id("demo");
+    let seed_writer = bootstrap_namespace(&plain, "runtime-writer", &ns).await;
+    let payload = vec![42; loonfs::CONTENT_READ_CHUNK_BYTES as usize * 3 + 17];
+    write_file_bytes(
+        &seed_writer,
+        &ns,
+        "/large.bin",
+        &payload,
+        "download-stream-seed",
+    )
+    .await;
+    let watched = Arc::new(BufferWatchStore::watching_content(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+    ));
+    let (router, state) = test_app(
+        test_options(temp_dir.path(), "server-writer"),
+        options_with_store(watched.clone()),
+    )
+    .await
+    .expect("app");
+
+    for corrupt in [false, true] {
+        let response = router
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/v0/namespaces/demo/filesystem/content?path=%2Flarge.bin")
+                    .header(axum::http::header::AUTHORIZATION, "Bearer test-token")
+                    .header("Loonfs-Actor", "test-actor")
+                    .body(axum::body::Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        assert!(response
+            .headers()
+            .get(axum::http::header::CONTENT_LENGTH)
+            .is_none());
+        if !corrupt {
+            assert_eq!(
+                watched.peaks().total_bytes,
+                0,
+                "opening the response must not fetch the file"
+            );
+        }
+        let mut body = response.into_body().into_data_stream();
+        let first = body
+            .next()
+            .await
+            .expect("first chunk")
+            .expect("valid chunk");
+        assert!(first.len() as u64 <= loonfs::CONTENT_READ_CHUNK_BYTES);
+        drop(first);
+        if corrupt {
+            let reader = loonfs::FsReader::builder_with_store(plain.clone())
+                .build()
+                .await
+                .expect("reader");
+            let entry = reader
+                .get_path_entry(&ns, "/large.bin", Default::default())
+                .await
+                .expect("entry");
+
+            let key = loonfs_objectstore::keys::content_blob(
+                &entry.content_ref().expect("file").owner_namespace_id,
+                &entry.content_ref().expect("file").content_id,
+            );
+            let mut changed = payload.clone();
+            changed[loonfs::CONTENT_READ_CHUNK_BYTES as usize] ^= 1;
+            plain
+                .put_overwrite(&key, changed.into())
+                .await
+                .expect("corrupt unread bytes");
+        }
+        let mut failed = false;
+        while let Some(chunk) = body.next().await {
+            if chunk.is_err() {
+                failed = true;
+                break;
+            }
+        }
+        assert_eq!(failed, corrupt, "corruption must abort the HTTP body");
+        drop(body);
+        assert_eq!(
+            state.download_permits.available_permits(),
+            state.options.max_concurrent_downloads
+        );
+        assert!(watched.peaks().peak_live_bytes <= loonfs::CONTENT_READ_CHUNK_BYTES);
+    }
+}
+
+#[tokio::test]
+async fn stale_commit_precondition_returns_409_with_its_index() {
+    use tower::ServiceExt;
+
+    let temp_dir = tempdir().expect("tempdir");
+    let (router, state) = test_app(
+        test_options(temp_dir.path(), "precondition-writer"),
+        TestAppOptions::default(),
+    )
+    .await
+    .expect("app");
+    state
+        .writer
+        .create_namespace(
+            &NamespaceId::parse("demo").expect("namespace"),
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("namespace");
+    let response = router
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/v0/namespaces/demo/commits")
+                .header(axum::http::header::AUTHORIZATION, "Bearer test-token")
+                .header("Loonfs-Actor", "test-actor")
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(axum::body::Body::from(
+                    serde_json::json!({
+                        "commit_id": "stale-precondition",
+                        "preconditions": [{"kind": "namespace_head", "expected_head_seq": 1}],
+                        "operations": [{"kind": "create_directory", "path": "/docs"}]
+                    })
+                    .to_string(),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let error: loonfs_api::ApiError = serde_json::from_slice(&body).expect("error");
+    assert_eq!(error.code, ErrorCode::StaleHead.as_str());
+    let details = error.details.expect("details");
+    assert_eq!(details.precondition_index, Some(0));
+    assert_eq!(details.expected_head_seq, Some(ChangeSeq(1)));
+    assert_eq!(details.actual_head_seq, Some(ChangeSeq(0)));
+    assert_eq!(details.operation_index, None);
+    state.writer.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn scoped_commit_precondition_returns_409_with_its_index() {
+    use tower::ServiceExt;
+
+    let temp_dir = tempdir().expect("tempdir");
+    let (router, state) = test_app(
+        test_options(temp_dir.path(), "precondition-writer"),
+        TestAppOptions::default(),
+    )
+    .await
+    .expect("app");
+    state
+        .writer
+        .create_namespace(
+            &NamespaceId::parse("demo").expect("namespace"),
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("namespace");
+    let response = router
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/v0/namespaces/demo/commits")
+                .header(axum::http::header::AUTHORIZATION, "Bearer test-token")
+                .header("Loonfs-Actor", "test-actor")
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(axum::body::Body::from(
+                    serde_json::json!({
+                        "commit_id": "stale-precondition",
+                        "preconditions": [{"kind": "namespace_head", "expected_head_seq": 0}, {"kind": "file_revision", "inode_id": "ino_99", "expected_revision_no": 1}],
+                        "operations": [{"kind": "create_directory", "path": "/docs"}]
+                    })
+                    .to_string(),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let error: loonfs_api::ApiError = serde_json::from_slice(&body).expect("error");
+    assert_eq!(error.code, ErrorCode::StaleRevision.as_str());
+    let details = error.details.expect("details");
+    assert_eq!(details.precondition_index, Some(1));
+    assert_eq!(details.inode_id, Some(loonfs_api::InodeId(99)));
+    assert_eq!(
+        details.expected_revision_no,
+        Some(loonfs_api::RevisionNo(1))
+    );
+    assert_eq!(details.actual_revision_no, None);
+    assert_eq!(details.operation_index, None);
+    state.writer.shutdown().await.expect("shutdown");
+}

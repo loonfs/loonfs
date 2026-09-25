@@ -6,7 +6,7 @@ use super::handlers_filesystem::{pin_requested_snapshot, reject_snapshot_with_re
 use super::handlers_inodes::{parse_inode_id, InodeRevisionPathParams};
 use super::handlers_uploads::{presign_issuer_error, presign_time};
 use super::query_params::parse_revision_no;
-use super::{AppJson, AppPath, AppQuery, AppState, NamespaceIdPath, NoQuery};
+use super::{AppJson, AppPath, AppQuery, BindingState, NamespaceIdPath, NoQuery};
 use axum::extract::State;
 use axum::Json;
 #[cfg(feature = "openapi")]
@@ -52,7 +52,7 @@ use std::time::Duration;
     )
 )]
 pub(super) async fn create_download(
-    State(state): State<AppState>,
+    State(state): State<BindingState>,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(_): AppQuery<NoQuery>,
@@ -108,7 +108,7 @@ pub(super) async fn create_download(
     )
 )]
 pub(super) async fn create_download_by_inode(
-    State(state): State<AppState>,
+    State(state): State<BindingState>,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(path): AppPath<InodeRevisionPathParams>,
@@ -133,7 +133,7 @@ pub(super) async fn create_download_by_inode(
     }))
 }
 
-fn direct_get_issuer(state: &AppState) -> Result<&dyn DirectGetIssuer, ApiResponseError> {
+fn direct_get_issuer(state: &BindingState) -> Result<&dyn DirectGetIssuer, ApiResponseError> {
     state
         .direct_transfers
         .as_ref()

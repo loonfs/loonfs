@@ -68,7 +68,7 @@ jobs:
           key: cargo-${{ runner.os }}-${{ github.job }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: cargo-${{ runner.os }}-${{ github.job }}-
       - run: cargo test --all --locked
-      - run: cargo test -p loonfs-server --features openapi --locked openapi
+      - run: cargo test -p loonfs-http --features openapi --locked openapi
 
   # Builds the conformance server once; the three language legs download it.
   sdk-conformance-server:

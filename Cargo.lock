@@ -2108,6 +2108,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "loonfs-http"
+version = "0.3.1"
+dependencies = [
+ "async-trait",
+ "axum",
+ "base64 0.22.1",
+ "bytes",
+ "form_urlencoded",
+ "futures",
+ "http 1.4.0",
+ "http-body 1.0.1",
+ "loonfs",
+ "loonfs-api",
+ "loonfs-client",
+ "loonfs-grep",
+ "loonfs-objectstore",
+ "loonfs-test-support",
+ "serde",
+ "serde_json",
+ "serde_path_to_error",
+ "serde_urlencoded",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tower",
+ "tracing",
+ "ureq",
+ "utoipa",
+]
+
+[[package]]
 name = "loonfs-model"
 version = "0.3.1"
 dependencies = [
@@ -2163,6 +2194,7 @@ dependencies = [
  "loonfs-client",
  "loonfs-core",
  "loonfs-grep",
+ "loonfs-http",
  "loonfs-objectstore",
  "loonfs-test-support",
  "mixtrics",
@@ -2171,8 +2203,6 @@ dependencies = [
  "rustls-pemfile",
  "serde",
  "serde_json",
- "serde_path_to_error",
- "serde_urlencoded",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -2182,7 +2212,6 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "ureq",
- "utoipa",
 ]
 
 [[package]]

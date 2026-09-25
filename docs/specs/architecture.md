@@ -4,6 +4,8 @@ LoonFS stores file bytes and filesystem metadata in object storage. The metadata
 
 A namespace id names one lifetime; deletion is terminal and a create or fork into that id returns `namespace_deleted` ([format section 1.1](format.md#11-namespaces-and-identity)).
 
+`loonfs-http` implements the representative HTTP binding. `loonfs-server` hosts it.
+
 ## Stored state
 
 The main objects have separate roles:

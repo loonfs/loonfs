@@ -484,6 +484,7 @@ jobs:
             loonfs-core \
             loonfs \
             loonfs-grep \
+            loonfs-http \
             loonfs-cli
           do
             status="$(curl --silent --show-error --retry 3 --output /dev/null \

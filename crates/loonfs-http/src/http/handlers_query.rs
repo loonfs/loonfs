@@ -4,7 +4,7 @@ use super::extractors::SubjectHeaders;
 use super::query_params::{parse_boolean_query_param, required_query_param, resolve_page_limit};
 #[cfg(feature = "openapi")]
 use super::query_params::{OpenApiDefaultFalseBoolean, OpenApiPageLimit};
-use super::{AppQuery, AppState, NamespaceIdPath, NoQuery};
+use super::{AppQuery, BindingState, NamespaceIdPath, NoQuery};
 use crate::http::error::ApiResponseError;
 use axum::extract::State;
 use axum::Json;
@@ -68,7 +68,7 @@ pub(super) struct GrepQuery {
     )
 )]
 pub(super) async fn grep(
-    State(state): State<AppState>,
+    State(state): State<BindingState>,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(mut query): AppQuery<GrepQuery>,
@@ -169,7 +169,7 @@ pub(super) async fn grep_index_not_maintained() -> ApiResponseError {
     )
 )]
 pub(super) async fn enable_grep_index(
-    State(state): State<AppState>,
+    State(state): State<BindingState>,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(_): AppQuery<NoQuery>,
 ) -> Result<Json<GrepIndex>, ApiResponseError> {
@@ -216,7 +216,7 @@ pub(super) async fn enable_grep_index(
     )
 )]
 pub(super) async fn get_grep_index(
-    State(state): State<AppState>,
+    State(state): State<BindingState>,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(_): AppQuery<NoQuery>,
 ) -> Result<Json<GrepIndex>, ApiResponseError> {
@@ -224,7 +224,7 @@ pub(super) async fn get_grep_index(
 }
 
 async fn read_grep_index_status(
-    state: &AppState,
+    state: &BindingState,
     namespace_id: &NamespaceId,
 ) -> Result<GrepIndex, ApiResponseError> {
     state
@@ -258,7 +258,7 @@ async fn read_grep_index_status(
     )
 )]
 pub(super) async fn disable_grep_index(
-    State(state): State<AppState>,
+    State(state): State<BindingState>,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(_): AppQuery<NoQuery>,
 ) -> Result<Json<GrepIndex>, ApiResponseError> {

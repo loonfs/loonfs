@@ -1,8 +1,8 @@
 //! Authorized path, query, JSON, and payload extractors for HTTP handlers.
 
 use super::error::ApiResponseError;
-use super::serve::AppState;
-use crate::config::AuthPolicy;
+use crate::AuthPolicy;
+use crate::BindingState;
 use axum::extract::rejection::PathRejection;
 use axum::extract::{DefaultBodyLimit, FromRequest, FromRequestParts, Path as AxumPath};
 use axum::http::request::Parts;
@@ -29,7 +29,7 @@ pub(super) fn server_busy_error(what: &str) -> ApiResponseError {
 }
 
 pub(super) fn acquire_download_permit(
-    state: &AppState,
+    state: &BindingState,
 ) -> Result<OwnedSemaphorePermit, ApiResponseError> {
     state
         .download_permits
@@ -41,13 +41,10 @@ pub(super) fn acquire_download_permit(
         })
 }
 
-pub(super) fn authorize(
-    policy: AuthPolicy<'_>,
-    headers: &HeaderMap,
-) -> Result<(), ApiResponseError> {
+pub(super) fn authorize(policy: &AuthPolicy, headers: &HeaderMap) -> Result<(), ApiResponseError> {
     let expected = match policy {
         AuthPolicy::Unauthenticated => return Ok(()),
-        AuthPolicy::BearerToken(expected) => expected,
+        AuthPolicy::BearerToken(expected) => expected.expose(),
     };
     let actual = headers
         .get(axum::http::header::AUTHORIZATION)
@@ -388,7 +385,7 @@ fn json_pointer(path: &serde_path_to_error::Path) -> Option<String> {
     (!pointer.is_empty()).then_some(pointer)
 }
 
-impl<T> FromRequest<AppState> for AppJson<T>
+impl<T> FromRequest<BindingState> for AppJson<T>
 where
     T: serde::de::DeserializeOwned,
 {
@@ -396,7 +393,7 @@ where
 
     async fn from_request(
         mut req: axum::extract::Request,
-        state: &AppState,
+        state: &BindingState,
     ) -> Result<Self, Self::Rejection> {
         DefaultBodyLimit::max(MAX_JSON_BODY_BYTES).apply(&mut req);
         extract_json(req, state, body_too_large_error(MAX_JSON_BODY_BYTES))
@@ -444,7 +441,7 @@ const _: () = assert!(
 /// JSON from an upload route with an explicit body-size limit.
 pub(super) struct UploadControlJson<T, const MAX_BYTES: usize>(pub(super) T);
 
-impl<T, const MAX_BYTES: usize> FromRequest<AppState> for UploadControlJson<T, MAX_BYTES>
+impl<T, const MAX_BYTES: usize> FromRequest<BindingState> for UploadControlJson<T, MAX_BYTES>
 where
     T: serde::de::DeserializeOwned,
 {
@@ -452,7 +449,7 @@ where
 
     async fn from_request(
         mut req: axum::extract::Request,
-        state: &AppState,
+        state: &BindingState,
     ) -> Result<Self, Self::Rejection> {
         DefaultBodyLimit::max(MAX_BYTES).apply(&mut req);
         extract_json(req, state, body_too_large_error(MAX_BYTES))
@@ -492,12 +489,12 @@ impl<const MAX_BYTES: usize> UploadBodyBytes<MAX_BYTES> {
     }
 }
 
-impl<const MAX_BYTES: usize> FromRequest<AppState> for UploadBodyBytes<MAX_BYTES> {
+impl<const MAX_BYTES: usize> FromRequest<BindingState> for UploadBodyBytes<MAX_BYTES> {
     type Rejection = ApiResponseError;
 
     async fn from_request(
         req: axum::extract::Request,
-        state: &AppState,
+        state: &BindingState,
     ) -> Result<Self, Self::Rejection> {
         extract_body_bytes(req, state, MAX_BYTES, body_too_large_error(MAX_BYTES))
             .await
@@ -601,12 +598,12 @@ impl UploadStreamOutcome {
     }
 }
 
-impl FromRequest<AppState> for UploadBodyStream {
+impl FromRequest<BindingState> for UploadBodyStream {
     type Rejection = ApiResponseError;
 
     async fn from_request(
         req: axum::extract::Request,
-        state: &AppState,
+        state: &BindingState,
     ) -> Result<Self, Self::Rejection> {
         let permit = state
             .upload_permits
@@ -616,7 +613,7 @@ impl FromRequest<AppState> for UploadBodyStream {
                 state.metrics.upload_rejected_as_busy();
                 server_busy_error("proxied uploads")
             })?;
-        let max_bytes = state.config.max_upload_bytes;
+        let max_bytes = state.options.max_upload_bytes;
         // A declared length past the limit is refused before a byte moves.
         // The incremental count still runs: a chunked body declares nothing,
         // and a declared length is a claim rather than a measurement.
@@ -665,7 +662,7 @@ pub(super) struct OptionalAppJson<T>(pub(super) Option<T>);
 
 const MAX_OPTIONAL_JSON_BODY_BYTES: usize = 1024 * 1024;
 
-impl<T> FromRequest<AppState> for OptionalAppJson<T>
+impl<T> FromRequest<BindingState> for OptionalAppJson<T>
 where
     T: serde::de::DeserializeOwned,
 {
@@ -673,7 +670,7 @@ where
 
     async fn from_request(
         req: axum::extract::Request,
-        state: &AppState,
+        state: &BindingState,
     ) -> Result<Self, Self::Rejection> {
         let body = extract_body_bytes(
             req,

@@ -6,7 +6,7 @@ use super::extractors::{missing_actor, ActorHeader, OptionalActorHeader, Subject
 use super::handlers_query::{grep_index_not_maintained, map_grep_error};
 use super::handlers_uploads::current_unix_ms;
 use super::query_params::{parse_path_id, parse_public_ordinal, resolve_page_limit};
-use super::{AppJson, AppPath, AppQuery, AppState, NamespaceIdPath, NoQuery};
+use super::{AppJson, AppPath, AppQuery, BindingState, NamespaceIdPath, NoQuery};
 use axum::extract::State;
 use axum::Json;
 use loonfs::{
@@ -79,11 +79,11 @@ pub(super) struct CheckpointPageQuery {
     )
 )]
 pub(super) async fn get_capabilities(
-    State(state): State<AppState>,
+    State(state): State<BindingState>,
     AppQuery(_): AppQuery<NoQuery>,
 ) -> Result<Json<loonfs_api::CapabilityDocument>, ApiResponseError> {
     let mut capabilities = state.reader.get_capabilities();
-    if let Some(threshold) = state.config.inline_content.inline_content_threshold_bytes {
+    if let Some(threshold) = state.options.inline_content.inline_content_threshold_bytes {
         set_feature(&mut capabilities, FEATURE_COMMIT_INLINE_CONTENT, true);
         capabilities.limits.insert(
             LIMIT_COMMIT_MAX_INLINE_CONTENT_BYTES_PER_OPERATION.to_owned(),
@@ -125,7 +125,7 @@ pub(super) async fn get_capabilities(
     }
     capabilities.limits.insert(
         LIMIT_UPLOAD_SERVICE_PROXIED_MAX_CONTENT_BYTES.to_owned(),
-        state.config.max_upload_bytes,
+        state.options.max_upload_bytes,
     );
     capabilities.limits.insert(
         LIMIT_UPLOAD_COMPLETE_MAX_REQUEST_BODY_BYTES.to_owned(),
@@ -137,33 +137,33 @@ pub(super) async fn get_capabilities(
     );
     capabilities.limits.insert(
         LIMIT_DOWNLOAD_SERVICE_PROXIED_MAX_CONTENT_BYTES.to_owned(),
-        state.config.max_download_bytes,
+        state.options.max_download_bytes,
     );
     capabilities.limits.insert(
         LIMIT_UPLOAD_SERVICE_PROXIED_MAX_CONCURRENT_REQUESTS.to_owned(),
-        state.config.max_concurrent_uploads as u64,
+        state.options.max_concurrent_uploads as u64,
     );
     capabilities.limits.insert(
         LIMIT_DOWNLOAD_SERVICE_PROXIED_MAX_CONCURRENT_REQUESTS.to_owned(),
-        state.config.max_concurrent_downloads as u64,
+        state.options.max_concurrent_downloads as u64,
     );
     capabilities.limits.insert(
         LIMIT_SNAPSHOT_MAX_TTL_MS.to_owned(),
-        state.config.snapshot_max_ttl_ms,
+        state.options.snapshot_policy.max_ttl_ms,
     );
     capabilities.limits.insert(
         LIMIT_SNAPSHOT_MAX_LIFETIME_MS.to_owned(),
-        state.config.snapshot_max_lifetime_ms,
+        state.options.snapshot_policy.max_lifetime_ms,
     );
     capabilities.limits.insert(
         LIMIT_SNAPSHOT_MAX_LIVE_PER_NAMESPACE.to_owned(),
-        state.config.snapshot_max_live_per_namespace as u64,
+        state.options.snapshot_policy.max_live_per_namespace as u64,
     );
     // The HTTP deployment replaces the embedded document's API groups with
     // the routes this router mounts. Serving searches and maintaining their
     // index remain separately deployable.
     capabilities.api_groups = vec![API_GROUP_FILESYSTEM_V0.to_owned()];
-    if state.config.maintenance.serves() {
+    if state.options.serves_maintenance {
         capabilities
             .api_groups
             .push(API_GROUP_MAINTENANCE_V0.to_owned());
@@ -171,9 +171,9 @@ pub(super) async fn get_capabilities(
     set_feature(
         &mut capabilities,
         FEATURE_MAINTENANCE_GREP_INDEX,
-        state.config.maintenance.serves() && state.config.grep.mode.maintains_index(),
+        state.options.serves_maintenance && state.options.maintains_grep_index,
     );
-    if state.config.grep.mode.serves_grep() {
+    if state.options.serves_grep {
         let pagination = PaginationPolicy::default();
         capabilities.api_groups.push(API_GROUP_QUERY_V0.to_owned());
         capabilities
@@ -226,7 +226,7 @@ pub(super) async fn get_capabilities(
     )
 )]
 pub(super) async fn create_namespace(
-    State(state): State<AppState>,
+    State(state): State<BindingState>,
     ActorHeader(actor_id): ActorHeader,
     AppQuery(_): AppQuery<NoQuery>,
     AppJson(request): AppJson<CreateNamespaceRequest>,
@@ -279,7 +279,7 @@ pub(super) async fn create_namespace(
     )
 )]
 pub(super) async fn get_namespace(
-    State(state): State<AppState>,
+    State(state): State<BindingState>,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(_): AppQuery<NoQuery>,
 ) -> Result<Json<loonfs_api::Namespace>, ApiResponseError> {
@@ -313,7 +313,7 @@ pub(super) async fn get_namespace(
     )
 )]
 pub(super) async fn get_namespace_diagnostics(
-    State(state): State<AppState>,
+    State(state): State<BindingState>,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(_): AppQuery<NoQuery>,
 ) -> Result<Json<loonfs_api::NamespaceDiagnostics>, ApiResponseError> {
@@ -354,7 +354,7 @@ pub(super) async fn get_namespace_diagnostics(
     )
 )]
 pub(super) async fn delete_namespace(
-    State(state): State<AppState>,
+    State(state): State<BindingState>,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(query): AppQuery<DeleteNamespaceQuery>,
@@ -408,7 +408,7 @@ fn parse_expected_head_seq(value: &str) -> Result<ChangeSeq, ApiResponseError> {
     )
 )]
 pub(super) async fn fork_namespace(
-    State(state): State<AppState>,
+    State(state): State<BindingState>,
     SubjectHeaders(subject): SubjectHeaders,
     ActorHeader(actor_id): ActorHeader,
     NamespaceIdPath(source_namespace_id): NamespaceIdPath,
@@ -459,7 +459,7 @@ pub(super) async fn fork_namespace(
     )
 )]
 pub(super) async fn create_snapshot(
-    State(state): State<AppState>,
+    State(state): State<BindingState>,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(_): AppQuery<NoQuery>,
@@ -477,7 +477,7 @@ pub(super) async fn create_snapshot(
                 expires_at_ms,
             },
             now_ms,
-            state.config.snapshot_max_live_per_namespace,
+            state.options.snapshot_policy.max_live_per_namespace,
         )
         .await
         .map_err(|error| {
@@ -521,7 +521,7 @@ pub(super) async fn create_snapshot(
     )
 )]
 pub(super) async fn list_snapshots(
-    State(state): State<AppState>,
+    State(state): State<BindingState>,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(query): AppQuery<CheckpointPageQuery>,
@@ -570,7 +570,7 @@ pub(super) async fn list_snapshots(
     )
 )]
 pub(super) async fn extend_snapshot(
-    State(state): State<AppState>,
+    State(state): State<BindingState>,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(SnapshotPathParams { snapshot_id }): AppPath<SnapshotPathParams>,
@@ -587,7 +587,7 @@ pub(super) async fn extend_snapshot(
             &namespace_id,
             &snapshot_id,
             requested_expires_at_ms,
-            state.config.snapshot_max_lifetime_ms,
+            state.options.snapshot_policy.max_lifetime_ms,
         )
         .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
@@ -621,7 +621,7 @@ pub(super) async fn extend_snapshot(
     )
 )]
 pub(super) async fn delete_snapshot(
-    State(state): State<AppState>,
+    State(state): State<BindingState>,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(SnapshotPathParams { snapshot_id }): AppPath<SnapshotPathParams>,
@@ -643,17 +643,15 @@ pub(super) struct SnapshotPathParams {
 }
 
 fn snapshot_expiry_from_ttl(
-    state: &AppState,
+    state: &BindingState,
     now_ms: u64,
     ttl_ms: u64,
 ) -> Result<u64, ApiResponseError> {
-    loonfs::SnapshotPolicy {
-        max_ttl_ms: state.config.snapshot_max_ttl_ms,
-        max_lifetime_ms: state.config.snapshot_max_lifetime_ms,
-        max_live_per_namespace: state.config.snapshot_max_live_per_namespace,
-    }
-    .expires_at_ms(now_ms, ttl_ms)
-    .map_err(ApiResponseError::runtime)
+    state
+        .options
+        .snapshot_policy
+        .expires_at_ms(now_ms, ttl_ms)
+        .map_err(ApiResponseError::runtime)
 }
 
 #[cfg_attr(
@@ -683,7 +681,7 @@ fn snapshot_expiry_from_ttl(
     )
 )]
 pub(super) async fn create_checkpoint(
-    State(state): State<AppState>,
+    State(state): State<BindingState>,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(_): AppQuery<NoQuery>,
     AppJson(request): AppJson<CreateCheckpointRequest>,
@@ -734,7 +732,7 @@ pub(super) async fn create_checkpoint(
     )
 )]
 pub(super) async fn list_checkpoints(
-    State(state): State<AppState>,
+    State(state): State<BindingState>,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(query): AppQuery<CheckpointPageQuery>,
 ) -> Result<Json<ListCheckpointsResponse>, ApiResponseError> {
@@ -781,7 +779,7 @@ pub(super) async fn list_checkpoints(
     )
 )]
 pub(super) async fn delete_checkpoint(
-    State(state): State<AppState>,
+    State(state): State<BindingState>,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(CheckpointPathParams { checkpoint_id }): AppPath<CheckpointPathParams>,
     AppQuery(_): AppQuery<NoQuery>,
@@ -840,14 +838,14 @@ fn decode_checkpoint_cursor(
     )
 )]
 pub(super) async fn run_maintenance(
-    State(state): State<AppState>,
+    State(state): State<BindingState>,
     OptionalActorHeader(actor_id): OptionalActorHeader,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(_): AppQuery<NoQuery>,
     AppJson(request): AppJson<RunMaintenanceRequest>,
 ) -> Result<Json<RunMaintenanceResponse>, ApiResponseError> {
     if let RunMaintenanceRequest::GrepGc {} = request {
-        if !state.config.grep.mode.maintains_index() {
+        if !state.options.maintains_grep_index {
             return Err(grep_index_not_maintained().await);
         }
         return loonfs_grep::run_grep_gc(state.grep_worker(), &namespace_id, current_unix_ms()?)

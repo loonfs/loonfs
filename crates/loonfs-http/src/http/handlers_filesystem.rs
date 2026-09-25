@@ -16,7 +16,7 @@ use super::query_params::{
 use super::query_params::{
     OpenApiDefaultFalseBoolean, OpenApiDefaultTrueBoolean, OpenApiPageLimit,
 };
-use super::{acquire_download_permit, AppJson, AppQuery, AppState, NamespaceIdPath, NoQuery};
+use super::{acquire_download_permit, AppJson, AppQuery, BindingState, NamespaceIdPath, NoQuery};
 use axum::extract::State;
 use axum::response::Response;
 use axum::Json;
@@ -246,7 +246,7 @@ impl ReadTarget {
     )
 )]
 pub(super) async fn list_path_entries(
-    State(state): State<AppState>,
+    State(state): State<BindingState>,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(query): AppQuery<ListPathPageQuery>,
@@ -303,7 +303,7 @@ pub(super) async fn list_path_entries(
     )
 )]
 pub(super) async fn get_path_entry(
-    State(state): State<AppState>,
+    State(state): State<BindingState>,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(query): AppQuery<PathQuery>,
@@ -355,7 +355,7 @@ pub(super) async fn get_path_entry(
     )
 )]
 pub(super) async fn get_file_bytes(
-    State(state): State<AppState>,
+    State(state): State<BindingState>,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(query): AppQuery<ContentQuery>,
@@ -382,7 +382,7 @@ pub(super) async fn get_file_bytes(
     streamed_download_response(
         stream,
         permit,
-        state.config.max_download_bytes,
+        state.options.max_download_bytes,
         &namespace_id,
     )
 }
@@ -420,7 +420,7 @@ pub(super) async fn get_file_bytes(
     )
 )]
 pub(super) async fn list_trash(
-    State(state): State<AppState>,
+    State(state): State<BindingState>,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(query): AppQuery<PageQuery>,
@@ -474,7 +474,7 @@ pub(super) async fn list_trash(
     )
 )]
 pub(super) async fn list_file_revisions(
-    State(state): State<AppState>,
+    State(state): State<BindingState>,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(query): AppQuery<PathPageQuery>,
@@ -526,7 +526,7 @@ pub(super) async fn list_file_revisions(
     )
 )]
 pub(super) async fn create_commit(
-    State(state): State<AppState>,
+    State(state): State<BindingState>,
     ActorHeader(actor_id): ActorHeader,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
@@ -543,7 +543,7 @@ pub(super) async fn create_commit(
     let inline_content = super::commit_content::prepare_inline_content(
         &namespace_id,
         &mut operations,
-        state.config.inline_content.inline_content_threshold_bytes,
+        state.options.inline_content.inline_content_threshold_bytes,
     )
     .map_err(|error| error.with_commit_id(&commit_id))?;
     // Failed and uncertain outcomes echo the idempotency key the caller can
@@ -568,7 +568,7 @@ pub(super) async fn create_commit(
             payload_class(usize::try_from(put_bytes).unwrap_or(usize::MAX)),
             content_preparation_for_puts(
                 &state.writer,
-                ContentTokenVerifier::new(state.config.content_token_secret()),
+                ContentTokenVerifier::new(state.options.content_token_secret.expose()),
                 &namespace_id,
                 &put_content_refs,
                 &content_tokens,
@@ -586,11 +586,11 @@ pub(super) async fn create_commit(
         operations,
     };
     let response_result = if let Some((payload_class, preparation)) = put_content_preparation {
-        let span = tracing::debug_span!(
+        let span = tracing::debug_span!(target: "loonfs_server::http::handlers_filesystem",
             "loonfs.put",
             operation = "put",
             mode = TraceMode::Remote.as_str(),
-            store_kind = TraceStoreKind::from(state.config.store.kind()).as_str(),
+            store_kind = TraceStoreKind::from(state.options.store_kind).as_str(),
             payload_class,
         );
         async {
@@ -653,7 +653,7 @@ pub(super) async fn create_commit(
     )
 )]
 pub(super) async fn list_changes(
-    State(state): State<AppState>,
+    State(state): State<BindingState>,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(query): AppQuery<ChangesQuery>,

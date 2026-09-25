@@ -6,7 +6,7 @@
 // A wrong reading kind in a fixture is a bug in the test.
 
 use super::*;
-use loonfs::metrics::LATENCY_SECONDS_BOUNDARIES;
+use loonfs::metrics::{DefaultMetricsRecorder, MetricsRecorder, LATENCY_SECONDS_BOUNDARIES};
 
 #[test]
 fn a_counter_renders_with_the_total_suffix_and_its_labels() {
@@ -159,25 +159,4 @@ fn a_scrape_reports_positive_process_resident_bytes() {
         })
         .expect("a Linux scrape should render process RSS");
     assert!(resident_bytes > 0);
-}
-
-#[test]
-fn route_labels_intern_once_and_refuse_to_grow_without_bound() {
-    let mut routes = RouteLabels::default();
-    let first = routes.intern("/v0/namespaces/{namespace_id}/commits");
-    let again = routes.intern("/v0/namespaces/{namespace_id}/commits");
-    assert_eq!(first, again);
-    assert_eq!(first.as_ptr(), again.as_ptr());
-
-    for index in 0..MAX_ROUTE_LABELS {
-        routes.intern(&format!("/synthetic/{index}"));
-    }
-    assert_eq!(routes.intern("/one/too/many"), UNMATCHED_ROUTE);
-}
-
-#[test]
-fn status_classes_collapse_to_their_leading_digit() {
-    assert_eq!(status_class_label(StatusCode::OK), "2xx");
-    assert_eq!(status_class_label(StatusCode::UNAUTHORIZED), "4xx");
-    assert_eq!(status_class_label(StatusCode::SERVICE_UNAVAILABLE), "5xx");
 }
