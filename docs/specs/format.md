@@ -69,13 +69,13 @@ The directory state at sequence 18 and the file content state at sequence 19 are
 
 ### 1.3 Directory bindings
 
-A directory slot is `(parent_inode_id, name_key)`. Its value is bound to one child inode or unbound. A bound value stores `display_name` to preserve the caller's spelling. The derived `name_key` determines sibling-name comparison.
+A directory slot is a parent inode and a name key, `(parent_inode_id, name_key)`. The slot's value is either bound to one child inode or unbound. A bound value stores `display_name`, which preserves the caller's spelling. The derived `name_key` is used for sibling-name comparison.
 
-Every binding change produces a `direntry_binding` row with `committed_seq` and `delta_index`. These fields identify the row's own position in namespace history. At sequence `N`, the slot's value is the row with the greatest `(committed_seq, delta_index)` whose sequence is at or below `N`. An unbound value, or no row, means the name is available. The last delta wins when a commit changes a slot more than once.
+Each binding change writes a `direntry_binding` row. Its `committed_seq` and `delta_index` are the row's own position in namespace history. At sequence `N`, a slot's value is the row with the greatest `(committed_seq, delta_index)` whose sequence is at or below `N`. If that row is unbound, or the slot has no such row, the name is available. When one commit changes a slot more than once, the last delta wins.
 
-The `direntry_binds` and `direntry_child_binds` families store the same rows, ordered by slot and child respectively. The child index uses the same version rule to find a child's current parent. Commit validation requires one child per slot and one parent per child. Moving a child first unbinds its old slot. Both indexes therefore agree at every read sequence.
+The `direntry_binds` family orders these rows by slot, and the `direntry_child_binds` family orders the same rows by child. A child's current parent is found in the child index with the same rule. Commit validation allows at most one child per slot and at most one parent per child. A move unbinds the child's old slot before it binds the new one. The two indexes therefore agree at every read sequence.
 
-A bind writes a bound value to both indexes. An unbind writes an unbound value with the parent, name, and child from its WAL delta. Validation checks that the delta targets the current binding. The WAL retains that target's sequence and delta index; the materialized row stores only the unbind event's own position. An unbound value is a tombstone for older values of the slot or child. Section 10.3 defines when it can be removed.
+A bind writes a bound value to both indexes. An unbind writes an unbound value to both, with the parent, name key, and child from its WAL delta. The WAL delta also names the bind it removes by sequence and delta index, and validation checks that this bind is the current binding. The materialized row stores only the unbind's own position. An unbound value is a tombstone for older values of its slot or child. Section 10.3 defines when it can be removed.
 
 ### 1.4 Names and paths
 
@@ -342,7 +342,7 @@ For a warm read, the reference runtime probes the next WAL number with GET. An a
 
 At sequence `N`, ignore events after `N`. An inode must have been created by `N` and must not be covered by an active tombstone on itself or an ancestor.
 
-A directory slot uses its newest version at or below `N`, ordered by `(committed_seq, delta_index)`. A bound version identifies the child; an unbound version or no version means absence. Parent lookup uses the same rule in the child index. Path lookup needs one slot-index lookup per component. A listing scans one parent prefix in name order, selects the newest visible version per name, and includes bound entries whose inodes, covering subtree tombstones, and caller permissions allow visibility. Snapshots and checkpoints apply these rules through their pinned manifests at their captured sequences.
+A directory slot's value is its newest version at or below `N`, ordered by `(committed_seq, delta_index)`. A bound version names the child. An unbound version, or no version, means the slot is empty. Parent lookup applies the same rule to the child index. Path resolution needs one slot-index lookup per component. A listing scans one parent's prefix in name order and takes the newest visible version of each name. It includes a bound entry only if the child inode was created by `N` and no active subtree tombstone covers it. Snapshots and checkpoints apply these rules through their pinned manifests at their captured sequences.
 
 A file's current content is its latest revision committed by `N`. Attributes are the latest applicable complete attribute revision, or the initial empty map when no applicable attribute row exists. Recoverable-deletion listing uses the derived active-deletion state; historical tombstone evaluation remains based on tombstone events.
 
@@ -787,11 +787,11 @@ The existence check detects missing recovery material before abandoning the corr
 
 ### 10.2 Compaction windows
 
-Metadata is compacted by family group. The slot and child binding indexes form one group because they must remain consistent. The `commits` and `commit_receipts` families form another group, and each of the other seven groups contains one family. Appendix A.6 lists the groups.
+Metadata is compacted by family group. The `direntry_binds` and `direntry_child_binds` families form one group because they must remain consistent. The `commits` and `commit_receipts` families form another group, and each of the other seven groups contains one family. Appendix A.6 lists the groups.
 
 A bounded rebuild merges an oldest-first contiguous window. It can skip the group's oldest run when that run is too large for one bounded step and merge the delta runs above it instead. It cannot skip an intervening delta run.
 
-An output run is `base` if and only if the window includes the group's oldest run. Only that kind of rebuild can drop rows under the retention rules. A rebuild above the oldest run produces a `delta` run and drops nothing, because an excluded older run may contain versions hidden by a tombstone in the selected window.
+An output run is `base` if and only if the window includes the group's oldest run. Only that kind of rebuild can drop rows under the retention rules. A rebuild above the oldest run produces a `delta` run and drops nothing, because an excluded older run may hold rows that a row in the window supersedes: an older binding version below an unbound one, or a listed deletion whose removal row is in the window.
 
 A group has at most one base run. A bottom-anchored rebuild replaces the existing base when one exists and is stamped with the manifest's `head_seq`. Base runs are ordered before delta runs regardless of their sequence stamp. A rebuild that skips the oldest run is stamped with its newest input's sequence and remains at that position in the group.
 
@@ -813,11 +813,11 @@ The following rules apply only when the selected inputs include the group's olde
 | `attributes` | For each inode, retain all revisions above the floor and the newest revision at or below it; remove earlier revisions. |
 | `access` | For each inode, retain all revisions above the floor and the newest revision at or below it; remove earlier revisions. |
 
-An unbound binding version is a tombstone. It must remain while it hides older versions of its slot or child. Only a bottom-anchored rebuild, which includes the group's oldest run, can drop it together with every older version it hides. A rebuild that excludes the oldest run keeps every row, including unbound values at or below the floor. Runs cover separate sequence ranges, so a bottom-anchored rebuild contains all older versions relevant to its floor state.
+An unbound binding version is a tombstone. It must remain while it hides older versions of its slot or child. Only a bottom-anchored rebuild, which includes the group's oldest run, can drop it. That rebuild drops it together with every older version it hides. A rebuild that excludes the oldest run keeps every row, including unbound versions at or below the floor. Runs cover separate sequence ranges, so a bottom-anchored rebuild includes every older version that can affect its floor state.
 
-Each binding event appears in both indexes. At the floor, a bound value is current in both indexes or neither: replacing a slot's child requires an unbind, and moving a child requires unbinding its old slot. Removing unbound floor values and the older values they hide leaves the same event set in both indexes. Row counts and row digests verify that agreement. Later events above the floor all remain.
+Each binding event appears in both indexes. At the floor, a bound value is current in both indexes or in neither, because replacing a slot's child requires an unbind and moving a child requires unbinding its old slot. Removing unbound floor values, together with the older values they hide, therefore leaves the same events in both indexes. Row counts and row digests verify that the two indexes agree. Every event above the floor remains.
 
-Binding positions come from the publishing delta. A later bind does not depend on a prior unbound value. Attribute and access revisions retain their cleared floor state because its revision number is needed to validate the next update.
+A binding row takes its position from the delta that published it, so a later bind does not depend on an earlier unbound value. Attribute and access revisions keep a cleared floor state, because the next update is validated against its revision number.
 
 An empty attribute map, or an access row with no boundary and no grants, is retained when it is the state at the floor. Removing it could expose an older row and restore state that had been cleared. Attribute and access rows are not removed merely because the inode is deleted, so undelete can restore the same state.
 
@@ -1225,7 +1225,7 @@ Rows are kind-tagged CBOR objects in the data blocks. The row-kind schema and th
 
 A `commit` row is the WAL commit record of A.5 without its inline content. The `inline_content` field is omitted, and a row that carries one is invalid.
 
-For a directory binding, `state` is `{"kind":"bound","display_name":...}` or `{"kind":"unbound"}`. Both indexes contain that complete row.
+For a directory binding, `state` is `{"kind":"bound","display_name":...}` or `{"kind":"unbound"}`. Both binding families store the complete row.
 
 For a tombstone, the top-level `committed_seq` and `delta_index` fields store the row's own position. A revoke target is a `DeltaPosition` value `{seq, delta_index}`. A set action is `{"kind":"set","deleted_binding":...}`. A revoke action is `{"kind":"revoke","target":...}`.
 
@@ -1249,7 +1249,7 @@ In the following grammar, `u64::MAX - x` and `u32::MAX - x` mean subtraction bef
 | `attributes` | `attribute-{inode_id:020}-{u64::MAX - attributes_revision_no:020}-{u64::MAX - committed_seq:020}-{u32::MAX - delta_index:010}` |
 | `access` | `access-{inode_id:020}-{u64::MAX - access_revision_no:020}-{u64::MAX - committed_seq:020}-{u32::MAX - delta_index:010}` |
 
-Binding keys sort positions oldest first within each slot or child. Reads select the greatest visible position. Compaction retains at most one candidate floor row while scanning each group.
+Within one slot or one child, binding keys sort positions oldest first. A read selects the greatest visible position. While compaction scans one slot or child, it holds at most one candidate floor row.
 
 Ascending byte order scans an inode's file revisions, attributes, and access rows newest-first. The active-deletion `sort_rank` is 0 for a removed entry and 1 for a listed entry. The stored widths are still ten digits.
 
@@ -1599,11 +1599,11 @@ A `grep_manifest` version-1 payload contains `namespace_id`, `manifest_no`, `sta
 
 `index_stored_bytes` is the sum of `index_block.offset + index_block.stored_bytes` for its referenced segments, using checked arithmetic. This calculation needs no segment reads. Report it with the grep manifest number and full indexing status, including any partial-commit position. Confirmed absence means zero referenced index bytes; a read failure remains an error.
 
-Discovery loads the hinted manifest and probes successive numbers until not-found. A missing hint or missing manifest 1 means grep is not enabled. A missing higher hinted manifest is corruption. After a missing object, discovery rechecks the hint because collection may have removed the old discovery path. Successors preserve namespace identity, advance the manifest number by one, and never lower the run allocator or indexing position. A restarted backfill may reset its inode cursor only with a new checkpoint pin. Disabling clears index state; enabling starts a new backfill. Queries validate a cached manifest with a HEAD of its successor on every query; a present successor reloads discovery. Decoded manifests can be cached by namespace and number.
+Discovery loads the hinted manifest and probes successive numbers until not-found. A missing hint or missing manifest 1 means grep is not enabled. A missing higher hinted manifest is corruption. After any not-found result, discovery reads the hint again, because collection may have deleted manifests below a newer hint. A successor manifest must have the same `namespace_id` and the next manifest number. It must not lower `next_run_no` or the indexing position in `status`. A backfill may reset its inode cursor only when it restarts from a newly pinned checkpoint. Disabling keeps `next_run_no` and drops the rest of the index state. Enabling starts a new backfill. Queries validate a cached manifest with a HEAD of its successor on every query; a present successor reloads discovery. Decoded manifests can be cached by namespace and number.
 
 An index watermark ahead of a reader's pinned head does not disable the index. The query pins the head again once before using that index.
 
-A step writes segments first, then publishes the next manifest with put-if-absent. A losing publisher reloads durable state and re-plans against current inputs. After an ambiguous manifest put, the publisher reloads the chain and reads the attempted number. An identical landed payload counts as published. Otherwise the caller reloads and plans its next step from current state. A successful publisher raises the hint with CAS, taking the greater number. A missing hint etag is a store error. A failed hint raise does not undo publication.
+A step writes segments first, then publishes the next manifest with put-if-absent. A losing publisher reloads durable state and re-plans against current inputs. If a manifest put ends with an unknown outcome, the publisher runs discovery again and reads the manifest at the number it attempted. If that manifest exists with an identical payload, the publication succeeded. Otherwise the publisher reloads and plans its next step from current state. A successful publisher raises the hint with CAS, taking the greater number. A hint read or write that returns no compare token is a store error. A failed hint raise does not undo publication.
 
 Every output-producing step must initiate publication within `METADATA_PUBLICATION_BUDGET_MS`, measured from before its first output. It writes no manifest after that bound. Grep uses bounded steps rather than core streaming compaction's epoch claim; conditional numbered publication and input revalidation control competing steps.
 
