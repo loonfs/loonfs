@@ -203,6 +203,8 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         let Some(subject) = &self.subject else {
             return Ok(());
         };
+        // Historical data does not restore historical administrator grants.
+        let context = self.authorization_head.as_ref().unwrap_or(context);
         let authorizer = Authorizer::for_request(
             &self.namespace_id,
             &context.head.access,
