@@ -164,20 +164,4 @@ impl Client {
         self.request_json::<(), GrepIndex>(self.post(&url), None, SendPolicy::Retry)
             .await
     }
-
-    /// Runs one complete grep index garbage-collection pass for a namespace.
-    ///
-    /// Retrying this request starts a distinct attempt.
-    pub async fn gc_grep_index(
-        &self,
-        namespace_id: &NamespaceId,
-        request: &GrepGcRequest,
-    ) -> Result<GrepGcResponse> {
-        let url = format!(
-            "{}/v0/maintenance/namespaces/{namespace_id}/grep/index/gc",
-            self.base_url
-        );
-        self.request_json(self.post(&url), Some(request), SendPolicy::Once)
-            .await
-    }
 }

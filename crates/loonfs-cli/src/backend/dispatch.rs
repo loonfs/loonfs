@@ -11,9 +11,8 @@ use crate::uploads::UploadJournal;
 use loonfs::{MaintenanceJobId, ReadFileStreamOptions};
 use loonfs_api::{
     v0::{
-        DeleteSnapshotResponse, GrepGcRequest, GrepGcResponse, GrepIndex, ListChangesResponse,
-        ListSnapshotsResponse, SnapshotSummary, StoreProbeRequest, StoreProbeResponse,
-        UploadSession,
+        DeleteSnapshotResponse, GrepIndex, ListChangesResponse, ListSnapshotsResponse,
+        SnapshotSummary, StoreProbeRequest, StoreProbeResponse, UploadSession,
     },
     AbsolutePath, ActorId, CapabilityDocument, ChangeSeq, Checkpoint, Commit, ContentRef,
     CreateCheckpointRequest, DeleteCheckpointResponse, DeleteNamespaceResponse, GrepRequest,
@@ -426,18 +425,6 @@ impl ResolvedTarget {
                 .await
                 .scoped(namespace_id),
             Self::Remote(target) => Ok(target.client.get_grep_index(namespace_id).await?),
-        }
-    }
-
-    /// Runs one bounded grep index garbage-collection pass (maintenance API group).
-    pub(crate) async fn gc_grep_index(
-        &self,
-        namespace_id: &NamespaceId,
-        request: &GrepGcRequest,
-    ) -> Result<GrepGcResponse, CliError> {
-        match self {
-            Self::Embedded(target) => target.backend.gc_grep_index(namespace_id, request).await,
-            Self::Remote(target) => Ok(target.client.gc_grep_index(namespace_id, request).await?),
         }
     }
 

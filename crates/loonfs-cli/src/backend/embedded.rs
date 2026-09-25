@@ -18,8 +18,7 @@ use loonfs::{
 use loonfs_api::PinId;
 use loonfs_api::{
     v0::{
-        GrepGcRequest, GrepGcResponse, GrepIndex, GrepIndexLifecycle, ListSnapshotsResponse,
-        SnapshotSummary, StoreProbeResponse,
+        GrepIndex, GrepIndexLifecycle, ListSnapshotsResponse, SnapshotSummary, StoreProbeResponse,
     },
     AbsolutePath, ChangeSeq, Checkpoint, Commit, CreateCheckpointRequest, EffectiveLimit,
     ErrorCode, GrepRequest, GrepResponse, InodeId, ListCheckpointsResponse,
@@ -222,25 +221,6 @@ impl EmbeddedBackend {
             .get_grep_index(namespace_id)
             .await
             .scoped(namespace_id)
-    }
-
-    pub(super) async fn gc_grep_index(
-        &self,
-        namespace_id: &NamespaceId,
-        _request: &GrepGcRequest,
-    ) -> Result<GrepGcResponse, CliError> {
-        let report = self
-            .grep_worker()
-            .garbage_collect_namespace(namespace_id, current_unix_ms()?)
-            .await
-            .scoped(namespace_id)?;
-        Ok(GrepGcResponse {
-            namespace_id: namespace_id.clone(),
-            deleted_segments: report.deleted_segments,
-            deleted_other_objects: report.deleted_other_objects,
-            namespace_reaped: report.namespace_reaped,
-            retained_candidates: report.retained_candidates,
-        })
     }
 
     /// Runs the grep index job's bounded steps until the index has built
@@ -717,6 +697,11 @@ impl EmbeddedBackend {
         namespace_id: &NamespaceId,
         request: RunMaintenanceRequest,
     ) -> Result<RunMaintenanceResponse, CliError> {
+        if let RunMaintenanceRequest::GrepGc {} = request {
+            return loonfs_grep::run_grep_gc(&self.grep_worker(), namespace_id, current_unix_ms()?)
+                .await
+                .scoped(namespace_id);
+        }
         self.maintenance
             .run_maintenance(namespace_id, request)
             .await

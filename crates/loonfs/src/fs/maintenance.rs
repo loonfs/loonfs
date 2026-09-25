@@ -223,11 +223,16 @@ impl FsMaintenance {
             RunMaintenanceRequest::Metadata(_) => "metadata",
             RunMaintenanceRequest::MetadataCompaction(_) => "metadata_compaction",
             RunMaintenanceRequest::Gc(_) => "gc",
+            RunMaintenanceRequest::GrepGc {} => "grep_gc",
             RunMaintenanceRequest::Retention(_) => "retention",
             RunMaintenanceRequest::RecoverAdministrator(_) => "recover_administrator",
         };
         span.record("kind", kind);
         match request {
+            RunMaintenanceRequest::GrepGc {} => Err(RuntimeError::Config(
+                "grep collection requires a grep worker; run it through the grep extension"
+                    .to_owned(),
+            )),
             RunMaintenanceRequest::RecoverAdministrator(_) => Err(RuntimeError::Config(
                 "administrator recovery publishes a commit; run it through the writer".to_owned(),
             )),

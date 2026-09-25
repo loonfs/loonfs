@@ -112,7 +112,7 @@ pub(crate) async fn run(
                     inspection::run_capabilities(kind, config_path, args).await
                 }
                 Command::Maintenance { command } => {
-                    maintenance::run_maintenance_command(kind, config_path, command, runtime).await
+                    maintenance::run_maintenance_command(kind, config_path, command).await
                 }
                 Command::Completion(_) | Command::Doctor(_) => pre_config_command_in_nested_match(),
             }

@@ -12,7 +12,7 @@ can maintain namespaces named on the command line:
 loonfs maintenance loop --namespaces docs,source --jobs grep-index,grep-gc
 loonfs maintenance loop --namespaces docs --jobs grep-index --drain
 loonfs maintenance loop --namespaces docs --jobs grep-gc --drain
-loonfs maintenance index gc --namespace docs
+loonfs maintenance grep-gc --namespace docs
 ```
 
 Without `--drain`, the command runs until it receives a stop signal and
@@ -23,7 +23,7 @@ repeated flags. Omitting `--jobs` also runs metadata, metadata compaction,
 and core garbage collection.
 
 The `grep-gc` job completes one collection pass per call.
-`loonfs maintenance index gc` runs a pass directly for one namespace,
+`loonfs maintenance grep-gc` runs a pass directly for one namespace,
 including an absent or deleted namespace whose old index data remains.
 Every pass reads the current manifest and hint before deletion. Manifests use
 contiguous numbers and put-if-absent publication. `hint.json` starts forward discovery

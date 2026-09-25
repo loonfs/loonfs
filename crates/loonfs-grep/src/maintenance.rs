@@ -12,7 +12,7 @@ use loonfs::{
     MaintenanceJobId, MaintenanceProbe, MaintenanceRunReport, NamespaceId, NamespacePublication,
     Result, RuntimeError,
 };
-use loonfs_api::ErrorCode;
+use loonfs_api::{ErrorCode, RunMaintenanceResponse};
 use loonfs_objectstore::ObjectStore;
 
 /// Identity of the grep index job wherever it is registered.
@@ -114,6 +114,23 @@ impl<S: ObjectStore + Clone + Send + Sync + 'static> MaintenanceJob for GrepMain
 
 fn not_enabled_step() -> MaintenanceRunReport {
     MaintenanceRunReport::concluded(MaintenanceConclusion::NotEnabled)
+}
+
+pub async fn run_grep_gc<S: ObjectStore + Clone>(
+    worker: &GrepWorker<S>,
+    namespace_id: &NamespaceId,
+    now_ms: u64,
+) -> crate::Result<RunMaintenanceResponse> {
+    let report = worker
+        .garbage_collect_namespace(namespace_id, now_ms)
+        .await?;
+    Ok(RunMaintenanceResponse::GrepGc {
+        namespace_id: namespace_id.clone(),
+        deleted_segments: report.deleted_segments,
+        deleted_other_objects: report.deleted_other_objects,
+        namespace_reaped: report.namespace_reaped,
+        retained_candidates: report.retained_candidates,
+    })
 }
 
 #[derive(Debug, Clone)]

@@ -135,14 +135,6 @@ pub(crate) const OPERATION_SDK_NAMES: &[(&str, SdkName)] = &[
         },
     ),
     (
-        "gc_grep_index",
-        SdkName {
-            group: &["maintenance", "grepIndex"],
-            method: "gc",
-            request: None,
-        },
-    ),
-    (
         "get_capabilities",
         SdkName {
             group: &["capabilities"],

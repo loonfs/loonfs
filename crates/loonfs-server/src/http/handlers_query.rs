@@ -1,15 +1,14 @@
 //! The `query/v0` API group: derived-index reads.
 
 use super::extractors::SubjectHeaders;
-use super::handlers_uploads::current_unix_ms;
 use super::query_params::{parse_boolean_query_param, required_query_param, resolve_page_limit};
 #[cfg(feature = "openapi")]
 use super::query_params::{OpenApiDefaultFalseBoolean, OpenApiPageLimit};
-use super::{AppQuery, AppState, NamespaceIdPath, NoQuery, OptionalAppJson};
+use super::{AppQuery, AppState, NamespaceIdPath, NoQuery};
 use crate::http::error::ApiResponseError;
 use axum::extract::State;
 use axum::Json;
-use loonfs_api::v0::{GrepGcRequest, GrepGcResponse, GrepIndex};
+use loonfs_api::v0::GrepIndex;
 #[cfg(feature = "openapi")]
 use loonfs_api::ApiError;
 use loonfs_api::{
@@ -277,53 +276,10 @@ pub(super) async fn disable_grep_index(
     Ok(Json(read_grep_index_status(&state, &namespace_id).await?))
 }
 
-#[cfg_attr(
-    feature = "openapi",
-    utoipa::path(
-        post,
-        operation_id = "gc_grep_index",
-        extensions(
-            ("x-loonfs-retry" = json!("not_idempotent")),
-            ("x-fern-retries" = json!({"disabled": true})),
-        ),
-        path = "/v0/maintenance/namespaces/{namespace_id}/grep/index/gc",
-        tag = "maintenance",
-        summary = "Collect grep index garbage",
-        description = "Runs one explicit garbage-collection pass over only this namespace's grep-owned extension keyspace. A tombstoned or absent namespace has aged extension state reaped. Every call reads durable roots and completes one pass. Unreadable or invalid roots fail before deletion. Requires this deployment to maintain the grep index.",
-        params(("namespace_id" = String, Path, description = "Namespace id")),
-        // A reference body is optional in utoipa; its value is an object.
-        request_body(content = ref("#/components/schemas/GrepGcRequest")),
-        responses(
-            (status = 200, description = "Namespace grep garbage collection completed", body = GrepGcResponse),
-            (status = 400, description = "Invalid namespace id or options", body = ApiError),
-            (status = 401, description = "Unauthorized", body = ApiError),
-            (status = 501, description = "This deployment does not maintain the grep index", body = ApiError),
-            (status = 500, description = "The grep index is corrupt or its backing store is unavailable", body = ApiError),
-            crate::http::openapi::UnavailableResponses
-        )
-    )
-)]
-pub(super) async fn gc_grep_index(
-    State(state): State<AppState>,
-    NamespaceIdPath(namespace_id): NamespaceIdPath,
-    AppQuery(_): AppQuery<NoQuery>,
-    OptionalAppJson(_request): OptionalAppJson<GrepGcRequest>,
-) -> Result<Json<GrepGcResponse>, ApiResponseError> {
-    let report = state
-        .grep_worker()
-        .garbage_collect_namespace(&namespace_id, current_unix_ms()?)
-        .await
-        .map_err(|error| map_grep_error(&namespace_id, error))?;
-    Ok(Json(GrepGcResponse {
-        namespace_id,
-        deleted_segments: report.deleted_segments,
-        deleted_other_objects: report.deleted_other_objects,
-        namespace_reaped: report.namespace_reaped,
-        retained_candidates: report.retained_candidates,
-    }))
-}
-
-fn map_grep_error(namespace_id: &loonfs_api::NamespaceId, error: GrepError) -> ApiResponseError {
+pub(super) fn map_grep_error(
+    namespace_id: &loonfs_api::NamespaceId,
+    error: GrepError,
+) -> ApiResponseError {
     if let GrepError::Runtime(error) = error {
         return ApiResponseError::runtime_for_namespace(namespace_id, error);
     }

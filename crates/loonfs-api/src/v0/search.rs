@@ -163,28 +163,6 @@ pub struct GrepIndex {
     pub reorganize_pending: bool,
 }
 
-/// One explicit grep index garbage-collection pass (maintenance API group).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[serde(deny_unknown_fields)]
-pub struct GrepGcRequest {}
-
-/// Result of one explicit grep index garbage-collection pass (maintenance API group).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct GrepGcResponse {
-    /// Namespace whose grep-owned keyspace was inspected.
-    pub namespace_id: NamespaceId,
-    /// Unreferenced grep segments older than the minimum segment age.
-    pub deleted_segments: u64,
-    /// Other unreferenced grep objects deleted after the grace window.
-    pub deleted_other_objects: u64,
-    /// Whether an absent or tombstoned namespace had extension state reaped.
-    pub namespace_reaped: bool,
-    /// Referenced, young, or unrecognized candidates retained by the pass.
-    pub retained_candidates: u64,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -320,15 +298,6 @@ mod tests {
                 "next_run_no": 1,
                 "reorganize_pending": false
             })
-        );
-    }
-
-    #[test]
-    fn grep_gc_request_bodies_reject_unknown_fields() {
-        serde_json::from_value::<GrepGcRequest>(serde_json::json!({}))
-            .expect("an empty collection request decodes");
-        assert!(
-            serde_json::from_value::<GrepGcRequest>(serde_json::json!({"max_objects": 8})).is_err()
         );
     }
 }

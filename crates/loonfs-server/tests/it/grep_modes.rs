@@ -7,11 +7,12 @@ use axum::http::{Method, Request, StatusCode};
 use axum::Router;
 use loonfs::{CreateNamespaceOptions, FsWriter, PutFileOptions};
 use loonfs::{FsMaintenance, FsReader};
-use loonfs_api::v0::{GrepGcResponse, GrepIndex, GrepIndexLifecycle};
+use loonfs_api::v0::{GrepIndex, GrepIndexLifecycle};
 use loonfs_api::{
-    ApiError, CapabilityDocument, ChangeSeq, GrepResponse, NamespaceId, API_GROUP_QUERY_V0,
-    FEATURE_MAINTENANCE_GREP_INDEX, FEATURE_QUERY_GREP, LIMIT_QUERY_GREP_DEFAULT,
-    LIMIT_QUERY_GREP_MAX, LIMIT_QUERY_GREP_SCAN_BUDGET_FILES, LIMIT_QUERY_GREP_TAIL_BUDGET_FILES,
+    ApiError, CapabilityDocument, ChangeSeq, GrepResponse, NamespaceId, RunMaintenanceResponse,
+    API_GROUP_QUERY_V0, FEATURE_MAINTENANCE_GREP_INDEX, FEATURE_QUERY_GREP,
+    LIMIT_QUERY_GREP_DEFAULT, LIMIT_QUERY_GREP_MAX, LIMIT_QUERY_GREP_SCAN_BUDGET_FILES,
+    LIMIT_QUERY_GREP_TAIL_BUDGET_FILES,
 };
 use loonfs_grep::manifest::{load_current_grep_manifest, GrepIndexStatus};
 use loonfs_grep::{GramIndexBuildPolicy, GrepBuildOutcome, GrepWorker, GREP_INDEX_JOB};
@@ -90,6 +91,29 @@ async fn disabled_mode_returns_not_supported_and_omits_grep_capabilities() {
         .shutdown()
         .await
         .expect("settle the server writer");
+}
+
+#[tokio::test]
+async fn grep_gc_requires_grep_maintenance() {
+    for mode in [GrepMode::Disabled, GrepMode::ServeOnly] {
+        let temp_dir = tempdir().expect("store tempdir");
+        let (router, server) = app(test_config(temp_dir.path(), mode), AppOptions::default())
+            .await
+            .expect("build app");
+        assert_not_supported(
+            &router,
+            Method::POST,
+            "/v0/maintenance/namespaces/demo/runs",
+            Some(br#"{"kind":"grep_gc"}"#.to_vec()),
+            FEATURE_MAINTENANCE_GREP_INDEX,
+        )
+        .await;
+        server
+            .writer
+            .shutdown()
+            .await
+            .expect("settle the server writer");
+    }
 }
 
 #[tokio::test]
@@ -306,17 +330,30 @@ async fn serving_and_maintaining_enables_queries_nudges_and_disables_per_namespa
         "no step may resurrect a manifest the operator disabled"
     );
 
-    let gc: GrepGcResponse = response_json(
-        send(
-            &router,
-            Method::POST,
-            &format!("/v0/maintenance/namespaces/{namespace_id}/grep/index/gc"),
-            None,
-        )
-        .await,
+    let response = send(
+        &router,
+        Method::POST,
+        &format!("/v0/maintenance/namespaces/{namespace_id}/runs"),
+        Some(br#"{"kind":"grep_gc"}"#.to_vec()),
     )
     .await;
-    assert_eq!(gc.namespace_id, namespace_id);
+    assert_eq!(response.status(), StatusCode::OK);
+    let gc: RunMaintenanceResponse = response_json(response).await;
+    let RunMaintenanceResponse::GrepGc {
+        namespace_id: actual_namespace_id,
+        deleted_segments,
+        deleted_other_objects,
+        namespace_reaped,
+        retained_candidates,
+    } = gc
+    else {
+        panic!("expected grep collection, got {gc:?}");
+    };
+    assert_eq!(actual_namespace_id, namespace_id);
+    assert_eq!(deleted_segments, 0);
+    assert_eq!(deleted_other_objects, 0);
+    assert!(!namespace_reaped);
+    assert!(retained_candidates > 0);
 
     assert_eq!(enable_grep(&router, &namespace_id).await, StatusCode::OK);
     settle(&server).await;
@@ -823,7 +860,7 @@ fn query_path_with_pattern(namespace_id: &NamespaceId, pattern: &str) -> String 
 }
 
 fn maintenance_grep_paths(namespace_id: &NamespaceId) -> Vec<String> {
-    ["enable", "disable", "gc"]
+    ["enable", "disable"]
         .into_iter()
         .map(|action| format!("/v0/maintenance/namespaces/{namespace_id}/grep/index/{action}"))
         .collect()

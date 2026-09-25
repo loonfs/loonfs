@@ -1,8 +1,8 @@
 use super::summaries::*;
 use crate::commands::{MaintenanceKeyReport, MaintenanceRan};
 use loonfs_api::v0::{
-    DeleteSnapshotResponse, GrepGcResponse, GrepIndex, ListChangesResponse, ListSnapshotsResponse,
-    SnapshotSummary, StoreProbeResponse,
+    DeleteSnapshotResponse, GrepIndex, ListChangesResponse, ListSnapshotsResponse, SnapshotSummary,
+    StoreProbeResponse,
 };
 use loonfs_api::{
     ChangeSeq, Checkpoint, DeleteCheckpointResponse, DeleteNamespaceResponse,
@@ -192,6 +192,21 @@ pub(super) fn human_maintenance_ran(ran: &MaintenanceRan) -> String {
         RunMaintenanceResponse::Gc(gc) => {
             format!("gc for {}: {}", gc.namespace_id, gc_summary(gc))
         }
+        RunMaintenanceResponse::GrepGc {
+            namespace_id,
+            deleted_segments,
+            deleted_other_objects,
+            namespace_reaped,
+            retained_candidates,
+        } => {
+            let mut summary = format!(
+                "grep gc for {namespace_id}: {deleted_segments} segments, {deleted_other_objects} other objects deleted, {retained_candidates} retained"
+            );
+            if *namespace_reaped {
+                summary.push_str("; the namespace's grep state was reaped");
+            }
+            summary
+        }
         RunMaintenanceResponse::Retention(retention) => {
             let state = if ran
                 .retention_floor_before
@@ -303,20 +318,5 @@ pub(super) fn human_grep_index_status(response: &GrepIndex) -> String {
     if response.reorganize_pending {
         summary.push_str("; a reorganization is in progress");
     }
-    summary
-}
-
-pub(super) fn human_grep_index_collected(response: &GrepGcResponse) -> String {
-    let mut summary = format!(
-        "index gc for {}: {} segments, {} other objects deleted, {} retained",
-        response.namespace_id,
-        response.deleted_segments,
-        response.deleted_other_objects,
-        response.retained_candidates
-    );
-    if response.namespace_reaped {
-        summary.push_str("; the namespace's grep state was reaped");
-    }
-
     summary
 }
