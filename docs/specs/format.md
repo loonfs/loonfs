@@ -899,7 +899,7 @@ The combined allowance is 180,000 milliseconds. This is one relative-clock, prec
 
 Publication budgets use monotonic elapsed time. The minimum ordinary grace includes the longest bounded publication, one provider-operation deadline, one attempt timeout, and the combined allowance. Fork installation and streaming compaction reserve that grace within their respective lifetime bounds. Appendix C records the exact calculations.
 
-These assumptions exclude an unbounded pause between a budget check and the write it permits. A client timeout does not establish that a remote write had no effect; unknown outcomes still require reconciliation.
+If a publication's budget has expired when its put returns, the publisher treats the outcome as unknown, even if the put succeeded. A client timeout does not establish that a remote write had no effect; unknown outcomes still require reconciliation.
 
 Direct expiry checks do not add GC grace to the requested lifetime. A host ahead by `E` milliseconds can reject an expired upload or snapshot up to `E` milliseconds earlier than the creating host would. Reclamation grace protects concurrent publication; it does not synchronize expiry decisions across hosts.
 

@@ -17,6 +17,7 @@ use loonfs_api::{
 };
 use loonfs_objectstore::keys::{hint, wal_segment, wal_segment_prefix};
 use loonfs_objectstore::{local_fs_store::LocalFsStore, ObjectStore};
+use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::stores::{
     BlockingStore, KeyPredicate, MetadataMapStore, OperationClass, RecordingStore,
 };
@@ -610,4 +611,188 @@ async fn fence_publication_enforces_the_wal_budget_before_the_put() {
         .await
         .expect("budget boundary");
     assert_eq!(store.counts().create_if_absent_puts, 1);
+}
+
+#[tokio::test]
+async fn a_wal_put_returning_after_its_budget_has_an_unknown_outcome() {
+    let directory = tempdir().expect("directory");
+    let namespace_id = NamespaceId::parse("wal-return-budget").expect("namespace");
+    let timer = Arc::new(ManualClock::new(0));
+    let tip = crate::time::Observation::now(timer.clone());
+    let store = MetadataMapStore::new(
+        RecordingStore::new(
+            LocalFsStore::new(directory.path()).expect("store"),
+            KeyPredicate::any(),
+        ),
+        KeyPredicate::prefix(wal_segment_prefix(&namespace_id)),
+        move |metadata| {
+            timer.advance_ms(crate::limits::WAL_PUBLISH_BUDGET_MS + 1);
+            metadata
+        },
+    );
+    let head = crate::namespace::state::NamespaceReadState::initial(
+        namespace_id.clone(),
+        1_000,
+        loonfs_test_support::test_actor(),
+    );
+    let fence =
+        super::prepare_segment(namespace_id.clone(), WriterEpoch(1), &head, &[]).expect("fence");
+    let error = super::publish_segment(&store, &fence, &tip)
+        .await
+        .expect_err("late put must not acknowledge publication");
+    assert!(matches!(
+        error,
+        crate::error::CoreError::WalPublish(crate::commit::WalPublishError::OutcomeUnknown(_))
+    ));
+    assert_eq!(store.inner().counts().create_if_absent_puts, 1);
+    assert_eq!(store.inner().snapshot().len(), 1);
+    assert!(store
+        .inner()
+        .inner()
+        .head(&wal_segment(&namespace_id, &WalNo(1)))
+        .await
+        .expect("landed fence")
+        .is_some());
+}
+
+#[tokio::test]
+async fn a_writer_resuming_after_its_fence_was_collected_does_not_acknowledge_its_put() {
+    let temp_dir = tempdir().expect("directory");
+    let namespace_id = NamespaceId::parse("sleep-budget").expect("namespace");
+    let store_clock = ManualClock::new(0);
+    let store = MetadataMapStore::aged(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyPredicate::any(),
+    );
+    let timer_a = Arc::new(ManualClock::new(0));
+    let timer_b = Arc::new(ManualClock::new(0));
+    let context_a = context(store_clock.now_ms());
+    let context_b = MutationContext {
+        writer_id: WriterId::parse("writer-b").expect("writer"),
+        ..context_a.clone()
+    };
+    create(&store, &namespace_id, &context_a)
+        .await
+        .expect("create");
+    let mut writer_a =
+        NamespaceCommitEngine::new(namespace_id.clone()).monotonic_timer(timer_a.clone());
+    let options = PublishTailOptions::default();
+    writer_a
+        .publish_batch(
+            &store,
+            [directory("before-sleep")],
+            &context_a,
+            &options,
+            &Deadline::start(timer_a.clone()),
+        )
+        .await
+        .results
+        .remove(0)
+        .expect("writer A observes its tip");
+    let blocked = BlockingStore::new(
+        store,
+        KeyPredicate::exact(wal_segment(&namespace_id, &WalNo(3))),
+        OperationClass::PutCreateIfAbsent,
+    );
+    blocked.block_next();
+    let batch = Deadline::start(timer_a.clone());
+    let (mut resumed, ()) = futures::join!(
+        writer_a.publish_batch(
+            &blocked,
+            [directory("after-sleep")],
+            &context_a,
+            &options,
+            &batch,
+        ),
+        async {
+            blocked.wait_until_blocked().await;
+            let mut writer_b =
+                NamespaceCommitEngine::new(namespace_id.clone()).monotonic_timer(timer_b.clone());
+            writer_b
+                .publish_batch(
+                    blocked.inner(),
+                    [directory("takeover")],
+                    &context_b,
+                    &options,
+                    &Deadline::start(timer_b.clone()),
+                )
+                .await
+                .results
+                .remove(0)
+                .expect("writer B takes the epoch and commits");
+            let fence_key = wal_segment(&namespace_id, &WalNo(3));
+            let fence = decode_wal_segment_envelope_zstd(
+                &blocked
+                    .inner()
+                    .get(&fence_key, None)
+                    .await
+                    .expect("get")
+                    .expect("fence"),
+            )
+            .expect("decode fence");
+            assert_eq!(fence.payload().writer_epoch, WriterEpoch(2));
+            assert!(fence.payload().records.is_empty());
+            crate::checkpoint::flush_wal_with_deadline(
+                blocked.inner(),
+                &namespace_id,
+                &Deadline::start(timer_b.clone()),
+            )
+            .await
+            .expect("fold takeover and commit");
+            let config = crate::gc::GcConfig {
+                grace_window_ms: crate::limits::GC_MIN_GRACE_WINDOW_MS,
+            };
+            store_clock.advance_ms(config.grace_window_ms + 1);
+            let report = crate::gc::gc_namespace(
+                blocked.inner(),
+                &namespace_id,
+                &config,
+                &MutationContext {
+                    now_ms: store_clock.now_ms(),
+                    ..context_b.clone()
+                },
+            )
+            .await
+            .expect("collect folded fence");
+            assert_eq!(report.deleted.wal_segments, 4);
+            assert!(blocked
+                .inner()
+                .head(&fence_key)
+                .await
+                .expect("fence removed")
+                .is_none());
+            assert_eq!(timer_a.now_ms(), 0);
+            timer_a.advance_ms(store_clock.now_ms());
+            blocked.release();
+        }
+    );
+    assert_eq!(
+        resumed
+            .results
+            .remove(0)
+            .expect_err("reclaimed number must not acknowledge a commit")
+            .code(),
+        ErrorCode::CommitOutcomeUnknown,
+    );
+    assert!(blocked
+        .inner()
+        .head(&wal_segment(&namespace_id, &WalNo(3)))
+        .await
+        .expect("late put landed")
+        .is_some());
+    let view = load_current_metadata_view(&blocked, &namespace_id)
+        .await
+        .expect("current view");
+    let access = crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted);
+    assert_eq!(view.head().seq, ChangeSeq(2));
+    view.resolve_path("/takeover", AttributeInclusion::Omit, &access)
+        .await
+        .expect("live commit");
+    assert_eq!(
+        view.resolve_path("/after-sleep", AttributeInclusion::Omit, &access)
+            .await
+            .expect_err("late commit is not replayed")
+            .code(),
+        ErrorCode::PathNotFound
+    );
 }

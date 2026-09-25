@@ -1982,6 +1982,7 @@ dependencies = [
  "getrandom 0.3.4",
  "icu_casemap",
  "icu_normalizer",
+ "libc",
  "serde",
  "serde_bytes",
  "serde_json",

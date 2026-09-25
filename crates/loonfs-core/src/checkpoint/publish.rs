@@ -153,7 +153,21 @@ pub(crate) async fn publish_manifest<S: ObjectStore + ?Sized>(
         .put_if_absent(&object_key, Bytes::from(manifest.into_bytes()))
         .await
     {
-        Ok(_) => ManifestPublicationOutcome::Published(candidate.clone()),
+        Ok(_) => {
+            let elapsed_ms = deadline.elapsed_ms();
+            // A put that lands after the budget may have landed on a reclaimed number.
+            if elapsed_ms > crate::limits::METADATA_PUBLICATION_BUDGET_MS {
+                return Err(CoreError::Store {
+                    object_key,
+                    message: format!(
+                        "manifest publication outcome is unknown after {elapsed_ms}ms (budget {}ms)",
+                        crate::limits::METADATA_PUBLICATION_BUDGET_MS,
+                    ),
+                    class: crate::error::StoreFailureClass::RetryableTransport,
+                });
+            }
+            ManifestPublicationOutcome::Published(candidate.clone())
+        }
         Err(ObjectStoreError::PreconditionFailed { .. }) => {
             classify_current_manifest(store, namespace_id, &candidate, expected_predecessor, false)
                 .await?

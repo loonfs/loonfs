@@ -4,6 +4,64 @@ use super::*;
 use loonfs_api::wire::control::{encode_control_state, ControlObjectKind, HintPayload};
 
 #[tokio::test]
+async fn a_manifest_put_returning_after_its_budget_has_an_unknown_outcome() {
+    let directory = tempdir().expect("directory");
+    let namespace_id = NamespaceId::parse("manifest-return-budget").expect("namespace");
+    let store = RecordingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::any(),
+    );
+    create(&store, &namespace_id, &test_context())
+        .await
+        .expect("create");
+    let current = load_current_manifest(&store, &namespace_id)
+        .await
+        .expect("current");
+    let mut payload = current.state.envelope.payload().clone();
+    payload.manifest_no = payload.manifest_no.successor().expect("next manifest");
+    let object_key = metadata_manifest_object(&namespace_id, &payload.manifest_no);
+    let manifest = encode_manifest(payload).expect("manifest");
+    let timer = Arc::new(loonfs_test_support::clock::ManualClock::new(0));
+    let deadline = Deadline::start(timer.clone());
+    store.reset();
+    let store = loonfs_test_support::stores::MetadataMapStore::new(
+        store,
+        KeyPredicate::exact(&object_key),
+        move |metadata| {
+            timer.advance_ms(crate::limits::METADATA_PUBLICATION_BUDGET_MS + 1);
+            metadata
+        },
+    );
+    let error = crate::checkpoint::publish::publish_manifest(&store, manifest, &deadline)
+        .await
+        .expect_err("late put must not acknowledge publication");
+    assert!(matches!(
+        error,
+        CoreError::Store { object_key: actual_key, class: crate::error::StoreFailureClass::RetryableTransport, .. }
+            if actual_key == object_key
+    ));
+    assert_eq!(store.inner().counts().create_if_absent_puts, 1);
+    assert_eq!(store.inner().counts().compare_and_swaps, 0);
+    let operations = store.inner().snapshot();
+    let last = operations.last().expect("numbered put");
+    assert!(matches!(
+        last,
+        loonfs_test_support::stores::RecordedOperation::Put {
+            mode: loonfs_objectstore::PutMode::CreateIfAbsent,
+            ..
+        }
+    ));
+    assert_eq!(last.key(), object_key);
+    assert!(store
+        .inner()
+        .inner()
+        .head(&object_key)
+        .await
+        .expect("landed manifest")
+        .is_some());
+}
+
+#[tokio::test]
 async fn identical_compactor_claims_report_the_loser_as_covered() {
     for race_at_put in [false, true] {
         let directory = tempdir().expect("directory");
