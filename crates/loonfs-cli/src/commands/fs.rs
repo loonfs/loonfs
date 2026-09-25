@@ -7,6 +7,7 @@ use super::context::{
     parse_snapshot_id_arg, parse_user_path_arg, render_target, resolve_command_context,
     resolve_mutation_context, CommandContext, RemoteDirectoryOutcome, UndeleteHint,
 };
+use super::download::FileDownload;
 use super::output::{
     CommandData, CommandFailure, CommandOutput, ListingHeadDrift, ListingHeadObservation,
     TrashListing,
@@ -22,7 +23,6 @@ use crate::args::{
     FilesystemRestoreArgs, FilesystemRevisionsArgs, FilesystemRmArgs, FilesystemStatArgs,
     FilesystemTransferArgs, FilesystemUndeleteArgs, PaginationArgs, RuntimeBehavior, TrashArgs,
 };
-use crate::backend::FileDownload;
 use crate::config::ConfigLocation;
 use crate::error::CliError;
 use crate::payload::{LocalPayload, STDIN_PATH};
@@ -323,6 +323,7 @@ pub(crate) async fn run_filesystem_annotate(
         .map_err(|error| context.fail(kind, error))?;
     let result = context
         .target
+        .client
         .update_attributes(&spec, &options)
         .await
         .map_err(|error| context.fail(kind, error))?;
@@ -367,6 +368,7 @@ pub(crate) async fn run_filesystem_grep(
     let (namespace_id, head_seq, built_through_seq, next_cursor) = loop {
         let response = context
             .target
+            .client
             .grep(context.namespace(), &request, plan.request_size())
             .await
             .map_err(|error| context.fail(kind, error))?;
@@ -783,8 +785,10 @@ pub(crate) async fn run_filesystem_trash(
         async |cursor, limit| {
             context
                 .target
-                .list_trash(context.namespace(), limit, cursor.as_deref())
+                .client
+                .list_trash_page(context.namespace(), limit, cursor.as_deref())
                 .await
+                .map_err(CliError::from)
         },
         |_: &loonfs_api::ListTrashResponse| {},
     )
@@ -824,8 +828,10 @@ pub(crate) async fn run_filesystem_revisions(
         async |cursor, limit| {
             context
                 .target
+                .client
                 .list_file_revisions_page(&spec, limit, cursor.as_deref())
                 .await
+                .map_err(CliError::from)
         },
         |_: &loonfs_api::ListFileRevisionsResponse| {},
     )
@@ -1046,13 +1052,12 @@ pub(super) async fn put_payload(
     if let Some(journal) = journal.as_ref() {
         if let Some(request) = journal.prepared_request() {
             progress.phase("committing");
-            let committed = context
-                .target
-                .replay_file_commit(
+            let committed = journal
+                .replay(
+                    &context.target.client,
                     context.namespace(),
                     &request,
                     &options.commit.actor_id,
-                    journal,
                 )
                 .await?;
             acknowledge_committed_upload(journal, &committed)?;
@@ -1092,7 +1097,7 @@ fn resume_journal(
         local_path,
         source,
         options,
-        context.target.subject(),
+        context.target.client.subject(),
     )
     .map_err(CliError::io)
 }
@@ -1118,6 +1123,7 @@ async fn commit_a_finished_upload(
     };
     let status = context
         .target
+        .client
         .get_upload(context.namespace(), &resume.upload_id)
         .await?;
     let UploadSessionStatus::Completed {
@@ -1132,14 +1138,8 @@ async fn commit_a_finished_upload(
     progress.phase("committing");
     let result = context
         .target
-        .commit_completed_upload(
-            spec,
-            &resume.upload_id,
-            content_ref,
-            content_token,
-            options,
-            journal,
-        )
+        .client
+        .commit_completed_upload(spec, content_ref, content_token, options, Some(journal))
         .await;
     let committed = result?;
     acknowledge_committed_upload(journal, &committed)?;
@@ -1210,6 +1210,7 @@ pub(crate) async fn run_filesystem_rm(
     };
     let result = context
         .target
+        .client
         .delete_path(&spec, &options)
         .await
         .map_err(|error| context.fail(kind, error))?;
@@ -1249,6 +1250,7 @@ pub(crate) async fn run_filesystem_restore(
         .map_err(|error| context.fail(kind, error))?;
     let result = context
         .target
+        .client
         .restore_file_revision(
             &spec,
             revision_no,
@@ -1291,6 +1293,7 @@ pub(crate) async fn run_filesystem_undelete(
             .map_err(|error| context.fail(kind, error))?;
     let result = context
         .target
+        .client
         .undelete(
             context.namespace(),
             args.inode,
@@ -1337,9 +1340,11 @@ pub(crate) async fn run_filesystem_mkdir(
     } else {
         context
             .target
+            .client
             .create_directory(&spec, &options)
             .await
             .map(RemoteDirectoryOutcome::Created)
+            .map_err(CliError::from)
     }
     .map_err(|error| context.fail(kind, error))?;
     let result = match outcome {
@@ -1550,6 +1555,7 @@ async fn run_filesystem_transfer(
         }
         context
             .target
+            .client
             .copy_path(
                 &from,
                 &to,
@@ -1564,6 +1570,7 @@ async fn run_filesystem_transfer(
     } else {
         context
             .target
+            .client
             .move_path(
                 &from,
                 &to,

@@ -3,6 +3,27 @@
 `loonfs-cli` provides the `loonfs` command for managing profiles, namespaces, path-based
 filesystem operations, and namespace maintenance against LoonFS.
 
+An embedded profile runs the HTTP binding in memory over its runtime handles.
+The CLI sends requests to it through the same client that a remote profile
+uses, so both kinds of profile answer the same API contract. An embedded
+profile opens no listener and needs no bearer token. `loonfs maintenance loop`
+and the bounded index steps of `loonfs maintenance index enable` run directly
+on the local runtime handles instead of through the binding.
+
+Embedded requests go through the binding's validation, error envelope, and
+JSON body limits, and a failed request reports the binding's request ID and
+error details. The binding cancels a request that runs past 60 seconds, the
+server's default deadline. Routes that stream file content, maintenance runs,
+and the store probe are exempt from that deadline. The binding admits at most
+8 concurrent uploads and 16 concurrent downloads, the same defaults as the
+server. The upload and download size limits are `u64::MAX`, which leaves
+embedded transfers unbounded. An interrupted embedded download starts again
+from the beginning. Progress for a single-file `loonfs get` counts the bytes
+received and shows no total. A file upload records its prepared commit
+request. A rerun after a process restart submits that request again and renews
+its content token through the upload session, so the file is not uploaded
+again.
+
 ## Shell completion
 
 Generate completion scripts for Bash, Zsh, Fish, PowerShell, or Elvish with:
@@ -533,9 +554,10 @@ Interrupted transfers
   digest as the ones fetched, so a partial that is not really this file's
   fails the rerun instead of landing.
 
-  A download the server proxies — a remote file under the deployment's
-  cap — arrives in one response and has no midpoint to resume from, so it
-  starts over.
+  An embedded download, or a remote download the server proxies, arrives
+  in one response and has no midpoint to resume from, so it starts over
+  from the beginning. Only a direct download from the object store
+  resumes.
 
   An upload resumes only where the transfer had parts to lose: a remote
   profile's direct multipart upload of a file past 8 MiB. The parts that
@@ -545,9 +567,15 @@ Interrupted transfers
   finished and only the commit was lost, commits what is already stored
   and sends nothing. A source that changed since the record was written
   starts over, because the parts already stored came from bytes that are
-  gone. The record is removed when the upload commits. Embedded profiles,
-  proxied uploads, and `loonfs put -` keep no record: there is no session
-  to rejoin, and a pipe cannot be read a second time.
+  gone. Every file upload, embedded and proxied ones included, also
+  records its prepared commit request before it submits the commit. A
+  rerun submits that saved request again. When the server rejects its
+  content token, the rerun takes a new token from the completed upload
+  session, so the file is not uploaded again. The record is removed when
+  the upload commits. A record made with an explicit --commit-id is kept
+  instead, so repeating the command replays the same request.
+  `loonfs put -` keeps no record, because a pipe cannot be read a second
+  time.
 
   A tree resumes file by file, on the same terms. Each file of a `put -r`
   keeps its own record, named by the profile, namespace, remote path, and

@@ -731,7 +731,7 @@ fn a_download_of_corrupted_content_leaves_nothing_at_the_destination() {
         destination.to_str().expect("utf-8 path"),
     ]);
     assert_failure(&failed);
-    assert_eq!(json_error(&failed)["code"], "namespace_corrupt");
+    assert_eq!(json_error(&failed)["code"], "io_error");
     assert!(
         !destination.exists(),
         "a failed download must not install a file"
@@ -747,7 +747,7 @@ fn a_download_of_corrupted_content_leaves_nothing_at_the_destination() {
 }
 
 #[test]
-fn an_interrupted_download_resumes_from_what_it_already_has() {
+fn an_interrupted_embedded_download_restarts_and_verifies_the_whole_file() {
     let harness = Harness::new();
     harness.add_embedded_profile("default");
     assert_success(&harness.run(&["namespace", "create", "demo"]));
@@ -772,17 +772,16 @@ fn an_interrupted_download_resumes_from_what_it_already_has() {
     assert_eq!(
         fs::read(&destination).expect("read destination"),
         payload,
-        "a resumed download still lands the whole verified file"
+        "a restarted download lands the whole verified file"
     );
 
     let resuming: Vec<Value> = events_of_kind(&get, "phase")
         .into_iter()
         .filter(|event| event["phase"] == "resuming")
         .collect();
-    assert_eq!(resuming.len(), 1, "one resume to report: {resuming:?}");
-    assert_eq!(
-        resuming[0]["bytes_done"], held as u64,
-        "the run started at what was already on disk, not at zero"
+    assert!(
+        resuming.is_empty(),
+        "proxied downloads restart: {resuming:?}"
     );
 
     let (partial, meta) = partial_paths(&destination);
@@ -1805,8 +1804,6 @@ fn namespace_delete_reports_both_head_sequences_when_the_precondition_fails() {
     assert_eq!(error["code"], "stale_head");
     assert_eq!(error["message"], "expected head sequence 0, found 1");
 
-    // The same sentence is what a human run prints, since the renderer
-    // writes the message through unchanged.
     let human = harness.run(&[
         "namespace",
         "delete",
@@ -1816,10 +1813,10 @@ fn namespace_delete_reports_both_head_sequences_when_the_precondition_fails() {
         "0",
     ]);
     assert_failure(&human);
-    assert_eq!(
-        stderr_string(&human).trim_end(),
-        "expected head sequence 0, found 1"
-    );
+    assert!(error["request_id"].is_string());
+    let message = stderr_string(&human);
+    assert!(message.starts_with("expected head sequence 0, found 1 (request id: req_"));
+    assert!(message.trim_end().ends_with(')'));
 
     // Refusing deleted nothing, so the namespace is still readable.
     assert_success(&harness.run(&["--json", "ls", "/"]));
@@ -2260,7 +2257,7 @@ fn a_remote_put_replays_its_exact_request_after_the_upload_session_is_gone() {
 }
 
 #[test]
-fn a_historical_download_resumes_using_its_own_content_identity() {
+fn an_interrupted_historical_download_restarts_at_the_requested_revision() {
     let harness = Harness::new();
     harness.add_embedded_profile("default");
     assert_success(&harness.run(&["namespace", "create", "demo"]));
@@ -2289,9 +2286,7 @@ fn a_historical_download_resumes_using_its_own_content_identity() {
     ]);
     assert_success(&get);
     assert_eq!(fs::read(&destination).expect("download"), payload);
-    let resuming = events_of_kind(&get, "phase")
+    assert!(events_of_kind(&get, "phase")
         .into_iter()
-        .find(|event| event["phase"] == "resuming")
-        .expect("resume event");
-    assert_eq!(resuming["bytes_done"], held as u64);
+        .all(|event| event["phase"] != "resuming"));
 }

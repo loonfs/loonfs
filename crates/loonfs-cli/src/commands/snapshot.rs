@@ -5,6 +5,7 @@ use crate::args::{
     CommandKind, SnapshotCommand, SnapshotCreateArgs, SnapshotDeleteArgs, SnapshotExtendArgs,
     SnapshotListArgs, SnapshotTargetArgs,
 };
+use crate::error::CliError;
 use crate::resolve::parse_namespace_id;
 use std::path::Path;
 
@@ -50,6 +51,7 @@ async fn run_snapshot_create(
     let context = resolve_snapshot_context(kind, config_path, &args.target).await?;
     let response = context
         .target
+        .client
         .create_snapshot(context.namespace(), &args.name, args.ttl_ms)
         .await
         .map_err(|error| context.fail(kind, error))?;
@@ -69,8 +71,10 @@ async fn run_snapshot_list(
         async |cursor, limit| {
             context
                 .target
+                .client
                 .list_snapshots_page(context.namespace(), limit, cursor.as_deref())
                 .await
+                .map_err(CliError::from)
         },
         |_: &loonfs_api::v0::ListSnapshotsResponse| {},
     )
@@ -92,6 +96,7 @@ async fn run_snapshot_extend(
         .map_err(|error| context.fail(kind, error))?;
     let response = context
         .target
+        .client
         .extend_snapshot(context.namespace(), &snapshot_id, args.ttl_ms)
         .await
         .map_err(|error| context.fail(kind, error))?;
@@ -108,6 +113,7 @@ async fn run_snapshot_delete(
         .map_err(|error| context.fail(kind, error))?;
     let response = context
         .target
+        .client
         .delete_snapshot(context.namespace(), &snapshot_id)
         .await
         .map_err(|error| context.fail(kind, error))?;

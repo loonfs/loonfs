@@ -62,6 +62,7 @@ async fn run_namespace_show(
     context.namespace = Some(namespace_id);
     let namespace = context
         .target
+        .client
         .get_namespace(context.namespace())
         .await
         .map_err(|error| context.fail(kind, error))?;
@@ -93,6 +94,7 @@ async fn run_namespace_create(
     let access = namespace_access(&args).map_err(|error| context.fail(kind, error))?;
     let namespace = context
         .target
+        .client
         .create_namespace(&namespace_id, &actor_id, access)
         .await
         .map_err(|error| context.fail(kind, error))?;
@@ -194,6 +196,7 @@ async fn run_namespace_delete(
 
     let response = context
         .target
+        .client
         .delete_namespace(&namespace_id, expected_head_seq)
         .await
         .map_err(|error| context.fail(kind, error))?;
@@ -233,10 +236,11 @@ async fn run_namespace_fork(
         .map_err(|error| context.fail(kind, error))?;
     let namespace = context
         .target
+        .client
         .fork_namespace(
             &source_namespace_id,
             &new_namespace_id,
-            loonfs::ForkNamespaceOptions {
+            &loonfs::ForkNamespaceOptions {
                 actor_id,
                 snapshot_id,
             },
@@ -269,6 +273,7 @@ pub(crate) async fn run_namespace_use(
 
     context
         .target
+        .client
         .get_namespace(&namespace_id)
         .await
         .map_err(|error| context.fail(kind, error))?;

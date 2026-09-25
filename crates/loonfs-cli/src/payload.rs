@@ -3,7 +3,6 @@
 use crate::error::CliError;
 use crate::progress::ProgressReporter;
 use futures::stream::StreamExt;
-use loonfs::{ByteStream, ObjectStoreError};
 use loonfs_client::PayloadSource;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -35,14 +34,6 @@ impl LocalPayload {
             Self::File { path, .. } => Some(path),
             _ => None,
         }
-    }
-
-    /// Opens the payload for the in-process runtime.
-    pub(crate) async fn open_byte_stream(
-        &self,
-        progress: &Arc<ProgressReporter>,
-    ) -> Result<ByteStream, CliError> {
-        Ok(as_object_store_stream(self.open_source(progress).await?))
     }
 
     /// Opens the payload for the HTTP client.
@@ -84,14 +75,4 @@ fn counted_source(source: PayloadSource, progress: Arc<ProgressReporter>) -> Pay
         })
         .boxed()
     })
-}
-
-/// Converts a client payload source into an object-store byte stream.
-fn as_object_store_stream(source: PayloadSource) -> ByteStream {
-    let (stream, _) = source.into_stream();
-    stream
-        .map(|chunk| {
-            chunk.map_err(|error| ObjectStoreError::transport("upload body", error.to_string()))
-        })
-        .boxed()
 }

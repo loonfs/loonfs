@@ -122,6 +122,7 @@ pub(crate) async fn run_capabilities(
     .await?;
     let document = context
         .target
+        .client
         .get_capabilities()
         .await
         .map_err(|error| context.fail(kind, error))?;
@@ -249,8 +250,10 @@ pub(crate) async fn run_doctor(
         let result = target
             .as_ref()
             .expect("remote provider validation constructs a target")
+            .client
             .get_capabilities()
-            .await;
+            .await
+            .map_err(CliError::from);
         checks.push(match &result {
             Ok(_) => ok(
                 DoctorCheckName::Auth,
@@ -298,7 +301,11 @@ pub(crate) async fn run_doctor(
     let capability_result = if remote {
         remote_capabilities.expect("remote auth check records its capability result")
     } else if let Some(target) = &target {
-        target.get_capabilities().await
+        target
+            .client
+            .get_capabilities()
+            .await
+            .map_err(CliError::from)
     } else {
         checks.push(skipped(
             DoctorCheckName::Capabilities,
@@ -369,11 +376,11 @@ async fn namespace_check(
         ));
         return;
     };
-    let result = target.get_namespace(&namespace).await;
+    let result = target.client.get_namespace(&namespace).await;
     checks.push(check_from_backend_result(
         DoctorCheckName::Namespace,
         format!("namespace `{namespace}` is reachable"),
-        result.map(|_| ()),
+        result.map(|_| ()).map_err(CliError::from),
     ));
 }
 
@@ -392,9 +399,13 @@ async fn append_write_check(
         ));
         return;
     };
-    match target.probe_store().await {
+    match target
+        .client
+        .probe_store(&loonfs_api::v0::StoreProbeRequest {})
+        .await
+    {
         Ok(response) => checks.push(store_probe_check(response)),
-        Err(error) => checks.push(failed(DoctorCheckName::StoreProbe, error)),
+        Err(error) => checks.push(failed(DoctorCheckName::StoreProbe, error.into())),
     }
 }
 

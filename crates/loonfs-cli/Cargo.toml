@@ -13,6 +13,10 @@ name = "loonfs"
 path = "src/main.rs"
 
 [dependencies]
+http.workspace = true
+http-body-util.workspace = true
+tower.workspace = true
+loonfs-http.workspace = true
 bytes.workspace = true
 clap.workspace = true
 clap_complete.workspace = true

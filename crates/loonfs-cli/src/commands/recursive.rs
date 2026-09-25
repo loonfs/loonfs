@@ -496,6 +496,7 @@ pub(crate) async fn run_copy_tree(
             };
             let result = context
                 .target
+                .client
                 .copy_path(
                     &from,
                     &to,
@@ -513,7 +514,7 @@ pub(crate) async fn run_copy_tree(
                 )
                 .await
                 .map(|_| spec_target(&to));
-            (source, result)
+            (source, result.map_err(CliError::from))
         }
     };
     let tally = transfer_tree(
@@ -568,8 +569,8 @@ mod tests {
     use super::*;
     use crate::args::RuntimeBehavior;
     use crate::progress::ProgressMode;
-    use crate::resolve::{EmbeddedTarget, ResolvedTarget};
-    use loonfs::{SharedObjectStore, TraceStoreKind};
+    use crate::resolve::ResolvedTarget;
+    use loonfs::SharedObjectStore;
     use loonfs_api::NamespaceId;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_objectstore::PROVIDER_MULTIPART_PART_BYTES;
@@ -605,14 +606,15 @@ mod tests {
             LocalFsStore::new(store_dir).expect("create local-fs store"),
         ));
         let store: SharedObjectStore = watched.clone();
-        let target = EmbeddedTarget::over_store(
+        let target = ResolvedTarget::over_store(
             store,
             Some("put-tree-test"),
-            TraceStoreKind::LocalFs,
+            loonfs_objectstore::ConfiguredObjectStoreKind::LocalFs,
             loonfs::InlineContentOptions {
                 inline_content_threshold_bytes: None,
                 ..Default::default()
             },
+            false,
         )
         .await
         .expect("build embedded target");
@@ -622,10 +624,11 @@ mod tests {
             mode: "embedded".to_owned(),
             namespace: Some(namespace.clone()),
             actor_id: Some(loonfs_test_support::test_actor()),
-            target: ResolvedTarget::Embedded(Box::new(target)),
+            target,
         };
         context
             .target
+            .client
             .create_namespace(
                 &namespace,
                 &loonfs_test_support::test_actor(),
@@ -819,6 +822,7 @@ mod tests {
         let broken = parse_remote(&context, "/up/broken", "remote_path").expect("path");
         context
             .target
+            .client
             .delete_path(
                 &broken,
                 &loonfs_client::DeleteOptions::new(context.actor().clone()),

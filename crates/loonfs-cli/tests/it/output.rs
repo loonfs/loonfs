@@ -28,7 +28,7 @@ fn a_download_reports_its_progress_to_an_agent() {
     assert_eq!(started.len(), 1, "one file, one start: {started:?}");
     assert_eq!(started[0]["op"], "get");
     assert_eq!(started[0]["path"], "/big.bin");
-    assert_eq!(started[0]["bytes_total"], payload.len() as u64);
+    assert!(started[0]["bytes_total"].is_null());
 
     let progress = events_of_kind(&get, "progress");
     assert!(
@@ -38,7 +38,7 @@ fn a_download_reports_its_progress_to_an_agent() {
     let last = progress.last().expect("a progress event");
     assert_eq!(last["op"], "get");
     assert_eq!(last["bytes_done"], payload.len() as u64);
-    assert_eq!(last["bytes_total"], payload.len() as u64);
+    assert!(last["bytes_total"].is_null());
     assert_eq!(last["files_total"], 1);
     assert!(last["rate_bps"].is_u64(), "a rate is always reported");
     assert!(last["elapsed_ms"].is_u64());

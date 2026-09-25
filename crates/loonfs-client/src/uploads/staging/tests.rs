@@ -388,6 +388,7 @@ impl PutFileJournal for RecordingJournal {
         &self,
         request: &CommitRequest,
         actor_id: &loonfs_api::ActorId,
+        _upload_id: Option<&UploadId>,
     ) -> std::io::Result<()> {
         *self.request.lock().expect("journal lock") = Some(request.clone());
         *self.actor_id.lock().expect("journal lock") = Some(actor_id.clone());
@@ -971,7 +972,12 @@ struct FailingJournal {
 }
 
 impl PutFileJournal for FailingJournal {
-    fn commit_prepared(&self, _: &CommitRequest, _: &loonfs_api::ActorId) -> std::io::Result<()> {
+    fn commit_prepared(
+        &self,
+        _: &CommitRequest,
+        _: &loonfs_api::ActorId,
+        _: Option<&UploadId>,
+    ) -> std::io::Result<()> {
         Err(std::io::Error::other("journal disk full"))
     }
 

@@ -71,6 +71,40 @@ pub(crate) struct UploadJournal {
 }
 
 impl UploadJournal {
+    pub(crate) async fn replay(
+        &self,
+        client: &loonfs_client::Client,
+        namespace_id: &loonfs_api::NamespaceId,
+        request: &CommitRequest,
+        actor_id: &ActorId,
+    ) -> Result<loonfs_api::Commit, crate::error::CliError> {
+        let error = match client.create_commit(namespace_id, request, actor_id).await {
+            Ok(commit) => return Ok(commit),
+            Err(error) if error.code() == Some(loonfs_api::ErrorCode::ContentNotPrepared) => error,
+            Err(error) => return Err(error.into()),
+        };
+        let upload_id = match &self.lock().progress {
+            UploadProgress::Prepared { upload_id, .. } => upload_id.clone(),
+            UploadProgress::Uploading { .. } => None,
+        };
+        let Some(upload_id) = upload_id else {
+            return Err(error.into());
+        };
+        let session = client.get_upload(namespace_id, &upload_id).await?;
+        let loonfs_api::v0::UploadSessionStatus::Completed {
+            content_token: Some(token),
+            ..
+        } = session.status
+        else {
+            return Err(error.into());
+        };
+        let mut request = request.clone();
+        request.content_tokens = vec![token];
+        Ok(client
+            .create_commit(namespace_id, &request, actor_id)
+            .await?)
+    }
+
     pub(crate) fn for_upload(
         profile: &str,
         target: &str,
@@ -292,19 +326,20 @@ impl PutFileJournal for UploadJournal {
         })
     }
 
-    fn commit_prepared(&self, request: &CommitRequest, actor_id: &ActorId) -> io::Result<()> {
-        self.record_prepared(request, actor_id, None)
+    fn commit_prepared(
+        &self,
+        request: &CommitRequest,
+        actor_id: &ActorId,
+        upload_id: Option<&UploadId>,
+    ) -> io::Result<()> {
+        let upload_id = upload_id
+            .cloned()
+            .or_else(|| self.resume().map(|resume| resume.upload_id));
+        self.record_prepared(request, actor_id, upload_id.as_ref())
     }
 }
 
 impl UploadJournal {
-    pub(crate) fn prepared_upload_id(&self) -> Option<UploadId> {
-        match &self.lock().progress {
-            UploadProgress::Prepared { upload_id, .. } => upload_id.clone(),
-            UploadProgress::Uploading { .. } => None,
-        }
-    }
-
     pub(crate) fn record_prepared(
         &self,
         request: &CommitRequest,
@@ -398,6 +433,108 @@ fn uploads_dir() -> Option<PathBuf> {
 mod tests {
     use super::*;
 
+    struct InterruptedUpload<'a>(&'a UploadJournal);
+
+    impl PutFileJournal for InterruptedUpload<'_> {
+        fn began(&self, _: &UploadId, _: u64, _: ChecksumAlgorithm) -> io::Result<()> {
+            Err(io::Error::other("this test uses proxied uploads"))
+        }
+
+        fn part_completed(&self, _: &CompletedUploadPart) -> io::Result<()> {
+            Err(io::Error::other("this test uses proxied uploads"))
+        }
+
+        fn commit_prepared(
+            &self,
+            request: &CommitRequest,
+            actor_id: &ActorId,
+            upload_id: Option<&UploadId>,
+        ) -> io::Result<()> {
+            let mut request = request.clone();
+            request.content_tokens[0].token = "previous-process-token".to_owned();
+            self.0.commit_prepared(&request, actor_id, upload_id)?;
+            Err(io::Error::other("stop before publication"))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_prepared_upload_renews_its_token_without_retransferring_content() {
+        use crate::resolve::ResolvedTarget;
+        use loonfs_objectstore::local_fs_store::LocalFsStore;
+        use loonfs_objectstore::ConfiguredObjectStoreKind;
+        use loonfs_test_support::stores::{KeyPredicate, RecordingStore};
+        use std::sync::Arc;
+
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = Arc::new(RecordingStore::new(
+            LocalFsStore::new(directory.path().join("store")).expect("local store"),
+            KeyPredicate::content_blob(),
+        ));
+        let target = ResolvedTarget::over_store(
+            store.clone(),
+            None,
+            ConfiguredObjectStoreKind::LocalFs,
+            loonfs::InlineContentOptions {
+                inline_content_threshold_bytes: None,
+                ..Default::default()
+            },
+            true,
+        )
+        .await
+        .expect("embedded target");
+        let spec = NamespacePath::parse("demo", "/file").expect("path");
+        target
+            .client
+            .create_namespace(
+                spec.namespace(),
+                &options().commit.actor_id,
+                loonfs_api::NamespaceAccess::unrestricted(),
+            )
+            .await
+            .expect("namespace");
+        let path = directory.path().join("journal.json");
+        let journal = open(&path);
+        let error = target
+            .client
+            .put_file_stream_resumable(
+                &spec,
+                loonfs_client::PayloadSource::reader(std::io::Cursor::new(b"retained content")),
+                &journal.options(),
+                &InterruptedUpload(&journal),
+                None,
+            )
+            .await
+            .expect_err("interrupted before publication");
+        assert!(error.to_string().contains("stop before publication"));
+        drop(journal);
+        let journal = open(&path);
+        let request = journal.prepared_request().expect("prepared request");
+        store.reset();
+        let commit = journal
+            .replay(
+                &target.client,
+                spec.namespace(),
+                &request,
+                &journal.options().commit.actor_id,
+            )
+            .await
+            .expect("renew and publish");
+        assert_eq!(commit.commit_id, request.commit_id);
+        assert_eq!(store.counts().puts, 0);
+        assert_eq!(journal.prepared_request(), Some(request.clone()));
+        let replayed = journal
+            .replay(
+                &target.client,
+                spec.namespace(),
+                &request,
+                &journal.options().commit.actor_id,
+            )
+            .await
+            .expect("replay committed request");
+        assert_eq!(replayed.committed_seq, commit.committed_seq);
+        assert_eq!(store.counts().puts, 0);
+    }
+
     fn source(size_bytes: u64) -> SourceIdentity {
         SourceIdentity {
             size_bytes,
@@ -468,10 +605,10 @@ mod tests {
         let mut wrong_options = expected.clone();
         wrong_options.message = Some("different intent".to_owned());
         assert!(next
-            .commit_prepared(&wrong_options, &next.options().commit.actor_id)
+            .commit_prepared(&wrong_options, &next.options().commit.actor_id, None)
             .is_err());
         assert!(next.prepared_request().is_none());
-        next.commit_prepared(&expected, &next.options().commit.actor_id)
+        next.commit_prepared(&expected, &next.options().commit.actor_id, None)
             .expect("save commit");
         drop(next);
         let replay = open(&path);
@@ -481,7 +618,7 @@ mod tests {
         let mut changed = expected;
         changed.commit_id = CommitId::generate();
         assert!(replay
-            .commit_prepared(&changed, &replay.options().commit.actor_id)
+            .commit_prepared(&changed, &replay.options().commit.actor_id, None)
             .is_err());
         replay.acknowledge().expect("acknowledged");
         assert!(!path.exists());
@@ -498,7 +635,7 @@ mod tests {
             UploadJournal::open_at(path.clone(), source(1024), &options, None).expect("journal");
         let expected = request(&journal);
         journal
-            .commit_prepared(&expected, &journal.options().commit.actor_id)
+            .commit_prepared(&expected, &journal.options().commit.actor_id, None)
             .expect("record");
         journal.acknowledge().expect("acknowledged");
         drop(journal);
@@ -616,7 +753,7 @@ mod tests {
         std::fs::write(&parent, b"blocked").expect("block writes");
         assert!(journal.part_completed(&part(2)).is_err());
         assert!(journal
-            .commit_prepared(&request(&journal), &journal.options().commit.actor_id)
+            .commit_prepared(&request(&journal), &journal.options().commit.actor_id, None)
             .is_err());
         assert_eq!(
             journal.resume().expect("original state").parts,

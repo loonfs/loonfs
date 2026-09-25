@@ -203,7 +203,7 @@ mod tests {
             kind: CommandKind::ConfigShow,
             profile: Some("embedded".to_owned()),
             mode: Some("embedded".to_owned()),
-            error: Box::new(crate::backend_error::map_runtime_error(
+            error: Box::new(crate::error::CliError::from(
                 poison_permission_runtime_error(),
             )),
         };
@@ -594,51 +594,6 @@ mod tests {
         .expect("pinned JSON is valid");
         assert_eq!(rendered, expected);
         assert_server_fields_survive(boundary, &rendered);
-    }
-
-    #[test]
-    fn remote_request_id_is_absent_from_equivalent_embedded_error() {
-        let remote_boundary = r#"{
-            "code": "invalid_request",
-            "message": "limit must be greater than zero",
-            "param": "limit",
-            "request_id": "req_remote"
-        }"#;
-        let remote = rendered_remote_error(remote_boundary);
-        let embedded_error = CliError::new(
-            loonfs_api::ErrorCode::InvalidRequest.as_str(),
-            "limit must be greater than zero",
-        )
-        .with_param("limit");
-        let embedded_failure = CommandFailure {
-            kind: CommandKind::ConfigShow,
-            profile: Some("embedded".to_owned()),
-            mode: Some("embedded".to_owned()),
-            error: Box::new(embedded_error),
-        };
-        let embedded: serde_json::Value = serde_json::from_str(
-            &json_error(&embedded_failure).expect("embedded JSON error renders"),
-        )
-        .expect("embedded error is valid JSON");
-        let expected_embedded: serde_json::Value = serde_json::from_str(
-            r#"{
-                "kind": "config_show",
-                "format_version": 1,
-                "profile": "embedded",
-                "mode": "embedded",
-                "error": {
-                    "code": "invalid_request",
-                    "message": "limit must be greater than zero",
-                    "param": "limit"
-                }
-            }"#,
-        )
-        .expect("pinned JSON is valid");
-
-        assert_eq!(remote["error"]["request_id"], "req_remote");
-        assert_eq!(embedded, expected_embedded);
-        assert!(embedded["error"].get("request_id").is_none());
-        assert_server_fields_survive(remote_boundary, &remote);
     }
 
     #[test]
