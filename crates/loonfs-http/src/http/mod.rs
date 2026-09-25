@@ -241,14 +241,8 @@ fn gated(
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum RouterSurface {
-    Standalone,
-    Filesystem,
-}
-
 /// Builds contract routes. Hosts register their own health, readiness, and metrics routes.
-pub fn router(state: BindingState, surface: RouterSurface) -> Router {
+pub fn router(state: BindingState) -> Router {
     // Searching an index and keeping one built are separate jobs, so they
     // are separately deployable: the query route exists where this server
     // serves grep, and the three routes that mutate a grep manifest exist where
@@ -361,7 +355,7 @@ pub fn router(state: BindingState, surface: RouterSurface) -> Router {
             get(get_upload),
         )
         .route("/v0/namespaces/{namespace_id}/changes", get(list_changes));
-    if surface == RouterSurface::Standalone && state.options.serves_maintenance {
+    if state.options.serves_maintenance {
         authenticated = authenticated
             .route(
                 "/v0/maintenance/namespaces/{namespace_id}/diagnostics",
@@ -409,7 +403,7 @@ pub fn router(state: BindingState, surface: RouterSurface) -> Router {
                 "/v0/maintenance/store/probe",
                 post(handlers_store::probe_store),
             );
-    } else if surface == RouterSurface::Standalone {
+    } else {
         authenticated = authenticated.route("/v0/maintenance/{*path}", any(maintenance_not_served));
     }
     let authenticated = authenticate_routes(authenticated.with_state(state.clone()), &state);

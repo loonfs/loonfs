@@ -1,6 +1,6 @@
 //! Runtime handles and options for binding tests.
 
-use crate::{AuthPolicy, BindingOptions, BindingState, HttpMetrics, RouterSurface};
+use crate::{AuthPolicy, BindingOptions, BindingState, HttpMetrics};
 use loonfs::{FsWriter, SharedObjectStore, SnapshotPolicy, TraceMode, TraceStoreKind};
 use loonfs_api::WriterId;
 use loonfs_grep::{
@@ -99,8 +99,5 @@ pub(super) async fn test_app(
         grep_maintenance: None,
         metrics,
     };
-    Ok((
-        crate::router(state.clone(), RouterSurface::Standalone),
-        state,
-    ))
+    Ok((crate::router(state.clone()), state))
 }
