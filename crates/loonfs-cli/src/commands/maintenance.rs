@@ -102,7 +102,8 @@ async fn run_maintenance_recover_administrator(
         RunMaintenanceRequest::RecoverAdministrator(RecoverAdministratorRequest { principal_id });
     let response = context
         .target
-        .run_maintenance(context.namespace(), request, context.actor_id.as_ref())
+        .client
+        .run_maintenance(context.namespace(), &request, context.actor_id.as_ref())
         .await
         .map_err(|error| context.fail(kind, error))?;
     Ok(context.output(
@@ -122,7 +123,8 @@ async fn run_maintenance_metadata(
     });
     let response = context
         .target
-        .run_maintenance(context.namespace(), request, context.actor_id.as_ref())
+        .client
+        .run_maintenance(context.namespace(), &request, context.actor_id.as_ref())
         .await
         .map_err(|error| context.fail(kind, error))?;
 
@@ -140,9 +142,10 @@ async fn run_maintenance_gc(
     let context = resolve_command_context(kind, config_path, &args.target).await?;
     let response = context
         .target
+        .client
         .run_maintenance(
             context.namespace(),
-            RunMaintenanceRequest::Gc(GcRequest {
+            &RunMaintenanceRequest::Gc(GcRequest {
                 grace_window_ms: args.grace_window_ms,
             }),
             context.actor_id.as_ref(),
@@ -168,7 +171,8 @@ async fn run_maintenance_checkpoint(
     };
     let response = context
         .target
-        .create_checkpoint(context.namespace(), request)
+        .client
+        .create_checkpoint(context.namespace(), &request)
         .await
         .map_err(|error| context.fail(kind, error))?;
 
@@ -188,8 +192,10 @@ async fn run_maintenance_checkpoint_list(
         async |cursor, limit| {
             context
                 .target
+                .client
                 .list_checkpoints_page(context.namespace(), limit, cursor.as_deref())
                 .await
+                .map_err(CliError::from)
         },
         |_: &loonfs_api::ListCheckpointsResponse| {},
     )
@@ -217,6 +223,7 @@ async fn run_maintenance_checkpoint_delete(
     })?;
     let response = context
         .target
+        .client
         .delete_checkpoint(context.namespace(), &checkpoint_id)
         .await
         .map_err(|error| context.fail(kind, error))?;
@@ -237,9 +244,10 @@ async fn run_maintenance_flush(
     let context = resolve_command_context(kind, config_path, &args.target).await?;
     let response = context
         .target
+        .client
         .run_maintenance(
             context.namespace(),
-            RunMaintenanceRequest::Metadata(MetadataMaintenanceRequest {
+            &RunMaintenanceRequest::Metadata(MetadataMaintenanceRequest {
                 max_wal_tail_segments: Some(1),
             }),
             context.actor_id.as_ref(),
@@ -261,9 +269,10 @@ async fn run_maintenance_compact(
     let context = resolve_command_context(kind, config_path, &args.target).await?;
     let response = context
         .target
+        .client
         .run_maintenance(
             context.namespace(),
-            RunMaintenanceRequest::MetadataCompaction(MetadataCompactionRequest {}),
+            &RunMaintenanceRequest::MetadataCompaction(MetadataCompactionRequest {}),
             context.actor_id.as_ref(),
         )
         .await
@@ -283,15 +292,17 @@ async fn run_maintenance_retention_advance(
     let context = resolve_command_context(kind, config_path, &args.target).await?;
     let retention_floor_before = context
         .target
+        .client
         .get_namespace(context.namespace())
         .await
         .map_err(|error| context.fail(kind, error))?
         .retention_floor_seq;
     let response = context
         .target
+        .client
         .run_maintenance(
             context.namespace(),
-            RunMaintenanceRequest::Retention(AdvanceRetentionRequest {}),
+            &RunMaintenanceRequest::Retention(AdvanceRetentionRequest {}),
             context.actor_id.as_ref(),
         )
         .await
@@ -386,7 +397,8 @@ async fn run_maintenance_store_probe(
     .await?;
     let response = context
         .target
-        .probe_store()
+        .client
+        .probe_store(&loonfs_api::v0::StoreProbeRequest {})
         .await
         .map_err(|error| context.fail(kind, error))?;
 
@@ -502,6 +514,7 @@ async fn run_maintenance_index_enable(
     let context = resolve_command_context(kind, config_path, &args.target).await?;
     let response = context
         .target
+        .client
         .enable_grep_index(context.namespace())
         .await
         .map_err(|error| context.fail(kind, error))?;
@@ -518,6 +531,7 @@ async fn run_maintenance_index_enable(
         (_, GrepIndexLifecycle::Active { .. }) => Some(
             context
                 .target
+                .client
                 .get_namespace(context.namespace())
                 .await
                 .map_err(|error| context.fail(kind, error))?
@@ -544,6 +558,7 @@ async fn run_maintenance_index_enable(
     let response = if waited.is_some() {
         context
             .target
+            .client
             .get_grep_index(context.namespace())
             .await
             .map_err(|error| context.fail(kind, error))?
@@ -570,6 +585,7 @@ async fn run_maintenance_index_status(
     let context = resolve_command_context(kind, config_path, &args.target).await?;
     let response = context
         .target
+        .client
         .get_grep_index(context.namespace())
         .await
         .map_err(|error| context.fail(kind, error))?;
@@ -584,9 +600,10 @@ async fn run_maintenance_grep_gc(
     let context = resolve_command_context(kind, config_path, &args.target).await?;
     let response = context
         .target
+        .client
         .run_maintenance(
             context.namespace(),
-            RunMaintenanceRequest::GrepGc {},
+            &RunMaintenanceRequest::GrepGc {},
             context.actor_id.as_ref(),
         )
         .await
@@ -605,6 +622,7 @@ async fn run_maintenance_index_disable(
     let context = resolve_command_context(kind, config_path, &args.target).await?;
     let response = context
         .target
+        .client
         .disable_grep_index(context.namespace())
         .await
         .map_err(|error| context.fail(kind, error))?;

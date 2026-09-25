@@ -1,8 +1,7 @@
 //! Resolves the active profile and namespace from flags, config defaults,
 //! and the environment.
 
-use crate::backend::EmbeddedBackend;
-use crate::backend_error::map_runtime_error;
+use crate::backend::MaintenanceHost;
 use crate::config::{
     load_config, non_empty_env, remote_client_config, CliConfig, ProfileConfig, StoreConfig,
     ACTOR_ID_ENV, NAMESPACE_ENV, PRINCIPALS_ENV, PRINCIPAL_SCOPE_ENV, SUBJECT_ID_ENV,
@@ -213,54 +212,71 @@ fn default_writer_id() -> String {
 
 // --- Target resolution ---
 
-pub(crate) enum ResolvedTarget {
-    Embedded(Box<EmbeddedTarget>),
-    Remote(Box<RemoteTarget>),
-}
-
-pub(crate) struct EmbeddedTarget {
-    pub(crate) journal_identity: String,
-    pub(super) backend: EmbeddedBackend,
-}
-
-pub(crate) struct RemoteTarget {
-    pub(super) client: Client,
+pub(crate) struct ResolvedTarget {
+    pub(crate) client: Client,
+    pub(crate) maintenance: Option<MaintenanceHost>,
+    journal_identity: String,
 }
 
 impl ResolvedTarget {
+    pub(crate) async fn remote_connectivity(&self) -> Result<(), CliError> {
+        if self.maintenance.is_none() {
+            match self.client.get_health().await {
+                Ok(()) | Err(loonfs_client::ClientError::Api { .. }) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn remote_health(&self) -> Result<(), CliError> {
+        if self.maintenance.is_none() {
+            self.client.get_health().await?;
+        }
+        Ok(())
+    }
+
     pub(crate) async fn resolve(profile: &ProfileConfig, no_retry: bool) -> Result<Self, CliError> {
         match profile {
             ProfileConfig::Embedded {
                 store, writer_id, ..
-            } => Ok(Self::Embedded(Box::new(
-                EmbeddedTarget::new(store, writer_id.as_deref()).await?,
-            ))),
+            } => Self::embedded(store, writer_id.as_deref(), no_retry).await,
             ProfileConfig::Remote {
                 server_url,
                 auth_token,
                 ca_cert_path,
                 ..
-            } => Ok(Self::Remote(Box::new(RemoteTarget::new(
+            } => Self::remote(
                 server_url,
                 auth_token.as_ref(),
                 ca_cert_path.as_deref(),
                 no_retry,
-            )?))),
+            ),
         }
     }
 
     pub(crate) fn mode_str(&self) -> &'static str {
-        match self {
-            ResolvedTarget::Embedded(_) => "embedded",
-            ResolvedTarget::Remote(_) => "remote",
+        if self.maintenance.is_some() {
+            "embedded"
+        } else {
+            "remote"
         }
+    }
+
+    pub(crate) fn journal_identity(&self) -> &str {
+        &self.journal_identity
+    }
+
+    pub(crate) fn scope_to_subject(&mut self, subject: &Subject) {
+        self.client = self.client.clone().with_subject(subject.clone());
     }
 }
 
-impl EmbeddedTarget {
-    pub(super) async fn new(
+impl ResolvedTarget {
+    pub(crate) async fn embedded(
         store_config: &StoreConfig,
         writer_id: Option<&str>,
+        no_retry: bool,
     ) -> Result<Self, CliError> {
         // One command drives all three handles from one runtime, so they
         // deliberately share one provider client.
@@ -271,8 +287,9 @@ impl EmbeddedTarget {
         let mut target = Self::over_store(
             store,
             writer_id,
-            TraceStoreKind::from(store_config.kind()),
+            store_config.kind(),
             loonfs::InlineContentOptions::default(),
+            no_retry,
         )
         .await?;
         target.journal_identity = loonfs_api::Checksum::sha256(
@@ -285,14 +302,15 @@ impl EmbeddedTarget {
 
     /// Opens the runtime handles over a store the caller already holds.
     ///
-    /// [`Self::new`] opens the profile's configured store and passes it here.
+    /// [`Self::embedded`] opens the profile's configured store and passes it here.
     /// Callers that need to observe store operations may provide a wrapped
     /// store directly.
     pub(crate) async fn over_store(
         store: SharedObjectStore,
         writer_id: Option<&str>,
-        trace_store_kind: TraceStoreKind,
+        store_kind: loonfs_objectstore::ConfiguredObjectStoreKind,
         inline_content: loonfs::InlineContentOptions,
+        no_retry: bool,
     ) -> Result<Self, CliError> {
         let writer_id = writer_id
             .map(ToOwned::to_owned)
@@ -302,19 +320,19 @@ impl EmbeddedTarget {
         );
         let writer = FsWriter::builder_with_store(store.clone())
             .writer_id(writer_id.clone())
-            .inline_content(inline_content)
+            .inline_content(inline_content.clone())
             .maintenance_hint_observer(move |hint| observer(hint))
             // A CLI invocation is one solo mutation: holding the commit
             // window open would only add its full delay to every command.
             .min_publish_interval_ms(0)
-            .trace_store_kind(trace_store_kind)
+            .trace_store_kind(TraceStoreKind::from(store_kind))
             .build()
             .await
-            .map_err(map_runtime_error)?;
+            .map_err(CliError::from)?;
         let reader = writer.reader();
         let maintenance = writer
             .maintenance_handle(format!("{writer_id}-maintenance"))
-            .map_err(map_runtime_error)?;
+            .map_err(CliError::from)?;
         let grep_block_cache = Arc::new(GrepBlockCache::new(
             DecodedBlockCacheConfig::with_max_decoded_bytes(DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES),
         ));
@@ -326,43 +344,46 @@ impl EmbeddedTarget {
         );
         let jobs = MaintenanceRegistry::new();
         jobs.register(Arc::new(MetadataMaintenanceJob::new(maintenance.clone())))
-            .map_err(map_runtime_error)?;
+            .map_err(CliError::from)?;
         jobs.register(Arc::new(MetadataCompactionJob::new(maintenance.clone())))
-            .map_err(map_runtime_error)?;
+            .map_err(CliError::from)?;
         jobs.register(Arc::new(GarbageCollectionJob::new(maintenance.clone())))
-            .map_err(map_runtime_error)?;
+            .map_err(CliError::from)?;
         jobs.register(Arc::new(GrepMaintenanceJob::new(
             grep_worker.clone(),
             GramIndexBuildPolicy::default(),
         )))
-        .map_err(map_runtime_error)?;
-        jobs.register(Arc::new(GrepGcJob::new(grep_worker)))
-            .map_err(map_runtime_error)?;
+        .map_err(CliError::from)?;
+        jobs.register(Arc::new(GrepGcJob::new(grep_worker.clone())))
+            .map_err(CliError::from)?;
         let runner = MaintenanceRunner::builder(jobs.clone())
             .build()
-            .map_err(map_runtime_error)?;
+            .map_err(CliError::from)?;
         runner.attach_hints(receiver);
-        let backend = EmbeddedBackend {
+        let maintenance = MaintenanceHost {
             writer,
-            service_reader: reader.clone(),
-            reader,
             maintenance,
             jobs,
             runner,
-            // Embedded mode composes grep itself: the runtime handles above
-            // know nothing about it.
-            grep: GrepService::new(Arc::clone(&grep_block_cache)),
-            grep_block_cache,
+            grep_worker,
         };
+        let client = crate::backend::client(
+            &maintenance,
+            GrepService::new(grep_block_cache),
+            store_kind,
+            inline_content,
+            no_retry,
+        )?;
         Ok(Self {
-            backend,
+            client,
+            maintenance: Some(maintenance),
             journal_identity: String::new(),
         })
     }
 }
 
-impl RemoteTarget {
-    fn new(
+impl ResolvedTarget {
+    fn remote(
         server_url: &str,
         auth_token: Option<&SecretString>,
         ca_cert_path: Option<&str>,
@@ -375,19 +396,23 @@ impl RemoteTarget {
             no_retry,
         ))
         .map_err(|error| CliError::invalid_config(error.to_string()))?;
-        Ok(Self { client })
+        Ok(Self {
+            journal_identity: client.server_url().to_owned(),
+            client,
+            maintenance: None,
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::RemoteTarget;
+    use super::ResolvedTarget;
     use loonfs_api::SecretString;
 
     #[test]
     fn a_stored_token_is_rejected_for_non_loopback_http() {
         let stored = SecretString::from("stored-token");
-        let error = RemoteTarget::new("http://example.internal", Some(&stored), None, false)
+        let error = ResolvedTarget::remote("http://example.internal", Some(&stored), None, false)
             .err()
             .expect("a token over non-loopback plaintext HTTP should be rejected");
 

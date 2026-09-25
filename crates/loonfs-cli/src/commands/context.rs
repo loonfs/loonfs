@@ -35,7 +35,13 @@ pub(crate) async fn create_directory_tolerating_existing(
     spec: &NamespacePath,
     options: &CreateDirectoryOptions,
 ) -> Result<RemoteDirectoryOutcome, CliError> {
-    match context.target.create_directory(spec, options).await {
+    match context
+        .target
+        .client
+        .create_directory(spec, options)
+        .await
+        .map_err(CliError::from)
+    {
         Ok(result) => Ok(RemoteDirectoryOutcome::Created(result)),
         Err(error) if error.code == ErrorCode::PathConflict.as_str() => {
             let existing = context

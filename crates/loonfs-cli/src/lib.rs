@@ -14,7 +14,6 @@
 )]
 mod args;
 mod backend;
-mod backend_error;
 mod commands;
 mod config;
 mod error;

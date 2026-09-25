@@ -180,6 +180,7 @@ impl Client {
     ) -> Result<Commit> {
         let staged = PreparedContent {
             kind: PreparedContentKind::Staged {
+                upload_id: None,
                 content_ref,
                 content_token,
             },
@@ -197,12 +198,13 @@ impl Client {
         journal: Option<&dyn PutFileJournal>,
     ) -> Result<Commit> {
         let commit_id = commit_id_or_generated(&options.commit);
-        let (content_ref, inline_content, content_token) = match prepared_content.kind {
-            PreparedContentKind::Inline(bytes) => (None, Some(bytes), None),
+        let (content_ref, inline_content, content_token, upload_id) = match prepared_content.kind {
+            PreparedContentKind::Inline(bytes) => (None, Some(bytes), None, None),
             PreparedContentKind::Staged {
+                upload_id,
                 content_ref,
                 content_token,
-            } => (Some(content_ref), None, content_token),
+            } => (Some(content_ref), None, content_token, upload_id),
         };
         let request = CommitRequest {
             preconditions: options.commit.preconditions.clone(),
@@ -220,7 +222,7 @@ impl Client {
         };
         if let Some(journal) = journal {
             journal
-                .commit_prepared(&request, &options.commit.actor_id)
+                .commit_prepared(&request, &options.commit.actor_id, upload_id.as_ref())
                 .map_err(|error| {
                     ClientError::Io(format!(
                         "could not record file commit `{commit_id}` before submission: {error}"

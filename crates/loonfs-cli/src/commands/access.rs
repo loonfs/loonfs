@@ -28,6 +28,7 @@ pub(crate) async fn run_access_set(
     };
     let result = context
         .target
+        .client
         .update_access(&spec, &options)
         .await
         .map_err(|error| context.fail(kind, error))?;

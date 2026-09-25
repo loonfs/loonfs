@@ -55,11 +55,13 @@ pub trait PutFileJournal: Send + Sync {
     /// Records a part after it has been uploaded successfully.
     fn part_completed(&self, part: &CompletedUploadPart) -> std::io::Result<()>;
     /// Persists the complete request before any attempt to submit its commit.
+    /// Includes the upload id when content was staged, so a caller can renew its token.
     /// Replay this request and actor with [`Client::create_commit`] after an interruption.
     fn commit_prepared(
         &self,
         request: &CommitRequest,
         actor_id: &loonfs_api::ActorId,
+        upload_id: Option<&UploadId>,
     ) -> std::io::Result<()>;
 }
 
@@ -83,6 +85,7 @@ pub struct PreparedContent {
 pub(crate) enum PreparedContentKind {
     Inline(Vec<u8>),
     Staged {
+        upload_id: Option<UploadId>,
         content_ref: ContentRef,
         content_token: Option<ContentToken>,
     },
@@ -818,6 +821,7 @@ impl Client {
             } => {
                 return Ok(PreparedContent {
                     kind: PreparedContentKind::Staged {
+                        upload_id: Some(response.upload_id),
                         content_ref,
                         content_token,
                     },

@@ -1,11 +1,51 @@
 //! Progress and budget state for iterative maintenance and grep operations.
 
 use crate::error::CliError;
+use crate::resolve::ResolvedTarget;
 use loonfs::{MaintenanceConclusion, MaintenanceJobId};
 use loonfs_api::v0::GrepIndexLifecycle;
 use loonfs_api::{ChangeSeq, NamespaceId};
 use loonfs_objectstore::timing::{MonotonicTimer, StdMonotonicTimer};
 use std::future::Future;
+
+impl ResolvedTarget {
+    pub(crate) async fn wait_for_grep_index(
+        &self,
+        namespace_id: &NamespaceId,
+        target_seq: ChangeSeq,
+        budget: StepBudget,
+    ) -> Result<GrepWaitProgress, CliError> {
+        use loonfs::{MaintenanceCancellation, MaintenanceJob};
+        use loonfs_grep::{GramIndexBuildPolicy, GrepMaintenanceJob};
+
+        let job = self.maintenance.as_ref().map(|host| {
+            GrepMaintenanceJob::new(host.grep_worker.clone(), GramIndexBuildPolicy::default())
+        });
+        wait_for_grep_index(
+            target_seq,
+            budget,
+            || async { Ok(self.client.get_grep_index(namespace_id).await?.lifecycle) },
+            || async {
+                let Some(job) = &job else {
+                    rest_between_status_checks().await;
+                    return Ok(GrepWaitStep::Continue);
+                };
+                let result = job
+                    .run(namespace_id, &MaintenanceCancellation::new())
+                    .await?;
+                Ok(match result.conclusion {
+                    MaintenanceConclusion::Progressed | MaintenanceConclusion::Superseded => {
+                        GrepWaitStep::Continue
+                    }
+                    MaintenanceConclusion::Idle
+                    | MaintenanceConclusion::Blocked
+                    | MaintenanceConclusion::NotEnabled => GrepWaitStep::Settled,
+                })
+            },
+        )
+        .await
+    }
+}
 
 /// Delay between remote status checks.
 const REMOTE_STATUS_POLL_INTERVAL_MS: u64 = 250;

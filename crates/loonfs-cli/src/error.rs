@@ -2,6 +2,7 @@
 
 use crate::config::NAMESPACE_ENV;
 use loonfs_api::ErrorCode;
+use loonfs_client::ClientError;
 use serde::{Deserialize, Serialize};
 
 macro_rules! cli_error_codes {
@@ -72,8 +73,7 @@ pub(crate) struct CliError {
     /// argument as written.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub param: Option<String>,
-    /// Correlation id the server assigned to the failed request; absent for
-    /// embedded and local failures, which have no server hop.
+    /// Correlation id assigned by the HTTP binding.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
     /// Structured context for the code, when the backend carried any.
@@ -227,6 +227,67 @@ impl CliError {
 
     pub(crate) fn cancelled() -> Self {
         Self::new(CliErrorCode::Cancelled.as_str(), "operation cancelled")
+    }
+}
+
+impl From<ClientError> for CliError {
+    fn from(error: ClientError) -> Self {
+        match error {
+            ClientError::ConfigIo(message) | ClientError::ConfigDecode(message) => {
+                Self::invalid_config(message)
+            }
+            ClientError::MissingConfigField { field } => {
+                Self::invalid_config(format!("missing `{field}`"))
+            }
+            ClientError::ConfigValidation { field, reason } => {
+                Self::invalid_config(format!("invalid `{field}`: {reason}"))
+            }
+            ClientError::InvalidNamespacePath(message) => Self::invalid_request(message),
+            ClientError::Http(message)
+            | ClientError::Json(message)
+            | ClientError::Protocol(message) => Self::client_error(message),
+            ClientError::Api {
+                status: _,
+                code,
+                feature,
+                message,
+                param,
+                request_id,
+                details,
+            } => Self {
+                code,
+                feature,
+                message,
+                param,
+                request_id,
+                details,
+            },
+            ClientError::UploadTooLarge { size_bytes, reason } => Self::new(
+                ErrorCode::ContentTooLarge.as_str(),
+                format!(
+                    "payload of {size_bytes} bytes exceeds every upload transport this deployment offers: {reason}"
+                ),
+            ),
+            ClientError::Io(message) => Self::io_error(format!("i/o error: {message}")),
+            // `ClientError` is non-exhaustive across crate boundaries, so future
+            // variants map to a generic transport failure. Add an explicit arm when a
+            // new variant needs a more specific CLI code.
+            other => Self::client_error(other.to_string()),
+        }
+    }
+}
+
+impl From<loonfs::RuntimeError> for CliError {
+    fn from(error: loonfs::RuntimeError) -> Self {
+        let error = error.to_api_error();
+        Self {
+            code: error.code,
+            message: error.message,
+            feature: error.feature,
+            param: error.param,
+            request_id: error.request_id,
+            details: error.details,
+        }
     }
 }
 

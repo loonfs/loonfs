@@ -1,18 +1,10 @@
-//! Unified CLI operations for embedded and remote profiles.
-//!
-//! [`crate::resolve::ResolvedTarget`] gives commands the same interface for
-//! both profile types. Embedded profiles call the in-process runtime, while
-//! remote profiles use the HTTP client. Both map failures to
-//! [`crate::error::CliError`].
+//! In-memory HTTP hosting and runtime maintenance for CLI profiles.
 
-mod dispatch;
-mod download;
-mod embedded;
+mod host;
+mod maintenance;
+mod operations;
 mod step_budget;
-mod uploads;
 
-pub(crate) use download::FileDownload;
-pub(crate) use embedded::EmbeddedBackend;
-pub(crate) use step_budget::{
-    GrepWaitProgress, MaintenanceDrainProgress, MaintenanceKeyProgress, StepBudget,
-};
+pub(crate) use host::client;
+pub(crate) use maintenance::MaintenanceHost;
+pub(crate) use step_budget::{MaintenanceDrainProgress, MaintenanceKeyProgress, StepBudget};

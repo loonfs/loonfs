@@ -1,6 +1,6 @@
 //! Partial files and metadata used to resume interrupted downloads.
 
-use crate::backend::FileDownload;
+use super::download::FileDownload;
 use crate::error::CliError;
 use loonfs_api::{Checksum, ContentRef, RevisionNo};
 use serde::{Deserialize, Deserializer, Serialize};
