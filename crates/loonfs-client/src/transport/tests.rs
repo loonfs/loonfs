@@ -2,6 +2,8 @@
 
 use super::*;
 use crate::{scripted_transport, ClientConfig};
+use futures::FutureExt as _;
+use loonfs_test_support::clock::ManualClock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -271,14 +273,66 @@ async fn services_receive_identical_body_and_identity_on_retries_but_not_provide
     );
 }
 
+fn timed_client<S>(service: S, timeout: Option<u64>) -> (Client, Arc<ManualClock>)
+where
+    S: tower::Service<Request<Body>, Response = Response<Body>, Error = TransportError>
+        + Clone
+        + Send
+        + Sync
+        + 'static,
+    S::Future: Send + 'static,
+{
+    let clock = Arc::new(ManualClock::new(0));
+    let mut client = service_client(service, timeout);
+    client.timer = clock.clone();
+    (client, clock)
+}
+
+async fn advance_time(clock: &ManualClock, elapsed_ms: u64) {
+    clock.advance_ms(elapsed_ms);
+    tokio::time::advance(Duration::from_millis(elapsed_ms)).await;
+}
+
+fn pending_chunks(count: usize) -> (Vec<tokio::sync::oneshot::Sender<Bytes>>, PayloadStream) {
+    let (senders, receivers): (Vec<_>, Vec<_>) =
+        (0..count).map(|_| tokio::sync::oneshot::channel()).unzip();
+    let chunks = futures::stream::iter(receivers)
+        .then(|receiver| async { receiver.await.map_err(std::io::Error::other) })
+        .boxed();
+    (senders, chunks)
+}
+
 #[tokio::test(start_paused = true)]
 async fn service_timeouts_cover_readiness_headers_and_streamed_bodies() {
-    for timeout in [None, Some(25)] {
+    for (timeout, elapsed_ms) in [(None, 60_001), (Some(25), 25)] {
+        let transport =
+            scripted_transport::script([scripted_transport::Outcome::Success(Vec::new())]);
+        let (client, clock) = timed_client(transport.clone(), timeout);
+        let request = client.put("http://127.0.0.1/content");
+        let upload = client.call_streamed_once(&request, futures::stream::pending().boxed(), None);
+        tokio::pin!(upload);
+        assert!(futures::poll!(&mut upload).is_pending());
+        advance_time(&clock, elapsed_ms).await;
+        let error = upload
+            .now_or_never()
+            .expect("request should finish")
+            .expect_err("upload timeout");
+        assert!(matches!(error, ClientError::Http(message) if message.contains("timed out")));
+        assert_eq!(transport.attempts(), 1);
+        assert_eq!(transport.sent()[0].body_bytes(), 0);
+
         let service = tower::service_fn(|_: Request<Body>| {
             std::future::pending::<std::result::Result<Response<Body>, TransportError>>()
         });
-        let client = service_client(service, timeout);
-        let error = client.get_health().await.expect_err("header timeout");
+        let (client, clock) = timed_client(service, timeout);
+        let headers = client.get_health();
+        tokio::pin!(headers);
+        assert!(futures::poll!(&mut headers).is_pending());
+        advance_time(&clock, elapsed_ms).await;
+        let error = headers
+            .now_or_never()
+            .expect("request should finish")
+            .expect_err("header timeout");
         assert!(matches!(error, ClientError::Http(message) if message.contains("timed out")));
 
         let service = tower::service_fn(|_: Request<Body>| async {
@@ -286,14 +340,18 @@ async fn service_timeouts_cover_readiness_headers_and_streamed_bodies() {
                 futures::stream::pending::<std::io::Result<Bytes>>(),
             )))
         });
-        let client = service_client(service, timeout);
+        let (client, clock) = timed_client(service, timeout);
         let mut stream = client
             .call_for_response_stream(&client.get("http://127.0.0.1/content"))
             .await
             .expect("response headers");
-        let error = stream
-            .next()
-            .await
+        let chunk = stream.next();
+        tokio::pin!(chunk);
+        assert!(futures::poll!(&mut chunk).is_pending());
+        advance_time(&clock, elapsed_ms).await;
+        let error = chunk
+            .now_or_never()
+            .expect("request should finish")
             .expect("body result")
             .expect_err("body timeout");
         assert!(error.to_string().contains("timed out"));
@@ -316,45 +374,130 @@ async fn service_timeouts_cover_readiness_headers_and_streamed_bodies() {
             std::future::pending()
         }
     }
-    let error = service_client(PendingService, Some(25))
-        .get_health()
-        .await
-        .expect_err("readiness timeout");
-    assert!(matches!(error, ClientError::Http(message) if message.contains("timed out")));
+    for (timeout, elapsed_ms) in [(None, 60_001), (Some(25), 25)] {
+        let (client, clock) = timed_client(PendingService, timeout);
+        let request = client.get_health();
+        tokio::pin!(request);
+        assert!(futures::poll!(&mut request).is_pending());
+        advance_time(&clock, elapsed_ms).await;
+        let error = request
+            .now_or_never()
+            .expect("request should finish")
+            .expect_err("readiness timeout");
+        assert!(matches!(error, ClientError::Http(message) if message.contains("timed out")));
+    }
 }
 
 #[tokio::test(start_paused = true)]
-async fn response_progress_resets_inactivity_without_resetting_the_request_deadline() {
-    let service = tower::service_fn(|_: Request<Body>| async {
-        let chunks = futures::stream::iter([b"one", b"two", b"end"]).then(|chunk| async move {
-            transport_delay(Duration::from_secs(40)).await;
-            Ok::<_, std::io::Error>(Bytes::from_static(chunk))
-        });
-        Ok(Response::new(Body::from_stream(chunks)))
-    });
+async fn upload_progress_resets_inactivity_without_resetting_the_request_deadline() {
     for timeout in [None, Some(90_000)] {
-        let client = service_client(service, timeout);
-        let mut stream = client
-            .call_for_response_stream(&client.get("http://127.0.0.1/content"))
-            .await
-            .expect("response headers");
-        assert_eq!(
-            stream.next().await.expect("first chunk").expect("data"),
-            b"one".as_slice()
-        );
-        assert_eq!(
-            stream.next().await.expect("second chunk").expect("data"),
-            b"two".as_slice()
-        );
-        let last = stream.next().await.expect("last chunk");
-        if timeout.is_some() {
-            assert!(last
-                .expect_err("total deadline")
-                .to_string()
-                .contains("timed out"));
-        } else {
-            assert_eq!(last.expect("progressing transfer"), b"end".as_slice());
-            assert!(stream.next().await.is_none());
+        let transport = scripted_transport::script([scripted_transport::Outcome::Success(
+            b"uploaded".to_vec(),
+        )]);
+        let (client, clock) = timed_client(transport.clone(), timeout);
+        let (senders, chunks) = pending_chunks(5);
+        let request = client.put("http://127.0.0.1/content");
+        let upload = client.call_streamed_once(&request, chunks, Some(15));
+        tokio::pin!(upload);
+        for (index, sender) in senders.into_iter().enumerate() {
+            assert!(futures::poll!(&mut upload).is_pending());
+            if timeout.is_some() && index == 2 {
+                advance_time(&clock, 30_000).await;
+                let error = upload
+                    .as_mut()
+                    .now_or_never()
+                    .expect("request should finish at its deadline")
+                    .expect_err("total deadline");
+                assert!(
+                    matches!(error, ClientError::Http(message) if message.contains("timed out"))
+                );
+                assert_eq!(transport.sent()[0].body_chunks, vec![3; 2]);
+                break;
+            }
+            advance_time(&clock, if index == 0 { 20_000 } else { 40_000 }).await;
+            sender
+                .send(Bytes::from_static(b"one"))
+                .expect("body reader");
+        }
+        if timeout.is_none() {
+            assert_eq!(
+                upload
+                    .now_or_never()
+                    .expect("upload should finish")
+                    .expect("progressing upload"),
+                b"uploaded"
+            );
+            assert_eq!(clock.now_ms(), 180_000);
+            assert_eq!(transport.sent()[0].body_chunks, vec![3; 5]);
+        }
+        assert_eq!(transport.attempts(), 1);
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn response_progress_resets_inactivity_without_resetting_total_deadlines() {
+    for (configured, attempt) in [(None, None), (Some(90_000), None), (None, Some(90_000))] {
+        let (senders, chunks) = pending_chunks(3);
+        let (headers_ready, headers_wait) = tokio::sync::oneshot::channel::<()>();
+        let response = Arc::new(std::sync::Mutex::new(Some((headers_wait, chunks))));
+        let service = tower::service_fn(move |_: Request<Body>| {
+            let (headers_wait, chunks) = response
+                .lock()
+                .expect("response lock")
+                .take()
+                .expect("one response");
+            async move {
+                headers_wait.await.expect("response headers");
+                Ok(Response::new(Body::from_stream(chunks)))
+            }
+        });
+        let (client, clock) = timed_client(service, configured);
+        let request = client
+            .build(&client.get("http://127.0.0.1/content"), Body::empty())
+            .expect("request");
+        let response = client.send(request, attempt.map(Duration::from_millis));
+        tokio::pin!(response);
+        assert!(futures::poll!(&mut response).is_pending());
+        advance_time(&clock, 40_000).await;
+        headers_ready.send(()).expect("header wait");
+        let response = response
+            .now_or_never()
+            .expect("headers should arrive")
+            .map_err(|failure| failure.error)
+            .expect("response");
+        let mut body = response.body;
+        for (index, sender) in senders.into_iter().enumerate() {
+            let chunk = body.frame();
+            tokio::pin!(chunk);
+            assert!(futures::poll!(&mut chunk).is_pending());
+            if (configured.is_some() || attempt.is_some()) && index == 1 {
+                advance_time(&clock, 10_000).await;
+                let error = chunk
+                    .now_or_never()
+                    .expect("request should finish at its deadline")
+                    .expect("body result")
+                    .expect_err("total deadline");
+                assert!(error.is_timeout());
+                break;
+            }
+            advance_time(&clock, 40_000).await;
+            sender
+                .send(Bytes::from_static(b"one"))
+                .expect("body reader");
+            let frame = chunk
+                .now_or_never()
+                .expect("chunk should arrive")
+                .expect("body result")
+                .expect("progressing response");
+            assert_eq!(frame.into_data().expect("data frame"), b"one".as_slice());
+        }
+        if configured.is_none() && attempt.is_none() {
+            assert!(body
+                .frame()
+                .now_or_never()
+                .expect("body should finish")
+                .is_none());
+            assert_eq!(clock.now_ms(), 160_000);
         }
     }
 }

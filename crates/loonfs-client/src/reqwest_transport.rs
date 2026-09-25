@@ -90,6 +90,9 @@ mod tests {
 
     #[test]
     fn conversion_preserves_buffered_replay_and_leaves_streams_unread() {
+        let activity = Arc::new(crate::transport_body::RequestActivity::new(Arc::new(
+            crate::transport::StdMonotonicTimer::default(),
+        )));
         let request = |body| {
             Request::builder()
                 .method("PUT")
@@ -97,8 +100,10 @@ mod tests {
                 .body(body)
                 .expect("request")
         };
-        let buffered = convert_request(request(Body::from(Bytes::from_static(b"content"))))
-            .expect("conversion");
+        let buffered = convert_request(request(
+            Body::from(Bytes::from_static(b"content")).track_activity(activity.clone()),
+        ))
+        .expect("conversion");
         assert_eq!(
             buffered.body().and_then(reqwest::Body::as_bytes),
             Some(b"content".as_slice())
@@ -113,7 +118,7 @@ mod tests {
                 std::task::Poll::Pending
             },
         ));
-        let streamed = convert_request(request(body)).expect("conversion");
+        let streamed = convert_request(request(body.track_activity(activity))).expect("conversion");
         assert!(streamed.body().and_then(reqwest::Body::as_bytes).is_none());
         assert!(streamed.try_clone().is_none());
         assert_eq!(polls.load(Ordering::SeqCst), 0);

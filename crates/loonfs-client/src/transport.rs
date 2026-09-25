@@ -1,7 +1,7 @@
 //! Builds HTTP requests, applies retry limits, and converts responses into
 //! client errors.
 
-use crate::transport_body::{timeout_error, wait_for_timeout, TimedBody};
+use crate::transport_body::{timeout_error, wait_for_timeout, RequestActivity, TimedBody};
 use crate::{Body, Client, ClientError, PayloadStream, Result, TransportError};
 use bytes::Bytes;
 use futures::StreamExt as _;
@@ -9,6 +9,7 @@ use http::{Method, Request, Response, StatusCode};
 use http_body_util::BodyExt as _;
 use loonfs_api::{transport_retry_backoff, ApiError, ErrorCode, OperationDeadline};
 pub(crate) use loonfs_api::{MonotonicTimer, StdMonotonicTimer, TransportRetryPolicy};
+use std::sync::Arc;
 use std::time::Duration;
 
 pub(crate) type Transport =
@@ -23,9 +24,6 @@ pub(crate) const DEFAULT: TransportRetryPolicy = TransportRetryPolicy {
     operation_deadline: Duration::from_secs(90),
 };
 
-/// Socket read/write inactivity timeout applied to every request. A
-/// connection that makes no progress for this long fails instead of hanging
-/// the caller forever.
 pub(crate) const IO_INACTIVITY_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -306,17 +304,20 @@ impl Client {
             (configured, remaining) => configured.or(remaining),
         };
         let mut total_timeout = timeout.map(transport_delay);
+        let activity = Arc::new(RequestActivity::new(self.timer.clone()));
+        let mut read_timeout = Box::pin(activity.clone().wait_for_inactivity());
+        let request = request.map(|body| body.track_activity(activity.clone()));
         let service = self.transport.clone();
         let response = tokio::select! {
             biased;
             () = wait_for_timeout(&mut total_timeout) => Err(timeout_error()),
-            response = tokio::time::timeout(IO_INACTIVITY_TIMEOUT, service.oneshot(request)) => {
-                response.unwrap_or_else(|error| Err(TransportError::timeout(error)))
-            }
+            () = &mut read_timeout => Err(timeout_error()),
+            response = service.oneshot(request) => response,
         }
         .map_err(|error| failed_attempt(&url, error))?;
+        activity.touch();
         Ok(WireResponse::from(response.map(|body| {
-            Body::new(TimedBody::new(body, total_timeout))
+            Body::new(TimedBody::new(body, total_timeout, read_timeout, activity))
         })))
     }
 }

@@ -108,7 +108,7 @@ pub struct Client {
     transport_retry_enabled: bool,
     /// Attempt count, delay, and total duration limits for replay-safe requests.
     transport_retry: TransportRetryPolicy,
-    /// Monotonic clock used to enforce the total retry limit.
+    /// Monotonic clock used for inactivity and retry limits.
     timer: Arc<dyn transport::MonotonicTimer>,
     /// Capability document cache, shared by clones and filled on first use.
     capabilities: Arc<OnceLock<CapabilityDocument>>,

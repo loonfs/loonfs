@@ -1,11 +1,13 @@
 //! Streaming request and response bodies shared by client transports.
 
+use crate::transport_body::RequestActivity;
 use crate::TransportError;
 use bytes::Bytes;
 use futures::{Stream, StreamExt as _};
 use http_body::{Body as HttpBody, Frame, SizeHint};
 use http_body_util::{combinators::UnsyncBoxBody, BodyExt as _, Full, StreamBody};
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 /// A streaming HTTP body whose frames contain `Bytes` and whose errors retain
@@ -14,6 +16,7 @@ use std::task::{Context, Poll};
 pub struct Body {
     inner: UnsyncBoxBody<Bytes, TransportError>,
     buffered: Option<Bytes>,
+    activity: Option<Arc<RequestActivity>>,
 }
 
 impl Body {
@@ -25,6 +28,7 @@ impl Body {
         Self {
             inner: body.boxed_unsync(),
             buffered: None,
+            activity: None,
         }
     }
 
@@ -42,6 +46,11 @@ impl Body {
         Self::new(StreamBody::new(stream.map(|chunk| {
             chunk.map(Frame::data).map_err(TransportError::body)
         })))
+    }
+
+    pub(crate) fn track_activity(mut self, activity: Arc<RequestActivity>) -> Self {
+        self.activity = Some(activity);
+        self
     }
 
     pub(crate) fn into_buffered(self) -> std::result::Result<Bytes, Self> {
@@ -71,7 +80,13 @@ impl HttpBody for Body {
     ) -> Poll<Option<std::result::Result<Frame<Bytes>, TransportError>>> {
         let this = self.get_mut();
         this.buffered = None;
-        Pin::new(&mut this.inner).poll_frame(context)
+        let frame = Pin::new(&mut this.inner).poll_frame(context);
+        if matches!(&frame, Poll::Ready(Some(Ok(frame))) if frame.is_data()) {
+            if let Some(activity) = &this.activity {
+                activity.touch();
+            }
+        }
+        frame
     }
 
     fn is_end_stream(&self) -> bool {
