@@ -3,6 +3,8 @@
 
 use super::error::ApiResponseError;
 use super::extractors::{missing_actor, ActorHeader, OptionalActorHeader, SubjectHeaders};
+use super::handlers_query::{grep_index_not_maintained, map_grep_error};
+use super::handlers_uploads::current_unix_ms;
 use super::query_params::{parse_path_id, parse_public_ordinal, resolve_page_limit};
 use super::{AppJson, AppPath, AppQuery, AppState, NamespaceIdPath, NoQuery};
 use axum::extract::State;
@@ -817,7 +819,7 @@ fn decode_checkpoint_cursor(
         path = "/v0/maintenance/namespaces/{namespace_id}/runs",
         tag = "maintenance",
         summary = "Run one maintenance job",
-        description = "Runs one maintenance job for the namespace. The body names the job with `kind`: `metadata`, `metadata_compaction`, `gc`, `retention`, or `recover_administrator`. The response carries the same `kind` and that job's result. A deleted namespace accepts only `gc`. A `gc` call reads the current manifest and lists pins, then sweeps every family to the end. Each listing starts at the beginning. The call keeps no continuation.",
+        description = "Runs one maintenance job for the namespace. The body names the job with `kind`: `metadata`, `metadata_compaction`, `gc`, `grep_gc`, `retention`, or `recover_administrator`. The response carries the same `kind` and that job's result. A deleted namespace accepts only `gc` or `grep_gc`. A `grep_gc` call collects aged, unreferenced grep index objects and requires `maintenance.grep.index`. A `gc` call reads the current manifest and lists pins, then sweeps every family to the end. Each listing starts at the beginning. The call keeps no continuation.",
         params(("namespace_id" = String, Path, description = "Namespace id")),
         request_body(content = RunMaintenanceRequest, description = "The maintenance job to run"),
         responses(
@@ -826,6 +828,7 @@ fn decode_checkpoint_cursor(
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace not found", body = ApiError),
             (status = 410, description = "Namespace deleted", body = ApiError),
+            (status = 501, description = "This deployment does not maintain the grep index", body = ApiError),
             crate::http::openapi::UnavailableResponses
         )
     )
@@ -837,6 +840,15 @@ pub(super) async fn run_maintenance(
     AppQuery(_): AppQuery<NoQuery>,
     AppJson(request): AppJson<RunMaintenanceRequest>,
 ) -> Result<Json<RunMaintenanceResponse>, ApiResponseError> {
+    if let RunMaintenanceRequest::GrepGc {} = request {
+        if !state.config.grep.mode.maintains_index() {
+            return Err(grep_index_not_maintained().await);
+        }
+        return loonfs_grep::run_grep_gc(state.grep_worker(), &namespace_id, current_unix_ms()?)
+            .await
+            .map(Json)
+            .map_err(|error| map_grep_error(&namespace_id, error));
+    }
     if let RunMaintenanceRequest::RecoverAdministrator(request) = request {
         let actor_id = actor_id.ok_or_else(missing_actor)?;
         let recovered = state

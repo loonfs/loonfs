@@ -389,16 +389,13 @@ fn openapi_documents_current_server_paths() {
             "/v0/maintenance/namespaces/{namespace_id}/grep/index/disable",
             "post",
         ),
-        (
-            "/v0/maintenance/namespaces/{namespace_id}/grep/index/gc",
-            "post",
-        ),
         ("/v0/maintenance/store/probe", "post"),
     ] {
         assert_path_method(paths, path, method);
     }
 
     assert!(!paths.contains_key("/openapi.json"));
+    assert!(!paths.contains_key("/v0/maintenance/namespaces/{namespace_id}/grep/index/gc"));
     assert_query_params(
         paths,
         "/v0/namespaces/{namespace_id}/filesystem/entries",
@@ -1269,6 +1266,9 @@ fn openapi_names_tagged_one_of_alternatives() {
         .and_then(Value::as_object)
         .expect("openapi schemas object");
 
+    assert!(!schemas.contains_key("GrepGcRequest"));
+    assert!(!schemas.contains_key("GrepGcResponse"));
+
     for (schema_name, expected_names) in [
         (
             "NamespaceAccess",
@@ -1284,6 +1284,7 @@ fn openapi_names_tagged_one_of_alternatives() {
                 "RunMaintenanceRequestMetadata",
                 "RunMaintenanceRequestMetadataCompaction",
                 "RunMaintenanceRequestGc",
+                "RunMaintenanceRequestGrepGc",
                 "RunMaintenanceRequestRetention",
                 "RunMaintenanceRequestRecoverAdministrator",
             ][..],
@@ -1294,6 +1295,7 @@ fn openapi_names_tagged_one_of_alternatives() {
                 "RunMaintenanceResponseMetadata",
                 "RunMaintenanceResponseMetadataCompaction",
                 "RunMaintenanceResponseGc",
+                "RunMaintenanceResponseGrepGc",
                 "RunMaintenanceResponseRetention",
                 "RunMaintenanceResponseRecoverAdministrator",
             ][..],

@@ -7,8 +7,8 @@ use crate::error::CliError;
 use crate::profiles::ProfileSummary;
 use crate::render::{store_probe_verdict, StoreProbeVerdict};
 use loonfs_api::v0::{
-    DeleteSnapshotResponse, GrepGcResponse, GrepIndex, ListChangesResponse, ListSnapshotsResponse,
-    SnapshotSummary, StoreProbeResponse,
+    DeleteSnapshotResponse, GrepIndex, ListChangesResponse, ListSnapshotsResponse, SnapshotSummary,
+    StoreProbeResponse,
 };
 use loonfs_api::{
     AbsolutePath, CapabilityDocument, ChangeSeq, Checkpoint, CommitId, DeleteCheckpointResponse,
@@ -241,7 +241,6 @@ pub(crate) enum CommandData {
     StoreProbed(StoreProbeResponse),
     GrepIndexDisabled(GrepIndex),
     GrepIndexStatus(GrepIndex),
-    GrepIndexCollected(GrepGcResponse),
     Changes(ListChangesResponse),
     Trash(TrashListing),
     PathEntries {

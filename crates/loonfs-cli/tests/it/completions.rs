@@ -12,6 +12,7 @@ fn completion_covers_capabilities_and_doctor_selectors() {
     for surface in [
         "(capabilities)",
         "(doctor)",
+        "(grep-gc)",
         "--profile=",
         "--namespace=",
         "--write-check",
@@ -28,6 +29,7 @@ fn completion_covers_capabilities_and_doctor_selectors() {
     let bash_script = stdout(&bash);
     assert!(bash_script.contains("loonfs"), "{bash_script}");
     assert!(bash_script.contains("--write-check"), "{bash_script}");
+    assert!(bash_script.contains("grep-gc"), "{bash_script}");
 }
 
 #[test]

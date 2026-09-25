@@ -87,7 +87,6 @@ fn human_success_text(output: &CommandOutput) -> String {
         CommandData::StoreProbed(response) => human_store_probed(response),
         CommandData::GrepIndexDisabled(response) => human_grep_index_disabled(response),
         CommandData::GrepIndexStatus(response) => human_grep_index_status(response),
-        CommandData::GrepIndexCollected(response) => human_grep_index_collected(response),
         CommandData::GrepMatches {
             pattern,
             matches,

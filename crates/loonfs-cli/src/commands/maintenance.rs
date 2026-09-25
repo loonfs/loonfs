@@ -12,17 +12,17 @@ use super::pagination::{collect_or_stream_pages, PagePlan, PagedListing};
 use crate::args::{
     ChangesArgs, CommandKind, MaintenanceCheckpointArgs, MaintenanceCheckpointCommand,
     MaintenanceCheckpointDeleteArgs, MaintenanceCheckpointListArgs, MaintenanceCommand,
-    MaintenanceGcArgs, MaintenanceIndexCommand, MaintenanceIndexEnableArgs, MaintenanceIndexGcArgs,
-    MaintenanceJobArg, MaintenanceLoopArgs, MaintenanceMetadataArgs, MaintenanceNamespaceArgs,
+    MaintenanceGcArgs, MaintenanceIndexCommand, MaintenanceIndexEnableArgs, MaintenanceJobArg,
+    MaintenanceLoopArgs, MaintenanceMetadataArgs, MaintenanceNamespaceArgs,
     MaintenanceRecoverAdministratorArgs, MaintenanceRetentionCommand, MaintenanceStoreCommand,
-    MaintenanceStoreProbeArgs, RuntimeBehavior,
+    MaintenanceStoreProbeArgs,
 };
 use crate::backend::{MaintenanceKeyProgress, StepBudget};
 use crate::error::CliError;
 use crate::resolve::parse_namespace_id;
 use clap::ValueEnum;
 use loonfs::{MaintenanceJobId, NamespaceId};
-use loonfs_api::v0::{GrepGcRequest, GrepIndexLifecycle};
+use loonfs_api::v0::GrepIndexLifecycle;
 use loonfs_api::{
     AdvanceRetentionRequest, ChangeSeq, CreateCheckpointRequest, ErrorCode, GcRequest,
     MetadataCompactionRequest, MetadataMaintenanceRequest, PinId, PrincipalId,
@@ -38,7 +38,6 @@ pub(crate) async fn run_maintenance_command(
     kind: CommandKind,
     config_path: &Path,
     command: MaintenanceCommand,
-    runtime: RuntimeBehavior,
 ) -> Result<CommandOutput, CommandFailure> {
     match command {
         MaintenanceCommand::RecoverAdministrator(args) => {
@@ -71,9 +70,6 @@ pub(crate) async fn run_maintenance_command(
             MaintenanceIndexCommand::Status(args) => {
                 run_maintenance_index_status(kind, config_path, args).await
             }
-            MaintenanceIndexCommand::Gc(args) => {
-                run_maintenance_index_gc(kind, config_path, args, runtime).await
-            }
         },
         MaintenanceCommand::Retention { command } => match command {
             MaintenanceRetentionCommand::Advance(args) => {
@@ -81,6 +77,7 @@ pub(crate) async fn run_maintenance_command(
             }
         },
         MaintenanceCommand::Gc(args) => run_maintenance_gc(kind, config_path, args).await,
+        MaintenanceCommand::GrepGc(args) => run_maintenance_grep_gc(kind, config_path, args).await,
         MaintenanceCommand::Store { command } => match command {
             MaintenanceStoreCommand::Probe(args) => {
                 run_maintenance_store_probe(kind, config_path, args).await
@@ -579,20 +576,25 @@ async fn run_maintenance_index_status(
     Ok(context.output(kind, CommandData::GrepIndexStatus(response)))
 }
 
-/// Runs one complete grep index garbage-collection pass for the namespace.
-async fn run_maintenance_index_gc(
+async fn run_maintenance_grep_gc(
     kind: CommandKind,
     config_path: &Path,
-    args: MaintenanceIndexGcArgs,
-    _runtime: RuntimeBehavior,
+    args: MaintenanceNamespaceArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, config_path, &args.target).await?;
     let response = context
         .target
-        .gc_grep_index(context.namespace(), &GrepGcRequest {})
+        .run_maintenance(
+            context.namespace(),
+            RunMaintenanceRequest::GrepGc {},
+            context.actor_id.as_ref(),
+        )
         .await
         .map_err(|error| context.fail(kind, error))?;
-    Ok(context.output(kind, CommandData::GrepIndexCollected(response)))
+    Ok(context.output(
+        kind,
+        CommandData::MaintenanceRan(MaintenanceRan::new(response)),
+    ))
 }
 
 async fn run_maintenance_index_disable(

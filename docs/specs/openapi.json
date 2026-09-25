@@ -2285,50 +2285,6 @@
         ],
         "type": "object"
       },
-      "GrepGcRequest": {
-        "additionalProperties": false,
-        "description": "One explicit grep index garbage-collection pass (maintenance API group).",
-        "type": "object"
-      },
-      "GrepGcResponse": {
-        "description": "Result of one explicit grep index garbage-collection pass (maintenance API group).",
-        "properties": {
-          "deleted_other_objects": {
-            "description": "Other unreferenced grep objects deleted after the grace window.",
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "deleted_segments": {
-            "description": "Unreferenced grep segments older than the minimum segment age.",
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "namespace_id": {
-            "$ref": "#/components/schemas/NamespaceId",
-            "description": "Namespace whose grep-owned keyspace was inspected."
-          },
-          "namespace_reaped": {
-            "description": "Whether an absent or tombstoned namespace had extension state reaped.",
-            "type": "boolean"
-          },
-          "retained_candidates": {
-            "description": "Referenced, young, or unrecognized candidates retained by the pass.",
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          }
-        },
-        "required": [
-          "namespace_id",
-          "deleted_segments",
-          "deleted_other_objects",
-          "namespace_reaped",
-          "retained_candidates"
-        ],
-        "type": "object"
-      },
       "GrepIndex": {
         "description": "The maintenance status of a namespace's grep index.",
         "discriminator": {
@@ -3657,6 +3613,7 @@
         "discriminator": {
           "mapping": {
             "gc": "#/components/schemas/RunMaintenanceRequestGc",
+            "grep_gc": "#/components/schemas/RunMaintenanceRequestGrepGc",
             "metadata": "#/components/schemas/RunMaintenanceRequestMetadata",
             "metadata_compaction": "#/components/schemas/RunMaintenanceRequestMetadataCompaction",
             "recover_administrator": "#/components/schemas/RunMaintenanceRequestRecoverAdministrator",
@@ -3673,6 +3630,9 @@
           },
           {
             "$ref": "#/components/schemas/RunMaintenanceRequestGc"
+          },
+          {
+            "$ref": "#/components/schemas/RunMaintenanceRequestGrepGc"
           },
           {
             "$ref": "#/components/schemas/RunMaintenanceRequestRetention"
@@ -3694,6 +3654,21 @@
           "kind": {
             "enum": [
               "gc"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      "RunMaintenanceRequestGrepGc": {
+        "description": "Collects aged, unreferenced grep index objects.",
+        "properties": {
+          "kind": {
+            "enum": [
+              "grep_gc"
             ],
             "type": "string"
           }
@@ -3779,6 +3754,7 @@
         "discriminator": {
           "mapping": {
             "gc": "#/components/schemas/RunMaintenanceResponseGc",
+            "grep_gc": "#/components/schemas/RunMaintenanceResponseGrepGc",
             "metadata": "#/components/schemas/RunMaintenanceResponseMetadata",
             "metadata_compaction": "#/components/schemas/RunMaintenanceResponseMetadataCompaction",
             "recover_administrator": "#/components/schemas/RunMaintenanceResponseRecoverAdministrator",
@@ -3795,6 +3771,9 @@
           },
           {
             "$ref": "#/components/schemas/RunMaintenanceResponseGc"
+          },
+          {
+            "$ref": "#/components/schemas/RunMaintenanceResponseGrepGc"
           },
           {
             "$ref": "#/components/schemas/RunMaintenanceResponseRetention"
@@ -3847,6 +3826,52 @@
           "deleted",
           "deleted_checkpoints_by_owner",
           "retained",
+          "kind"
+        ],
+        "type": "object"
+      },
+      "RunMaintenanceResponseGrepGc": {
+        "description": "Counts from one grep index collection pass.",
+        "properties": {
+          "deleted_other_objects": {
+            "description": "Other unreferenced grep objects deleted after the grace window.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "deleted_segments": {
+            "description": "Unreferenced grep segments older than the minimum segment age.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "kind": {
+            "enum": [
+              "grep_gc"
+            ],
+            "type": "string"
+          },
+          "namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "Namespace whose grep-owned keyspace was inspected."
+          },
+          "namespace_reaped": {
+            "description": "Whether an absent or tombstoned namespace had extension state reaped.",
+            "type": "boolean"
+          },
+          "retained_candidates": {
+            "description": "Referenced, young, or unrecognized candidates retained by the pass.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "namespace_id",
+          "deleted_segments",
+          "deleted_other_objects",
+          "namespace_reaped",
+          "retained_candidates",
           "kind"
         ],
         "type": "object"
@@ -5330,103 +5355,9 @@
         "x-loonfs-retry": "idempotent"
       }
     },
-    "/v0/maintenance/namespaces/{namespace_id}/grep/index/gc": {
-      "post": {
-        "description": "Runs one explicit garbage-collection pass over only this namespace's grep-owned extension keyspace. A tombstoned or absent namespace has aged extension state reaped. Every call reads durable roots and completes one pass. Unreadable or invalid roots fail before deletion. Requires this deployment to maintain the grep index.",
-        "operationId": "gc_grep_index",
-        "parameters": [
-          {
-            "description": "Namespace id",
-            "in": "path",
-            "name": "namespace_id",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/GrepGcRequest"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/GrepGcResponse"
-                }
-              }
-            },
-            "description": "Namespace grep garbage collection completed"
-          },
-          "400": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "Invalid namespace id or options"
-          },
-          "401": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "Unauthorized"
-          },
-          "500": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "The grep index is corrupt or its backing store is unavailable"
-          },
-          "501": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "This deployment does not maintain the grep index"
-          },
-          "503": {
-            "$ref": "#/components/responses/UnavailableResponse"
-          }
-        },
-        "summary": "Collect grep index garbage",
-        "tags": [
-          "maintenance"
-        ],
-        "x-fern-retries": {
-          "disabled": true
-        },
-        "x-fern-sdk-group-name": [
-          "maintenance",
-          "grepIndex"
-        ],
-        "x-fern-sdk-method-name": "gc",
-        "x-loonfs-retry": "not_idempotent"
-      }
-    },
     "/v0/maintenance/namespaces/{namespace_id}/runs": {
       "post": {
-        "description": "Runs one maintenance job for the namespace. The body names the job with `kind`: `metadata`, `metadata_compaction`, `gc`, `retention`, or `recover_administrator`. The response carries the same `kind` and that job's result. A deleted namespace accepts only `gc`. A `gc` call reads the current manifest and lists pins, then sweeps every family to the end. Each listing starts at the beginning. The call keeps no continuation.",
+        "description": "Runs one maintenance job for the namespace. The body names the job with `kind`: `metadata`, `metadata_compaction`, `gc`, `grep_gc`, `retention`, or `recover_administrator`. The response carries the same `kind` and that job's result. A deleted namespace accepts only `gc` or `grep_gc`. A `grep_gc` call collects aged, unreferenced grep index objects and requires `maintenance.grep.index`. A `gc` call reads the current manifest and lists pins, then sweeps every family to the end. Each listing starts at the beginning. The call keeps no continuation.",
         "operationId": "run_maintenance",
         "parameters": [
           {
@@ -5500,6 +5431,16 @@
               }
             },
             "description": "Namespace deleted"
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "This deployment does not maintain the grep index"
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"

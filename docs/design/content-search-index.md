@@ -196,7 +196,7 @@ Index maintenance reduces this gap when it runs. Core WAL-tail backpressure does
 
 ## Grep garbage collection
 
-Grep GC is namespace-scoped. It runs through `loonfs maintenance index gc`, `POST /v0/maintenance/namespaces/{ns}/grep/index/gc`, or the `grep_gc` maintenance job, which `loonfs maintenance loop` runs when `--jobs` selects `grep-gc` or is omitted. Index building and reorganization do not run it.
+Grep GC is namespace-scoped. It runs through `loonfs maintenance grep-gc`, `POST /v0/maintenance/namespaces/{ns}/runs` with `kind: "grep_gc"`, or the `grep_gc` maintenance job, which `loonfs maintenance loop` runs when `--jobs` selects `grep-gc` or is omitted. Index building and reorganization do not run it.
 
 Each call loads the current manifest, builds its live segment set, and scans the manifest and segment collections from beginning to end. It uses a fixed call clock and stores no progress cursor. Invalid or unreadable roots fail before deletion.
 

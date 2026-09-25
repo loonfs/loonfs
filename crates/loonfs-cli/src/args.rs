@@ -276,6 +276,7 @@ impl Command {
                         | MaintenanceCommand::Retention { .. }
                         | MaintenanceCommand::Compact(_)
                         | MaintenanceCommand::Gc(_)
+                        | MaintenanceCommand::GrepGc(_)
                         | MaintenanceCommand::RecoverAdministrator(_),
                 }
         )
@@ -1311,6 +1312,8 @@ pub(crate) enum MaintenanceCommand {
     },
     /// Collect aged, unreferenced objects.
     Gc(MaintenanceGcArgs),
+    /// Collect the namespace's unreferenced gram-index objects.
+    GrepGc(MaintenanceNamespaceArgs),
     /// Inspect and manage the profile's object store.
     Store {
         #[command(subcommand)]
@@ -1351,8 +1354,6 @@ pub(crate) enum MaintenanceIndexCommand {
     Disable(MaintenanceNamespaceArgs),
     /// Show whether the gram content index is disabled, backfilling, or active.
     Status(MaintenanceNamespaceArgs),
-    /// Collect the namespace's unreferenced gram-index objects.
-    Gc(MaintenanceIndexGcArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -1434,12 +1435,6 @@ pub(crate) struct MaintenanceIndexEnableArgs {
     /// far the index got.
     #[arg(long)]
     pub deadline_ms: Option<u64>,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct MaintenanceIndexGcArgs {
-    #[command(flatten)]
-    pub target: TargetSelectorArgs,
 }
 
 #[derive(Debug, Args)]
@@ -1617,7 +1612,7 @@ command_kinds! {
     MaintenanceIndexEnable => "maintenance_index_enable",
     MaintenanceIndexDisable => "maintenance_index_disable",
     MaintenanceIndexStatus => "maintenance_index_status",
-    MaintenanceIndexGc => "maintenance_index_gc",
+    MaintenanceGrepGc => "maintenance_grep_gc",
     ConfigPath => "config_path",
     ConfigShow => "config_show",
     Version => "version",
@@ -1698,7 +1693,6 @@ impl Cli {
                     MaintenanceIndexCommand::Enable(_) => CommandKind::MaintenanceIndexEnable,
                     MaintenanceIndexCommand::Disable(_) => CommandKind::MaintenanceIndexDisable,
                     MaintenanceIndexCommand::Status(_) => CommandKind::MaintenanceIndexStatus,
-                    MaintenanceIndexCommand::Gc(_) => CommandKind::MaintenanceIndexGc,
                 },
                 MaintenanceCommand::Retention { command } => match command {
                     MaintenanceRetentionCommand::Advance(_) => {
@@ -1706,6 +1700,7 @@ impl Cli {
                     }
                 },
                 MaintenanceCommand::Gc(_) => CommandKind::MaintenanceGc,
+                MaintenanceCommand::GrepGc(_) => CommandKind::MaintenanceGrepGc,
                 MaintenanceCommand::Store { command } => match command {
                     MaintenanceStoreCommand::Probe(_) => CommandKind::MaintenanceStoreProbe,
                 },
@@ -1991,11 +1986,17 @@ mod tests {
     }
 
     #[test]
-    fn index_gc_rejects_continuation_and_budget_options() {
-        Cli::try_parse_from(["loonfs", "maintenance", "index", "gc"]).expect("complete pass");
-        for option in ["--max-objects", "--max-steps", "--cursor"] {
+    fn grep_gc_rejects_the_old_command_and_collection_options() {
+        Cli::try_parse_from(["loonfs", "maintenance", "grep-gc"]).expect("complete pass");
+        assert!(Cli::try_parse_from(["loonfs", "maintenance", "index", "gc"]).is_err());
+        for option in [
+            "--max-objects",
+            "--max-steps",
+            "--cursor",
+            "--grace-window-ms",
+        ] {
             assert!(
-                Cli::try_parse_from(["loonfs", "maintenance", "index", "gc", option, "1"]).is_err()
+                Cli::try_parse_from(["loonfs", "maintenance", "grep-gc", option, "1"]).is_err()
             );
         }
     }
@@ -2051,6 +2052,7 @@ mod tests {
                 "index",
                 "retention",
                 "gc",
+                "grep-gc",
                 "store",
             ],
         );
@@ -2060,7 +2062,7 @@ mod tests {
         );
         assert_subcommands(
             subcommand(maintenance, "index"),
-            &["enable", "disable", "status", "gc"],
+            &["enable", "disable", "status"],
         );
         assert_subcommands(subcommand(maintenance, "retention"), &["advance"]);
         assert_subcommands(subcommand(maintenance, "store"), &["probe"]);

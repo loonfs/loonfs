@@ -404,7 +404,7 @@ Maintenance
   loonfs maintenance index disable
     Disable the gram content index
 
-  loonfs maintenance index gc
+  loonfs maintenance grep-gc
     Complete one collection pass over the namespace's gram-index objects.
     Read the current manifest and hint before deletion. Reap aged index
     objects for an absent or deleted namespace.

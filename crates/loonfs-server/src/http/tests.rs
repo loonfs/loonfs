@@ -124,6 +124,7 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "file_created",
     "file_revision",
     "grace_window_ms",
+    "grep_gc",
     "head_drift",
     "head_seq",
     "include_attributes",
@@ -2210,7 +2211,6 @@ async fn every_route_except_health_and_readiness_requires_authorization() {
         ("GET", "/v0/maintenance/namespaces/demo/grep/index"),
         ("POST", "/v0/maintenance/namespaces/demo/grep/index/enable"),
         ("POST", "/v0/maintenance/namespaces/demo/grep/index/disable"),
-        ("POST", "/v0/maintenance/namespaces/demo/grep/index/gc"),
         ("GET", "/v0/namespaces/demo/filesystem/revisions"),
         ("GET", "/v0/namespaces/demo/inodes/ino_1"),
         ("GET", "/v0/namespaces/demo/inodes/ino_1/children"),
@@ -2550,9 +2550,14 @@ async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
         "unauthorized",
     );
 
-    let grep_gc_url = format!("http://{addr}/v0/maintenance/namespaces/demo/grep/index/gc");
+    let runs_url = format!("http://{addr}/v0/maintenance/namespaces/demo/runs");
     expect_enveloped(
-        || raw_agent().post(&grep_gc_url).call(),
+        || {
+            raw_agent()
+                .post(&runs_url)
+                .set("content-type", "application/json")
+                .send_string(r#"{"kind":"grep_gc"}"#)
+        },
         "grep index collection should require authorization",
         401,
         "unauthorized",

@@ -55,8 +55,8 @@ use self::handlers_namespace::{
     list_checkpoints, list_snapshots, run_maintenance,
 };
 use self::handlers_query::{
-    disable_grep_index, enable_grep_index, gc_grep_index, get_grep_index, grep,
-    grep_index_not_maintained, grep_queries_not_served,
+    disable_grep_index, enable_grep_index, get_grep_index, grep, grep_index_not_maintained,
+    grep_queries_not_served,
 };
 use self::handlers_uploads::{
     abort_upload, complete_upload, create_upload, get_upload, put_upload_content, sign_upload_parts,
@@ -113,7 +113,6 @@ const DEADLINE_EXEMPT_ROUTES: &[&str] = &[
     "/v0/namespaces/{namespace_id}/uploads/{upload_id}/content",
     "/v0/maintenance/namespaces/{namespace_id}/runs",
     "/v0/maintenance/store/probe",
-    "/v0/maintenance/namespaces/{namespace_id}/grep/index/gc",
 ];
 
 /// Assigns each request a correlation id: every response carries it as the
@@ -413,14 +412,6 @@ fn router(state: AppState, surface: RouterSurface) -> Router {
                 gated(
                     maintains_index,
                     post(disable_grep_index),
-                    post(grep_index_not_maintained),
-                ),
-            )
-            .route(
-                "/v0/maintenance/namespaces/{namespace_id}/grep/index/gc",
-                gated(
-                    maintains_index,
-                    post(gc_grep_index),
                     post(grep_index_not_maintained),
                 ),
             )

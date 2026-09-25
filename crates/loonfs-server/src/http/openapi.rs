@@ -85,7 +85,6 @@ pub fn openapi_document() -> utoipa::openapi::OpenApi {
         crate::http::handlers_query::get_grep_index,
         crate::http::handlers_query::enable_grep_index,
         crate::http::handlers_query::disable_grep_index,
-        crate::http::handlers_query::gc_grep_index,
         crate::http::handlers_store::probe_store
     ),
     components(
@@ -177,8 +176,6 @@ pub fn openapi_document() -> utoipa::openapi::OpenApi {
         loonfs_api::v0::GrepResponse,
         loonfs_api::v0::GrepIndexLifecycle,
         loonfs_api::v0::GrepIndex,
-        loonfs_api::v0::GrepGcRequest,
-        loonfs_api::v0::GrepGcResponse,
         loonfs_api::v0::StoreProbeRequest,
         loonfs_api::v0::StoreProbeCheckOutcome,
         loonfs_api::v0::StoreProbeCheckResult,

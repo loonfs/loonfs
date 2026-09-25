@@ -1368,6 +1368,8 @@ pub enum RunMaintenanceRequest {
     MetadataCompaction(MetadataCompactionRequest),
     /// Collects aged, unreferenced objects.
     Gc(GcRequest),
+    /// Collects aged, unreferenced grep index objects.
+    GrepGc {},
     /// Advances the retention floor to the flushed manifest head.
     Retention(AdvanceRetentionRequest),
     /// Restores a root administrator.
@@ -1484,6 +1486,19 @@ pub enum RunMaintenanceResponse {
     MetadataCompaction(MetadataCompactionResponse),
     /// Counts and deadlines from one collection call.
     Gc(GcResponse),
+    /// Counts from one grep index collection pass.
+    GrepGc {
+        /// Namespace whose grep-owned keyspace was inspected.
+        namespace_id: NamespaceId,
+        /// Unreferenced grep segments older than the minimum segment age.
+        deleted_segments: u64,
+        /// Other unreferenced grep objects deleted after the grace window.
+        deleted_other_objects: u64,
+        /// Whether an absent or tombstoned namespace had extension state reaped.
+        namespace_reaped: bool,
+        /// Referenced, young, or unrecognized candidates retained by the pass.
+        retained_candidates: u64,
+    },
     /// Result of advancing the retention floor.
     Retention(AdvanceRetentionResponse),
     /// The committed administrator recovery.
@@ -2469,6 +2484,14 @@ mod tests {
             (
                 serde_json::json!({"kind": "retention"}),
                 Some(RunMaintenanceRequest::Retention(AdvanceRetentionRequest {})),
+            ),
+            (
+                serde_json::json!({"kind": "grep_gc"}),
+                Some(RunMaintenanceRequest::GrepGc {}),
+            ),
+            (
+                serde_json::json!({"kind": "grep_gc", "max_objects": 8}),
+                None,
             ),
             (serde_json::json!({}), None),
             (serde_json::json!({"kind": "nope"}), None),

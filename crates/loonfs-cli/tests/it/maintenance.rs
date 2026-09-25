@@ -516,28 +516,61 @@ fn index_status_and_enable_answer_the_same_over_the_remote_transport() {
         1
     );
 
-    let collected = harness.run(&["--json", "maintenance", "index", "gc"]);
+    let collected = harness.run(&["--json", "maintenance", "grep-gc"]);
     assert_success(&collected);
     assert_eq!(json_data(&collected)["namespace_reaped"], false);
 }
 
 #[test]
-fn index_gc_completes_one_pass() {
+fn grep_gc_reports_collection_counts_in_both_modes() {
     let harness = Harness::new();
-    harness.add_embedded_profile("default");
-    assert_success(&harness.run(&["namespace", "create", "demo"]));
-    assert_success(&harness.run(&["use", "demo"]));
-    let payload = harness.temp_dir.path().join("one.txt");
-    fs::write(&payload, b"needle\n").expect("write payload");
-    assert_success(&harness.run(&["put", payload.to_str().expect("utf-8 path"), "/one.txt"]));
-    assert_success(&harness.run(&["maintenance", "index", "enable"]));
+    harness.add_embedded_profile("embedded");
+    let remote_server = harness.start_external_server(harness.write_server_config_with(
+        "remote",
+        "grep-gc-parity",
+        "\n[grep]\nmode = \"serve_and_maintain\"\n",
+    ));
+    assert_success(&harness.run(&[
+        "profile",
+        "create",
+        "remote",
+        "remote",
+        "--server-url",
+        &remote_server.server_url,
+        "--auth-token",
+        "test-token",
+    ]));
+    for profile in ["embedded", "remote"] {
+        assert_success(&harness.run(&["namespace", "create", "--profile", profile, "demo"]));
+        assert_success(&harness.run(&["use", "--profile", profile, "demo"]));
+        assert_success(&harness.run(&["maintenance", "index", "enable", "--profile", profile]));
 
-    let collected = harness.run(&["--json", "maintenance", "index", "gc"]);
-    assert_success(&collected);
-    let data = json_data(&collected);
-    assert_eq!(data["deleted_segments"], 0);
-    assert_eq!(data["namespace_reaped"], false);
-    assert!(data.get("next_cursor").is_none(), "{data}");
+        let collected = harness.run(&["--json", "maintenance", "grep-gc", "--profile", profile]);
+        assert_success(&collected);
+        let data = json_data(&collected);
+        assert_eq!(data["kind"], "grep_gc");
+        assert_eq!(data["namespace_id"], "demo");
+        assert_eq!(data["deleted_segments"], 0);
+        assert_eq!(data["deleted_other_objects"], 0);
+        assert_eq!(data["namespace_reaped"], false);
+        assert!(
+            data["retained_candidates"]
+                .as_u64()
+                .expect("retained count")
+                > 0
+        );
+        assert_eq!(data.as_object().expect("collection result").len(), 6);
+
+        let human = harness.run(&["maintenance", "grep-gc", "--profile", profile]);
+        assert_success(&human);
+        assert_eq!(
+            stdout_string(&human).trim(),
+            format!(
+                "grep gc for demo: 0 segments, 0 other objects deleted, {} retained",
+                data["retained_candidates"]
+            )
+        );
+    }
 }
 
 #[test]

@@ -161,7 +161,7 @@ hoc.
 
 | Feature key | Gates | Notes |
 | --- | --- | --- |
-| `maintenance.grep.index` | Maintaining a namespace's grep index: `GET /v0/maintenance/namespaces/{ns}/grep/index` and its `enable`, `disable`, and `gc` routes. | The maintenance half of the grep capability, and independent of `query.grep`: searching an index and keeping one built are separately deployable, so a deployment may advertise either key alone. A deployment that maintains no index answers all four routes `not_supported` with this key. |
+| `maintenance.grep.index` | Maintaining a namespace's grep index: `GET /v0/maintenance/namespaces/{ns}/grep/index` and its `enable` and `disable` routes, and the `grep_gc` run kind. | The maintenance half of the grep capability, and independent of `query.grep`: searching an index and keeping one built are separately deployable, so a deployment may advertise either key alone. A deployment that maintains no index answers these routes and the run kind `not_supported` with this key. |
 | `filesystem.namespaces.create` | Creating namespaces (`POST /v0/namespaces`). | |
 | `filesystem.namespaces.fork` | Forking namespaces (`POST /v0/namespaces/{ns}/forks`). | |
 | `filesystem.namespaces.delete` | Deleting namespaces (`DELETE /v0/namespaces/{ns}`). | Deletion is terminal. Metadata and the namespace's own content become conditionally reclaimable through maintenance runs with `kind` set to `gc` (section 6.3). A deployment may still advertise `false` and answer `not_supported`. |
@@ -843,7 +843,7 @@ API that implements them.
 HTTP is one transport binding for these abstract operations. It is not the
 underlying semantics.
 
-GET routes name resources, so they use nouns such as `entry`, `entries`, `content`, `revisions`, and `trash`. A POST route ends in a verb when it invokes an action rather than creating a resource, as in `enable`, `disable`, `gc`, `abort`, `complete`, and `probe`. `/v0/maintenance/` is the only API group prefix. Other routes are grouped by resource, including `GET /v0/namespaces/{ns}/grep`.
+GET routes name resources, so they use nouns such as `entry`, `entries`, `content`, `revisions`, and `trash`. A POST route ends in a verb when it invokes an action rather than creating a resource, as in `enable`, `disable`, `abort`, `complete`, and `probe`. `/v0/maintenance/` is the only API group prefix. Other routes are grouped by resource, including `GET /v0/namespaces/{ns}/grep`.
 
 Operation IDs start with a verb. `get` reads one resource, `list` reads a page, and `create` posts a new resource to a collection. Other verbs describe the operation directly, as in `grep`, `run_maintenance`, and `delete_checkpoint`. Operation IDs are the wire registry only. Generated SDK group and method names come from the SDK naming table in the OpenAPI postprocessor, which every operation must appear in or be explicitly excluded from.
 
@@ -942,12 +942,12 @@ The table below lists the retry class for every v0 operation.
 | Read grep index status | `get_grep_index` | `idempotent` | `GET /v0/maintenance/namespaces/{ns}/grep/index` |
 | Enable the grep index | `enable_grep_index` | `idempotent` | `POST /v0/maintenance/namespaces/{ns}/grep/index/enable`; idempotent |
 | Disable the grep index | `disable_grep_index` | `idempotent` | `POST /v0/maintenance/namespaces/{ns}/grep/index/disable`; idempotent |
-| Collect grep index garbage | `gc_grep_index` | `not_idempotent` | `POST /v0/maintenance/namespaces/{ns}/grep/index/gc`; completes one pass with body `{}` |
 | Test object storage | `probe_store` | `not_idempotent` | `POST /v0/maintenance/store/probe` with body `{}` |
 | Scrape metrics | `get_metrics` | `idempotent` | `GET /metrics` (Prometheus text exposition; authorized, unlike the liveness routes — see below) |
 
 Grep index GC reads durable roots on each call and completes one pass over
-the namespace's grep manifests and segments. Its request body is `{}`.
+the namespace's grep manifests and segments. It runs through `run_maintenance`
+with request body `{"kind":"grep_gc"}`.
 Its response carries `namespace_id`, `deleted_segments`,
 `deleted_other_objects`, `namespace_reaped`, and `retained_candidates`.
 Unreadable or invalid roots fail before deletion. A tombstoned or absent
@@ -988,6 +988,7 @@ A maintenance run body names exactly one job with `kind`:
 | `metadata` | Optional `max_wal_tail_segments` | `wal_flush` and `reorganize` outcomes |
 | `metadata_compaction` | None | `compaction`, tagged by `outcome`; a published outcome includes the manifest number and row, byte, and segment counts |
 | `gc` | Optional `grace_window_ms` | The collection result |
+| `grep_gc` | None | `deleted_segments`, `deleted_other_objects`, `namespace_reaped`, and `retained_candidates` |
 | `retention` | None | `retention_floor_seq` |
 | `recover_administrator` | `principal_id` | `commit_id`, `committed_seq`, and the root row's new `access_revision_no`. Grants `admin` on the root row to the principal and keeps every other root grant, through a commit that checks no subject and is attributed to `Loonfs-Actor`. Use it when an ACL namespace has lost every administrator. |
 
@@ -1000,7 +1001,7 @@ job's result. None of the jobs creates a pin.
 
 Races and supersessions are outcomes, not errors.
 
-A deleted namespace accepts only a run with `kind` set to `gc`; other jobs return `namespace_deleted`. Retirement follows [format section 9.5](format.md#95-retirement).
+A deleted namespace accepts only a run with `kind` set to `gc` or `grep_gc`; other jobs return `namespace_deleted`. Retirement follows [format section 9.5](format.md#95-retirement).
 
 `wal_flush.outcome` has four values. `not_needed` means the WAL tail was below the threshold. `flushed` means this step published the next current manifest. `already_published` means the current manifest already covered the captured WAL tail, so this step published no manifest. `retries_exhausted` means concurrent updates prevented every attempt from publishing; nothing was flushed, and a later step can try again.
 
