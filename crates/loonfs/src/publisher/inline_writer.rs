@@ -14,6 +14,176 @@ fn policy() -> InlineContentOptions {
     }
 }
 
+#[tokio::test]
+async fn inline_unknown_publish_recovers_after_terminal_reload_failure() {
+    check_terminal_reload_failure(false).await;
+}
+
+#[tokio::test]
+async fn receipt_replay_survives_another_requests_terminal_reload_failure() {
+    check_terminal_reload_failure(true).await;
+}
+
+async fn check_terminal_reload_failure(include_replay: bool) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let directory = tempdir().expect("directory");
+    let namespace = NamespaceId::parse("inline-unknown").expect("namespace");
+    let armed = Arc::new(AtomicBool::new(false));
+    let unreadable = Arc::new(AtomicBool::new(false));
+    let put_armed = Arc::clone(&armed);
+    let put_unreadable = Arc::clone(&unreadable);
+    let wal_prefix = wal_segment_prefix(&namespace);
+    let lost_ack = FailStore::matching(
+        LocalFsStore::new(directory.path()).expect("store"),
+        move |operation| {
+            if operation.key().starts_with(&wal_prefix)
+                && matches!(operation.kind(), OperationKind::Put { bytes, mode: PutMode::CreateIfAbsent } if is_publication(bytes))
+                && put_armed.swap(false, Ordering::SeqCst)
+            {
+                put_unreadable.store(true, Ordering::SeqCst);
+                true
+            } else {
+                false
+            }
+        },
+        InjectedError::Transport("lost inline WAL acknowledgement".to_owned()),
+    )
+    .apply_then_fail();
+    lost_ack.fail_all();
+    let read_unreadable = Arc::clone(&unreadable);
+    let store = Arc::new(FailStore::matching(
+        lost_ack,
+        move |operation| {
+            read_unreadable.load(Ordering::SeqCst)
+                && matches!(
+                    operation.kind(),
+                    OperationKind::Get { .. }
+                        | OperationKind::GetWithMetadata
+                        | OperationKind::Head
+                )
+        },
+        InjectedError::Transport("recovery reads unavailable".to_owned()),
+    ));
+    store.fail_all();
+    let writer = crate::FsWriter::builder_with_store(store.clone())
+        .writer_id("inline-writer")
+        .inline_content(InlineContentOptions {
+            inline_content_threshold_bytes: Some(4),
+            inline_content_fold_at_bytes: 4,
+            inline_content_tail_limit_bytes: 4,
+            ..Default::default()
+        })
+        .min_publish_interval_ms(0)
+        .build()
+        .await
+        .expect("writer");
+    writer
+        .create_namespace(
+            &namespace,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("namespace");
+    let mut warmup_options = crate::CreateDirectoryOptions::new(loonfs_test_support::test_actor());
+    warmup_options.commit.commit_id = Some(CommitId::parse("warmup").expect("commit"));
+    let warmup = writer
+        .create_directory(&namespace, "/warmup", warmup_options.clone())
+        .await
+        .expect("writer epoch");
+    let permits = writer
+        .bits
+        .wal_fold_permits
+        .acquire_many(crate::DEFAULT_MAX_CONCURRENT_FOLDS as u32)
+        .await
+        .expect("hold folds");
+    armed.store(true, Ordering::SeqCst);
+    let first = writer.put_file_bytes(&namespace, "/file", b"four", put_options("uncertain"));
+    let first_error = if include_replay {
+        let registry = writer.publisher();
+        let slots = registry
+            .shared
+            .admission
+            .publications
+            .acquire_many(8)
+            .await
+            .expect("hold publications");
+        let publisher = registry.test_publisher_for(&namespace).expect("publisher");
+        let (replayed, first, ()) = tokio::join!(
+            writer.create_directory(&namespace, "/warmup", warmup_options),
+            first,
+            async {
+                timeout(
+                    Duration::from_secs(10),
+                    wait_for_queued_candidates(&publisher, 2),
+                )
+                .await
+                .expect("both candidates queued");
+                assert_eq!(publisher.lock_state().queue.len(), 1);
+                drop(slots);
+            }
+        );
+        assert_eq!(
+            replayed.expect("independent receipt remains successful"),
+            warmup
+        );
+        first.expect_err("WAL acknowledgement and recovery reads lost")
+    } else {
+        first
+            .await
+            .expect_err("WAL acknowledgement and recovery reads lost")
+    };
+    assert!(unreadable.load(Ordering::SeqCst));
+    let durable =
+        loonfs_core::cache::load_namespace_wal_tail_usage(store.inner().inner(), &namespace)
+            .await
+            .expect("raw durable tail");
+    assert_eq!(durable.wal_tail_inline_bytes, 4);
+    assert_eq!(writer.publisher().shared.admission.used_requests(), 0);
+    assert_eq!(first_error.code(), ErrorCode::CommitOutcomeUnknown);
+
+    unreadable.store(false, Ordering::SeqCst);
+    let replay = writer
+        .put_file_bytes(&namespace, "/file", b"four", put_options("uncertain"))
+        .await
+        .expect("replay after recovery");
+    assert_eq!(replay.committed_seq, durable.head_seq);
+    assert_eq!(
+        writer.publisher().wal_tail_inline_bytes(&namespace).await,
+        Some(4)
+    );
+    writer
+        .put_file_bytes(&namespace, "/next", b"next", put_options("next"))
+        .await
+        .expect("full known tail stages next value");
+    let recovered =
+        loonfs_core::cache::load_namespace_wal_tail_usage(store.inner().inner(), &namespace)
+            .await
+            .expect("recovered usage");
+    assert_eq!(recovered.wal_tail_inline_bytes, 4);
+    assert_eq!(writer.publisher().shared.admission.used_requests(), 0);
+    assert_eq!(
+        writer
+            .reader()
+            .get_file_bytes(&namespace, "/file")
+            .await
+            .expect("first bytes")
+            .bytes,
+        b"four"
+    );
+    assert_eq!(
+        writer
+            .reader()
+            .get_file_bytes(&namespace, "/next")
+            .await
+            .expect("next bytes")
+            .bytes,
+        b"next"
+    );
+    drop(permits);
+    writer.shutdown().await.expect("shutdown");
+}
+
 async fn writer_with_policy(
     policy: InlineContentOptions,
 ) -> (

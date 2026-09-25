@@ -1447,28 +1447,51 @@ impl NamespacePublisher {
             // The wall timestamp and elapsed-time origin describe one batch.
             // Refreshing only the timestamp on retry counts prior waiting twice.
             let batch = Deadline::start(Arc::clone(&self.timer));
-            let mut results = Vec::new();
+            let mut results = vec![None; candidates.len()];
+            let mut pending: Vec<_> = candidates.into_iter().enumerate().collect();
             let mut retry_count = 0_u64;
             for attempt in 0..CONTENTION_RETRY_LIMIT {
-                let Some(writer) = self.writer.upgrade() else {
-                    results = candidates
+                let (indices, candidates): (Vec<_>, Vec<_>) =
+                    std::mem::take(&mut pending).into_iter().unzip();
+                let attempt_permits: Vec<_> = indices
+                    .iter()
+                    .map(|index| Arc::clone(&permits[*index]))
+                    .collect();
+                let observed = match self.writer.upgrade() {
+                    Some(writer) => {
+                        self.publish_through_engine(
+                            &writer,
+                            &candidates,
+                            &attempt_permits,
+                            &context,
+                            &batch,
+                        )
+                        .await
+                    }
+                    None => candidates
                         .iter()
                         .map(|_| Err(CoreError::ShuttingDown.into()))
-                        .collect();
-                    break;
+                        .collect(),
                 };
-                results = self
-                    .publish_through_engine(&writer, &candidates, &permits, &context, &batch)
-                    .await;
-                if !results.iter().any(is_retryable_wal_publish) {
-                    break;
+                for ((index, candidate), result) in
+                    indices.into_iter().zip(candidates).zip(observed)
+                {
+                    let retry = is_retryable_wal_publish(&result);
+                    results[index] = Some(reconcile_publish_attempt(results[index].take(), result));
+                    if retry {
+                        pending.push((index, candidate));
+                    }
                 }
-                if attempt + 1 == CONTENTION_RETRY_LIMIT {
+                if pending.is_empty() || attempt + 1 == CONTENTION_RETRY_LIMIT {
                     break;
                 }
                 retry_count += 1;
                 self.claim_publish_slot().await;
             }
+            let results = results
+                .into_iter()
+                .map(|result| result.expect("each candidate received a publication result"))
+                .collect::<Vec<_>>();
             (results, retry_count)
         }
         .instrument(publish_span.clone())
@@ -2016,6 +2039,27 @@ fn is_retryable_wal_publish(result: &CommitResult) -> bool {
             WalPublishError::StaleHead | WalPublishError::OutcomeUnknown(_)
         )))
     )
+}
+
+/// A failed recovery attempt does not prove that an earlier WAL put failed.
+/// Only a successful publication or receipt replay resolves that uncertainty.
+fn reconcile_publish_attempt(
+    previous: Option<CommitResult>,
+    current: CommitResult,
+) -> CommitResult {
+    match (previous, current) {
+        (Some(previous), Err(_))
+            if matches!(
+                &previous,
+                Err(RuntimeError::Core(CoreError::WalPublish(
+                    WalPublishError::OutcomeUnknown(_)
+                )))
+            ) =>
+        {
+            previous
+        }
+        (_, current) => current,
+    }
 }
 
 fn is_maintenance_required(result: &CommitResult) -> bool {
