@@ -642,10 +642,10 @@ of the fingerprint or upload ownership: a namespace has one scope and refuses
 subjects from every other scope.
 
 Embedded callers set the subject once, on the handle they use. Every read,
-commit, and upload through that handle acts as that subject. A commit does not
-carry its own subject. The CLI records the handle's subject in its upload
-journal beside the request, and it refuses to resume the upload under a
-different subject.
+commit, and upload through that handle acts as that subject. Commits and upload
+methods do not take a separate subject. The CLI records the handle's subject
+in its upload journal beside the request, and it refuses to resume the upload
+under a different subject.
 
 ### Identity headers
 

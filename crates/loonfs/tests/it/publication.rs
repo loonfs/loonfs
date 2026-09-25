@@ -66,11 +66,11 @@ async fn park_two_puts(temp_dir: &Path) -> ParkedPuts {
     // callers start being cancelled, the only work still in flight is
     // publication, the thing under test.
     let upload = writer
-        .create_upload(&namespace_id, None)
+        .create_upload(&namespace_id)
         .await
         .expect("begin upload");
     let staged = writer
-        .put_upload_content(&namespace_id, &upload.upload_id, None, b"b")
+        .put_upload_content(&namespace_id, &upload.upload_id, b"b")
         .await
         .expect("stage second put content");
     let catalog = loonfs_core::control::load_namespace_catalog_entry(&store, &namespace_id)

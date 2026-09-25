@@ -551,14 +551,14 @@ async fn proxied_upload_completion_proof_publishes_without_additional_content_io
     let bytes = b"service proxied upload";
     let begin = harness
         .writer
-        .create_upload(&harness.namespace_id, None)
+        .create_upload(&harness.namespace_id)
         .await
         .expect("begin upload");
     harness.recording.reset();
 
     harness
         .writer
-        .put_upload_content(&harness.namespace_id, &begin.upload_id, None, bytes)
+        .put_upload_content(&harness.namespace_id, &begin.upload_id, bytes)
         .await
         .expect("upload content");
     let upload_counts = harness.recording.snapshot();
@@ -577,7 +577,6 @@ async fn proxied_upload_completion_proof_publishes_without_additional_content_io
         .complete_upload(
             &harness.namespace_id,
             &begin.upload_id,
-            None,
             ResolvedUploadCompletion::KnownContent,
         )
         .await
@@ -615,7 +614,6 @@ async fn direct_put_completion_avoids_blob_get_and_prepared_publish_uses_no_cont
         .writer
         .create_direct_put_upload_target(
             &harness.namespace_id,
-            None,
             loonfs_api::ChecksumAlgorithm::Sha256,
         )
         .await
@@ -632,19 +630,14 @@ async fn direct_put_completion_avoids_blob_get_and_prepared_publish_uses_no_cont
 
     let completed = harness
         .writer
-        .complete_upload_for_mode(
-            &harness.namespace_id,
-            &begin.session.upload_id,
-            None,
-            |_| {
-                Ok(loonfs::uploads::ResolvedUploadCompletion::DirectPut {
-                    content: loonfs::UploadContentClaim {
-                        size_bytes: bytes.len() as u64,
-                        checksum: loonfs_api::Checksum::sha256(bytes),
-                    },
-                })
-            },
-        )
+        .complete_upload_for_mode(&harness.namespace_id, &begin.session.upload_id, |_| {
+            Ok(loonfs::uploads::ResolvedUploadCompletion::DirectPut {
+                content: loonfs::UploadContentClaim {
+                    size_bytes: bytes.len() as u64,
+                    checksum: loonfs_api::Checksum::sha256(bytes),
+                },
+            })
+        })
         .await
         .expect("complete direct put with proof");
     let content_ref = completed

@@ -1885,11 +1885,11 @@ async fn publisher_batches_plain_and_prepared_mutations_together() {
         .await
         .expect("bootstrap");
     let upload = writer
-        .create_upload(&namespace_id, None)
+        .create_upload(&namespace_id)
         .await
         .expect("begin upload");
     let staged = writer
-        .put_upload_content(&namespace_id, &upload.upload_id, None, b"hello")
+        .put_upload_content(&namespace_id, &upload.upload_id, b"hello")
         .await
         .expect("stage content");
     let catalog = loonfs_core::control::load_namespace_catalog_entry(&shared, &namespace_id)
