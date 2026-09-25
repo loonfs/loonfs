@@ -3297,3 +3297,9 @@ async fn registry_shares_admission_and_publication_slots_after_caller_cancellati
 }
 
 mod inline_writer;
+
+impl loonfs_core::time::WallClock for ManualMonotonicTimer {
+    fn now_ms(&self) -> Result<u64, crate::CoreError> {
+        Ok(self.0.load(AtomicOrdering::SeqCst))
+    }
+}

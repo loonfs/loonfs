@@ -72,7 +72,7 @@ async fn publish_after_retry_delay(remaining_ms: u64, apply_then_fail: bool) -> 
     Arc::get_mut(&mut runtime.bits)
         .expect("unshared writer bits")
         .identity
-        .test_wall_clock = Some(clock.clone());
+        .wall_clock = clock.clone();
     let mut publisher = standalone_publisher(&namespace_id, &runtime);
     publisher.timer = clock;
     publisher.min_publish_interval = Duration::ZERO;

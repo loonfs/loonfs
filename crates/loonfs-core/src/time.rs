@@ -75,6 +75,22 @@ impl Observation {
     }
 }
 
+/// The wall clock a writer stamps into durable state.
+pub trait WallClock: std::fmt::Debug + Send + Sync {
+    /// Unix milliseconds now.
+    fn now_ms(&self) -> Result<u64>;
+}
+
+/// The system wall clock.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SystemWallClock;
+
+impl WallClock for SystemWallClock {
+    fn now_ms(&self) -> Result<u64> {
+        current_time_ms()
+    }
+}
+
 /// Reads the wall clock as unix milliseconds.
 ///
 /// Every timestamp that reaches durable state — commit, checkpoint, upload
