@@ -21,10 +21,6 @@ WORKDIR /src
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates ./crates
 
-# One package, default features. `--all-features` would also build
-# `loonfs-openapi`, the crate's second binary, which rides the non-default
-# `openapi` feature. That binary regenerates the API spec during development
-# and does not belong in a deployment.
 RUN cargo build --locked --release -p loonfs-server
 
 FROM debian:bookworm-slim

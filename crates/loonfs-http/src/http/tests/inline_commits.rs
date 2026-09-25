@@ -9,11 +9,12 @@ use loonfs_api::{
 use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
 use loonfs_test_support::stores::{RecordedOperation, RecordingStore};
 use serde_json::{json, Value};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tower::ServiceExt;
 
 struct Harness {
     router: axum::Router,
-    state: AppState,
+    state: BindingState,
     store: Arc<RecordingStore<LocalFsStore>>,
     namespace: NamespaceId,
     _directory: tempfile::TempDir,
@@ -21,25 +22,26 @@ struct Harness {
 
 impl Harness {
     async fn new(threshold: Option<usize>, segment_budget: usize) -> Self {
-        Self::with_policy(crate::config::InlineContentOverrides {
+        Self::with_policy(loonfs::InlineContentOptions {
             inline_content_threshold_bytes: threshold,
-            inline_content_segment_budget_bytes: Some(segment_budget),
+            inline_content_segment_budget_bytes: segment_budget,
             ..Default::default()
         })
         .await
     }
 
-    async fn with_policy(inline_content: crate::config::InlineContentOverrides) -> Self {
+    async fn with_policy(inline_content: loonfs::InlineContentOptions) -> Self {
         let directory = tempdir().expect("directory");
         let store = Arc::new(RecordingStore::new(
             LocalFsStore::new(directory.path()).expect("store"),
             KeyPredicate::any(),
         ));
-        let mut config = test_config(directory.path(), "inline-host");
-        config.inline_content = inline_content;
-        config.maintenance = crate::config::MaintenanceMode::Disabled;
-        config.grep = Default::default();
-        let (router, state) = app(config, options_with_store(store.clone()))
+        let mut config = test_options(directory.path(), "inline-host");
+        config.binding.inline_content = inline_content;
+        config.binding.serves_maintenance = false;
+        config.binding.serves_grep = false;
+        config.binding.maintains_grep_index = false;
+        let (router, state) = test_app(config, options_with_store(store.clone()))
             .await
             .expect("app");
         let namespace = namespace_id("hosted-inline");

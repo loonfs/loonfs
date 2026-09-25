@@ -43,10 +43,11 @@ async fn delete_routes_require_the_owner_and_delete_each_pin_once() {
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::any(),
     ));
-    let mut config = test_config(directory.path(), "pin-deletion-writer");
-    config.maintenance = crate::config::MaintenanceMode::ServeOnly;
-    config.grep.mode = crate::config::GrepMode::Disabled;
-    let (router, state) = app(config, options_with_store(store.clone()))
+    let mut config = test_options(directory.path(), "pin-deletion-writer");
+    config.binding.serves_maintenance = true;
+    config.binding.serves_grep = false;
+    config.binding.maintains_grep_index = false;
+    let (router, state) = test_app(config, options_with_store(store.clone()))
         .await
         .expect("app");
     let namespace_id = namespace_id("pins");

@@ -1,6 +1,6 @@
 //! Subject headers and their invalid-request parameter names.
 
-use crate::common::http_split_support::test_config;
+use super::fixtures::{test_app, test_options, TestAppOptions};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use loonfs_api::{ApiError, ErrorCode};
@@ -11,13 +11,9 @@ use tower::ServiceExt as _;
 #[tokio::test]
 async fn subject_headers_are_parsed_and_rejected_with_the_header_named() {
     let temp_dir = tempdir().expect("tempdir");
-    let (router, state) = loonfs_server::app(
-        test_config(
-            temp_dir.path().join("store"),
-            "subject-headers",
-            "subject-headers",
-        ),
-        loonfs_server::AppOptions::default(),
+    let (router, state) = test_app(
+        test_options(&temp_dir.path().join("store"), "subject-headers"),
+        TestAppOptions::default(),
     )
     .await
     .expect("build app");
@@ -110,13 +106,9 @@ async fn subject_headers_are_parsed_and_rejected_with_the_header_named() {
 #[tokio::test]
 async fn subject_headers_distinguish_service_and_subject_authority() {
     let temp_dir = tempdir().expect("tempdir");
-    let (router, _state) = loonfs_server::app(
-        test_config(
-            temp_dir.path().join("store"),
-            "subject-authority",
-            "subject-authority",
-        ),
-        loonfs_server::AppOptions::default(),
+    let (router, _state) = test_app(
+        test_options(&temp_dir.path().join("store"), "subject-authority"),
+        TestAppOptions::default(),
     )
     .await
     .expect("build app");
@@ -179,13 +171,9 @@ async fn subject_headers_distinguish_service_and_subject_authority() {
 #[tokio::test]
 async fn an_acl_namespace_refuses_a_subject_from_another_scope() {
     let temp_dir = tempdir().expect("tempdir");
-    let (router, _state) = loonfs_server::app(
-        test_config(
-            temp_dir.path().join("store"),
-            "subject-scope",
-            "subject-scope",
-        ),
-        loonfs_server::AppOptions::default(),
+    let (router, _state) = test_app(
+        test_options(&temp_dir.path().join("store"), "subject-scope"),
+        TestAppOptions::default(),
     )
     .await
     .expect("app");
@@ -262,13 +250,9 @@ async fn an_acl_namespace_refuses_a_subject_from_another_scope() {
 #[tokio::test]
 async fn read_handlers_accept_the_subject_headers() {
     let temp_dir = tempdir().expect("tempdir");
-    let (router, state) = loonfs_server::app(
-        test_config(
-            temp_dir.path().join("store"),
-            "read-subject-headers",
-            "read-subject-headers",
-        ),
-        loonfs_server::AppOptions::default(),
+    let (router, state) = test_app(
+        test_options(&temp_dir.path().join("store"), "read-subject-headers"),
+        TestAppOptions::default(),
     )
     .await
     .expect("app");
@@ -337,9 +321,9 @@ async fn json_body(response: axum::response::Response) -> serde_json::Value {
 #[tokio::test]
 async fn an_acl_namespace_is_created_over_the_wire() {
     let temp_dir = tempdir().expect("tempdir");
-    let (router, _state) = loonfs_server::app(
-        test_config(temp_dir.path().join("store"), "acl-wire", "acl-wire"),
-        loonfs_server::AppOptions::default(),
+    let (router, _state) = test_app(
+        test_options(&temp_dir.path().join("store"), "acl-wire"),
+        TestAppOptions::default(),
     )
     .await
     .expect("app");
@@ -430,13 +414,9 @@ async fn an_acl_namespace_is_created_over_the_wire() {
 #[tokio::test]
 async fn a_repeated_grant_principal_is_invalid_and_does_not_commit() {
     let temp_dir = tempdir().expect("tempdir");
-    let (router, state) = loonfs_server::app(
-        test_config(
-            temp_dir.path().join("store"),
-            "repeated-grant-principal",
-            "repeated-grant-principal",
-        ),
-        loonfs_server::AppOptions::default(),
+    let (router, state) = test_app(
+        test_options(&temp_dir.path().join("store"), "repeated-grant-principal"),
+        TestAppOptions::default(),
     )
     .await
     .expect("app");
@@ -482,12 +462,11 @@ async fn a_repeated_grant_principal_is_invalid_and_does_not_commit() {
 #[tokio::test]
 async fn a_former_server_observes_revocation_on_its_first_read_after_publication() {
     let temp_dir = tempdir().expect("tempdir");
-    let mut config = test_config(temp_dir.path().join("store"), "old-writer", "revocation");
-    config.maintenance = loonfs_server::MaintenanceMode::ServeOnly;
-    let (old_router, old_state) =
-        loonfs_server::app(config.clone(), loonfs_server::AppOptions::default())
-            .await
-            .expect("old server");
+    let mut config = test_options(&temp_dir.path().join("store"), "old-writer");
+    config.binding.serves_maintenance = true;
+    let (old_router, old_state) = test_app(config.clone(), TestAppOptions::default())
+        .await
+        .expect("old server");
     let response = old_router
         .clone()
         .oneshot(request(
@@ -525,11 +504,10 @@ async fn a_former_server_observes_revocation_on_its_first_read_after_publication
         .await
         .expect("publish response");
     assert_eq!(response.status(), StatusCode::OK);
-    config.writer_id = "peer".to_owned();
-    let (peer_router, peer_state) =
-        loonfs_server::app(config, loonfs_server::AppOptions::default())
-            .await
-            .expect("peer server");
+    config.writer_id = loonfs_api::WriterId::parse("peer").expect("writer id");
+    let (peer_router, peer_state) = test_app(config, TestAppOptions::default())
+        .await
+        .expect("peer server");
     let revocation = serde_json::json!({
         "commit_id": loonfs_api::CommitId::generate(),
         "operations": [

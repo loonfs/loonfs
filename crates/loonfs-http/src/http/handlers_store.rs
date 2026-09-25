@@ -1,7 +1,7 @@
 //! The `maintenance/v0` routes whose subject is the backing store itself rather
 //! than one namespace.
 
-use super::{AppQuery, AppState, NoQuery, OptionalAppJson};
+use super::{AppQuery, BindingState, NoQuery, OptionalAppJson};
 use crate::http::error::ApiResponseError;
 use axum::extract::State;
 use axum::Json;
@@ -34,7 +34,7 @@ use loonfs_objectstore::probe::run_store_contract_probe;
     )
 )]
 pub(super) async fn probe_store(
-    State(state): State<AppState>,
+    State(state): State<BindingState>,
     AppQuery(_): AppQuery<NoQuery>,
     OptionalAppJson(request): OptionalAppJson<StoreProbeRequest>,
 ) -> Result<Json<StoreProbeResponse>, ApiResponseError> {

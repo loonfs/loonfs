@@ -5,7 +5,7 @@ use super::error::ApiResponseError;
 use super::extractors::SubjectHeaders;
 use super::query_params::parse_path_id;
 use super::{
-    AppPath, AppQuery, AppState, NamespaceIdPath, NoQuery, UploadBodyBytes, UploadBodyStream,
+    AppPath, AppQuery, BindingState, NamespaceIdPath, NoQuery, UploadBodyBytes, UploadBodyStream,
     UploadControlJson, MAX_COMPLETION_BODY_BYTES, MAX_UPLOAD_CONTROL_BODY_BYTES,
 };
 use axum::extract::State;
@@ -124,7 +124,7 @@ pub(super) struct UploadPathParams {
     )
 )]
 pub(super) async fn create_upload(
-    State(state): State<AppState>,
+    State(state): State<BindingState>,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(_): AppQuery<NoQuery>,
@@ -153,7 +153,7 @@ pub(super) async fn create_upload(
 }
 
 async fn begin_direct_put_upload(
-    state: AppState,
+    state: BindingState,
     namespace_id: NamespaceId,
     subject: Option<&loonfs_api::Subject>,
     size_bytes: Option<u64>,
@@ -222,7 +222,7 @@ async fn fill_direct_put_access(
 }
 
 async fn begin_direct_multipart_upload(
-    state: AppState,
+    state: BindingState,
     namespace_id: NamespaceId,
     subject: Option<&loonfs_api::Subject>,
     part_size_bytes: Option<u64>,
@@ -285,7 +285,7 @@ async fn begin_direct_multipart_upload(
     )
 )]
 pub(super) async fn sign_upload_parts(
-    State(state): State<AppState>,
+    State(state): State<BindingState>,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(UploadPathParams { upload_id }): AppPath<UploadPathParams>,
@@ -406,14 +406,14 @@ pub(super) async fn content_preparation_for_puts(
             Err(error) => {
                 let content_id = token.content_ref.content_id.clone();
                 if is_forged_content_token(&error) {
-                    tracing::warn!(
+                    tracing::warn!(target: "loonfs_server::http::handlers_uploads",
                         namespace_id = %namespace_id,
                         content_id = %content_id,
                         error = %error,
                         "content token was not minted by this deployment for this namespace"
                     );
                 } else {
-                    tracing::debug!(
+                    tracing::debug!(target: "loonfs_server::http::handlers_uploads",
                         namespace_id = %namespace_id,
                         content_id = %content_id,
                         error = %error,
@@ -528,7 +528,7 @@ pub(super) fn current_unix_ms() -> Result<u64, ApiResponseError> {
     )
 )]
 pub(super) async fn put_upload_content(
-    State(state): State<AppState>,
+    State(state): State<BindingState>,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(UploadPathParams { upload_id }): AppPath<UploadPathParams>,
@@ -580,7 +580,7 @@ pub(super) async fn put_upload_content(
     )
 )]
 pub(super) async fn complete_upload(
-    State(state): State<AppState>,
+    State(state): State<BindingState>,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(UploadPathParams { upload_id }): AppPath<UploadPathParams>,
@@ -598,7 +598,7 @@ pub(super) async fn complete_upload(
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
     Ok(Json(with_content_token(
         completed.response,
-        ContentTokenVerifier::new(state.config.content_token_secret()),
+        ContentTokenVerifier::new(state.options.content_token_secret.expose()),
         completed.receipt.as_ref(),
         current_unix_ms()?,
     )?))
@@ -654,7 +654,7 @@ fn decode_completion_body(
     )
 )]
 pub(super) async fn get_upload(
-    State(state): State<AppState>,
+    State(state): State<BindingState>,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(UploadPathParams { upload_id }): AppPath<UploadPathParams>,
@@ -681,7 +681,7 @@ pub(super) async fn get_upload(
     }
     Ok(Json(with_content_token(
         view.session,
-        ContentTokenVerifier::new(state.config.content_token_secret()),
+        ContentTokenVerifier::new(state.options.content_token_secret.expose()),
         view.receipt.as_ref(),
         current_unix_ms()?,
     )?))
@@ -713,7 +713,7 @@ pub(super) async fn get_upload(
     )
 )]
 pub(super) async fn abort_upload(
-    State(state): State<AppState>,
+    State(state): State<BindingState>,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(UploadPathParams { upload_id }): AppPath<UploadPathParams>,

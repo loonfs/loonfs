@@ -8,7 +8,7 @@ use super::query_params::{
     decode_optional_cursor, invalid_path_id_error, parse_include_attributes, parse_revision_no,
     resolve_page_limit,
 };
-use super::{acquire_download_permit, AppPath, AppQuery, AppState, NamespaceIdPath, NoQuery};
+use super::{acquire_download_permit, AppPath, AppQuery, BindingState, NamespaceIdPath, NoQuery};
 use axum::extract::State;
 use axum::response::Response;
 use axum::Json;
@@ -71,7 +71,7 @@ pub(super) struct StatInodeQuery {
     )
 )]
 pub(super) async fn get_inode(
-    State(state): State<AppState>,
+    State(state): State<BindingState>,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(path): AppPath<InodePathParams>,
@@ -139,7 +139,7 @@ pub(super) struct ListInodeChildrenQuery {
     )
 )]
 pub(super) async fn list_inode_children(
-    State(state): State<AppState>,
+    State(state): State<BindingState>,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(path): AppPath<InodePathParams>,
@@ -203,7 +203,7 @@ pub(super) async fn list_inode_children(
     )
 )]
 pub(super) async fn list_file_revisions_by_inode(
-    State(state): State<AppState>,
+    State(state): State<BindingState>,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(path): AppPath<InodePathParams>,
@@ -254,7 +254,7 @@ pub(super) async fn list_file_revisions_by_inode(
     )
 )]
 pub(super) async fn get_file_revision_bytes_by_inode(
-    State(state): State<AppState>,
+    State(state): State<BindingState>,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(path): AppPath<InodeRevisionPathParams>,
@@ -272,7 +272,7 @@ pub(super) async fn get_file_revision_bytes_by_inode(
     streamed_download_response(
         stream,
         permit,
-        state.config.max_download_bytes,
+        state.options.max_download_bytes,
         &namespace_id,
     )
 }

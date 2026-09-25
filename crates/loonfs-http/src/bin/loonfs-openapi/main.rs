@@ -12,7 +12,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("usage: loonfs-openapi <openapi.json> <openapi-proxy.json>".into());
     };
     let (full, proxy) =
-        openapi_postprocess::openapi_documents_pretty(&loonfs_server::openapi_document())?;
+        openapi_postprocess::openapi_documents_pretty(&loonfs_http::openapi_document())?;
     write_json(Path::new(&full_path), full)?;
     write_json(Path::new(&proxy_path), proxy)?;
     Ok(())

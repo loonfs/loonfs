@@ -5,6 +5,8 @@
 //! explicit operation ID, so changing its Rust function name does not rename
 //! the generated SDK method.
 
+mod host;
+
 use loonfs_api::ChangeSeq;
 use loonfs_api::{
     v0::{
@@ -45,9 +47,9 @@ pub fn openapi_document() -> utoipa::openapi::OpenApi {
         description = "Static OpenAPI document for the LoonFS v0 HTTP API."
     ),
     paths(
-        crate::http::get_health,
-        crate::http::get_readiness,
-        crate::http::get_metrics,
+        host::get_health,
+        host::get_readiness,
+        host::get_metrics,
         crate::http::handlers_namespace::get_capabilities,
         crate::http::handlers_namespace::create_namespace,
         crate::http::handlers_namespace::get_namespace,

@@ -15,11 +15,9 @@ pub use config::{
     MaintenanceMode, PublicationLimitsOverrides, RuntimeCacheConfigOverrides, ServerConfig,
     ServerConfigError, StoreConfig, TlsServerConfig,
 };
-#[cfg(feature = "openapi")]
-pub use http::openapi_document;
 pub use http::{
-    api_error_response, app, check_config, filesystem_app, probe_store, serve, serve_with_shutdown,
-    AppOptions, AppState, ServeError, TlsConfigError,
+    app, check_config, filesystem_app, probe_store, serve, serve_with_shutdown, AppOptions,
+    AppState, ServeError, TlsConfigError,
 };
 pub use local_cache::FoyerStoredMetadataBlockCache;
 pub use trace::{init_tracing_from_env, TraceInitError};

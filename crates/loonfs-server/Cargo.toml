@@ -13,18 +13,12 @@ publish = false
 name = "loonfs-server"
 path = "src/main.rs"
 
-[[bin]]
-name = "loonfs-openapi"
-path = "src/bin/loonfs-openapi/main.rs"
-required-features = ["openapi"]
-
 [dependencies]
 async-trait.workspace = true
 axum.workspace = true
 bytes.workspace = true
 clap.workspace = true
 foyer.workspace = true
-form_urlencoded.workspace = true
 fs4.workspace = true
 futures.workspace = true
 http-body.workspace = true
@@ -32,14 +26,13 @@ http.workspace = true
 loonfs-api.workspace = true
 loonfs.workspace = true
 loonfs-grep.workspace = true
+loonfs-http.workspace = true
 loonfs-objectstore.workspace = true
 mixtrics.workspace = true
 rustls.workspace = true
 rustls-pemfile.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-serde_path_to_error.workspace = true
-serde_urlencoded.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
@@ -47,9 +40,9 @@ tokio-rustls.workspace = true
 toml.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-utoipa = { workspace = true, optional = true }
 
 [dev-dependencies]
+form_urlencoded.workspace = true
 base64.workspace = true
 loonfs-client.workspace = true
 loonfs-core.workspace = true
@@ -57,9 +50,6 @@ loonfs-test-support.workspace = true
 rcgen.workspace = true
 tower = { version = "0.5", features = ["util"] }
 ureq.workspace = true
-
-[features]
-openapi = ["dep:utoipa", "loonfs-api/openapi"]
 
 [lints]
 workspace = true

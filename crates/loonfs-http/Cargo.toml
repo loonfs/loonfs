@@ -1,0 +1,48 @@
+[package]
+name = "loonfs-http"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "The representative LoonFS HTTP binding."
+repository.workspace = true
+
+[[bin]]
+name = "loonfs-openapi"
+path = "src/bin/loonfs-openapi/main.rs"
+required-features = ["openapi"]
+
+[dependencies]
+axum.workspace = true
+bytes.workspace = true
+form_urlencoded.workspace = true
+futures.workspace = true
+http-body.workspace = true
+http.workspace = true
+loonfs.workspace = true
+loonfs-api.workspace = true
+loonfs-objectstore.workspace = true
+loonfs-grep.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_path_to_error.workspace = true
+serde_urlencoded.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tower.workspace = true
+tracing.workspace = true
+utoipa = { workspace = true, optional = true }
+
+[dev-dependencies]
+async-trait.workspace = true
+base64.workspace = true
+loonfs-client.workspace = true
+loonfs-test-support.workspace = true
+tempfile.workspace = true
+ureq.workspace = true
+
+[features]
+openapi = ["dep:utoipa", "loonfs-api/openapi"]
+
+[lints]
+workspace = true

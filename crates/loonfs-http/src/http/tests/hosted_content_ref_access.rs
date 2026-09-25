@@ -2,7 +2,7 @@
 
 #![allow(clippy::panic)]
 
-use crate::common::http_split_support::test_config;
+use super::fixtures::{test_app, test_options, TestAppOptions};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use loonfs::{CreateNamespaceOptions, PutFileOptions};
@@ -58,13 +58,9 @@ fn request(method: &str, uri: &str, body: Option<String>) -> Request<Body> {
 #[tokio::test]
 async fn hosted_subject_cannot_import_a_foreign_bare_content_reference() {
     let temp_dir = tempdir().expect("tempdir");
-    let (router, state) = loonfs_server::app(
-        test_config(
-            temp_dir.path().join("store"),
-            "hosted-content-ref-access",
-            "hosted-content-ref-access",
-        ),
-        loonfs_server::AppOptions::default(),
+    let (router, state) = test_app(
+        test_options(&temp_dir.path().join("store"), "hosted-content-ref-access"),
+        TestAppOptions::default(),
     )
     .await
     .expect("app");

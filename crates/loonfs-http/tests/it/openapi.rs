@@ -1,3 +1,5 @@
+//! Generated HTTP schema and operation contracts.
+
 #![allow(clippy::panic)]
 
 use serde_json::{json, Value};
@@ -19,7 +21,7 @@ const PROXY_OPENAPI_JSON_PATH: &str = concat!(
     "/../../docs/specs/openapi-proxy.json"
 );
 const OPENAPI_PATH_SOURCES: &[&str] = &[
-    include_str!("../../src/http/mod.rs"),
+    include_str!("../../src/http/openapi/host.rs"),
     include_str!("../../src/http/handlers_downloads.rs"),
     include_str!("../../src/http/handlers_filesystem.rs"),
     include_str!("../../src/http/handlers_inodes.rs"),
@@ -124,7 +126,7 @@ fn unregistered_cursor_operation_returns_a_named_error() {
 #[test]
 fn openapi_static_files_are_current() {
     let (mut full, mut proxy) =
-        openapi_postprocess::openapi_documents_pretty(&loonfs_server::openapi_document())
+        openapi_postprocess::openapi_documents_pretty(&loonfs_http::openapi_document())
             .expect("generate full and proxy OpenAPI JSON");
     full.push('\n');
     proxy.push('\n');
@@ -132,13 +134,13 @@ fn openapi_static_files_are_current() {
     assert_eq!(
         full,
         std::fs::read_to_string(OPENAPI_JSON_PATH).expect("read static openapi json"),
-        "docs/specs/openapi.json is stale; rerun `cargo run -p loonfs-server --features openapi --bin loonfs-openapi -- docs/specs/openapi.json docs/specs/openapi-proxy.json`"
+        "docs/specs/openapi.json is stale; rerun `cargo run -p loonfs-http --features openapi --bin loonfs-openapi -- docs/specs/openapi.json docs/specs/openapi-proxy.json`"
     );
     assert_eq!(
         proxy,
         std::fs::read_to_string(PROXY_OPENAPI_JSON_PATH)
             .expect("read static proxy openapi json"),
-        "docs/specs/openapi-proxy.json is stale; rerun `cargo run -p loonfs-server --features openapi --bin loonfs-openapi -- docs/specs/openapi.json docs/specs/openapi-proxy.json`"
+        "docs/specs/openapi-proxy.json is stale; rerun `cargo run -p loonfs-http --features openapi --bin loonfs-openapi -- docs/specs/openapi.json docs/specs/openapi-proxy.json`"
     );
 }
 
@@ -806,9 +808,9 @@ fn proxy_components_are_exactly_the_referenced_closure() {
 
 #[test]
 fn openapi_document_generation_is_byte_stable() {
-    let first = openapi_postprocess::openapi_documents_pretty(&loonfs_server::openapi_document())
+    let first = openapi_postprocess::openapi_documents_pretty(&loonfs_http::openapi_document())
         .expect("generate full and proxy OpenAPI JSON");
-    let second = openapi_postprocess::openapi_documents_pretty(&loonfs_server::openapi_document())
+    let second = openapi_postprocess::openapi_documents_pretty(&loonfs_http::openapi_document())
         .expect("generate full and proxy OpenAPI JSON again");
     assert_eq!(first, second);
     assert_eq!(
@@ -820,7 +822,7 @@ fn openapi_document_generation_is_byte_stable() {
 
 #[test]
 fn every_registered_operation_publishes_its_retry_class() {
-    let generated = openapi_postprocess::openapi_json_pretty(&loonfs_server::openapi_document())
+    let generated = openapi_postprocess::openapi_json_pretty(&loonfs_http::openapi_document())
         .expect("generate openapi json");
     let spec: Value = serde_json::from_str(&generated).expect("parse generated openapi json");
     let published = operations_by_id(&spec)
@@ -850,7 +852,7 @@ fn every_registered_operation_publishes_its_retry_class() {
 
 #[test]
 fn every_registered_operation_publishes_its_sdk_name() {
-    let generated = openapi_postprocess::openapi_json_pretty(&loonfs_server::openapi_document())
+    let generated = openapi_postprocess::openapi_json_pretty(&loonfs_http::openapi_document())
         .expect("generate openapi json");
     let spec: Value = serde_json::from_str(&generated).expect("parse generated openapi json");
 
@@ -933,7 +935,7 @@ fn proxy_operations_keep_their_sdk_names() {
 
 #[test]
 fn non_idempotent_operations_disable_generated_sdk_retries() {
-    let generated = openapi_postprocess::openapi_json_pretty(&loonfs_server::openapi_document())
+    let generated = openapi_postprocess::openapi_json_pretty(&loonfs_http::openapi_document())
         .expect("generate openapi json");
     let spec: Value = serde_json::from_str(&generated).expect("parse generated openapi json");
     let operations = operations_by_id(&spec);
@@ -2326,7 +2328,7 @@ fn path_parameter<'a>(
 #[test]
 fn actor_headers_are_global_and_only_attributed_operations_require_them() {
     let (full, proxy) =
-        openapi_postprocess::openapi_documents_pretty(&loonfs_server::openapi_document())
+        openapi_postprocess::openapi_documents_pretty(&loonfs_http::openapi_document())
             .expect("generate documents");
     let full: Value = serde_json::from_str(&full).expect("full document");
     let proxy: Value = serde_json::from_str(&proxy).expect("proxy document");

@@ -1,9 +1,8 @@
 //! HTTP application construction, the listener service, and where its
 //! graceful shutdown is triggered from.
 
-use super::metrics::ServerMetrics;
+use super::router;
 use super::tls::{self, TlsConfigError, TlsListener};
-use super::{router, RouterSurface};
 use crate::config::{MaintenanceMode, ServerConfig, ServerConfigError};
 use crate::local_cache::FoyerStoredMetadataBlockCache;
 use axum::body::Body;
@@ -14,15 +13,16 @@ use axum::Router;
 use loonfs::metrics::{JsonlObjectStoreMetricsRecorder, ObjectStoreMetricsRecorder};
 use loonfs::{
     maintenance_hint_relay, FsMaintenance, FsReader, FsWriter, GarbageCollectionJob,
-    MaintenanceHandle, MaintenanceHintObserver, MaintenanceJob, MaintenanceProbe,
-    MaintenanceRegistry, MaintenanceRunner, MetadataCompactionJob, MetadataMaintenanceJob,
-    SharedObjectStore, StoredMetadataBlockCache, StoredMetadataBlockCacheCloseError, TraceMode,
-    TraceStoreKind,
+    MaintenanceHintObserver, MaintenanceRegistry, MaintenanceRunner, MetadataCompactionJob,
+    MetadataMaintenanceJob, SharedObjectStore, StoredMetadataBlockCache,
+    StoredMetadataBlockCacheCloseError, TraceMode, TraceStoreKind,
 };
-use loonfs_api::NamespaceId;
 use loonfs_grep::{
     new_grep_block_cache, GrepGcJob, GrepMaintenanceJob, GrepService, GrepWorker,
-    DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES, GREP_INDEX_JOB,
+    DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
+};
+use loonfs_http::{
+    AuthPolicy, BindingOptions, BindingState, GrepMaintenance, HttpMetrics, RouterSurface,
 };
 use loonfs_objectstore::presign::DirectTransferIssuers;
 use loonfs_objectstore::{run_store_contract_probe, StoreProbeReport};
@@ -125,100 +125,14 @@ impl http_body::Body for DrainedBody {
     }
 }
 
-/// Request handles built over one shared store client.
-///
-/// Read handlers use `reader`, mutations use `writer`, and maintenance uses
-/// `maintenance`. After the listener drains, the host shuts down the writer
-/// and the optional maintenance runner. `reader` is stored separately because
-/// most handlers require only read access.
+/// Handles and resources whose shutdown belongs to this host.
 #[derive(Clone)]
 pub struct AppState {
-    pub(super) config: Arc<ServerConfig>,
-    /// Writer handle that owns mutation and publication work.
+    pub binding: BindingState,
     pub writer: FsWriter,
-    pub(super) reader: FsReader,
-    pub(super) maintenance: FsMaintenance,
     pub jobs: MaintenanceRegistry,
     pub runner: Option<MaintenanceRunner>,
-    /// The store itself, for the one endpoint whose subject is the store
-    /// rather than a namespace: the contract probe. It is the same
-    /// instrumented client the handles were built on, so a probe measures
-    /// what production traffic measures.
-    pub(super) probe_store: SharedObjectStore,
-    /// The direct transfers this deployment can authorize, as its store
-    /// settled them at construction. Each feature is read from its own
-    /// field; nothing here re-derives what the store already decided.
-    pub(super) direct_transfers: Option<DirectTransferIssuers>,
-    pub(super) grep_worker: Option<GrepWorker<SharedObjectStore>>,
-    /// The grep query service: one process-wide decoded-block cache for
-    /// grep's own segments, held here because grep is a composed extension
-    /// rather than part of the runtime the handles come from.
-    pub(super) grep_service: Option<Arc<GrepService>>,
-    /// Present when this deployment maintains the index: how a request tells
-    /// the runner a namespace may have indexing to do.
-    pub(super) grep_maintenance: Option<GrepMaintenance>,
-    /// Bounds concurrently streamed proxied-upload bodies; bodies forward to
-    /// the store incrementally, so worst-case upload memory is this times one
-    /// streamed part. Requests past the cap answer 503 `server_busy` before
-    /// any transfer.
-    pub(super) upload_permits: Arc<Semaphore>,
-    /// Bounds live proxied download bodies until completion or cancellation.
-    /// Content memory follows this count times the internal read chunk size.
-    pub(super) download_permits: Arc<Semaphore>,
-    /// Shared recorder for runtime and request-level metrics. `GET /metrics`
-    /// renders its snapshot. It is always installed.
-    pub(super) metrics: Arc<ServerMetrics>,
-    /// Optional node-local block cache.
-    ///
-    /// Runtime handles use it through the shared cache interface. The server
-    /// retains the concrete type to read foyer statistics and close it during
-    /// shutdown.
     pub local_cache: Option<Arc<FoyerStoredMetadataBlockCache>>,
-}
-
-impl AppState {
-    pub(super) fn grep_worker(&self) -> &GrepWorker<SharedObjectStore> {
-        self.grep_worker
-            .as_ref()
-            .expect("grep routes should carry a grep worker")
-    }
-
-    pub(super) fn grep_service(&self) -> &GrepService {
-        self.grep_service
-            .as_deref()
-            .expect("grep routes should carry a grep service")
-    }
-}
-
-/// Request-side access to grep maintenance.
-///
-/// Requests may probe whether indexing is due and submit a non-blocking nudge.
-/// The maintenance runner owns admission, concurrency, backoff, and shutdown.
-#[derive(Clone)]
-pub(super) struct GrepMaintenance {
-    handle: MaintenanceHandle,
-    job: Arc<GrepMaintenanceJob<SharedObjectStore>>,
-}
-
-impl GrepMaintenance {
-    /// Asks for one bounded indexing step as soon as a permit frees.
-    /// Repeated asks coalesce into one run.
-    pub(super) fn nudge(&self, namespace_id: &NamespaceId) {
-        self.handle.nudge(GREP_INDEX_JOB, namespace_id);
-    }
-
-    /// Nudges a namespace only when the probe reports that indexing is due.
-    ///
-    /// Probe failures do not schedule work because the indexing step would fail
-    /// on the same unreadable state.
-    pub(super) async fn nudge_if_behind(&self, namespace_id: &NamespaceId) {
-        if matches!(
-            self.job.probe(namespace_id).await,
-            Ok(MaintenanceProbe::Due)
-        ) {
-            self.nudge(namespace_id);
-        }
-    }
 }
 
 /// Optional inputs for building the HTTP application.
@@ -287,7 +201,7 @@ async fn build_app(
             (store.into_shared(), direct_transfers)
         }
     };
-    let metrics = ServerMetrics::new();
+    let metrics = HttpMetrics::new();
     // Two switches decide scheduled grep indexing and nothing else does:
     // whether this server maintains anything, and whether its
     // grep mode maintains the index.
@@ -388,26 +302,51 @@ async fn build_app(
             handle: runner.handle(),
             job,
         });
-    let config = Arc::new(config);
-    let state = AppState {
+    let options = Arc::new(BindingOptions {
+        serves_grep: config.grep.mode.serves_grep(),
+        maintains_grep_index,
+        serves_maintenance: config.maintenance.serves(),
+        snapshot_policy: loonfs::SnapshotPolicy {
+            max_ttl_ms: config.snapshot_max_ttl_ms,
+            max_lifetime_ms: config.snapshot_max_lifetime_ms,
+            max_live_per_namespace: config.snapshot_max_live_per_namespace,
+        },
+        max_download_bytes: config.max_download_bytes,
+        max_upload_bytes: config.max_upload_bytes,
+        max_concurrent_uploads: config.max_concurrent_uploads,
+        max_concurrent_downloads: config.max_concurrent_downloads,
+        inline_content: config.inline_content.resolve(),
+        content_token_secret: config.content_token_secret.clone(),
+        request_deadline_ms: config.request_deadline_ms,
+        store_kind: config.store.kind(),
+        auth_policy: config
+            .auth_token
+            .clone()
+            .map_or(AuthPolicy::Unauthenticated, AuthPolicy::BearerToken),
+    });
+    let binding = BindingState {
         upload_permits: Arc::new(Semaphore::new(
             config.max_concurrent_uploads.min(Semaphore::MAX_PERMITS),
         )),
         download_permits: Arc::new(Semaphore::new(
             config.max_concurrent_downloads.min(Semaphore::MAX_PERMITS),
         )),
-        config,
-        writer,
+        options,
+        writer: writer.clone(),
         reader,
         maintenance,
-        jobs,
-        runner,
         probe_store,
         direct_transfers,
         grep_worker,
         grep_service,
         grep_maintenance,
         metrics,
+    };
+    let state = AppState {
+        binding,
+        writer,
+        jobs,
+        runner,
         local_cache,
     };
     Ok((router(state.clone(), surface), state))
@@ -429,7 +368,7 @@ fn grep_config_error(error: impl std::fmt::Display) -> ServerConfigError {
 
 async fn open_local_cache(
     config: &ServerConfig,
-    metrics: &ServerMetrics,
+    metrics: &HttpMetrics,
 ) -> Result<Option<Arc<FoyerStoredMetadataBlockCache>>, ServerConfigError> {
     match &config.local_cache {
         Some(local_cache) => Ok(Some(Arc::new(
@@ -447,7 +386,7 @@ async fn open_local_cache(
 pub(super) async fn build_handles(
     config: &ServerConfig,
     store: SharedObjectStore,
-    metrics: &ServerMetrics,
+    metrics: &HttpMetrics,
     metrics_jsonl_path: Option<OsString>,
     local_cache: Option<Arc<FoyerStoredMetadataBlockCache>>,
     maintenance_hint_observer: Option<MaintenanceHintObserver>,
