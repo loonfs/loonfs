@@ -2566,6 +2566,40 @@ async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
     server.abort();
 }
 
+#[tokio::test]
+async fn http_namespace_json_body_over_the_limit_answers_content_too_large() {
+    use tower::ServiceExt;
+
+    let directory = tempdir().expect("temporary store");
+    let mut config = test_config(directory.path(), "json-body-limit");
+    config.maintenance = crate::config::MaintenanceMode::Disabled;
+    let (router, state) = app(config, AppOptions::default()).await.expect("app");
+    let mut body = br#"{"namespace_id":"oversized-body"}"#.to_vec();
+    body.resize(super::MAX_JSON_BODY_BYTES + 1, b' ');
+
+    let response = router
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/v0/namespaces")
+                .header("authorization", "Bearer test-token")
+                .header("loonfs-actor", "test-actor")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(body))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    let body = axum::body::to_bytes(response.into_body(), 4096)
+        .await
+        .expect("response body");
+    let error: loonfs_api::ApiError = serde_json::from_slice(&body).expect("API error");
+    assert_eq!(error.code, ErrorCode::ContentTooLarge.as_str());
+    state.writer.shutdown().await.expect("writer shutdown");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn http_upload_body_over_the_limit_answers_content_too_large() {
     let temp_dir = tempdir().expect("tempdir");

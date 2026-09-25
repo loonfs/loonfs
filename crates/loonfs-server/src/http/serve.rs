@@ -427,13 +427,6 @@ fn grep_config_error(error: impl std::fmt::Display) -> ServerConfigError {
     }
 }
 
-/// Opens the node-local block cache the config asks for, or answers `None`
-/// where it asks for none.
-///
-/// The one place the cache is opened, so [`check_config`] takes the
-/// configured directory exactly the way a start takes it: the root is
-/// created if it is missing, the lock is claimed, and the disk tier is
-/// allocated.
 async fn open_local_cache(
     config: &ServerConfig,
     metrics: &ServerMetrics,
@@ -556,25 +549,25 @@ fn tls_server_config(
 
 /// Validates configuration and startup resources without starting the server.
 ///
-/// This checks the TLS identity and opens the local cache through the same
-/// paths used at startup. It does not bind the configured address or contact
+/// This checks the TLS identity, local cache sizes, and cache directory access.
+/// It does not bind the configured address or contact
 /// the object store. Use `loonfs-server --probe-store` or
 /// `loonfs maintenance store probe` to test storage access. Constructing a local
-/// store still creates its root directory.
-/// The check allocates the configured cache capacity and discards a cache
-/// directory whose geometry is incompatible with the configured size.
+/// store still creates its root directory. The cache directory is created if
+/// missing and checked with a temporary file. No cache device is opened.
 pub async fn check_config(config: &ServerConfig) -> Result<(), ServeError> {
     config.validate()?;
     config.object_store()?;
     // Building the identity is the whole check; nothing here serves with it.
     let _identity = tls_server_config(config).map_err(ServeError::Tls)?;
-    if let Some(local_cache) = open_local_cache(config, &ServerMetrics::new()).await? {
-        // Closing is what releases the directory lock, so a check leaves the
-        // directory in the state the start that follows it needs to find.
-        local_cache
-            .close()
-            .await
-            .map_err(ServeError::LocalCacheClose)?;
+    if let Some(local_cache) = &config.local_cache {
+        let path = std::path::Path::new(local_cache.path.trim());
+        std::fs::create_dir_all(path)
+            .and_then(|()| tempfile::tempfile_in(path))
+            .map_err(|error| ServerConfigError::InvalidField {
+                field: "local_cache.path",
+                reason: format!("cannot write to `{}`: {error}", path.display()),
+            })?;
     }
     Ok(())
 }

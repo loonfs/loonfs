@@ -3145,6 +3145,16 @@
             },
             "description": "Namespace deleted"
           },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "JSON body exceeds the 2 MiB limit"
+          },
           "501": {
             "content": {
               "application/json": {
@@ -3370,6 +3380,16 @@
               }
             },
             "description": "Namespace deleted or snapshot deleted or expired"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "JSON body exceeds the 2 MiB limit"
           },
           "501": {
             "content": {
@@ -4230,6 +4250,16 @@
             },
             "description": "Namespace deleted"
           },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "JSON body exceeds the 2 MiB limit"
+          },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
           }
@@ -4416,6 +4446,16 @@
               }
             },
             "description": "Snapshot expired"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "JSON body exceeds the 2 MiB limit"
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"

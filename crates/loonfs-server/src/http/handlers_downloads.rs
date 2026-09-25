@@ -45,6 +45,7 @@ use std::time::Duration;
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace, path, revision, or snapshot not found", body = ApiError),
             (status = 410, description = "Namespace deleted or snapshot deleted or expired", body = ApiError),
+            (status = 413, description = "JSON body exceeds the 2 MiB limit", body = ApiError),
             (status = 501, description = "Direct download is unsupported", body = ApiError),
             crate::http::openapi::UnavailableResponses
         )
