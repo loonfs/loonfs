@@ -220,6 +220,7 @@ pub(super) async fn get_capabilities(
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 409, description = "Namespace already exists", body = ApiError),
             (status = 410, description = "Namespace id permanently deleted (namespace_deleted)", body = ApiError),
+            (status = 413, description = "JSON body exceeds the 2 MiB limit", body = ApiError),
             crate::http::openapi::UnavailableResponses
         )
     )
@@ -401,6 +402,7 @@ fn parse_expected_head_seq(value: &str) -> Result<ChangeSeq, ApiResponseError> {
             (status = 404, description = "Source namespace or snapshot not found", body = ApiError),
             (status = 409, description = "Fork conflict", body = ApiError),
             (status = 410, description = "Source or target namespace id permanently deleted (namespace_deleted), or snapshot gone", body = ApiError),
+            (status = 413, description = "JSON body exceeds the 2 MiB limit", body = ApiError),
             crate::http::openapi::UnavailableResponses
         )
     )
@@ -451,6 +453,7 @@ pub(super) async fn fork_namespace(
             (status = 404, description = "Namespace not found", body = ApiError),
             (status = 409, description = "Snapshot quota exceeded", body = ApiError),
             (status = 410, description = "Namespace deleted", body = ApiError),
+            (status = 413, description = "JSON body exceeds the 2 MiB limit", body = ApiError),
             crate::http::openapi::UnavailableResponses
         )
     )
@@ -561,6 +564,7 @@ pub(super) async fn list_snapshots(
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Snapshot not found", body = ApiError),
             (status = 410, description = "Snapshot expired", body = ApiError),
+            (status = 413, description = "JSON body exceeds the 2 MiB limit", body = ApiError),
             crate::http::openapi::UnavailableResponses
         )
     )
@@ -673,6 +677,7 @@ fn snapshot_expiry_from_ttl(
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace not found", body = ApiError),
             (status = 410, description = "Namespace deleted", body = ApiError),
+            (status = 413, description = "JSON body exceeds the 2 MiB limit", body = ApiError),
             crate::http::openapi::UnavailableResponses
         )
     )
@@ -828,6 +833,7 @@ fn decode_checkpoint_cursor(
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace not found", body = ApiError),
             (status = 410, description = "Namespace deleted", body = ApiError),
+            (status = 413, description = "JSON body exceeds the 2 MiB limit", body = ApiError),
             (status = 501, description = "This deployment does not maintain the grep index", body = ApiError),
             crate::http::openapi::UnavailableResponses
         )

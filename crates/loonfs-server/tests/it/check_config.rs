@@ -42,8 +42,6 @@ fn tls_table(cert_path: &Path, key_path: &Path) -> String {
     )
 }
 
-/// A `[local_cache]` table at `path`, sized at the smallest disk tier the
-/// config accepts so the check allocates as little as it can.
 fn local_cache_table(path: &Path) -> String {
     format!(
         "\n[local_cache]\npath = \"{}\"\nmemory_bytes = 4194304\ndisk_bytes = 100663296\n",
@@ -327,7 +325,7 @@ fn check_config_reports_a_local_cache_it_cannot_open() {
 }
 
 #[test]
-fn check_config_opens_the_local_cache_and_leaves_it_openable() {
+fn check_config_leaves_no_cache_files_behind() {
     let dir = tempfile::tempdir().expect("tempdir");
     let store_root = dir.path().join("store");
     let (cert_path, key_path) = write_tls_identity(dir.path());
@@ -357,16 +355,11 @@ fn check_config_opens_the_local_cache_and_leaves_it_openable() {
         "config ok: bind 127.0.0.1:9400, store local-fs, maintenance serve_and_maintain"
     );
     assert!(
-        cache_root.is_dir(),
-        "the check opens the cache, and opening it builds the directory"
-    );
-
-    let second = run_server(&config_path, &["--check-config"]);
-
-    assert!(
-        second.status.success(),
-        "the checked directory must be one the next open can take: {}",
-        String::from_utf8_lossy(&second.stderr)
+        std::fs::read_dir(&cache_root)
+            .expect("cache directory")
+            .next()
+            .is_none(),
+        "the check must leave the cache directory empty"
     );
 }
 

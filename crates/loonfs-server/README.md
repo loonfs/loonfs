@@ -56,13 +56,14 @@ through `LOONFS_SERVER_CONFIG_TOML` and omit `--config`. Keep credentials and
 the two server secrets in their dedicated environment variables rather than
 putting them in the inline TOML.
 
-The command prints one line and exits. It runs the checks a start runs
-before it serves: the config fields, the TLS certificate and key, and the
-local block cache directory. It does not bind the configured address and it
-performs no object-store operation, so it belongs in a deployment pipeline
-ahead of the rollout. Opening the cache takes the directory lock a start
-takes, so run the check where the server is not already running.
-The check allocates the configured cache capacity and discards a cache directory whose geometry is incompatible with the configured size.
+The command prints one line and exits. It checks the config fields, the TLS
+certificate and key, and write access to the local cache directory. It
+creates the cache directory if it is missing, then creates and removes a
+temporary file in it. It does not open the cache device, allocate cache
+capacity, or touch existing cache files. The server locks and recovers the
+cache when it starts. The check does not bind the configured address, and it
+performs no object-store operation. For a local filesystem store, it does
+create the store's root directory.
 
 ## Deploying it
 

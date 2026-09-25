@@ -519,6 +519,7 @@ pub(super) async fn list_file_revisions(
             (status = 404, description = "Namespace or path not found", body = ApiError),
             (status = 409, description = "Operation conflict", body = ApiError),
             (status = 410, description = "Namespace deleted", body = ApiError),
+            (status = 413, description = "JSON body exceeds the 2 MiB limit", body = ApiError),
             (status = 501, description = "Inline content is disabled", body = ApiError),
             crate::http::openapi::UnavailableResponses
         )
