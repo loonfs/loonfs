@@ -52,6 +52,8 @@ pub(crate) struct ReadCoreInner {
 #[derive(Clone)]
 pub(crate) struct WriterIdentity {
     pub(crate) writer_id: WriterId,
+    #[cfg(test)]
+    pub(crate) test_wall_clock: Option<Arc<dyn loonfs_api::MonotonicTimer>>,
 }
 
 /// Writer state shared weakly with the publisher worker.
@@ -128,10 +130,21 @@ impl WriterIdentity {
     pub(crate) fn new(writer_id: String) -> Result<Self> {
         let writer_id =
             WriterId::parse(writer_id).map_err(|error| RuntimeError::Config(error.to_string()))?;
-        Ok(Self { writer_id })
+        Ok(Self {
+            writer_id,
+            #[cfg(test)]
+            test_wall_clock: None,
+        })
     }
 
     pub(crate) fn mutation_context(&self) -> Result<MutationContext> {
+        #[cfg(test)]
+        if let Some(clock) = &self.test_wall_clock {
+            return Ok(MutationContext {
+                writer_id: self.writer_id.clone(),
+                now_ms: clock.monotonic_now_ms(),
+            });
+        }
         Ok(MutationContext {
             writer_id: self.writer_id.clone(),
             now_ms: current_time_ms()?,

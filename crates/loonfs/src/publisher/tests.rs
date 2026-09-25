@@ -3,6 +3,9 @@
 #![allow(clippy::panic)]
 // Publisher tests use panic in async result helpers for precise diagnostics.
 
+#[path = "publication_clock.rs"]
+mod publication_clock;
+
 use super::*;
 use crate::config::ReadConfig;
 use crate::content_tokens::ContentTokenError;
