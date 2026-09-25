@@ -224,6 +224,105 @@ async fn ordinary_read_returns_current_data_after_compaction_and_collection() {
 }
 
 #[tokio::test]
+async fn durable_pinned_reads_keep_missing_segments_corrupt_after_manifest_advance() {
+    use loonfs_api::wire::manifest::MetadataRowFamily;
+    use loonfs_core::control::load_namespace_current_manifest;
+    use loonfs_objectstore::{keys, local_fs_store::LocalFsStore, ObjectStore};
+    use loonfs_test_support::stores::{KeyPredicate, OperationClass, RecordingStore};
+    use std::sync::Arc;
+
+    let directory = tempdir().expect("tempdir");
+    let store = Arc::new(RecordingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::any(),
+    ));
+    let namespace_id = NamespaceId::parse("missing-pinned-segment").expect("namespace");
+    let runtime = open_runtime_async(store.clone(), "missing-pinned-segment").await;
+    runtime
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("namespace");
+    runtime
+        .put_file_bytes(
+            &namespace_id,
+            "/file",
+            b"content",
+            PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("file");
+    let snapshot = runtime
+        .writer
+        .create_snapshot(
+            &namespace_id,
+            CreateSnapshotOptions {
+                name: "durable".to_owned(),
+                expires_at_ms: loonfs::current_time_ms().expect("time") + 60_000,
+            },
+        )
+        .await
+        .expect("snapshot");
+    let checkpoint = runtime
+        .create_checkpoint(&namespace_id)
+        .await
+        .expect("checkpoint");
+    let reader = loonfs::FsReader::builder_with_store(store.clone())
+        .build()
+        .await
+        .expect("cold reader");
+    let pinned_snapshot = reader
+        .pin_namespace_at_snapshot(&namespace_id, &snapshot.checkpoint_id)
+        .await
+        .expect("snapshot view");
+    let pinned_checkpoint = reader
+        .pin_namespace_at_checkpoint(&namespace_id, &checkpoint.checkpoint_id)
+        .await
+        .expect("checkpoint view");
+    let captured = load_namespace_current_manifest(store.as_ref(), &namespace_id)
+        .await
+        .expect("captured manifest");
+    let segment = captured
+        .state
+        .envelope
+        .payload()
+        .runs
+        .iter()
+        .flat_map(|run| &run.segments)
+        .find(|segment| segment.family == MetadataRowFamily::Inodes)
+        .expect("inode segment");
+    store
+        .delete(&keys::metadata_segment_object_key(segment))
+        .await
+        .expect("delete pinned segment");
+    loonfs_core::NamespaceEngine::writer(
+        store.clone(),
+        namespace_id.clone(),
+        loonfs_api::WriterId::parse("manifest-advance").expect("writer id"),
+    )
+    .claim_compactor()
+    .await
+    .expect("advance current manifest");
+    let current = load_namespace_current_manifest(store.as_ref(), &namespace_id)
+        .await
+        .expect("current manifest");
+    assert!(current.state.manifest().manifest_no > captured.state.manifest().manifest_no);
+
+    for pinned in [pinned_snapshot, pinned_checkpoint] {
+        store.reset();
+        assert_core_error_kind(
+            pinned.get_path_entry("/file", Default::default()).await,
+            ErrorCode::NamespaceCorrupt,
+        );
+        assert_eq!(store.count(OperationClass::Put), 0);
+        assert_eq!(store.count(OperationClass::Delete), 0);
+    }
+    runtime.writer.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
 async fn snapshot_directory_cursor_resumes_only_at_its_snapshot() {
     let temp_dir = tempdir().expect("tempdir");
     let runtime = open_runtime_async(store(temp_dir.path()), "snapshot-cursor-test").await;
