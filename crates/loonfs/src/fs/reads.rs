@@ -71,12 +71,17 @@ pub struct FsReadSnapshot {
     store: SharedObjectStore,
     context: RuntimeReadContext,
     snapshot_id: Option<PinId>,
+    durable_pin: bool,
     max_read_content_bytes: Option<u64>,
 }
 
 impl FsReadSnapshot {
     async fn read<T>(&self, read: impl std::future::Future<Output = Result<T>>) -> Result<T> {
-        super::read_result::classify_read_result(&self.store, &self.context, read.await).await
+        let result = read.await;
+        if self.durable_pin {
+            return result;
+        }
+        super::read_result::classify_read_result(&self.store, &self.context, result).await
     }
 
     /// Returns the namespace this snapshot reads.
@@ -374,12 +379,14 @@ impl FsReader {
         engine: NamespaceReaderEngine<SharedObjectStore>,
         context: RuntimeReadContext,
         snapshot_id: Option<PinId>,
+        durable_pin: bool,
     ) -> FsReadSnapshot {
         FsReadSnapshot {
             engine,
             store: self.core.inner.store.clone(),
             context,
             snapshot_id,
+            durable_pin,
             max_read_content_bytes: self.core.inner.config.max_read_content_bytes,
         }
     }
@@ -406,7 +413,7 @@ impl FsReader {
     pub async fn pin_namespace(&self, namespace_id: &NamespaceId) -> Result<FsReadSnapshot> {
         self.core.record_trace_context(&tracing::Span::current());
         let (engine, context) = self.core.pinned_metadata_read(namespace_id).await?;
-        Ok(self.read_snapshot(engine, context, None))
+        Ok(self.read_snapshot(engine, context, None, false))
     }
 
     /// Pins the namespace state captured by a checkpoint.
@@ -436,7 +443,7 @@ impl FsReader {
             .core
             .pinned_read_at_checkpoint(namespace_id, checkpoint_id)
             .await?;
-        Ok(self.read_snapshot(engine, context, None))
+        Ok(self.read_snapshot(engine, context, None, true))
     }
 
     /// Pins the namespace state captured by a live snapshot.
@@ -466,7 +473,7 @@ impl FsReader {
             .pinned_read_at_snapshot(namespace_id, snapshot_id, now_ms)
             .await?;
         self.core.inner.cache_stats.record_snapshot_view_read();
-        Ok(self.read_snapshot(engine, context, Some(snapshot_id.clone())))
+        Ok(self.read_snapshot(engine, context, Some(snapshot_id.clone()), true))
     }
 
     /// Returns a namespace's current state.

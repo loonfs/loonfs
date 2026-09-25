@@ -291,7 +291,7 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | `content_not_prepared` | 409 | A path put or explicit create/replace operation references external content without a matching admission, or carries a rejected relevant token. Prepare the content and retry with its proof. |
 | `path_conflict` | 409 | The destination path is already bound. |
 | `directory_not_empty` | 409 | The directory has children and the operation is not recursive. |
-| `stale_head` | 409 | The write raced a head advance, or a caller-supplied `expected_head_seq` does not match the head; retry against fresh state. A read that captured a manifest whose segments have since been collected also returns this code when a newer manifest exists; read again against current state. |
+| `stale_head` | 409 | The write raced a head advance, or a caller-supplied `expected_head_seq` does not match the head; retry against fresh state. A read also returns this code when its manifest's segments were collected and a newer manifest exists; read again against current state. A read at a snapshot or checkpoint returns `namespace_corrupt` instead, because collection keeps the segments that a snapshot or checkpoint needs. |
 | `stale_revision` | 409 | A caller-supplied base revision is no longer current. |
 | `stale_attributes` | 409 | The inode's attribute revision moved while the update was being decided. Two things raise it: a caller-supplied expected attribute revision that is no longer current, and the revision precondition every attribute update carries even when the caller states no expectation. Re-read the attributes and retry. |
 | `stale_access` | 409 | The inode's access revision moved while the update was being decided. Re-read the access row and retry. |
