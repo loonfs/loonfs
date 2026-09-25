@@ -104,11 +104,11 @@ async fn runtime_retry_does_not_expire_a_still_valid_content_proof() {
 }
 
 #[tokio::test]
-async fn runtime_retry_still_rejects_content_that_expired_during_the_failed_attempt() {
+async fn runtime_retry_preserves_uncertainty_when_the_content_proof_expires() {
     let error = publish_after_retry_delay(5, false)
         .await
-        .expect_err("ten milliseconds must exhaust five milliseconds of validity");
-    assert_eq!(error.code(), ErrorCode::ContentNotPrepared);
+        .expect_err("an expired proof cannot resolve the earlier publication outcome");
+    assert_eq!(error.code(), ErrorCode::CommitOutcomeUnknown);
 }
 
 #[tokio::test]
