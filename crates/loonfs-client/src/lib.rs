@@ -11,6 +11,7 @@
     reason = "ClientError::Api exposes all structured server error fields"
 )]
 
+mod body;
 mod config;
 mod downloads;
 mod error;
@@ -20,7 +21,13 @@ mod namespace_path;
 mod payload;
 mod query;
 mod reads;
+mod reqwest_transport;
 mod transport;
+mod transport_body;
+mod transport_error;
+
+#[cfg(test)]
+mod scripted_transport;
 mod uploads;
 
 use bytes::Bytes;
@@ -48,7 +55,9 @@ use loonfs_api::{
 use payload::PartReader;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
+use tower::{util::BoxCloneSyncService, Service};
 
+pub use body::Body;
 pub use config::ClientConfig;
 pub use error::ClientError;
 pub use maintenance::CheckpointsPager;
@@ -57,10 +66,8 @@ pub use reads::{
     ChangesPager, FileRevisionsPager, InodeChildrenPager, ListChangesOptions, PathEntriesPager,
     ReadFileOptions, SnapshotsPager, TrashPager,
 };
-use transport::{
-    SendPolicy, StdMonotonicTimer, TransportRetryPolicy, WireRequest, DEFAULT,
-    IO_INACTIVITY_TIMEOUT,
-};
+use transport::{SendPolicy, StdMonotonicTimer, TransportRetryPolicy, WireRequest, DEFAULT};
+pub use transport_error::TransportError;
 pub use ClientError as Error;
 
 /// Per-operation options, defined once in `loonfs-api` and shared with the
@@ -90,7 +97,7 @@ pub struct Client {
     subject: Option<loonfs_api::Subject>,
     base_url: String,
     auth_token: Option<SecretString>,
-    http: reqwest::Client,
+    transport: transport::Transport,
     /// Optional timeout configured for each HTTP attempt.
     ///
     /// Replay-safe requests use the smaller of this value and the time left in
@@ -101,7 +108,7 @@ pub struct Client {
     transport_retry_enabled: bool,
     /// Attempt count, delay, and total duration limits for replay-safe requests.
     transport_retry: TransportRetryPolicy,
-    /// Monotonic clock used to enforce the total retry limit.
+    /// Monotonic clock used for inactivity and retry limits.
     timer: Arc<dyn transport::MonotonicTimer>,
     /// Capability document cache, shared by clones and filled on first use.
     capabilities: Arc<OnceLock<CapabilityDocument>>,
@@ -129,30 +136,29 @@ impl Client {
     /// validation.
     pub fn new(config: ClientConfig) -> Result<Self> {
         config.validate()?;
+        let service = reqwest_transport::service(&config)?;
+        Self::with_transport(config, service)
+    }
+
+    /// Creates a client for in-process hosts and tests using an HTTP service.
+    /// Retries, timeouts, and identity headers apply the same way as with
+    /// [`Client::new`].
+    pub fn with_transport<S>(config: ClientConfig, service: S) -> Result<Self>
+    where
+        S: Service<http::Request<Body>, Response = http::Response<Body>, Error = TransportError>
+            + Clone
+            + Send
+            + Sync
+            + 'static,
+        S::Future: Send + 'static,
+    {
+        config.validate()?;
         let request_timeout = config.request_timeout_ms.map(Duration::from_millis);
-        let mut builder = reqwest::Client::builder()
-            // Bounds a stalled connection without cutting off a slow but
-            // progressing transfer, which a whole-request deadline would.
-            .read_timeout(IO_INACTIVITY_TIMEOUT)
-            .connect_timeout(IO_INACTIVITY_TIMEOUT);
-        if let Some(request_timeout) = request_timeout {
-            builder = builder.timeout(request_timeout);
-        }
-        // Additive: the platform roots stay in place, so one configured
-        // private CA does not cost this client every public one.
-        for certificate in config.extra_root_certificates()? {
-            builder = builder.add_root_certificate(certificate);
-        }
         Ok(Self {
             subject: None,
             base_url: config.server_url.trim().trim_end_matches('/').to_owned(),
             auth_token: config.auth_token,
-            http: builder
-                .build()
-                .map_err(|err| ClientError::ConfigValidation {
-                    field: "http_client",
-                    reason: format!("failed to build: {err}"),
-                })?,
+            transport: BoxCloneSyncService::new(service),
             request_timeout,
             transport_retry_enabled: !config.disable_transient_retry,
             transport_retry: DEFAULT,

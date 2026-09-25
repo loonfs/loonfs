@@ -247,7 +247,7 @@ impl Client {
                 content_ref.size_bytes
             )));
         }
-        let mut request = WireRequest::presigned(reqwest::Method::GET, url);
+        let mut request = WireRequest::presigned(http::Method::GET, url);
         for (name, value) in headers {
             request = request.header(name, value);
         }

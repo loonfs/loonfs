@@ -94,7 +94,7 @@ impl Client {
                 "unsupported presigned part method `{method}`"
             )));
         }
-        let mut request = WireRequest::presigned(reqwest::Method::PUT, url);
+        let mut request = WireRequest::presigned(http::Method::PUT, url);
         for (name, value) in headers {
             request = request.header(name, value);
         }
