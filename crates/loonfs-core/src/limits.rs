@@ -9,7 +9,9 @@
 //! plus a margin for clock error and scheduling delay. Callers may configure
 //! a larger grace window, never a smaller one.
 
-use loonfs_objectstore::{PROVIDER_ATTEMPT_TIMEOUT, PROVIDER_OPERATION_DEADLINE};
+use loonfs_objectstore::{
+    PROVIDER_ATTEMPT_TIMEOUT, PROVIDER_OPERATION_DEADLINE, PROVIDER_PUBLICATION_REQUEST_BOUND,
+};
 
 /// Maximum semantic operations in one explicit commit, bounding how long one
 /// request can occupy the serialized publisher during planning and
@@ -54,22 +56,19 @@ pub const FOLD_AT_WAL_SEGMENTS: u64 = 32;
 const _: () =
     assert!(0 < FOLD_AT_WAL_SEGMENTS && FOLD_AT_WAL_SEGMENTS < MAX_UNFLUSHED_WAL_SEGMENTS);
 
-/// Provider operation deadline, in milliseconds (`loonfs-objectstore`
-/// consumes it across every retry of one single-request operation).
-/// Multipart transfers of large immutable payloads carry no
-/// whole-operation clock — their parts are individually time- and
-/// retry-bounded — which leaves the floor derivation below untouched:
-/// every object it times (WAL segments inside the publish budget,
-/// pins, and numbered manifests) is a small control
-/// object on the single-request path, and publications self-enforce their
-/// budgets by local monotonic elapsed time regardless of provider deadlines.
+/// Provider retry-admission deadline, in milliseconds. This alone does not
+/// bound a final retry's backoff and request phase.
 pub const PROVIDER_OPERATION_DEADLINE_MS: u64 = PROVIDER_OPERATION_DEADLINE.as_millis() as u64;
 
 /// One control-plane provider HTTP attempt's request timeout, in
-/// milliseconds. An operation's total wall time is bounded by
-/// `PROVIDER_OPERATION_DEADLINE_MS + PROVIDER_ATTEMPT_TIMEOUT_MS`, because the
-/// deadline gates starting an attempt rather than preempting one.
+/// milliseconds. Payload-sized conditional writes use a longer timeout.
 pub const PROVIDER_ATTEMPT_TIMEOUT_MS: u64 = PROVIDER_ATTEMPT_TIMEOUT.as_millis() as u64;
+
+/// Allowance for publication request phases, including retry admission,
+/// final backoff and a payload-sized final attempt. Conditional publications
+/// always use a single request, even when their bodies are large.
+pub const PROVIDER_PUBLICATION_REQUEST_BOUND_MS: u64 =
+    PROVIDER_PUBLICATION_REQUEST_BOUND.as_millis() as u64;
 
 /// Maximum elapsed time from observing a tip to initiating its next numbered put.
 pub const WAL_PUBLISH_BUDGET_MS: u64 = 60_000;
@@ -106,8 +105,7 @@ const fn max_u64(left: u64, right: u64) -> u64 {
 pub const GC_MIN_GRACE_WINDOW_MS: u64 = max_u64(
     max_u64(WAL_PUBLISH_BUDGET_MS, PIN_VERIFY_BUDGET_MS),
     METADATA_PUBLICATION_BUDGET_MS,
-) + PROVIDER_OPERATION_DEADLINE_MS
-    + PROVIDER_ATTEMPT_TIMEOUT_MS
+) + PROVIDER_PUBLICATION_REQUEST_BOUND_MS
     + GC_SAFETY_MARGIN_MS;
 
 /// Minimum provider age of a metadata segment no manifest lists before
@@ -134,10 +132,7 @@ pub const DIRECT_TRANSFER_URL_TTL_MS: u64 = 15 * 60 * 1000;
 pub const NAMESPACE_RETIREMENT_GRACE_MS: u64 = METADATA_PUBLICATION_BUDGET_MS
     + max_u64(
         GC_MIN_GRACE_WINDOW_MS,
-        DIRECT_TRANSFER_URL_TTL_MS
-            + PROVIDER_OPERATION_DEADLINE_MS
-            + PROVIDER_ATTEMPT_TIMEOUT_MS
-            + GC_SAFETY_MARGIN_MS,
+        DIRECT_TRANSFER_URL_TTL_MS + PROVIDER_PUBLICATION_REQUEST_BOUND_MS + GC_SAFETY_MARGIN_MS,
     );
 
 /// Default age of an unreachable object before garbage collection may remove it.
@@ -192,10 +187,24 @@ mod tests {
     use crate::gc::GcConfig;
 
     #[test]
+    fn minimum_grace_reserves_payload_sized_publication_attempts() {
+        let retry = loonfs_objectstore::PROVIDER_OPERATION_DEADLINE;
+        let attempt = loonfs_objectstore::PROVIDER_TRANSFER_ATTEMPT_TIMEOUT;
+        let backoff = loonfs_objectstore::PROVIDER_MAX_RETRY_BACKOFF;
+        assert!(
+            GC_MIN_GRACE_WINDOW_MS
+                >= METADATA_PUBLICATION_BUDGET_MS
+                    + (retry + backoff + attempt).as_millis() as u64
+                    + GC_SAFETY_MARGIN_MS,
+            "conditional WAL and manifest puts can carry payload-sized bodies"
+        );
+    }
+
+    #[test]
     fn derived_minimum_grace_window_sits_below_the_default() {
-        // 15 min publication + 2 min provider deadline + 30 s attempt
-        // timeout + 3 min margin = 20.5 minutes.
-        assert_eq!(GC_MIN_GRACE_WINDOW_MS, 1_230_000);
+        // 15 min publication + 2 min retry budget + 15 s final backoff
+        // + 2 min payload attempt + 3 min margin = 22 min 15 s.
+        assert_eq!(GC_MIN_GRACE_WINDOW_MS, 1_335_000);
         assert!(
             GC_MIN_GRACE_WINDOW_MS < GcConfig::default().grace_window_ms,
             "the conservative default grace window must satisfy its own floor"

@@ -841,7 +841,7 @@ Segments not referenced by a collection root are protected for a minimum provide
 streaming publication budget + minimum GC grace <= 24 hours
 ```
 
-With the current constants, the job can initiate publication for at most 23 hours, 39 minutes, and 30 seconds after its timer begins before output. Beyond that point it abandons publication because its earliest unreferenced output may become collectable. A cancelled or crashed job leaves output subject to the same age rule.
+With the current constants, the job can initiate publication for at most 23 hours, 37 minutes, and 45 seconds after its timer begins before output. Beyond that point it abandons publication because its earliest unreferenced output may become collectable. A cancelled or crashed job leaves output subject to the same age rule.
 
 Streaming compaction applies the row-retention rules for its selected window, just as bounded compaction does. It must preserve every retained view. Restart begins a new plan from the current manifest; there is no durable compaction cursor or output-protection record.
 
@@ -1496,22 +1496,22 @@ Publication and collection use the timing relationships below. Configurable sizi
 | `METADATA_PUBLICATION_BUDGET_MS` | 900,000 | First output through initiation of a bounded manifest publication. |
 | `PROVIDER_OPERATION_DEADLINE_MS` | 120,000 | Shared client-operation retry budget. |
 | `PROVIDER_ATTEMPT_TIMEOUT_MS` | 30,000 | One control-operation attempt. |
+| `PROVIDER_PUBLICATION_REQUEST_BOUND_MS` | 255,000 | Retry budget, final backoff, and payload-sized final request. |
 | `GC_SAFETY_MARGIN_MS` | 180,000 | Combined relative-clock, timestamp-precision, and scheduling allowance. |
-| `GC_MIN_GRACE_WINDOW_MS` | 1,230,000 | Derived minimum ordinary collection grace. |
+| `GC_MIN_GRACE_WINDOW_MS` | 1,335,000 | Derived minimum ordinary collection grace. |
 | `GC_DEFAULT_GRACE_WINDOW_MS` | 3,600,000 | Default configured ordinary grace. |
 | `UNREFERENCED_SEGMENT_MIN_AGE_MS` | 86,400,000 | Segments must be strictly older than this before unreferenced collection. |
-| `METADATA_COMPACTION_BUDGET_MS` | 85,170,000 | Maximum elapsed time before initiating streaming publication. |
+| `METADATA_COMPACTION_BUDGET_MS` | 85,065,000 | Maximum elapsed time before initiating streaming publication. |
 | `DIRECT_TRANSFER_URL_TTL_MS` | 900,000 | Lifetime of a direct transfer capability. |
-| `NAMESPACE_RETIREMENT_GRACE_MS` | 2,130,000 | Minimum grace from the deletion call clock. |
+| `NAMESPACE_RETIREMENT_GRACE_MS` | 2,235,000 | Minimum grace from the deletion call clock. |
 
-A provider attempt can begin before its operation deadline and finish within its separate timeout. The grace therefore includes both terms. This client-side calculation does not prove that a timed-out remote mutation had no effect.
+A provider retry can be admitted before its operation deadline, wait up to 15 seconds of backoff, then take up to 120 seconds for a payload-sized request. Conditional WAL and manifest writes can exceed the payload threshold even though they use a single request. The publication allowance therefore reserves 120 + 15 + 120 seconds, not the 30-second small-request timeout. This is a request-phase allowance, not a bound on response-body consumption. It retains the relative-clock and scheduling assumptions and does not prove that a timed-out remote mutation had no effect.
 
 ```text
 GC_MIN_GRACE_WINDOW_MS
     = max(WAL_PUBLISH_BUDGET_MS, PIN_VERIFY_BUDGET_MS,
           METADATA_PUBLICATION_BUDGET_MS)
-      + PROVIDER_OPERATION_DEADLINE_MS
-      + PROVIDER_ATTEMPT_TIMEOUT_MS
+      + PROVIDER_PUBLICATION_REQUEST_BOUND_MS
       + GC_SAFETY_MARGIN_MS
 
 METADATA_COMPACTION_BUDGET_MS
@@ -1520,8 +1520,8 @@ METADATA_COMPACTION_BUDGET_MS
 NAMESPACE_RETIREMENT_GRACE_MS
     = METADATA_PUBLICATION_BUDGET_MS
       + max(GC_MIN_GRACE_WINDOW_MS,
-            DIRECT_TRANSFER_URL_TTL_MS + PROVIDER_OPERATION_DEADLINE_MS
-            + PROVIDER_ATTEMPT_TIMEOUT_MS + GC_SAFETY_MARGIN_MS)
+            DIRECT_TRANSFER_URL_TTL_MS + PROVIDER_PUBLICATION_REQUEST_BOUND_MS
+            + GC_SAFETY_MARGIN_MS)
 ```
 
 Configured grace `T` cannot be below the minimum. Retirement uses the greater of `T` and the retirement minimum. Segment age and completed-content grace use their fixed constants. Changing a publication bound or its safety relationship changes the protocol, not just a scheduling preference.
@@ -1534,9 +1534,9 @@ Configured grace `T` cannot be below the minimum. Retirement uses the greater of
 | `COMPLETED_UPLOAD_RECEIPT_WINDOW_MS` | 604,800,000 | Seven-day window in which completed content can issue new receipts. |
 | `CONTENT_RECEIPT_TTL_MS` | 3,600,000 | One-hour token lifetime. |
 | `COMPLETED_UPLOAD_ADMISSION_WINDOW_MS` | 608,400,000 | Receipt issuance window plus the final token's lifetime. |
-| `CONTENT_RECLAMATION_GRACE_MS` | 609,630,000 | Admission window plus minimum GC grace. |
+| `CONTENT_RECLAMATION_GRACE_MS` | 609,735,000 | Admission window plus minimum GC grace. |
 
-The completed-content interval is seven days, one hour, and twenty minutes thirty seconds. Eligibility is still conditional on the namespace state and reference evidence; reaching that age does not delete referenced content.
+The completed-content interval is seven days, one hour, and twenty-two minutes fifteen seconds. Eligibility is still conditional on the namespace state and reference evidence; reaching that age does not delete referenced content.
 
 A direct multipart upload is also subject to provider transfer geometry. The current reference limits are 10,000 parts, 5 MiB minimum configured part size, 5 GiB maximum configured part size, and 1,000 part capabilities per signing request. These limits do not override a provider's lower maximum object size or other supported-provider constraints.
 

@@ -57,6 +57,9 @@ pub const PROVIDER_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// operation.
 pub const PROVIDER_OPERATION_DEADLINE: Duration = Duration::from_secs(120);
 
+/// Maximum retry delay after the provider client admits a final retry.
+pub const PROVIDER_MAX_RETRY_BACKOFF: Duration = Duration::from_secs(15);
+
 /// Minimum payload size for native multipart overwrite uploads.
 ///
 /// Create-if-absent and compare-and-swap writes always use a single request
@@ -84,6 +87,17 @@ pub(crate) const MAX_PROVIDER_MULTIPART_PARTS: usize = 10_000;
 /// this fixed timeout treats an excessively slow part as stalled. Multipart
 /// parts are bounded by [`PROVIDER_MULTIPART_PART_BYTES`].
 pub const PROVIDER_TRANSFER_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Request-phase allowance for a single-request publication, including retries.
+///
+/// Conditional WAL and manifest puts can carry payload-sized bodies. The
+/// provider client checks its retry deadline before backoff, so the final
+/// request may finish one backoff and one payload attempt after that deadline.
+/// This does not bound response-body consumption or prove that a timed-out
+/// request cannot take effect remotely.
+pub const PROVIDER_PUBLICATION_REQUEST_BOUND: Duration = PROVIDER_OPERATION_DEADLINE
+    .saturating_add(PROVIDER_MAX_RETRY_BACKOFF)
+    .saturating_add(PROVIDER_TRANSFER_ATTEMPT_TIMEOUT);
 
 /// Request bodies at least this large are payload transfers and get
 /// [`PROVIDER_TRANSFER_ATTEMPT_TIMEOUT`] as their request-phase bound;
@@ -121,6 +135,11 @@ pub(crate) fn provider_client_options() -> provider_store::ClientOptions {
 pub(crate) fn provider_retry_config() -> provider_store::RetryConfig {
     provider_store::RetryConfig {
         retry_timeout: PROVIDER_OPERATION_DEADLINE,
+        backoff: provider_store::BackoffConfig {
+            init_backoff: DEFAULT.initial_backoff,
+            max_backoff: PROVIDER_MAX_RETRY_BACKOFF,
+            ..Default::default()
+        },
         ..Default::default()
     }
 }

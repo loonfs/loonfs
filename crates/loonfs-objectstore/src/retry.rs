@@ -1,7 +1,7 @@
 //! Shared bounded-backoff machinery for replay-safe store operations.
 
 use crate::attempts::count_retry_attempt;
-use crate::PROVIDER_OPERATION_DEADLINE;
+use crate::{PROVIDER_MAX_RETRY_BACKOFF, PROVIDER_OPERATION_DEADLINE};
 use loonfs_api::{transport_retry_backoff, OperationDeadline, TransportRetryPolicy};
 use std::future::Future;
 use std::time::Duration;
@@ -10,7 +10,7 @@ use std::time::Duration;
 pub(crate) const DEFAULT: TransportRetryPolicy = TransportRetryPolicy {
     max_retries: 10,
     initial_backoff: Duration::from_millis(100),
-    max_backoff: Duration::from_secs(15),
+    max_backoff: PROVIDER_MAX_RETRY_BACKOFF,
     operation_deadline: PROVIDER_OPERATION_DEADLINE,
 };
 
