@@ -154,18 +154,7 @@ pub(crate) async fn publish_manifest<S: ObjectStore + ?Sized>(
         .await
     {
         Ok(_) => {
-            let elapsed_ms = deadline.elapsed_ms();
-            // A put that lands after the budget may have landed on a reclaimed number.
-            if elapsed_ms > crate::limits::METADATA_PUBLICATION_BUDGET_MS {
-                return Err(CoreError::Store {
-                    object_key,
-                    message: format!(
-                        "manifest publication outcome is unknown after {elapsed_ms}ms (budget {}ms)",
-                        crate::limits::METADATA_PUBLICATION_BUDGET_MS,
-                    ),
-                    class: crate::error::StoreFailureClass::RetryableTransport,
-                });
-            }
+            ensure_publication_in_budget(&object_key, deadline)?;
             ManifestPublicationOutcome::Published(candidate.clone())
         }
         Err(ObjectStoreError::PreconditionFailed { .. }) => {
@@ -207,6 +196,13 @@ pub(crate) async fn publish_manifest<S: ObjectStore + ?Sized>(
                     match outcome {
                         ManifestClassification::Installable => Ok(WriteEvidence::Unknown),
                         ManifestClassification::Settled(outcome) => {
+                            if matches!(
+                                outcome,
+                                ManifestPublicationOutcome::Published(_)
+                                    | ManifestPublicationOutcome::CoveredByCurrent(_)
+                            ) {
+                                ensure_publication_in_budget(&object_key, deadline)?;
+                            }
                             Ok(WriteEvidence::Landed(outcome))
                         }
                     }
@@ -233,6 +229,22 @@ pub(crate) async fn publish_manifest<S: ObjectStore + ?Sized>(
         }
     }
     Ok(outcome)
+}
+
+fn ensure_publication_in_budget(object_key: &str, deadline: &Deadline) -> Result<()> {
+    let elapsed_ms = deadline.elapsed_ms();
+    // A put that lands after the budget may have landed on a reclaimed number.
+    if elapsed_ms > crate::limits::METADATA_PUBLICATION_BUDGET_MS {
+        return Err(CoreError::Store {
+            object_key: object_key.to_owned(),
+            message: format!(
+                "manifest publication outcome is unknown after {elapsed_ms}ms (budget {}ms)",
+                crate::limits::METADATA_PUBLICATION_BUDGET_MS,
+            ),
+            class: crate::error::StoreFailureClass::RetryableTransport,
+        });
+    }
+    Ok(())
 }
 
 fn classify_current(
