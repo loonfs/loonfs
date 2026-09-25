@@ -406,6 +406,18 @@ impl FsMaintenance {
         Ok(epoch)
     }
 
+    async fn forget_fenced_compactor_epoch(
+        &self,
+        namespace_id: &NamespaceId,
+        fenced_epoch: CompactorEpoch,
+    ) {
+        let mut epochs = self.compactor_epochs.lock().await;
+        // An older attempt can finish after another request has claimed again.
+        if epochs.get(namespace_id) == Some(&fenced_epoch) {
+            epochs.remove(namespace_id);
+        }
+    }
+
     async fn reorganize_once(
         &self,
         namespace_id: &NamespaceId,
@@ -466,7 +478,8 @@ impl FsMaintenance {
                 return Ok(ReorganizationStep::CompactionPlanned(spec))
             }
             loonfs_core::MetadataReorganizeOutcome::Fenced => {
-                self.compactor_epochs.lock().await.remove(namespace_id);
+                self.forget_fenced_compactor_epoch(namespace_id, compactor_epoch)
+                    .await;
                 return Ok(ReorganizationStep::Fenced);
             }
             loonfs_core::MetadataReorganizeOutcome::Superseded => {
@@ -564,7 +577,8 @@ impl FsMaintenance {
             outcome,
             Ok(loonfs_core::MetadataCompactionJobOutcome::Fenced)
         ) {
-            self.compactor_epochs.lock().await.remove(namespace_id);
+            self.forget_fenced_compactor_epoch(namespace_id, compactor_epoch)
+                .await;
         }
         let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         self.core
