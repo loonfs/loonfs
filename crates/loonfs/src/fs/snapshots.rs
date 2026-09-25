@@ -105,8 +105,11 @@ impl FsReader {
         request: PageRequest<CheckpointPageCursor>,
     ) -> Result<ListSnapshotsResponse> {
         if self.core.subject.is_some() {
-            let (engine, context) = self.core.pinned_metadata_read(namespace_id).await?;
-            engine.require_administrator(&context).await?;
+            self.core
+                .read(namespace_id, |engine, context| async move {
+                    Ok(engine.require_administrator(&context).await?)
+                })
+                .await?;
         }
         self.core.record_trace_context(&tracing::Span::current());
         let now_ms = loonfs_core::time::current_time_ms()?;

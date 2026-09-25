@@ -214,6 +214,14 @@ pub enum RuntimeError {
     /// An error surfaced by the underlying `loonfs-core` engine.
     #[error(transparent)]
     Core(#[from] CoreError),
+    /// A newer manifest replaced a captured view whose segment is missing.
+    #[error("captured manifest `{expected_manifest_no}` has a missing segment; current manifest is `{actual_manifest_no}`")]
+    StaleHead {
+        /// Manifest captured by the read.
+        expected_manifest_no: ManifestNo,
+        /// Current manifest observed after the missing segment.
+        actual_manifest_no: ManifestNo,
+    },
     /// A request field fails runtime policy.
     #[error("invalid request: {message}")]
     InvalidRequest {
@@ -247,6 +255,7 @@ impl RuntimeError {
     pub fn code(&self) -> ErrorCode {
         match self {
             Self::Core(error) => error.code(),
+            Self::StaleHead { .. } => ErrorCode::StaleHead,
             Self::Config(_) | Self::InvalidRequest { .. } => ErrorCode::InvalidRequest,
             Self::RuntimeTask(_) => ErrorCode::ServerError,
         }
@@ -261,7 +270,10 @@ impl RuntimeError {
     pub fn details(&self) -> Option<loonfs_api::ErrorDetails> {
         match self {
             Self::Core(error) => error.details(),
-            Self::Config(_) | Self::RuntimeTask(_) | Self::InvalidRequest { .. } => None,
+            Self::Config(_)
+            | Self::RuntimeTask(_)
+            | Self::InvalidRequest { .. }
+            | Self::StaleHead { .. } => None,
         }
     }
 
@@ -294,7 +306,10 @@ impl RuntimeError {
     pub fn public_message(&self) -> std::borrow::Cow<'static, str> {
         let store_message = match self {
             Self::Core(error) => error.object_store_public_message(),
-            Self::Config(_) | Self::RuntimeTask(_) | Self::InvalidRequest { .. } => None,
+            Self::Config(_)
+            | Self::RuntimeTask(_)
+            | Self::InvalidRequest { .. }
+            | Self::StaleHead { .. } => None,
         };
         if let Some(message) = store_message {
             return message;
@@ -305,6 +320,7 @@ impl RuntimeError {
             | Self::RuntimeTask(message)
             | Self::InvalidRequest { message, .. } => std::borrow::Cow::Owned(message.clone()),
             Self::Core(error) => std::borrow::Cow::Owned(error.to_string()),
+            Self::StaleHead { .. } => std::borrow::Cow::Owned(self.to_string()),
         }
     }
 }

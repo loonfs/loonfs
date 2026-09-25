@@ -3,6 +3,7 @@
 mod core;
 mod maintenance;
 mod namespaces;
+mod read_result;
 mod reads;
 mod snapshots;
 mod speculative_read;

@@ -7,6 +7,222 @@ use loonfs::{
 };
 use tempfile::tempdir;
 
+async fn read_during_compaction_and_collection(
+    durable: bool,
+    pin_in_memory: bool,
+) -> loonfs::Result<loonfs::PathEntry> {
+    use loonfs_objectstore::{local_fs_store::LocalFsStore, ObjectStore};
+    use loonfs_test_support::stores::{
+        BlockingStore, KeyPredicate, MetadataMapStore, OperationClass,
+    };
+    use std::collections::BTreeSet;
+    use std::sync::{Arc, Mutex};
+
+    let directory = tempdir().expect("tempdir");
+    let old_segments = Arc::new(Mutex::new(BTreeSet::<String>::new()));
+    let selected = old_segments.clone();
+    let store = Arc::new(BlockingStore::new(
+        MetadataMapStore::aged(
+            LocalFsStore::new(directory.path()).expect("store"),
+            KeyPredicate::new(move |key| selected.lock().expect("old segments").contains(key)),
+        ),
+        KeyPredicate::metadata_segment(),
+        OperationClass::Get,
+    ));
+    let runtime = open_runtime_async(store.clone(), "reader-gc-probe").await;
+    let namespace = NamespaceId::parse("reader-gc-probe").expect("namespace");
+    runtime
+        .create_namespace(
+            &namespace,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("namespace");
+    for name in ["a", "b"] {
+        runtime
+            .put_file_bytes(
+                &namespace,
+                &format!("/{name}"),
+                name.as_bytes(),
+                PutFileOptions::new(loonfs_test_support::test_actor()),
+            )
+            .await
+            .expect("file");
+        runtime
+            .maintenance
+            .flush_wal(&namespace)
+            .await
+            .expect("flush");
+    }
+    let segment_keys = store
+        .list_prefix(&loonfs_objectstore::keys::metadata_segment_prefix(
+            &namespace,
+        ))
+        .await
+        .expect("list metadata");
+    old_segments
+        .lock()
+        .expect("old segments")
+        .extend(segment_keys.into_iter().filter(|key| {
+            loonfs_objectstore::layout::parse_object_key(key).is_some_and(|parsed| {
+                parsed.family() == loonfs_objectstore::layout::DurableObjectFamily::MetadataSegment
+            })
+        }));
+    assert!(!old_segments.lock().expect("old segments").is_empty());
+    let snapshot = if durable {
+        Some(
+            runtime
+                .writer
+                .create_snapshot(
+                    &namespace,
+                    CreateSnapshotOptions {
+                        name: "durable".to_owned(),
+                        expires_at_ms: loonfs::current_time_ms().expect("time") + 60_000,
+                    },
+                )
+                .await
+                .expect("snapshot"),
+        )
+    } else {
+        None
+    };
+    let reader = loonfs::FsReader::builder_with_store(store.clone())
+        .build()
+        .await
+        .expect("cold reader");
+    let pinned = if let Some(snapshot) = &snapshot {
+        Some(
+            reader
+                .pin_namespace_at_snapshot(&namespace, &snapshot.checkpoint_id)
+                .await
+                .expect("durable view"),
+        )
+    } else if pin_in_memory {
+        Some(reader.pin_namespace(&namespace).await.expect("memory view"))
+    } else {
+        None
+    };
+    let captured = runtime
+        .reader
+        .get_path_entry(&namespace, "/a", Default::default())
+        .await
+        .expect("captured entry");
+    store.block_next();
+    let read = async {
+        match &pinned {
+            Some(pinned) => pinned.get_path_entry("/a", Default::default()).await,
+            None => {
+                reader
+                    .get_path_entry(&namespace, "/a", Default::default())
+                    .await
+            }
+        }
+    };
+    let maintenance = async {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            store.wait_until_blocked(),
+        )
+        .await
+        .expect("read reached an uncached segment");
+        runtime
+            .put_file_bytes(
+                &namespace,
+                "/a",
+                b"current",
+                PutFileOptions {
+                    behavior: DestinationBehavior::Replace,
+                    ..PutFileOptions::new(loonfs_test_support::test_actor())
+                },
+            )
+            .await
+            .expect("replace captured file");
+        runtime
+            .maintenance
+            .flush_wal(&namespace)
+            .await
+            .expect("flush replacement");
+        let mut published = false;
+        let mut converged = false;
+        for _ in 0..16 {
+            let outcome = runtime
+                .maintenance
+                .compact_metadata(&namespace)
+                .await
+                .expect("compact");
+            if matches!(
+                outcome.compaction,
+                loonfs::MetadataCompactionOutcome::NotNeeded
+            ) {
+                converged = true;
+                break;
+            }
+            assert!(
+                matches!(
+                    outcome.compaction,
+                    loonfs::MetadataCompactionOutcome::BoundedMergePublished
+                        | loonfs::MetadataCompactionOutcome::Published { .. }
+                ),
+                "unexpected compaction: {:?}",
+                outcome.compaction
+            );
+            published = true;
+        }
+        assert!(published && converged);
+        let gc = runtime
+            .maintenance
+            .gc_namespace(&namespace, &Default::default())
+            .await
+            .expect("GC");
+        assert!(
+            gc.deleted.metadata_segments > 0,
+            "the pass really collected old segments"
+        );
+        store.release();
+    };
+    let (result, ()) = tokio::join!(read, maintenance);
+    let fresh = loonfs::FsReader::builder_with_store(store)
+        .build()
+        .await
+        .expect("fresh reader");
+    let current = fresh
+        .get_file_bytes(&namespace, "/a")
+        .await
+        .expect("current data remains readable");
+    assert_eq!(current.bytes, b"current");
+    if let Ok(entry) = &result {
+        let current_entry = fresh
+            .get_path_entry(&namespace, "/a", Default::default())
+            .await
+            .expect("current entry");
+        assert_eq!(entry, if durable { &captured } else { &current_entry });
+    }
+    runtime.writer.shutdown().await.expect("shutdown");
+    result
+}
+
+#[tokio::test]
+async fn memory_pinned_read_returns_stale_head_after_compaction_and_collection() {
+    let error = read_during_compaction_and_collection(false, true)
+        .await
+        .expect_err("captured segments were collected");
+    assert_eq!(error.code(), ErrorCode::StaleHead);
+}
+
+#[tokio::test]
+async fn durable_pinned_read_survives_compaction_and_collection() {
+    read_during_compaction_and_collection(true, true)
+        .await
+        .expect("durable snapshot remains readable");
+}
+
+#[tokio::test]
+async fn ordinary_read_returns_current_data_after_compaction_and_collection() {
+    read_during_compaction_and_collection(false, false)
+        .await
+        .expect("one current read remains readable");
+}
+
 #[tokio::test]
 async fn snapshot_directory_cursor_resumes_only_at_its_snapshot() {
     let temp_dir = tempdir().expect("tempdir");
@@ -660,4 +876,88 @@ async fn a_pinned_reader_rejects_options_naming_another_snapshot() {
             .await
             .map(drop),
     );
+}
+
+#[tokio::test]
+async fn a_missing_current_segment_stays_corrupt_and_manifest_read_failures_propagate() {
+    use loonfs_objectstore::{keys, local_fs_store::LocalFsStore, ObjectStore};
+    use loonfs_test_support::stores::{
+        FailStore, InjectedError, KeyPredicate, OperationClass, RecordingStore,
+    };
+    use std::sync::Arc;
+
+    let directory = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("missing-current-segment").expect("namespace");
+    let failures = Arc::new(FailStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::manifest(&namespace_id),
+        OperationClass::Get,
+        InjectedError::Transport("manifest read failed".to_owned()),
+    ));
+    let store = Arc::new(RecordingStore::new(failures.clone(), KeyPredicate::any()));
+    let runtime = open_runtime_async(store.clone(), "missing-current-segment").await;
+    runtime
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("namespace");
+    runtime
+        .put_file_bytes(
+            &namespace_id,
+            "/file",
+            b"content",
+            PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("file");
+    runtime
+        .maintenance
+        .flush_wal(&namespace_id)
+        .await
+        .expect("flush");
+    let reader = loonfs::FsReader::builder_with_store(store.clone())
+        .build()
+        .await
+        .expect("reader");
+    let pinned = reader
+        .pin_namespace(&namespace_id)
+        .await
+        .expect("captured view");
+    for key in store
+        .list_prefix(&keys::metadata_segment_prefix(&namespace_id))
+        .await
+        .expect("segments")
+    {
+        store.delete(&key).await.expect("delete segment");
+    }
+    store.reset();
+    assert_core_error_kind(
+        reader
+            .get_path_entry(&namespace_id, "/file", Default::default())
+            .await,
+        ErrorCode::NamespaceCorrupt,
+    );
+    assert_eq!(
+        store
+            .snapshot()
+            .iter()
+            .filter(|operation| operation.key() == keys::hint(&namespace_id))
+            .count(),
+        2
+    );
+    assert_eq!(store.count(OperationClass::Put), 0);
+    assert_eq!(store.count(OperationClass::Delete), 0);
+
+    failures.fail_all();
+    store.reset();
+    assert_core_error_kind(
+        pinned.get_path_entry("/file", Default::default()).await,
+        ErrorCode::ServerError,
+    );
+    assert_eq!(failures.attempts(), 1);
+    assert_eq!(store.count(OperationClass::Put), 0);
+    assert_eq!(store.count(OperationClass::Delete), 0);
+    runtime.writer.shutdown().await.expect("shutdown");
 }
