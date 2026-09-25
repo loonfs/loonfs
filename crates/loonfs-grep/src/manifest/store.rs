@@ -229,6 +229,17 @@ pub async fn publish_grep_manifest<S: ObjectStore + ?Sized>(
         }
         Err(error) => return Err(store_error(&object_key, &error).into()),
     }
+    let elapsed_ms = deadline.elapsed_ms();
+    if elapsed_ms > METADATA_PUBLICATION_BUDGET_MS {
+        return Err(GrepManifestError::Store {
+            object_key,
+            message: format!(
+                "manifest publication outcome is unknown after {elapsed_ms}ms (budget {METADATA_PUBLICATION_BUDGET_MS}ms)",
+            ),
+            class: StoreFailureClass::RetryableTransport,
+        }
+        .into());
+    }
     let mut loaded = LoadedGrepManifest { hint, manifest };
     match raise_grep_hint(
         store,

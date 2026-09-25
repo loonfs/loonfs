@@ -899,7 +899,9 @@ The combined allowance is 180,000 milliseconds. This is one relative-clock, prec
 
 Publication budgets use monotonic elapsed time. The minimum ordinary grace includes the longest bounded publication, one provider-operation deadline, one attempt timeout, and the combined allowance. Fork installation and streaming compaction reserve that grace within their respective lifetime bounds. Appendix C records the exact calculations.
 
-These assumptions exclude an unbounded pause between a budget check and the write it permits. A client timeout does not establish that a remote write had no effect; unknown outcomes still require reconciliation.
+If a publication's budget has expired when its put returns, the publisher treats the outcome as unknown, even if the put succeeded. A client timeout does not establish that a remote write had no effect; unknown outcomes still require reconciliation.
+
+The same rule applies when a manifest put has an unknown outcome and a read-back finds identical bytes. The read-back confirms publication only while the budget has not expired. After that, the bytes may come from a delayed put that recreated a collected manifest number. The outcome stays unknown, and the caller reloads and plans from current state.
 
 Direct expiry checks do not add GC grace to the requested lifetime. A host ahead by `E` milliseconds can reject an expired upload or snapshot up to `E` milliseconds earlier than the creating host would. Reclamation grace protects concurrent publication; it does not synchronize expiry decisions across hosts.
 
@@ -1603,7 +1605,7 @@ Discovery loads the hinted manifest and probes successive numbers until not-foun
 
 An index watermark ahead of a reader's pinned head does not disable the index. The query pins the head again once before using that index.
 
-A step writes segments first, then publishes the next manifest with put-if-absent. A losing publisher reloads durable state and re-plans against current inputs. If a manifest put ends with an unknown outcome, the publisher runs discovery again and reads the manifest at the number it attempted. If that manifest exists with an identical payload, the publication succeeded. Otherwise the publisher reloads and plans its next step from current state. A successful publisher raises the hint with CAS, taking the greater number. A hint read or write that returns no compare token is a store error. A failed hint raise does not undo publication.
+A step writes segments first, then publishes the next manifest with put-if-absent. A losing publisher reloads durable state and re-plans against current inputs. If a manifest put ends with an unknown outcome, the publisher runs discovery again and reads the manifest at the number it attempted. If that manifest exists with an identical payload and the publication budget has not expired, the publication succeeded. Otherwise the publisher reloads and plans its next step from current state. A put that succeeds after the budget has expired also has an unknown outcome, as in section 11.4. A successful publisher raises the hint with CAS, taking the greater number. A hint read or write that returns no compare token is a store error. A failed hint raise does not undo publication.
 
 Every output-producing step must initiate publication within `METADATA_PUBLICATION_BUDGET_MS`, measured from before its first output. It writes no manifest after that bound. Grep uses bounded steps rather than core streaming compaction's epoch claim; conditional numbered publication and input revalidation control competing steps.
 

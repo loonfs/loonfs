@@ -420,3 +420,117 @@ async fn regressing_successors_fail_on_publication_and_discovery() {
         ));
     }
 }
+
+#[tokio::test]
+async fn a_late_ambiguous_put_cannot_confirm_a_recreated_manifest() {
+    use crate::common::GrepHost;
+    use loonfs::{CreateNamespaceOptions, FsWriter, SharedObjectStore, StoreFailureClass};
+    use loonfs_test_support::stores::{BlockingStore, MetadataMapStore};
+
+    let directory = tempfile::tempdir().expect("directory");
+    let namespace_id = namespace_id("late-manifest");
+    let store: SharedObjectStore = Arc::new(MetadataMapStore::aged(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::prefix(manifests_prefix(&namespace_id)),
+    ));
+    let writer = FsWriter::builder_with_store(store.clone())
+        .writer_id("late-manifest")
+        .build()
+        .await
+        .expect("writer");
+    writer
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("namespace");
+    let host = GrepHost::new(&store, "collector").await;
+    let deadline = Deadline::start(Arc::new(ManualClock::new(0)));
+    let first = publish_grep_manifest(
+        &store,
+        None,
+        &state(namespace_id.clone(), ManifestNo(1), RunNo(0)),
+        &deadline,
+    )
+    .await
+    .expect("first manifest");
+    let candidate = state(namespace_id.clone(), ManifestNo(2), RunNo(1));
+    let object_key = manifest_key(&namespace_id, &ManifestNo(2));
+    let recorded = Arc::new(RecordingStore::new(store.clone(), KeyPredicate::any()));
+    let failing = FailStore::new(
+        recorded.clone(),
+        KeyPredicate::exact(&object_key),
+        OperationClass::PutCreateIfAbsent,
+        InjectedError::Transport("lost acknowledgement".to_owned()),
+    )
+    .apply_then_fail();
+    failing.fail_next(1);
+    let blocked = BlockingStore::new(
+        failing,
+        KeyPredicate::exact(&object_key),
+        OperationClass::PutCreateIfAbsent,
+    );
+    let timer = Arc::new(ManualClock::new(0));
+    let late_deadline = Deadline::start(timer.clone());
+    blocked.block_next();
+    let (outcome, ()) = tokio::join!(
+        publish_grep_manifest(&blocked, Some(&first), &candidate, &late_deadline),
+        async {
+            blocked.wait_until_blocked().await;
+            let second = publish_grep_manifest(&store, Some(&first), &candidate, &deadline)
+                .await
+                .expect("second manifest");
+            publish_grep_manifest(
+                &store,
+                Some(&second),
+                &state(namespace_id.clone(), ManifestNo(3), RunNo(2)),
+                &deadline,
+            )
+            .await
+            .expect("third manifest");
+            timer.advance_ms(loonfs_grep::GREP_GC_GRACE_WINDOW_MS + 1);
+            let report = host
+                .worker
+                .garbage_collect_namespace(&namespace_id, timer.now_ms())
+                .await
+                .expect("collect old manifests");
+            assert_eq!(report.deleted_other_objects, 2);
+            assert!(store
+                .get(&object_key, None)
+                .await
+                .expect("collected manifest")
+                .is_none());
+            recorded.reset();
+            blocked.release();
+        }
+    );
+    assert!(matches!(outcome, Err(GrepError::StoreUnavailable {
+        object_key: actual_key, class: StoreFailureClass::RetryableTransport, ..
+    }) if actual_key == object_key));
+    assert_eq!(blocked.inner().remaining(), 0);
+    assert_eq!(recorded.counts().create_if_absent_puts, 1);
+    assert_eq!(recorded.counts().compare_and_swaps, 0);
+    assert!(recorded
+        .take_gets()
+        .iter()
+        .any(|(key, _)| key == &object_key));
+    assert_eq!(
+        store
+            .get(&object_key, None)
+            .await
+            .expect("recreated manifest"),
+        Some(Bytes::from(
+            encode_grep_manifest(candidate)
+                .expect("manifest")
+                .into_parts()
+                .1
+        ))
+    );
+    let current = load_current_grep_manifest(&store, &namespace_id)
+        .await
+        .expect("current manifest")
+        .expect("enabled");
+    assert_eq!(current.manifest_no(), ManifestNo(3));
+    assert_eq!(current.hint.state.manifest_no, ManifestNo(3));
+}

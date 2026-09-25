@@ -32,7 +32,11 @@
 //! ```
 //!
 //! Readers and maintenance handles start no background work; a runner is the only scheduler and is optional.
+
 #![warn(missing_docs)]
+
+#[cfg(not(any(target_os = "linux", target_vendor = "apple")))]
+compile_error!("the loonfs runtime needs a monotonic clock that counts host sleep; see StdMonotonicTimer in loonfs-api");
 
 mod cache;
 mod config;

@@ -30,8 +30,7 @@ pub(crate) async fn publish_segment<S: ObjectStore + ?Sized>(
         .into());
     }
     store.put_if_absent(&object_key, Bytes::copy_from_slice(wal.as_bytes())).await
-        .map(|_| ())
-        .map_err(|error| {
+        .map_err(|error| -> crate::error::CoreError {
             match error {
                 // Another batch took this number; the caller re-plans at the tip.
                 ObjectStoreError::PreconditionFailed { .. } => WalPublishError::StaleHead.into(),
@@ -43,5 +42,15 @@ pub(crate) async fn publish_segment<S: ObjectStore + ?Sized>(
                     }
                 }
             }
-        })
+        })?;
+    let elapsed_ms = tip.age_ms();
+    // A put that lands after the budget may have landed on a reclaimed number.
+    if elapsed_ms > crate::limits::WAL_PUBLISH_BUDGET_MS {
+        return Err(WalPublishError::OutcomeUnknown(format!(
+            "publication budget exceeded after {elapsed_ms}ms (budget {}ms)",
+            crate::limits::WAL_PUBLISH_BUDGET_MS,
+        ))
+        .into());
+    }
+    Ok(())
 }

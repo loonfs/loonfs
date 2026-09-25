@@ -5,6 +5,9 @@ mod error;
 mod state;
 mod store;
 
+#[cfg(test)]
+mod tests;
+
 pub use codec::{
     decode_grep_hint, decode_grep_manifest, encode_grep_hint, encode_grep_manifest,
     GrepManifestEnvelope,

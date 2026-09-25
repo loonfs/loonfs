@@ -1,7 +1,7 @@
 //! Monotonic timers and bounded transport retry policy.
 
 use std::sync::OnceLock;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// Supplies monotonic milliseconds for retry deadlines and deterministic test injection.
 pub trait MonotonicTimer: std::fmt::Debug + Send + Sync {
@@ -9,20 +9,50 @@ pub trait MonotonicTimer: std::fmt::Debug + Send + Sync {
     fn monotonic_now_ms(&self) -> u64;
 }
 
-/// Process-clock implementation backed by [`std::time::Instant`].
+/// Measures monotonic elapsed time, including host sleep.
 #[derive(Debug, Default)]
 pub struct StdMonotonicTimer {
-    origin: OnceLock<Instant>,
+    origin: OnceLock<Duration>,
 }
 
 impl MonotonicTimer for StdMonotonicTimer {
     fn monotonic_now_ms(&self) -> u64 {
-        // This monotonic boundary controls local retry timing, so it cannot affect durable state.
-        #[allow(clippy::disallowed_methods)]
-        let now = Instant::now();
+        let now = monotonic_now();
         let origin = self.origin.get_or_init(|| now);
-        u64::try_from(now.saturating_duration_since(*origin).as_millis()).unwrap_or(u64::MAX)
+        u64::try_from(now.saturating_sub(*origin).as_millis()).unwrap_or(u64::MAX)
     }
+}
+
+/// These clocks count host sleep, so publication budgets keep advancing where `Instant` would stop.
+#[cfg(any(target_os = "linux", target_vendor = "apple"))]
+#[allow(clippy::disallowed_methods, unsafe_code)]
+fn monotonic_now() -> Duration {
+    #[cfg(target_os = "linux")]
+    const CLOCK: libc::clockid_t = libc::CLOCK_BOOTTIME;
+    #[cfg(target_vendor = "apple")]
+    const CLOCK: libc::clockid_t = libc::CLOCK_MONOTONIC;
+
+    let mut time = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // The pointer refers to writable storage for one initialized timespec.
+    let result = unsafe { libc::clock_gettime(CLOCK, &mut time) };
+    assert_eq!(result, 0, "the monotonic clock should be available");
+    Duration::new(
+        u64::try_from(time.tv_sec).expect("monotonic seconds should be nonnegative"),
+        u32::try_from(time.tv_nsec).expect("monotonic nanoseconds should fit u32"),
+    )
+}
+
+/// `Instant` stops during host sleep. That is adequate for the client's retry timing, and the
+/// runtime refuses to build on these platforms.
+#[cfg(not(any(target_os = "linux", target_vendor = "apple")))]
+#[allow(clippy::disallowed_methods)]
+fn monotonic_now() -> Duration {
+    static START: OnceLock<std::time::Instant> = OnceLock::new();
+    let start = START.get_or_init(std::time::Instant::now);
+    start.elapsed()
 }
 
 /// Bounded retry configuration for replay-safe transport operations.

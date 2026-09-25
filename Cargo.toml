@@ -43,6 +43,7 @@ http-body = "1"
 icu_casemap = "=2.1.1"
 icu_normalizer = "=2.1.1"
 indexmap = { version = "2", features = ["serde"] }
+libc = "0.2"
 # The `serde` feature makes foyer encode keys and values through their serde
 # impls, which is how the server's cache key reaches foyer's storage traits.
 # Pinned exactly: the cache-directory geometry code reads foyer's block-file
@@ -114,7 +115,8 @@ zstd = "0.13"
 debug = "line-tables-only"
 
 [workspace.lints.rust]
-unsafe_code = "forbid"
+# The clock_gettime boundary in loonfs-api needs one local unsafe allowance.
+unsafe_code = "deny"
 unreachable_pub = "warn"
 
 [workspace.lints.clippy]
