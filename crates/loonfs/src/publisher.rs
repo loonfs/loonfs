@@ -1434,9 +1434,21 @@ impl NamespacePublisher {
             retry_count = tracing::field::Empty,
         );
         let (results, retry_count) = async {
+            let context = match self.writer.upgrade() {
+                Some(writer) => writer.identity.mutation_context(),
+                None => Err(CoreError::ShuttingDown.into()),
+            };
+            let context = match context {
+                Ok(context) => context,
+                Err(error) => {
+                    return (candidates.iter().map(|_| Err(error.clone())).collect(), 0);
+                }
+            };
+            // The wall timestamp and elapsed-time origin describe one batch.
+            // Refreshing only the timestamp on retry counts prior waiting twice.
+            let batch = Deadline::start(Arc::clone(&self.timer));
             let mut results = Vec::new();
             let mut retry_count = 0_u64;
-            let batch = Deadline::start(Arc::clone(&self.timer));
             for attempt in 0..CONTENTION_RETRY_LIMIT {
                 let Some(writer) = self.writer.upgrade() else {
                     results = candidates
@@ -1446,7 +1458,7 @@ impl NamespacePublisher {
                     break;
                 };
                 results = self
-                    .publish_through_engine(&writer, &candidates, &permits, &batch)
+                    .publish_through_engine(&writer, &candidates, &permits, &context, &batch)
                     .await;
                 if !results.iter().any(is_retryable_wal_publish) {
                     break;
@@ -1475,6 +1487,7 @@ impl NamespacePublisher {
         writer: &Arc<WriterBits>,
         candidates: &[CommitCandidate],
         permits: &[Arc<AdmissionPermit>],
+        context: &loonfs_core::MutationContext,
         batch: &Deadline,
     ) -> Vec<CommitResult> {
         let mut slot = self.engine.lock().await;
@@ -1485,6 +1498,7 @@ impl NamespacePublisher {
             &self.namespace_id,
             engine,
             candidates,
+            context,
             batch,
         )
         .await;

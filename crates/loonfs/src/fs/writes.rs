@@ -932,21 +932,11 @@ pub(crate) async fn publish_batch_with_engine(
     namespace_id: &NamespaceId,
     engine: &mut loonfs_core::publish::NamespaceCommitEngine,
     candidates: &[CommitCandidate],
+    context: &loonfs_core::MutationContext,
     batch: &loonfs_core::time::Deadline,
 ) -> EnginePublishResult {
     let batch_size = u64::try_from(candidates.len()).unwrap_or(u64::MAX);
     let store = core.store();
-    let context = match writer.identity.mutation_context() {
-        Ok(context) => context,
-        Err(error) => {
-            return EnginePublishResult {
-                results: candidates.iter().map(|_| Err(error.clone())).collect(),
-                wal_tail_segments: 0,
-                wal_tail_inline_bytes: 0,
-                wal_tail_observed: false,
-            };
-        }
-    };
     let cache_config = core.runtime_cache_config();
     // The per-projection ceiling. The publisher applies the same two knobs
     // as an aggregate over every projection it retains.
@@ -958,7 +948,7 @@ pub(crate) async fn publish_batch_with_engine(
     // it, callers awaiting a put or commit (CLI, server, embedding
     // crates) exceed rustc's type-recursion depth.
     let mut publish =
-        Box::pin(engine.publish_batch(&store, candidates, &context, &tail_options, batch)).await;
+        Box::pin(engine.publish_batch(&store, candidates, context, &tail_options, batch)).await;
     if let Some(state) = &publish.resulting_read_state {
         writer
             .hint_raise
