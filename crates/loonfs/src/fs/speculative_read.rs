@@ -37,19 +37,23 @@ impl FsReader {
         absolute_path: &str,
         cached: &CachedFileTarget,
     ) -> Result<ResolvedFileContent> {
-        let (engine, context) = self.core.pinned_metadata_read(namespace_id).await?;
-        let target = if context.head == cached.view.head && context.basis == cached.view.basis {
-            cached.target.clone()
-        } else {
-            engine
-                .resolve_file_content(
-                    absolute_path,
-                    &context,
-                    self.core.inner.config.max_read_content_bytes,
-                )
-                .await?
-        };
-        Ok(target)
+        self.core
+            .read(namespace_id, |engine, context| async move {
+                let target =
+                    if context.head == cached.view.head && context.basis == cached.view.basis {
+                        cached.target.clone()
+                    } else {
+                        engine
+                            .resolve_file_content(
+                                absolute_path,
+                                &context,
+                                self.core.inner.config.max_read_content_bytes,
+                            )
+                            .await?
+                    };
+                Ok(target)
+            })
+            .await
     }
 
     pub(super) async fn get_current_file_bytes(
@@ -59,8 +63,12 @@ impl FsReader {
     ) -> Result<FileBytes> {
         let max_bytes = self.core.inner.config.max_read_content_bytes;
         let Some(cached) = self.cached_file_target(namespace_id, absolute_path).await else {
-            let (engine, context) = self.core.pinned_metadata_read(namespace_id).await?;
-            return Ok(engine.get_file(absolute_path, &context, max_bytes).await?);
+            return self
+                .core
+                .read(namespace_id, |engine, context| async move {
+                    Ok(engine.get_file(absolute_path, &context, max_bytes).await?)
+                })
+                .await;
         };
 
         let engine = self.core.reader_engine(namespace_id);

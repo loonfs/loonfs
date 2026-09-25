@@ -17,7 +17,6 @@ use loonfs_api::{
     PageRequest, PaginationPolicy, TrashPageCursor,
 };
 use loonfs_core::{NamespaceReaderEngine, RuntimeReadContext};
-use tracing::Instrument;
 
 fn validate_pinned_directory_cursor(
     cursor: Option<&DirectoryPageCursor>,
@@ -69,12 +68,17 @@ fn reject_snapshot_bound_directory_cursor(cursor: Option<&DirectoryPageCursor>) 
 #[must_use]
 pub struct FsReadSnapshot {
     engine: NamespaceReaderEngine<SharedObjectStore>,
+    store: SharedObjectStore,
     context: RuntimeReadContext,
     snapshot_id: Option<PinId>,
     max_read_content_bytes: Option<u64>,
 }
 
 impl FsReadSnapshot {
+    async fn read<T>(&self, read: impl std::future::Future<Output = Result<T>>) -> Result<T> {
+        super::read_result::classify_read_result(&self.store, &self.context, read.await).await
+    }
+
     /// Returns the namespace this snapshot reads.
     pub fn namespace_id(&self) -> &NamespaceId {
         self.engine.namespace_id()
@@ -108,20 +112,23 @@ impl FsReadSnapshot {
         after_seq: ChangeSeq,
         limit: EffectiveLimit,
     ) -> Result<ListChangesResponse> {
-        if after_seq > self.head_seq() {
-            return Err(RuntimeError::InvalidRequest {
-                message: format!(
-                    "after_seq `{after_seq}` is above snapshot sequence `{}`",
-                    self.head_seq()
-                ),
-                param: "after_seq",
-            });
-        }
-        self.engine.require_administrator(&self.context).await?;
-        Ok(self
-            .engine
-            .list_changes_after(after_seq, limit, &self.context)
-            .await?)
+        self.read(async {
+            if after_seq > self.head_seq() {
+                return Err(RuntimeError::InvalidRequest {
+                    message: format!(
+                        "after_seq `{after_seq}` is above snapshot sequence `{}`",
+                        self.head_seq()
+                    ),
+                    param: "after_seq",
+                });
+            }
+            self.engine.require_administrator(&self.context).await?;
+            Ok(self
+                .engine
+                .list_changes_after(after_seq, limit, &self.context)
+                .await?)
+        })
+        .await
     }
 
     /// Resolves an absolute path against this snapshot.
@@ -130,11 +137,14 @@ impl FsReadSnapshot {
         absolute_path: &str,
         options: StatPathOptions,
     ) -> Result<PathEntry> {
-        self.require_pinned_snapshot(options.snapshot_id.as_ref())?;
-        Ok(self
-            .engine
-            .resolve_path(absolute_path, options, &self.context)
-            .await?)
+        self.read(async {
+            self.require_pinned_snapshot(options.snapshot_id.as_ref())?;
+            Ok(self
+                .engine
+                .resolve_path(absolute_path, options, &self.context)
+                .await?)
+        })
+        .await
     }
 
     /// Lists one directory page against this snapshot.
@@ -144,30 +154,33 @@ impl FsReadSnapshot {
         request: PageRequest<DirectoryPageCursor>,
         options: ListPathEntriesOptions,
     ) -> Result<ListPathEntriesResponse> {
-        self.require_pinned_snapshot(options.snapshot_id.as_ref())?;
-        validate_pinned_directory_cursor(
-            request.cursor.as_ref(),
-            self.head_seq(),
-            self.snapshot_id.as_ref(),
-        )?;
-        let listed_path = AbsolutePath::parse(absolute_path)
-            .map_err(|error| CoreError::InvalidPath(error.to_string()))?;
-        let mut page = self
-            .engine
-            .list_path_page(listed_path.as_str(), request, options, &self.context)
-            .await?;
-        if let (Some(cursor), Some(snapshot_id)) =
-            (page.next_cursor.as_mut(), self.snapshot_id.as_ref())
-        {
-            cursor.snapshot_id = Some(snapshot_id.clone());
-        }
-        Ok(ListPathEntriesResponse {
-            namespace_id: self.namespace_id().clone(),
-            path: listed_path,
-            head_seq: self.head_seq(),
-            entries: page.items,
-            next_cursor: encode_next_cursor(page.next_cursor.as_ref())?,
+        self.read(async {
+            self.require_pinned_snapshot(options.snapshot_id.as_ref())?;
+            validate_pinned_directory_cursor(
+                request.cursor.as_ref(),
+                self.head_seq(),
+                self.snapshot_id.as_ref(),
+            )?;
+            let listed_path = AbsolutePath::parse(absolute_path)
+                .map_err(|error| CoreError::InvalidPath(error.to_string()))?;
+            let mut page = self
+                .engine
+                .list_path_page(listed_path.as_str(), request, options, &self.context)
+                .await?;
+            if let (Some(cursor), Some(snapshot_id)) =
+                (page.next_cursor.as_mut(), self.snapshot_id.as_ref())
+            {
+                cursor.snapshot_id = Some(snapshot_id.clone());
+            }
+            Ok(ListPathEntriesResponse {
+                namespace_id: self.namespace_id().clone(),
+                path: listed_path,
+                head_seq: self.head_seq(),
+                entries: page.items,
+                next_cursor: encode_next_cursor(page.next_cursor.as_ref())?,
+            })
         })
+        .await
     }
 
     /// Reads a visible inode against this snapshot.
@@ -176,11 +189,14 @@ impl FsReadSnapshot {
         inode_id: InodeId,
         options: StatPathOptions,
     ) -> Result<PathEntry> {
-        self.require_pinned_snapshot(options.snapshot_id.as_ref())?;
-        Ok(self
-            .engine
-            .stat_inode(inode_id, options, &self.context)
-            .await?)
+        self.read(async {
+            self.require_pinned_snapshot(options.snapshot_id.as_ref())?;
+            Ok(self
+                .engine
+                .stat_inode(inode_id, options, &self.context)
+                .await?)
+        })
+        .await
     }
 
     /// Lists one directory inode page against this snapshot.
@@ -190,28 +206,31 @@ impl FsReadSnapshot {
         request: PageRequest<DirectoryPageCursor>,
         options: ListInodeChildrenOptions,
     ) -> Result<ListInodeChildrenResponse> {
-        self.require_pinned_snapshot(options.snapshot_id.as_ref())?;
-        validate_pinned_directory_cursor(
-            request.cursor.as_ref(),
-            self.head_seq(),
-            self.snapshot_id.as_ref(),
-        )?;
-        let mut page = self
-            .engine
-            .list_inode_children_page(inode_id, request, options, &self.context)
-            .await?;
-        if let (Some(cursor), Some(snapshot_id)) =
-            (page.next_cursor.as_mut(), self.snapshot_id.as_ref())
-        {
-            cursor.snapshot_id = Some(snapshot_id.clone());
-        }
-        Ok(ListInodeChildrenResponse {
-            namespace_id: self.namespace_id().clone(),
-            parent_inode_id: inode_id,
-            head_seq: self.head_seq(),
-            entries: page.items,
-            next_cursor: encode_next_cursor(page.next_cursor.as_ref())?,
+        self.read(async {
+            self.require_pinned_snapshot(options.snapshot_id.as_ref())?;
+            validate_pinned_directory_cursor(
+                request.cursor.as_ref(),
+                self.head_seq(),
+                self.snapshot_id.as_ref(),
+            )?;
+            let mut page = self
+                .engine
+                .list_inode_children_page(inode_id, request, options, &self.context)
+                .await?;
+            if let (Some(cursor), Some(snapshot_id)) =
+                (page.next_cursor.as_mut(), self.snapshot_id.as_ref())
+            {
+                cursor.snapshot_id = Some(snapshot_id.clone());
+            }
+            Ok(ListInodeChildrenResponse {
+                namespace_id: self.namespace_id().clone(),
+                parent_inode_id: inode_id,
+                head_seq: self.head_seq(),
+                entries: page.items,
+                next_cursor: encode_next_cursor(page.next_cursor.as_ref())?,
+            })
         })
+        .await
     }
 
     /// Resolves current visibility, revision, and path against this snapshot.
@@ -221,10 +240,13 @@ impl FsReadSnapshot {
         &self,
         inode_ids: &[InodeId],
     ) -> Result<Vec<CurrentFileState>> {
-        Ok(self
-            .engine
-            .resolve_current_files(inode_ids, &self.context)
-            .await?)
+        self.read(async {
+            Ok(self
+                .engine
+                .resolve_current_files(inode_ids, &self.context)
+                .await?)
+        })
+        .await
     }
 
     /// Reads and verifies immutable content selected from this snapshot.
@@ -237,10 +259,13 @@ impl FsReadSnapshot {
         content_ref: &ContentRef,
         max_bytes: u64,
     ) -> Result<Vec<u8>> {
-        Ok(self
-            .engine
-            .read_content_ref(content_ref, max_bytes, &self.context)
-            .await?)
+        self.read(async {
+            Ok(self
+                .engine
+                .read_content_ref(content_ref, max_bytes, &self.context)
+                .await?)
+        })
+        .await
     }
 
     /// Refuses a reader with no subject on an ACL namespace, for callers
@@ -256,18 +281,24 @@ impl FsReadSnapshot {
         revision_no: RevisionNo,
         max_bytes: u64,
     ) -> Result<Vec<u8>> {
-        Ok(self
-            .engine
-            .get_file_revision_for_inode(inode_id, revision_no, &self.context, Some(max_bytes))
-            .await?)
+        self.read(async {
+            Ok(self
+                .engine
+                .get_file_revision_for_inode(inode_id, revision_no, &self.context, Some(max_bytes))
+                .await?)
+        })
+        .await
     }
 
     /// Reads the file selected by this snapshot.
     pub async fn get_file_bytes(&self, absolute_path: &str) -> Result<FileBytes> {
-        Ok(self
-            .engine
-            .get_file(absolute_path, &self.context, self.max_read_content_bytes)
-            .await?)
+        self.read(async {
+            Ok(self
+                .engine
+                .get_file(absolute_path, &self.context, self.max_read_content_bytes)
+                .await?)
+        })
+        .await
     }
 
     /// Streams the file selected by this snapshot in bounded chunks.
@@ -277,30 +308,36 @@ impl FsReadSnapshot {
         absolute_path: &str,
         options: ReadFileStreamOptions,
     ) -> Result<FileContentStream<SharedObjectStore>> {
-        if options.revision_no.is_some() {
-            return Err(CoreError::InvalidCheckpointRequest(
-                "revision_no cannot be combined with a snapshot read".to_owned(),
-            )
-            .into());
-        }
-        Ok(self
-            .engine
-            .read_file_stream(
-                absolute_path,
-                &self.context,
-                None,
-                options.chunk_bytes,
-                options.start_offset,
-            )
-            .await?)
+        self.read(async {
+            if options.revision_no.is_some() {
+                return Err(CoreError::InvalidCheckpointRequest(
+                    "revision_no cannot be combined with a snapshot read".to_owned(),
+                )
+                .into());
+            }
+            Ok(self
+                .engine
+                .read_file_stream(
+                    absolute_path,
+                    &self.context,
+                    None,
+                    options.chunk_bytes,
+                    options.start_offset,
+                )
+                .await?)
+        })
+        .await
     }
 
     /// Resolves the file selected by this snapshot for a direct download.
     pub async fn create_download(&self, absolute_path: &str) -> Result<DirectDownloadTarget> {
-        Ok(self
-            .engine
-            .direct_download_target(absolute_path, None, &self.context)
-            .await?)
+        self.read(async {
+            Ok(self
+                .engine
+                .direct_download_target(absolute_path, None, &self.context)
+                .await?)
+        })
+        .await
     }
 }
 
@@ -340,6 +377,7 @@ impl FsReader {
     ) -> FsReadSnapshot {
         FsReadSnapshot {
             engine,
+            store: self.core.inner.store.clone(),
             context,
             snapshot_id,
             max_read_content_bytes: self.core.inner.config.max_read_content_bytes,
@@ -478,11 +516,17 @@ impl FsReader {
         }
         let span = tracing::Span::current();
         self.core.record_trace_context(&span);
-        let (engine, read_context) = self.core.pinned_metadata_read(namespace_id).await?;
-        let entry = engine
-            .resolve_path(absolute_path, options, &read_context)
-            .await?;
-        Ok(entry)
+        self.core
+            .read(namespace_id, |engine, read_context| {
+                let options = options.clone();
+                async move {
+                    let entry = engine
+                        .resolve_path(absolute_path, options, &read_context)
+                        .await?;
+                    Ok(entry)
+                }
+            })
+            .await
     }
 
     /// Returns the current entry for a visible inode.
@@ -513,9 +557,15 @@ impl FsReader {
         }
         let span = tracing::Span::current();
         self.core.record_trace_context(&span);
-        let (engine, read_context) = self.core.pinned_metadata_read(namespace_id).await?;
-        let entry = engine.stat_inode(inode_id, options, &read_context).await?;
-        Ok(entry)
+        self.core
+            .read(namespace_id, |engine, read_context| {
+                let options = options.clone();
+                async move {
+                    let entry = engine.stat_inode(inode_id, options, &read_context).await?;
+                    Ok(entry)
+                }
+            })
+            .await
     }
 
     /// Creates a directory pager beginning at `request.cursor`.
@@ -599,29 +649,31 @@ impl FsReader {
     ) -> Result<(ListPathEntriesResponse, Option<DirectoryPageCursor>)> {
         let listed_path = AbsolutePath::parse(absolute_path)
             .map_err(|error| CoreError::InvalidPath(error.to_string()))?;
-        let (engine, read_context) = self
-            .core
-            .pinned_metadata_read(namespace_id)
-            .instrument(
-                tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "pin_read"),
-            )
-            .await?;
-        // Give awakened validation waiters a turn before synchronous page work.
-        // The read is already pinned and the validation guard has been released.
-        tokio::task::yield_now().await;
-        let page = engine
-            .list_path_page(listed_path.as_str(), request, options, &read_context)
-            .await?;
-        let head_seq = read_context.head.seq;
-        let next_cursor = page.next_cursor;
-        let response = ListPathEntriesResponse {
-            namespace_id: namespace_id.clone(),
-            path: listed_path,
-            head_seq,
-            entries: page.items,
-            next_cursor: None,
-        };
-        Ok((response, next_cursor))
+        self.core
+            .read(namespace_id, |engine, read_context| {
+                let request = request.clone();
+                let options = options.clone();
+                let listed_path = listed_path.clone();
+                async move {
+                    // Give awakened validation waiters a turn before synchronous page work.
+                    // The read is already pinned and the validation guard has been released.
+                    tokio::task::yield_now().await;
+                    let page = engine
+                        .list_path_page(listed_path.as_str(), request, options, &read_context)
+                        .await?;
+                    let head_seq = read_context.head.seq;
+                    let next_cursor = page.next_cursor;
+                    let response = ListPathEntriesResponse {
+                        namespace_id: namespace_id.clone(),
+                        path: listed_path,
+                        head_seq,
+                        entries: page.items,
+                        next_cursor: None,
+                    };
+                    Ok((response, next_cursor))
+                }
+            })
+            .await
     }
 
     /// Creates a children pager for one directory inode beginning at
@@ -689,28 +741,29 @@ impl FsReader {
         }
         reject_snapshot_bound_directory_cursor(request.cursor.as_ref())?;
         self.core.record_trace_context(&tracing::Span::current());
-        let (engine, read_context) = self
-            .core
-            .pinned_metadata_read(namespace_id)
-            .instrument(
-                tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "pin_read"),
-            )
-            .await?;
-        // Give awakened validation waiters a turn before synchronous page work.
-        // The read is already pinned and the validation guard has been released.
-        tokio::task::yield_now().await;
-        let page = engine
-            .list_inode_children_page(inode_id, request, options, &read_context)
-            .await?;
-        let head_seq = read_context.head.seq;
-        let next_cursor = encode_next_cursor(page.next_cursor.as_ref())?;
-        Ok(ListInodeChildrenResponse {
-            namespace_id: namespace_id.clone(),
-            parent_inode_id: inode_id,
-            head_seq,
-            entries: page.items,
-            next_cursor,
-        })
+        self.core
+            .read(namespace_id, |engine, read_context| {
+                let request = request.clone();
+                let options = options.clone();
+                async move {
+                    // Give awakened validation waiters a turn before synchronous page work.
+                    // The read is already pinned and the validation guard has been released.
+                    tokio::task::yield_now().await;
+                    let page = engine
+                        .list_inode_children_page(inode_id, request, options, &read_context)
+                        .await?;
+                    let head_seq = read_context.head.seq;
+                    let next_cursor = encode_next_cursor(page.next_cursor.as_ref())?;
+                    Ok(ListInodeChildrenResponse {
+                        namespace_id: namespace_id.clone(),
+                        parent_inode_id: inode_id,
+                        head_seq,
+                        entries: page.items,
+                        next_cursor,
+                    })
+                }
+            })
+            .await
     }
 
     /// Reads a file's current content plus the metadata entry it came from.
@@ -767,17 +820,20 @@ impl FsReader {
         options: ReadFileStreamOptions,
     ) -> Result<FileContentStream<SharedObjectStore>> {
         self.core.record_trace_context(&tracing::Span::current());
-        let (engine, read_context) = self.core.pinned_metadata_read(namespace_id).await?;
-        let stream = engine
-            .read_file_stream(
-                absolute_path,
-                &read_context,
-                options.revision_no,
-                options.chunk_bytes,
-                options.start_offset,
-            )
-            .await?;
-        Ok(stream)
+        self.core
+            .read(namespace_id, |engine, read_context| async move {
+                let stream = engine
+                    .read_file_stream(
+                        absolute_path,
+                        &read_context,
+                        options.revision_no,
+                        options.chunk_bytes,
+                        options.start_offset,
+                    )
+                    .await?;
+                Ok(stream)
+            })
+            .await
     }
 
     /// Prepares a content object for a direct download.
@@ -803,11 +859,14 @@ impl FsReader {
         revision_no: Option<RevisionNo>,
     ) -> Result<DirectDownloadTarget> {
         self.core.record_trace_context(&tracing::Span::current());
-        let (engine, read_context) = self.core.pinned_metadata_read(namespace_id).await?;
-        let target = engine
-            .direct_download_target(absolute_path, revision_no, &read_context)
-            .await?;
-        Ok(target)
+        self.core
+            .read(namespace_id, |engine, read_context| async move {
+                let target = engine
+                    .direct_download_target(absolute_path, revision_no, &read_context)
+                    .await?;
+                Ok(target)
+            })
+            .await
     }
 
     /// Resolves retained inode content for a direct download without
@@ -831,11 +890,14 @@ impl FsReader {
         revision_no: RevisionNo,
     ) -> Result<DirectDownloadByInodeTarget> {
         self.core.record_trace_context(&tracing::Span::current());
-        let (engine, read_context) = self.core.pinned_metadata_read(namespace_id).await?;
-        let target = engine
-            .direct_download_target_by_inode(inode_id, revision_no, &read_context)
-            .await?;
-        Ok(target)
+        self.core
+            .read(namespace_id, |engine, read_context| async move {
+                let target = engine
+                    .direct_download_target_by_inode(inode_id, revision_no, &read_context)
+                    .await?;
+                Ok(target)
+            })
+            .await
     }
 
     /// Lists files visible at a checkpoint in ascending inode-ID order.
@@ -895,11 +957,14 @@ impl FsReader {
         inode_ids: &[InodeId],
     ) -> Result<Vec<CurrentFileState>> {
         self.core.record_trace_context(&tracing::Span::current());
-        let (engine, read_context) = self.core.pinned_metadata_read(namespace_id).await?;
-        let states = engine
-            .resolve_current_files(inode_ids, &read_context)
-            .await?;
-        Ok(states)
+        self.core
+            .read(namespace_id, |engine, read_context| async move {
+                let states = engine
+                    .resolve_current_files(inode_ids, &read_context)
+                    .await?;
+                Ok(states)
+            })
+            .await
     }
 
     /// Reads one immutable content object by reference.
@@ -931,10 +996,13 @@ impl FsReader {
         max_bytes: u64,
     ) -> Result<Vec<u8>> {
         self.core.record_trace_context(&tracing::Span::current());
-        let (engine, read_context) = self.core.pinned_read(namespace_id).await?;
-        Ok(engine
-            .read_content_ref(content_ref, max_bytes, &read_context)
-            .await?)
+        self.core
+            .read(namespace_id, |engine, read_context| async move {
+                Ok(engine
+                    .read_content_ref(content_ref, max_bytes, &read_context)
+                    .await?)
+            })
+            .await
     }
 
     /// Lists one page of the namespace's recoverable deletions, ascending
@@ -959,15 +1027,21 @@ impl FsReader {
         request: PageRequest<loonfs_api::TrashPageCursor>,
     ) -> Result<loonfs_api::ListTrashResponse> {
         self.core.record_trace_context(&tracing::Span::current());
-        let (engine, read_context) = self.core.pinned_metadata_read(namespace_id).await?;
-        let page = engine.list_trash_page(request, &read_context).await?;
-        let next_cursor = encode_next_cursor(page.next_cursor.as_ref())?;
-        Ok(loonfs_api::ListTrashResponse {
-            namespace_id: namespace_id.clone(),
-            head_seq: read_context.head.seq,
-            entries: page.items,
-            next_cursor,
-        })
+        self.core
+            .read(namespace_id, |engine, read_context| {
+                let request = request.clone();
+                async move {
+                    let page = engine.list_trash_page(request, &read_context).await?;
+                    let next_cursor = encode_next_cursor(page.next_cursor.as_ref())?;
+                    Ok(loonfs_api::ListTrashResponse {
+                        namespace_id: namespace_id.clone(),
+                        head_seq: read_context.head.seq,
+                        entries: page.items,
+                        next_cursor,
+                    })
+                }
+            })
+            .await
     }
 
     /// Creates a trash pager beginning at `request.cursor`.
@@ -1013,16 +1087,23 @@ impl FsReader {
         self.core.record_trace_context(&tracing::Span::current());
         let absolute_path = AbsolutePath::parse(absolute_path)
             .map_err(|error| CoreError::InvalidPath(error.to_string()))?;
-        let (engine, read_context) = self.core.pinned_metadata_read(namespace_id).await?;
-        let (inode_id, page) = engine
-            .list_file_revisions_page(absolute_path.as_str(), request, &read_context)
-            .await?;
-        Ok(file_revisions_page_response(
-            namespace_id.clone(),
-            read_context.head.seq,
-            page,
-            inode_id,
-        )?)
+        self.core
+            .read(namespace_id, |engine, read_context| {
+                let request = request.clone();
+                let absolute_path = absolute_path.clone();
+                async move {
+                    let (inode_id, page) = engine
+                        .list_file_revisions_page(absolute_path.as_str(), request, &read_context)
+                        .await?;
+                    Ok(file_revisions_page_response(
+                        namespace_id.clone(),
+                        read_context.head.seq,
+                        page,
+                        inode_id,
+                    )?)
+                }
+            })
+            .await
     }
 
     /// Creates a path-based revision pager beginning at `request.cursor`.
@@ -1073,16 +1154,22 @@ impl FsReader {
         request: PageRequest<FileRevisionsPageCursor>,
     ) -> Result<ListFileRevisionsResponse> {
         self.core.record_trace_context(&tracing::Span::current());
-        let (engine, read_context) = self.core.pinned_metadata_read(namespace_id).await?;
-        let page = engine
-            .list_file_revisions_for_inode_page(inode_id, request, &read_context)
-            .await?;
-        Ok(file_revisions_page_response(
-            namespace_id.clone(),
-            read_context.head.seq,
-            page,
-            inode_id,
-        )?)
+        self.core
+            .read(namespace_id, |engine, read_context| {
+                let request = request.clone();
+                async move {
+                    let page = engine
+                        .list_file_revisions_for_inode_page(inode_id, request, &read_context)
+                        .await?;
+                    Ok(file_revisions_page_response(
+                        namespace_id.clone(),
+                        read_context.head.seq,
+                        page,
+                        inode_id,
+                    )?)
+                }
+            })
+            .await
     }
 
     /// Creates an inode-based revision pager beginning at `request.cursor`.
@@ -1132,16 +1219,19 @@ impl FsReader {
         revision_no: RevisionNo,
     ) -> Result<FileBytes> {
         self.core.record_trace_context(&tracing::Span::current());
-        let (engine, read_context) = self.core.pinned_metadata_read(namespace_id).await?;
-        let read = engine
-            .get_file_revision(
-                absolute_path,
-                revision_no,
-                &read_context,
-                self.core.inner.config.max_read_content_bytes,
-            )
-            .await?;
-        Ok(read)
+        self.core
+            .read(namespace_id, |engine, read_context| async move {
+                let read = engine
+                    .get_file_revision(
+                        absolute_path,
+                        revision_no,
+                        &read_context,
+                        self.core.inner.config.max_read_content_bytes,
+                    )
+                    .await?;
+                Ok(read)
+            })
+            .await
     }
 
     /// Streams a retained inode revision, including content without a visible path.
@@ -1166,10 +1256,13 @@ impl FsReader {
         revision_no: RevisionNo,
     ) -> Result<FileContentStream<SharedObjectStore>> {
         self.core.record_trace_context(&tracing::Span::current());
-        let (engine, context) = self.core.pinned_metadata_read(namespace_id).await?;
-        Ok(engine
-            .read_file_revision_stream_by_inode(inode_id, revision_no, &context)
-            .await?)
+        self.core
+            .read(namespace_id, |engine, context| async move {
+                Ok(engine
+                    .read_file_revision_stream_by_inode(inode_id, revision_no, &context)
+                    .await?)
+            })
+            .await
     }
 
     /// Reads and verifies one retained file revision by inode identity.
@@ -1193,16 +1286,19 @@ impl FsReader {
         revision_no: RevisionNo,
     ) -> Result<Vec<u8>> {
         self.core.record_trace_context(&tracing::Span::current());
-        let (engine, read_context) = self.core.pinned_metadata_read(namespace_id).await?;
-        let bytes = engine
-            .get_file_revision_for_inode(
-                inode_id,
-                revision_no,
-                &read_context,
-                self.core.inner.config.max_read_content_bytes,
-            )
-            .await?;
-        Ok(bytes)
+        self.core
+            .read(namespace_id, |engine, read_context| async move {
+                let bytes = engine
+                    .get_file_revision_for_inode(
+                        inode_id,
+                        revision_no,
+                        &read_context,
+                        self.core.inner.config.max_read_content_bytes,
+                    )
+                    .await?;
+                Ok(bytes)
+            })
+            .await
     }
 
     /// Reads the ordered change feed after the `after_seq` cursor.
@@ -1225,17 +1321,20 @@ impl FsReader {
         options: ListChangesOptions,
     ) -> Result<ListChangesResponse> {
         self.core.record_trace_context(&tracing::Span::current());
-        let (engine, context) = self.core.pinned_metadata_read(namespace_id).await?;
-        engine.require_administrator(&context).await?;
-        let limit = match options.limit {
-            Some(limit) => limit,
-            None => PaginationPolicy::default()
-                .resolve_limit(None)
-                .map_err(|error| RuntimeError::Config(error.to_string()))?,
-        };
-        Ok(engine
-            .list_changes_after(after_seq, limit, &context)
-            .await?)
+        self.core
+            .read(namespace_id, |engine, context| async move {
+                engine.require_administrator(&context).await?;
+                let limit = match options.limit {
+                    Some(limit) => limit,
+                    None => PaginationPolicy::default()
+                        .resolve_limit(None)
+                        .map_err(|error| RuntimeError::Config(error.to_string()))?,
+                };
+                Ok(engine
+                    .list_changes_after(after_seq, limit, &context)
+                    .await?)
+            })
+            .await
     }
 
     /// Creates a change-feed pager beginning after `after_seq`.
