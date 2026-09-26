@@ -332,11 +332,11 @@ After selecting a manifest, discover the WAL tip by probing consecutive numbers.
 
 Each data segment must contain contiguous commits following the preceding head. Its `prior_head_seq` is derived by subtracting one from the first record sequence; a first sequence of zero is invalid. A fence derives its preceding head from `head_seq`. Namespace identity, WAL number, sequence range, allocation state, and writer epoch must validate. Empty fence segments contain no metadata changes. Epochs cannot decrease along the log or exceed the current manifest's epoch. If a WAL object exposes a newer epoch, reload the manifest before deciding that the object is invalid.
 
-A deleted manifest ends discovery without a WAL or manifest successor probe. For an active manifest, check for a successor after WAL discovery and reload if one appeared. This prevents a concurrent fold or retention advance from making a reclaimed WAL number look unused. Required missing or malformed objects fail the read.
+A deleted manifest ends discovery without a WAL or manifest successor probe. For an active manifest, check for a successor after WAL discovery and reload if one appeared. This prevents a concurrent fold or retention advance from making a reclaimed WAL number look unused. Required missing or malformed objects fail the read. The successor check is trusted only while the manifest probe it confirms is younger than `READ_REVALIDATION_BOUND_MS`; a reader that has taken longer reloads the manifest instead, because a successor published after its probe may already have been collected.
 
 A read is evaluated at one sequence. Replaying the WAL produces a projection of its metadata changes and any file bytes stored inline. This is the *projected WAL tail*. An implementation may query verified metadata segments and this projection directly, without loading every metadata row into memory, provided it applies the same visibility rules.
 
-For a warm read, the reference runtime probes the next WAL number with GET. An absent object confirms the cached tip; a present object requires advancing the state and probing onward. On a monotonic revalidation interval, defaulting to one second, it also probes the next manifest number with HEAD. A successor triggers discovery again. This is how cached readers observe deletion and retention changes. The hint is not used to validate a cached view. The acknowledging runtime seeds its read caches from the publication. Its next read probes the next WAL number like any warm read. If the manifest and WAL tip are unchanged and the seeded projection is retained, it replays nothing and does not reload the manifest.
+For a warm read, the reference runtime probes the next WAL number with GET. An absent object confirms the cached tip; a present object requires advancing the state and probing onward. On a monotonic revalidation interval, defaulting to one second, it also probes the next manifest number with HEAD. A successor triggers discovery again. So does a successor probe that comes `READ_REVALIDATION_BOUND_MS` or more after the previous one, whatever it finds. This is how cached readers observe deletion and retention changes. The hint is not used to validate a cached view. The acknowledging runtime seeds its read caches from the publication. Its next read probes the next WAL number like any warm read. If the manifest and WAL tip are unchanged and the seeded projection is retained, it replays nothing and does not reload the manifest.
 
 ### 4.3 Visible metadata
 
@@ -463,7 +463,7 @@ A writer session acquires authority lazily, before its first semantic publicatio
 
 Another session can acquire a higher epoch. Its numbered fence prevents an older writer from extending the log using a previously observed tip: the stale writer's put collides, discovery observes the higher epoch, and the session returns `writer_fenced`. A fenced session does not automatically reacquire authority.
 
-A fence preserves `head_seq` and `next_inode_id` and contains no commit records. Its derived `prior_head_seq` equals `head_seq`. It advances WAL position without advancing logical history. Concurrent attempts are serialized by conditional creation of the next number.
+A fence preserves `head_seq` and `next_inode_id` and contains no commit records. Its derived `prior_head_seq` equals `head_seq`. It advances WAL position without advancing logical history. Concurrent attempts are serialized by conditional creation of the next number. A fence put is planned against a discovered tip under `WAL_PUBLISH_BUDGET_MS` like any numbered put; a collision or an expired budget discovers the tip again and retries at the new number, and a transport failure fails the acquisition, whose next attempt claims a new epoch.
 
 There is no writer lease or writer-expiry timestamp. The `writer_id` and `acquired_at_ms` fields describe the acquisition; the epoch determines authority. An acquisition retried after an uncertain outcome can advance the epoch again. Commit retry identity is separate and uses durable receipts.
 
@@ -881,7 +881,7 @@ Being unreferenced makes an object a candidate; it does not make it immediately 
 
 | Family | Conditions for deletion |
 | --- | --- |
-| Namespace manifest | Below the observed hint and unpinned; its provider age is at least `T`, and its immediate successor, if present, is also at least `T` old. |
+| Namespace manifest | Below the observed hint and unpinned, with provider age at least `T`. |
 | WAL object in an active namespace | At or below `folded_wal_no`, with provider age at least `T`. |
 | WAL object in a deleted namespace | Provider age at least `T`; no current WAL is protected. |
 | Metadata segment | No root lists it, and its provider age is strictly greater than 24 hours. |
@@ -889,7 +889,7 @@ Being unreferenced makes an object a candidate; it does not make it immediately 
 | Upload session and its content | Status-specific rules in section 11.6. |
 | An eligible tombstone’s owned content | Sections 9.5 and 11.8. |
 
-The hint and current manifest are never swept. Unrecognized keys outside an eligible tombstone’s content prefix are retained by core GC. On an age-gated candidate, a missing provider timestamp or one in the future cannot establish sufficient age. If a manifest's successor is absent, that absence does not itself prevent deleting the predecessor.
+The hint and current manifest are never swept. Unrecognized keys outside an eligible tombstone’s content prefix are retained by core GC. On an age-gated candidate, a missing provider timestamp or one in the future cannot establish sufficient age.
 
 For example, a collector observing hint 8 and current manifest 10 keeps manifests 8–10 for discovery. It keeps the segments in manifest 10 and any pinned manifests. It does not keep every segment mentioned only by 8 or 9. Such a segment still needs to exceed the segment minimum age before deletion.
 
@@ -913,7 +913,7 @@ Direct expiry checks do not add GC grace to the requested lifetime. A host ahead
 
 A new pin from the current head is acknowledged only after its manifest identity is checked again following the pin write. This closes the race between collection's current-manifest read and its complete pin listing. A snapshot fork is protected by the snapshot pin or by the new fork pin written before the snapshot recheck.
 
-A collector protects every WAL number above its captured folded boundary. Writers must refresh a cached tip within the publication budget before attempting its successor. They cannot treat a much later reclaimed WAL number as a free publication slot.
+A collector protects every WAL number above its captured folded boundary. Writers must refresh a cached tip within the publication budget before attempting its successor. They cannot treat a much later reclaimed WAL number as a free publication slot. Readers have the matching obligation: a cold discovery trusts an absent successor only within `READ_REVALIDATION_BOUND_MS` of its manifest probe, and a cached view only within that bound of its previous probe.
 
 New metadata segments remain protected by their minimum age while a publisher writes and verifies them. Streaming compaction must initiate publication before its budget expires, and every compaction checks its epoch and selected inputs. These rules apply to output that is not yet listed by a root captured earlier in the pass.
 
@@ -1508,6 +1508,7 @@ Publication and collection use the timing relationships below. Configurable sizi
 | `PROVIDER_PUBLICATION_REQUEST_BOUND_MS` | 255,000 | Retry budget, final backoff, and payload-sized final request. |
 | `GC_SAFETY_MARGIN_MS` | 180,000 | Combined relative-clock, timestamp-precision, and scheduling allowance. |
 | `GC_MIN_GRACE_WINDOW_MS` | 1,335,000 | Derived minimum ordinary collection grace. |
+| `READ_REVALIDATION_BOUND_MS` | 1,155,000 | Longest gap between a reader's manifest probe and the successor check that confirms it. |
 | `GC_DEFAULT_GRACE_WINDOW_MS` | 3,600,000 | Default configured ordinary grace. |
 | `UNREFERENCED_SEGMENT_MIN_AGE_MS` | 86,400,000 | Segments must be strictly older than this before unreferenced collection. |
 | `METADATA_COMPACTION_BUDGET_MS` | 85,065,000 | Maximum elapsed time before initiating streaming publication. |
@@ -1522,6 +1523,11 @@ GC_MIN_GRACE_WINDOW_MS
           METADATA_PUBLICATION_BUDGET_MS)
       + PROVIDER_PUBLICATION_REQUEST_BOUND_MS
       + GC_SAFETY_MARGIN_MS
+
+READ_REVALIDATION_BOUND_MS
+    = max(WAL_PUBLISH_BUDGET_MS, PIN_VERIFY_BUDGET_MS,
+          METADATA_PUBLICATION_BUDGET_MS)
+      + PROVIDER_PUBLICATION_REQUEST_BOUND_MS
 
 METADATA_COMPACTION_BUDGET_MS
     = UNREFERENCED_SEGMENT_MIN_AGE_MS - GC_MIN_GRACE_WINDOW_MS
@@ -1675,7 +1681,7 @@ The current manifest protects all listed segments, including pending reorganizat
 
 | Candidate on a live namespace | Collection rule |
 | --- | --- |
-| Manifest below the observed hint | Its own provider age and its immediate successor's age must meet ordinary grep grace. An absent successor does not prevent deletion. |
+| Manifest below the observed hint | Its own provider age must meet ordinary grep grace. |
 | Segment outside the current live set | Provider age must be strictly greater than 24 hours. |
 | Unknown age or unrecognized key | Retain. |
 

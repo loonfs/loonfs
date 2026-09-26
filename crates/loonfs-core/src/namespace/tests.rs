@@ -275,12 +275,6 @@ async fn a_pending_hint_cannot_name_a_manifest_collected_after_its_replacement()
             crate::gc::gc_namespace(store.inner(), &namespace_id, &config, &aged)
                 .await
                 .expect("collect during pending hint");
-            assert!(store
-                .inner()
-                .head(&metadata_manifest_object(&namespace_id, &ManifestNo(2)))
-                .await
-                .expect("predecessor")
-                .is_some());
             store.release();
         }
     );

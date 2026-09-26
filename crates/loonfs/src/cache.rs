@@ -304,27 +304,34 @@ impl ReadCore {
             .control_cache()
             .cached_namespace_head(namespace_id);
         if let Some(mut head) = cached {
-            let interval_ms = self
-                .runtime_cache_config()
-                .manifest_revalidation_interval_ms;
-            let check_due = head
-                .last_control_check
-                .as_ref()
-                .is_none_or(|checked| checked.age_ms() >= interval_ms);
-            let observed = Observation::now(Arc::clone(&self.inner.timer));
-            let matches = !check_due || !manifest_has_successor(self.store(), namespace_id, head.basis.manifest_no())
-                .instrument(tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "validation_manifest_probe"))
-                .await?;
-            if matches {
-                if check_due {
-                    head.last_control_check = Some(observed);
-                }
-                let mut context = self.runtime_read_context(&head);
-                if loonfs_core::control::probe_namespace_wal(self.store(), &mut context)
-                    .instrument(tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "validation_wal_probe"))
+            // A HEAD of the successor after a long gap cannot see a successor that was
+            // collected in the meantime; rediscover instead of trusting it.
+            let stale = head.last_control_check.as_ref().is_none_or(|checked| {
+                checked.age_ms() >= loonfs_core::limits::READ_REVALIDATION_BOUND_MS
+            });
+            if !stale {
+                let interval_ms = self
+                    .runtime_cache_config()
+                    .manifest_revalidation_interval_ms;
+                let check_due = head
+                    .last_control_check
+                    .as_ref()
+                    .is_none_or(|checked| checked.age_ms() >= interval_ms);
+                let observed = Observation::now(Arc::clone(&self.inner.timer));
+                let matches = !check_due || !manifest_has_successor(self.store(), namespace_id, head.basis.manifest_no())
+                    .instrument(tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "validation_manifest_probe"))
+                    .await?;
+                if matches {
+                    if check_due {
+                        head.last_control_check = Some(observed);
+                    }
+                    let mut context = self.runtime_read_context(&head);
+                    if loonfs_core::control::probe_namespace_wal(self.store(), &mut context)
+                        .instrument(tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "validation_wal_probe"))
                     .await? {
-                    head.head = context.head;
-                    return Ok(head);
+                        head.head = context.head;
+                        return Ok(head);
+                    }
                 }
             }
         }

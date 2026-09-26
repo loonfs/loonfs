@@ -6,13 +6,17 @@
 
 use loonfs::metrics::{DefaultMetricsRecorder, MetricValue};
 use loonfs::{
-    CreateNamespaceOptions, CreateSnapshotOptions, DeleteNamespaceOptions, FsWriter, NamespaceId,
-    PutFileOptions, RuntimeCacheConfig, RuntimeError, SharedObjectStore, WriterFence,
+    CreateNamespaceOptions, CreateSnapshotOptions, DeleteNamespaceOptions, FsReader, FsWriter,
+    NamespaceId, PutFileOptions, RuntimeCacheConfig, RuntimeError, SharedObjectStore, WriterFence,
+    READ_REVALIDATION_BOUND_MS,
 };
 use loonfs_api::wire::control::NamespaceStatus;
 use loonfs_core::control::NamespaceReadState;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
-use loonfs_test_support::stores::{KeyPredicate, OperationClass, RecordingStore};
+use loonfs_test_support::clock::ManualClock;
+use loonfs_test_support::stores::{
+    KeyPredicate, OperationClass, RecordedOperation, RecordingStore,
+};
 use std::sync::Arc;
 use tempfile::tempdir;
 
@@ -484,6 +488,76 @@ async fn fenced_writer_stays_fenced_with_runtime_caches_disabled() {
         )
         .await
         .expect("live writer is not fenced back");
+}
+
+#[tokio::test]
+async fn a_cached_view_older_than_the_revalidation_bound_rediscovers() {
+    let temp_dir = tempdir().expect("tempdir");
+    let recording = Arc::new(RecordingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyPredicate::any(),
+    ));
+    let store: SharedObjectStore = recording.clone();
+    let namespace_id = NamespaceId::parse("revalidation-bound").expect("namespace");
+    let timer = Arc::new(ManualClock::new(0));
+    let interval_ms = 1_000;
+    let reader = FsReader::builder_with_store(store.clone())
+        .monotonic_timer(timer.clone())
+        .runtime_cache(RuntimeCacheConfig {
+            manifest_revalidation_interval_ms: interval_ms,
+            ..Default::default()
+        })
+        .build()
+        .await
+        .expect("reader");
+    let writer = writer(&store, "revalidation-writer").await;
+    writer
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("create namespace");
+    writer
+        .put_file_bytes(
+            &namespace_id,
+            "/file.txt",
+            b"file",
+            PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("commit file");
+    writer.publisher().drain().await.expect("finish hints");
+    reader
+        .get_path_entry(&namespace_id, "/file.txt", Default::default())
+        .await
+        .expect("seed reader cache");
+
+    recording.reset();
+    timer.advance_ms(READ_REVALIDATION_BOUND_MS);
+    reader
+        .get_path_entry(&namespace_id, "/file.txt", Default::default())
+        .await
+        .expect("rediscover at the revalidation bound");
+    let operations = recording.take();
+    assert!(matches!(
+        operations.first(),
+        Some(RecordedOperation::GetWithMetadata { key, .. })
+            if key == &loonfs_objectstore::keys::hint(&namespace_id)
+    ));
+
+    timer.advance_ms(interval_ms);
+    reader
+        .get_path_entry(&namespace_id, "/file.txt", Default::default())
+        .await
+        .expect("revalidate a fresh cached view");
+    let operations = recording.take();
+    assert!(matches!(
+        operations.as_slice(),
+        [RecordedOperation::Head { key: manifest_key }, RecordedOperation::Get { key: wal_key, range: None, result_bytes: 0 }]
+            if manifest_key.starts_with(&loonfs_objectstore::keys::metadata_manifest_prefix(&namespace_id))
+                && wal_key.starts_with(&loonfs_objectstore::keys::wal_segment_prefix(&namespace_id))
+    ));
 }
 
 #[tokio::test]

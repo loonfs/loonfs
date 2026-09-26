@@ -2384,7 +2384,7 @@ async fn enable_disable_and_cached_queries_use_numbered_publication() {
 }
 
 #[tokio::test]
-async fn gc_preserves_discovery_and_applies_successor_and_segment_age_rules() {
+async fn gc_preserves_discovery_and_applies_manifest_and_segment_age_rules() {
     use loonfs::UNREFERENCED_SEGMENT_MIN_AGE_MS;
     use loonfs_api::ManifestNo;
     use loonfs_grep::manifest::encode_grep_manifest;
@@ -2470,19 +2470,19 @@ async fn gc_preserves_discovery_and_applies_successor_and_segment_age_rules() {
         .expect("young pass");
     assert_eq!(
         (young.deleted_segments, young.deleted_other_objects),
-        (0, 0)
+        (0, 1)
     );
-    assert_eq!(recording.counts().deletes, 0);
-    let aged = collector
-        .garbage_collect_namespace(&namespace_id, UNREFERENCED_SEGMENT_MIN_AGE_MS + 1)
-        .await
-        .expect("aged pass");
-    assert_eq!((aged.deleted_segments, aged.deleted_other_objects), (1, 1));
+    assert_eq!(recording.counts().deletes, 1);
     assert!(store
         .head(&manifest_key(&namespace_id, &ManifestNo(1)))
         .await
         .expect("head")
         .is_none());
+    let aged = collector
+        .garbage_collect_namespace(&namespace_id, UNREFERENCED_SEGMENT_MIN_AGE_MS + 1)
+        .await
+        .expect("aged pass");
+    assert_eq!((aged.deleted_segments, aged.deleted_other_objects), (1, 0));
     for number in 2..=4 {
         assert!(store
             .head(&manifest_key(&namespace_id, &ManifestNo(number)))

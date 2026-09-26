@@ -44,7 +44,10 @@ pub(crate) async fn acquire_writer_epoch<S: ObjectStore + ?Sized>(
             .map_err(|error| CoreError::Internal(format!("WAL fence build failed: {error}")))?;
         match publish_segment(store, &fence, &tip).await {
             Ok(()) => return Ok(acquired),
-            Err(CoreError::WalPublish(crate::commit::WalPublishError::StaleHead)) => {}
+            Err(CoreError::WalPublish(
+                crate::commit::WalPublishError::StaleHead
+                | crate::commit::WalPublishError::PublishBudgetExceeded { .. },
+            )) => {}
             Err(error) => return Err(error),
         }
     }

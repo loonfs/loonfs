@@ -63,30 +63,6 @@ impl<S: ObjectStore + ?Sized> Sweep<'_, '_, S> {
             self.report.retain(RetainedReason::Referenced);
             return Ok(());
         }
-        if family == CandidateFamily::Manifests {
-            let successor = loonfs_objectstore::layout::manifest_no_of(key)
-                .and_then(|number| number.successor().ok());
-            if let Some(successor) = successor {
-                let successor_key = loonfs_objectstore::keys::metadata_manifest_object(
-                    self.namespace_id,
-                    &successor,
-                );
-                let age = grace_age(
-                    self.store,
-                    &successor_key,
-                    self.grace_window_ms,
-                    self.mutation.now_ms,
-                )
-                .await
-                .map_err(|error| CoreError::store(&successor_key, &error))?;
-                // A reader that loaded a lagging hint may still be fetching the
-                // predecessor while its successor is young.
-                if let Some(reason) = age.retained_reason() {
-                    self.report.retain(reason);
-                    return Ok(());
-                }
-            }
-        }
         // A compaction may publish output that is exactly the minimum age
         // old, so a segment must be strictly older before it goes.
         let min_age_ms = if family == CandidateFamily::MetadataSegments {

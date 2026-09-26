@@ -1,8 +1,7 @@
 //! Complete collection passes over one namespace's grep objects.
 
 use crate::keyspace::{
-    grep_prefix, manifest_key, manifests_prefix, parse_key, segment_key, segments_prefix,
-    GrepKeyKind,
+    grep_prefix, manifests_prefix, parse_key, segment_key, segments_prefix, GrepKeyKind,
 };
 use crate::manifest::load_current_grep_manifest;
 use crate::{GrepError, GrepWorker, Result};
@@ -88,23 +87,6 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                 continue;
             };
             if manifest_no >= observed_hint {
-                report.retained_candidates += 1;
-                continue;
-            }
-            let successor = manifest_no
-                .successor()
-                .expect("a manifest below the hint should have a successor");
-            let successor_key = manifest_key(namespace_id, &successor);
-            let metadata = self
-                .store()
-                .head(&successor_key)
-                .await
-                .map_err(|error| store_error(&successor_key, &error))?;
-            if metadata.is_some_and(|metadata| {
-                metadata.last_modified_ms.is_none_or(|modified| {
-                    now_ms.saturating_sub(modified) < GREP_GC_GRACE_WINDOW_MS
-                })
-            }) {
                 report.retained_candidates += 1;
                 continue;
             }
