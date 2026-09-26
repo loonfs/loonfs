@@ -28,6 +28,34 @@ fn access_record(
     }
 }
 
+#[test]
+fn the_fold_keeps_a_latest_empty_revision() {
+    let cleared = AccessRevisionRecord {
+        boundary: false,
+        grants: AccessGrants::default(),
+        ..access_record(2, 4, &[AccessRight::Read], true)
+    };
+    let mut builder = MetadataStateBuilder::default();
+    builder.push_access_revision(access_record(1, 3, &[AccessRight::Read], true));
+    builder.push_access_revision(cleared.clone());
+    let mut rows_by_family = BTreeMap::from([(
+        ApiMetadataRowFamily::Access,
+        manifest_rows_for_family(&builder.finish(), ApiMetadataRowFamily::Access),
+    )]);
+
+    fold_rows_with_retention(
+        MetadataFamilyGroup::Access,
+        &mut rows_by_family,
+        ChangeSeq(9),
+    )
+    .expect("fold access");
+
+    assert_eq!(
+        rows_by_family.remove(&ApiMetadataRowFamily::Access),
+        Some(vec![MetadataRow::AccessRevision(cleared)])
+    );
+}
+
 #[tokio::test]
 async fn a_published_segment_answers_at_the_sequence_the_read_asks_for() {
     let temp_dir = tempdir().expect("tempdir");
