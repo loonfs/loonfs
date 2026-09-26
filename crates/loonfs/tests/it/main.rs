@@ -34,6 +34,7 @@ mod pagination;
 mod publication;
 mod read_snapshot;
 mod request_accounting;
+mod retained_views;
 mod runtime_config;
 mod snapshots;
 mod speculative_reads;
