@@ -6,7 +6,7 @@
 //! maintenance family together.
 
 use crate::GramIndexBuildPolicy;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::num::{NonZeroU64, NonZeroUsize};
 use thiserror::Error;
 
@@ -15,7 +15,7 @@ use thiserror::Error;
 ///
 /// Project-wide, zero may disable an explicitly documented cache. Work
 /// budgets instead reject zero at their construction boundaries.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct GrepWorkerConfig {
     /// Revisions examined per build step.

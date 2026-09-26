@@ -7,7 +7,7 @@ use loonfs_api::env::{AUTH_TOKEN_ENV, CONTENT_TOKEN_SECRET_ENV};
 use loonfs_api::SecretString;
 use loonfs_grep::GrepWorkerConfig;
 use loonfs_objectstore::{ConfiguredObjectStore, StoreConfigError};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs;
 use std::net::SocketAddr;
@@ -17,10 +17,13 @@ use thiserror::Error;
 pub use loonfs_objectstore::StoreConfig;
 
 /// Overrides the embedded writer's inline content policy.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct InlineContentOverrides {
-    #[serde(deserialize_with = "deserialize_inline_content_threshold")]
+    #[serde(
+        serialize_with = "serialize_inline_content_threshold",
+        deserialize_with = "deserialize_inline_content_threshold"
+    )]
     pub inline_content_threshold_bytes: Option<usize>,
     pub inline_content_segment_budget_bytes: Option<usize>,
     pub inline_content_fold_at_bytes: Option<usize>,
@@ -36,6 +39,19 @@ impl Default for InlineContentOverrides {
             inline_content_fold_at_bytes: None,
             inline_content_tail_limit_bytes: None,
         }
+    }
+}
+
+fn serialize_inline_content_threshold<S>(
+    threshold: &Option<usize>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    match threshold {
+        Some(bytes) => bytes.serialize(serializer),
+        None => serializer.serialize_bool(false),
     }
 }
 
@@ -78,7 +94,7 @@ impl InlineContentOverrides {
 }
 
 /// Optional overrides for the writer's shared publication budget.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PublicationLimitsOverrides {
     pub max_requests: Option<std::num::NonZeroUsize>,
@@ -118,7 +134,7 @@ impl PublicationLimitsOverrides {
 /// variables instead of the file. A non-blank value in the file takes
 /// precedence; blank environment values are ignored. Object-store credentials
 /// follow the source explicitly selected by the nested `credentials` table.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServerConfig {
     pub bind: String,
@@ -248,7 +264,7 @@ pub struct ServerConfig {
 /// The server's TLS identity: one certificate chain and its private key,
 /// both read at startup. A file that is missing, unreadable, or not the PEM
 /// it claims to be fails the process rather than degrading to plaintext.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TlsServerConfig {
     /// PEM certificate chain, leaf first.
@@ -327,7 +343,7 @@ fn default_max_concurrent_maintenance() -> usize {
 /// implementation. Those are engine-tuning numbers, not deployment
 /// decisions, and they stay out of configuration until measurement says
 /// otherwise.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LocalCacheConfig {
     /// Directory the cache owns. Created if missing; locked while this
@@ -344,7 +360,7 @@ pub struct LocalCacheConfig {
     pub disk_bytes: u64,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeCacheConfigOverrides {
     pub manifest_revalidation_interval_ms: Option<u64>,
@@ -356,7 +372,7 @@ pub struct RuntimeCacheConfigOverrides {
 
 /// What this server does about maintenance: serve the API group, run the
 /// scheduler, both, or neither.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MaintenanceMode {
     /// Neither serve the maintenance API group nor run the scheduler.
@@ -390,7 +406,7 @@ impl MaintenanceMode {
 /// namespaces it never answers searches about; the reference deployment
 /// does both. Every combination is named here, so none has to be validated
 /// away.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GrepMode {
     /// Neither answer grep queries nor maintain the index.
@@ -417,7 +433,7 @@ impl GrepMode {
 }
 
 /// The server's `[grep]` table.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GrepConfig {
     pub mode: GrepMode,
@@ -2213,6 +2229,25 @@ root = "/tmp/loonfs-server"
         match error {
             ServerConfigError::Decode(_) => {}
             other => panic!("expected decode error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn server_config_toml_round_trip_preserves_values() {
+        let mut config: super::ServerConfig =
+            toml::from_str(include_str!("../config/local-fs.example.toml"))
+                .expect("example config should parse");
+
+        for threshold in [
+            config.inline_content.inline_content_threshold_bytes,
+            Some(0),
+            None,
+        ] {
+            config.inline_content.inline_content_threshold_bytes = threshold;
+            let serialized = toml::to_string(&config).expect("server config should serialize");
+            let decoded: super::ServerConfig =
+                toml::from_str(&serialized).expect("serialized server config should parse");
+            assert_eq!(decoded, config);
         }
     }
 
