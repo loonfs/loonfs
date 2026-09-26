@@ -86,7 +86,7 @@ pub use loonfs_core::limits::{
     MAX_MULTIPART_PARTS, MAX_SIGNED_PARTS_PER_REQUEST, METADATA_PUBLICATION_BUDGET_MS,
     UNREFERENCED_SEGMENT_MIN_AGE_MS,
 };
-pub use loonfs_core::time::{current_time_ms, Deadline, Observation};
+pub use loonfs_core::time::{current_time_ms, Deadline, Observation, WallClock};
 pub use loonfs_core::{
     delete_if_aged, next_run_no_after, refill_iterators, select_next_iterator,
     write_segments_in_waves, CheckpointFile, CheckpointFilesPage, CheckpointFilesPageCursor,

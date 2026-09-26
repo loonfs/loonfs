@@ -640,6 +640,8 @@ The inode count includes retained deleted records. An implicit root counts as ze
 
 Statistics reads use one validated manifest without reading segments or replaying newer WAL. Observations include namespace identity, lifecycle status, manifest number, head sequence, and folded WAL number. Checkpoint statistics read the pinned manifest. Compaction can change footprint without changing the logical head, so the manifest number matters too.
 
+Observations also include `manifest_bytes`, the stored length of the manifest document as read, and `segments_by_family`, which counts each family's segment descriptors across every run and lists every family, with zero for a family that has none. Both values come from the same validated manifest, so they add no requests.
+
 A fork inherits the source manifest's segment descriptors, so its footprint values begin as the source's. Its counters begin at zero. Activity committed in the source stays in the source's manifests.
 
 Counters start at zero. Meters compare observations for the same namespace. Billing cursors and policy belong to the application.

@@ -265,7 +265,7 @@ mod tests {
         ))
         .expect("valid manifest fixture");
         DecodedMetadataSegmentBlock::Manifest {
-            manifest: (Arc::new(manifest), Arc::new(Vec::new())),
+            manifest: (Arc::new(manifest), Arc::new(Vec::new()), 0),
             decoded_bytes: 1,
         }
     }

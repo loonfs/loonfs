@@ -48,11 +48,12 @@ impl FsMaintenance {
         core: ReadCore,
         publisher: crate::publisher::PublisherRegistry,
         actor_id: String,
+        wall_clock: Arc<dyn crate::WallClock>,
     ) -> Result<Self> {
         Ok(Self {
             core,
             publisher: Some(publisher),
-            actor: WriterIdentity::new(actor_id)?,
+            actor: WriterIdentity::new(actor_id, wall_clock)?,
             compactor_epochs: Arc::default(),
             #[cfg(test)]
             reorganization_row_budget: None,
@@ -90,6 +91,7 @@ impl FsMaintenance {
 pub struct FsMaintenanceBuilder {
     core: HandleBuilderCore,
     actor_id: Option<String>,
+    wall_clock: Arc<dyn crate::WallClock>,
 }
 
 impl FsMaintenanceBuilder {
@@ -97,6 +99,7 @@ impl FsMaintenanceBuilder {
         Self {
             core,
             actor_id: None,
+            wall_clock: Arc::new(loonfs_core::time::SystemWallClock),
         }
     }
 
@@ -110,6 +113,12 @@ impl FsMaintenanceBuilder {
     /// Supplies monotonic time for runtime scheduling and deterministic tests.
     pub fn monotonic_timer(mut self, timer: Arc<dyn loonfs_api::MonotonicTimer>) -> Self {
         self.core.timer = timer;
+        self
+    }
+
+    /// Supplies wall time for maintenance timestamps and collection decisions.
+    pub fn wall_clock(mut self, clock: Arc<dyn crate::WallClock>) -> Self {
+        self.wall_clock = clock;
         self
     }
 
@@ -159,7 +168,7 @@ impl FsMaintenanceBuilder {
         let actor_id = self
             .actor_id
             .ok_or_else(|| RuntimeError::Config("actor_id is required".to_owned()))?;
-        let actor = WriterIdentity::new(actor_id)?;
+        let actor = WriterIdentity::new(actor_id, self.wall_clock)?;
         Ok(FsMaintenance {
             core: self.core.open_read_core()?,
             publisher: None,

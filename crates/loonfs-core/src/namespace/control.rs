@@ -40,6 +40,7 @@ impl CurrentManifest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoadedManifest {
     pub object_key: String,
+    pub(crate) manifest_bytes: u64,
     pub state: CurrentManifest,
 }
 
@@ -251,8 +252,9 @@ pub(crate) async fn load_manifest_by_number<S: ObjectStore + ?Sized>(
             message: error.to_string(),
         },
     })?;
-    Ok(envelope.map(|envelope| LoadedManifest {
+    Ok(envelope.map(|(envelope, manifest_bytes)| LoadedManifest {
         object_key,
+        manifest_bytes,
         state: CurrentManifest {
             envelope: std::sync::Arc::new(envelope),
         },

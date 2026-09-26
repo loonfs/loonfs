@@ -42,6 +42,7 @@ pub(crate) struct VerifiedMetadataSegments<'a, S: ObjectStore + ?Sized> {
     pub(super) segment_cache: Option<&'a MetadataSegmentCache>,
     pub(super) manifest_object_key: String,
     pub(super) manifest: Option<Arc<NamespaceManifestEnvelope>>,
+    pub(super) manifest_bytes: u64,
     /// The manifest's runs, grouped once during load validation and shared
     /// through the manifest cache entry. Scans merge globally unique row keys
     /// and do not depend on this order.
@@ -63,6 +64,7 @@ impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
             segment_cache: Some(segment_cache),
             manifest_object_key: String::new(),
             manifest: None,
+            manifest_bytes: 0,
             scan_runs: Arc::new(scan_runs),
             block_memo: SessionBlockMemo::default(),
         }

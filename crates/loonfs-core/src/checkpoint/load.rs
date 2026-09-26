@@ -133,6 +133,7 @@ pub(crate) async fn load_namespace_manifest_envelope<S: ObjectStore + ?Sized>(
     let manifest_key = metadata_manifest_object(namespace_id, manifest_no);
     load_namespace_manifest_envelope_if_present(store, namespace_id, manifest_no)
         .await?
+        .map(|(envelope, _)| envelope)
         .ok_or(ManifestLoadError::MissingManifest {
             object_key: manifest_key,
         })
@@ -200,7 +201,7 @@ pub(crate) async fn load_manifest_segments_for_inspection<'a, S: ObjectStore + ?
             decode_manifest_at(namespace_id, *manifest_no, &manifest_key, &manifest_bytes)?;
         let scan_runs = Arc::new(runs_in_reorganization_order(manifest.payload()));
         Ok(DecodedMetadataSegmentBlock::Manifest {
-            manifest: (Arc::new(manifest), scan_runs),
+            manifest: (Arc::new(manifest), scan_runs, manifest_bytes.len() as u64),
             // The entry retains the envelope plus its scan-ordered run list.
             decoded_bytes: manifest_bytes.len().saturating_mul(2),
         })
@@ -216,12 +217,13 @@ pub(crate) async fn load_manifest_segments_for_inspection<'a, S: ObjectStore + ?
         }
         None => fetch().await?,
     };
-    let (manifest, scan_runs) = decoded.into_manifest(&manifest_key)?;
+    let (manifest, scan_runs, manifest_bytes) = decoded.into_manifest(&manifest_key)?;
     let segments = VerifiedMetadataSegments {
         store,
         segment_cache,
         manifest_object_key: manifest_key,
         manifest: Some(manifest),
+        manifest_bytes,
         scan_runs,
         block_memo: SessionBlockMemo::default(),
     };
@@ -244,7 +246,7 @@ pub(crate) async fn load_namespace_manifest_envelope_if_present<S: ObjectStore +
     store: &S,
     namespace_id: &NamespaceId,
     manifest_no: &ManifestNo,
-) -> Result<Option<NamespaceManifestEnvelope>, ManifestLoadError> {
+) -> Result<Option<(NamespaceManifestEnvelope, u64)>, ManifestLoadError> {
     let manifest_key = metadata_manifest_object(namespace_id, manifest_no);
     let Some(manifest_bytes) = store
         .get(&manifest_key, None)
@@ -262,7 +264,8 @@ pub(crate) async fn load_namespace_manifest_envelope_if_present<S: ObjectStore +
     else {
         return Ok(None);
     };
-    decode_manifest_at(namespace_id, *manifest_no, &manifest_key, &manifest_bytes).map(Some)
+    let manifest = decode_manifest_at(namespace_id, *manifest_no, &manifest_key, &manifest_bytes)?;
+    Ok(Some((manifest, manifest_bytes.len() as u64)))
 }
 
 pub(crate) fn decode_manifest_at(
