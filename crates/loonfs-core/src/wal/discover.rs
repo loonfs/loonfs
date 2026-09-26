@@ -38,33 +38,45 @@ pub(crate) async fn discover_tail<S: ObjectStore + ?Sized>(
     // number to the replay concurrency; the last window can spend up to seven reads
     // on absent numbers.
     loop {
+        let first = head.wal_no.0 + 1;
         let end = (head.wal_no.0 + window as u64).min(MAX_PUBLIC_INTEGER);
         let loaded = stream::iter(head.wal_no.0..end)
             .map(|number| load_wal_segment(store, namespace_id, WalNo(number + 1)))
             .buffered(window)
             .collect::<Vec<_>>()
             .await;
-        let mut absent: Option<String> = None;
-        for loaded in loaded {
-            if let Some(object_key) = &absent {
-                if matches!(loaded.envelope, Ok(Some(_))) {
-                    return Err(wal_error(WalTailLoadError::MissingWalObject {
-                        object_key: object_key.clone(),
-                    }));
+        let last_present = loaded
+            .iter()
+            .rposition(|loaded| matches!(loaded.envelope, Ok(Some(_))));
+        let mut ended = false;
+        for (index, loaded) in loaded.into_iter().enumerate() {
+            let (object_key, envelope) = match loaded.envelope.map_err(wal_error)? {
+                Some(envelope) => (loaded.object_key, envelope),
+                None if last_present.is_none_or(|last| index > last) => {
+                    ended = true;
+                    break;
                 }
-                continue;
-            }
-            let Some(envelope) = loaded.envelope.map_err(wal_error)? else {
-                absent = Some(loaded.object_key);
-                continue;
+                None => {
+                    // The window's reads do not see one moment: a number absent here
+                    // may have been published before a later number was read. Read it
+                    // again; only a number still absent is missing.
+                    let again =
+                        load_wal_segment(store, namespace_id, WalNo(first + index as u64)).await;
+                    match again.envelope.map_err(wal_error)? {
+                        Some(envelope) => (again.object_key, envelope),
+                        None => {
+                            return Err(wal_error(WalTailLoadError::MissingWalObject {
+                                object_key: again.object_key,
+                            }))
+                        }
+                    }
+                }
             };
-            let segment = walk
-                .validate(loaded.object_key, envelope)
-                .map_err(wal_error)?;
+            let segment = walk.validate(object_key, envelope).map_err(wal_error)?;
             head = head.after_segment(segment.envelope().payload());
             segments.push(segment);
         }
-        if absent.is_some() || end == MAX_PUBLIC_INTEGER {
+        if ended || end == MAX_PUBLIC_INTEGER {
             break;
         }
         window = (window * 2).min(WAL_REPLAY_READ_CONCURRENCY);

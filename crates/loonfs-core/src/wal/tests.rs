@@ -415,6 +415,40 @@ async fn cold_open_probes_past_a_lagging_hint_and_reads_a_missing_hint_as_absent
 }
 
 #[tokio::test]
+async fn a_number_published_during_a_window_is_read_again_not_reported_missing() {
+    let directory = tempdir().expect("directory");
+    let namespace_id = NamespaceId::parse("window-race").expect("namespace");
+    let store = BlockingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::prefix(wal_segment(&namespace_id, &WalNo(6))),
+        OperationClass::Get,
+    );
+    create(&store, &namespace_id, &context(1_000))
+        .await
+        .expect("create");
+    let mut engine = NamespaceCommitEngine::new(namespace_id.clone());
+    for name in ["one", "two", "three"] {
+        publish(&mut engine, &store, name).await.expect(name);
+    }
+    // WAL 1 through 4 exist. The window 4..7 reads 5 as absent, then 5 and 6
+    // are published while the read of 6 is parked, so 6 comes back present.
+    store.block_next();
+    let (anchor, ()) = futures::join!(
+        crate::namespace::read_anchor::load_read_anchor(&store, &namespace_id),
+        async {
+            store.wait_until_blocked().await;
+            for name in ["four", "five"] {
+                publish(&mut engine, &store, name).await.expect(name);
+            }
+            store.release();
+        }
+    );
+    let anchor = anchor.expect("discovery across concurrent publishes");
+    assert_eq!(anchor.read_state.wal_no, WalNo(6));
+    assert_eq!(anchor.tail.segments().len(), 6);
+}
+
+#[tokio::test]
 async fn a_bounded_tail_load_overlaps_reads_and_matches_sequential_replay() {
     use super::reader::{load_wal_segment, load_wal_tail, WalWalk, WAL_REPLAY_READ_CONCURRENCY};
 
