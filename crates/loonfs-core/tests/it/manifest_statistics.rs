@@ -1,6 +1,8 @@
+//! Manifest activity and referenced storage observations.
+
 use crate::common::commit_split_support::*;
 use crate::common::namespace_engine;
-use loonfs_api::wire::manifest::{ActivityCounter, ManifestActivity};
+use loonfs_api::wire::manifest::{ActivityCounter, ManifestActivity, MetadataRowFamily};
 use loonfs_api::{AbsolutePath, ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior};
 use loonfs_core::content::store_bytes_as_content;
 use loonfs_core::control::{
@@ -17,6 +19,7 @@ use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{
     FailStore, InjectedError, KeyPredicate, OperationClass, RecordedOperation, RecordingStore,
 };
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use tempfile::tempdir;
 
@@ -37,6 +40,8 @@ async fn cached_and_replayed_folds_count_commits_once_and_reads_use_only_manifes
             .await
             .expect("activity");
         assert_eq!(initial.activity, ManifestActivity::default());
+        assert_eq!(initial.segments_by_family.len(), 11);
+        assert!(initial.segments_by_family.values().all(|count| *count == 0));
         assert_eq!(
             (initial.inode_record_count, initial.metadata_stored_bytes),
             (0, 0)
@@ -231,6 +236,52 @@ async fn forks_start_activity_at_zero_and_inherit_the_selected_checkpoint_footpr
         baseline
     );
     engine.flush_wal().await.expect("fold parent");
+    let layout_snapshot = engine
+        .create_snapshot("layout".to_owned(), u64::MAX / 2)
+        .await
+        .expect("layout snapshot");
+    let current = load_namespace_current_manifest(&store, &parent)
+        .await
+        .expect("manifest");
+    assert_eq!(current.state.envelope.payload().runs.len(), 2);
+    let mut manifest_bytes = store
+        .get(&current.object_key, None)
+        .await
+        .expect("manifest bytes")
+        .expect("manifest exists")
+        .to_vec();
+    manifest_bytes.extend_from_slice(b" \n\t");
+    let stored_length = manifest_bytes.len() as u64;
+    store
+        .put_overwrite(&current.object_key, manifest_bytes.into())
+        .await
+        .expect("manifest with trailing whitespace");
+    let layout = load_namespace_statistics(&store, &parent)
+        .await
+        .expect("layout statistics");
+    assert_eq!(layout.manifest_bytes, stored_length);
+    assert_eq!(
+        layout.segments_by_family,
+        BTreeMap::from([
+            (MetadataRowFamily::Inodes, 1),
+            (MetadataRowFamily::DirentryBinds, 1),
+            (MetadataRowFamily::DirentryChildBinds, 1),
+            (MetadataRowFamily::Revisions, 2),
+            (MetadataRowFamily::Tombstones, 0),
+            (MetadataRowFamily::ActiveDeletions, 0),
+            (MetadataRowFamily::CommitReceipts, 2),
+            (MetadataRowFamily::Commits, 2),
+            (MetadataRowFamily::ContentPublications, 2),
+            (MetadataRowFamily::Attributes, 0),
+            (MetadataRowFamily::Access, 0),
+        ])
+    );
+    assert_eq!(
+        load_checkpoint_statistics(&store, &parent, &layout_snapshot.checkpoint_id)
+            .await
+            .expect("checkpoint layout statistics"),
+        layout
+    );
     engine
         .fork_namespace(
             &child,

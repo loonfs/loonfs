@@ -3,12 +3,14 @@
 use super::block_fetch::segment_object_len;
 use super::publish::manifest_ref_for;
 use super::read_basis::load_pinned_checkpoint_basis;
+use super::runs::CHECKPOINT_ROW_FAMILIES;
 use crate::error::{CoreError, Result};
 use crate::namespace::control::{load_current_manifest, LoadedManifest};
 use loonfs_api::wire::control::{ForkBasis, ManifestRef, NamespaceStatus};
 use loonfs_api::wire::manifest::{ManifestActivity, MetadataRowFamily, NamespaceManifestEnvelope};
 use loonfs_api::{NamespaceId, PinId, WalNo};
 use loonfs_objectstore::ObjectStore;
+use std::collections::BTreeMap;
 
 /// Statistics through the selected manifest's folded head. Newer WAL commits
 /// are excluded. Counters start at zero and comparisons hold within one namespace.
@@ -16,6 +18,10 @@ use loonfs_objectstore::ObjectStore;
 pub struct NamespaceStatistics {
     /// Namespace, manifest number, head sequence, and checksum of this observation.
     pub manifest: ManifestRef,
+    /// Stored length of the manifest document read by the loader.
+    pub manifest_bytes: u64,
+    /// Segment descriptor counts across all runs, including families with none.
+    pub segments_by_family: BTreeMap<MetadataRowFamily, u64>,
     /// Immutable namespace creation time in Unix milliseconds.
     pub created_at_ms: u64,
     /// Lifecycle at this manifest, including whether these are final totals.
@@ -36,7 +42,7 @@ pub struct NamespaceStatistics {
 impl LoadedManifest {
     /// Calculates statistics from the loaded manifest without storage requests.
     pub fn statistics(&self) -> Result<NamespaceStatistics> {
-        manifest_statistics(&self.state.envelope)
+        manifest_statistics(&self.state.envelope, self.manifest_bytes)
     }
 }
 
@@ -59,15 +65,23 @@ pub async fn load_checkpoint_statistics<S: ObjectStore + ?Sized>(
     checkpoint_id: &PinId,
 ) -> Result<NamespaceStatistics> {
     let pinned = load_pinned_checkpoint_basis(store, None, namespace_id, checkpoint_id).await?;
-    manifest_statistics(pinned.segments.manifest())
+    manifest_statistics(pinned.segments.manifest(), pinned.segments.manifest_bytes)
 }
 
-fn manifest_statistics(manifest: &NamespaceManifestEnvelope) -> Result<NamespaceStatistics> {
+fn manifest_statistics(
+    manifest: &NamespaceManifestEnvelope,
+    manifest_bytes: u64,
+) -> Result<NamespaceStatistics> {
     let payload = manifest.payload();
     // Both loaders validate descriptor uniqueness and byte ranges before this call.
     let mut inode_record_count = 0_u64;
     let mut metadata_stored_bytes = 0_u64;
+    let mut segments_by_family: BTreeMap<_, _> = CHECKPOINT_ROW_FAMILIES
+        .into_iter()
+        .map(|family| (family, 0))
+        .collect();
     for segment in payload.runs.iter().flat_map(|run| &run.segments) {
+        *segments_by_family.entry(segment.family).or_default() += 1;
         metadata_stored_bytes = metadata_stored_bytes
             .checked_add(segment_object_len(segment))
             .ok_or_else(|| {
@@ -83,6 +97,8 @@ fn manifest_statistics(manifest: &NamespaceManifestEnvelope) -> Result<Namespace
     }
     Ok(NamespaceStatistics {
         manifest: manifest_ref_for(&payload.namespace_id, manifest),
+        manifest_bytes,
+        segments_by_family,
         created_at_ms: payload.created_at_ms,
         status: payload.status,
         folded_wal_no: payload.folded_wal_no,

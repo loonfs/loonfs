@@ -51,7 +51,7 @@ pub(super) async fn load_manifest_materialization_for_inspection_if_present<
     let manifest_key = metadata_manifest_object(namespace_id, manifest_number);
     let manifest =
         load_namespace_manifest_envelope_if_present(store, namespace_id, manifest_number).await?;
-    let Some(manifest) = manifest else {
+    let Some((manifest, _)) = manifest else {
         return Ok(None);
     };
     let metadata_state = load_manifest_metadata_state_for_inspection_from_manifest(
