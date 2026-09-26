@@ -20,6 +20,9 @@ use std::fmt;
 /// a raw JSON fragment. `payload_checksum` covers the fragment's exact bytes.
 pub const NAMESPACE_MANIFEST_FORMAT_VERSION: u32 = 1;
 
+/// Version 1 uses the [block layout](../../../docs/specs/format.md#a7-block-segment-encoding).
+pub const METADATA_SEGMENT_ENCODING: u32 = 1;
+
 /// Identifies the durable payload family carried by a namespace-manifest envelope.
 ///
 /// See [durable object families](../../../docs/specs/format.md#a8-object-keys).
@@ -189,6 +192,8 @@ pub struct MetadataSegmentRef {
     pub segment_id: MetadataSegmentId,
     /// Row schema and lookup ordering encoded in this segment.
     pub family: MetadataRowFamily,
+    /// Version of the segment's block layout.
+    pub encoding: u32,
     /// Number of row payloads in the segment, used for validation and planning.
     pub row_count: u64,
     /// Inclusive least durable row key; the segment is corrupt if decoded rows disagree.
@@ -2013,6 +2018,7 @@ mod tests {
             owner_namespace_id: NamespaceId::parse(owner_namespace_id).expect("valid namespace id"),
             segment_id: MetadataSegmentId::parse(segment_id).expect("valid segment id"),
             family: MetadataRowFamily::Inodes,
+            encoding: super::METADATA_SEGMENT_ENCODING,
             row_count: 0,
             min_row_key: String::new(),
             max_row_key: String::new(),

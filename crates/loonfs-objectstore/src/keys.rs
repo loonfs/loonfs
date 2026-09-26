@@ -95,7 +95,9 @@ mod tests {
         checkpoint_record, content_blob, hint, metadata_manifest_object, metadata_segment,
         metadata_segment_object_key, upload_session, wal_segment, wal_segment_prefix,
     };
-    use loonfs_api::wire::manifest::{MetadataRowFamily, MetadataSegmentRef};
+    use loonfs_api::wire::manifest::{
+        MetadataRowFamily, MetadataSegmentRef, METADATA_SEGMENT_ENCODING,
+    };
     use loonfs_api::wire::sst_blocks::BlockHandle;
     use loonfs_api::{
         ContentId, ManifestNo, MetadataSegmentId, NamespaceId, PinId, UploadId, WalNo,
@@ -222,6 +224,7 @@ mod tests {
             owner_namespace_id: namespace_id(),
             segment_id: metadata_segment_id(),
             family: MetadataRowFamily::Inodes,
+            encoding: METADATA_SEGMENT_ENCODING,
             row_count: 0,
             min_row_key: String::new(),
             max_row_key: String::new(),

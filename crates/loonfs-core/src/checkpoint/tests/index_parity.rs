@@ -1045,6 +1045,61 @@ async fn lookups_find_rows_in_a_segment_whose_last_row_closed_a_block() {
 }
 
 #[tokio::test]
+async fn manifest_validation_rejects_unsupported_segment_encoding() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context)
+        .await
+        .expect("bootstrap");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/hello.txt",
+        b"hello",
+        &context,
+        None,
+    )
+    .await
+    .expect("write file");
+    create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("checkpoint");
+    let manifest = load_current_manifest(&store, &namespace_id)
+        .await
+        .expect("valid manifest");
+    let mut payload = manifest.state.envelope.payload().clone();
+    let descriptor = &mut payload.runs[0].segments[0];
+    descriptor.encoding = loonfs_api::wire::manifest::METADATA_SEGMENT_ENCODING + 1;
+    let segment_id = descriptor.segment_id.clone();
+    let encoding = descriptor.encoding;
+    let manifest_no = payload.manifest_no;
+    let manifest_key = metadata_manifest_object(&namespace_id, &manifest_no);
+    let (_, bytes) = encode_namespace_manifest_json(payload)
+        .expect("manifest envelope")
+        .into_parts();
+
+    let error = load::decode_manifest_at(&namespace_id, manifest_no, &manifest_key, &bytes)
+        .expect_err("unsupported segment encoding must fail validation");
+    match error {
+        ManifestLoadError::RunManifestMismatch {
+            object_key,
+            message,
+        } => {
+            assert_eq!(object_key, manifest_key);
+            assert_eq!(
+                message,
+                format!(
+                    "metadata segment `{segment_id}` uses unsupported encoding `{encoding}`; a newer binary is required"
+                )
+            );
+        }
+        other => panic!("expected manifest validation error, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn manifest_load_rejects_descriptors_off_the_frozen_segment_layout() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
