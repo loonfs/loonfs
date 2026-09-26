@@ -9,12 +9,14 @@ use loonfs::{
     NamespaceId, PutFileOptions, ReorganizeStepOutcome, RuntimeCacheConfig, SharedObjectStore,
     StoredMetadataBlockKind,
 };
+use loonfs_core::limits::FOLD_AT_WAL_SEGMENTS;
 use loonfs_core::test_support::{
     RecordedStoredMetadataBlockCall, RecordingStoredMetadataBlockCache,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::namespace_id;
-use loonfs_test_support::stores::{KeyPredicate, OperationClass, RecordingStore};
+use loonfs_test_support::stores::{BlockingStore, KeyPredicate, OperationClass, RecordingStore};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tempfile::tempdir;
 
@@ -214,6 +216,73 @@ fn runtime_publish_reuses_wal_tail_projection_for_sequential_writes() {
         0,
         "second measured write should not reread WAL tail"
     );
+}
+
+#[tokio::test]
+async fn runtime_publish_reuses_wal_tail_projection_while_a_fold_runs() {
+    let directory = tempdir().expect("directory");
+    let namespace_id = namespace_id("fold-projection");
+    let blocking = BlockingStore::matching(
+        LocalFsStore::new(directory.path()).expect("store"),
+        folded_manifest_put,
+    );
+    let recording = Arc::new(RecordingStore::new(
+        blocking,
+        KeyPredicate::prefix(loonfs_objectstore::keys::wal_segment_prefix(&namespace_id)),
+    ));
+    let tail_segments = Arc::new(AtomicU64::new(0));
+    let writer = loonfs::FsWriter::builder_with_store(recording.clone())
+        .writer_id("fold-projection")
+        .maintenance_hint_observer({
+            let tail_segments = Arc::clone(&tail_segments);
+            move |hint| {
+                if let loonfs::MaintenanceHint::Published(publication) = hint {
+                    tail_segments.store(publication.wal_tail_segments, Ordering::SeqCst);
+                }
+            }
+        })
+        .build()
+        .await
+        .expect("writer");
+    writer
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("namespace");
+    recording.inner().block_next();
+    for number in 0..FOLD_AT_WAL_SEGMENTS + 3 {
+        recording.reset();
+        writer
+            .create_directory(
+                &namespace_id,
+                &format!("/directory-{number}"),
+                CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
+            )
+            .await
+            .expect("publish directory");
+        if tail_segments.load(Ordering::SeqCst) == FOLD_AT_WAL_SEGMENTS {
+            recording.inner().wait_until_blocked().await;
+        }
+        if number > 0 {
+            assert_eq!(recording.count(OperationClass::Put), 1, "publish {number}");
+            assert_eq!(recording.count(OperationClass::Get), 0, "publish {number}");
+        }
+        assert_eq!(tail_segments.load(Ordering::SeqCst), number + 2);
+    }
+    recording.inner().release();
+    writer.wait_for_fold(&namespace_id).await.expect("fold");
+    writer
+        .create_directory(
+            &namespace_id,
+            "/after-fold",
+            CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("publish after fold");
+    assert!(tail_segments.load(Ordering::SeqCst) < FOLD_AT_WAL_SEGMENTS);
+    writer.shutdown().await.expect("shutdown");
 }
 
 #[test]

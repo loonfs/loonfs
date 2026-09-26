@@ -2358,7 +2358,7 @@ async fn a_runtime_fold_materializes_inline_content_and_reloads_an_empty_tail() 
 }
 
 #[tokio::test]
-async fn a_failed_fold_notifies_maintenance_when_the_attempt_finishes() {
+async fn a_failed_fold_notifies_maintenance_and_reloads_the_tail() {
     let temp_dir = tempdir().expect("tempdir");
     let failing = Arc::new(FailStore::matching(
         LocalFsStore::new(temp_dir.path()).expect("store"),
@@ -2416,6 +2416,33 @@ async fn a_failed_fold_notifies_maintenance_when_the_attempt_finishes() {
             hint,
             MaintenanceHint::WalFoldFinished { namespace_id: folded } if folded == &namespace_id
         )));
+    }
+    loonfs_core::fold_wal_tail(
+        failing.inner(),
+        None,
+        &namespace_id,
+        None,
+        &Deadline::start(Arc::new(
+            loonfs_objectstore::timing::StdMonotonicTimer::default(),
+        )),
+    )
+    .await
+    .expect("another process folds the tail");
+    writer
+        .publisher()
+        .submit_candidate(
+            namespace_id.clone(),
+            CommitCandidate::new(create_directory_request("after-fold", "after-fold")),
+        )
+        .await
+        .expect("reload the folded tail and publish");
+    {
+        let hints = hints.lock().expect("hint log");
+        let publication = hints.iter().rev().find_map(|hint| match hint {
+            MaintenanceHint::Published(publication) => Some(publication),
+            _ => None,
+        });
+        assert!(publication.expect("publication").wal_tail_segments < FOLD_AT_WAL_SEGMENTS);
     }
     writer.shutdown().await.expect("shut down writer");
 }
