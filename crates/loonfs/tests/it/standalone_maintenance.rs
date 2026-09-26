@@ -1,10 +1,10 @@
 //! Standalone execution of every core maintenance job through a registry.
 
 use loonfs::{
-    CreateDirectoryOptions, CreateNamespaceOptions, FsMaintenance, FsWriter, GarbageCollectionJob,
-    MaintenanceAssignment, MaintenanceJobId, MaintenanceRegistry, MetadataCompactionJob,
-    MetadataMaintenanceJob, MetadataMaintenanceOptions, PutFileOptions, SharedObjectStore,
-    WallClock,
+    CreateCheckpointOptions, CreateDirectoryOptions, CreateNamespaceOptions, FsMaintenance,
+    FsWriter, GarbageCollectionJob, MaintenanceAssignment, MaintenanceJobId, MaintenanceRegistry,
+    MetadataCompactionJob, MetadataMaintenanceJob, MetadataMaintenanceOptions, PutFileOptions,
+    SharedObjectStore, WallClock,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
@@ -62,10 +62,22 @@ async fn injected_wall_time_collects_objects_the_system_clock_keeps() {
         .expect("system maintenance");
     let future = FsMaintenance::builder_with_store(store.clone())
         .actor_id("future")
-        .wall_clock(clock)
+        .wall_clock(clock.clone())
         .build()
         .await
         .expect("future maintenance");
+    let checkpoint = future
+        .create_checkpoint(
+            &namespace_id,
+            CreateCheckpointOptions {
+                name: "pinned".to_owned(),
+                ttl_ms: Some(1_000),
+            },
+        )
+        .await
+        .expect("checkpoint");
+    assert_eq!(checkpoint.created_at_ms, clock.0);
+    assert_eq!(checkpoint.expires_at_ms, Some(clock.0 + 1_000));
     let derived = writer.maintenance_handle("derived").expect("maintenance");
     for maintenance in [future, derived] {
         let object_key = loonfs_objectstore::keys::metadata_segment(

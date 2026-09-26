@@ -338,6 +338,7 @@ impl ReadCore {
             namespace_id.clone(),
             actor.writer_id.clone(),
         )
+        .with_wall_clock(actor.wall_clock.clone())
     }
 }
 

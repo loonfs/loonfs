@@ -26,7 +26,6 @@ use crate::storage::content::{
     StreamedPayloadKind,
 };
 use crate::storage::content_admission::PreparedContent;
-use crate::time::current_time_ms;
 use loonfs_api::options::{
     DirectMultipartUploadOptions, ListInodeChildrenOptions, ListPathEntriesOptions, StatPathOptions,
 };
@@ -123,6 +122,7 @@ pub struct NamespaceEngine<S, M> {
     store: S,
     namespace_id: NamespaceId,
     mode: M,
+    wall_clock: Arc<dyn crate::time::WallClock>,
     subject: Option<Subject>,
     authorization_head: Option<RuntimeReadContext>,
     /// A narrowed per-step row budget, so a test can reach a frozen base
@@ -149,6 +149,12 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// Sets the subject for this engine's reads.
     pub fn with_subject(mut self, subject: Subject) -> Self {
         self.subject = Some(subject);
+        self
+    }
+
+    /// Supplies the wall clock behind every timestamp this engine records.
+    pub fn with_wall_clock(mut self, wall_clock: Arc<dyn crate::time::WallClock>) -> Self {
+        self.wall_clock = wall_clock;
         self
     }
 
@@ -261,7 +267,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
 
     /// Returns the current wall-clock time.
     fn now_ms(&self) -> Result<u64> {
-        current_time_ms()
+        self.wall_clock.now_ms()
     }
 
     /// Stats one path against the pinned runtime read context.
@@ -337,6 +343,7 @@ impl<S: ObjectStore> NamespaceEngine<S, ReadOnly> {
             store,
             namespace_id,
             mode: ReadOnly,
+            wall_clock: Arc::new(crate::time::SystemWallClock),
             subject: None,
             authorization_head: None,
             #[cfg(any(test, feature = "test-support"))]
@@ -352,6 +359,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             store,
             namespace_id,
             mode: Writable { writer_id },
+            wall_clock: Arc::new(crate::time::SystemWallClock),
             subject: None,
             authorization_head: None,
             #[cfg(any(test, feature = "test-support"))]
