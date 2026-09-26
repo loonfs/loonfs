@@ -51,7 +51,7 @@ pub(crate) struct ReadCoreInner {
 #[derive(Clone)]
 pub(crate) struct WriterIdentity {
     pub(crate) writer_id: WriterId,
-    pub(crate) wall_clock: Arc<dyn loonfs_core::time::WallClock>,
+    pub(crate) wall_clock: Arc<dyn crate::WallClock>,
 }
 
 /// Writer state shared weakly with the publisher worker.
@@ -125,12 +125,12 @@ impl WriterBits {
 
 impl WriterIdentity {
     /// Mints an identity, rejecting a blank writer id.
-    pub(crate) fn new(writer_id: String) -> Result<Self> {
+    pub(crate) fn new(writer_id: String, wall_clock: Arc<dyn crate::WallClock>) -> Result<Self> {
         let writer_id =
             WriterId::parse(writer_id).map_err(|error| RuntimeError::Config(error.to_string()))?;
         Ok(Self {
             writer_id,
-            wall_clock: Arc::new(loonfs_core::time::SystemWallClock),
+            wall_clock,
         })
     }
 

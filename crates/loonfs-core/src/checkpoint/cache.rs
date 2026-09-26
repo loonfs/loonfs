@@ -58,6 +58,7 @@ pub(super) type DecodedMetadataSegmentBlock = DecodedSegmentBlock<
     (
         Arc<NamespaceManifestEnvelope>,
         Arc<Vec<MetadataRunManifest>>,
+        u64,
     ),
 >;
 

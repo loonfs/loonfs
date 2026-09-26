@@ -125,7 +125,7 @@ impl LiveSet {
                 .map_err(|error| {
                     CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
                 })?;
-        let Some(envelope) = envelope else {
+        let Some((envelope, _)) = envelope else {
             // Do not cache absence: another pin for this number may still
             // require retention even when an earlier pin was deletable.
             return Ok(false);
