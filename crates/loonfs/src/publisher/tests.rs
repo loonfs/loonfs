@@ -2243,7 +2243,7 @@ async fn a_fold_reloads_the_tail_when_no_projection_is_retained() {
 }
 
 #[tokio::test]
-async fn a_runtime_fold_materializes_inline_content_and_reloads_an_empty_tail() {
+async fn a_runtime_fold_materializes_inline_content_and_reanchors_to_an_empty_tail() {
     use loonfs_core::cache::DecodedBlock;
     use loonfs_core::publish::InlineContent;
 
@@ -2326,11 +2326,6 @@ async fn a_runtime_fold_materializes_inline_content_and_reloads_an_empty_tail() 
         value.bytes().as_ref()
     );
     assert!(store.count(OperationClass::Read) > 0);
-    store.reset();
-    registry
-        .submit_candidate(namespace_id.clone(), candidate)
-        .await
-        .expect("reload receipt");
     let publisher = registry
         .shared
         .lock_state()
@@ -2346,10 +2341,15 @@ async fn a_runtime_fold_materializes_inline_content_and_reloads_an_empty_tail() 
         .as_ref()
         .expect("engine")
         .wal_fold_input()
-        .expect("reloaded projection");
+        .expect("reanchored projection");
     assert_eq!(input.wal_tail_segments, 0);
     assert_eq!(input.tail_state.weight().rows, 0);
     assert_eq!(input.tail_state.weight().bytes, 0);
+    store.reset();
+    registry
+        .submit_candidate(namespace_id.clone(), candidate)
+        .await
+        .expect("folded receipt");
     assert_eq!(store.count(OperationClass::Put), 0);
     assert_eq!(
         loonfs_core::control::load_namespace_statistics(store.as_ref(), &namespace_id)

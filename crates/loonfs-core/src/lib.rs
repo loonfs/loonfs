@@ -144,7 +144,7 @@ pub mod control {
         LoadedManifest,
     };
     pub use crate::namespace::read_anchor::{
-        load_read_anchor, manifest_has_successor, NamespaceReadAnchor,
+        load_read_anchor, manifest_has_successor, project_anchor_tail, NamespaceReadAnchor,
     };
     pub use crate::namespace::state::NamespaceReadState;
     pub use crate::namespace::MetadataBasis;
@@ -170,7 +170,7 @@ pub mod publish {
 // Crate-root re-exports used by `loonfs` or required by public return types.
 pub use checkpoint::{
     fold_wal_tail, next_run_no_after, refill_iterators, select_next_iterator, CheckpointFile,
-    CheckpointFilesPage, CheckpointFilesPageCursor, CheckpointPageCursor,
+    CheckpointFilesPage, CheckpointFilesPageCursor, CheckpointPageCursor, FoldedWalTail,
     MetadataCompactionCancellation, MetadataCompactionJobOutcome, MetadataCompactionPolicy,
     MetadataCompactionSpec, MetadataFamilyGroup, MetadataReorganizeOutcome, SegmentBlockLoader,
     SegmentRowIterator,

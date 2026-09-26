@@ -233,6 +233,10 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
     );
 
     let gets = log.take_gets();
+    assert_eq!(
+        gets.iter().filter(|(key, _)| key.contains("/wal/")).count(),
+        1
+    );
     let segment_gets: Vec<&RecordedGet> = gets
         .iter()
         .filter(|(key, _)| segment_keys.contains(key))

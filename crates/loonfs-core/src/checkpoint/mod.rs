@@ -46,7 +46,7 @@ pub use self::compaction_merge::{
 };
 pub use self::error::{ManifestLoadError, ManifestLoadFailureClass};
 pub use self::files::{CheckpointFile, CheckpointFilesPage, CheckpointFilesPageCursor};
-pub use self::flush::{fold_wal_tail, next_run_no_after};
+pub use self::flush::{fold_wal_tail, next_run_no_after, FoldedWalTail};
 pub use self::list::CheckpointPageCursor;
 pub use self::read_basis::{load_checkpoint_read_basis, CheckpointReadBasis};
 pub use self::reorganize::{MetadataCompactionPolicy, MetadataReorganizeOutcome};

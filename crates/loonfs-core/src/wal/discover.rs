@@ -1,37 +1,78 @@
 //! Discovers the WAL tip and advances cached namespace views.
 
 use super::frame::{ValidatedWalTail, WalTailLoadError};
-use super::reader::{load_wal_segment, WalWalk};
+use super::reader::{load_wal_segment, WalWalk, WAL_REPLAY_READ_CONCURRENCY};
 use super::replay::project_validated_wal_tail;
 use crate::cache::WalTailProjectionCacheKey;
 use crate::control_object::ControlObjectLoadError;
 use crate::namespace::control::LoadedManifest;
 use crate::namespace::state::NamespaceReadState;
 use crate::RuntimeReadContext;
-use loonfs_api::{NamespaceId, WalNo};
+use futures::{stream, StreamExt};
+use loonfs_api::{NamespaceId, WalNo, MAX_PUBLIC_INTEGER};
 use loonfs_objectstore::ObjectStore;
 use std::sync::Arc;
 
-pub(crate) async fn discover_tip<S: ObjectStore + ?Sized>(
+pub(crate) struct DiscoveredTail {
+    pub(crate) head: NamespaceReadState,
+    pub(crate) segments: ValidatedWalTail,
+}
+
+pub(crate) async fn discover_tail<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     manifest: &LoadedManifest,
-    hinted_wal_no: WalNo,
-) -> Result<NamespaceReadState, ControlObjectLoadError> {
-    let mut state = NamespaceReadState::from(manifest.state.envelope.payload());
-    if state.status.is_deleted() {
-        return Ok(state);
+) -> Result<DiscoveredTail, ControlObjectLoadError> {
+    let mut head = NamespaceReadState::from(manifest.state.envelope.payload());
+    let mut segments = Vec::new();
+    if head.status.is_deleted() {
+        return Ok(DiscoveredTail {
+            head,
+            segments: ValidatedWalTail::new(segments),
+        });
     }
-    let start = hinted_wal_no.max(state.folded_wal_no);
-    let mut walk = WalWalk::after(namespace_id, state.wal_no, state.seq, state.writer_epoch);
-    if start > state.folded_wal_no {
-        let segment = walk.at_hint(store, start).await.map_err(wal_error)?;
-        state = state.after_segment(segment.envelope().payload());
+    let mut walk = WalWalk::after(namespace_id, head.wal_no, head.seq, head.writer_epoch);
+    let mut window = 1;
+    // One pass reads the tail and finds its end: replay needs every object above the
+    // folded boundary anyway, so the walk keeps the bodies. Windows grow from one
+    // number to the replay concurrency; the last window can spend up to seven reads
+    // on absent numbers.
+    loop {
+        let end = (head.wal_no.0 + window as u64).min(MAX_PUBLIC_INTEGER);
+        let loaded = stream::iter(head.wal_no.0..end)
+            .map(|number| load_wal_segment(store, namespace_id, WalNo(number + 1)))
+            .buffered(window)
+            .collect::<Vec<_>>()
+            .await;
+        let mut absent: Option<String> = None;
+        for loaded in loaded {
+            if let Some(object_key) = &absent {
+                if matches!(loaded.envelope, Ok(Some(_))) {
+                    return Err(wal_error(WalTailLoadError::MissingWalObject {
+                        object_key: object_key.clone(),
+                    }));
+                }
+                continue;
+            }
+            let Some(envelope) = loaded.envelope.map_err(wal_error)? else {
+                absent = Some(loaded.object_key);
+                continue;
+            };
+            let segment = walk
+                .validate(loaded.object_key, envelope)
+                .map_err(wal_error)?;
+            head = head.after_segment(segment.envelope().payload());
+            segments.push(segment);
+        }
+        if absent.is_some() || end == MAX_PUBLIC_INTEGER {
+            break;
+        }
+        window = (window * 2).min(WAL_REPLAY_READ_CONCURRENCY);
     }
-    while let Some(segment) = walk.next(store).await.map_err(wal_error)? {
-        state = state.after_segment(segment.envelope().payload());
-    }
-    Ok(state)
+    Ok(DiscoveredTail {
+        head,
+        segments: ValidatedWalTail::new(segments),
+    })
 }
 
 pub(super) fn wal_error(error: WalTailLoadError) -> ControlObjectLoadError {

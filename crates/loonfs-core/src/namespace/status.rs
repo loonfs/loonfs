@@ -37,13 +37,12 @@ pub async fn load_namespace_wal_tail_usage<S: ObjectStore + ?Sized>(
     super::control::ensure_namespace_live(&loaded.read_state)?;
     let basis =
         crate::checkpoint::load_basis_metadata_segments(store, None, &loaded.basis()).await?;
-    let tail = crate::wal::load_replayed_wal_tail(
-        store,
+    let tail = crate::wal::replay_discovered_tail(
         &basis.replay_head(&loaded.read_state),
         &loaded.read_state,
         &basis.base_state,
+        &loaded.tail,
     )
-    .await
     .map_err(CoreError::MetadataProjection)?;
     Ok(NamespaceWalTailUsage {
         head_seq: loaded.read_state.seq,

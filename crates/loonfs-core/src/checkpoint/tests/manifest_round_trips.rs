@@ -94,7 +94,8 @@ async fn a_publish_projection_fold_writes_the_replayed_tail_rows() {
         &crate::time::Deadline::start(Arc::new(crate::time::StdMonotonicTimer::default())),
     )
     .await
-    .expect("fold publish projection");
+    .expect("fold publish projection")
+    .response;
     assert_eq!(response.outcome, loonfs_api::FlushWalOutcome::Published);
     let materialized =
         load_manifest_materialization_for_inspection(&store, &namespace_id, response.manifest_no)

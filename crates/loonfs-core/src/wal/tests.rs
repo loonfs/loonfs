@@ -80,7 +80,7 @@ async fn readers_reject_invalid_numbers_epochs_sequences_and_allocation_summarie
 }
 
 #[tokio::test]
-async fn hinted_fences_carry_the_head_without_reading_earlier_wal() {
+async fn a_cold_anchor_reads_each_wal_object_once() {
     let directory = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("hinted-fences").expect("namespace");
     let store = RecordingStore::new(
@@ -91,32 +91,55 @@ async fn hinted_fences_carry_the_head_without_reading_earlier_wal() {
         .await
         .expect("create");
     let mut engine = NamespaceCommitEngine::new(namespace_id.clone());
-    let committed = publish(&mut engine, &store, "data")
-        .await
-        .expect("data commit");
+    for number in 0..9 {
+        publish(&mut engine, &store, &format!("data-{number}"))
+            .await
+            .expect("data commit");
+    }
     acquire_writer_epoch(&store, &namespace_id, &context(1_000))
         .await
         .expect("first fence");
     acquire_writer_epoch(&store, &namespace_id, &context(1_000))
         .await
         .expect("second fence");
-    crate::namespace::control::raise_namespace_hint(&store, &namespace_id, WalNo(3), None)
+    crate::namespace::control::raise_namespace_hint(&store, &namespace_id, WalNo(11), None)
         .await
         .expect("raise hint");
     drop(engine);
     store.reset();
 
-    let head = crate::namespace::control::load_namespace_read_state(&store, &namespace_id)
+    let anchor = crate::namespace::read_anchor::load_read_anchor(&store, &namespace_id)
         .await
         .expect("cold discovery");
-    assert_eq!(head.seq, committed.committed_seq);
+    let tail = crate::namespace::read_anchor::project_anchor_tail(&store, None, &anchor)
+        .await
+        .expect("replay discovery");
+    assert_eq!(anchor.read_state.seq, ChangeSeq(9));
+    assert_eq!(anchor.read_state.wal_no, WalNo(12));
+    assert!(tail
+        .rows
+        .find_commit_receipt(&CommitId::parse("data-8").expect("commit"))
+        .is_some());
+    let mut gets = store.take_get_keys();
+    gets.sort();
     assert_eq!(
-        store.take_get_keys(),
-        vec![
-            wal_segment(&namespace_id, &WalNo(3)),
-            wal_segment(&namespace_id, &WalNo(4)),
-            wal_segment(&namespace_id, &WalNo(5)),
-        ]
+        gets,
+        (1..=15)
+            .map(|number| wal_segment(&namespace_id, &WalNo(number)))
+            .collect::<Vec<_>>()
+    );
+    let absent_reads = gets.len() - anchor.tail.segments().len();
+    assert_eq!(absent_reads, 3);
+    assert!(absent_reads <= 7);
+
+    let missing = wal_segment(&namespace_id, &WalNo(10));
+    store.delete(&missing).await.expect("remove middle segment");
+    let error = crate::namespace::read_anchor::load_read_anchor(&store, &namespace_id)
+        .await
+        .err()
+        .expect("gap in discovery window");
+    assert!(
+        matches!(error, crate::control_object::ControlObjectLoadError::Codec { object_key, .. } if object_key == missing)
     );
 }
 
@@ -393,7 +416,7 @@ async fn cold_open_probes_past_a_lagging_hint_and_reads_a_missing_hint_as_absent
 
 #[tokio::test]
 async fn a_bounded_tail_load_overlaps_reads_and_matches_sequential_replay() {
-    use super::reader::{load_wal_tail, WalWalk, WAL_REPLAY_READ_CONCURRENCY};
+    use super::reader::{load_wal_segment, load_wal_tail, WalWalk, WAL_REPLAY_READ_CONCURRENCY};
 
     let directory = tempdir().expect("directory");
     let store = LocalFsStore::new(directory.path()).expect("store");
@@ -407,11 +430,18 @@ async fn a_bounded_tail_load_overlaps_reads_and_matches_sequential_replay() {
             .await
             .expect("publish");
     }
-    let mut walk =
-        WalWalk::after(&namespace_id, WalNo(0), ChangeSeq(0), WriterEpoch(1)).through(WalNo(20));
+    let mut walk = WalWalk::after(&namespace_id, WalNo(0), ChangeSeq(0), WriterEpoch(1));
     let mut sequential = Vec::new();
-    while let Some(segment) = walk.next(&store).await.expect("sequential load") {
-        sequential.push(segment);
+    for number in 1..=20 {
+        let loaded = load_wal_segment(&store, &namespace_id, WalNo(number)).await;
+        let envelope = loaded
+            .envelope
+            .expect("sequential load")
+            .expect("sequential segment");
+        sequential.push(
+            walk.validate(loaded.object_key, envelope)
+                .expect("sequential validation"),
+        );
     }
     let watched = ConcurrencyWatchStore::new(
         store,
@@ -472,20 +502,22 @@ async fn a_bounded_tail_load_names_the_missing_segment() {
         .delete(&lowest_missing)
         .await
         .expect("remove an earlier segment");
-    let error = load_current_metadata_view(&store, &namespace_id)
-        .await
-        .err()
-        .expect("a gap below the tip is corruption");
-    assert_eq!(error.code(), ErrorCode::NamespaceCorrupt, "{error}");
-    assert!(error.to_string().contains(&lowest_missing), "{error}");
-    assert!(matches!(
-        error,
-        crate::error::CoreError::MetadataProjection(
-            crate::error::MetadataProjectionLoadError::WalTailLoad(
-                super::WalTailLoadError::MissingWalObject { object_key }
-            )
-        ) if object_key == lowest_missing
-    ));
+    let error = super::reader::load_wal_tail(
+        &store,
+        super::WalTailLoadRequest {
+            namespace_id: &namespace_id,
+            base_seq: ChangeSeq(0),
+            head_seq: ChangeSeq(3),
+            base_wal_no: WalNo(0),
+            tip_wal_no: WalNo(4),
+            writer_epoch: WriterEpoch(1),
+        },
+    )
+    .await
+    .expect_err("a gap below the tip is corruption");
+    assert!(
+        matches!(error, super::WalTailLoadError::MissingWalObject { object_key } if object_key == lowest_missing)
+    );
 }
 
 #[tokio::test]

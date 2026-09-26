@@ -6,11 +6,13 @@ use crate::metrics::RuntimeInstruments;
 use crate::trace::phase_span;
 use crate::{CoreError, NamespaceId, PinId, Recency, RuntimeCacheConfig};
 use crate::{Result, RuntimeError};
-use loonfs_core::cache::{MetadataSegmentCacheStats, WalTailProjectionCacheStats};
+use loonfs_core::cache::{
+    MetadataSegmentCacheStats, WalTailProjectionCacheKey, WalTailProjectionCacheStats,
+};
 use loonfs_core::control::NamespaceReadState;
 use loonfs_core::control::{
     load_checkpoint_read_basis, load_read_anchor, load_snapshot_read_basis, manifest_has_successor,
-    CheckpointReadBasis, ControlObjectLoadError, MetadataBasis, NamespaceReadAnchor,
+    project_anchor_tail, CheckpointReadBasis, MetadataBasis, NamespaceReadAnchor,
     VerifiedNamespaceCatalogEntry,
 };
 use loonfs_core::time::Observation;
@@ -232,7 +234,7 @@ impl ReadCore {
     pub(crate) async fn load_namespace_head_cached(
         &self,
         namespace_id: &NamespaceId,
-    ) -> std::result::Result<CachedNamespaceAnchor, ControlObjectLoadError> {
+    ) -> std::result::Result<CachedNamespaceAnchor, CoreError> {
         let validation = self
             .inner
             .control_cache()
@@ -298,7 +300,7 @@ impl ReadCore {
     async fn refresh_namespace_head(
         &self,
         namespace_id: &NamespaceId,
-    ) -> std::result::Result<CachedNamespaceAnchor, ControlObjectLoadError> {
+    ) -> std::result::Result<CachedNamespaceAnchor, CoreError> {
         let cached = self
             .inner
             .control_cache()
@@ -323,7 +325,7 @@ impl ReadCore {
                 let observed = Observation::now(Arc::clone(&self.inner.timer));
                 let matches = !check_due || !manifest_has_successor(self.store(), namespace_id, head.basis.manifest_no())
                     .instrument(tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "validation_manifest_probe"))
-                    .await?;
+                    .await.map_err(MetadataProjectionLoadError::LoadHead)?;
                 if matches {
                     if check_due {
                         head.last_control_check = Some(observed);
@@ -331,7 +333,7 @@ impl ReadCore {
                     let mut context = self.runtime_read_context(&head);
                     if loonfs_core::control::probe_namespace_wal(self.store(), &mut context)
                         .instrument(tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "validation_wal_probe"))
-                    .await? && fresh(&head.last_control_check) {
+                    .await.map_err(MetadataProjectionLoadError::LoadHead)? && fresh(&head.last_control_check) {
                         head.head = context.head;
                         return Ok(head);
                     }
@@ -339,10 +341,27 @@ impl ReadCore {
             }
         }
         let observed = Observation::now(Arc::clone(&self.inner.timer));
-        load_read_anchor(self.store(), namespace_id)
+        let loaded = load_read_anchor(self.store(), namespace_id)
             .instrument(tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "validation_anchor_load"))
             .await
-            .map(|loaded| cached_anchor(loaded, Some(observed)))
+            .map_err(MetadataProjectionLoadError::LoadHead)?;
+        if !loaded.read_state.status.is_deleted() {
+            let tail = project_anchor_tail(
+                self.store(),
+                Some(self.inner.metadata_segment_cache.as_ref()),
+                &loaded,
+            )
+            .await?;
+            self.inner.wal_tail_projection_cache.insert(
+                WalTailProjectionCacheKey {
+                    namespace_id: namespace_id.clone(),
+                    manifest_no: loaded.basis().manifest_no(),
+                    head_seq: loaded.read_state.seq,
+                },
+                tail,
+            );
+        }
+        Ok(cached_anchor(loaded, Some(observed)))
     }
 
     /// Loads the read anchor, mapping an absent head to the one answer it
@@ -353,11 +372,7 @@ impl ReadCore {
     ) -> Result<CachedNamespaceAnchor> {
         self.load_namespace_head_cached(namespace_id)
             .await
-            .map_err(|error| {
-                RuntimeError::Core(CoreError::MetadataProjection(
-                    MetadataProjectionLoadError::LoadHead(error),
-                ))
-            })
+            .map_err(RuntimeError::Core)
     }
 
     pub(crate) fn control_cache_enabled(&self) -> bool {

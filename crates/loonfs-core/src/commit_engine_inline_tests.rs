@@ -380,7 +380,7 @@ async fn inline_tail_replay_matches_publication_and_materializes_before_metadata
         .await
         .expect("flush inline content");
         if index == 0 {
-            assert_eq!(flushed.outcome, FlushWalOutcome::Published);
+            assert_eq!(flushed.response.outcome, FlushWalOutcome::Published);
             fold_tests::assert_content_before_metadata(&store, values.len());
             for value in &values {
                 let key = crate::storage::content::content_object_key_for_ref(value.content_ref())
@@ -395,14 +395,14 @@ async fn inline_tail_replay_matches_publication_and_materializes_before_metadata
                 );
             }
         } else if index == 1 {
-            assert_eq!(flushed.outcome, FlushWalOutcome::ManifestAdvanced);
+            assert_eq!(flushed.response.outcome, FlushWalOutcome::ManifestAdvanced);
             fold_tests::assert_content_before_metadata(&store, values.len());
             assert!(!store.snapshot().iter().any(|operation| {
                 matches!(operation, RecordedOperation::Put { key, .. }
                     if loonfs_objectstore::layout::manifest_no_of(key).is_some())
             }));
         } else {
-            assert_eq!(flushed.outcome, FlushWalOutcome::AlreadyCurrent);
+            assert_eq!(flushed.response.outcome, FlushWalOutcome::AlreadyCurrent);
             assert_no_writes(&store);
         }
         let manifest =

@@ -611,7 +611,7 @@ impl PublisherRegistry {
             .get(namespace_id)
             .cloned();
         if let Some(publisher) = publisher {
-            publisher.engine.lock().await.record_fold_outcome();
+            publisher.engine.lock().await.record_fold_outcome(None);
         }
     }
 
@@ -822,9 +822,9 @@ impl EngineSlot {
             .or(self.last_known_wal_tail_inline_bytes)
     }
 
-    fn record_fold_outcome(&mut self) {
+    fn record_fold_outcome(&mut self, folded: Option<&loonfs_core::FoldedWalTail>) {
         if let Some(engine) = self.engine.as_mut() {
-            engine.invalidate_projection();
+            engine.record_wal_fold(folded);
         }
     }
 }
@@ -1620,7 +1620,7 @@ impl NamespacePublisher {
             .expect("fold permit semaphore should remain open");
         drop(waiting);
         let input = {
-            let slot = self.engine.lock().await;
+            let mut slot = self.engine.lock().await;
             let input = slot
                 .engine
                 .as_ref()
@@ -1632,7 +1632,9 @@ impl NamespacePublisher {
             }) {
                 return;
             }
-            input
+            slot.engine
+                .as_mut()
+                .and_then(NamespaceCommitEngine::begin_wal_fold)
         };
         match writer.identity.mutation_context() {
             Ok(_) => {}
@@ -1662,7 +1664,10 @@ impl NamespacePublisher {
         self.read_core
             .instruments()
             .publisher_wal_fold_duration(self.elapsed_ms_since(started_ms));
-        self.engine.lock().await.record_fold_outcome();
+        self.engine
+            .lock()
+            .await
+            .record_fold_outcome(result.as_ref().ok());
         match result {
             Ok(_) => {
                 self.read_core.instruments().publisher_wal_fold();
