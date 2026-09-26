@@ -104,6 +104,85 @@ async fn subject_headers_are_parsed_and_rejected_with_the_header_named() {
 }
 
 #[tokio::test]
+async fn every_upload_route_acts_as_the_request_subject() {
+    let temp_dir = tempdir().expect("tempdir");
+    let (router, _state) = test_app(
+        test_options(&temp_dir.path().join("store"), "upload-subject"),
+        TestAppOptions::default(),
+    )
+    .await
+    .expect("app");
+    let response = router
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/v0/namespaces",
+            Some(
+                r#"{"namespace_id":"demo","access":{"kind":"acl","principal_scope":"org","root_grants":{"team":["admin"]}}}"#,
+            ),
+            &[],
+        ))
+        .await
+        .expect("namespace response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let subject = |id| {
+        [
+            ("Loonfs-Subject", id),
+            ("Loonfs-Principal-Scope", "org"),
+            ("Loonfs-Principals", "team"),
+        ]
+    };
+    let response = router
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/v0/namespaces/demo/uploads",
+            Some(r#"{"mode":"service_proxied"}"#),
+            &subject("usr_ada"),
+        ))
+        .await
+        .expect("create upload response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let uri = format!(
+        "/v0/namespaces/demo/uploads/{}",
+        json_body(response).await["upload_id"]
+            .as_str()
+            .expect("upload id")
+    );
+
+    for (method, path, body) in [
+        ("GET", uri.clone(), None),
+        ("PUT", format!("{uri}/content"), Some("bytes")),
+        (
+            "POST",
+            format!("{uri}/complete"),
+            Some(r#"{"mode":"service_proxied"}"#),
+        ),
+        ("POST", format!("{uri}/abort"), None),
+    ] {
+        let response = router
+            .clone()
+            .oneshot(request(method, &path, body, &subject("usr_bob")))
+            .await
+            .expect("other subject response");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{method} {path}");
+        let error: ApiError = serde_json::from_value(json_body(response).await).expect("error");
+        assert_eq!(error.code, ErrorCode::UploadNotFound.as_str());
+    }
+    let response = router
+        .clone()
+        .oneshot(request(
+            "POST",
+            &format!("{uri}/abort"),
+            None,
+            &subject("usr_ada"),
+        ))
+        .await
+        .expect("owner abort response");
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
 async fn subject_headers_distinguish_service_and_subject_authority() {
     let temp_dir = tempdir().expect("tempdir");
     let (router, _state) = test_app(

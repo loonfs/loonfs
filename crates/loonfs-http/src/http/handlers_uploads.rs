@@ -130,21 +130,21 @@ pub(super) async fn create_upload(
     AppQuery(_): AppQuery<NoQuery>,
     UploadControlJson(request): UploadControlJson<CreateUploadBody, MAX_UPLOAD_CONTROL_BODY_BYTES>,
 ) -> Result<Json<UploadSession>, ApiResponseError> {
+    let scoped_writer = subject.map(|subject| state.writer.as_subject(subject));
+    let writer = scoped_writer.as_ref().unwrap_or(&state.writer);
     // Decoding the body settled which transport this is and that it carries
     // that transport's fields and no other's, so there is nothing left here
     // to check before dispatching on it.
     match request {
         CreateUploadBody::DirectPut { size_bytes } => {
-            begin_direct_put_upload(state, namespace_id, subject.as_ref(), size_bytes).await
+            begin_direct_put_upload(&state, writer, namespace_id, size_bytes).await
         }
         CreateUploadBody::DirectMultipart { part_size_bytes } => {
-            begin_direct_multipart_upload(state, namespace_id, subject.as_ref(), part_size_bytes)
-                .await
+            begin_direct_multipart_upload(&state, writer, namespace_id, part_size_bytes).await
         }
         CreateUploadBody::ServiceProxied {} => {
-            let response = state
-                .writer
-                .create_upload(&namespace_id, subject.as_ref())
+            let response = writer
+                .create_upload(&namespace_id)
                 .await
                 .map_err(ApiResponseError::for_namespace(&namespace_id))?;
             Ok(Json(response))
@@ -153,9 +153,9 @@ pub(super) async fn create_upload(
 }
 
 async fn begin_direct_put_upload(
-    state: BindingState,
+    state: &BindingState,
+    writer: &FsWriter,
     namespace_id: NamespaceId,
-    subject: Option<&loonfs_api::Subject>,
     size_bytes: Option<u64>,
 ) -> Result<Json<UploadSession>, ApiResponseError> {
     let Some(issuer) = state
@@ -186,9 +186,8 @@ async fn begin_direct_put_upload(
     }
 
     let checksum_algorithm = issuer.stored_checksum_algorithm();
-    let mut prepared = state
-        .writer
-        .create_direct_put_upload_target(&namespace_id, subject, checksum_algorithm)
+    let mut prepared = writer
+        .create_direct_put_upload_target(&namespace_id, checksum_algorithm)
         .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
     fill_direct_put_access(issuer.as_ref(), &prepared.object_key, &mut prepared.session).await?;
@@ -222,9 +221,9 @@ async fn fill_direct_put_access(
 }
 
 async fn begin_direct_multipart_upload(
-    state: BindingState,
+    state: &BindingState,
+    writer: &FsWriter,
     namespace_id: NamespaceId,
-    subject: Option<&loonfs_api::Subject>,
     part_size_bytes: Option<u64>,
 ) -> Result<Json<UploadSession>, ApiResponseError> {
     if state
@@ -240,11 +239,9 @@ async fn begin_direct_multipart_upload(
         ));
     }
     // Use the server's default when no part size is requested.
-    let prepared = state
-        .writer
+    let prepared = writer
         .create_direct_multipart_upload_target(
             &namespace_id,
-            subject,
             DirectMultipartUploadOptions { part_size_bytes },
         )
         .await
@@ -295,6 +292,8 @@ pub(super) async fn sign_upload_parts(
         MAX_UPLOAD_CONTROL_BODY_BYTES,
     >,
 ) -> Result<Json<SignUploadPartsResponse>, ApiResponseError> {
+    let scoped_writer = subject.map(|subject| state.writer.as_subject(subject));
+    let writer = scoped_writer.as_ref().unwrap_or(&state.writer);
     let upload_id = parse_path_id::<UploadId>("upload_id", &upload_id)?;
     let Some(issuer) = state
         .direct_transfers
@@ -307,9 +306,8 @@ pub(super) async fn sign_upload_parts(
         ));
     };
 
-    let targets = state
-        .writer
-        .sign_upload_parts(&namespace_id, &upload_id, subject.as_ref(), &request.parts)
+    let targets = writer
+        .sign_upload_parts(&namespace_id, &upload_id, &request.parts)
         .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
     let parts = sign_parts(issuer.as_ref(), &targets).await?;
@@ -535,11 +533,12 @@ pub(super) async fn put_upload_content(
     AppQuery(_): AppQuery<NoQuery>,
     body: UploadBodyStream,
 ) -> Result<Json<UploadSession>, ApiResponseError> {
+    let scoped_writer = subject.map(|subject| state.writer.as_subject(subject));
+    let writer = scoped_writer.as_ref().unwrap_or(&state.writer);
     let upload_id = parse_path_id::<UploadId>("upload_id", &upload_id)?;
     let (stream, outcome) = body.into_stream();
-    match state
-        .writer
-        .put_upload_content_stream(&namespace_id, &upload_id, subject.as_ref(), stream)
+    match writer
+        .put_upload_content_stream(&namespace_id, &upload_id, stream)
         .await
     {
         Ok(response) => Ok(Json(response)),
@@ -587,11 +586,12 @@ pub(super) async fn complete_upload(
     AppQuery(_): AppQuery<NoQuery>,
     body: UploadBodyBytes<MAX_COMPLETION_BODY_BYTES>,
 ) -> Result<Json<UploadSession>, ApiResponseError> {
+    let scoped_writer = subject.map(|subject| state.writer.as_subject(subject));
+    let writer = scoped_writer.as_ref().unwrap_or(&state.writer);
     let upload_id = parse_path_id::<UploadId>("upload_id", &upload_id)?;
     let body = body.into_bytes();
-    let completed = state
-        .writer
-        .complete_upload_for_mode(&namespace_id, &upload_id, subject.as_ref(), |mode| {
+    let completed = writer
+        .complete_upload_for_mode(&namespace_id, &upload_id, |mode| {
             decode_completion_body(mode, &body)
         })
         .await
@@ -660,10 +660,11 @@ pub(super) async fn get_upload(
     AppPath(UploadPathParams { upload_id }): AppPath<UploadPathParams>,
     AppQuery(_): AppQuery<NoQuery>,
 ) -> Result<Json<UploadSession>, ApiResponseError> {
+    let scoped_writer = subject.map(|subject| state.writer.as_subject(subject));
+    let writer = scoped_writer.as_ref().unwrap_or(&state.writer);
     let upload_id = parse_path_id::<UploadId>("upload_id", &upload_id)?;
-    let mut view = state
-        .writer
-        .get_upload(&namespace_id, &upload_id, subject.as_ref())
+    let mut view = writer
+        .get_upload(&namespace_id, &upload_id)
         .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
     if let Some(object_key) = &view.direct_put_object_key {
@@ -719,10 +720,11 @@ pub(super) async fn abort_upload(
     AppPath(UploadPathParams { upload_id }): AppPath<UploadPathParams>,
     AppQuery(_): AppQuery<NoQuery>,
 ) -> Result<Json<UploadSession>, ApiResponseError> {
+    let scoped_writer = subject.map(|subject| state.writer.as_subject(subject));
+    let writer = scoped_writer.as_ref().unwrap_or(&state.writer);
     let upload_id = parse_path_id::<UploadId>("upload_id", &upload_id)?;
-    let response = state
-        .writer
-        .abort_upload(&namespace_id, &upload_id, subject.as_ref())
+    let response = writer
+        .abort_upload(&namespace_id, &upload_id)
         .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
     Ok(Json(response))
@@ -757,19 +759,15 @@ mod completion_body_tests {
             )
             .await
             .expect("namespace");
-        let upload = writer
-            .create_upload(&namespace_id, None)
-            .await
-            .expect("upload");
+        let upload = writer.create_upload(&namespace_id).await.expect("upload");
         writer
-            .put_upload_content(&namespace_id, &upload.upload_id, None, b"content")
+            .put_upload_content(&namespace_id, &upload.upload_id, b"content")
             .await
             .expect("content");
         let completed = writer
             .complete_upload(
                 &namespace_id,
                 &upload.upload_id,
-                None,
                 ResolvedUploadCompletion::KnownContent,
             )
             .await
@@ -779,7 +777,7 @@ mod completion_body_tests {
             receipt,
             ..
         } = writer
-            .get_upload(&namespace_id, &upload.upload_id, None)
+            .get_upload(&namespace_id, &upload.upload_id)
             .await
             .expect("eligible status");
         let receipt = receipt.expect("receipt eligible at status read");

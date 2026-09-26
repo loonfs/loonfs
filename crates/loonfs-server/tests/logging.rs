@@ -274,7 +274,7 @@ async fn expected_typed_errors_use_debug_or_warn_and_keep_completion_fields() {
         .await
         .expect("create namespace");
     let upload = writer
-        .create_upload(&namespace, None)
+        .create_upload(&namespace)
         .await
         .expect("begin upload");
 

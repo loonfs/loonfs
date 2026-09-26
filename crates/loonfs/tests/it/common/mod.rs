@@ -335,7 +335,7 @@ impl TestRuntime {
         checksum_algorithm: ChecksumAlgorithm,
     ) -> loonfs::Result<loonfs::uploads::BeginDirectPutUploadTargetResponse> {
         self.writer
-            .create_direct_put_upload_target(namespace_id, None, checksum_algorithm)
+            .create_direct_put_upload_target(namespace_id, checksum_algorithm)
             .await
     }
 
@@ -346,7 +346,7 @@ impl TestRuntime {
         content: loonfs::UploadContentClaim,
     ) -> loonfs::Result<UploadSession> {
         self.writer
-            .complete_upload_for_mode(namespace_id, upload_id, None, |_| {
+            .complete_upload_for_mode(namespace_id, upload_id, |_| {
                 Ok(loonfs::uploads::ResolvedUploadCompletion::DirectPut { content })
             })
             .await
@@ -611,7 +611,7 @@ impl RuntimeTestExt for TestRuntime {
     }
 
     fn begin_upload_blocking(&self, namespace_id: &NamespaceId) -> loonfs::Result<UploadSession> {
-        block_on(self.writer.create_upload(namespace_id, None))
+        block_on(self.writer.create_upload(namespace_id))
     }
 
     fn upload_content_blocking(
@@ -622,7 +622,7 @@ impl RuntimeTestExt for TestRuntime {
     ) -> loonfs::Result<UploadSession> {
         block_on(
             self.writer
-                .put_upload_content(namespace_id, upload_id, None, bytes),
+                .put_upload_content(namespace_id, upload_id, bytes),
         )
     }
 
@@ -634,7 +634,6 @@ impl RuntimeTestExt for TestRuntime {
         block_on(self.writer.complete_upload(
             namespace_id,
             upload_id,
-            None,
             ResolvedUploadCompletion::KnownContent,
         ))
         .map(|completed| completed.response)
