@@ -1015,7 +1015,7 @@ Authoritative durable envelopes and their nested payloads reject unknown fields.
 
 API request bodies also reject unknown fields, including nested fields, so a misspelled precondition cannot silently become a request without that precondition. Response bodies generally tolerate additions, except for shared closed shapes. The companion API specification defines those transport rules.
 
-The owning envelope's `format_version` governs its entire payload, including nested objects and collection semantics. A payload does not add an independent format-version field. Block segments are interpreted under the version of the manifest that references them. A name such as `blob_v1` identifies a closed content strategy; it is not permission to ignore the owning family's version.
+The owning envelope's `format_version` governs its entire payload, including nested objects and collection semantics. A payload does not add an independent format-version field. A metadata segment is a separate object. Its descriptor's `encoding` names the version of that object's block layout, not a version of the manifest payload. The manifest version governs the descriptor itself. A manifest may name different encodings for different segments. A reader rejects a manifest that names an encoding it does not support, before it opens any segment. Grep segments are interpreted under the version of the grep manifest that references them. A name such as `blob_v1` identifies a closed content strategy; it is not permission to ignore the owning family's version.
 
 After the stable format is released, a change to a field's name, presence, type, tag, encoding, or governed semantics requires a new owning-family version. Collection-protocol changes can require a version gate even when most stored fields remain unchanged. An implementation must not operate on a newer protocol merely because it can deserialize a subset of its fields.
 
@@ -1052,7 +1052,7 @@ The three control-object kinds are `hint`, `pin`, and `upload_session`.
 | WAL segment | `wal_segment` | zstd-compressed CBOR envelope with CBOR payload bytes | 1 |
 | Namespace manifest | `manifest` | Uncompressed JSON | 1 |
 | Namespace hint | `hint` | Uncompressed JSON | 1 |
-| Metadata segment | No envelope | Block sections described in A.7 | Governed by namespace manifest version 1 |
+| Metadata segment | No envelope | Block sections described in A.7 | 1, named by the segment descriptor's `encoding` |
 | Pin record | `pin` | Uncompressed JSON | 1 |
 | Upload session | `upload_session` | Uncompressed JSON | 1 |
 | Content object | No envelope | Complete file bytes | Referenced as `blob_v1` |
@@ -1162,6 +1162,7 @@ A run contains `run_no`, `run_seq`, `tier`, and `segments`. Tier is `delta` or `
 | `owner_namespace_id` | Namespace storing the segment. |
 | `segment_id` | Immutable generated segment identity. |
 | `family` | Metadata row family. |
+| `encoding` | Required unsigned integer that names the segment's block encoding. The value is 1. |
 | `row_count` | Positive number of stored rows. |
 | `min_row_key`, `max_row_key` | Inclusive key range. |
 | `index_block`, `filter_block` | Index and filter handles. |
@@ -1300,6 +1301,8 @@ A segment is a concatenation of independently readable sections:
 ```
 
 There is no segment header or footer. The manifest descriptor supplies the filter and index handles; the index supplies the data-block handles. A segment cannot be opened from its own bytes without the necessary descriptor information.
+
+A metadata segment descriptor's `encoding` names the version of this layout. Grep segments take their version from the grep manifest that references them.
 
 Each handle is an encoded object with the following fields:
 

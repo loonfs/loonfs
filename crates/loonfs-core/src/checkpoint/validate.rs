@@ -7,7 +7,7 @@ use super::runs::{runs_in_materialization_order, MetadataFamilyGroup, MetadataRu
 use super::scan::ordered_manifest_segments;
 use loonfs_api::wire::manifest::{
     MetadataRow, MetadataRowFamily, MetadataSegmentRef, NamespaceManifestEnvelope,
-    NamespaceManifestPayload, RunTier,
+    NamespaceManifestPayload, RunTier, METADATA_SEGMENT_ENCODING,
 };
 use loonfs_api::{ChangeSeq, ManifestNo, NamespaceId, RunNo};
 use loonfs_objectstore::keys::metadata_segment_object_key;
@@ -117,6 +117,15 @@ pub(super) fn validate_manifest_materialization_ranges(
             saw_head_seq_run |= run.run_seq == payload.head_seq;
         }
         for descriptor in &run.segments {
+            if descriptor.encoding != METADATA_SEGMENT_ENCODING {
+                return Err(ManifestLoadError::RunManifestMismatch {
+                    object_key: object_key.to_owned(),
+                    message: format!(
+                        "metadata segment `{}` uses unsupported encoding `{}`; a newer binary is required",
+                        descriptor.segment_id, descriptor.encoding
+                    ),
+                });
+            }
             if !seen_segment_ids.insert(descriptor.segment_id.as_str()) {
                 return Err(ManifestLoadError::RunManifestMismatch {
                     object_key: object_key.to_owned(),

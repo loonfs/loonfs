@@ -28,6 +28,7 @@ use loonfs_api::wire::manifest::{
     decode_namespace_manifest_json, encode_namespace_manifest_json, ActiveDeletionRowAction,
     DeletedBinding, DeltaPosition, MetadataRow, MetadataRowFamily, MetadataRunRef,
     MetadataSegmentRef, NamespaceAccess, NamespaceManifestPayload, RunTier, TombstoneRowAction,
+    METADATA_SEGMENT_ENCODING,
 };
 use loonfs_api::wire::wal::{
     decode_wal_segment_envelope_zstd, encode_wal_segment_envelope_zstd, WalCommitDelta,
@@ -403,6 +404,7 @@ fn sample_manifest_payload() -> NamespaceManifestPayload {
                 owner_namespace_id: namespace_id(),
                 segment_id: segment_id(),
                 family: MetadataRowFamily::Inodes,
+                encoding: METADATA_SEGMENT_ENCODING,
                 row_count: 6,
                 min_row_key: "commit-receipt".to_owned(),
                 max_row_key: "tombstone".to_owned(),

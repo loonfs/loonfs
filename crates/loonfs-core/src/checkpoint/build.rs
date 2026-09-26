@@ -6,7 +6,9 @@ use super::runs::{MetadataFamilySegments, MetadataLsmPolicy, CHECKPOINT_ROW_FAMI
 use crate::error::{CoreError, Result};
 use crate::metadata::MetadataState;
 use bytes::Bytes;
-use loonfs_api::wire::manifest::{MetadataRow, MetadataRowFamily, MetadataSegmentRef};
+use loonfs_api::wire::manifest::{
+    MetadataRow, MetadataRowFamily, MetadataSegmentRef, METADATA_SEGMENT_ENCODING,
+};
 #[cfg(test)]
 pub(super) use loonfs_api::wire::sst_blocks::DEFAULT_INLINE_FILTER_MAX_BYTES as INLINE_SEGMENT_FILTER_MAX_BYTES;
 use loonfs_api::wire::sst_blocks::{BuiltSegmentBlocks, SegmentBlocksBuilder};
@@ -114,7 +116,7 @@ pub(super) async fn write_manifest_segment<S: ObjectStore + ?Sized>(
         owner_namespace_id: namespace_id.clone(),
         segment_id,
         family,
-
+        encoding: METADATA_SEGMENT_ENCODING,
         row_count: built.row_count,
         min_row_key: built.min_row_key,
         max_row_key: built.max_row_key,
