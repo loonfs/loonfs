@@ -108,6 +108,15 @@ pub const GC_MIN_GRACE_WINDOW_MS: u64 = max_u64(
 ) + PROVIDER_PUBLICATION_REQUEST_BOUND_MS
     + GC_SAFETY_MARGIN_MS;
 
+/// Longest gap a reader may leave between the manifest probe it relies on
+/// and the successor check that confirms it. A successor published after the
+/// probe cannot be collected within this bound: collection waits the grace
+/// window, which reserves this bound plus the clock allowance.
+pub const READ_REVALIDATION_BOUND_MS: u64 =
+    METADATA_PUBLICATION_BUDGET_MS + PROVIDER_PUBLICATION_REQUEST_BOUND_MS;
+
+const _: () = assert!(READ_REVALIDATION_BOUND_MS + GC_SAFETY_MARGIN_MS <= GC_MIN_GRACE_WINDOW_MS);
+
 /// Minimum provider age of a metadata segment no manifest lists before
 /// garbage collection may delete it. A streaming compaction writes its
 /// output under `segments/` as it goes and publishes at the end, so its

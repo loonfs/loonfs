@@ -7,6 +7,7 @@ use crate::namespace::state::NamespaceReadState;
 use crate::wal::discover_tip;
 use loonfs_api::{ChangeSeq, ManifestNo, NamespaceId};
 use loonfs_objectstore::ObjectStore;
+use std::sync::Arc;
 
 pub struct NamespaceReadAnchor {
     pub read_state: NamespaceReadState,
@@ -28,20 +29,30 @@ pub async fn load_read_anchor<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> Result<NamespaceReadAnchor, ControlObjectLoadError> {
+    let mut observed =
+        crate::time::Observation::now(Arc::new(crate::time::StdMonotonicTimer::default()));
     let (mut manifest, mut hint) = load_current_manifest_with_hint(store, namespace_id).await?;
     loop {
         match discover_tip(store, namespace_id, &manifest, hint.state.wal_no).await {
             Ok(state) => {
-                if !state.status.is_deleted()
-                    && manifest_has_successor(
+                if !state.status.is_deleted() {
+                    let successor = manifest_has_successor(
                         store,
                         namespace_id,
                         manifest.state.manifest().manifest_no,
                     )
-                    .await?
-                {
-                    (manifest, hint) = load_current_manifest_with_hint(store, namespace_id).await?;
-                    continue;
+                    .await?;
+                    // An absent successor proves nothing once the probe it would confirm is
+                    // older than the revalidation bound when the answer arrives: the
+                    // successor may have been collected while the reader waited.
+                    if successor || observed.age_ms() >= crate::limits::READ_REVALIDATION_BOUND_MS {
+                        observed = crate::time::Observation::now(Arc::new(
+                            crate::time::StdMonotonicTimer::default(),
+                        ));
+                        (manifest, hint) =
+                            load_current_manifest_with_hint(store, namespace_id).await?;
+                        continue;
+                    }
                 }
                 return Ok(NamespaceReadAnchor {
                     read_state: state,
@@ -50,6 +61,9 @@ pub async fn load_read_anchor<S: ObjectStore + ?Sized>(
                 });
             }
             Err(error @ ControlObjectLoadError::Codec { .. }) => {
+                observed = crate::time::Observation::now(Arc::new(
+                    crate::time::StdMonotonicTimer::default(),
+                ));
                 let (current, current_hint) =
                     load_current_manifest_with_hint(store, namespace_id).await?;
                 if current.state.manifest().manifest_no == manifest.state.manifest().manifest_no {
