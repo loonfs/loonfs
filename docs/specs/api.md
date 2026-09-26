@@ -1038,7 +1038,9 @@ Nothing sweeps unless `gc` is present.
 
 The retention floor bounds incremental replay only. File revision history
 is never pruned: a revisions listing is always complete, however far the
-floor has advanced.
+floor has advanced. File content and recoverable deletions in the trash are
+never pruned either. All of them remain at least until the namespace is
+deleted and retired, and no operation in this version reclaims file history.
 
 #### Checkpoint inventory
 

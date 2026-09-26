@@ -30,7 +30,7 @@ manifest descriptor
 
 The descriptor is the entry point for a read. Keeping these handles in the manifest avoids a separate footer lookup and another copy of the segment's structural metadata. The tradeoff is that an isolated segment is not a self-contained recovery description: its manifest descriptor is required to interpret it.
 
-The descriptor also records a SHA-256 checksum of the complete segment, which the block cache uses as the segment's identity. Reads verify the CRC of each section they fetch. Section checksums detect corruption in the ranges read; they do not authenticate a range against the complete-object digest.
+Reads verify the CRC of each section they fetch. Section checksums detect corruption in the ranges read.
 
 ## Reads
 
