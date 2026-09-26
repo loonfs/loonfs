@@ -228,7 +228,7 @@ mod tests {
     #[tokio::test]
     async fn preconditions_change_only_the_fingerprint_in_the_wal_payload() {
         use super::super::planner::commit_fingerprint;
-        use crate::commit::{materialize_commit, wal_payload_from_materialized_commit};
+        use crate::commit::{wal_payload_from_prepared_commit, PreparedCommit};
 
         let (_temp_dir, store, namespace_id, _) = setup_namespace().await;
         let view = load_current_metadata_view(&store, &namespace_id)
@@ -257,11 +257,11 @@ mod tests {
                 .await
                 .expect("plan");
             let next_inode_id = session.commit_candidate(allocation).expect("allocation");
-            payloads.push(wal_payload_from_materialized_commit(&materialize_commit(
-                plan.finish(next_inode_id),
-                1,
-                &[],
-            )));
+            payloads.push(wal_payload_from_prepared_commit(&PreparedCommit {
+                commit: plan.finish(next_inode_id),
+                committed_at_ms: 1,
+                inline_content: Vec::new(),
+            }));
         }
         assert_ne!(
             payloads[0].semantic_commit_fingerprint,

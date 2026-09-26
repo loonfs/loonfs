@@ -1,8 +1,7 @@
 //! The metadata view used while validating a commit for publication.
 
-use super::super::materialize::materialize_validated_op;
-use super::super::ValidatedOp;
 use crate::metadata::{MetadataState, MetadataView};
+use loonfs_api::wire::wal::WalDelta;
 use loonfs_api::{ActorId, ChangeSeq, CommitId};
 use loonfs_objectstore::ObjectStore;
 
@@ -44,20 +43,20 @@ impl<S: ObjectStore + ?Sized> PublishValidationView<'_, S> {
         self.committed_seq
     }
 
-    pub(crate) fn apply_validated_op_mut(
+    pub(crate) fn apply_deltas_mut(
         &mut self,
         commit_id: &CommitId,
         actor: &ActorId,
         committed_at_ms: u64,
-        op: &ValidatedOp,
+        deltas: &[WalDelta],
     ) {
-        for delta in &materialize_validated_op(op) {
+        for delta in deltas {
             self.overlay.apply_committed_wal_delta_mut(
                 self.committed_seq,
                 commit_id,
                 actor,
                 committed_at_ms,
-                &delta.wal_delta,
+                delta,
             );
         }
     }

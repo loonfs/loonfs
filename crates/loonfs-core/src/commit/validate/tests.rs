@@ -9,9 +9,7 @@ use super::super::{CommitOp, ResolvedBinding, ValidatedCommitPlan};
 use super::checks::{validate_ops, CommitNumbering};
 use super::error::CommitOperand;
 use super::view::PublishValidationView;
-use crate::commit::{
-    materialize_commit, CommitFingerprint, CommitPlan, CommitValidationError, InodeAllocator,
-};
+use crate::commit::{CommitFingerprint, CommitPlan, CommitValidationError, InodeAllocator};
 use crate::error::{CoreError, ErrorCode};
 use crate::metadata::{InMemoryMetadataView, MetadataState};
 use crate::namespace::state::NamespaceReadState;
@@ -254,7 +252,7 @@ async fn build_commit_plan(
     )
     .await;
 
-    let validated_ops = result.map_err(|error| match error {
+    let deltas = result.map_err(|error| match error {
         CoreError::CommitValidation(error) => error,
         error => panic!("unexpected validation dependency error: {error}"),
     })?;
@@ -270,7 +268,7 @@ async fn build_commit_plan(
         semantic_identity: test_fingerprint(),
         apply_after_seq: context.head.seq,
         assigned_seq: committed_seq,
-        validated_ops,
+        deltas,
     }
     .finish(resulting_next_inode_id))
 }
@@ -727,9 +725,8 @@ async fn restore_revision_can_reference_revision_created_earlier_in_same_request
     let plan = build_commit_plan(&request, 4_200, &context)
         .await
         .expect("replace then restore in same request should validate");
-    let materialized = materialize_commit(plan, 4_200, &[]);
     assert!(matches!(
-        &materialized.deltas[1].wal_delta,
+        &plan.deltas[1].delta,
         WalDelta::AppendFileRevision {
             content_ref,
             ..
@@ -770,16 +767,15 @@ async fn restore_revision_can_reference_restore_created_earlier_in_same_request(
     let plan = build_commit_plan(&request, 4_200, &context)
         .await
         .expect("restore then restore in same request should validate");
-    let materialized = materialize_commit(plan, 4_200, &[]);
     assert!(matches!(
-        &materialized.deltas[0].wal_delta,
+        &plan.deltas[0].delta,
         WalDelta::AppendFileRevision {
             content_ref,
             ..
         } if *content_ref == expected
     ));
     assert!(matches!(
-        &materialized.deltas[1].wal_delta,
+        &plan.deltas[1].delta,
         WalDelta::AppendFileRevision {
             content_ref,
             ..
