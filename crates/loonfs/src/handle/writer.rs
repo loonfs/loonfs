@@ -476,7 +476,6 @@ impl FsWriterBuilder {
         let core = self.core.open_read_core()?;
         let bits = Arc::new(WriterBits {
             inline_content: self.inline_content,
-            hint_raise: crate::hint_raise::DiscoveryHints::default(),
             identity,
             wal_fold_permits: Semaphore::new(self.max_concurrent_folds.get()),
             wal_folds_waiting: AtomicUsize::new(0),

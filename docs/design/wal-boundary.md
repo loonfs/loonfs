@@ -43,7 +43,7 @@ The numbered-key builder is restricted by `clippy.toml`, with explicit exception
 
 Several parts of the storage protocol involve both the log and other namespace state:
 
-- Manifest and hint management. A hint contains both a manifest number and a WAL number. Its updates live in the control module, and the runtime decides how often they run. WAL discovery starts at the manifest's folded position and reads forward in windows; the hint's WAL number is not used.
+- Manifest and hint management. A hint contains a manifest number, raised by manifest publications. Its updates live in the control module. WAL discovery starts at the manifest's folded position and reads forward in windows.
 - Garbage collection. Object enumeration, age checks, and deletion live in `gc/`. For a live namespace, an object is required if its number is above the folded position. An object at or below it goes through the remaining collection checks.
 - Position tracking. WAL numbers appear in the namespace head and durable manifest. Their differences count unfolded segments and enforce maintenance and write limits.
 

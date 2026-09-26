@@ -56,7 +56,6 @@ async fn discover_during_collection(start: ManifestNo, block_next_manifest: bool
                 blocked.inner(),
                 &namespace_id,
                 expected.state.manifest().manifest_no,
-                loonfs_api::WalNo(0),
                 None,
             )
             .await

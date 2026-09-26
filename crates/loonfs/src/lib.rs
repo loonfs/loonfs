@@ -42,7 +42,6 @@ mod cache;
 mod config;
 mod fs;
 mod handle;
-mod hint_raise;
 mod maintenance;
 pub mod metrics;
 mod options;

@@ -170,7 +170,6 @@ mod tests {
         let state = HintPayload {
             namespace_id: namespace_id.clone(),
             manifest_no: loonfs_api::ManifestNo(1),
-            wal_no: loonfs_api::WalNo(0),
         };
         let bytes =
             loonfs_api::wire::control::encode_control_state(ControlObjectKind::Hint, &state)

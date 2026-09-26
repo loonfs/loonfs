@@ -93,7 +93,6 @@ async fn an_ambiguous_manifest_read_back_must_finish_within_its_budget() {
                     &HintPayload {
                         namespace_id: payload.namespace_id.clone(),
                         manifest_no: ManifestNo(1),
-                        wal_no: loonfs_api::WalNo(0),
                     },
                 )
                 .expect("hint");
@@ -365,7 +364,6 @@ async fn a_lagging_hint_probes_forward_and_a_missing_hint_reads_as_absent() {
         let bytes = encode_control_state(
             ControlObjectKind::Hint,
             &HintPayload {
-                wal_no: loonfs_api::WalNo(0),
                 namespace_id: namespace_id.clone(),
                 manifest_no,
             },

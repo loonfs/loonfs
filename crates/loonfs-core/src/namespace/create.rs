@@ -7,7 +7,7 @@ use crate::time::Deadline;
 use bytes::Bytes;
 use loonfs_api::wire::control::{encode_control_state, ControlObjectKind, HintPayload};
 use loonfs_api::wire::manifest::NamespaceManifestPayload;
-use loonfs_api::{ManifestNo, WalNo};
+use loonfs_api::ManifestNo;
 use loonfs_objectstore::keys::hint;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 use serde::Serialize;
@@ -31,7 +31,6 @@ pub(super) async fn publish_namespace<S: ObjectStore + ?Sized>(
     let first = HintPayload {
         namespace_id: namespace_id.clone(),
         manifest_no: ManifestNo(1),
-        wal_no: WalNo(0),
     };
     put_control_if_absent(store, hint(namespace_id), ControlObjectKind::Hint, &first).await?;
     let manifest = encode_manifest(start.clone())?;

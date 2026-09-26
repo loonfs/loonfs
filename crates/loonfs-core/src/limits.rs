@@ -45,11 +45,6 @@ pub const CONTENTION_RETRY_LIMIT: usize = 8;
 /// so a landed publication never leaves more than this behind.
 pub const MAX_UNFLUSHED_WAL_SEGMENTS: u64 = 128;
 
-/// WAL publications since the last successful hint raise that trigger another attempt.
-pub const HINT_RAISE_SEGMENTS: u64 = 8;
-
-const _: () = assert!(0 < HINT_RAISE_SEGMENTS && HINT_RAISE_SEGMENTS < MAX_UNFLUSHED_WAL_SEGMENTS);
-
 /// Visible WAL-tail length, in segments, that starts an automatic WAL fold.
 pub const FOLD_AT_WAL_SEGMENTS: u64 = 32;
 

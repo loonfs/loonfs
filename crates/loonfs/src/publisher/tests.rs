@@ -216,7 +216,6 @@ fn test_read_core(store: SharedStore) -> ReadCore {
 fn test_writer_bits() -> Arc<WriterBits> {
     Arc::new(WriterBits {
         inline_content: crate::InlineContentOptions::default(),
-        hint_raise: crate::hint_raise::DiscoveryHints::default(),
         identity: WriterIdentity::new(
             "writer-a".to_owned(),
             Arc::new(loonfs_core::time::SystemWallClock),

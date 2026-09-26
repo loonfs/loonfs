@@ -154,8 +154,7 @@ pub(crate) struct ReadConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeCacheConfig {
     /// Minimum monotonic interval between checks for a successor to the cached manifest.
-    /// Also paces the writer's hint raise after publication. Defaults to 1000 milliseconds;
-    /// zero checks on every read.
+    /// Defaults to 1000 milliseconds; zero checks on every read.
     pub manifest_revalidation_interval_ms: u64,
     /// Maximum namespaces retained by entry-counted runtime caches. Zero
     /// disables those caches. This does not affect maintenance scheduling.

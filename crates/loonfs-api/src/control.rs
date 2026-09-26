@@ -67,8 +67,6 @@ pub struct HintPayload {
     pub namespace_id: NamespaceId,
     /// Positive manifest number from which discovery begins.
     pub manifest_no: ManifestNo,
-    /// Highest acknowledged WAL number known to the publisher.
-    pub wal_no: crate::WalNo,
 }
 
 /// One reference to a namespace manifest.

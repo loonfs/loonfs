@@ -1611,7 +1611,7 @@ and does not reload the manifest.
 
 `RuntimeCacheConfig::manifest_revalidation_interval_ms` sets the minimum
 monotonic interval between checks for a successor to the cached manifest.
-It also paces the writer's hint raise after publication. It defaults to 1000 milliseconds; `0` checks on every read. A read after the
+It defaults to 1000 milliseconds; `0` checks on every read. A read after the
 interval probes the successor manifest with HEAD as well as the next WAL
 number, so an unchanged warm head costs two requests; within the interval
 it costs one. A present successor reloads the namespace. Warm readers
