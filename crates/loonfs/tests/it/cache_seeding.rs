@@ -518,26 +518,27 @@ fn runtime_wal_tail_projection_cache_skips_oversized_projection() {
             &namespace_id,
             loonfs_api::WalNo(3),
         );
-        for (operation, wal_no) in operations[..2]
+        // The bounded replay overlaps its reads, so they finish in either order.
+        let mut replayed = operations[..2]
             .iter()
-            .zip([loonfs_api::WalNo(1), loonfs_api::WalNo(2)])
-        {
-            match operation {
+            .map(|operation| match operation {
                 loonfs_test_support::stores::RecordedOperation::Get {
                     key,
                     range,
                     result_bytes,
                 } => {
-                    assert_eq!(
-                        key,
-                        &format!("namespaces/{namespace_id}/wal/{:020}.wal.zst", wal_no.0)
-                    );
                     assert_eq!(*range, None);
                     assert!(*result_bytes > 0);
+                    key.clone()
                 }
                 other => panic!("expected WAL segment read, got {other:?}"),
-            }
-        }
+            })
+            .collect::<Vec<_>>();
+        replayed.sort();
+        assert_eq!(
+            replayed,
+            [1, 2].map(|wal_no| format!("namespaces/{namespace_id}/wal/{wal_no:020}.wal.zst"))
+        );
     }
     let stats = fs.runtime_cache_stats();
     assert_eq!(stats.wal_tail_projection_cache_misses, 2);
