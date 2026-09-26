@@ -29,8 +29,8 @@ Numbered WAL keys, segment construction, reads, and publication are handled in `
 | `frame.rs` | Segment and tail types, including validation errors |
 | `writer.rs` | Construction of data and fence segments, calculation of the next WAL number and resulting head |
 | `publish.rs` | Conditional writes and classification of successful, conflicting, and uncertain outcomes |
-| `discover.rs` | Discovery of the latest WAL state and incremental updates to cached views |
-| `reader.rs` | Reading consecutive segments after a position, and loading a bounded range of them |
+| `discover.rs` | Windowed discovery that retains the WAL tail and incremental updates to cached views |
+| `reader.rs` | Reading consecutive segments, loading bounded tails, and replaying discovered tails |
 | `replay.rs` | Reconstruction of metadata state from committed records |
 | `projected_tail.rs` | Metadata rows and inline content projected from the unfolded WAL tail |
 | `reclaim.rs` | Identification of WAL objects still required for recovery |
@@ -43,7 +43,7 @@ The numbered-key builder is restricted by `clippy.toml`, with explicit exception
 
 Several parts of the storage protocol involve both the log and other namespace state:
 
-- Manifest and hint management. A hint contains both a manifest number and a WAL number. Its updates live in the control module, and the runtime decides how often they run. WAL discovery starts from the larger of the hint's WAL number and the manifest's folded position.
+- Manifest and hint management. A hint contains both a manifest number and a WAL number. Its updates live in the control module, and the runtime decides how often they run. WAL discovery starts at the manifest's folded position and reads forward in windows; the hint's WAL number is not used.
 - Garbage collection. Object enumeration, age checks, and deletion live in `gc/`. For a live namespace, an object is required if its number is above the folded position. An object at or below it goes through the remaining collection checks.
 - Position tracking. WAL numbers appear in the namespace head and durable manifest. Their differences count unfolded segments and enforce maintenance and write limits.
 

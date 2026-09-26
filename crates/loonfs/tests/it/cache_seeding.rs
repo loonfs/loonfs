@@ -89,11 +89,15 @@ fn runtime_cache_reuses_wal_tail_projection_for_repeated_reads() {
 }
 
 #[tokio::test]
-async fn reader_reuses_published_projection_after_control_cache_eviction() {
+async fn cold_discovery_seeds_projection_after_control_cache_eviction() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
     let other_namespace_id = NamespaceId::parse("other").expect("namespace id");
-    let object_store = store(temp_dir.path());
+    let recording = Arc::new(RecordingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyPredicate::any(),
+    ));
+    let object_store: SharedObjectStore = recording.clone();
     let fs = open_runtime_with_async(object_store.clone(), "shared-projection", |builder| {
         builder
             .inline_content(loonfs::InlineContentOptions {
@@ -130,14 +134,14 @@ async fn reader_reuses_published_projection_after_control_cache_eviction() {
         .await
         .expect("raise hint without changing visible state");
 
-    // Content preparation evicts the control entry without inserting a projection.
     fs.writer
         .prepare_file_bytes(&other_namespace_id, b"pending")
         .await
         .expect("evict published control entry");
     let before_read = fs.runtime_cache_stats();
-    assert_eq!(before_read.wal_tail_projection_cache_inserts, 1);
-    assert_eq!(before_read.wal_tail_projection_cache_evictions, 0);
+    assert_eq!(before_read.wal_tail_projection_cache_inserts, 2);
+    assert_eq!(before_read.wal_tail_projection_cache_evictions, 1);
+    recording.reset();
 
     let entry = fs
         .reader
@@ -145,6 +149,12 @@ async fn reader_reuses_published_projection_after_control_cache_eviction() {
         .await
         .expect("read published directory");
     assert_eq!(entry.head_seq, ChangeSeq(1));
+    let gets = recording.take_get_keys();
+    let wal_gets = gets
+        .iter()
+        .filter(|key| key.contains("/wal/"))
+        .collect::<Vec<_>>();
+    assert_eq!(wal_gets.len(), 3, "{gets:?}");
     let after_read = fs.runtime_cache_stats();
     assert_eq!(
         after_read.wal_tail_projection_cache_hits,
@@ -156,7 +166,7 @@ async fn reader_reuses_published_projection_after_control_cache_eviction() {
     );
     assert_eq!(
         after_read.wal_tail_projection_cache_inserts,
-        before_read.wal_tail_projection_cache_inserts
+        before_read.wal_tail_projection_cache_inserts + 1
     );
 }
 
@@ -226,10 +236,7 @@ async fn runtime_publish_reuses_wal_tail_projection_while_a_fold_runs() {
         LocalFsStore::new(directory.path()).expect("store"),
         folded_manifest_put,
     );
-    let recording = Arc::new(RecordingStore::new(
-        blocking,
-        KeyPredicate::prefix(loonfs_objectstore::keys::wal_segment_prefix(&namespace_id)),
-    ));
+    let recording = Arc::new(RecordingStore::new(blocking, KeyPredicate::any()));
     let tail_segments = Arc::new(AtomicU64::new(0));
     let writer = loonfs::FsWriter::builder_with_store(recording.clone())
         .writer_id("fold-projection")
@@ -266,13 +273,35 @@ async fn runtime_publish_reuses_wal_tail_projection_while_a_fold_runs() {
             recording.inner().wait_until_blocked().await;
         }
         if number > 0 {
-            assert_eq!(recording.count(OperationClass::Put), 1, "publish {number}");
-            assert_eq!(recording.count(OperationClass::Get), 0, "publish {number}");
+            let wal = recording
+                .snapshot()
+                .into_iter()
+                .filter(|operation| {
+                    operation
+                        .key()
+                        .starts_with(&loonfs_objectstore::keys::wal_segment_prefix(&namespace_id))
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(wal.len(), 1, "publish {number}: {wal:?}");
+            assert!(matches!(
+                wal[0],
+                loonfs_test_support::stores::RecordedOperation::Put { .. }
+            ));
         }
         assert_eq!(tail_segments.load(Ordering::SeqCst), number + 2);
     }
     recording.inner().release();
     writer.wait_for_fold(&namespace_id).await.expect("fold");
+    writer.publisher().drain().await.expect("finish hints");
+    let manifest =
+        loonfs_core::control::load_namespace_current_manifest(recording.as_ref(), &namespace_id)
+            .await
+            .expect("folded manifest");
+    let manifest_key = loonfs_objectstore::keys::metadata_manifest_object(
+        &namespace_id,
+        &manifest.state.manifest().manifest_no,
+    );
+    recording.reset();
     writer
         .create_directory(
             &namespace_id,
@@ -282,6 +311,32 @@ async fn runtime_publish_reuses_wal_tail_projection_while_a_fold_runs() {
         .await
         .expect("publish after fold");
     assert!(tail_segments.load(Ordering::SeqCst) < FOLD_AT_WAL_SEGMENTS);
+    let operations = recording.take();
+    let mut manifest_gets = 0;
+    let mut wal_puts = 0;
+    for operation in &operations {
+        match operation {
+            loonfs_test_support::stores::RecordedOperation::Get { key, .. }
+                if key == &manifest_key =>
+            {
+                manifest_gets += 1;
+            }
+            loonfs_test_support::stores::RecordedOperation::Get { key, .. }
+                if key.starts_with(&format!("namespaces/{namespace_id}/segments/")) => {}
+            loonfs_test_support::stores::RecordedOperation::Put { key, .. }
+                if key
+                    .starts_with(&loonfs_objectstore::keys::wal_segment_prefix(&namespace_id)) =>
+            {
+                wal_puts += 1;
+            }
+            loonfs_test_support::stores::RecordedOperation::GetWithMetadata { key, .. }
+            | loonfs_test_support::stores::RecordedOperation::CompareAndSwap { key, .. }
+                if key == &loonfs_objectstore::keys::hint(&namespace_id) => {}
+            other => panic!("unexpected operation after fold: {other:?}"),
+        }
+    }
+    assert!(manifest_gets <= 1, "{operations:?}");
+    assert_eq!(wal_puts, 1);
     writer.shutdown().await.expect("shutdown");
 }
 
@@ -401,8 +456,6 @@ fn runtime_cache_can_be_disabled() {
         .expect("first read should project WAL tail");
     fs.get_file_bytes_blocking(&namespace_id, "/docs/file.txt")
         .expect("second read should project WAL tail again");
-    // Each cold read discovers from the folded number, since the hint is
-    // raised only every eighth segment: three probes, then two tail reads.
     assert_eq!(raw_store.wal_get_count(), 10);
     let stats = fs.runtime_cache_stats();
     assert_eq!(stats.wal_tail_projection_cache_hits, 0);
@@ -467,9 +520,7 @@ fn runtime_wal_tail_projection_cache_evicts_by_namespace_count() {
     fs.get_file_bytes_blocking(&first, "/file.txt")
         .expect("first tail projection reloads after eviction");
     let after_reload = fs.runtime_cache_stats();
-    // Discovery from the folded number probes three numbers, then the tail
-    // projection reads two.
-    assert_eq!(raw_store.wal_get_count(), 5);
+    assert_eq!(raw_store.wal_get_count(), 3);
     assert_eq!(after_reload.wal_tail_projection_cache_evictions, 2);
 }
 

@@ -618,6 +618,26 @@ impl NamespaceCommitEngine {
             })
     }
 
+    pub fn begin_wal_fold(&mut self) -> Option<WalFoldInput> {
+        self.publish_tail_projection.as_mut()?.begin_fold();
+        self.wal_fold_input()
+    }
+
+    // A fold this engine published consumed its own projection, so the rows it
+    // folded are exactly the rows before `FoldInProgress::from`; the projection
+    // re-anchors to the published manifest and keeps only what landed since.
+    // Any other outcome leaves the store ahead of what the engine knows.
+    pub fn record_wal_fold(&mut self, folded: Option<&crate::checkpoint::FoldedWalTail>) {
+        if let (Some(folded), Some(projection)) = (folded, &mut self.publish_tail_projection) {
+            if folded.response.outcome == loonfs_api::FlushWalOutcome::Published
+                && projection.reanchor_after_fold(folded.basis.clone())
+            {
+                return;
+            }
+        }
+        self.invalidate_projection();
+    }
+
     /// Returns the session's writer epoch, acquiring it on first use. A fenced
     /// session fails immediately without accessing the store or acquiring a new
     /// epoch.
@@ -797,7 +817,7 @@ impl NamespaceCommitEngine {
             } => {
                 projection.wal_tail_segments += 1;
                 let tail_state = Arc::make_mut(&mut projection.tail_state);
-                for value in inline_content {
+                for value in &inline_content {
                     tail_state
                         .insert_inline_content(value.content_ref().clone(), value.bytes().clone());
                 }
@@ -813,6 +833,15 @@ impl NamespaceCommitEngine {
                             None,
                         );
                     }
+                }
+                if let Err(error) = projection.apply_fold_records(&inline_content, &records) {
+                    tracing::error!(%error, "could not update the committed WAL projection");
+                    self.invalidate_projection();
+                    return (
+                        projection.wal_tail_segments,
+                        projection.tail_state.inline_bytes(),
+                        None,
+                    );
                 }
                 projection.reanchor(head.clone());
                 Some(ResultingReadState {

@@ -871,11 +871,8 @@ async fn repeated_projection_invalidation_does_not_repeat_the_tail_limit_oversho
     writer.shutdown().await.expect("shutdown");
 }
 
-/// A publish during a fold observes the old tail, so its count still holds
-/// the folded bytes. The fold leaves that count alone; the next publish
-/// observes the new tail and replaces it.
 #[tokio::test]
-async fn fold_completion_leaves_the_last_observed_count_until_the_next_publish() {
+async fn fold_completion_reports_only_inline_bytes_published_since_it_began() {
     let directory = tempdir().expect("directory");
     let namespace = NamespaceId::parse("inline-fold-race").expect("namespace");
     let store = Arc::new(blocking_fold_store(
@@ -925,7 +922,7 @@ async fn fold_completion_leaves_the_last_observed_count_until_the_next_publish()
     writer.wait_for_fold(&namespace).await.expect("finish fold");
     assert_eq!(
         writer.publisher().wal_tail_inline_bytes(&namespace).await,
-        Some(8)
+        Some(4)
     );
 
     let fold_permits = writer
@@ -934,16 +931,14 @@ async fn fold_completion_leaves_the_last_observed_count_until_the_next_publish()
         .acquire_many(crate::DEFAULT_MAX_CONCURRENT_FOLDS as u32)
         .await
         .expect("hold next fold");
-    // The stale count leaves no room under the limit, so this batch stages
-    // both values and observes the real four-byte tail on the way.
     commit_two_values(&writer, &namespace, "after-fold").await;
     let usage = loonfs_core::cache::load_namespace_wal_tail_usage(store.as_ref(), &namespace)
         .await
         .expect("tail usage");
-    assert_eq!(usage.wal_tail_inline_bytes, 4);
+    assert_eq!(usage.wal_tail_inline_bytes, 8);
     assert_eq!(
         writer.publisher().wal_tail_inline_bytes(&namespace).await,
-        Some(4)
+        Some(8)
     );
     commit_two_values(&writer, &namespace, "recovered").await;
     let usage = loonfs_core::cache::load_namespace_wal_tail_usage(store.as_ref(), &namespace)
@@ -1023,8 +1018,8 @@ async fn inline_bytes_make_automatic_and_explicit_folds_due_before_segment_count
         );
         assert_eq!(
             family_requests(&store, DurableObjectFamily::WalSegment),
-            4,
-            "one WAL tip check without a byte-count replay"
+            7,
+            "one windowed WAL discovery without a byte-count replay"
         );
         let independent = crate::FsMaintenance::builder_with_store(store.clone())
             .actor_id("independent")
@@ -1039,8 +1034,8 @@ async fn inline_bytes_make_automatic_and_explicit_folds_due_before_segment_count
         assert_eq!(step.wal_flush, crate::WalFlushStepOutcome::NotNeeded);
         assert_eq!(
             family_requests(&store, DurableObjectFamily::WalSegment),
-            8,
-            "two WAL tip checks without a byte-count replay"
+            14,
+            "two windowed WAL discoveries without a byte-count replay"
         );
         if mode == "explicit" {
             let step = maintenance

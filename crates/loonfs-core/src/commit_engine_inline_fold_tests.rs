@@ -159,7 +159,7 @@ async fn failed_manifest_and_over_budget_retries_keep_materialized_content() {
     )
     .await
     .expect("retry");
-    assert_eq!(flushed.outcome, FlushWalOutcome::Published);
+    assert_eq!(flushed.response.outcome, FlushWalOutcome::Published);
     assert_content_before_metadata(&store, values.len());
     let mut retry_keys = content_puts(&store);
     retry_keys.sort();
@@ -218,9 +218,15 @@ async fn competing_engines_materialize_identical_objects_and_publish_one_manifes
     let (first_result, second_result) = tokio::join!(first_flush, second_flush);
     let first_result = first_result.expect("first flush");
     let second_result = second_result.expect("second flush");
-    assert_eq!(first_result.outcome, FlushWalOutcome::AlreadyCurrent);
-    assert_eq!(second_result.outcome, FlushWalOutcome::Published);
-    assert_eq!(first_result.manifest_no, second_result.manifest_no);
+    assert_eq!(
+        first_result.response.outcome,
+        FlushWalOutcome::AlreadyCurrent
+    );
+    assert_eq!(second_result.response.outcome, FlushWalOutcome::Published);
+    assert_eq!(
+        first_result.response.manifest_no,
+        second_result.response.manifest_no
+    );
     let keys = content_puts(&store);
     assert_eq!(keys.len(), 2);
     assert_eq!(keys[0], keys[1]);
@@ -331,4 +337,88 @@ async fn a_materialization_transport_failure_remains_retryable() {
             .manifest(),
         *input.basis.manifest()
     );
+}
+
+#[tokio::test]
+async fn a_fold_reanchors_with_only_the_commits_published_since_it_began() {
+    let (_directory, store, mut engine, context) = setup().await;
+    let before = candidate(
+        "before",
+        vec![inline(&engine.namespace_id, Bytes::from_static(b"before"))],
+    );
+    publish(&mut engine, &store, &context, before)
+        .await
+        .expect("before fold");
+    let input = engine.begin_wal_fold().expect("fold input");
+    let observed = engine.projection_observed.clone();
+    let mut expected = crate::wal::ProjectedWalTail::default();
+    for name in ["during-one", "during-two"] {
+        let value = inline(&engine.namespace_id, Bytes::from_static(b"during"));
+        publish(
+            &mut engine,
+            &store,
+            &context,
+            candidate(name, vec![value.clone()]),
+        )
+        .await
+        .expect("during fold");
+        let key = store
+            .snapshot()
+            .into_iter()
+            .rev()
+            .find_map(|operation| match operation {
+                RecordedOperation::Put { key, .. }
+                    if key.starts_with(&wal_segment_prefix(&engine.namespace_id)) =>
+                {
+                    Some(key)
+                }
+                _ => None,
+            })
+            .expect("published WAL key");
+        let bytes = store
+            .get(&key, None)
+            .await
+            .expect("WAL read")
+            .expect("WAL object");
+        let segment = decode_wal_segment_envelope_zstd(&bytes).expect("WAL decode");
+        expected.insert_inline_content(value.content_ref().clone(), value.bytes().clone());
+        expected
+            .apply_commit(&segment.payload().records[0])
+            .expect("later rows");
+    }
+    let folded = fold_wal_tail(
+        &store,
+        None,
+        &engine.namespace_id,
+        Some(input.clone()),
+        &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+    )
+    .await
+    .expect("fold");
+    assert_eq!(folded.response.outcome, FlushWalOutcome::Published);
+    engine.record_wal_fold(Some(&folded));
+    let projection = engine
+        .publish_tail_projection
+        .as_ref()
+        .expect("retained projection");
+    assert_eq!(projection.basis(), &folded.basis);
+    assert_eq!(projection.wal_tail_segments, 2);
+    assert_eq!(projection.head.folded_wal_no, input.head.wal_no);
+    assert_eq!(*projection.tail_state, expected);
+    let retained = engine.projection_observed.as_ref().expect("observation");
+    let observed = observed.expect("original observation");
+    assert_eq!(retained.age_at(&observed), 0);
+    assert_eq!(observed.age_at(retained), 0);
+    store.reset();
+    let after = candidate(
+        "after",
+        vec![inline(&engine.namespace_id, Bytes::from_static(b"after"))],
+    );
+    publish(&mut engine, &store, &context, after)
+        .await
+        .expect("after fold");
+    assert!(store.snapshot().iter().all(|operation| !matches!(operation,
+        RecordedOperation::Get { key, .. } | RecordedOperation::GetWithMetadata { key, .. }
+        if key.ends_with("hint.json") || key.starts_with(&wal_segment_prefix(&engine.namespace_id))
+    )));
 }

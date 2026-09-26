@@ -6,12 +6,14 @@ use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::limits::MAX_UNFLUSHED_WAL_SEGMENTS;
 use crate::metadata::{CommitReceiptRecord, MetadataView};
 use crate::namespace::basis::MetadataBasis;
-use crate::namespace::read_anchor::load_read_anchor;
+use crate::namespace::read_anchor::{load_read_anchor, NamespaceReadAnchor};
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::writer_epoch::ensure_writer_not_fenced;
-use crate::wal::load_replayed_wal_tail;
+use crate::storage::inline_content::InlineContent;
 use crate::wal::ProjectedWalTail;
+use crate::wal::{replay_discovered_tail, ValidatedWalTail, WalSegmentError};
 use loonfs_api::wire::control::AcquiredWriter;
+use loonfs_api::wire::wal::WalCommitPayload;
 use loonfs_api::{CommitId, NamespaceId};
 use loonfs_objectstore::ObjectStore;
 use std::sync::Arc;
@@ -78,9 +80,59 @@ pub(crate) struct PublishTailProjection {
     pub(crate) head: NamespaceReadState,
     pub(crate) wal_tail_segments: u64,
     pub(crate) tail_state: Arc<ProjectedWalTail>,
+    fold: Option<FoldInProgress>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FoldInProgress {
+    /// The head the fold was taken at: its `wal_no` is the boundary the
+    /// published manifest will fold through.
+    from: NamespaceReadState,
+    /// Rows and inline content of every commit published since `from`.
+    since: Arc<ProjectedWalTail>,
+    segments_since: u64,
 }
 
 impl PublishTailProjection {
+    pub(crate) fn begin_fold(&mut self) {
+        self.fold = Some(FoldInProgress {
+            from: self.head.clone(),
+            since: Arc::new(ProjectedWalTail::default()),
+            segments_since: 0,
+        });
+    }
+
+    pub(crate) fn reanchor_after_fold(&mut self, basis: MetadataBasis) -> bool {
+        if let Some(fold) = self.fold.take() {
+            if basis.0.head_seq == fold.from.seq {
+                self.basis = basis;
+                self.tail_state = fold.since;
+                self.wal_tail_segments = fold.segments_since;
+                self.head.folded_wal_no = fold.from.wal_no;
+                return true;
+            }
+        }
+        false
+    }
+
+    pub(crate) fn apply_fold_records(
+        &mut self,
+        inline_content: &[InlineContent],
+        records: &[WalCommitPayload],
+    ) -> std::result::Result<(), WalSegmentError> {
+        if let Some(fold) = &mut self.fold {
+            let since = Arc::make_mut(&mut fold.since);
+            for value in inline_content {
+                since.insert_inline_content(value.content_ref().clone(), value.bytes().clone());
+            }
+            for record in records {
+                since.apply_commit(record)?;
+            }
+            fold.segments_since += 1;
+        }
+        Ok(())
+    }
+
     pub(crate) fn weight(&self) -> PublishTailWeight {
         PublishTailWeight {
             rows: self.tail_state.rows.row_count(),
@@ -103,6 +155,11 @@ impl PublishTailProjection {
     }
 }
 
+enum ViewSource<'p> {
+    Cached(&'p PublishTailProjection),
+    Cold(Box<NamespaceReadAnchor>),
+}
+
 pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
     store: &'a S,
     segment_cache: Option<&'a MetadataSegmentCache>,
@@ -110,14 +167,17 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
     acquired_writer: AcquiredWriter,
     cached_projection: Option<&PublishTailProjection>,
 ) -> Result<(PublishMetadataView<'a, S>, PublishTailProjection)> {
-    let (head, basis) = if let Some(cached) = cached_projection {
-        (cached.head.clone(), cached.basis().clone())
-    } else {
-        let anchor = load_read_anchor(store, namespace_id)
-            .await
-            .map_err(CoreError::ControlObjectLoad)?;
-        let basis = anchor.basis();
-        (anchor.read_state, basis)
+    let source = match cached_projection {
+        Some(cached) => ViewSource::Cached(cached),
+        None => ViewSource::Cold(Box::new(
+            load_read_anchor(store, namespace_id)
+                .await
+                .map_err(CoreError::ControlObjectLoad)?,
+        )),
+    };
+    let (head, basis) = match &source {
+        ViewSource::Cached(cached) => (cached.head.clone(), cached.basis().clone()),
+        ViewSource::Cold(anchor) => (anchor.read_state.clone(), anchor.basis()),
     };
     ensure_writer_not_fenced(&head, &acquired_writer)?;
     if head.status.is_deleted() {
@@ -128,9 +188,11 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
         ));
     }
     let loaded_basis = load_basis_metadata_segments(store, segment_cache, &basis).await?;
-    let projection = match cached_projection {
-        Some(cached) => cached.clone(),
-        None => load_publish_tail_projection(store, &head, basis, &loaded_basis).await?,
+    let projection = match source {
+        ViewSource::Cached(cached) => cached.clone(),
+        ViewSource::Cold(anchor) => {
+            load_publish_tail_projection(&head, basis, &loaded_basis, &anchor.tail)?
+        }
     };
 
     let manifest_segments = loaded_basis.segments;
@@ -149,15 +211,14 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
     ))
 }
 
-async fn load_publish_tail_projection<S: ObjectStore + ?Sized>(
-    store: &S,
+fn load_publish_tail_projection<S: ObjectStore + ?Sized>(
     head: &NamespaceReadState,
     basis: MetadataBasis,
     loaded_basis: &LoadedMetadataBasis<'_, S>,
+    tail: &ValidatedWalTail,
 ) -> Result<PublishTailProjection> {
     let manifest_head = loaded_basis.replay_head(head);
-    let replayed = load_replayed_wal_tail(store, &manifest_head, head, &loaded_basis.base_state)
-        .await
+    let replayed = replay_discovered_tail(&manifest_head, head, &loaded_basis.base_state, tail)
         .map_err(CoreError::MetadataProjection)?;
     let wal_tail_segments = head.unfolded_wal_segments();
     let projection = PublishTailProjection {
@@ -165,6 +226,7 @@ async fn load_publish_tail_projection<S: ObjectStore + ?Sized>(
         head: head.clone(),
         wal_tail_segments,
         tail_state: Arc::new(replayed.projected_tail),
+        fold: None,
     };
     Ok(projection)
 }

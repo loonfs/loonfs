@@ -1,10 +1,14 @@
 //! Loads a manifest and rechecks its successor around WAL tip discovery.
 
+use crate::checkpoint::{load_basis_metadata_segments, MetadataSegmentCache};
 use crate::control_object::ControlObjectLoadError;
+use crate::error::{CoreError, Result as CoreResult};
 use crate::namespace::basis::MetadataBasis;
 use crate::namespace::control::{load_current_manifest_with_hint, LoadedHint, LoadedManifest};
 use crate::namespace::state::NamespaceReadState;
-use crate::wal::discover_tip;
+use crate::wal::{
+    discover_tail, replay_discovered_tail, DiscoveredTail, ProjectedWalTail, ValidatedWalTail,
+};
 use loonfs_api::{ChangeSeq, ManifestNo, NamespaceId};
 use loonfs_objectstore::ObjectStore;
 use std::sync::Arc;
@@ -13,6 +17,7 @@ pub struct NamespaceReadAnchor {
     pub read_state: NamespaceReadState,
     pub(crate) manifest: LoadedManifest,
     pub(crate) hint: LoadedHint,
+    pub(crate) tail: ValidatedWalTail,
 }
 
 impl NamespaceReadAnchor {
@@ -33,8 +38,11 @@ pub async fn load_read_anchor<S: ObjectStore + ?Sized>(
         crate::time::Observation::now(Arc::new(crate::time::StdMonotonicTimer::default()));
     let (mut manifest, mut hint) = load_current_manifest_with_hint(store, namespace_id).await?;
     loop {
-        match discover_tip(store, namespace_id, &manifest, hint.state.wal_no).await {
-            Ok(state) => {
+        match discover_tail(store, namespace_id, &manifest).await {
+            Ok(DiscoveredTail {
+                head: state,
+                segments,
+            }) => {
                 if !state.status.is_deleted() {
                     let successor = manifest_has_successor(
                         store,
@@ -58,6 +66,7 @@ pub async fn load_read_anchor<S: ObjectStore + ?Sized>(
                     read_state: state,
                     manifest,
                     hint,
+                    tail: segments,
                 });
             }
             Err(error @ ControlObjectLoadError::Codec { .. }) => {
@@ -75,6 +84,22 @@ pub async fn load_read_anchor<S: ObjectStore + ?Sized>(
             Err(error) => return Err(error),
         }
     }
+}
+
+pub async fn project_anchor_tail<S: ObjectStore + ?Sized>(
+    store: &S,
+    segment_cache: Option<&MetadataSegmentCache>,
+    anchor: &NamespaceReadAnchor,
+) -> CoreResult<Arc<ProjectedWalTail>> {
+    let loaded_basis = load_basis_metadata_segments(store, segment_cache, &anchor.basis()).await?;
+    let replayed = replay_discovered_tail(
+        &loaded_basis.replay_head(&anchor.read_state),
+        &anchor.read_state,
+        &loaded_basis.base_state,
+        &anchor.tail,
+    )
+    .map_err(CoreError::MetadataProjection)?;
+    Ok(Arc::new(replayed.projected_tail))
 }
 
 pub async fn manifest_has_successor<S: ObjectStore + ?Sized>(

@@ -20,7 +20,7 @@ use crate::storage::content::{
     content_object_key_for_ref, materialize_content, validate_loaded_content_bytes,
 };
 use crate::time::{Deadline, StdMonotonicTimer};
-use crate::wal::load_replayed_wal_tail;
+use crate::wal::replay_discovered_tail;
 use crate::wal::ProjectedWalTail;
 use futures::{stream, TryStreamExt};
 use loonfs_api::wire::control::ManifestRef;
@@ -71,12 +71,19 @@ pub(crate) async fn flush_wal_with_deadline<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     deadline: &Deadline,
 ) -> Result<FlushWalResponse> {
+    let basis = flush_wal_basis_with_deadline(store, namespace_id, deadline).await?;
+    Ok(flush_wal_response(namespace_id, basis))
+}
+
+async fn flush_wal_basis_with_deadline<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    deadline: &Deadline,
+) -> Result<FlushedBasis> {
     retry_while_contended(
         || async move {
             Result::Ok(match try_flush_wal(store, namespace_id, deadline).await? {
-                TryFlushWal::Settled(basis) => {
-                    CasAttempt::Settled(flush_wal_response(namespace_id, *basis))
-                }
+                TryFlushWal::Settled(basis) => CasAttempt::Settled(*basis),
                 TryFlushWal::RaceLost => {
                     CasAttempt::Contended(CoreError::WalPublish(WalPublishError::StaleHead))
                 }
@@ -177,28 +184,42 @@ async fn materialize_inline_content<S: ObjectStore + ?Sized>(
         .await
 }
 
+pub struct FoldedWalTail {
+    pub response: FlushWalResponse,
+    /// The manifest that covers the tail after the call: the one it published,
+    /// or the current one that already covered it.
+    pub basis: MetadataBasis,
+}
+
 pub async fn fold_wal_tail<S: ObjectStore + ?Sized>(
     store: &S,
     segment_cache: Option<&MetadataSegmentCache>,
     namespace_id: &NamespaceId,
     input: Option<WalFoldInput>,
     deadline: &Deadline,
-) -> Result<FlushWalResponse> {
-    let Some(input) = input else {
-        return flush_wal_with_deadline(store, namespace_id, deadline).await;
+) -> Result<FoldedWalTail> {
+    let flushed = if let Some(input) = input {
+        let loaded_basis = load_basis_metadata_segments(store, segment_cache, &input.basis).await?;
+        let manifest_projection = ManifestProjection {
+            head: input.head,
+            basis: input.basis,
+            manifest_segments: loaded_basis.segments,
+            tail_state: input.tail_state,
+        };
+        // A fold publishes metadata without updating the namespace head.
+        match try_flush_wal_projection(store, namespace_id, &manifest_projection, deadline).await? {
+            TryFlushWal::Settled(basis) => *basis,
+            TryFlushWal::RaceLost => {
+                flush_wal_basis_with_deadline(store, namespace_id, deadline).await?
+            }
+        }
+    } else {
+        flush_wal_basis_with_deadline(store, namespace_id, deadline).await?
     };
-    let loaded_basis = load_basis_metadata_segments(store, segment_cache, &input.basis).await?;
-    let manifest_projection = ManifestProjection {
-        head: input.head,
-        basis: input.basis,
-        manifest_segments: loaded_basis.segments,
-        tail_state: input.tail_state,
-    };
-    // A fold publishes metadata without updating the namespace head.
-    match try_flush_wal_projection(store, namespace_id, &manifest_projection, deadline).await? {
-        TryFlushWal::Settled(basis) => Ok(flush_wal_response(namespace_id, *basis)),
-        TryFlushWal::RaceLost => flush_wal_with_deadline(store, namespace_id, deadline).await,
-    }
+    Ok(FoldedWalTail {
+        basis: MetadataBasis(flushed.manifest.clone()),
+        response: flush_wal_response(namespace_id, flushed),
+    })
 }
 
 fn flush_wal_response(namespace_id: &NamespaceId, basis: FlushedBasis) -> FlushWalResponse {
@@ -271,9 +292,13 @@ pub(super) async fn load_manifest_projection<'a, S: ObjectStore + ?Sized>(
     let loaded_basis = load_basis_metadata_segments(store, None, &basis).await?;
     let manifest_head = loaded_basis.replay_head(&head);
     let manifest_segments = loaded_basis.segments;
-    let replayed = load_replayed_wal_tail(store, &manifest_head, &head, &loaded_basis.base_state)
-        .await
-        .map_err(CoreError::MetadataProjection)?;
+    let replayed = replay_discovered_tail(
+        &manifest_head,
+        &head,
+        &loaded_basis.base_state,
+        &anchor.tail,
+    )
+    .map_err(CoreError::MetadataProjection)?;
     Ok(ManifestProjection {
         head,
         basis,

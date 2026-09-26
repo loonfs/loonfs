@@ -80,7 +80,6 @@ pub(super) struct WalWalk<'a> {
     namespace_id: &'a NamespaceId,
     wal_no: WalNo,
     seq: ChangeSeq,
-    tip: Option<WalNo>,
     epoch: WriterEpoch,
     epoch_bound: WriterEpoch,
 }
@@ -97,17 +96,8 @@ impl<'a> WalWalk<'a> {
             namespace_id,
             wal_no,
             seq,
-            tip: None,
             epoch: WriterEpoch(0),
             epoch_bound,
-        }
-    }
-
-    /// Reads every number through `tip`; an absent one is missing history.
-    pub(super) fn through(self, tip: WalNo) -> Self {
-        Self {
-            tip: Some(tip),
-            ..self
         }
     }
 
@@ -117,50 +107,6 @@ impl<'a> WalWalk<'a> {
 
     pub(super) fn object_key(&self) -> String {
         wal_segment(self.namespace_id, &self.wal_no)
-    }
-
-    pub(super) async fn next<S: ObjectStore + ?Sized>(
-        &mut self,
-        store: &S,
-    ) -> Result<Option<ValidatedWalSegment>, WalTailLoadError> {
-        if self.tip.is_some_and(|tip| self.wal_no >= tip) {
-            return Ok(None);
-        }
-        let Ok(wal_no) = self.wal_no.successor() else {
-            return Ok(None);
-        };
-        let LoadedWalSegment {
-            object_key,
-            envelope,
-        } = load_wal_segment(store, self.namespace_id, wal_no).await;
-        let Some(envelope) = envelope? else {
-            return match self.tip {
-                Some(_) => Err(WalTailLoadError::MissingWalObject { object_key }),
-                None => Ok(None),
-            };
-        };
-        self.validate(object_key, envelope).map(Some)
-    }
-
-    pub(super) async fn at_hint<S: ObjectStore + ?Sized>(
-        &mut self,
-        store: &S,
-        wal_no: WalNo,
-    ) -> Result<ValidatedWalSegment, WalTailLoadError> {
-        let loaded = load_wal_segment(store, self.namespace_id, wal_no).await;
-        let envelope = loaded
-            .envelope?
-            .ok_or_else(|| WalTailLoadError::MissingWalObject {
-                object_key: loaded.object_key.clone(),
-            })?;
-        self.seq = envelope
-            .payload()
-            .prior_head_seq()
-            .ok_or_else(|| WalTailLoadError::Replay {
-                object_key: loaded.object_key.clone(),
-                error: WalSegmentError::SeqOverflow,
-            })?;
-        self.validate(loaded.object_key, envelope)
     }
 
     pub(super) fn validate(
@@ -200,8 +146,7 @@ pub(super) async fn load_wal_tail<S: ObjectStore + ?Sized>(
         request.base_wal_no,
         request.base_seq,
         request.writer_epoch,
-    )
-    .through(request.tip_wal_no);
+    );
     let mut loaded = stream::iter(request.base_wal_no.0..request.tip_wal_no.0)
         .map(|number| load_wal_segment(store, request.namespace_id, WalNo(number + 1)))
         .buffered(WAL_REPLAY_READ_CONCURRENCY);
@@ -244,13 +189,22 @@ pub(crate) async fn load_replayed_wal_tail<S: ObjectStore + ?Sized>(
         },
     )
     .await?;
+    replay_discovered_tail(base_head, current_head, base_metadata_state, &tail)
+}
+
+pub(crate) fn replay_discovered_tail(
+    base_head: &NamespaceReadState,
+    current_head: &NamespaceReadState,
+    base_metadata_state: &MetadataState,
+    tail: &ValidatedWalTail,
+) -> Result<ReplayedWalTail, MetadataProjectionLoadError> {
     let replayed = {
         let _span =
             tracing::debug_span!("loonfs.phase", phase = "project_metadata_state").entered();
         project_validated_wal_tail(
             base_head,
             &super::ProjectedWalTail::from_rows(base_metadata_state.clone()),
-            &tail,
+            tail,
         )?
     };
     ensure_replayed_head_matches(current_head, &replayed.resulting_head)?;

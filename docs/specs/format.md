@@ -328,7 +328,7 @@ This example assumes 12 is the discovered WAL tip. Manifest and WAL discovery mu
 
 ### 4.2 Replaying the visible WAL
 
-After selecting a manifest, discover the WAL tip by probing consecutive numbers. If the hint names a WAL number above `folded_wal_no`, load that object and probe forward from it; otherwise probe from the folded boundary. The first absent successor ends discovery. Replay still requires every WAL number between the folded boundary and the discovered tip, including numbers below the hint.
+After selecting a manifest, read the WAL from `folded_wal_no + 1` upward until the first absent number. The objects read are the ones replay needs, so a reader keeps them; discovery and replay are one pass. Numbers may be read in concurrent windows. Those reads do not observe one moment, so a number absent in one read may have been published before a later number was read: the reader reads it again before treating it as missing. The first number still absent ends the tail; a still-absent number below a present one is a missing object. The hint's WAL number is not used for discovery. Replay requires every WAL number between the folded boundary and the discovered tip.
 
 Each data segment must contain contiguous commits following the preceding head. Its `prior_head_seq` is derived by subtracting one from the first record sequence; a first sequence of zero is invalid. A fence derives its preceding head from `head_seq`. Namespace identity, WAL number, sequence range, allocation state, and writer epoch must validate. Empty fence segments contain no metadata changes. Epochs cannot decrease along the log or exceed the current manifest's epoch. If a WAL object exposes a newer epoch, reload the manifest before deciding that the object is invalid.
 
@@ -539,7 +539,7 @@ While the receipt is retained, an equal fingerprint under the same `commit_id` i
 
 Inline content is identified by its bytes. While the commit receipt is retained, retrying the same request with the same inline bytes returns the original commit, even if a new content ID was assigned. Changed bytes or a different subject return `commit_id_reuse_conflict`.
 
-Receipt lookup uses the publisher's current projection. The publisher refreshes that projection when its WAL publication budget expires or its fold threshold is reached. Check for the commit receipt before uploading inline bytes as content objects. If the receipt is still available, return the original result for an identical request or a reuse conflict for a changed request. Neither requires another upload, even after a restart or on another server.
+Receipt lookup uses the publisher's current projection. The publisher refreshes that projection when its WAL publication budget expires. A fold it published itself moves the projection's basis to the new manifest and keeps the commits published since, without a refresh. Check for the commit receipt before uploading inline bytes as content objects. If the receipt is still available, return the original result for an identical request or a reuse conflict for a changed request. Neither requires another upload, even after a restart or on another server.
 
 The guarantee is bounded by retention. Receipts below the retention floor can be removed during compaction. Once a receipt is gone, the old ID cannot be distinguished from an unused ID and a later request can execute as a new mutation. A receipt that has not yet been compacted may still be available, but callers must not depend on that extra lifetime.
 
