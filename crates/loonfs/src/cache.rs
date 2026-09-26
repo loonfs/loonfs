@@ -305,11 +305,14 @@ impl ReadCore {
             .cached_namespace_head(namespace_id);
         if let Some(mut head) = cached {
             // A HEAD of the successor after a long gap cannot see a successor that was
-            // collected in the meantime; rediscover instead of trusting it.
-            let stale = head.last_control_check.as_ref().is_none_or(|checked| {
-                checked.age_ms() >= loonfs_core::limits::READ_REVALIDATION_BOUND_MS
-            });
-            if !stale {
+            // collected in the meantime, whether the gap came before the probe or while
+            // it waited; rediscover instead of trusting it.
+            let fresh = |checked: &Option<Observation>| {
+                checked.as_ref().is_some_and(|checked| {
+                    checked.age_ms() < loonfs_core::limits::READ_REVALIDATION_BOUND_MS
+                })
+            };
+            if fresh(&head.last_control_check) {
                 let interval_ms = self
                     .runtime_cache_config()
                     .manifest_revalidation_interval_ms;
@@ -328,7 +331,7 @@ impl ReadCore {
                     let mut context = self.runtime_read_context(&head);
                     if loonfs_core::control::probe_namespace_wal(self.store(), &mut context)
                         .instrument(tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "validation_wal_probe"))
-                    .await? {
+                    .await? && fresh(&head.last_control_check) {
                         head.head = context.head;
                         return Ok(head);
                     }

@@ -35,30 +35,24 @@ pub async fn load_read_anchor<S: ObjectStore + ?Sized>(
     loop {
         match discover_tip(store, namespace_id, &manifest, hint.state.wal_no).await {
             Ok(state) => {
-                // An absent successor proves nothing once the probe it would confirm is
-                // older than the revalidation bound: the successor may have been collected.
-                if !state.status.is_deleted()
-                    && observed.age_ms() >= crate::limits::READ_REVALIDATION_BOUND_MS
-                {
-                    observed = crate::time::Observation::now(Arc::new(
-                        crate::time::StdMonotonicTimer::default(),
-                    ));
-                    (manifest, hint) = load_current_manifest_with_hint(store, namespace_id).await?;
-                    continue;
-                }
-                if !state.status.is_deleted()
-                    && manifest_has_successor(
+                if !state.status.is_deleted() {
+                    let successor = manifest_has_successor(
                         store,
                         namespace_id,
                         manifest.state.manifest().manifest_no,
                     )
-                    .await?
-                {
-                    observed = crate::time::Observation::now(Arc::new(
-                        crate::time::StdMonotonicTimer::default(),
-                    ));
-                    (manifest, hint) = load_current_manifest_with_hint(store, namespace_id).await?;
-                    continue;
+                    .await?;
+                    // An absent successor proves nothing once the probe it would confirm is
+                    // older than the revalidation bound when the answer arrives: the
+                    // successor may have been collected while the reader waited.
+                    if successor || observed.age_ms() >= crate::limits::READ_REVALIDATION_BOUND_MS {
+                        observed = crate::time::Observation::now(Arc::new(
+                            crate::time::StdMonotonicTimer::default(),
+                        ));
+                        (manifest, hint) =
+                            load_current_manifest_with_hint(store, namespace_id).await?;
+                        continue;
+                    }
                 }
                 return Ok(NamespaceReadAnchor {
                     read_state: state,

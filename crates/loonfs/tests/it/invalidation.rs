@@ -15,7 +15,7 @@ use loonfs_core::control::NamespaceReadState;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::stores::{
-    KeyPredicate, OperationClass, RecordedOperation, RecordingStore,
+    BlockingStore, KeyPredicate, OperationClass, RecordedOperation, RecordingStore,
 };
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -558,6 +558,80 @@ async fn a_cached_view_older_than_the_revalidation_bound_rediscovers() {
             if manifest_key.starts_with(&loonfs_objectstore::keys::metadata_manifest_prefix(&namespace_id))
                 && wal_key.starts_with(&loonfs_objectstore::keys::wal_segment_prefix(&namespace_id))
     ));
+}
+
+#[tokio::test]
+async fn a_pause_during_the_successor_probe_rediscovers() {
+    let temp_dir = tempdir().expect("tempdir");
+    let blocking = BlockingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyPredicate::prefix(loonfs_objectstore::keys::metadata_manifest_prefix(
+            &NamespaceId::parse("probe-pause").expect("namespace"),
+        )),
+        OperationClass::Head,
+    );
+    let recording = Arc::new(RecordingStore::new(blocking, KeyPredicate::any()));
+    let store: SharedObjectStore = recording.clone();
+    let namespace_id = NamespaceId::parse("probe-pause").expect("namespace");
+    let timer = Arc::new(ManualClock::new(0));
+    let interval_ms = 1_000;
+    let reader = FsReader::builder_with_store(store.clone())
+        .monotonic_timer(timer.clone())
+        .runtime_cache(RuntimeCacheConfig {
+            manifest_revalidation_interval_ms: interval_ms,
+            ..Default::default()
+        })
+        .build()
+        .await
+        .expect("reader");
+    let writer = writer(&store, "probe-pause-writer").await;
+    writer
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("create namespace");
+    writer
+        .put_file_bytes(
+            &namespace_id,
+            "/file.txt",
+            b"file",
+            PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("commit file");
+    writer.publisher().drain().await.expect("finish hints");
+    reader
+        .get_path_entry(&namespace_id, "/file.txt", Default::default())
+        .await
+        .expect("seed reader cache");
+
+    timer.advance_ms(interval_ms);
+    recording.reset();
+    recording.inner().block_next();
+    let (entry, ()) = futures::join!(
+        reader.get_path_entry(&namespace_id, "/file.txt", Default::default()),
+        async {
+            recording.inner().wait_until_blocked().await;
+            timer.advance_ms(READ_REVALIDATION_BOUND_MS);
+            recording.inner().release();
+        }
+    );
+    entry.expect("read across the pause");
+    let operations = recording.take();
+    let probe = operations
+        .iter()
+        .position(|operation| matches!(operation, RecordedOperation::Head { .. }))
+        .expect("successor probe");
+    assert!(
+        operations[probe..].iter().any(|operation| matches!(
+            operation,
+            RecordedOperation::GetWithMetadata { key, .. }
+                if key == &loonfs_objectstore::keys::hint(&namespace_id)
+        )),
+        "{operations:?}"
+    );
 }
 
 #[tokio::test]
