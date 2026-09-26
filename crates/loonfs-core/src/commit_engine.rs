@@ -715,13 +715,7 @@ impl NamespaceCommitEngine {
 
         if self.projection_observed.as_ref().is_some_and(|observed| {
             observed.age_at(&attempt) >= crate::limits::WAL_PUBLISH_BUDGET_MS
-        }) || self
-            .publish_tail_projection
-            .as_ref()
-            .is_some_and(|projection| {
-                projection.wal_tail_segments >= crate::limits::FOLD_AT_WAL_SEGMENTS
-            })
-        {
+        }) {
             self.invalidate_projection();
         }
         let loaded = load_publish_metadata_view(

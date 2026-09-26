@@ -12,10 +12,14 @@ use super::{
 use crate::error::MetadataProjectionLoadError;
 use crate::metadata::MetadataState;
 use crate::namespace::state::NamespaceReadState;
+use futures::{stream, StreamExt};
 use loonfs_api::wire::wal::{decode_wal_segment_envelope_zstd, WalSegmentEnvelope};
 use loonfs_api::{ChangeSeq, NamespaceId, WalNo, WriterEpoch};
 use loonfs_objectstore::keys::wal_segment;
 use loonfs_objectstore::ObjectStore;
+
+// Each load has its own limit, and several loads can run at once in one process.
+pub(super) const WAL_REPLAY_READ_CONCURRENCY: usize = 8;
 
 // Missing and malformed objects still need their numbered key in caller diagnostics.
 pub(super) struct LoadedWalSegment {
@@ -198,9 +202,19 @@ pub(super) async fn load_wal_tail<S: ObjectStore + ?Sized>(
         request.writer_epoch,
     )
     .through(request.tip_wal_no);
+    let mut loaded = stream::iter(request.base_wal_no.0..request.tip_wal_no.0)
+        .map(|number| load_wal_segment(store, request.namespace_id, WalNo(number + 1)))
+        .buffered(WAL_REPLAY_READ_CONCURRENCY);
     let mut segments = Vec::new();
-    while let Some(segment) = walk.next(store).await? {
-        segments.push(segment);
+    while let Some(LoadedWalSegment {
+        object_key,
+        envelope,
+    }) = loaded.next().await
+    {
+        let envelope = envelope?.ok_or_else(|| WalTailLoadError::MissingWalObject {
+            object_key: object_key.clone(),
+        })?;
+        segments.push(walk.validate(object_key, envelope)?);
     }
     if walk.seq() != request.head_seq {
         return Err(WalTailLoadError::HeadSeqMismatch {

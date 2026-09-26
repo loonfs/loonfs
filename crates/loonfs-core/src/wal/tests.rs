@@ -19,7 +19,8 @@ use loonfs_objectstore::keys::{hint, wal_segment, wal_segment_prefix};
 use loonfs_objectstore::{local_fs_store::LocalFsStore, ObjectStore};
 use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::stores::{
-    BlockingStore, KeyPredicate, MetadataMapStore, OperationClass, RecordingStore,
+    BlockingStore, ConcurrencyWatchStore, KeyPredicate, MetadataMapStore, OperationClass,
+    RecordingStore,
 };
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -391,6 +392,52 @@ async fn cold_open_probes_past_a_lagging_hint_and_reads_a_missing_hint_as_absent
 }
 
 #[tokio::test]
+async fn a_bounded_tail_load_overlaps_reads_and_matches_sequential_replay() {
+    use super::reader::{load_wal_tail, WalWalk, WAL_REPLAY_READ_CONCURRENCY};
+
+    let directory = tempdir().expect("directory");
+    let store = LocalFsStore::new(directory.path()).expect("store");
+    let namespace_id = NamespaceId::parse("bounded-replay").expect("namespace");
+    create(&store, &namespace_id, &context(1_000))
+        .await
+        .expect("create");
+    let mut engine = NamespaceCommitEngine::new(namespace_id.clone());
+    for number in 1..20 {
+        publish(&mut engine, &store, &format!("directory-{number}"))
+            .await
+            .expect("publish");
+    }
+    let mut walk =
+        WalWalk::after(&namespace_id, WalNo(0), ChangeSeq(0), WriterEpoch(1)).through(WalNo(20));
+    let mut sequential = Vec::new();
+    while let Some(segment) = walk.next(&store).await.expect("sequential load") {
+        sequential.push(segment);
+    }
+    let watched = ConcurrencyWatchStore::new(
+        store,
+        KeyPredicate::prefix(wal_segment_prefix(&namespace_id)),
+    );
+    let tail = load_wal_tail(
+        &watched,
+        super::WalTailLoadRequest {
+            namespace_id: &namespace_id,
+            base_seq: ChangeSeq(0),
+            head_seq: ChangeSeq(19),
+            base_wal_no: WalNo(0),
+            tip_wal_no: WalNo(20),
+            writer_epoch: WriterEpoch(1),
+        },
+    )
+    .await
+    .expect("bounded load");
+
+    assert_eq!(watched.reads().total, 20);
+    assert!(watched.reads().peak_in_flight > 1);
+    assert!(watched.reads().peak_in_flight <= WAL_REPLAY_READ_CONCURRENCY);
+    assert_eq!(tail, super::ValidatedWalTail::new(sequential));
+}
+
+#[tokio::test]
 async fn a_bounded_tail_load_names_the_missing_segment() {
     let directory = tempdir().expect("directory");
     let store = LocalFsStore::new(directory.path()).expect("store");
@@ -420,12 +467,25 @@ async fn a_bounded_tail_load_names_the_missing_segment() {
         .delete(&missing)
         .await
         .expect("remove the middle segment");
+    let lowest_missing = wal_segment(&namespace_id, &WalNo(2));
+    store
+        .delete(&lowest_missing)
+        .await
+        .expect("remove an earlier segment");
     let error = load_current_metadata_view(&store, &namespace_id)
         .await
         .err()
         .expect("a gap below the tip is corruption");
     assert_eq!(error.code(), ErrorCode::NamespaceCorrupt, "{error}");
-    assert!(error.to_string().contains(&missing), "{error}");
+    assert!(error.to_string().contains(&lowest_missing), "{error}");
+    assert!(matches!(
+        error,
+        crate::error::CoreError::MetadataProjection(
+            crate::error::MetadataProjectionLoadError::WalTailLoad(
+                super::WalTailLoadError::MissingWalObject { object_key }
+            )
+        ) if object_key == lowest_missing
+    ));
 }
 
 #[tokio::test]
