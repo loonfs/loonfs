@@ -611,7 +611,7 @@ impl PublisherRegistry {
             .get(namespace_id)
             .cloned();
         if let Some(publisher) = publisher {
-            publisher.engine.lock().await.record_successful_fold();
+            publisher.engine.lock().await.record_fold_outcome();
         }
     }
 
@@ -822,7 +822,7 @@ impl EngineSlot {
             .or(self.last_known_wal_tail_inline_bytes)
     }
 
-    fn record_successful_fold(&mut self) {
+    fn record_fold_outcome(&mut self) {
         if let Some(engine) = self.engine.as_mut() {
             engine.invalidate_projection();
         }
@@ -1662,14 +1662,10 @@ impl NamespacePublisher {
         self.read_core
             .instruments()
             .publisher_wal_fold_duration(self.elapsed_ms_since(started_ms));
+        self.engine.lock().await.record_fold_outcome();
         match result {
             Ok(_) => {
                 self.read_core.instruments().publisher_wal_fold();
-                // The fold moved the folded number. The next batch counts its
-                // tail from the new manifest instead of starting another fold
-                // over a stale count.
-                let mut slot = self.engine.lock().await;
-                slot.record_successful_fold();
             }
             Err(error) => {
                 let error = RuntimeError::Core(error);
