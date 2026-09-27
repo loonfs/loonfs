@@ -162,3 +162,188 @@ async fn directory_pages_use_bindings_and_load_revision_heads_concurrently() {
         assert_eq!(entry.kind, stat.kind);
     }
 }
+
+async fn create_compacted_directories(
+    store: &SharedObjectStore,
+    namespace_id: &loonfs::NamespaceId,
+) {
+    use loonfs::publish::{CommitCandidate, CommitRequest, FilesystemOperation, InlineContent};
+    use loonfs_api::{AbsolutePath, ActorId, CommitId, MetadataCompactionRequest};
+
+    // Long attribution produces enough base segments without a million files.
+    let actor = ActorId::parse("a".repeat(256)).expect("actor");
+    let writer = FsWriter::builder_with_store(store.clone())
+        .writer_id("compacted-page-writer")
+        .min_publish_interval_ms(0)
+        .build()
+        .await
+        .expect("writer");
+    let maintenance = FsMaintenance::builder_with_store(store.clone())
+        .actor_id("compacted-page-maintenance")
+        .build()
+        .await
+        .expect("maintenance");
+    writer
+        .create_namespace(namespace_id, CreateNamespaceOptions::new(actor.clone()))
+        .await
+        .expect("namespace");
+    for directory in 0..64 {
+        writer
+            .create_directory(
+                namespace_id,
+                &format!("/directory-{directory:02}"),
+                CreateDirectoryOptions::new(actor.clone()),
+            )
+            .await
+            .expect("directory");
+    }
+    for fold in 0..40 {
+        let content = InlineContent::new(
+            namespace_id.clone(),
+            loonfs_api::ContentId::generate(),
+            bytes::Bytes::new(),
+        );
+        let content_ref = content.content_ref();
+        // Permuted names spread the first page across all folds.
+        let operations = (fold * 50..(fold + 1) * 50)
+            .flat_map(|round| {
+                (0..64).map(move |directory| FilesystemOperation::PutFile {
+                    path: AbsolutePath::parse(format!(
+                        "/directory-{directory:02}/file-{:04}",
+                        (round * 37) % 2000
+                    ))
+                    .expect("file path"),
+                    content_ref: Some(content_ref.clone()),
+                    inline_content: None,
+                    behavior: DestinationBehavior::NoReplace,
+                    expected_inode_id: None,
+                    expected_revision_no: None,
+                })
+            })
+            .collect();
+        writer
+            .commit_candidate(
+                namespace_id,
+                CommitCandidate::with_inline_content(
+                    CommitRequest {
+                        commit_id: CommitId::generate(),
+                        actor_id: actor.clone(),
+                        subject: None,
+                        message: None,
+                        operations,
+                        preconditions: Vec::new(),
+                    },
+                    Vec::new(),
+                    vec![content],
+                ),
+            )
+            .await
+            .expect("file batch");
+        maintenance
+            .flush_wal(namespace_id)
+            .await
+            .expect("fold file batch");
+    }
+    loop {
+        let response = maintenance
+            .run_maintenance(
+                namespace_id,
+                loonfs_api::RunMaintenanceRequest::MetadataCompaction(MetadataCompactionRequest {}),
+            )
+            .await
+            .expect("compact metadata");
+        if matches!(
+            response,
+            loonfs_api::RunMaintenanceResponse::MetadataCompaction(
+                loonfs_api::MetadataCompactionResponse {
+                    compaction: loonfs_api::MetadataCompactionOutcome::NotNeeded,
+                    ..
+                }
+            )
+        ) {
+            break;
+        }
+    }
+}
+
+#[tokio::test]
+async fn compacted_directory_page_overlaps_revision_segment_reads() {
+    use loonfs_api::MonotonicTimer;
+    use loonfs_objectstore::timing::StdMonotonicTimer;
+    use loonfs_test_support::stores::LatencyStore;
+    use std::time::Duration;
+
+    let temporary = tempdir().expect("temporary directory");
+    let store: SharedObjectStore = Arc::new(LocalFsStore::new(temporary.path()).expect("store"));
+    let namespace_id = namespace_id("compacted-directory-page");
+    create_compacted_directories(&store, &namespace_id).await;
+    let manifest = loonfs_core::control::load_namespace_current_manifest(&store, &namespace_id)
+        .await
+        .expect("manifest");
+    let revision_runs: Vec<_> = manifest
+        .state
+        .envelope
+        .payload()
+        .runs
+        .iter()
+        .filter(|run| {
+            run.segments
+                .iter()
+                .any(|segment| segment.family == MetadataRowFamily::Revisions)
+        })
+        .collect();
+    assert_eq!(revision_runs.len(), 1);
+    let revision_keys = family_keys(&store, &namespace_id, MetadataRowFamily::Revisions).await;
+    assert!(
+        revision_keys.len() >= 8,
+        "{} revision segments",
+        revision_keys.len()
+    );
+    // Debug row decoding must fit well below the serialized I/O budget.
+    let latency = Duration::from_millis(500);
+    let keys = KeyPredicate::new(move |key| revision_keys.contains(key));
+    let delayed = Arc::new(LatencyStore::new(store, keys.clone(), latency));
+    let revisions = Arc::new(ConcurrencyWatchStore::new(delayed.clone(), keys.clone()));
+    let recording = Arc::new(RecordingStore::new(revisions.clone(), keys));
+    let reader = FsReader::builder_with_store(recording.clone())
+        .build()
+        .await
+        .expect("reader");
+    let timer = StdMonotonicTimer::default();
+    let started_at_ms = timer.monotonic_now_ms();
+    let page = reader
+        .list_path_entries_page(
+            &namespace_id,
+            "/directory-00",
+            PageRequest {
+                limit: page_limit(1000),
+                cursor: None,
+            },
+            Default::default(),
+        )
+        .await
+        .expect("page");
+    let elapsed_ms = timer.monotonic_now_ms() - started_at_ms;
+    assert_eq!(page.entries.len(), 1000);
+    assert!(page.next_cursor.is_some());
+    let touched = recording
+        .take_get_keys()
+        .into_iter()
+        .collect::<BTreeSet<_>>()
+        .len();
+    let concurrency = revisions.reads();
+    let starts_ms = delayed.read_starts_ms();
+    assert!(
+        concurrency.peak_in_flight >= 8,
+        "{concurrency:?}; starts_ms={starts_ms:?}"
+    );
+    assert!(
+        concurrency.peak_in_flight <= STORE_READ_WAVE,
+        "{concurrency:?}"
+    );
+    let serial_ms = touched as u128 * latency.as_millis();
+    assert!(
+        u128::from(elapsed_ms) < serial_ms * 3 / 4,
+        "{elapsed_ms} ms for {touched} segments; starts_ms={starts_ms:?}"
+    );
+}

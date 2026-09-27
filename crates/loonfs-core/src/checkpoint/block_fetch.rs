@@ -195,17 +195,8 @@ pub(super) fn segment_object_len(descriptor: &MetadataSegmentRef) -> u64 {
     descriptor.index_block.offset + u64::from(descriptor.index_block.stored_bytes)
 }
 
-/// Fetches the byte span that answers one filter or index load with a single
-/// GET, decoding and publishing every section the span covers: the whole
-/// object when it is small (index, filter, and all data blocks), otherwise
-/// everything from the requested section to the end of the object — for a
-/// filter that is the filter plus the index that directly follows it
-/// (manifest loading rejects any other layout), and for an index exactly the
-/// index, which ends the object. Returns the requested block.
-///
-/// Every section the span covers is also offered to the local stored-block
-/// cache in its stored form, so what one GET produced is what a later read
-/// finds there.
+// Small objects cost one round trip. Retain their data bytes so an index
+// lookup does not decode unrelated rows before another read can start.
 async fn load_and_publish_segment_sections<S: ObjectStore + ?Sized>(
     store: &S,
     segment_cache: Option<&MetadataSegmentCache>,
@@ -313,6 +304,17 @@ async fn load_and_publish_segment_sections<S: ObjectStore + ?Sized>(
                     &entry.block,
                     stored,
                 );
+                if let Some(memo) = memo {
+                    memo.record_stored(
+                        &segment_block_cache_key(
+                            descriptor,
+                            MetadataSegmentBlockKind::Data,
+                            entry.block.offset,
+                        ),
+                        stored,
+                    );
+                    continue;
+                }
                 let decoded = decode_data_block(stored, &entry.block)
                     .map_err(|err| segment_codec_error(&object_key, err))?;
                 let block = decoded_data_cache_block(decoded);

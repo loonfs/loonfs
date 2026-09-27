@@ -271,3 +271,86 @@ async fn bounded_pages_reject_corruption_when_the_damaged_block_is_requested() {
         "requested corrupt data must fail validation"
     );
 }
+
+#[tokio::test]
+async fn lookup_readahead_retains_bytes_and_checks_rows_only_when_requested() {
+    for count in [16, 1024] {
+        let temp = tempdir().expect("tempdir");
+        let store =
+            RecordingStore::metadata_segments(LocalFsStore::new(temp.path()).expect("store"));
+        let expected = rows(0, count, 1);
+        let mut builder = SegmentBlocksBuilder::new(NonZeroUsize::MIN);
+        for row in &expected {
+            builder
+                .push(
+                    &row.row_key_for_family(FAMILY),
+                    &row.filter_key_for_family(FAMILY),
+                    row,
+                )
+                .expect("encode row");
+        }
+        let built = builder.finish().expect("segment");
+        let descriptor = write_manifest_segment(
+            &store,
+            &NamespaceId::parse("lookup-readahead").expect("namespace"),
+            FAMILY,
+            built,
+        )
+        .await
+        .expect("write segment");
+        assert_eq!(
+            block_fetch::segment_object_len(&descriptor) <= 256 * 1024,
+            count == 16
+        );
+        let index = block_fetch::load_segment_index(
+            &store,
+            None,
+            &load::SessionBlockMemo::default(),
+            &descriptor,
+        )
+        .await
+        .expect("index");
+        let key = metadata_segment_object_key(&descriptor);
+        let mut bytes = store
+            .get(&key, None)
+            .await
+            .expect("read segment")
+            .expect("segment")
+            .to_vec();
+        bytes[index[2].block.offset as usize] ^= 1;
+        store
+            .put_overwrite(&key, Bytes::from(bytes))
+            .await
+            .expect("corrupt unrequested block");
+        let memo = load::SessionBlockMemo::default();
+        store.reset();
+        for position in [0, 1, 2] {
+            let lower = expected[position].row_key_for_family(FAMILY);
+            let loaded = load_manifest_segment_rows_in_key_range_with_cache(
+                &store,
+                None,
+                &memo,
+                &descriptor,
+                ChangeSeq(1),
+                &lower,
+                loonfs_api::wire::sst_blocks::string_prefix_upper_bound(&lower).as_deref(),
+                1,
+                scan::Readahead::Stored,
+            )
+            .await;
+            if position == 2 {
+                assert!(matches!(
+                    loaded,
+                    Err(ManifestLoadError::SegmentCodec { .. })
+                ));
+            } else {
+                let loaded = loaded.expect("intact requested block");
+                assert_eq!(loaded.rows().collect::<Vec<_>>(), vec![&expected[position]]);
+            }
+            assert_eq!(
+                store.count(OperationClass::Read),
+                if count == 16 { 1 } else { 2 }
+            );
+        }
+    }
+}

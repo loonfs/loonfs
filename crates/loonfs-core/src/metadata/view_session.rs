@@ -677,17 +677,23 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
         pending.sort_unstable();
         pending.dedup();
         let base = &self.base;
-        let loaded: Vec<_> =
-            futures::stream::iter(pending.into_iter().map(|inode_id| async move {
-                Ok::<_, CoreError>((
-                    inode_id,
-                    fetch_latest_revision_head_of_visible(base, inode_id).await?,
-                ))
+        // Adjacent inode ids often share a read. Separate ranges let each
+        // worker start in a different part of the page's revision segments.
+        let group_size = pending.len().div_ceil(STORE_READ_WAVE).max(1);
+        let loaded =
+            futures::future::try_join_all(pending.chunks(group_size).map(|inode_ids| async move {
+                let mut revisions = Vec::with_capacity(inode_ids.len());
+                for &inode_id in inode_ids {
+                    revisions.push((
+                        inode_id,
+                        fetch_latest_revision_head_of_visible(base, inode_id).await?,
+                    ));
+                }
+                Ok::<_, CoreError>(revisions)
             }))
-            .buffered(STORE_READ_WAVE)
-            .try_collect()
             .await?;
-        self.latest_revision_head_cache.extend(loaded);
+        self.latest_revision_head_cache
+            .extend(loaded.into_iter().flatten());
         Ok(())
     }
 

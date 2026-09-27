@@ -1,12 +1,14 @@
-//! SST block-range selection and per-view decoded-block memoization.
+//! SST block-range selection and per-view block memoization.
 
 use super::block_fetch::load_segment_index;
 use super::cache::{DecodedMetadataSegmentBlock, MetadataSegmentCache, MetadataSegmentCacheKey};
-use super::data_block_load::load_segment_data_block_span;
+use super::data_block_load::{
+    load_segment_data_block_span, load_segment_data_block_with_readahead,
+};
 use super::error::ManifestLoadError;
 use super::scan::Readahead;
 use super::validate::validate_manifest_row_seq_range;
-use crate::block_cache::DecodedBlock as _;
+use bytes::Bytes;
 use loonfs_api::wire::manifest::{MetadataRow, MetadataSegmentRef};
 use loonfs_api::wire::sst_blocks::{index_blocks_for_key_range, DecodedDataBlock};
 use loonfs_api::ChangeSeq;
@@ -15,11 +17,7 @@ use loonfs_objectstore::ObjectStore;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
-/// Bounds decoded data retained by one view. 64 MiB comfortably holds one
-/// page's working set plus read-ahead, while a runaway scan cannot pin
-/// gigabytes through its memo. Its `_DECODED_BYTES` suffix follows the
-/// decoded-byte budget family in [`super::cache`].
-const SESSION_BLOCK_MEMO_DATA_DECODED_BYTES: usize = 64 * 1024 * 1024;
+const SESSION_BLOCK_MEMO_DATA_BYTES: usize = 64 * 1024 * 1024;
 
 /// The data blocks of one segment that can hold keys in
 /// `[lower_bound, upper_bound)`, shared straight from the decoded-block
@@ -75,9 +73,27 @@ pub(super) struct SessionBlockMemo {
 
 #[derive(Debug, Default)]
 struct SessionBlockMemoInner {
-    blocks: HashMap<Arc<MetadataSegmentCacheKey>, DecodedMetadataSegmentBlock>,
+    blocks: HashMap<Arc<MetadataSegmentCacheKey>, MemoBlock>,
     data_insertion_order: VecDeque<Arc<MetadataSegmentCacheKey>>,
-    data_decoded_bytes: usize,
+    data_bytes: usize,
+}
+
+#[derive(Debug, Clone)]
+enum MemoBlock {
+    Decoded(DecodedMetadataSegmentBlock),
+    Stored(Bytes),
+}
+
+impl MemoBlock {
+    fn data_bytes(&self) -> usize {
+        match self {
+            Self::Decoded(DecodedMetadataSegmentBlock::Data { decoded_bytes, .. }) => {
+                *decoded_bytes
+            }
+            Self::Decoded(_) => 0,
+            Self::Stored(bytes) => bytes.len(),
+        }
+    }
 }
 
 impl SessionBlockMemo {
@@ -90,7 +106,26 @@ impl SessionBlockMemo {
             .expect("session block memo lock should not be poisoned")
             .blocks
             .get(cache_key)
-            .cloned()
+            .and_then(|block| match block {
+                MemoBlock::Decoded(block) => Some(block.clone()),
+                MemoBlock::Stored(_) => None,
+            })
+    }
+
+    pub(super) fn stored(&self, cache_key: &MetadataSegmentCacheKey) -> Option<Bytes> {
+        self.inner
+            .lock()
+            .expect("session block memo lock should not be poisoned")
+            .blocks
+            .get(cache_key)
+            .and_then(|block| match block {
+                MemoBlock::Stored(bytes) => Some(bytes.clone()),
+                MemoBlock::Decoded(_) => None,
+            })
+    }
+
+    pub(super) fn record_stored(&self, cache_key: &MetadataSegmentCacheKey, bytes: &[u8]) {
+        self.record_block(cache_key, MemoBlock::Stored(Bytes::copy_from_slice(bytes)));
     }
 
     pub(super) fn record(
@@ -98,29 +133,32 @@ impl SessionBlockMemo {
         cache_key: &MetadataSegmentCacheKey,
         block: &DecodedMetadataSegmentBlock,
     ) {
+        self.record_block(cache_key, MemoBlock::Decoded(block.clone()));
+    }
+
+    fn record_block(&self, cache_key: &MetadataSegmentCacheKey, block: MemoBlock) {
+        let data_bytes = block.data_bytes();
         let cache_key = Arc::new(cache_key.clone());
-        let DecodedMetadataSegmentBlock::Data { decoded_bytes, .. } = block else {
+        if data_bytes == 0 {
             self.inner
                 .lock()
                 .expect("session block memo lock should not be poisoned")
                 .blocks
-                .insert(cache_key, block.clone());
+                .insert(cache_key, block);
             return;
-        };
+        }
         let mut inner = self
             .inner
             .lock()
             .expect("session block memo lock should not be poisoned");
-        let previous = inner.blocks.insert(Arc::clone(&cache_key), block.clone());
+        let previous = inner.blocks.insert(Arc::clone(&cache_key), block);
         if let Some(previous) = previous {
-            inner.data_decoded_bytes = inner
-                .data_decoded_bytes
-                .saturating_sub(previous.weight().bytes);
+            inner.data_bytes = inner.data_bytes.saturating_sub(previous.data_bytes());
         } else {
             inner.data_insertion_order.push_back(cache_key);
         }
-        inner.data_decoded_bytes = inner.data_decoded_bytes.saturating_add(*decoded_bytes);
-        while inner.data_decoded_bytes > SESSION_BLOCK_MEMO_DATA_DECODED_BYTES {
+        inner.data_bytes = inner.data_bytes.saturating_add(data_bytes);
+        while inner.data_bytes > SESSION_BLOCK_MEMO_DATA_BYTES {
             let oldest = inner
                 .data_insertion_order
                 .pop_front()
@@ -129,19 +167,12 @@ impl SessionBlockMemo {
                 .blocks
                 .remove(&oldest)
                 .expect("session block memo queue and map should stay one-to-one");
-            inner.data_decoded_bytes = inner
-                .data_decoded_bytes
-                .saturating_sub(evicted.weight().bytes);
+            inner.data_bytes = inner.data_bytes.saturating_sub(evicted.data_bytes());
         }
     }
 }
 
-/// Blocks a range scan reads ahead within a segment. Paged scans ask for a
-/// couple of blocks at a time while marching through whole segments; without
-/// readahead every page pays its own small GETs, and request counts scale
-/// with pages instead of bytes. Read-ahead blocks land in the per-view memo
-/// and shared cache, so the following pages are memory hits. 32 blocks of
-/// the 8 KiB target is a ~256 KiB ranged GET.
+// Adjacent lookups share fetched bytes within one aligned window.
 const RANGE_SCAN_READAHEAD_BLOCKS: usize = 32;
 /// Loads the rows of one segment whose keys can fall in
 /// `[lower_bound, upper_bound)`: index first, then only the data blocks the
@@ -173,7 +204,9 @@ pub(super) async fn load_manifest_segment_rows_in_key_range_with_cache<S: Object
         // segment before the global merge truncates it. Count actual decoded
         // matches one aligned window at a time; byte size is not a row count.
         // Unbounded scans retain their existing coalesced range fetch.
-        let required_end = if row_limit == usize::MAX {
+        let required_end = if readahead == Readahead::Stored {
+            start + 1
+        } else if row_limit == usize::MAX {
             needed.end
         } else {
             (start + 1)
@@ -182,7 +215,7 @@ pub(super) async fn load_manifest_segment_rows_in_key_range_with_cache<S: Object
                 .min(needed.end)
         };
         // Preserve the aligned read-ahead policy for subsequent pages.
-        let extended_end = if readahead == Readahead::Enabled {
+        let extended_end = if readahead != Readahead::Disabled {
             required_end
                 .div_ceil(RANGE_SCAN_READAHEAD_BLOCKS)
                 .saturating_mul(RANGE_SCAN_READAHEAD_BLOCKS)
@@ -190,8 +223,19 @@ pub(super) async fn load_manifest_segment_rows_in_key_range_with_cache<S: Object
         } else {
             required_end
         };
-        let batch = SegmentKeyRangeBlocks {
-            blocks: load_segment_data_block_span(
+        let blocks = if readahead == Readahead::Stored {
+            vec![
+                load_segment_data_block_with_readahead(
+                    store,
+                    segment_cache,
+                    Some(memo),
+                    descriptor,
+                    &index[start..extended_end],
+                )
+                .await?,
+            ]
+        } else {
+            load_segment_data_block_span(
                 store,
                 segment_cache,
                 Some(memo),
@@ -201,8 +245,9 @@ pub(super) async fn load_manifest_segment_rows_in_key_range_with_cache<S: Object
             .await?
             .into_iter()
             .take(required_end - start)
-            .collect(),
+            .collect()
         };
+        let batch = SegmentKeyRangeBlocks { blocks };
         if row_limit != usize::MAX {
             remaining_rows = remaining_rows
                 .saturating_sub(batch.rows_in_key_range(lower_bound, upper_bound).count());
@@ -291,11 +336,11 @@ mod tests {
         let newest_data_key = key(MetadataSegmentBlockKind::Data, 6);
         memo.record(
             &oldest_data_key,
-            &data_block(SESSION_BLOCK_MEMO_DATA_DECODED_BYTES / 2),
+            &data_block(SESSION_BLOCK_MEMO_DATA_BYTES / 2),
         );
         memo.record(
             &newer_data_key,
-            &data_block(SESSION_BLOCK_MEMO_DATA_DECODED_BYTES / 2),
+            &data_block(SESSION_BLOCK_MEMO_DATA_BYTES / 2),
         );
         memo.record(&newest_data_key, &data_block(1));
 
