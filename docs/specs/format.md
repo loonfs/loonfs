@@ -205,7 +205,7 @@ The key layout is part of the format. Other objects must not collide with these 
 | Object | Role | How it changes |
 | --- | --- | --- |
 | Namespace manifest | Namespace identity, lifecycle, writer authority, materialized file set, and retention floor | Publish the next immutable number. |
-| WAL segment | Ordered commits or a writer fence after the materialized boundary | Create the next immutable number. |
+| WAL object | Ordered commits or a writer fence after the materialized boundary | Create the next immutable number. |
 | Hint | Starting point for manifest discovery | Compare-and-swap; the number never decreases. |
 | Metadata segment | Sorted metadata rows referenced by a manifest | Write a new immutable object. |
 | Pin record | Retain one manifest for a user, snapshot, or fork | Create and delete; snapshot expiry can be extended by CAS. |
@@ -258,6 +258,34 @@ A pin refers to a manifest under its own namespace and stores these manifest fie
 
 Readers validate the referenced identity, sequence, and checksum. A missing or corrupt required object is an error, never permission to substitute another manifest.
 
+### 2.6 The log protocol in one page
+
+This section summarizes how commits, writer takeover, flushes, discovery, and collection fit together. Sections 4, 6, 7, and 11 give the complete rules.
+
+Each namespace has two chains of numbered objects: manifests and WAL objects. Each chain starts at 1, and a publisher creates each object with put-if-absent at the previous number plus one. A manifest records the namespace's lifecycle, its writer and compactor epochs, `head_seq`, `folded_wal_no`, and the metadata segments that hold its rows through `head_seq`. A WAL object holds the commits that follow the previous WAL object, stamped with the writer epoch of the session that wrote it; a fence holds no commits. The hint is mutable. It names a manifest number, manifest publications raise it by compare-and-swap, and it never decreases. Content objects hold file bytes and are written once. Pins are retained manifests (section 8).
+
+A commit creates WAL `tip + 1` with put-if-absent. An acquired writer session plans the batch against the tip it discovered. The put is the commit boundary. A put that collides creates nothing; the writer discovers the new tip and plans again (section 6.3).
+
+A writer takeover publishes the next manifest with `writer_epoch + 1`, then creates a zero-record fence at the next WAL number with that epoch. Between the manifest and the fence, the previous writer can still commit at `tip + 1`. Those commits are valid: their epoch is below the manifest's, and the fence lands above them. Once the fence lands, a stale session cannot commit. Its next put collides, and the discovery that follows finds the higher epoch and fences the session for good. Any earlier discovery that finds the higher epoch fences it the same way (section 6.1).
+
+A flush needs no writer epoch, and any process may run one. It folds the WAL above the current manifest's `folded_wal_no` into new metadata segments and publishes the next manifest with `folded_wal_no` set to the tip it read. That manifest carries the predecessor's writer and compactor epochs. Before it publishes, the flush writes the inline content it covers as content objects (section 7.2).
+
+Discovery loads the hint and the manifest it names, then probes successive manifest numbers until one is absent, rereading the hint in case it rose meanwhile. It reads WAL objects from `folded_wal_no + 1` upward, in concurrent windows, until the first absent number. It then checks that the manifest still has no successor. If a successor appeared, or the check came `READ_REVALIDATION_BOUND_MS` or more after the manifest probe, discovery reloads the manifest and starts again. A missing or invalid WAL object also reloads the manifest; if the manifest number is unchanged, the store is corrupt (sections 4.1 and 4.2).
+
+Collection deletes WAL objects at or below the current manifest's `folded_wal_no` and unpinned manifests below the hint it observed. It deletes each one only after its provider age reaches the reclamation grace (sections 11.2 and 11.3).
+
+A publisher initiates each numbered put within a budget of the observation it planned against, and treats a put that returns after the budget as having an unknown outcome. The grace is at least the longest budget plus the provider request bound plus the clock allowance, so, under the provider requirement in section 3.1, an object can be collected only after the provider has applied or rejected every put planned against an observation older than the object (section 11.4, Appendix C.1). Readers have the matching bound: a reader trusts an absent manifest successor only within `READ_REVALIDATION_BOUND_MS` of the probe it confirms (section 4.2).
+
+What the protocol guarantees:
+
+1. Creating WAL `n + 1` commits its records, and the visible log is the unique chain of consecutive numbers above the current manifest's `folded_wal_no` (put-if-absent numbering, section 6.3).
+2. Every acknowledged commit is in that chain or folded into the current manifest (the publication budget and the grace, section 11.4).
+3. Writer epochs never decrease along the chain and never exceed the current manifest's epoch; once a newer writer's fence has landed, no older writer commits (the claim and the fence, sections 6.1 and 4.2).
+4. A fresh discovery observes every commit acknowledged before it began (the successor check within the revalidation bound, section 4.2).
+5. A cached view never regresses, and a read served from it reflects a successor check no older than the revalidation bound (the successor probe and the revalidation bound, section 4.2).
+6. Inline bytes stay readable: in the WAL until a flush has written their content objects, then in those objects (content written before the manifest, sections 7.2 and 1.5).
+7. A retry with the same commit ID and request does not commit twice while its receipt is retained (the commit receipt, section 6.5).
+
 ## 3. Object-storage requirements
 
 ### 3.1 Required operations
@@ -269,6 +297,8 @@ A compare-and-swap (CAS) replaces an object only if its compare token still matc
 A mutable-object read must return the bytes and the compare token for those same bytes in one observation. Reading metadata and content separately is insufficient: a concurrent update could otherwise pair one version's payload with another version's token. Compare tokens, including ETags, are opaque. They are not assumed to be content digests.
 
 Successful writes and deletes require strong consistency. Prefix enumeration returns keys in ascending lexicographic order. The collection protocols depend on this behavior; “S3 compatible” is not, by itself, evidence of conformance.
+
+A provider must also apply each request, if it applies it at all, within `PROVIDER_PUBLICATION_REQUEST_BOUND_MS` of the moment the client began the operation that sent it. This is the provider time that the reclamation grace reserves. The implementation cannot check this assumption. Section 11.4 explains what depends on it, and Appendix C.1 gives the numbers.
 
 Readers determine committed state from verified manifests and numbered WAL objects. Collectors also use listings to find candidates and dependencies. In particular, namespace retirement requires a complete pin scan after deletion. The format does not assume a multi-object transaction or a snapshot across separately read control objects.
 
@@ -300,11 +330,13 @@ Section 11.4 explains the clock assumptions and their limits.
 
 A cold read loads `hint.json`, loads the manifest at its `manifest_no`, and probes successive manifest numbers until the first not-found response. That selects the current manifest. A lagging hint is expected; it is a starting point, not a statement that later objects do not exist.
 
+When the probe ends after an active manifest, the reader reads the hint again. If the hint now names a higher number than the last manifest found, discovery starts again from that number, because collection may have deleted manifests below the new hint while the probe ran. Each probed manifest must be a legal successor of the one before it: identity fields equal; `folded_wal_no`, both epochs, `head_seq`, the retention floor, the allocators, and the activity counters non-decreasing; and no manifest after a tombstone, which ends the probe. A chain that fails this check is corrupt.
+
 | Discovery result | Interpretation |
 | --- | --- |
 | Missing hint | Namespace not installed. |
 | Hint names manifest 1, which is absent | Installation has not completed. |
-| A higher hinted manifest is absent | Corruption; hints cannot run ahead of publication. |
+| A higher hinted manifest is absent | Read the hint again. If it now names a higher number, start again from it; if it is unchanged, the store is corrupt. Collection deletes manifests below the hint it observed, so a manifest named by an older hint value can be gone after a raise. |
 | A required object is unreadable or invalid | Error; do not treat it as absence. |
 | Current manifest is deleted | `namespace_deleted` for ordinary namespace operations. |
 
@@ -330,9 +362,9 @@ This example assumes 12 is the discovered WAL tip. Manifest and WAL discovery mu
 
 After selecting a manifest, read the WAL from `folded_wal_no + 1` upward until the first absent number. The objects read are the ones replay needs, so a reader keeps them; discovery and replay are one pass. Numbers may be read in concurrent windows. Those reads do not observe one moment, so a number absent in one read may have been published before a later number was read: the reader reads it again before treating it as missing. The first number still absent ends the tail; a still-absent number below a present one is a missing object. Replay requires every WAL number between the folded boundary and the discovered tip.
 
-Each data segment must contain contiguous commits following the preceding head. Its `prior_head_seq` is derived by subtracting one from the first record sequence; a first sequence of zero is invalid. A fence derives its preceding head from `head_seq`. Namespace identity, WAL number, sequence range, allocation state, and writer epoch must validate. Empty fence segments contain no metadata changes. Epochs cannot decrease along the log or exceed the current manifest's epoch. If a WAL object exposes a newer epoch, reload the manifest before deciding that the object is invalid.
+Each WAL object other than a fence must contain contiguous commits following the preceding head. Its `prior_head_seq` is derived by subtracting one from the first record sequence; a first sequence of zero is invalid. A fence derives its preceding head from `head_seq`. Namespace identity, WAL number, sequence range, allocation state, and writer epoch must validate. Empty fence objects contain no metadata changes. Epochs cannot decrease along the log or exceed the current manifest's epoch. When discovery finds a missing or invalid WAL object, reload the current manifest. If its number changed, start discovery again from it; if it did not, the store is corrupt. A WAL object whose epoch exceeds the loaded manifest's is one case of this rule: another writer may have claimed that epoch after the manifest was loaded.
 
-A deleted manifest ends discovery without a WAL or manifest successor probe. For an active manifest, check for a successor after WAL discovery and reload if one appeared. This prevents a concurrent fold or retention advance from making a reclaimed WAL number look unused. Required missing or malformed objects fail the read. The successor check is trusted only while the manifest probe it confirms is younger than `READ_REVALIDATION_BOUND_MS`; a reader that has taken longer reloads the manifest instead, because a successor published after its probe may already have been collected.
+A deleted manifest ends discovery without a WAL or manifest successor probe. For an active manifest, check for a successor after WAL discovery and reload if one appeared. This prevents a concurrent flush or retention advance from making a reclaimed WAL number look unused. Required missing or malformed objects fail the read. The successor check is trusted only while the manifest probe it confirms is younger than `READ_REVALIDATION_BOUND_MS`; a reader that has taken longer reloads the manifest instead, because a successor published after its probe may already have been collected.
 
 A read is evaluated at one sequence. Replaying the WAL produces a projection of its metadata changes and any file bytes stored inline. This is the *projected WAL tail*. An implementation may query verified metadata segments and this projection directly, without loading every metadata row into memory, provided it applies the same visibility rules.
 
@@ -342,7 +374,7 @@ For a warm read, the reference runtime probes the next WAL number with GET. An a
 
 At sequence `N`, ignore events after `N`. An inode must have been created by `N` and must not be covered by an active tombstone on itself or an ancestor.
 
-A directory slot's value is its newest version at or below `N`, ordered by `(committed_seq, delta_index)`. A bound version names the child. An unbound version, or no version, means the slot is empty. Parent lookup applies the same rule to the child index. Path resolution needs one slot-index lookup per component. A listing scans one parent's prefix in name order and takes the newest visible version of each name. It includes a bound entry only if the child inode was created by `N` and no active subtree tombstone covers it. Snapshots and checkpoints apply these rules through their pinned manifests at their captured sequences.
+A directory slot's value is its newest version at or below `N`, ordered by `(committed_seq, delta_index)`. A bound version names the child. An unbound version, or no version, means the slot is empty. Parent lookup applies the same rule to the child index. Path resolution needs one slot-index lookup per component. A listing scans one parent's prefix in name order and takes the newest visible version of each name. It includes a bound entry only if the child inode was created by `N` and no active subtree tombstone covers it. Snapshots and user pins apply these rules through their pinned manifests at their captured sequences.
 
 A file's current content is its latest revision committed by `N`. Attributes are the latest applicable complete attribute revision, or the initial empty map when no applicable attribute row exists. Recoverable-deletion listing uses the derived active-deletion state; historical tombstone evaluation remains based on tombstone events.
 
@@ -459,11 +491,15 @@ A metadata commit becomes visible when put-if-absent creates its numbered WAL ob
 
 ### 6.1 Writer ownership
 
-A writer session acquires authority lazily, before its first semantic publication. It publishes the next manifest with `writer_epoch + 1` and a diagnostic writer block, then creates a zero-record fence at the next WAL number. The session uses that epoch for later batches.
+A writer session acquires authority lazily, before its first semantic publication. Acquisition moves through these states in order:
 
-Another session can acquire a higher epoch. Its numbered fence prevents an older writer from extending the log using a previously observed tip: the stale writer's put collides, discovery observes the higher epoch, and the session returns `writer_fenced`. A fenced session does not automatically reacquire authority.
+1. Claim. The session loads the current manifest and publishes its successor with `writer_epoch + 1` and a diagnostic writer block. The claim runs under `METADATA_PUBLICATION_BUDGET_MS`, measured from the start of the acquisition, before the session loads the manifest it copies. A budget that has expired before the put starts, or by the time the put is confirmed, fails the acquisition. A claim that loses its number reloads the current manifest and claims again with the next epoch. A claim whose put has an unknown outcome reads back the manifest at its number. If it finds its own bytes, it treats that manifest as covering the claim and claims again; the epoch it left behind carries no fence. If it finds another manifest, the claim lost and it claims again. If it finds none, the acquisition fails.
+2. Fence. The session discovers the tip. If the current manifest now has a higher epoch than the claim, another session has claimed since, and the acquisition returns `writer_fenced`. Otherwise the session creates a zero-record fence with its epoch at the next WAL number. A fence put is planned against a discovered tip under `WAL_PUBLISH_BUDGET_MS` like any numbered put. A collision, or a budget that expired before the put, discovers the tip again and retries at the new number. A transport failure, or a put that returns after the budget, fails the acquisition, whose next attempt claims a new epoch. Between the claim landing and the fence landing, the previous writer can still commit at `tip + 1`. Those commits are valid because their epoch is below the manifest's, and the new writer's discovery includes them: a fence planned before such a commit collides and retries above it.
+3. Acquired. After the fence lands, the session is acquired and uses that epoch for every later batch. A later discovery that finds a higher epoch, whether after a collision or after a refresh, fences the session for good. A fenced session returns `writer_fenced` and does not automatically reacquire authority.
 
-A fence preserves `head_seq` and `next_inode_id` and contains no commit records. Its derived `prior_head_seq` equals `head_seq`. It advances WAL position without advancing logical history. Concurrent attempts are serialized by conditional creation of the next number. A fence put is planned against a discovered tip under `WAL_PUBLISH_BUDGET_MS` like any numbered put; a collision or an expired budget discovers the tip again and retries at the new number, and a transport failure fails the acquisition, whose next attempt claims a new epoch.
+Another session can acquire a higher epoch. Its numbered fence prevents an older writer from extending the log using a previously observed tip: the stale writer's put collides, discovery observes the higher epoch, and the session returns `writer_fenced`.
+
+A fence preserves `head_seq` and `next_inode_id` and contains no commit records. Its derived `prior_head_seq` equals `head_seq`. It advances WAL position without advancing logical history. Concurrent attempts are serialized by conditional creation of the next number.
 
 There is no writer lease or writer-expiry timestamp. The `writer_id` and `acquired_at_ms` fields describe the acquisition; the epoch determines authority. An acquisition retried after an uncertain outcome can advance the epoch again. Commit retry identity is separate and uses durable receipts.
 
@@ -521,7 +557,7 @@ Commits do not raise the hint. Manifest publications raise it (section 7.2), and
 
 ### 6.4 Failed and unknown outcomes
 
-A transport error after the numbered WAL put was sent is not necessarily a failed commit. The put may have succeeded even though its response was lost. An implementation that cannot establish the outcome must report it as unknown, not as a definite failure.
+A transport error after the put of the WAL object was sent is not necessarily a failed commit. The put may have succeeded even though its response was lost. An implementation that cannot establish the outcome must report it as unknown, not as a definite failure. An implementation may resolve an unknown outcome itself by retrying with the same commit ID and request: the retry discovers the tip again and looks up the commit receipt, so it returns the original result if the earlier put landed. It reports `commit_outcome_unknown` only when that also fails to establish the outcome. The reference publisher retries a bounded number of times before it reports.
 
 The caller should retry with the same commit ID and the same logical request. Re-uploading the bytes first creates a new content identity and is not the same request.
 
@@ -539,7 +575,7 @@ While the receipt is retained, an equal fingerprint under the same `commit_id` i
 
 Inline content is identified by its bytes. While the commit receipt is retained, retrying the same request with the same inline bytes returns the original commit, even if a new content ID was assigned. Changed bytes or a different subject return `commit_id_reuse_conflict`.
 
-Receipt lookup uses the publisher's current projection. The publisher refreshes that projection when its WAL publication budget expires. A fold it published itself moves the projection's basis to the new manifest and keeps the commits published since, without a refresh. Check for the commit receipt before uploading inline bytes as content objects. If the receipt is still available, return the original result for an identical request or a reuse conflict for a changed request. Neither requires another upload, even after a restart or on another server.
+Receipt lookup uses the publisher's current projection. The publisher refreshes that projection when its WAL publication budget expires. A flush it published itself moves the projection's basis to the new manifest and keeps the commits published since, without a refresh. Check for the commit receipt before uploading inline bytes as content objects. If the receipt is still available, return the original result for an identical request or a reuse conflict for a changed request. Neither requires another upload, even after a restart or on another server.
 
 The guarantee is bounded by retention. Receipts below the retention floor can be removed during compaction. Once a receipt is gone, the old ID cannot be distinguished from an unused ID and a later request can execute as a new mutation. A receipt that has not yet been compacted may still be available, but callers must not depend on that extra lifetime.
 
@@ -561,9 +597,9 @@ Each delta has a `delta_index`, and its wrapper has a `semantic_operation_index`
 
 ### 6.7 Change feed
 
-The change feed is ordered by logical commit, not by physical WAL object. A segment containing three commits contains three commit boundaries in the feed. Within a commit, semantic filesystem events follow request-operation order; one operation can produce several events.
+The change feed is ordered by logical commit, not by physical WAL object. A WAL object containing three commits contains three commit boundaries in the feed. Within a commit, semantic filesystem events follow request-operation order; one operation can produce several events.
 
-A consumer resuming after sequence N reads the `commits` family of the current file set and then the commits in the unfolded WAL after it. Fence objects produce no change events. If its cursor is older than the retention floor, it must bootstrap from a fresh checkpoint instead. The API’s event shapes and cursor contract are specified in [the API specification][api-spec].
+A consumer resuming after sequence N reads the `commits` family of the current file set and then the commits in the unfolded WAL after it. Fence objects produce no change events. If its cursor is older than the retention floor, it must bootstrap from a fresh pin instead. The API’s event shapes and cursor contract are specified in [the API specification][api-spec].
 
 A consumer that requires permanent event history must retain its own copy before the floor advances. Use `(namespace_id, committed_seq)` for a commit's position and `(namespace_id, inode_id)` for item identity. A commit ID is useful for correlation, but is not a permanent unique event key because it can be reused after receipt reclamation.
 
@@ -593,7 +629,9 @@ The first manifest has number 1, the requested namespace identity, creation time
 
 A flush starts from the verified manifest and discovered WAL tip. It materializes the required numbers after `folded_wal_no`, writes new segments, and publishes the next manifest with `folded_wal_no` set to the captured tip. A fence is folded even when the logical sequence does not change. Ordinary flushes write a run at the head when materializing new state.
 
-Before writing segments or publishing the manifest, a flush writes every inline value it covers as a content object, verified against its reference. A manifest whose `folded_wal_no` is `n` implies a content object exists for every inline value in WAL segments up to `n`. WAL collection's rule is unchanged because it already requires each segment to be at or below `folded_wal_no`.
+A flush needs no writer epoch and may run in any process. It carries the predecessor's writer and compactor epochs forward. When its put loses, it reloads the current manifest and decides coverage. The flush is covered if the current manifest's `folded_wal_no` is at least the flush's captured tip, and the current manifest's head sequence and manifest number are at least the flush's. A covered flush is finished. Otherwise it rebuilds against the new predecessor and carries that predecessor's epochs. One `METADATA_PUBLICATION_BUDGET_MS` deadline covers the whole call, including rebuilds.
+
+Before writing segments or publishing the manifest, a flush writes every inline value it covers as a content object, verified against its reference. A manifest whose `folded_wal_no` is `n` implies a content object exists for every inline value in WAL objects up to `n`. WAL collection's rule is unchanged because it already requires each WAL object to be at or below `folded_wal_no`.
 
 Publication uses put-if-absent at `predecessor.manifest_no + 1`. A lost put loads the winning manifest. A flush already covered by the winner needs no further publication; coverage includes WAL position as well as sequence. Otherwise it rebuilds against the new predecessor. Reorganization and compaction additionally require their selected inputs to remain valid.
 
@@ -609,7 +647,7 @@ Forks follow the same path from manifest 1. Publishing a target-owned manifest d
 
 After the corresponding WAL is reclaimed, metadata segments are required recovery material. They are not disposable caches. A missing or corrupt required manifest or segment is an error; readers do not select a different file set and silently return another state.
 
-Implementations can flush automatically as the WAL grows. The reference defaults request a flush at 32 unflushed segments and reject new commits with `maintenance_required` at 128. The commit that triggers a flush can finish before the flush completes. Reads and retained-receipt lookup remain available at the threshold.
+Implementations can flush automatically as the WAL grows. The reference defaults request a flush at 32 unflushed WAL objects and reject new commits with `maintenance_required` at 128. The commit that triggers a flush can finish before the flush completes. Reads and retained-receipt lookup remain available at the threshold.
 
 Flushing does not advance retention. An operator separately decides when older replay history may be discarded. Appendix C lists the reference implementation's sizing defaults.
 
@@ -625,9 +663,9 @@ Each manifest stores three cumulative activity counters in a required `activity`
 
 For example, writing a 10-byte file and then replacing it with a 6-byte revision adds 16 bytes, two revisions, and two mutations. Creating a directory adds one mutation. Recursively deleting that directory adds one mutation, regardless of how many descendants it hides. Convenience requests can contain several internal operations, so mutation totals can exceed request counts.
 
-A fold adds only the activity after its predecessor's covered position. It publishes the counters, runs, head sequence, and folded WAL number together. A competing publication requires the fold to reload the predecessor and count only the remaining tail. A recognized commit retry adds nothing again. If an expired receipt allows a new durable commit, that commit counts as new activity.
+A flush adds only the activity after its predecessor's covered position. It publishes the counters, runs, head sequence, and folded WAL number together. A competing publication requires the flush to reload the predecessor and count only the remaining tail. A recognized commit retry adds nothing again. If an expired receipt allows a new durable commit, that commit counts as new activity.
 
-Uploads alone, fence records, pins, inline-content extraction, and compaction add no activity. Retention and deletion do not subtract past activity. Every publisher carries forward the counters from the predecessor it actually updates, including when compaction races a newer fold.
+Uploads alone, fence records, pins, inline-content extraction, and compaction add no activity. Retention and deletion do not subtract past activity. Every publisher carries forward the counters from the predecessor it actually updates, including when compaction races a newer flush.
 
 Two footprint values are calculated from the manifest's segment descriptors:
 
@@ -638,7 +676,7 @@ Two footprint values are calculated from the manifest's segment descriptors:
 
 The inode count includes retained deleted records. An implicit root counts as zero until stored as an inode record. Metadata bytes exclude content, WAL, manifest and pin JSON, unreferenced outputs, and segments referenced only by other manifests. Shared segments count in each referencing manifest; these totals do not measure unique physical storage.
 
-Statistics reads use one validated manifest without reading segments or replaying newer WAL. Observations include namespace identity, lifecycle status, manifest number, head sequence, and folded WAL number. Checkpoint statistics read the pinned manifest. Compaction can change footprint without changing the logical head, so the manifest number matters too.
+Statistics reads use one validated manifest without reading segments or replaying newer WAL. Observations include namespace identity, lifecycle status, manifest number, head sequence, and folded WAL number. Pin statistics read the pinned manifest. Compaction can change footprint without changing the logical head, so the manifest number matters too.
 
 Observations also include `manifest_bytes`, the stored length of the manifest document as read, and `segments_by_family`, which counts each family's segment descriptors across every run and lists every family, with zero for a family that has none. Both values come from the same validated manifest, so they add no requests.
 
@@ -728,7 +766,7 @@ The fixed creation grace on the source pin protects installation. The metadata p
 
 A losing manifest-1 put returns to the existing-state checks in section 9.1. Deleted status follows the lifetime rule in section 1. Invalid bytes or key/payload disagreement are corruption. No loser overwrites the winner.
 
-A confirmed precondition failure is a conflict. A put with an unknown transport outcome confirms its own success only when a fork's first manifest reads back exactly: its source pin is unique to that attempt. Every other manifest, including a plain create under section 9.1, a compactor claim, a writer acquisition, or a tombstone, can be rebuilt byte for byte by another publisher, so an exact read-back counts as the current manifest and the attempt retries from it.
+A confirmed precondition failure is a conflict. After a put with an unknown transport outcome, the publisher reads the manifest at that number. Another manifest there is a conflict. Identical bytes there confirm the attempt's own success only for a fork's first manifest: its source pin is unique to that attempt. Every other manifest, including a plain create under section 9.1, a compactor claim, a writer acquisition, or a tombstone, can be rebuilt byte for byte by another publisher, so identical bytes count as the current manifest and the attempt retries from it. Identical bytes count only if the read-back returns within the publication budget (section 11.4). Identical bytes read back after the budget, or a number that is still absent, end the call with an unknown outcome, and a later call starts from current state.
 
 On `namespace_exists` or `namespace_deleted`, a fork installer reloads the target and deletes its source pin unless the target’s fork basis names it. A matching pin ID with a different manifest reference is corruption under section 11.7.
 
@@ -899,13 +937,13 @@ Ordinary age is calculated as `now_ms.saturating_sub(last_modified_ms)`. Safety 
 
 The combined allowance is 180,000 milliseconds. This is one relative-clock, precision, and scheduling allowance, not three minutes for each participant. A provider ahead of the collector delays collection. Record-based ages use the corresponding bound between the collector and the host that recorded creation, expiry, or completion.
 
-Publication budgets use monotonic elapsed time, measured on a clock that continues through host sleep. The minimum ordinary grace includes the longest bounded publication, one provider-operation deadline, one attempt timeout, and the combined allowance. Fork installation and streaming compaction reserve that grace within their respective lifetime bounds. Appendix C records the exact calculations.
+Publication budgets use monotonic elapsed time, measured on a clock that continues through host sleep. The minimum ordinary grace includes the longest bounded publication, the provider publication request bound, and the combined allowance. Fork installation and streaming compaction reserve that grace within their respective lifetime bounds. Appendix C records the exact calculations.
 
 If a publication's budget has expired when its put returns, the publisher treats the outcome as unknown, even if the put succeeded. A client timeout does not establish that a remote write had no effect; unknown outcomes still require reconciliation.
 
-The same rule applies when a manifest put has an unknown outcome and a read-back finds identical bytes. The read-back confirms publication only while the budget has not expired. After that, the bytes may come from a delayed put that recreated a collected manifest number. The outcome stays unknown, and the caller reloads and plans from current state.
+The same rule applies when a manifest put has an unknown outcome and a read-back finds identical bytes. The read-back confirms publication only while the budget has not expired. After that, the attempt cannot rule out that its put was applied outside the provider bound, so the outcome stays unknown, and the caller reloads and plans from current state.
 
-The publication protocol depends on one assumption that the implementation cannot check: a provider applies a request within the reclamation grace of the time the client issued it. This is an operational requirement on the provider. Under this assumption, a delayed put that recreates a collected WAL or manifest number is never acknowledged. Its budget expired before the provider applied it, so its outcome is unknown. For a manifest, the read-back rule above does not confirm it. The recreated object is also not read. Collection removes only WAL objects at or below the folded boundary, which replay does not read, and only manifest numbers below the hint observed for the pass, which discovery does not probe. The format keeps no durable record of the WAL and manifest numbers that have been used. Checking such a record would add a read to every commit acknowledgement and every current-state read, and it would remove only this assumption.
+The publication protocol depends on one assumption that the implementation cannot check: a provider applies a request, if it applies it at all, within `PROVIDER_PUBLICATION_REQUEST_BOUND_MS` of the moment the client began the operation that sent it. This is the provider time that the reclamation grace reserves, and it is an operational requirement on the provider. The argument that depends on it runs as follows. A WAL object or manifest at number `n` is created no earlier than the observation that `n - 1` was the tip, because that observation found `n` absent. The object becomes collectable only a grace after its creation, and the grace is at least the longest budget plus the provider request bound plus the clock allowance. A put planned against that observation starts within its budget, and under the assumption the provider applies or rejects it within the request bound after that. So before `n` can be collected, the provider has applied or rejected every such put, and each has succeeded, failed, or been reported unknown. No put recreates a collected number. The budget check before a put keeps a stale observation from being used. The budget check after a put makes a late success unknown, so every acknowledged put was applied within its budget. The same two checks cover the epoch claim and other manifest puts under `METADATA_PUBLICATION_BUDGET_MS`, and the fence and data puts under `WAL_PUBLISH_BUDGET_MS`. The format keeps no durable record of the WAL and manifest numbers that have been used. Checking such a record would add a read to every commit acknowledgement and every current-state read, and it would remove only this assumption.
 
 Direct expiry checks do not add GC grace to the requested lifetime. A host ahead by `E` milliseconds can reject an expired upload or snapshot up to `E` milliseconds earlier than the creating host would. Reclamation grace protects concurrent publication; it does not synchronize expiry decisions across hosts.
 

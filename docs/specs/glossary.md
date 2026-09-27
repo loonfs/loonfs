@@ -39,12 +39,16 @@
 | **Change feed** | Committed filesystem events ordered by namespace sequence and operation position. |
 | **Cursor** | A position used to resume a paginated read or bounded index build under its consistency rules. Core and grep GC complete one pass without a cursor. |
 | **Precondition** | A requirement checked against the applicable metadata state before a new mutation is accepted. |
-| **Writer epoch** | A namespace-local fencing counter. A writer session cannot publish after another session acquires a newer epoch. |
+| **Writer epoch** | A namespace-local fencing counter. A writer session cannot publish once another session's fence for a newer epoch has landed. |
+| **Epoch claim** | A manifest publication that raises the writer or compactor epoch by one. A writer's claim is followed by a fence; until the fence lands, the previous writer can still commit ([format section 6.1](format.md#61-writer-ownership)). |
 | **Compare-and-swap (CAS)** | A conditional update that succeeds only if the object's compare token still matches the version previously read. |
 | **Control object** | A structured durable record for discovery, retained views, or upload state. Its kind determines its update rules. |
 | **Family group** | Related metadata row families that compaction processes together, such as the two bind indexes and unbinds. |
 | **Compactor epoch** | A namespace-wide counter in the manifest that fences compaction publications from older runtime claims. |
 | **GC pass** | One complete collection call with freshly loaded roots, an in-memory live set, and a fixed call clock. |
+| **Publication budget** | The longest monotonic time from the observation a publisher planned against to the start of its numbered put. A put that returns after its budget has an unknown outcome ([format Appendix C.1](format.md#c1-publication-and-collection-timing)). |
+| **Reclamation grace** | The configured age `T` that a collectable manifest or WAL object must reach before collection deletes it. It is at least `GC_MIN_GRACE_WINDOW_MS`, the longest publication budget plus the provider request bound and the clock allowance ([format section 11.3](format.md#113-candidate-and-age-rules)). |
+| **Revalidation bound** | `READ_REVALIDATION_BOUND_MS`, the longest time a reader trusts an absent manifest successor after the probe it confirms ([format section 4.2](format.md#42-replaying-the-visible-wal)). |
 | **API group** | A conformance unit, such as `filesystem/v0`, advertised only when all its required operations are implemented. |
 | **Feature** | An optional capability within an API group, such as `filesystem.uploads.direct_put`. |
 | **Capability document** | The deployment's advertised protocol version, API groups, features, and advisory limits. |
