@@ -530,6 +530,209 @@ async fn an_immediate_step_reports_the_compaction_the_explicit_call_runs() {
 }
 
 #[tokio::test]
+async fn explicit_compaction_merges_twenty_deltas_and_reads_the_large_base_once() {
+    use crate::publish::{
+        parse_mutation_path, CommitCandidate, CommitRequest, FilesystemOperation,
+    };
+    use crate::{CommitId, UpdateAttributesOptions};
+    use loonfs_api::{Checksum, MetadataCompactionRequest};
+    use loonfs_objectstore::keys::metadata_segment;
+    use loonfs_test_support::ids::{attribute_key, attribute_text};
+    use loonfs_test_support::stores::RecordingStore;
+
+    let directory = tempdir().expect("tempdir");
+    let store = Arc::new(RecordingStore::metadata_segments(
+        LocalFsStore::new(directory.path()).expect("store"),
+    ));
+    let writer = FsWriter::builder_with_store(store.clone())
+        .writer_id("writer")
+        .build()
+        .await
+        .expect("writer");
+    let maintenance = writer
+        .maintenance_handle("maintenance")
+        .expect("maintenance");
+    let namespace = namespace_id("compact-deltas-first");
+    writer
+        .create_namespace(
+            &namespace,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("namespace");
+    let keys: Vec<_> = (0..15)
+        .map(|index| attribute_key(&format!("key-{index}")))
+        .collect();
+    writer
+        .put_file_bytes(
+            &namespace,
+            "/file",
+            b"content",
+            PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("file");
+    for batch in 0..10 {
+        let operations = (batch * 32..(batch + 1) * 32)
+            .map(|revision| FilesystemOperation::UpdateAttributes {
+                path: parse_mutation_path("/file").expect("file path"),
+                set: keys
+                    .iter()
+                    .enumerate()
+                    .map(|(index, key)| {
+                        let value: String = (0..64)
+                            .map(|part| {
+                                Checksum::sha256(format!("{revision}/{index}/{part}").as_bytes())
+                                    .value
+                            })
+                            .collect();
+                        (key.clone(), attribute_text(&value))
+                    })
+                    .collect(),
+                remove: Vec::new(),
+                expected_inode_id: None,
+                expected_attributes_revision_no: None,
+            })
+            .collect();
+        writer
+            .commit_candidate(
+                &namespace,
+                CommitCandidate::new(CommitRequest {
+                    commit_id: CommitId::generate(),
+                    actor_id: loonfs_test_support::test_actor(),
+                    subject: None,
+                    message: None,
+                    preconditions: Vec::new(),
+                    operations,
+                }),
+            )
+            .await
+            .expect("write the base attribute history");
+    }
+    maintenance.flush_wal(&namespace).await.expect("flush base");
+    let maintenance =
+        maintenance.starve_reorganization_row_budget(NonZeroUsize::new(16).expect("nonzero"));
+    for revision in 0..20 {
+        let mut options = UpdateAttributesOptions::new(loonfs_test_support::test_actor());
+        options.remove = keys.clone();
+        options.set.insert(
+            attribute_key("delta"),
+            attribute_text(&revision.to_string()),
+        );
+        writer
+            .update_attributes(&namespace, "/file", options)
+            .await
+            .expect("write delta");
+        maintenance
+            .run_wal_flush(&namespace)
+            .await
+            .expect("flush delta");
+    }
+
+    let attribute_runs = |manifest: &NamespaceManifestPayload| {
+        manifest
+            .runs
+            .iter()
+            .filter(|run| {
+                run.segments
+                    .iter()
+                    .any(|segment| segment.family == MetadataRowFamily::Attributes)
+            })
+            .count()
+    };
+    let mut manifest = current_manifest_payload(store.as_ref(), &namespace).await;
+    assert_eq!(attribute_runs(&manifest), 21);
+    let base_bytes: u64 = manifest
+        .runs
+        .iter()
+        .filter(|run| run.tier == RunTier::Base)
+        .flat_map(|run| &run.segments)
+        .filter(|segment| segment.family == MetadataRowFamily::Attributes)
+        .map(|segment| segment.index_block.offset + u64::from(segment.index_block.stored_bytes))
+        .sum();
+    assert!(
+        base_bytes > 8 * 1024 * 1024,
+        "base has {base_bytes} stored bytes"
+    );
+    let mut base_reads = 0;
+    let mut remaining_runs = vec![21];
+    let mut completed = false;
+    for _ in 0..32 {
+        let base_keys: BTreeSet<_> = manifest
+            .runs
+            .iter()
+            .filter(|run| run.tier == RunTier::Base)
+            .flat_map(|run| &run.segments)
+            .filter(|segment| segment.family == MetadataRowFamily::Attributes)
+            .map(|segment| metadata_segment(&segment.owner_namespace_id, &segment.segment_id))
+            .collect();
+        store.reset();
+        let response = maintenance
+            .run_maintenance(
+                &namespace,
+                RunMaintenanceRequest::MetadataCompaction(MetadataCompactionRequest {}),
+            )
+            .await
+            .expect("compact one unit");
+        let compaction = match response {
+            RunMaintenanceResponse::MetadataCompaction(response) => Some(response.compaction),
+            _ => None,
+        }
+        .expect("compaction response");
+        let read_base = store
+            .take_get_keys()
+            .iter()
+            .any(|key| base_keys.contains(key));
+        base_reads += usize::from(read_base);
+        let next = current_manifest_payload(store.as_ref(), &namespace).await;
+        if attribute_runs(&next) != attribute_runs(&manifest) {
+            remaining_runs.push(attribute_runs(&next));
+            if read_base {
+                assert!(
+                    matches!(
+                        compaction,
+                        MetadataCompactionOutcome::Published {
+                            rows_read: 340,
+                            rows_written: 340,
+                            ..
+                        }
+                    ),
+                    "{compaction:?}"
+                );
+            } else {
+                assert_eq!(compaction, MetadataCompactionOutcome::BoundedMergePublished);
+            }
+            if attribute_runs(&next) == 7 {
+                let response = maintenance
+                    .maintain_metadata(
+                        &namespace,
+                        crate::MetadataMaintenanceOptions {
+                            compaction_policy: MetadataCompactionPolicy::CompactImmediately,
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .expect("plan the base rebuild");
+                assert_eq!(
+                    response.reorganize,
+                    ReorganizeStepOutcome::CompactionRequired {}
+                );
+            }
+        }
+        manifest = next;
+        if compaction == MetadataCompactionOutcome::NotNeeded {
+            completed = true;
+            break;
+        }
+    }
+    assert!(completed, "compaction must finish");
+    assert_eq!(remaining_runs, [21, 14, 7, 1]);
+    assert_eq!(base_reads, 1);
+    assert!(manifest.runs.iter().all(|run| run.tier == RunTier::Base));
+    writer.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
 async fn maintenance_clones_share_one_claim_and_never_reclaim_after_fencing() {
     use loonfs_test_support::stores::{KeyPredicate, RecordingStore};
     let directory = tempdir().expect("tempdir");
