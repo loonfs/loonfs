@@ -399,6 +399,16 @@ fn select_merge_window(
     small_run_bytes: u64,
 ) -> Option<std::ops::Range<usize>> {
     for start in 0..candidates.len() {
+        if start == 0
+            && policy == MetadataCompactionPolicy::CompactImmediately
+            && candidates.len() > MAX_COMPACTION_INPUT_RUNS
+            && group_run_descriptors(candidates[0], group)
+                .map(segment_object_len)
+                .sum::<u64>()
+                > small_run_bytes
+        {
+            continue;
+        }
         let end = candidates.len().min(start + MAX_COMPACTION_INPUT_RUNS);
         if window_is_eligible(
             &candidates[start..end],
@@ -897,5 +907,24 @@ mod planning_tests {
             window(&sizes, policy),
             Some(1..1 + MAX_COMPACTION_INPUT_RUNS)
         );
+    }
+
+    #[test]
+    fn immediate_compaction_merges_deltas_before_rewriting_a_large_base() {
+        let policy = MetadataCompactionPolicy::CompactImmediately;
+        for delta_runs in [12, 20] {
+            let mut sizes = vec![4096];
+            sizes.extend(vec![1; delta_runs]);
+            while sizes.len() > MAX_COMPACTION_INPUT_RUNS {
+                let selected = window(&sizes, policy).expect("delta merge");
+                assert_eq!(selected, 1..1 + MAX_COMPACTION_INPUT_RUNS);
+                let merged_size = sizes[selected.clone()].iter().sum();
+                sizes.splice(selected, [merged_size]);
+            }
+            assert_eq!(window(&sizes, policy), Some(0..sizes.len()));
+        }
+        assert_eq!(window(&[8, 1, 1], policy), Some(0..3));
+        assert_eq!(window(&[8; 12], policy), Some(0..MAX_COMPACTION_INPUT_RUNS));
+        assert_eq!(window(&[4096, 1, 1, 1, 1, 1, 1, 1], policy), Some(0..8));
     }
 }
