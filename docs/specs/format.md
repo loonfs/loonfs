@@ -69,7 +69,7 @@ The directory state at sequence 18 and the file content state at sequence 19 are
 
 ### 1.3 Directory bindings
 
-A directory slot is a parent inode and a name key, `(parent_inode_id, name_key)`. The slot's value is either bound to one child inode or unbound. A bound value stores `display_name`, which preserves the caller's spelling. The derived `name_key` is used for sibling-name comparison.
+A directory slot is a parent inode and a name key, `(parent_inode_id, name_key)`. The slot's value is either bound to one child inode or unbound. A bound value stores `display_name`, which preserves the caller's spelling, and the child's kind and creation attribution, which never change for the life of an inode. The derived `name_key` is used for sibling-name comparison.
 
 Each binding change writes a `direntry_binding` row. Its `committed_seq` and `delta_index` are the row's own position in namespace history. At sequence `N`, a slot's value is the row with the greatest `(committed_seq, delta_index)` whose sequence is at or below `N`. If that row is unbound, or the slot has no such row, the name is available. When one commit changes a slot more than once, the last delta wins.
 
@@ -162,7 +162,7 @@ Every row that records an event copies the commit's actor and timestamp as `comm
 | --- | --- |
 | Inode, file revision, tombstone event, attribute revision, access revision, commit | `committed_by`, `committed_at_ms` |
 | Listed active deletion | `deleted_by`, `deleted_at_ms` |
-| Directory binding | Neither actor nor timestamp |
+| Directory binding | `child_created_by`, `child_created_at_ms` copied from the child inode |
 
 The root inode in a newly created namespace is attributed to the actor id `loonfs`. A fork inherits the root inode from its source basis; the target manifest's creation time is the creation time of the namespace, not a rewrite of inherited inode timestamps.
 
@@ -375,7 +375,7 @@ For a warm read, the reference runtime probes the next WAL number with GET. An a
 
 At sequence `N`, ignore events after `N`. An inode must have been created by `N` and must not be covered by an active tombstone on itself or an ancestor.
 
-A directory slot's value is its newest version at or below `N`, ordered by `(committed_seq, delta_index)`. A bound version names the child. An unbound version, or no version, means the slot is empty. Parent lookup applies the same rule to the child index. Path resolution needs one slot-index lookup per component. A listing scans one parent's prefix in name order and takes the newest visible version of each name. It includes a bound entry only if the child inode was created by `N` and no active subtree tombstone covers it. Snapshots and user pins apply these rules through their pinned manifests at their captured sequences.
+A directory slot's value is its newest version at or below `N`, ordered by `(committed_seq, delta_index)`. A bound version names the child. An unbound version, or no version, means the slot is empty. Parent lookup applies the same rule to the child index. Path resolution needs one slot-index lookup per component. A listing scans one parent's prefix in name order and takes the newest visible version of each name. It includes a bound entry only if the child inode was created by `N` and no active subtree tombstone covers it. Each binding row copies the child inode's kind and creation attribution. They never change for the life of an inode, so listing and path resolution read them from the binding instead of from the child's inode row. Snapshots and user pins apply these rules through their pinned manifests at their captured sequences.
 
 A file's current content is its latest revision committed by `N`. Attributes are the latest applicable complete attribute revision, or the initial empty map when no applicable attribute row exists. Recoverable-deletion listing uses the derived active-deletion state; historical tombstone evaluation remains based on tombstone events.
 
@@ -1231,8 +1231,8 @@ Each commit contains `committed_seq`, `commit_id`, `committed_by`, `semantic_com
 | Delta kind | Fields after `kind` |
 | --- | --- |
 | `create_inode` | `delta_index`, `inode_id`, `inode_kind` |
-| `bind_direntry` | `delta_index`, `parent_inode_id`, `name_key`, `display_name`, `child_inode_id` |
-| `unbind_direntry` | `delta_index`, `parent_inode_id`, `name_key`, `display_name`, `child_inode_id`, `target` |
+| `bind_direntry` | `delta_index`, `parent_inode_id`, `name_key`, `display_name`, `child_inode_id`, `child_kind`, `child_created_by`, `child_created_at_ms` |
+| `unbind_direntry` | `delta_index`, `parent_inode_id`, `name_key`, `display_name`, `child_inode_id`, `child_kind`, `child_created_by`, `child_created_at_ms`, `target` |
 | `append_file_revision` | `delta_index`, `inode_id`, `revision_no`, `content_ref` |
 | `tombstone_subtree` | `delta_index`, `root_inode_id`, `deleted_binding` |
 | `revoke_subtree_tombstone` | `delta_index`, `root_inode_id`, `target` |
@@ -1262,7 +1262,7 @@ Rows are kind-tagged CBOR objects in the data blocks. The row-kind schema and th
 | Row kind | Fields after `kind` |
 | --- | --- |
 | `inode` | `inode_id`, `inode_kind`, `committed_seq`, `commit_id`, `committed_by`, `committed_at_ms` |
-| `direntry_binding` | `parent_inode_id`, `name_key`, `child_inode_id`, `committed_seq`, `delta_index`, `state` |
+| `direntry_binding` | `parent_inode_id`, `name_key`, `child_inode_id`, `child_kind`, `child_created_by`, `child_created_at_ms`, `committed_seq`, `delta_index`, `state` |
 | `file_revision` | `inode_id`, `revision_no`, `committed_seq`, `commit_id`, `committed_by`, `committed_at_ms`, `delta_index`, `content_ref` |
 | `tombstone` | `root_inode_id`, `committed_seq`, `delta_index`, `commit_id`, `action`, `committed_by`, `committed_at_ms` |
 | `active_deletion` | `root_inode_id`, `deletion_seq`, `action` |

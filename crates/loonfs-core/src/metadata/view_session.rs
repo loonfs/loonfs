@@ -1,12 +1,7 @@
-//! [`MetadataViewSession`]: one read operation's memo over a
-//! [`MetadataView`](super::view::MetadataView).
-//!
-//! A session caches the primitive lookups a multi-step read repeats — path
-//! walks, listing pages, grep candidate walks — and layers the directory
-//! page stream that merges manifest candidates with the WAL tail. Every
-//! visibility decision still routes through the canonical
-//! [`super::visibility`] rule bodies; the session only memoizes their
-//! primitive inputs.
+//! A [`MetadataViewSession`] caches repeated lookups for one read operation
+//! over a [`MetadataView`] and merges manifest and WAL directory page rows.
+//! Every visibility decision routes through [`super::visibility`]; the session
+//! memoizes the inputs and results of those rules.
 
 use super::durable_cache::ParentNameCacheKey;
 use super::manifest_index;
@@ -17,10 +12,13 @@ use super::{
     RecoverableDeletion, ResolvedVisiblePath, RevisionRecord, SubtreeTombstoneRecord,
 };
 use crate::error::CoreError;
+use futures::{StreamExt, TryStreamExt};
 use loonfs_api::wire::manifest::lookup_keys;
 use loonfs_api::{AbsolutePath, ChangeSeq, InodeId, InodeKind, NameKey, ROOT_INODE_ID};
 use loonfs_objectstore::ObjectStore;
 use std::collections::{HashMap, VecDeque};
+
+const PAGE_READ_CONCURRENCY: usize = 16;
 
 pub(super) fn latest_visible_binding<'a>(
     rows: impl Iterator<Item = &'a DirentryBindingRecord>,
@@ -116,7 +114,6 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
 #[derive(Debug, Clone)]
 pub(crate) struct VisibleChildEntry {
     pub(crate) binding: DirentryBindingRecord,
-    pub(crate) inode: InodeRecord,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -306,20 +303,14 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
             self.preload_group_visibility(parent_inode_id, &groups)
                 .await?;
             for group in &groups {
-                // One group per name key: the stream already deduplicated
-                // and ordered candidates, and the preload seeded the caches
-                // the canonical visibility rules read through.
-                let Some(active) = self.visible_child(parent_inode_id, &group.name_key).await?
+                let Some(binding) = self.bound_child(parent_inode_id, &group.name_key).await?
                 else {
                     continue;
                 };
-                let Some(inode) = self.visible_inode(active.child_inode_id).await? else {
+                let Some(active) = visibility::visible_page_child(self, binding).await? else {
                     continue;
                 };
-                children.push(VisibleChildEntry {
-                    binding: active,
-                    inode,
-                });
+                children.push(VisibleChildEntry { binding: active });
                 if children.len() == limit {
                     break 'pages;
                 }
@@ -447,7 +438,27 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
                 latest,
             );
         }
-        self.preload_visibility(&child_inode_ids).await
+        child_inode_ids.sort_unstable();
+        child_inode_ids.dedup();
+        let base = &self.base;
+        let pending = child_inode_ids
+            .into_iter()
+            .filter(|inode_id| !self.active_tombstone_cache.contains_key(inode_id));
+        let loaded: Vec<_> = futures::stream::iter(pending.map(|inode_id| async move {
+            Ok::<_, CoreError>((
+                inode_id,
+                fetch_active_subtree_tombstone(base, inode_id).await?,
+            ))
+        }))
+        .buffered(PAGE_READ_CONCURRENCY)
+        .try_collect()
+        .await?;
+        self.counters.list_preload_child_lookups = self
+            .counters
+            .list_preload_child_lookups
+            .saturating_add(loaded.len() as u64);
+        self.active_tombstone_cache.extend(loaded);
+        Ok(())
     }
 
     pub(crate) async fn preload_visibility(
@@ -607,15 +618,6 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
         Ok(())
     }
 
-    pub(crate) async fn visible_child(
-        &mut self,
-        parent_inode_id: InodeId,
-        name_key: &NameKey,
-    ) -> Result<Option<DirentryBindingRecord>, CoreError> {
-        self.counters.visible_child_calls = self.counters.visible_child_calls.saturating_add(1);
-        visibility::visible_child(self, parent_inode_id, name_key).await
-    }
-
     /// Returns the inode when it is visible in this session's snapshot.
     pub(crate) async fn visible_inode(
         &mut self,
@@ -661,6 +663,56 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
         self.latest_revision_head_cache
             .insert(inode_id, revision.clone());
         Ok(revision)
+    }
+
+    pub(crate) async fn preload_revision_heads(
+        &mut self,
+        children: &[VisibleChildEntry],
+    ) -> Result<(), CoreError> {
+        let mut pending: Vec<_> = children
+            .iter()
+            .filter(|child| child.binding.child_kind == InodeKind::File)
+            .map(|child| child.binding.child_inode_id)
+            .filter(|inode_id| !self.latest_revision_head_cache.contains_key(inode_id))
+            .collect();
+        pending.sort_unstable();
+        pending.dedup();
+        let base = &self.base;
+        let loaded: Vec<_> =
+            futures::stream::iter(pending.into_iter().map(|inode_id| async move {
+                Ok::<_, CoreError>((
+                    inode_id,
+                    fetch_latest_revision_head_of_visible(base, inode_id).await?,
+                ))
+            }))
+            .buffered(PAGE_READ_CONCURRENCY)
+            .try_collect()
+            .await?;
+        self.latest_revision_head_cache.extend(loaded);
+        Ok(())
+    }
+
+    pub(crate) async fn preload_access_rows(
+        &mut self,
+        children: &[VisibleChildEntry],
+    ) -> Result<(), CoreError> {
+        let mut pending: Vec<_> = children
+            .iter()
+            .map(|child| child.binding.child_inode_id)
+            .filter(|inode_id| !self.access_row_cache.contains_key(inode_id))
+            .collect();
+        pending.sort_unstable();
+        pending.dedup();
+        let base = &self.base;
+        let loaded: Vec<_> =
+            futures::stream::iter(pending.into_iter().map(|inode_id| async move {
+                Ok::<_, CoreError>((inode_id, base.latest_access_revision(inode_id).await?))
+            }))
+            .buffered(PAGE_READ_CONCURRENCY)
+            .try_collect()
+            .await?;
+        self.access_row_cache.extend(loaded);
+        Ok(())
     }
 
     pub(crate) async fn access_row(
@@ -729,13 +781,15 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
             .saturating_add(pending.len() as u64);
 
         let base = &self.base;
-        let loaded =
-            futures::future::try_join_all(pending.into_iter().map(|inode_id| async move {
+        let loaded: Vec<_> =
+            futures::stream::iter(pending.into_iter().map(|inode_id| async move {
                 Ok::<_, CoreError>((
                     inode_id,
                     base.attributes_projection_at_visible_seq(inode_id).await?,
                 ))
             }))
+            .buffered(PAGE_READ_CONCURRENCY)
+            .try_collect()
             .await?;
         self.attributes_cache.extend(loaded);
         Ok(())

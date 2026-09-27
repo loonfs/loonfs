@@ -356,6 +356,7 @@ impl DecodedRowWeight for DirentryBindingRecord {
     fn decoded_weight(&self) -> usize {
         ALLOCATED_ROW_OVERHEAD
             + self.name_key.as_str().len()
+            + actor_bytes(&self.child_created_by)
             + self.display_name().map_or(0, |name| name.as_str().len())
     }
 }
@@ -418,13 +419,19 @@ impl DecodedRowWeight for WalCommitPayload {
                     WalDelta::BindDirentry {
                         name_key,
                         display_name,
+                        child_created_by,
                         ..
                     }
                     | WalDelta::UnbindDirentry {
                         name_key,
                         display_name,
+                        child_created_by,
                         ..
-                    } => name_key.as_str().len() + display_name.as_str().len(),
+                    } => {
+                        name_key.as_str().len()
+                            + display_name.as_str().len()
+                            + actor_bytes(child_created_by)
+                    }
                     WalDelta::AppendFileRevision { content_ref, .. } => {
                         content_ref_bytes(content_ref)
                     }

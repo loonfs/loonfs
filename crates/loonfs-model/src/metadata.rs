@@ -191,6 +191,7 @@ impl MetadataState {
                     name_key,
                     display_name,
                     child_inode_id,
+                    ..
                 } => {
                     metadata_state.direntry_binds.push(DirentryBindingRecord {
                         parent_inode_id: *parent_inode_id,
@@ -377,6 +378,9 @@ mod tests {
                 display_name: loonfs_api::DisplayName::parse("Report.TXT")
                     .expect("valid display name"),
                 child_inode_id: InodeId(2),
+                child_kind: loonfs_api::InodeKind::File,
+                child_created_by: loonfs_api::ActorId::loonfs(),
+                child_created_at_ms: 4_200,
             }],
         );
 

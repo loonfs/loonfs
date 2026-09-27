@@ -77,6 +77,9 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
                 name_key: NameKey::parse("source").expect("key"),
                 display_name: DisplayName::parse("source").expect("name"),
                 child_inode_id: InodeId(2),
+                child_kind: loonfs_api::InodeKind::File,
+                child_created_by: actor.clone(),
+                child_created_at_ms: 0,
             },
             WalDelta::AppendFileRevision {
                 delta_index: 3,

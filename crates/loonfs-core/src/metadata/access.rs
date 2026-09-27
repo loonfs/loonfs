@@ -178,6 +178,13 @@ mod tests {
                 name_key: NameKey::for_display_name(&display_name),
                 state: loonfs_api::wire::manifest::DirentryBindingState::Bound { display_name },
                 child_inode_id: InodeId(child),
+                child_kind: if matches!(child, 4 | 7 | 8) {
+                    InodeKind::File
+                } else {
+                    InodeKind::Directory
+                },
+                child_created_by: loonfs_api::ActorId::loonfs(),
+                child_created_at_ms: 1_000,
                 committed_seq: ChangeSeq(1),
                 delta_index: 0,
             });
@@ -300,6 +307,9 @@ mod tests {
                 name_key: NameKey::for_display_name(&display_name),
                 state: loonfs_api::wire::manifest::DirentryBindingState::Bound { display_name },
                 child_inode_id,
+                child_kind: InodeKind::Directory,
+                child_created_by: ActorId::loonfs(),
+                child_created_at_ms: 1_000,
                 committed_seq: ChangeSeq(1),
                 delta_index: 0,
             });

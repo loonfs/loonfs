@@ -89,6 +89,9 @@ fn wal_create_directory(
                 .expect("derived name key"),
             display_name: test_display_name(display_name),
             child_inode_id: inode_id,
+            child_kind: loonfs_api::InodeKind::Directory,
+            child_created_by: loonfs_api::ActorId::loonfs(),
+            child_created_at_ms: 4_200,
         },
     ]
 }
@@ -113,6 +116,9 @@ fn wal_create_file(
                 .expect("derived name key"),
             display_name: test_display_name(display_name),
             child_inode_id: inode_id,
+            child_kind: loonfs_api::InodeKind::File,
+            child_created_by: loonfs_api::ActorId::loonfs(),
+            child_created_at_ms: 4_200,
         },
         WalDelta::AppendFileRevision {
             delta_index: delta_index.saturating_add(2),

@@ -28,6 +28,9 @@ fn rows(start: usize, count: usize, sequence: u64) -> Vec<MetadataRow> {
                     display_name: loonfs_api::DisplayName::parse(&name).expect("display name"),
                 },
                 child_inode_id: InodeId(index as u64 + 2),
+                child_kind: loonfs_api::InodeKind::File,
+                child_created_by: loonfs_api::ActorId::loonfs(),
+                child_created_at_ms: 4_200,
                 committed_seq: ChangeSeq(sequence),
                 delta_index: 0,
             })

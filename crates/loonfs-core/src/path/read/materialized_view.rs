@@ -885,6 +885,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         let mut readable = vec![true; children.len()];
         async {
             if !access.is_unrestricted() {
+                session.preload_access_rows(&children).await?;
                 for (child, readable) in children.iter().zip(&mut readable) {
                     *readable = access
                         .can_read(session, child.binding.child_inode_id)
@@ -917,9 +918,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             { METADATA_VIEW_SESSION_COUNTER_FIELDS[11].0 } = tracing::field::Empty,
         );
         let entries = async {
-            // A projected page reads every child's attributes as one wave,
-            // so the build loop below runs over cache hits instead of a
-            // round trip per entry.
+            session.preload_revision_heads(&children).await?;
             if attributes == AttributeInclusion::Include {
                 let child_inode_ids: Vec<InodeId> = children
                     .iter()
@@ -1054,9 +1053,9 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             &ResolvedVisiblePath {
                 absolute_path: child_path.as_str().to_owned(),
                 inode_id: child.binding.child_inode_id,
-                inode_kind: child.inode.inode_kind,
-                created_by: child.inode.committed_by,
-                created_at_ms: child.inode.committed_at_ms,
+                inode_kind: child.binding.child_kind,
+                created_by: child.binding.child_created_by.clone(),
+                created_at_ms: child.binding.child_created_at_ms,
                 parent_inode_id: Some(child.binding.parent_inode_id),
                 display_name: child
                     .binding

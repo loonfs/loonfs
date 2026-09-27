@@ -118,6 +118,9 @@ fn create_dir_overlay_rows_match_replayed_wal_deltas() {
                 name_key: NameKey::parse("docs").expect("valid name key"),
                 display_name: loonfs_api::DisplayName::parse("Docs").expect("valid display name"),
                 child_inode_id: InodeId(2),
+                child_kind: loonfs_api::InodeKind::Directory,
+                child_created_by: loonfs_api::ActorId::loonfs(),
+                child_created_at_ms: 4_200,
             },
         ],
     );
@@ -140,6 +143,9 @@ fn create_file_overlay_rows_match_replayed_wal_deltas() {
                 display_name: loonfs_api::DisplayName::parse("Note.TXT")
                     .expect("valid display name"),
                 child_inode_id: InodeId(2),
+                child_kind: loonfs_api::InodeKind::File,
+                child_created_by: loonfs_api::ActorId::loonfs(),
+                child_created_at_ms: 4_200,
             },
             WalDelta::AppendFileRevision {
                 delta_index: 2,
@@ -188,6 +194,9 @@ fn delete_file_overlay_rows_match_replayed_wal_deltas() {
                 name_key: NameKey::parse("note.txt").expect("name key"),
                 display_name: loonfs_api::DisplayName::parse("Note.TXT").expect("display name"),
                 child_inode_id: InodeId(4),
+                child_kind: loonfs_api::InodeKind::File,
+                child_created_by: loonfs_api::ActorId::loonfs(),
+                child_created_at_ms: 4_200,
                 target: DeltaPosition {
                     seq: ChangeSeq(8),
                     delta_index: 3,
@@ -217,6 +226,9 @@ fn rename_of_preexisting_binding_overlay_rows_match_replayed_wal_deltas() {
                 name_key: NameKey::parse("old.txt").expect("name key"),
                 display_name: loonfs_api::DisplayName::parse("Old.TXT").expect("display name"),
                 child_inode_id: InodeId(4),
+                child_kind: loonfs_api::InodeKind::File,
+                child_created_by: loonfs_api::ActorId::loonfs(),
+                child_created_at_ms: 4_200,
                 target: DeltaPosition {
                     seq: ChangeSeq(11),
                     delta_index: 2,
@@ -229,6 +241,9 @@ fn rename_of_preexisting_binding_overlay_rows_match_replayed_wal_deltas() {
                 display_name: loonfs_api::DisplayName::parse("New.TXT")
                     .expect("valid display name"),
                 child_inode_id: InodeId(4),
+                child_kind: loonfs_api::InodeKind::File,
+                child_created_by: loonfs_api::ActorId::loonfs(),
+                child_created_at_ms: 4_200,
             },
         ],
     );
@@ -252,6 +267,9 @@ fn rename_of_same_commit_binding_overlay_rows_match_replayed_wal_deltas() {
                 display_name: loonfs_api::DisplayName::parse("Draft.md")
                     .expect("valid display name"),
                 child_inode_id: InodeId(2),
+                child_kind: loonfs_api::InodeKind::File,
+                child_created_by: loonfs_api::ActorId::loonfs(),
+                child_created_at_ms: 4_200,
             },
             WalDelta::AppendFileRevision {
                 delta_index: 2,
@@ -265,6 +283,9 @@ fn rename_of_same_commit_binding_overlay_rows_match_replayed_wal_deltas() {
                 name_key: NameKey::parse("draft.md").expect("name key"),
                 display_name: loonfs_api::DisplayName::parse("Draft.md").expect("display name"),
                 child_inode_id: InodeId(2),
+                child_kind: loonfs_api::InodeKind::File,
+                child_created_by: loonfs_api::ActorId::loonfs(),
+                child_created_at_ms: 4_200,
                 target: DeltaPosition {
                     seq: committed_seq,
                     delta_index: 1,
@@ -277,6 +298,9 @@ fn rename_of_same_commit_binding_overlay_rows_match_replayed_wal_deltas() {
                 display_name: loonfs_api::DisplayName::parse("Final.md")
                     .expect("valid display name"),
                 child_inode_id: InodeId(2),
+                child_kind: loonfs_api::InodeKind::File,
+                child_created_by: loonfs_api::ActorId::loonfs(),
+                child_created_at_ms: 4_200,
             },
         ],
     );
@@ -327,6 +351,9 @@ fn delete_subtree_overlay_rows_match_replayed_wal_deltas() {
                 name_key: NameKey::parse("attic").expect("name key"),
                 display_name: loonfs_api::DisplayName::parse("Attic").expect("display name"),
                 child_inode_id: InodeId(5),
+                child_kind: loonfs_api::InodeKind::File,
+                child_created_by: loonfs_api::ActorId::loonfs(),
+                child_created_at_ms: 4_200,
                 target: DeltaPosition {
                     seq: ChangeSeq(22),
                     delta_index: 6,
@@ -362,6 +389,9 @@ fn chained_multi_op_commit_overlay_rows_match_replayed_wal_deltas() {
                 name_key: NameKey::parse("docs").expect("valid name key"),
                 display_name: loonfs_api::DisplayName::parse("Docs").expect("valid display name"),
                 child_inode_id: InodeId(2),
+                child_kind: loonfs_api::InodeKind::Directory,
+                child_created_by: loonfs_api::ActorId::loonfs(),
+                child_created_at_ms: 4_200,
             },
             WalDelta::CreateInode {
                 delta_index: 2,
@@ -375,6 +405,9 @@ fn chained_multi_op_commit_overlay_rows_match_replayed_wal_deltas() {
                 display_name: loonfs_api::DisplayName::parse("Note.txt")
                     .expect("valid display name"),
                 child_inode_id: InodeId(3),
+                child_kind: loonfs_api::InodeKind::File,
+                child_created_by: loonfs_api::ActorId::loonfs(),
+                child_created_at_ms: 4_200,
             },
             WalDelta::AppendFileRevision {
                 delta_index: 4,
@@ -394,6 +427,9 @@ fn chained_multi_op_commit_overlay_rows_match_replayed_wal_deltas() {
                 name_key: NameKey::parse("note.txt").expect("name key"),
                 display_name: loonfs_api::DisplayName::parse("Note.txt").expect("display name"),
                 child_inode_id: InodeId(3),
+                child_kind: loonfs_api::InodeKind::File,
+                child_created_by: loonfs_api::ActorId::loonfs(),
+                child_created_at_ms: 4_200,
                 target: DeltaPosition {
                     seq: committed_seq,
                     delta_index: 3,
@@ -406,6 +442,9 @@ fn chained_multi_op_commit_overlay_rows_match_replayed_wal_deltas() {
                 display_name: loonfs_api::DisplayName::parse("Renamed.txt")
                     .expect("valid display name"),
                 child_inode_id: InodeId(3),
+                child_kind: loonfs_api::InodeKind::File,
+                child_created_by: loonfs_api::ActorId::loonfs(),
+                child_created_at_ms: 4_200,
             },
             WalDelta::AppendFileRevision {
                 delta_index: 8,
@@ -419,6 +458,9 @@ fn chained_multi_op_commit_overlay_rows_match_replayed_wal_deltas() {
                 name_key: NameKey::parse("renamed.txt").expect("name key"),
                 display_name: loonfs_api::DisplayName::parse("Renamed.txt").expect("display name"),
                 child_inode_id: InodeId(3),
+                child_kind: loonfs_api::InodeKind::File,
+                child_created_by: loonfs_api::ActorId::loonfs(),
+                child_created_at_ms: 4_200,
                 target: DeltaPosition {
                     seq: committed_seq,
                     delta_index: 7,
@@ -440,6 +482,9 @@ fn chained_multi_op_commit_overlay_rows_match_replayed_wal_deltas() {
                 name_key: NameKey::parse("docs").expect("name key"),
                 display_name: loonfs_api::DisplayName::parse("Docs").expect("display name"),
                 child_inode_id: InodeId(2),
+                child_kind: loonfs_api::InodeKind::Directory,
+                child_created_by: loonfs_api::ActorId::loonfs(),
+                child_created_at_ms: 4_200,
                 target: DeltaPosition {
                     seq: committed_seq,
                     delta_index: 1,
@@ -474,6 +519,9 @@ fn overlays_across_commits_match_accumulated_wal_replay() {
             name_key: NameKey::parse("a").expect("valid name key"),
             display_name: loonfs_api::DisplayName::parse("a").expect("valid display name"),
             child_inode_id: InodeId(2),
+            child_kind: loonfs_api::InodeKind::Directory,
+            child_created_by: loonfs_api::ActorId::loonfs(),
+            child_created_at_ms: 4_200,
         },
         WalDelta::CreateInode {
             delta_index: 2,
@@ -486,6 +534,9 @@ fn overlays_across_commits_match_accumulated_wal_replay() {
             name_key: NameKey::parse("f").expect("valid name key"),
             display_name: loonfs_api::DisplayName::parse("f").expect("valid display name"),
             child_inode_id: InodeId(3),
+            child_kind: loonfs_api::InodeKind::File,
+            child_created_by: loonfs_api::ActorId::loonfs(),
+            child_created_at_ms: 4_200,
         },
         WalDelta::AppendFileRevision {
             delta_index: 4,
@@ -507,6 +558,9 @@ fn overlays_across_commits_match_accumulated_wal_replay() {
             name_key: NameKey::parse("f").expect("name key"),
             display_name: loonfs_api::DisplayName::parse("f").expect("display name"),
             child_inode_id: InodeId(3),
+            child_kind: loonfs_api::InodeKind::File,
+            child_created_by: loonfs_api::ActorId::loonfs(),
+            child_created_at_ms: 4_200,
             target: DeltaPosition {
                 seq: first_seq,
                 delta_index: 3,
@@ -518,6 +572,9 @@ fn overlays_across_commits_match_accumulated_wal_replay() {
             name_key: NameKey::parse("f2").expect("valid name key"),
             display_name: loonfs_api::DisplayName::parse("f2").expect("valid display name"),
             child_inode_id: InodeId(3),
+            child_kind: loonfs_api::InodeKind::File,
+            child_created_by: loonfs_api::ActorId::loonfs(),
+            child_created_at_ms: 4_200,
         },
     ];
 

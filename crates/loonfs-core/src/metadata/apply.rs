@@ -85,11 +85,17 @@ impl MetadataState {
                 name_key,
                 display_name,
                 child_inode_id,
+                child_kind,
+                child_created_by,
+                child_created_at_ms,
             } => {
                 self.push_direntry_binding_record(DirentryBindingRecord {
                     parent_inode_id: *parent_inode_id,
                     name_key: name_key.clone(),
                     child_inode_id: *child_inode_id,
+                    child_kind: *child_kind,
+                    child_created_by: child_created_by.clone(),
+                    child_created_at_ms: *child_created_at_ms,
                     committed_seq,
                     delta_index: *delta_index,
                     state: DirentryBindingState::Bound {
@@ -102,12 +108,18 @@ impl MetadataState {
                 parent_inode_id,
                 name_key,
                 child_inode_id,
+                child_kind,
+                child_created_by,
+                child_created_at_ms,
                 ..
             } => {
                 self.push_direntry_binding_record(DirentryBindingRecord {
                     parent_inode_id: *parent_inode_id,
                     name_key: name_key.clone(),
                     child_inode_id: *child_inode_id,
+                    child_kind: *child_kind,
+                    child_created_by: child_created_by.clone(),
+                    child_created_at_ms: *child_created_at_ms,
                     committed_seq,
                     delta_index: *delta_index,
                     state: DirentryBindingState::Unbound,
