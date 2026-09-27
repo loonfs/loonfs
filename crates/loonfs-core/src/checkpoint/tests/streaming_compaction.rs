@@ -1778,6 +1778,197 @@ impl MonotonicTimer for SteppingTimer {
 // Resource discipline
 // -------------------------------------------------------------------------
 
+async fn large_compaction_inputs(
+    store: &LocalFsStore,
+    namespace_id: &NamespaceId,
+) -> (Vec<MetadataRunManifest>, Vec<MetadataRow>) {
+    use loonfs_api::wire::manifest::AttributesRevisionRecord;
+    use loonfs_api::{AttributeKey, AttributeValue, Attributes, AttributesRevisionNo};
+
+    let mut runs = Vec::new();
+    let mut sequential = Vec::new();
+    let mut value_state = 1u64;
+    for run in 0..3 {
+        let mut rows = Vec::new();
+        for index in 0..2_400 {
+            let value: String = (0..4_096)
+                .map(|_| {
+                    value_state ^= value_state << 13;
+                    value_state ^= value_state >> 7;
+                    value_state ^= value_state << 17;
+                    char::from(b'!' + (value_state % 90) as u8)
+                })
+                .collect();
+            rows.push(MetadataRow::AttributesRevision(AttributesRevisionRecord {
+                inode_id: InodeId(index * 3 + run + 1),
+                attributes_revision_no: AttributesRevisionNo(1),
+                committed_seq: ChangeSeq(run + 1),
+                commit_id: CommitId::parse(format!("c_{run}")).expect("commit id"),
+                delta_index: 0,
+                committed_by: loonfs_api::ActorId::loonfs(),
+                committed_at_ms: 0,
+                attributes: Attributes::new(BTreeMap::from([(
+                    AttributeKey::parse("value").expect("key"),
+                    AttributeValue::parse(value).expect("value"),
+                )]))
+                .expect("attributes"),
+            }));
+        }
+        sequential.extend(rows.iter().cloned());
+        let mut rows = Some(rows);
+        let segments = build_manifest_segments_from_rows(
+            store,
+            namespace_id,
+            |family| {
+                if family == ApiMetadataRowFamily::Attributes {
+                    rows.take().expect("one attributes family")
+                } else {
+                    Vec::new()
+                }
+            },
+            MetadataLsmPolicy {
+                max_rows_per_segment: NonZeroUsize::new(1_200).expect("nonzero"),
+                ..MetadataLsmPolicy::default()
+            },
+        )
+        .await
+        .expect("input segments");
+        runs.push(MetadataRunManifest {
+            run_no: RunNo(run + 1),
+            run_seq: ChangeSeq(run + 1),
+            tier: if run == 0 {
+                RunTier::Base
+            } else {
+                RunTier::Delta
+            },
+            segments,
+        });
+    }
+    sequential.sort_by_key(|row| row.row_key_for_family(ApiMetadataRowFamily::Attributes));
+    (runs, sequential)
+}
+
+#[tokio::test]
+async fn a_merge_reads_byte_sized_spans_concurrently_with_bounded_decoded_input() {
+    use super::super::compaction_merge::{
+        refill_iterators, MetadataSegmentBlockLoader, MetadataSegmentRowIterator,
+        ITERATOR_FETCH_CONCURRENCY, ITERATOR_FETCH_TARGET_BYTES, MAX_MERGE_DECODED_INPUT_BYTES,
+    };
+
+    let directory = tempdir().expect("directory");
+    let local = LocalFsStore::new(directory.path()).expect("store");
+    let namespace_id = NamespaceId::parse("byte-compaction").expect("namespace");
+    let group = MetadataFamilyGroup::Attributes;
+    let (runs, sequential) = large_compaction_inputs(&local, &namespace_id).await;
+    let mut indexes = BTreeMap::new();
+    let mut input_bytes = 0;
+    let mut old_gets = 0;
+    for descriptor in runs
+        .iter()
+        .flat_map(|run| group_run_descriptors(run, group))
+    {
+        let index =
+            block_fetch::load_segment_index_for_reorganization(&local, None, None, descriptor)
+                .await
+                .expect("index");
+        input_bytes += index
+            .iter()
+            .map(|entry| entry.block.stored_bytes as usize)
+            .sum::<usize>();
+        old_gets += index.len().div_ceil(2);
+        indexes.insert(metadata_segment_object_key(descriptor), index);
+    }
+    let store = ConcurrencyWatchStore::new(
+        RecordingStore::metadata_segments(local),
+        KeyPredicate::metadata_segment(),
+    );
+    let result = merge_group_in_step(
+        &store,
+        None,
+        &namespace_id,
+        group,
+        &runs,
+        reorganize::MergePlacement::Base {
+            output_seq: ChangeSeq(3),
+        },
+        ChangeSeq(0),
+        MetadataLsmPolicy::default(),
+    )
+    .await
+    .expect("merge");
+    let gets = store.inner().take_gets();
+    let data_gets = gets
+        .iter()
+        .filter(|(key, range)| {
+            range.is_some_and(|(start, _)| {
+                indexes[key].iter().any(|entry| entry.block.offset == start)
+            })
+        })
+        .count();
+    let expected_gets = input_bytes.div_ceil(ITERATOR_FETCH_TARGET_BYTES);
+    assert!((expected_gets..=expected_gets + indexes.len()).contains(&data_gets));
+    assert!(data_gets * 8 < old_gets);
+    assert!((2..=ITERATOR_FETCH_CONCURRENCY).contains(&store.reads().peak_in_flight));
+
+    let local = store.inner().inner();
+    let mut actual = Vec::new();
+    for descriptor in &result.output_segments {
+        let index =
+            block_fetch::load_segment_index_for_reorganization(local, None, None, descriptor)
+                .await
+                .expect("output index");
+        for entry in index.iter() {
+            let block =
+                data_block_load::load_segment_data_block(local, None, None, descriptor, entry)
+                    .await
+                    .expect("output block");
+            actual.extend(block.rows.iter().cloned());
+        }
+    }
+    assert_eq!(actual, sequential);
+
+    let descriptor = group_run_descriptors(&runs[0], group)
+        .next()
+        .expect("input")
+        .clone();
+    let mut iterators: Vec<_> = (0..64)
+        .map(|_| {
+            MetadataSegmentRowIterator::metadata(
+                ApiMetadataRowFamily::Attributes,
+                ChangeSeq(3),
+                vec![descriptor.clone()],
+            )
+        })
+        .collect();
+    refill_iterators(
+        &MetadataSegmentBlockLoader::new(&store, None),
+        &mut iterators,
+    )
+    .await
+    .expect("wide refill");
+    let mut decoded_bytes = 0;
+    let mut data_gets = 0;
+    for (key, range) in store.inner().take_gets() {
+        if let Some((start, end)) = range {
+            let entries: Vec<_> = indexes[&key]
+                .iter()
+                .filter(|entry| entry.block.offset >= start && entry.block.offset < end)
+                .collect();
+            if !entries.is_empty() {
+                data_gets += 1;
+                decoded_bytes += entries
+                    .iter()
+                    .map(|entry| entry.block.decoded_bytes as usize)
+                    .sum::<usize>();
+            }
+        }
+    }
+    assert_eq!(data_gets, iterators.len());
+    assert!(decoded_bytes <= MAX_MERGE_DECODED_INPUT_BYTES);
+    assert!(decoded_bytes > MAX_MERGE_DECODED_INPUT_BYTES / 2);
+    assert!(store.reads().peak_in_flight <= ITERATOR_FETCH_CONCURRENCY);
+}
+
 #[tokio::test]
 async fn a_merge_keeps_its_reads_and_its_decoded_blocks_bounded() {
     let temp_dir = tempdir().expect("tempdir");

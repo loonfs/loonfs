@@ -15,14 +15,14 @@ use std::collections::VecDeque;
 use std::future::Future;
 use std::sync::Arc;
 
-/// Decoded data blocks one iterator holds at a time. An iterator refills only
-/// when it has none left, so this is also the most it ever holds, and a
-/// merge's input residency is this times the number of open iterators.
-const BLOCKS_PER_ITERATOR_FETCH: usize = 2;
-
-/// Iterators refilled in one wave. Refills are a merge's only bulk reads, so
-/// this is the width of its fan-out at the store.
-const ITERATOR_FETCH_CONCURRENCY: usize = 8;
+/// Stored bytes one refill asks for in a single ranged read; at object-store
+/// latency the round trip, not the bytes, is what a refill costs.
+pub(super) const ITERATOR_FETCH_TARGET_BYTES: usize = 2 * 1024 * 1024;
+/// Decoded input a merge holds across every open iterator; each iterator's
+/// share caps its refill below the target when many inputs are open.
+pub(super) const MAX_MERGE_DECODED_INPUT_BYTES: usize = 64 * 1024 * 1024;
+/// Iterators refilled in one wave, the merge's fan-out at the store.
+pub(super) const ITERATOR_FETCH_CONCURRENCY: usize = 8;
 
 /// Defines which adjacent rows a retention rule processes together.
 ///
@@ -165,7 +165,11 @@ impl<Row, Segment, SortKey> SegmentRowIterator<Row, Segment, SortKey> {
         self.blocks.len()
     }
 
-    async fn fill<Loader>(&mut self, loader: &Loader) -> std::result::Result<(), Loader::Error>
+    async fn fill<Loader>(
+        &mut self,
+        loader: &Loader,
+        decoded_byte_limit: usize,
+    ) -> std::result::Result<(), Loader::Error>
     where
         Segment: Clone,
         Loader: SegmentBlockLoader<Row, Segment>,
@@ -188,7 +192,22 @@ impl<Row, Segment, SortKey> SegmentRowIterator<Row, Segment, SortKey> {
                 }
             };
             let segment = self.segments[self.next_segment - 1].clone();
-            let end = (self.next_block + BLOCKS_PER_ITERATOR_FETCH).min(index.len());
+            let mut end = self.next_block;
+            let mut stored_bytes = 0;
+            let mut decoded_bytes = 0;
+            let target_bytes = ITERATOR_FETCH_TARGET_BYTES.min(decoded_byte_limit);
+            while let Some(entry) = index.get(end) {
+                let next_decoded_bytes = decoded_bytes + entry.block.decoded_bytes as usize;
+                // A block cannot be split, even when it exceeds the iterator's share.
+                if end > self.next_block
+                    && (stored_bytes >= target_bytes || next_decoded_bytes > decoded_byte_limit)
+                {
+                    break;
+                }
+                stored_bytes += entry.block.stored_bytes as usize;
+                decoded_bytes = next_decoded_bytes;
+                end += 1;
+            }
             let entries = index[self.next_block..end].to_vec();
             let blocks = loader.load_data_blocks(segment, entries).await?;
             self.next_block = end;
@@ -298,6 +317,7 @@ where
     Segment: Clone,
     Loader: SegmentBlockLoader<Row, Segment>,
 {
+    let decoded_byte_limit = MAX_MERGE_DECODED_INPUT_BYTES / iterators.len().max(1);
     let mut hungry: Vec<&mut SegmentRowIterator<Row, Segment, SortKey>> = iterators
         .iter_mut()
         .filter(|iterator| iterator.needs_fill())
@@ -305,7 +325,7 @@ where
     for wave in hungry.chunks_mut(ITERATOR_FETCH_CONCURRENCY) {
         futures::future::try_join_all(
             wave.iter_mut()
-                .map(|iterator| Box::pin(iterator.fill(loader))),
+                .map(|iterator| Box::pin(iterator.fill(loader, decoded_byte_limit))),
         )
         .await?;
     }
