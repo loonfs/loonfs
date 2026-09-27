@@ -19,6 +19,7 @@ mod common;
 mod content_ref_import_access;
 mod content_request_accounting;
 mod direct_put;
+mod directory_page_reads;
 mod handles;
 mod handoff;
 mod immutable_view_inputs;
