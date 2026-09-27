@@ -102,9 +102,6 @@ async fn a_cold_anchor_reads_each_wal_object_once() {
     acquire_writer_epoch(&store, &namespace_id, &context(1_000))
         .await
         .expect("second fence");
-    crate::namespace::control::raise_namespace_hint(&store, &namespace_id, WalNo(11), None)
-        .await
-        .expect("raise hint");
     drop(engine);
     store.reset();
 
@@ -375,7 +372,6 @@ async fn cold_open_probes_past_a_lagging_hint_and_reads_a_missing_hint_as_absent
         &loonfs_api::wire::control::HintPayload {
             namespace_id: namespace_id.clone(),
             manifest_no: ManifestNo(1),
-            wal_no: WalNo(0),
         },
     )
     .expect("hint");
@@ -513,19 +509,6 @@ async fn a_bounded_tail_load_names_the_missing_segment() {
     for name in ["one", "two", "three"] {
         publish(&mut engine, &store, name).await.expect(name);
     }
-    let hint_bytes = loonfs_api::wire::control::encode_control_state(
-        loonfs_api::wire::control::ControlObjectKind::Hint,
-        &loonfs_api::wire::control::HintPayload {
-            namespace_id: namespace_id.clone(),
-            manifest_no: ManifestNo(1),
-            wal_no: WalNo(4),
-        },
-    )
-    .expect("hint");
-    store
-        .put_overwrite(&hint(&namespace_id), hint_bytes.into())
-        .await
-        .expect("hint at the tip");
     let missing = wal_segment(&namespace_id, &WalNo(3));
     store
         .delete(&missing)

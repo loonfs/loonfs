@@ -77,15 +77,14 @@ pub(crate) async fn load_hint<S: ObjectStore + ?Sized>(
     .await
 }
 
-/// Raises the hint to at least the given numbers and returns the hint as
+/// Raises the hint to at least the given manifest number and returns the hint as
 /// written. `known` is the hint as the caller last saw it; a raise from a
-/// current token needs no read. Each number only ever increases, so a
+/// current token needs no read. The number only ever increases, so a
 /// stale actor cannot regress what a newer one wrote.
 pub(crate) async fn raise_hint<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     manifest_no: loonfs_api::ManifestNo,
-    wal_no: loonfs_api::WalNo,
     known: Option<LoadedHint>,
 ) -> crate::error::Result<LoadedHint> {
     let object_key = hint(namespace_id);
@@ -97,10 +96,8 @@ pub(crate) async fn raise_hint<S: ObjectStore + ?Sized>(
         let raised = HintPayload {
             namespace_id: namespace_id.clone(),
             manifest_no: current.state.manifest_no.max(manifest_no),
-            wal_no: current.state.wal_no.max(wal_no),
         };
-        if raised.manifest_no == current.state.manifest_no && raised.wal_no == current.state.wal_no
-        {
+        if raised.manifest_no == current.state.manifest_no {
             return Ok(current);
         }
         let bytes =
@@ -291,27 +288,10 @@ pub async fn load_namespace_current_manifest<S: ObjectStore + ?Sized>(
     load_current_manifest(store, expected_namespace_id).await
 }
 
-/// Raises the discovery start without changing the committed WAL tip.
-pub async fn raise_namespace_hint<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    wal_no: loonfs_api::WalNo,
-    known: Option<LoadedHint>,
-) -> crate::error::Result<LoadedHint> {
-    raise_hint(
-        store,
-        namespace_id,
-        loonfs_api::ManifestNo(1),
-        wal_no,
-        known,
-    )
-    .await
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use loonfs_api::{ManifestNo, WalNo};
+    use loonfs_api::ManifestNo;
     use loonfs_test_support::stores::{
         KeyPredicate, MetadataMapStore, RecordedOperation, RecordingStore,
     };
@@ -325,7 +305,6 @@ mod tests {
         let state = HintPayload {
             namespace_id: namespace_id.clone(),
             manifest_no: ManifestNo(1),
-            wal_no: WalNo(0),
         };
         let bytes =
             loonfs_api::wire::control::encode_control_state(ControlObjectKind::Hint, &state)
@@ -339,7 +318,7 @@ mod tests {
             MetadataMapStore::without_etag(store, KeyPredicate::any()),
             KeyPredicate::any(),
         );
-        let error = raise_hint(&store, &namespace_id, ManifestNo(2), WalNo(0), Some(known))
+        let error = raise_hint(&store, &namespace_id, ManifestNo(2), Some(known))
             .await
             .expect_err("etag required");
         assert!(matches!(error, CoreError::Store { .. }));

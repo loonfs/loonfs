@@ -28,7 +28,7 @@
 | **Metadata segment** | An immutable, sorted set of rows in one metadata family, stored in independently readable blocks. |
 | **Run** | The metadata segments produced together, identified by a manifest-allocated run number. |
 | **Namespace manifest** | A numbered immutable record of namespace identity, lifecycle, authority, materialized file set, and retention floors. |
-| **Hint** | A mutable starting point for forward discovery. Its numbers can lag publication and are not freshness evidence. |
+| **Hint** | A mutable starting point for forward manifest discovery. Its number can lag publication and is not freshness evidence. |
 | **Metadata basis** | The verified file set in the reading namespace’s current manifest. A fork’s own manifest lists its inherited runs. |
 | **Checkpoint** | A durable pin retaining one numbered manifest for a user, snapshot, or fork dependency. |
 | **Snapshot** | A retained read view represented by a snapshot-owned pin; reads require an unexpired record. |

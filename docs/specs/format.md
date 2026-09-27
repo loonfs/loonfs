@@ -206,13 +206,13 @@ The key layout is part of the format. Other objects must not collide with these 
 | --- | --- | --- |
 | Namespace manifest | Namespace identity, lifecycle, writer authority, materialized file set, and retention floor | Publish the next immutable number. |
 | WAL segment | Ordered commits or a writer fence after the materialized boundary | Create the next immutable number. |
-| Hint | Starting point for manifest and WAL discovery | Compare-and-swap; neither number decreases. |
+| Hint | Starting point for manifest discovery | Compare-and-swap; the number never decreases. |
 | Metadata segment | Sorted metadata rows referenced by a manifest | Write a new immutable object. |
 | Pin record | Retain one manifest for a user, snapshot, or fork | Create and delete; snapshot expiry can be extended by CAS. |
 | Upload session | Own a transfer and its completed content until publication or cleanup | Conditional lifecycle transitions. |
 | Content object | Complete bytes of one file revision | Write once. |
 
-A manifest publication can change physical layout or control state without creating a logical commit. A WAL publication can advance logical history without creating a manifest. The hint selects neither history nor visibility: its numbers may lag successful publications.
+A manifest publication can change physical layout or control state without creating a logical commit. A WAL publication can advance logical history without creating a manifest. The hint selects neither history nor visibility: its number may lag successful publications.
 
 ### 2.3 Numbered objects and generated IDs
 
@@ -328,7 +328,7 @@ This example assumes 12 is the discovered WAL tip. Manifest and WAL discovery mu
 
 ### 4.2 Replaying the visible WAL
 
-After selecting a manifest, read the WAL from `folded_wal_no + 1` upward until the first absent number. The objects read are the ones replay needs, so a reader keeps them; discovery and replay are one pass. Numbers may be read in concurrent windows. Those reads do not observe one moment, so a number absent in one read may have been published before a later number was read: the reader reads it again before treating it as missing. The first number still absent ends the tail; a still-absent number below a present one is a missing object. The hint's WAL number is not used for discovery. Replay requires every WAL number between the folded boundary and the discovered tip.
+After selecting a manifest, read the WAL from `folded_wal_no + 1` upward until the first absent number. The objects read are the ones replay needs, so a reader keeps them; discovery and replay are one pass. Numbers may be read in concurrent windows. Those reads do not observe one moment, so a number absent in one read may have been published before a later number was read: the reader reads it again before treating it as missing. The first number still absent ends the tail; a still-absent number below a present one is a missing object. Replay requires every WAL number between the folded boundary and the discovered tip.
 
 Each data segment must contain contiguous commits following the preceding head. Its `prior_head_seq` is derived by subtracting one from the first record sequence; a first sequence of zero is invalid. A fence derives its preceding head from `head_seq`. Namespace identity, WAL number, sequence range, allocation state, and writer epoch must validate. Empty fence segments contain no metadata changes. Epochs cannot decrease along the log or exceed the current manifest's epoch. If a WAL object exposes a newer epoch, reload the manifest before deciding that the object is invalid.
 
@@ -496,7 +496,7 @@ The publication procedure is:
 3. Assign contiguous sequences to accepted requests and construct one object at `tip + 1`, including the resulting `next_inode_id`.
 4. Check the publication budget and content-admission evidence immediately before the put-if-absent.
    If a candidate's evidence has expired, return its own error for that candidate and `stale_head` for the other accepted candidates so they can be planned again. Write no WAL for that batch.
-5. On success, update the local read state and acknowledge the requests. Raise the hint first if a raise is due; a failed hint update does not fail the commits.
+5. On success, update the local read state and acknowledge the requests.
 
 The publication budget is measured from observing the tip used to plan the batch until initiating its numbered put. A cached tip has the same time limit. An expired attempt reloads and re-plans before writing. Appendix C records the bound.
 
@@ -512,12 +512,12 @@ validate requests A, B, C against the current view
 put-if-absent WAL 10: [seq 41, seq 42, seq 43]  ← commit boundary
            │
            v
-raise hint if due, then acknowledge
+acknowledge
 ```
 
 A confirmed precondition failure creates no object. The writer discovers the winning publication, checks for fencing, and re-plans before trying another number. It does not create a parallel branch of history.
 
-The reference writer raises the hint when at least eight WAL objects have accumulated since its last raise or the revalidation interval has elapsed, whichever occurs first. Each CAS takes the greater of the old and proposed numbers. A stale compare token requires rereading the hint. Failed raises are retried at a later trigger. Readers remain correct while the hint lags because discovery probes forward.
+Commits do not raise the hint. Manifest publications raise it (section 7.2), and readers remain correct while it lags because discovery probes forward.
 
 ### 6.4 Failed and unknown outcomes
 
@@ -707,7 +707,7 @@ Read existing namespace state before writing new objects. An existing active nam
 
 For an absent namespace, build the first manifest under section 7.2.
 
-Write the hint naming manifest 1 and WAL 0, then manifest 1, both with put-if-absent. A hint collision is permitted. The manifest put decides which installation wins. A hint left before that put does not establish namespace existence.
+Write the hint naming manifest 1, then manifest 1, both with put-if-absent. A hint collision is permitted. The manifest put decides which installation wins. A hint left before that put does not establish namespace existence.
 
 Conflicting and unknown publication outcomes follow section 9.3.
 
@@ -1126,7 +1126,7 @@ The following tables list the durable payload fields. Their transition rules are
 
 | Payload | Fields |
 | --- | --- |
-| Namespace hint | `namespace_id`, `manifest_no`, `wal_no` |
+| Namespace hint | `namespace_id`, `manifest_no` |
 | Writer block | `writer_id`, `acquired_at_ms` |
 | Fork basis | `manifest`, `source_pin_id` |
 | Manifest reference | `owner_namespace_id`, `manifest_no`, `head_seq`, `payload_checksum` |
@@ -1585,11 +1585,10 @@ These are reference producer and runtime defaults. A target size can be exceeded
 | Maximum bounded reorganization decoded input | 64 MiB |
 | Automatic WAL-flush threshold | 32 segments |
 | Unflushed-tail write rejection threshold | 128 segments |
-| Hint-raise threshold | 8 WAL objects |
 | `RuntimeCacheConfig::manifest_revalidation_interval_ms` | 1,000 ms |
 | Maximum commit-message size | 4,096 bytes |
 
-`manifest_revalidation_interval_ms` is the minimum monotonic interval between checks for a successor to the cached manifest. It also paces the writer's hint raise.
+`manifest_revalidation_interval_ms` is the minimum monotonic interval between checks for a successor to the cached manifest.
 
 A decoder cannot use target block or segment sizes as hard allocation bounds. The reference block reader initially reserves at most the smaller of `decoded_bytes` and 64 KiB. Further allocation follows bytes actually decompressed. Output stops at the declared length plus one byte as specified in Appendix A.7; vector capacity can exceed that output length. This does not impose a smaller maximum block size. Request admission limits are specified in the [API specification][api-spec].
 

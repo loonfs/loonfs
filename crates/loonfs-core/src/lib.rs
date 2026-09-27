@@ -140,8 +140,7 @@ pub mod control {
     };
     pub use crate::namespace::control::{
         load_namespace_checkpoint_record_control, load_namespace_current_manifest,
-        load_namespace_read_state, raise_namespace_hint, CurrentManifest, LoadedHint,
-        LoadedManifest,
+        load_namespace_read_state, CurrentManifest, LoadedHint, LoadedManifest,
     };
     pub use crate::namespace::read_anchor::{
         load_read_anchor, manifest_has_successor, project_anchor_tail, NamespaceReadAnchor,

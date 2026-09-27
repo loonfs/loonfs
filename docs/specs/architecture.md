@@ -14,14 +14,14 @@ The main objects have separate roles:
 | --- | --- |
 | Numbered namespace manifest | Records namespace identity, lifecycle, writer authority, materialized metadata runs, and the retention floor. |
 | Numbered WAL object | Publishes logical commits or a writer fence after the materialized boundary. |
-| Hint | Records a starting point for forward discovery of manifests and WAL. |
+| Hint | Records a starting point for forward discovery of manifests. |
 | Pin record | Retains one manifest for a user, snapshot, or fork. |
 | Metadata segment | Stores sorted rows in independently readable blocks. |
 | Content object | Stores the complete bytes of a file revision. |
 
 Creating the next numbered WAL object commits its records. Creating the next numbered manifest publishes a new materialized file set or control-state change. Each publication uses put-if-absent, so competing attempts at one number cannot both succeed.
 
-The hint may lag either publication stream. Readers load the hinted objects and probe forward; they do not treat the hint as the current state. The [format specification](format.md#2-objects-and-references) defines the complete layout and stored fields.
+The hint may lag manifest publication. Readers load the hinted manifest and probe forward; they do not treat the hint as the current state. The [format specification](format.md#2-objects-and-references) defines the complete layout and stored fields.
 
 ## Writing a file
 

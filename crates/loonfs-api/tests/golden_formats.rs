@@ -667,7 +667,6 @@ fn control_objects_match_golden_bytes() {
         HintPayload {
             namespace_id: namespace_id(),
             manifest_no: ManifestNo(2),
-            wal_no: WalNo(2),
         },
     );
     check_control_golden(
@@ -1511,14 +1510,13 @@ fn control_object_decode_rejects_tampered_payload_as_checksum_mismatch() {
     let envelope = HintPayload {
         namespace_id: namespace_id(),
         manifest_no: ManifestNo(2),
-        wal_no: WalNo(2),
     };
     let encoded =
         loonfs_api::wire::control::encode_control_state(ControlObjectKind::Hint, &envelope)
             .expect("encode control object");
     let mut document: serde_json::Value =
         serde_json::from_slice(&encoded).expect("decode document");
-    document["payload"]["wal_no"] = serde_json::Value::from(999);
+    document["payload"]["manifest_no"] = serde_json::Value::from(999);
     let tampered = serde_json::to_vec(&document).expect("encode tampered document");
 
     let err = decode_control_object::<HintPayload>(&tampered, ControlObjectKind::Hint)

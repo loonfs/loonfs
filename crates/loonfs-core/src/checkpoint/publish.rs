@@ -216,14 +216,8 @@ pub(crate) async fn publish_manifest<S: ObjectStore + ?Sized>(
         && deadline.elapsed_ms() <= crate::limits::METADATA_PUBLICATION_BUDGET_MS
     {
         // Publication is already durable; a failed hint update cannot undo it.
-        if let Err(error) = raise_hint(
-            store,
-            namespace_id,
-            candidate.manifest().manifest_no,
-            candidate.folded_wal_no(),
-            None,
-        )
-        .await
+        if let Err(error) =
+            raise_hint(store, namespace_id, candidate.manifest().manifest_no, None).await
         {
             tracing::warn!(namespace_id = namespace_id.as_str(), error = %error, "manifest discovery hint update failed");
         }

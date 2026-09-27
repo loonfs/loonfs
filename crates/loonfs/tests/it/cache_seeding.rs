@@ -126,14 +126,6 @@ async fn cold_discovery_seeds_projection_after_control_cache_eviction() {
         )
         .await
         .expect("publish directory");
-    fs.writer.publisher().drain().await.expect("finish hints");
-    let head = loonfs_core::control::load_namespace_read_state(&object_store, &namespace_id)
-        .await
-        .expect("published head");
-    loonfs_core::control::raise_namespace_hint(&object_store, &namespace_id, head.wal_no, None)
-        .await
-        .expect("raise hint without changing visible state");
-
     fs.writer
         .prepare_file_bytes(&other_namespace_id, b"pending")
         .await

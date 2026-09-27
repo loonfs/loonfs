@@ -2332,7 +2332,6 @@ async fn gc_keeps_pinned_and_current_numbers_and_preserves_discovery_from_a_lagg
         &HintPayload {
             namespace_id: namespace_id.clone(),
             manifest_no: ManifestNo(1),
-            wal_no: loonfs_api::WalNo(0),
         },
     )
     .expect("hint");
