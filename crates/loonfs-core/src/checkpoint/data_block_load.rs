@@ -1,9 +1,9 @@
 //! Fetching, decoding, coalescing, and cache publication for SST data blocks.
 //!
 //! Point loads consult the per-view memo, the decoded block cache, and the
-//! node-local cache of stored bytes. Span loads skip the stored-byte tier
+//! node-local cache of stored bytes. Scan loads skip the stored-byte tier
 //! because it answers one block per awaited read, turning a wide scan into
-//! tens of thousands of serial point reads. Spans use the decoded caches and
+//! tens of thousands of serial point reads. Scans use the decoded caches and
 //! coalesced store GETs, and they do not populate the stored-byte tier.
 
 use super::block_fetch::{
@@ -20,7 +20,9 @@ use loonfs_api::wire::manifest::{
     InodeRecord, MetadataRow, MetadataSegmentRef, RevisionRecord, SubtreeTombstoneRecord,
     TombstoneRowAction,
 };
-use loonfs_api::wire::sst_blocks::{decode_data_block, DecodedDataBlock, SegmentIndexEntry};
+use loonfs_api::wire::sst_blocks::{
+    decode_data_block, BlockHandle, DecodedDataBlock, SegmentIndexEntry,
+};
 use loonfs_api::wire::wal::{WalCommitPayload, WalDelta};
 use loonfs_api::ActorId;
 use loonfs_objectstore::keys::metadata_segment_object_key;
@@ -47,6 +49,9 @@ pub(super) async fn load_segment_data_block<S: ObjectStore + ?Sized>(
         return Ok(block);
     }
     let fetch = || async {
+        if let Some(bytes) = memo.and_then(|memo| memo.stored(&cache_key)) {
+            return decode_stored_data(descriptor, &handle, &bytes);
+        }
         // Between the decoded cache above and the store below: a local copy
         // of the same stored bytes.
         if let Some(decoded) = stored_block_section(
@@ -88,6 +93,80 @@ pub(super) async fn load_segment_data_block<S: ObjectStore + ?Sized>(
         memo.record(&cache_key, &block);
     }
     block.into_data(&metadata_segment_object_key(descriptor))
+}
+
+pub(super) async fn load_segment_data_block_with_readahead<S: ObjectStore + ?Sized>(
+    store: &S,
+    segment_cache: Option<&MetadataSegmentCache>,
+    memo: Option<&SessionBlockMemo>,
+    descriptor: &MetadataSegmentRef,
+    entries: &[SegmentIndexEntry],
+) -> Result<Arc<DecodedDataBlock>, ManifestLoadError> {
+    let handle = entries[0].block;
+    let cache_key =
+        segment_block_cache_key(descriptor, MetadataSegmentBlockKind::Data, handle.offset);
+    if let Some(DecodedMetadataSegmentBlock::Data { block, .. }) =
+        memo.and_then(|memo| memo.get(&cache_key))
+    {
+        return Ok(block);
+    }
+    let fetch = || async {
+        if let Some(bytes) = memo.and_then(|memo| memo.stored(&cache_key)) {
+            return decode_stored_data(descriptor, &handle, &bytes);
+        }
+        let read_count = entries
+            .iter()
+            .take_while(|entry| {
+                entry.block.offset == handle.offset
+                    || entry.block.offset + u64::from(entry.block.stored_bytes) - handle.offset
+                        <= MAX_BULK_LOAD_BYTES
+            })
+            .count();
+        let entries = &entries[..read_count];
+        let last = entries[entries.len() - 1].block;
+        let object_key = metadata_segment_object_key(descriptor);
+        let bytes = load_section_bytes(
+            store,
+            &object_key,
+            handle.offset,
+            last.offset + u64::from(last.stored_bytes) - handle.offset,
+        )
+        .await?;
+        if let Some(memo) = memo {
+            for entry in &entries[1..] {
+                let start = (entry.block.offset - handle.offset) as usize;
+                memo.record_stored(
+                    &segment_block_cache_key(
+                        descriptor,
+                        MetadataSegmentBlockKind::Data,
+                        entry.block.offset,
+                    ),
+                    &bytes[start..start + entry.block.stored_bytes as usize],
+                );
+            }
+        }
+        let bytes = &bytes[..handle.stored_bytes as usize];
+        decode_stored_data(descriptor, &handle, bytes)
+    };
+    let block = match segment_cache {
+        Some(cache) => cache.get_or_load(&cache_key, fetch).await?,
+        None => fetch().await?,
+    };
+    if let Some(memo) = memo {
+        memo.record(&cache_key, &block);
+    }
+    block.into_data(&metadata_segment_object_key(descriptor))
+}
+
+fn decode_stored_data(
+    descriptor: &MetadataSegmentRef,
+    handle: &BlockHandle,
+    bytes: &[u8],
+) -> Result<DecodedMetadataSegmentBlock, ManifestLoadError> {
+    Ok(decoded_data_cache_block(
+        decode_data_block(bytes, handle)
+            .map_err(|err| segment_codec_error(&metadata_segment_object_key(descriptor), err))?,
+    ))
 }
 
 pub(super) fn decoded_data_cache_block(block: DecodedDataBlock) -> DecodedMetadataSegmentBlock {
@@ -142,6 +221,16 @@ pub(super) async fn load_segment_data_block_span<S: ObjectStore + ?Sized>(
                 blocks[position] = Some(block);
                 continue;
             }
+        }
+        if let Some(bytes) = memo.and_then(|memo| memo.stored(&probe_key)) {
+            let decoded = decode_stored_data(descriptor, &handle, &bytes)?;
+            if let Some(memo) = memo {
+                memo.record(&probe_key, &decoded);
+            }
+            if let Some(cache) = segment_cache {
+                cache.insert(probe_key.clone(), decoded.clone());
+            }
+            blocks[position] = Some(decoded.into_data(&metadata_segment_object_key(descriptor))?);
         }
     }
 

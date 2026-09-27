@@ -23,6 +23,7 @@ use std::sync::Arc;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Readahead {
     Enabled,
+    Stored,
     Disabled,
 }
 
@@ -43,8 +44,7 @@ pub(crate) struct VerifiedMetadataSegments<'a, S: ObjectStore + ?Sized> {
     /// through the manifest cache entry. Scans merge globally unique row keys
     /// and do not depend on this order.
     pub(super) scan_runs: Arc<Vec<MetadataRunManifest>>,
-    /// Per-view memo of decoded blocks: one operation never re-fetches a
-    /// block it already saw, with or without a shared cache attached.
+    /// Retains fetched blocks within the operation's data budget.
     pub(super) block_memo: SessionBlockMemo,
 }
 
@@ -83,7 +83,7 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataSegments<'_, S> {
         // Matching on the stored row key: the scan already selected the rows
         // by that key, and recomputing keys from rows allocates per row.
         Ok(self
-            .scan_prefix_rows(family, key, Some(filter_probe), Readahead::Enabled)
+            .scan_prefix_rows(family, key, Some(filter_probe), Readahead::Stored)
             .await?
             .into_iter()
             .find(|(row_key, _)| row_key == key)
@@ -181,7 +181,7 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataSegments<'_, S> {
                 upper_bound,
                 limit,
                 Some(filter_probe),
-                Readahead::Enabled,
+                Readahead::Stored,
             )
             .await?,
         ))

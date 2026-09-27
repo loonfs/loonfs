@@ -1,5 +1,6 @@
 //! Checkpoint metadata cache, scan sharing, filters, and lookup behavior.
 
+use super::super::block_load::load_manifest_segment_rows_in_key_range_with_cache;
 use super::*;
 
 async fn eight_files_one_row_per_segment<S: ObjectStore + ?Sized>(
@@ -874,12 +875,7 @@ async fn a_cold_local_block_cache_takes_every_section_one_fetch_produced() {
             entry.block.offset,
         )
     }));
-    for key in expected {
-        assert!(
-            offered.contains(&key),
-            "the fetch did not offer {key:?} to the local cache"
-        );
-    }
+    assert_eq!(offered, expected);
 }
 
 #[tokio::test]
@@ -1375,6 +1371,70 @@ async fn a_span_load_never_reads_or_writes_the_local_block_cache() {
         calls_before,
         "a span load must perform no local-cache gets or inserts"
     );
+}
+
+#[tokio::test]
+async fn deferred_lookup_reads_never_read_or_write_local_data_blocks() {
+    let (_temp_dir, store, descriptor, _) = multi_block_direntry_segment().await;
+    let expected = segment_rows(&store, &descriptor).await;
+    for retain_local_data in [true, false] {
+        let blocks = Arc::new(RecordingStoredMetadataBlockCache::new());
+        let index = warm_local_block_cache(&store, &descriptor, &blocks).await;
+        if !retain_local_data {
+            for entry in index.iter() {
+                blocks.invalidate(&stored_key(
+                    &descriptor,
+                    StoredMetadataBlockKind::Data,
+                    entry.block.offset,
+                ));
+            }
+        }
+        let cache = segment_cache_over(&blocks);
+        let memo = load::SessionBlockMemo::default();
+        let calls_before = blocks.call_count();
+        store.reset();
+        load::load_segment_filter(&store, Some(&cache), &memo, &descriptor)
+            .await
+            .expect("cached filter");
+        for row in &expected[..2] {
+            let loaded = load_manifest_segment_rows_in_key_range_with_cache(
+                &store,
+                Some(&cache),
+                &memo,
+                &descriptor,
+                ChangeSeq(u64::MAX),
+                &row.row_key_for_family(descriptor.family),
+                None,
+                1,
+                scan::Readahead::Stored,
+            )
+            .await
+            .expect("lookup rows");
+            assert_eq!(loaded.rows().collect::<Vec<_>>(), vec![row]);
+        }
+        assert_eq!(store.count(OperationClass::Read), 1);
+        assert_eq!(
+            &blocks.calls()[calls_before..],
+            &[
+                RecordedStoredMetadataBlockCall::Get {
+                    key: stored_key(
+                        &descriptor,
+                        StoredMetadataBlockKind::Filter,
+                        descriptor.filter_block.offset,
+                    ),
+                    hit: true,
+                },
+                RecordedStoredMetadataBlockCall::Get {
+                    key: stored_key(
+                        &descriptor,
+                        StoredMetadataBlockKind::Index,
+                        descriptor.index_block.offset,
+                    ),
+                    hit: true,
+                },
+            ]
+        );
+    }
 }
 
 #[tokio::test]
