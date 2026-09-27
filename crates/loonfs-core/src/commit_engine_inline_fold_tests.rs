@@ -28,6 +28,83 @@ fn content_puts(store: &RecordingStore<LocalFsStore>) -> Vec<String> {
         .collect()
 }
 
+#[tokio::test]
+async fn an_own_fold_replays_only_later_objects_after_projection_invalidation() {
+    let (_directory, store, mut engine, context) = setup().await;
+    let before = candidate(
+        "before",
+        vec![inline(&engine.namespace_id, Bytes::from_static(b"before"))],
+    );
+    publish(&mut engine, &store, &context, before)
+        .await
+        .expect("before");
+    let input = engine.begin_wal_fold().expect("fold input");
+    engine.invalidate_projection();
+    let during = candidate(
+        "during",
+        vec![inline(&engine.namespace_id, Bytes::from_static(b"during"))],
+    );
+    publish(&mut engine, &store, &context, during.clone())
+        .await
+        .expect("during");
+    let expected = store
+        .snapshot()
+        .into_iter()
+        .rev()
+        .find_map(|operation| match operation {
+            RecordedOperation::Put { key, .. }
+                if key.starts_with(&wal_segment_prefix(&engine.namespace_id)) =>
+            {
+                Some(key)
+            }
+            _ => None,
+        })
+        .expect("published WAL");
+    let folded = fold_wal_tail(
+        &store,
+        None,
+        &engine.namespace_id,
+        Some(input.clone()),
+        &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+    )
+    .await
+    .expect("fold");
+    engine.record_wal_fold(Some(&folded));
+    store.reset();
+    publish(&mut engine, &store, &context, during)
+        .await
+        .expect("retained receipt");
+    let operations = store.take();
+    let wal_gets = operations
+        .iter()
+        .filter(|operation| {
+            matches!(operation, RecordedOperation::Get { .. })
+                && operation
+                    .key()
+                    .starts_with(&wal_segment_prefix(&engine.namespace_id))
+        })
+        .map(RecordedOperation::key)
+        .collect::<Vec<_>>();
+    assert_eq!(wal_gets, vec![expected.as_str()]);
+    assert!(
+        !operations
+            .iter()
+            .any(|operation| operation.key().ends_with("hint.json")
+                || matches!(
+                    operation,
+                    RecordedOperation::Head { .. } | RecordedOperation::Put { .. }
+                )),
+        "{operations:?}"
+    );
+    assert_eq!(
+        engine
+            .wal_fold_input()
+            .expect("projection")
+            .wal_tail_segments,
+        1
+    );
+}
+
 pub(super) fn assert_content_before_metadata(store: &RecordingStore<LocalFsStore>, count: usize) {
     let operations = store.snapshot();
     let first_metadata = operations

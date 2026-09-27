@@ -17,6 +17,7 @@ use crate::error::{CoreError, MetadataProjectionLoadError};
 use crate::metadata::MetadataState;
 use crate::namespace::basis::MetadataBasis;
 use crate::namespace::bootstrap::bootstrap_metadata_state;
+use crate::namespace::control::LoadedManifest;
 use crate::namespace::state::NamespaceReadState;
 use loonfs_api::wire::control::ManifestRef;
 use loonfs_api::wire::manifest::{decode_namespace_manifest_json, NamespaceManifestEnvelope};
@@ -109,7 +110,49 @@ pub(crate) async fn load_basis_metadata_segments<'a, S: ObjectStore + ?Sized>(
 ) -> crate::error::Result<LoadedMetadataBasis<'a, S>> {
     let manifest = basis.manifest();
     let segments = load_manifest_segments(store, segment_cache, manifest).await?;
-    Ok(LoadedMetadataBasis {
+    Ok(metadata_basis_from_segments(segments))
+}
+
+pub(crate) fn metadata_basis_from_manifest<'a, S: ObjectStore + ?Sized>(
+    store: &'a S,
+    segment_cache: Option<&'a MetadataSegmentCache>,
+    manifest: &LoadedManifest,
+) -> LoadedMetadataBasis<'a, S> {
+    let scan_runs = Arc::new(runs_in_reorganization_order(
+        manifest.state.envelope.payload(),
+    ));
+    if let Some(cache) = segment_cache {
+        cache.insert(
+            MetadataSegmentCacheKey {
+                identity: manifest.object_key.clone(),
+                block_kind: MetadataSegmentBlockKind::Manifest,
+                block_offset: 0,
+            },
+            DecodedMetadataSegmentBlock::Manifest {
+                manifest: (
+                    Arc::clone(&manifest.state.envelope),
+                    Arc::clone(&scan_runs),
+                    manifest.manifest_bytes,
+                ),
+                decoded_bytes: (manifest.manifest_bytes as usize).saturating_mul(2),
+            },
+        );
+    }
+    metadata_basis_from_segments(VerifiedMetadataSegments {
+        store,
+        segment_cache,
+        manifest_object_key: manifest.object_key.clone(),
+        manifest: Some(Arc::clone(&manifest.state.envelope)),
+        manifest_bytes: manifest.manifest_bytes,
+        scan_runs,
+        block_memo: SessionBlockMemo::default(),
+    })
+}
+
+fn metadata_basis_from_segments<S: ObjectStore + ?Sized>(
+    segments: VerifiedMetadataSegments<'_, S>,
+) -> LoadedMetadataBasis<'_, S> {
+    LoadedMetadataBasis {
         base_state: if segments.manifest().payload().runs.is_empty() {
             bootstrap_metadata_state(
                 segments.manifest().payload().created_at_ms,
@@ -119,7 +162,7 @@ pub(crate) async fn load_basis_metadata_segments<'a, S: ObjectStore + ?Sized>(
             MetadataState::default()
         },
         segments,
-    })
+    }
 }
 
 /// Loads and validates only the manifest envelope, without fetching its

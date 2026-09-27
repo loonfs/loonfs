@@ -3,7 +3,8 @@
 use crate::control_update::{settle_control_write, CasAttempt, WriteEvidence};
 use crate::error::{CoreError, Result};
 use crate::namespace::control::{
-    load_current_manifest_if_present, load_manifest_by_number, raise_hint, CurrentManifest,
+    load_current_manifest_if_present, load_current_manifest_with_hint, load_manifest_by_number,
+    raise_hint, CurrentManifest, LoadedHint, LoadedManifest,
 };
 use crate::time::Deadline;
 use bytes::Bytes;
@@ -49,27 +50,33 @@ pub(crate) async fn update_manifest<S, T, F, Fut>(
     namespace_id: &NamespaceId,
     deadline: &Deadline,
     mut change: F,
-) -> Result<T>
+) -> Result<(T, LoadedManifest, LoadedHint)>
 where
     S: ObjectStore + ?Sized,
     F: FnMut(NamespaceManifestPayload) -> Fut,
     Fut: std::future::Future<Output = Result<ManifestChange<T>>>,
 {
     loop {
-        let current = crate::namespace::control::load_current_manifest(store, namespace_id).await?;
+        let (current, hint) = load_current_manifest_with_hint(store, namespace_id).await?;
         let predecessor = current.state.envelope.payload().manifest_no;
         let (mut payload, result) = match change(current.state.envelope.payload().clone()).await? {
             ManifestChange::Next(payload, result) => (*payload, result),
-            ManifestChange::Finished(result) => return Ok(result),
+            ManifestChange::Finished(result) => return Ok((result, current, hint)),
             ManifestChange::Again => continue,
         };
         payload.manifest_no = super::flush::next_manifest_no_after(predecessor)?;
         let manifest = encode_manifest(payload)?;
-        if matches!(
-            publish_manifest(store, manifest, deadline).await?,
-            ManifestPublicationOutcome::Published(_)
-        ) {
-            return Ok(result);
+        let manifest_bytes = manifest.as_bytes().len() as u64;
+        if let ManifestPublicationOutcome::Published(state) =
+            publish_manifest_from(store, manifest, deadline, Some(current), Some(hint.clone()))
+                .await?
+        {
+            let loaded = LoadedManifest {
+                object_key: metadata_manifest_object(namespace_id, &state.manifest().manifest_no),
+                manifest_bytes,
+                state,
+            };
+            return Ok((result, loaded, hint));
         }
     }
 }
@@ -85,6 +92,18 @@ pub(crate) async fn publish_manifest<S: ObjectStore + ?Sized>(
     store: &S,
     manifest: EncodedEnvelope<NamespaceManifestPayload>,
     deadline: &Deadline,
+) -> Result<ManifestPublicationOutcome> {
+    let namespace_id = &manifest.envelope().payload().namespace_id;
+    let current = load_current_manifest_if_present(store, namespace_id).await?;
+    publish_manifest_from(store, manifest, deadline, current, None).await
+}
+
+async fn publish_manifest_from<S: ObjectStore + ?Sized>(
+    store: &S,
+    manifest: EncodedEnvelope<NamespaceManifestPayload>,
+    deadline: &Deadline,
+    current: Option<LoadedManifest>,
+    hint: Option<LoadedHint>,
 ) -> Result<ManifestPublicationOutcome> {
     let namespace_id = manifest.envelope().payload().namespace_id.clone();
     let namespace_id = &namespace_id;
@@ -104,9 +123,6 @@ pub(crate) async fn publish_manifest<S: ObjectStore + ?Sized>(
     let candidate = CurrentManifest {
         envelope: std::sync::Arc::new(manifest.envelope().clone()),
     };
-    let current = load_current_manifest_if_present(store, namespace_id)
-        .await
-        .map_err(CoreError::ControlObjectLoad)?;
     if let Some(current) = &current {
         // A tombstone ends its namespace; work that raced the deletion stops here.
         if current.state.envelope.payload().status.is_deleted()
@@ -217,7 +233,7 @@ pub(crate) async fn publish_manifest<S: ObjectStore + ?Sized>(
     {
         // Publication is already durable; a failed hint update cannot undo it.
         if let Err(error) =
-            raise_hint(store, namespace_id, candidate.manifest().manifest_no, None).await
+            raise_hint(store, namespace_id, candidate.manifest().manifest_no, hint).await
         {
             tracing::warn!(namespace_id = namespace_id.as_str(), error = %error, "manifest discovery hint update failed");
         }

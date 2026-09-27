@@ -51,7 +51,7 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
 ) -> Result<AdvanceRetentionResponse> {
     let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
-    let floor = update_manifest(store, namespace_id, &deadline, |mut payload| async move {
+    let (floor, _, _) = update_manifest(store, namespace_id, &deadline, |mut payload| async move {
         ensure_namespace_live(&NamespaceReadState::from(&payload))?;
         let target = payload.head_seq;
         if payload.retention_floor_seq >= target {

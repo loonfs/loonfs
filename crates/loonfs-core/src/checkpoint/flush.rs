@@ -289,7 +289,7 @@ pub(super) async fn load_manifest_projection<'a, S: ObjectStore + ?Sized>(
             },
         ));
     }
-    let loaded_basis = load_basis_metadata_segments(store, None, &basis).await?;
+    let loaded_basis = super::load::metadata_basis_from_manifest(store, None, &anchor.manifest);
     let manifest_head = loaded_basis.replay_head(&head);
     let manifest_segments = loaded_basis.segments;
     let replayed = replay_discovered_tail(

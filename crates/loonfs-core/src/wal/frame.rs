@@ -86,6 +86,18 @@ impl ValidatedWalTail {
     pub(crate) fn segments(&self) -> &[ValidatedWalSegment] {
         &self.segments
     }
+
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "published WAL framing owns its numbered object key"
+    )]
+    pub(crate) fn push_published(&mut self, envelope: WalSegmentEnvelope) {
+        let payload = envelope.payload();
+        let object_key =
+            loonfs_objectstore::keys::wal_segment(&payload.namespace_id, &payload.wal_no);
+        self.segments
+            .push(ValidatedWalSegment::new(object_key, envelope));
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]

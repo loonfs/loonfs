@@ -50,4 +50,5 @@ pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
         }
     })
     .await
+    .map(|(result, _, _)| result)
 }

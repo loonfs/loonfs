@@ -1,6 +1,6 @@
 //! Loads a manifest and rechecks its successor around WAL tip discovery.
 
-use crate::checkpoint::{load_basis_metadata_segments, MetadataSegmentCache};
+use crate::checkpoint::{metadata_basis_from_manifest, MetadataSegmentCache};
 use crate::control_object::ControlObjectLoadError;
 use crate::error::{CoreError, Result as CoreResult};
 use crate::namespace::basis::MetadataBasis;
@@ -13,6 +13,7 @@ use loonfs_api::{ChangeSeq, ManifestNo, NamespaceId};
 use loonfs_objectstore::ObjectStore;
 use std::sync::Arc;
 
+#[derive(Debug, Clone)]
 pub struct NamespaceReadAnchor {
     pub read_state: NamespaceReadState,
     pub(crate) manifest: LoadedManifest,
@@ -34,9 +35,19 @@ pub async fn load_read_anchor<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> Result<NamespaceReadAnchor, ControlObjectLoadError> {
-    let mut observed =
+    let observed =
         crate::time::Observation::now(Arc::new(crate::time::StdMonotonicTimer::default()));
-    let (mut manifest, mut hint) = load_current_manifest_with_hint(store, namespace_id).await?;
+    let (manifest, hint) = load_current_manifest_with_hint(store, namespace_id).await?;
+    load_read_anchor_from_manifest(store, namespace_id, manifest, hint, observed).await
+}
+
+pub(crate) async fn load_read_anchor_from_manifest<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    mut manifest: LoadedManifest,
+    mut hint: LoadedHint,
+    mut observed: crate::time::Observation,
+) -> Result<NamespaceReadAnchor, ControlObjectLoadError> {
     loop {
         match discover_tail(store, namespace_id, &manifest).await {
             Ok(DiscoveredTail {
@@ -91,7 +102,7 @@ pub async fn project_anchor_tail<S: ObjectStore + ?Sized>(
     segment_cache: Option<&MetadataSegmentCache>,
     anchor: &NamespaceReadAnchor,
 ) -> CoreResult<Arc<ProjectedWalTail>> {
-    let loaded_basis = load_basis_metadata_segments(store, segment_cache, &anchor.basis()).await?;
+    let loaded_basis = metadata_basis_from_manifest(store, segment_cache, &anchor.manifest);
     let replayed = replay_discovered_tail(
         &loaded_basis.replay_head(&anchor.read_state),
         &anchor.read_state,

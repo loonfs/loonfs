@@ -27,4 +27,5 @@ pub(crate) async fn claim_compactor<S: ObjectStore + ?Sized>(
         Ok(ManifestChange::Next(Box::new(payload), epoch))
     })
     .await
+    .map(|(result, _, _)| result)
 }
