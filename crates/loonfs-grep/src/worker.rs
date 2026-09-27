@@ -6,11 +6,11 @@
 //! many gram posting lists. The mid level absorbs frequent delta merges
 //! without rewriting most of the base on every step.
 
-use crate::cache::{GrepBlockCache, DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES};
+use crate::cache::GrepBlockCache;
 use crate::codec::{
     extract_grams, lookup::GRAM_ROW_PREFIX, Gram, GramPosting, IndexRow, INDEX_GRAMS_MAX_FILE_BYTES,
 };
-use crate::index_read::{load_data_block, load_index_block};
+use crate::index_read::{load_data_block_span, load_index_block};
 use crate::keyspace::{hint_key, segment_key};
 use crate::manifest::{
     load_current_grep_manifest, publish_grep_manifest, ChangeFeedResume, GrepIndexState,
@@ -163,7 +163,6 @@ pub struct GrepWorker<S> {
     store: S,
     reader: FsReader,
     maintenance: FsMaintenance,
-    block_cache: Arc<GrepBlockCache>,
 }
 
 /// The runtime handles carry no debug representation — they are clones of a
@@ -179,34 +178,23 @@ impl<S: std::fmt::Debug> std::fmt::Debug for GrepWorker<S> {
 
 impl<S: ObjectStore + Clone> GrepWorker<S> {
     /// Creates a worker over one grep-keyspace store handle and the runtime
-    /// handles it reads and checkpoints through, with a fresh default-sized
-    /// block cache.
+    /// handles it reads and checkpoints through.
     pub fn new(store: S, reader: FsReader, maintenance: FsMaintenance) -> Self {
-        Self::with_block_cache(
-            store,
-            reader,
-            maintenance,
-            Arc::new(GrepBlockCache::new(
-                loonfs::DecodedBlockCacheConfig::with_max_decoded_bytes(
-                    DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
-                ),
-            )),
-        )
-    }
-
-    /// Creates a worker over a host-composed process-wide grep block cache.
-    pub fn with_block_cache(
-        store: S,
-        reader: FsReader,
-        maintenance: FsMaintenance,
-        block_cache: Arc<GrepBlockCache>,
-    ) -> Self {
         Self {
             store,
             reader,
             maintenance,
-            block_cache,
         }
+    }
+
+    /// Accepts the host's query cache; reorganization reads bypass it.
+    pub fn with_block_cache(
+        store: S,
+        reader: FsReader,
+        maintenance: FsMaintenance,
+        _block_cache: Arc<GrepBlockCache>,
+    ) -> Self {
+        Self::new(store, reader, maintenance)
     }
 
     /// This worker's filesystem reads for one namespace.
@@ -1077,7 +1065,6 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             .collect::<Result<Vec<_>>>()?;
         let merged = merge_snapshot_range(
             &self.store,
-            &self.block_cache,
             namespace_id,
             &snapshot,
             &reorganize.row_key_cursor,
@@ -1157,7 +1144,6 @@ struct MergedRange {
 
 async fn merge_snapshot_range<S: ObjectStore + ?Sized>(
     store: &S,
-    block_cache: &GrepBlockCache,
     namespace_id: &NamespaceId,
     snapshot: &[&GrepSegmentRef],
     cursor: &str,
@@ -1170,7 +1156,6 @@ async fn merge_snapshot_range<S: ObjectStore + ?Sized>(
     };
     let loader = GrepSegmentBlockLoader {
         store,
-        block_cache,
         namespace_id,
     };
     let mut readers: Vec<SegmentRowIterator<IndexRow, GrepSegmentRef, ()>> = snapshot
@@ -1255,7 +1240,6 @@ fn reorganize_snapshot_row(
 
 struct GrepSegmentBlockLoader<'a, S: ?Sized> {
     store: &'a S,
-    block_cache: &'a GrepBlockCache,
     namespace_id: &'a NamespaceId,
 }
 
@@ -1266,7 +1250,7 @@ impl<S: ObjectStore + ?Sized> SegmentBlockLoader<IndexRow, GrepSegmentRef>
 
     async fn load_index(&self, segment: GrepSegmentRef) -> Result<Arc<Vec<SegmentIndexEntry>>> {
         let object_key = segment_key(self.namespace_id, &segment.segment_id);
-        load_index_block(self.store, self.block_cache, &object_key, &segment).await
+        load_index_block(self.store, None, &object_key, &segment).await
     }
 
     async fn load_data_blocks(
@@ -1275,19 +1259,7 @@ impl<S: ObjectStore + ?Sized> SegmentBlockLoader<IndexRow, GrepSegmentRef>
         entries: Vec<SegmentIndexEntry>,
     ) -> Result<Vec<Arc<DecodedDataBlock<IndexRow>>>> {
         let object_key = segment_key(self.namespace_id, &segment.segment_id);
-        let object_key = &object_key;
-        let segment_id = &segment.segment_id;
-        try_join_all(entries.into_iter().map(|entry| async move {
-            load_data_block(
-                self.store,
-                self.block_cache,
-                object_key,
-                segment_id,
-                &entry.block,
-            )
-            .await
-        }))
-        .await
+        load_data_block_span(self.store, None, &object_key, &segment.segment_id, &entries).await
     }
 }
 

@@ -984,7 +984,7 @@ async fn an_oversized_tail_candidate_is_skipped_without_a_content_read() {
 }
 
 #[tokio::test]
-async fn worker_and_service_share_decoded_index_blocks() {
+async fn reorganization_does_not_warm_the_query_cache() {
     let temp_dir = tempdir().expect("tempdir");
     let raw_store = Arc::new(RecordingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
@@ -1010,7 +1010,6 @@ async fn worker_and_service_share_decoded_index_blocks() {
         .expect("create namespace");
     host.enable_grep_index(&namespace_id).await.expect("enable");
 
-    // Build eight separate delta runs without invoking reorganization.
     for round in 1..=8u32 {
         writer
             .put_file_bytes(
@@ -1052,25 +1051,21 @@ async fn worker_and_service_share_decoded_index_blocks() {
         "the worker must load its snapshot's segment blocks"
     );
     let stats_after_reorganization = host.block_cache.stats();
-    assert!(
-        stats_after_reorganization.inserts > stats_before_reorganization.inserts,
-        "the worker must publish decoded blocks to the shared cache"
-    );
+    assert_eq!(stats_after_reorganization, stats_before_reorganization);
 
     let gets_before_query = raw_store.count(OperationClass::Read);
     let result = host
         .grep(&namespace_id, &request("needle"), default_page_limit())
         .await
-        .expect("grep after worker load");
+        .expect("grep after reorganization");
     assert_eq!(result.matches.len(), 8);
-    assert_eq!(
-        raw_store.count(OperationClass::Read) - gets_before_query,
-        0,
-        "the service must not refetch index-segment sections the worker warmed"
+    assert!(
+        raw_store.count(OperationClass::Read) > gets_before_query,
+        "the query must load its segment blocks"
     );
     assert!(
-        host.block_cache.stats().hits > stats_after_reorganization.hits,
-        "the service must hit blocks inserted by the worker"
+        host.block_cache.stats().inserts > stats_after_reorganization.inserts,
+        "the query must cache its segment blocks"
     );
 
     writer.shutdown().await.expect("writer shutdown");

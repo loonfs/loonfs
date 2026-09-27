@@ -507,7 +507,7 @@ async fn segment_postings_for_gram<S: ObjectStore + ?Sized>(
     if !admitted {
         return Ok(postings);
     }
-    let entries = load_index_block(store, block_cache, &object_key, descriptor).await?;
+    let entries = load_index_block(store, Some(block_cache), &object_key, descriptor).await?;
     let range =
         index_blocks_for_key_range(&entries, &gram_lookup.prefix, gram_lookup.upper.as_deref());
     // The range's blocks are independent ranged GETs, so they fan out
