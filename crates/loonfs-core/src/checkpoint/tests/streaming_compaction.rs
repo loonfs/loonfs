@@ -16,6 +16,7 @@ use super::super::streaming_compaction::{
     MetadataCompactionSpec, MetadataMergeResult,
 };
 use super::*;
+use crate::store_waves::STORE_READ_WAVE;
 use crate::time::Deadline;
 use crate::time::{MonotonicTimer, StdMonotonicTimer};
 use loonfs_objectstore::keys::metadata_segment_prefix;
@@ -1852,7 +1853,7 @@ async fn large_compaction_inputs(
 async fn a_merge_reads_byte_sized_spans_concurrently_with_bounded_decoded_input() {
     use super::super::compaction_merge::{
         refill_iterators, MetadataSegmentBlockLoader, MetadataSegmentRowIterator,
-        ITERATOR_FETCH_CONCURRENCY, ITERATOR_FETCH_TARGET_BYTES, MAX_MERGE_DECODED_INPUT_BYTES,
+        ITERATOR_FETCH_TARGET_BYTES, MAX_MERGE_DECODED_INPUT_BYTES,
     };
 
     let directory = tempdir().expect("directory");
@@ -1908,7 +1909,7 @@ async fn a_merge_reads_byte_sized_spans_concurrently_with_bounded_decoded_input(
     let expected_gets = input_bytes.div_ceil(ITERATOR_FETCH_TARGET_BYTES);
     assert!((expected_gets..=expected_gets + indexes.len()).contains(&data_gets));
     assert!(data_gets * 8 < old_gets);
-    assert!((2..=ITERATOR_FETCH_CONCURRENCY).contains(&store.reads().peak_in_flight));
+    assert!((2..=STORE_READ_WAVE).contains(&store.reads().peak_in_flight));
 
     let local = store.inner().inner();
     let mut actual = Vec::new();
@@ -1966,7 +1967,7 @@ async fn a_merge_reads_byte_sized_spans_concurrently_with_bounded_decoded_input(
     assert_eq!(data_gets, iterators.len());
     assert!(decoded_bytes <= MAX_MERGE_DECODED_INPUT_BYTES);
     assert!(decoded_bytes > MAX_MERGE_DECODED_INPUT_BYTES / 2);
-    assert!(store.reads().peak_in_flight <= ITERATOR_FETCH_CONCURRENCY);
+    assert!(store.reads().peak_in_flight <= STORE_READ_WAVE);
 }
 
 #[tokio::test]
@@ -2002,11 +2003,9 @@ async fn a_merge_keeps_its_reads_and_its_decoded_blocks_bounded() {
         panic!("nothing cancelled this job");
     };
 
-    // Eight iterators refill at once at most, and each refill is one span
-    // fetch, so eight reads is the widest the job ever goes.
     let reads = store.reads();
     assert!(
-        reads.peak_in_flight <= 8,
+        reads.peak_in_flight <= STORE_READ_WAVE,
         "the job overlapped {} reads at once",
         reads.peak_in_flight
     );
@@ -2066,7 +2065,7 @@ async fn a_merge_keeps_its_reads_and_its_decoded_blocks_bounded() {
     .await
     .expect("merge the window inside a step");
     assert!(
-        store.reads().peak_in_flight <= 8,
+        store.reads().peak_in_flight <= STORE_READ_WAVE,
         "the step's merge overlapped {} reads at once",
         store.reads().peak_in_flight
     );

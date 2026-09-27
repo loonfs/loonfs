@@ -12,13 +12,12 @@ use super::{
     RecoverableDeletion, ResolvedVisiblePath, RevisionRecord, SubtreeTombstoneRecord,
 };
 use crate::error::CoreError;
+use crate::store_waves::STORE_READ_WAVE;
 use futures::{StreamExt, TryStreamExt};
 use loonfs_api::wire::manifest::lookup_keys;
 use loonfs_api::{AbsolutePath, ChangeSeq, InodeId, InodeKind, NameKey, ROOT_INODE_ID};
 use loonfs_objectstore::ObjectStore;
 use std::collections::{HashMap, VecDeque};
-
-const PAGE_READ_CONCURRENCY: usize = 16;
 
 pub(super) fn latest_visible_binding<'a>(
     rows: impl Iterator<Item = &'a DirentryBindingRecord>,
@@ -450,7 +449,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
                 fetch_active_subtree_tombstone(base, inode_id).await?,
             ))
         }))
-        .buffered(PAGE_READ_CONCURRENCY)
+        .buffered(STORE_READ_WAVE)
         .try_collect()
         .await?;
         self.counters.list_preload_child_lookups = self
@@ -685,7 +684,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
                     fetch_latest_revision_head_of_visible(base, inode_id).await?,
                 ))
             }))
-            .buffered(PAGE_READ_CONCURRENCY)
+            .buffered(STORE_READ_WAVE)
             .try_collect()
             .await?;
         self.latest_revision_head_cache.extend(loaded);
@@ -708,7 +707,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
             futures::stream::iter(pending.into_iter().map(|inode_id| async move {
                 Ok::<_, CoreError>((inode_id, base.latest_access_revision(inode_id).await?))
             }))
-            .buffered(PAGE_READ_CONCURRENCY)
+            .buffered(STORE_READ_WAVE)
             .try_collect()
             .await?;
         self.access_row_cache.extend(loaded);
@@ -788,7 +787,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
                     base.attributes_projection_at_visible_seq(inode_id).await?,
                 ))
             }))
-            .buffered(PAGE_READ_CONCURRENCY)
+            .buffered(STORE_READ_WAVE)
             .try_collect()
             .await?;
         self.attributes_cache.extend(loaded);

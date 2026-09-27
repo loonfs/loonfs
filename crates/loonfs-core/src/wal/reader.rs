@@ -12,14 +12,12 @@ use super::{
 use crate::error::MetadataProjectionLoadError;
 use crate::metadata::MetadataState;
 use crate::namespace::state::NamespaceReadState;
+use crate::store_waves::STORE_READ_WAVE;
 use futures::{stream, StreamExt};
 use loonfs_api::wire::wal::{decode_wal_segment_envelope_zstd, WalSegmentEnvelope};
 use loonfs_api::{ChangeSeq, NamespaceId, WalNo, WriterEpoch};
 use loonfs_objectstore::keys::wal_segment;
 use loonfs_objectstore::ObjectStore;
-
-// Each load has its own limit, and several loads can run at once in one process.
-pub(super) const WAL_REPLAY_READ_CONCURRENCY: usize = 8;
 
 // Missing and malformed objects still need their numbered key in caller diagnostics.
 pub(super) struct LoadedWalSegment {
@@ -149,7 +147,7 @@ pub(super) async fn load_wal_tail<S: ObjectStore + ?Sized>(
     );
     let mut loaded = stream::iter(request.base_wal_no.0..request.tip_wal_no.0)
         .map(|number| load_wal_segment(store, request.namespace_id, WalNo(number + 1)))
-        .buffered(WAL_REPLAY_READ_CONCURRENCY);
+        .buffered(STORE_READ_WAVE);
     let mut segments = Vec::new();
     while let Some(LoadedWalSegment {
         object_key,

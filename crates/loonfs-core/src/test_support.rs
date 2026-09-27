@@ -1,5 +1,8 @@
 //! Test helpers and recording implementations.
 
+/// Shares the read request bound with tests outside this crate.
+pub const STORE_READ_WAVE: usize = crate::store_waves::STORE_READ_WAVE;
+
 // These path-mutation helpers use dev-dependencies and are only needed by
 // in-crate checkpoint and planner tests.
 #[cfg(test)]

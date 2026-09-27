@@ -1,12 +1,13 @@
 //! Discovers the WAL tip and advances cached namespace views.
 
 use super::frame::{ValidatedWalTail, WalTailLoadError};
-use super::reader::{load_wal_segment, WalWalk, WAL_REPLAY_READ_CONCURRENCY};
+use super::reader::{load_wal_segment, WalWalk};
 use super::replay::project_validated_wal_tail;
 use crate::cache::WalTailProjectionCacheKey;
 use crate::control_object::ControlObjectLoadError;
 use crate::namespace::control::LoadedManifest;
 use crate::namespace::state::NamespaceReadState;
+use crate::store_waves::STORE_READ_WAVE;
 use crate::RuntimeReadContext;
 use futures::{stream, StreamExt};
 use loonfs_api::{NamespaceId, WalNo, MAX_PUBLIC_INTEGER};
@@ -33,10 +34,7 @@ pub(crate) async fn discover_tail<S: ObjectStore + ?Sized>(
     }
     let mut walk = WalWalk::after(namespace_id, head.wal_no, head.seq, head.writer_epoch);
     let mut window = 1;
-    // One pass reads the tail and finds its end: replay needs every object above the
-    // folded boundary anyway, so the walk keeps the bodies. Windows grow from one
-    // number to the replay concurrency; the last window can spend up to seven reads
-    // on absent numbers.
+    // Replay needs every object above the folded boundary, so discovery keeps the bodies.
     loop {
         let first = head.wal_no.0 + 1;
         let end = (head.wal_no.0 + window as u64).min(MAX_PUBLIC_INTEGER);
@@ -79,7 +77,7 @@ pub(crate) async fn discover_tail<S: ObjectStore + ?Sized>(
         if ended || end == MAX_PUBLIC_INTEGER {
             break;
         }
-        window = (window * 2).min(WAL_REPLAY_READ_CONCURRENCY);
+        window = (window * 2).min(STORE_READ_WAVE);
     }
     Ok(DiscoveredTail {
         head,
