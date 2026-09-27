@@ -8,6 +8,7 @@ use crate::commit::CommitFingerprint;
 use crate::context::MutationContext;
 use crate::error::{CoreError, Result, WriterFence};
 use crate::namespace::basis::MetadataBasis;
+use crate::namespace::control::LoadedManifest;
 use crate::namespace::read_anchor::NamespaceReadAnchor;
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::writer_epoch::acquire_writer;
@@ -528,7 +529,7 @@ pub struct NamespaceCommitEngine {
     publish_tail_projection: Option<PublishTailProjection>,
     projection_observed: Option<Observation>,
     acquired_anchor: Option<NamespaceReadAnchor>,
-    folded_basis: Option<MetadataBasis>,
+    folded_basis: Option<LoadedManifest>,
     fold_observed: Option<Observation>,
     /// When a store observation last confirmed the projection's basis manifest
     /// current: the discovery that loaded it, or a HEAD that found no successor.
@@ -660,7 +661,7 @@ impl NamespaceCommitEngine {
                         return;
                     }
                 }
-                self.folded_basis = Some(folded.basis.clone());
+                self.folded_basis = folded.published_manifest.clone();
                 self.basis_checked = self.fold_observed.take();
                 if self.projection_observed.is_none() {
                     self.projection_observed = self.basis_checked.clone();
@@ -812,10 +813,6 @@ impl NamespaceCommitEngine {
             folded_basis.as_ref(),
         )
         .await;
-        let projection_observed = self
-            .projection_observed
-            .clone()
-            .unwrap_or_else(|| attempt.clone());
         let (publish_view, projection) = match loaded {
             Ok(value) => {
                 if cold {
@@ -838,6 +835,15 @@ impl NamespaceCommitEngine {
                     resulting_read_state: None,
                 };
             }
+        };
+        let projection_observed = if publish_view.tail_discovered {
+            // Tail discovery observed the tip during this attempt, even when
+            // the basis came from an earlier fold.
+            attempt.clone()
+        } else {
+            self.projection_observed
+                .clone()
+                .unwrap_or_else(|| attempt.clone())
         };
 
         let published = crate::protocol::publish_namespace_commits_batch_against_publish_view(

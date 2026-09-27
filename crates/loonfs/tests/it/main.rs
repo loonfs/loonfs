@@ -32,6 +32,7 @@ mod namespace_advance_observer;
 mod namespace_sessions;
 mod pagination;
 mod publication;
+mod publish_discovery;
 mod read_snapshot;
 mod request_accounting;
 mod retained_views;

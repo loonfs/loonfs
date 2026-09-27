@@ -9,6 +9,7 @@ use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::limits::MAX_UNFLUSHED_WAL_SEGMENTS;
 use crate::metadata::{CommitReceiptRecord, MetadataView};
 use crate::namespace::basis::MetadataBasis;
+use crate::namespace::control::LoadedManifest;
 use crate::namespace::read_anchor::{load_read_anchor, NamespaceReadAnchor};
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::writer_epoch::ensure_writer_not_fenced;
@@ -24,6 +25,8 @@ use std::sync::Arc;
 pub(crate) struct PublishMetadataView<'a, S: ObjectStore + ?Sized> {
     pub(super) head: NamespaceReadState,
     pub(super) acquired_writer: AcquiredWriter,
+    /// The tip observation starts with this load rather than a retained view.
+    pub(crate) tail_discovered: bool,
     manifest_segments: VerifiedMetadataSegments<'a, S>,
     tail_state: Arc<ProjectedWalTail>,
     /// The WAL tail length when it has reached the write-stop bound, so the
@@ -161,7 +164,7 @@ impl PublishTailProjection {
 enum ViewSource<'p> {
     Cached(&'p PublishTailProjection),
     Cold(Box<NamespaceReadAnchor>),
-    Folded(&'p MetadataBasis),
+    Folded(&'p LoadedManifest),
 }
 
 pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
@@ -171,7 +174,7 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
     acquired_writer: AcquiredWriter,
     cached_projection: Option<&PublishTailProjection>,
     acquired_anchor: Option<NamespaceReadAnchor>,
-    folded_basis: Option<&MetadataBasis>,
+    folded_basis: Option<&LoadedManifest>,
 ) -> Result<(PublishMetadataView<'a, S>, PublishTailProjection)> {
     let source = if let Some(anchor) = acquired_anchor {
         ViewSource::Cold(Box::new(anchor))
@@ -185,20 +188,35 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
     let basis = match &source {
         ViewSource::Cached(cached) => cached.basis().clone(),
         ViewSource::Cold(anchor) => anchor.basis(),
-        ViewSource::Folded(basis) => (*basis).clone(),
+        ViewSource::Folded(manifest) => MetadataBasis(manifest.state.manifest()),
     };
     let loaded_basis = match &source {
         ViewSource::Cold(anchor) => {
             metadata_basis_from_manifest(store, segment_cache, &anchor.manifest)
         }
-        _ => load_basis_metadata_segments(store, segment_cache, &basis).await?,
+        ViewSource::Folded(manifest) => {
+            metadata_basis_from_manifest(store, segment_cache, manifest)
+        }
+        ViewSource::Cached(_) => load_basis_metadata_segments(store, segment_cache, &basis).await?,
     };
+    let discovered_tail = match &source {
+        ViewSource::Folded(manifest)
+            if cached_projection
+                .is_none_or(|cached| cached.head.wal_no <= manifest.state.folded_wal_no()) =>
+        {
+            Some(crate::wal::discover_tail(store, namespace_id, manifest).await?)
+        }
+        _ => None,
+    };
+    let tail_discovered = matches!(source, ViewSource::Cold(_)) || discovered_tail.is_some();
     let head = match &source {
         ViewSource::Cached(cached) => cached.head.clone(),
         ViewSource::Cold(anchor) => anchor.read_state.clone(),
         ViewSource::Folded(_) => {
             let mut head = NamespaceReadState::from(loaded_basis.segments.manifest().payload());
-            if let Some(cached) =
+            if let Some(discovered) = &discovered_tail {
+                head = discovered.head.clone();
+            } else if let Some(cached) =
                 cached_projection.filter(|cached| cached.head.wal_no > head.wal_no)
             {
                 head.seq = cached.head.seq;
@@ -222,20 +240,24 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
             load_publish_tail_projection(&head, basis, &loaded_basis, &anchor.tail)?
         }
         ViewSource::Folded(_) => {
-            let replayed = crate::wal::load_replayed_wal_tail(
-                store,
-                &loaded_basis.replay_head(&head),
-                &head,
-                &loaded_basis.base_state,
-            )
-            .await
-            .map_err(CoreError::MetadataProjection)?;
-            PublishTailProjection {
-                basis,
-                head: head.clone(),
-                wal_tail_segments: head.unfolded_wal_segments(),
-                tail_state: Arc::new(replayed.projected_tail),
-                fold: None,
+            if let Some(discovered) = discovered_tail {
+                load_publish_tail_projection(&head, basis, &loaded_basis, &discovered.segments)?
+            } else {
+                let replayed = crate::wal::load_replayed_wal_tail(
+                    store,
+                    &loaded_basis.replay_head(&head),
+                    &head,
+                    &loaded_basis.base_state,
+                )
+                .await
+                .map_err(CoreError::MetadataProjection)?;
+                PublishTailProjection {
+                    basis,
+                    head: head.clone(),
+                    wal_tail_segments: head.unfolded_wal_segments(),
+                    tail_state: Arc::new(replayed.projected_tail),
+                    fold: None,
+                }
             }
         }
     };
@@ -247,6 +269,7 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
         PublishMetadataView {
             head,
             acquired_writer,
+            tail_discovered,
             manifest_segments,
             tail_state,
             write_stop: (projection.wal_tail_segments >= MAX_UNFLUSHED_WAL_SEGMENTS)
