@@ -1,5 +1,8 @@
 //! Manifests, runs, and WAL objects protected by namespace retention and pins.
+//! Superseded manifests and their runs remain rooted while their successor is
+//! younger than the pass's grace window or has no provider timestamp.
 
+use super::reap::{grace_age, GraceAge};
 use crate::checkpoint::load_namespace_manifest_envelope_if_present;
 use crate::checkpoint::record::checkpoint_key_ids;
 use crate::context::MutationContext;
@@ -11,8 +14,10 @@ use futures::StreamExt;
 use loonfs_api::wire::manifest::NamespaceManifestPayload;
 use loonfs_api::{ManifestNo, NamespaceId, WalNo};
 use loonfs_objectstore::keys::{
-    checkpoint_prefix, metadata_manifest_object, metadata_segment_object_key,
+    checkpoint_prefix, metadata_manifest_object, metadata_manifest_prefix,
+    metadata_segment_object_key,
 };
+use loonfs_objectstore::layout::manifest_no_of;
 use loonfs_objectstore::ObjectStore;
 use std::collections::BTreeSet;
 
@@ -23,6 +28,8 @@ pub(super) enum RetirementState {
     Eligible,
 }
 
+/// Protects current and pinned manifests, plus superseded manifests whose
+/// successor is within the pass's grace window or has an unknown age.
 pub(super) struct LiveSet {
     pub(super) namespace_deleted: bool,
     pub(super) current_tombstone: Option<NamespaceManifestPayload>,
@@ -35,6 +42,8 @@ pub(super) struct LiveSet {
 }
 
 impl LiveSet {
+    /// Loads roots and their segments, including superseded manifests with a
+    /// young or undated successor regardless of the discovery hint.
     pub(super) async fn load<S: ObjectStore + ?Sized>(
         store: &S,
         namespace_id: &NamespaceId,
@@ -103,6 +112,29 @@ impl LiveSet {
                 | super::reap::CheckpointSweep::DeleteUser
                 | super::reap::CheckpointSweep::DeleteSnapshot
                 | super::reap::CheckpointSweep::DeleteFork => {}
+            }
+        }
+        let prefix = metadata_manifest_prefix(namespace_id);
+        let mut listing = store.list_prefix_stream(&prefix);
+        while let Some(key) = listing
+            .next()
+            .await
+            .transpose()
+            .map_err(|error| CoreError::store(&prefix, &error))?
+        {
+            let Some(manifest_no) = manifest_no_of(&key) else {
+                continue;
+            };
+            if manifest_no >= head.manifest_no || manifests.contains(&manifest_no) {
+                continue;
+            }
+            let successor = metadata_manifest_object(namespace_id, &ManifestNo(manifest_no.0 + 1));
+            let age = grace_age(store, &successor, grace_window_ms, context.now_ms)
+                .await
+                .map_err(|error| CoreError::store(&successor, &error))?;
+            if matches!(age, GraceAge::Young | GraceAge::Unknown) {
+                live.load_manifest(store, namespace_id, manifest_no, &mut manifests)
+                    .await?;
             }
         }
         Ok(live)
