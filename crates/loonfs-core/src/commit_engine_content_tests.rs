@@ -178,6 +178,7 @@ async fn content_reclaimed_during_view_load_cannot_be_published() {
         .session_writer_epoch(&store, &setup)
         .await
         .expect("acquire writer");
+    engine.invalidate_projection();
     let head_before = load_namespace_read_state(&store, &namespace_id)
         .await
         .expect("head");

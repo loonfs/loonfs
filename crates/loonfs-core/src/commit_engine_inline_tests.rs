@@ -37,7 +37,7 @@ async fn setup() -> (
     create(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    let engine = NamespaceCommitEngine::new(namespace_id);
+    let mut engine = NamespaceCommitEngine::new(namespace_id);
     engine
         .session_writer_epoch(&store, &context)
         .await

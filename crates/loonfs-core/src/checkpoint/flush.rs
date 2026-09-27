@@ -14,6 +14,7 @@ use crate::error::MetadataProjectionLoadError;
 use crate::error::Result;
 use crate::metadata::{MetadataState, MetadataView};
 use crate::namespace::basis::MetadataBasis;
+use crate::namespace::control::LoadedManifest;
 use crate::namespace::read_anchor::load_read_anchor;
 use crate::namespace::state::NamespaceReadState;
 use crate::storage::content::{
@@ -39,6 +40,8 @@ use tracing::Instrument;
 pub(super) struct FlushedBasis {
     /// Reference to the manifest that covers the head.
     pub(super) manifest: ManifestRef,
+    /// The manifest body when this attempt published it itself.
+    published_manifest: Option<LoadedManifest>,
     /// Head sequence the attempt targeted.
     pub(super) target_head_seq: ChangeSeq,
     /// Current manifest after the attempt.
@@ -126,6 +129,7 @@ async fn try_flush_wal_projection<S: ObjectStore + ?Sized>(
     {
         return Ok(TryFlushWal::Settled(Box::new(FlushedBasis {
             manifest: basis_manifest.clone(),
+            published_manifest: None,
             target_head_seq: head_seq,
             current_manifest_no: basis_manifest.manifest_no,
             current_manifest_head_seq: head_seq,
@@ -140,6 +144,7 @@ async fn try_flush_wal_projection<S: ObjectStore + ?Sized>(
         build_namespace_manifest_for_projection(store, namespace_id, projection, manifest_no)
             .await?;
     let manifest = encode_manifest(manifest)?;
+    let manifest_bytes = manifest.as_bytes().len() as u64;
     // Written segments may outlive the GC grace if publication exceeds its budget.
     deadline.ensure_metadata_publication_budget(namespace_id)?;
     let (outcome, current) = match publish_manifest(store, manifest, deadline).await? {
@@ -158,6 +163,14 @@ async fn try_flush_wal_projection<S: ObjectStore + ?Sized>(
         current_manifest_no: current.manifest().manifest_no,
         current_manifest_head_seq: current.manifest().head_seq,
         manifest: current.manifest(),
+        published_manifest: (outcome == FlushWalOutcome::Published).then(|| LoadedManifest {
+            object_key: loonfs_objectstore::keys::metadata_manifest_object(
+                namespace_id,
+                &current.manifest().manifest_no,
+            ),
+            manifest_bytes,
+            state: current,
+        }),
         target_head_seq: head_seq,
         outcome,
     })))
@@ -189,6 +202,9 @@ pub struct FoldedWalTail {
     /// The manifest that covers the tail after the call: the one it published,
     /// or the current one that already covered it.
     pub basis: MetadataBasis,
+    /// Retained only for an own publication, so a dropped projection can
+    /// discover the remaining WAL tail without fetching the manifest again.
+    pub(crate) published_manifest: Option<LoadedManifest>,
 }
 
 pub async fn fold_wal_tail<S: ObjectStore + ?Sized>(
@@ -218,6 +234,7 @@ pub async fn fold_wal_tail<S: ObjectStore + ?Sized>(
     };
     Ok(FoldedWalTail {
         basis: MetadataBasis(flushed.manifest.clone()),
+        published_manifest: flushed.published_manifest.clone(),
         response: flush_wal_response(namespace_id, flushed),
     })
 }
@@ -289,7 +306,7 @@ pub(super) async fn load_manifest_projection<'a, S: ObjectStore + ?Sized>(
             },
         ));
     }
-    let loaded_basis = load_basis_metadata_segments(store, None, &basis).await?;
+    let loaded_basis = super::load::metadata_basis_from_manifest(store, None, &anchor.manifest);
     let manifest_head = loaded_basis.replay_head(&head);
     let manifest_segments = loaded_basis.segments;
     let replayed = replay_discovered_tail(

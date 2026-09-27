@@ -133,8 +133,7 @@ async fn a_cold_anchor_reads_each_wal_object_once() {
     store.delete(&missing).await.expect("remove middle segment");
     let error = crate::namespace::read_anchor::load_read_anchor(&store, &namespace_id)
         .await
-        .err()
-        .expect("gap in discovery window");
+        .expect_err("gap in discovery window");
     assert!(
         matches!(error, crate::control_object::ControlObjectLoadError::Codec { object_key, .. } if object_key == missing)
     );

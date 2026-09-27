@@ -28,6 +28,188 @@ fn content_puts(store: &RecordingStore<LocalFsStore>) -> Vec<String> {
         .collect()
 }
 
+#[tokio::test]
+async fn an_own_fold_replays_only_later_objects_after_projection_invalidation() {
+    let (_directory, store, mut engine, context) = setup().await;
+    let before = candidate(
+        "before",
+        vec![inline(&engine.namespace_id, Bytes::from_static(b"before"))],
+    );
+    publish(&mut engine, &store, &context, before)
+        .await
+        .expect("before");
+    let input = engine.begin_wal_fold().expect("fold input");
+    engine.invalidate_projection();
+    let during = candidate(
+        "during",
+        vec![inline(&engine.namespace_id, Bytes::from_static(b"during"))],
+    );
+    publish(&mut engine, &store, &context, during.clone())
+        .await
+        .expect("during");
+    let expected = store
+        .snapshot()
+        .into_iter()
+        .rev()
+        .find_map(|operation| match operation {
+            RecordedOperation::Put { key, .. }
+                if key.starts_with(&wal_segment_prefix(&engine.namespace_id)) =>
+            {
+                Some(key)
+            }
+            _ => None,
+        })
+        .expect("published WAL");
+    let folded = fold_wal_tail(
+        &store,
+        None,
+        &engine.namespace_id,
+        Some(input.clone()),
+        &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+    )
+    .await
+    .expect("fold");
+    engine.record_wal_fold(Some(&folded));
+    store.reset();
+    publish(&mut engine, &store, &context, during)
+        .await
+        .expect("retained receipt");
+    let operations = store.take();
+    let wal_gets = operations
+        .iter()
+        .filter(|operation| {
+            matches!(operation, RecordedOperation::Get { .. })
+                && operation
+                    .key()
+                    .starts_with(&wal_segment_prefix(&engine.namespace_id))
+        })
+        .map(RecordedOperation::key)
+        .collect::<Vec<_>>();
+    assert_eq!(wal_gets, vec![expected.as_str()]);
+    assert!(
+        !operations
+            .iter()
+            .any(|operation| operation.key().ends_with("hint.json")
+                || matches!(
+                    operation,
+                    RecordedOperation::Head { .. } | RecordedOperation::Put { .. }
+                )),
+        "{operations:?}"
+    );
+    assert_eq!(
+        engine
+            .wal_fold_input()
+            .expect("projection")
+            .wal_tail_segments,
+        1
+    );
+}
+
+#[tokio::test]
+async fn an_own_fold_discovers_later_commits_after_the_projection_is_dropped() {
+    // A receipt replay does not land a put, so it also tests that discovery
+    // itself refreshes the tip observation independently of the fold's basis.
+    for replay_receipt in [false, true] {
+        let (_directory, store, mut engine, context) = setup().await;
+        let directory = |name: &str| {
+            CommitCandidate::new(CommitRequest::single(
+                CommitId::generate(),
+                loonfs_test_support::test_actor(),
+                None,
+                FilesystemOperation::CreateDirectory {
+                    path: AbsolutePath::parse(name).expect("path"),
+                    parents: false,
+                },
+            ))
+        };
+        publish(&mut engine, &store, &context, directory("/before"))
+            .await
+            .expect("before fold");
+        let timer = Arc::new(loonfs_test_support::clock::ManualClock::new(0));
+        engine = engine.monotonic_timer(timer.clone());
+        let input = engine.begin_wal_fold().expect("fold input");
+        let during = directory("/during");
+        engine
+            .publish_batch(
+                &store,
+                [during.clone()],
+                &context,
+                &PublishTailOptions::default(),
+                &Deadline::start(timer.clone()),
+            )
+            .await
+            .results
+            .pop()
+            .expect("result")
+            .expect("during fold");
+        engine.invalidate_projection();
+        let folded = fold_wal_tail(
+            &store,
+            None,
+            &engine.namespace_id,
+            Some(input.clone()),
+            &Deadline::start(timer.clone()),
+        )
+        .await
+        .expect("fold");
+        assert_eq!(folded.response.outcome, FlushWalOutcome::Published);
+        engine.record_wal_fold(Some(&folded));
+        timer.advance_ms(100);
+        store.reset();
+
+        let candidate = if replay_receipt {
+            during
+        } else {
+            directory("/during/child")
+        };
+        engine
+            .publish_batch(
+                &store,
+                [candidate],
+                &context,
+                &PublishTailOptions::default(),
+                &Deadline::start(timer.clone()),
+            )
+            .await
+            .results
+            .pop()
+            .expect("result")
+            .expect("discover the commit made during the fold");
+        let operations = store.take();
+        let wal_gets = operations
+            .iter()
+            .filter(|operation| {
+                matches!(operation, RecordedOperation::Get { .. })
+                    && family(operation) == Some(DurableObjectFamily::WalSegment)
+            })
+            .map(|operation| {
+                loonfs_objectstore::layout::wal_no_of(operation.key()).expect("WAL number")
+            })
+            .collect::<Vec<_>>();
+        assert!(wal_gets.contains(&input.head.wal_no.successor().expect("next WAL")));
+        assert!(wal_gets.iter().all(|number| *number > input.head.wal_no));
+        assert!(
+            !operations.iter().any(|operation| {
+                matches!(
+                    family(operation),
+                    Some(DurableObjectFamily::Hint | DurableObjectFamily::MetadataManifest)
+                ) || matches!(operation, RecordedOperation::Head { .. })
+            }),
+            "{operations:?}"
+        );
+        if replay_receipt {
+            assert!(!operations
+                .iter()
+                .any(|operation| matches!(operation, RecordedOperation::Put { .. })));
+        }
+        assert_eq!(
+            engine.projection_observed.as_ref().expect("tip").age_ms(),
+            0
+        );
+        assert_eq!(engine.basis_checked.as_ref().expect("basis").age_ms(), 100);
+    }
+}
+
 pub(super) fn assert_content_before_metadata(store: &RecordingStore<LocalFsStore>, count: usize) {
     let operations = store.snapshot();
     let first_metadata = operations
