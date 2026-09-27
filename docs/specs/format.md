@@ -272,7 +272,7 @@ A flush needs no writer epoch, and any process may run one. It folds the WAL abo
 
 Discovery loads the hint and the manifest it names, then probes successive manifest numbers until one is absent, rereading the hint in case it rose meanwhile. It reads WAL objects from `folded_wal_no + 1` upward, in concurrent windows, until the first absent number. It then checks that the manifest still has no successor. If a successor appeared, or the check came `READ_REVALIDATION_BOUND_MS` or more after the manifest probe, discovery reloads the manifest and starts again. A missing or invalid WAL object also reloads the manifest; if the manifest number is unchanged, the store is corrupt (sections 4.1 and 4.2).
 
-Collection deletes WAL objects at or below the current manifest's `folded_wal_no` and unpinned manifests below the hint it observed. It deletes each one only after its provider age reaches the reclamation grace (sections 11.2 and 11.3).
+Collection deletes WAL objects at or below the current manifest's `folded_wal_no` and unpinned manifests below the hint it observed. It deletes each one only after its provider age reaches the reclamation grace (sections 11.2 and 11.3). It keeps a superseded manifest and every segment in its runs until the manifest's successor is one grace old. It deletes a metadata segment once no current, pinned, or kept superseded manifest lists it and the segment is older than 24 hours.
 
 A publisher initiates each numbered put within a budget of the observation it planned against, and treats a put that returns after the budget as having an unknown outcome. The grace is at least the longest budget plus the provider request bound plus the clock allowance, so, under the provider requirement in section 3.1, an object can be collected only after the provider has applied or rejected every put planned against an observation older than the object (section 11.4, Appendix C.1). Readers have the matching bound: a reader trusts an absent manifest successor only within `READ_REVALIDATION_BOUND_MS` of the probe it confirms (section 4.2).
 
@@ -285,6 +285,7 @@ What the protocol guarantees:
 5. A cached view never regresses, and a read served from it reflects a successor check no older than the revalidation bound (the successor probe and the revalidation bound, section 4.2).
 6. Inline bytes stay readable: in the WAL until a flush has written their content objects, then in those objects (content written before the manifest, sections 7.2 and 1.5).
 7. A retry with the same commit ID and request does not commit twice while its receipt is retained (the commit receipt, section 6.5).
+8. A view that revalidates within its bound never lists a collected segment: its manifest was current at its last successor check, so the manifest and its segments stay for at least one grace after that check (the superseded-manifest root and the revalidation bound, sections 11.2 and 4.2).
 
 ## 3. Object-storage requirements
 
@@ -639,7 +640,7 @@ Successors preserve namespace identity and cannot lower head sequence, writer or
 
 The bounded metadata publication budget runs from the start of the publication, before any output segment is written, until initiation of the manifest put. An expired attempt publishes nothing further. Its unreferenced output remains subject to segment-age collection rules. Streaming compaction has the longer bound in section 10.4.
 
-After publication, raise the hint within the publication budget. Failure to raise it does not undo the manifest. GC preserves manifest numbers at or above the hint observed for its pass so discovery can cross a lagging hint. Intermediate manifests retained for discovery do not independently retain their runs.
+After publication, raise the hint within the publication budget. Failure to raise it does not undo the manifest. GC preserves manifest numbers at or above the hint observed for its pass so discovery can cross a lagging hint. Intermediate manifests retained for discovery do not independently retain their runs. A manifest whose successor is younger than the grace retains its runs as a root (section 11.2).
 
 Forks follow the same path from manifest 1. Publishing a target-owned manifest does not imply copying inherited segments into the target's prefix; each segment retains its owner.
 
@@ -891,7 +892,7 @@ Collection removes objects that no retained view needs, after the applicable age
 
 ### 11.1 One complete pass
 
-A call discovers the namespace's current manifest, lists all pin keys, and builds an in-memory set of protected manifests and segments. Invalid or unreadable root manifests stop the call before sweeping. An absent namespace has nothing for core GC to collect.
+A call discovers the namespace's current manifest, lists all pin keys and manifest numbers, reads the age of each manifest's successor, and builds an in-memory set of protected manifests and segments. Invalid or unreadable root manifests stop the call before sweeping. An absent namespace has nothing for core GC to collect.
 
 The call then lists each candidate family from the beginning to completion. It stores no durable run, phase, reference table, or cursor. The complete pin listing used to establish roots is separate from the later pin sweep that decides which records can be deleted.
 
@@ -904,10 +905,13 @@ Every age decision uses the call's fixed `now_ms`. A later call reads fresh root
 | Current active namespace manifest | The manifest and every segment in its runs. |
 | Current deleted manifest | The tombstone and every segment in its runs. |
 | Every recognized pin key in the complete listing | The numbered manifest in its ID and every segment in that manifest. |
-| Hint's observed manifest number | All manifest numbers at or above it, so discovery can probe forward. Intermediate numbers do not protect additional runs. |
+| Every manifest below the current one whose immediate successor is younger than the ordinary grace `T` | The manifest and every segment in its runs. |
+| Hint's observed manifest number | All manifest numbers at or above it, so discovery can probe forward. This root does not protect their runs. |
 | Current active manifest's folded boundary | Every WAL number above `folded_wal_no`. |
 
 Pin bodies are not needed to identify these roots: the manifest number is part of the pin key. Bodies are normally read later for owner and expiry decisions. If a pin's manifest is absent, the collector reads the pin and applies the same owner and grace rules as pin cleanup. An absent or collectable pin does not require that missing basis; this permits recovery from failed installation cleanup and concurrent pin removal. A retained pin naming a missing manifest is corruption. Invalid or unreadable manifests still fail the pass. Each listed pin whose manifest is present protects its files for the whole pass, even if that pass deletes the pin.
+
+A manifest below the current one stays a root while its immediate successor is younger than `T`, whether it is above or below the observed hint. The successor's age is its provider age, and a successor without a provider timestamp counts as young. A reader or writer confirms its view with a successor check that finds the next manifest number absent, so that successor is created no earlier than the check. The view's manifest and every segment in its runs therefore stay for at least one grace after the check. A reader revalidates within `READ_REVALIDATION_BOUND_MS` of its previous check, and the writer confirms its basis at least once per `WAL_PUBLISH_BUDGET_MS` (sections 4.2 and 6.3). Both bounds are below the grace, and the clock allowance in section 11.4 is the margin.
 
 The tombstone retains its runs so an import from a deleted owner can still be authorized against its final access state. Retirement does not read those segments. Retirement eligibility follows section 9.5.
 
@@ -919,7 +923,7 @@ Being unreferenced makes an object a candidate; it does not make it immediately 
 
 | Family | Conditions for deletion |
 | --- | --- |
-| Namespace manifest | Below the observed hint and unpinned, with provider age at least `T`. |
+| Namespace manifest | Below the observed hint and not a root (section 11.2), with provider age at least `T`. |
 | WAL object in an active namespace | At or below `folded_wal_no`, with provider age at least `T`. |
 | WAL object in a deleted namespace | Provider age at least `T`; no current WAL is protected. |
 | Metadata segment | No root lists it, and its provider age is strictly greater than 24 hours. |
@@ -929,7 +933,7 @@ Being unreferenced makes an object a candidate; it does not make it immediately 
 
 The hint and current manifest are never swept. Unrecognized keys outside an eligible tombstone’s content prefix are retained by core GC. On an age-gated candidate, a missing provider timestamp or one in the future cannot establish sufficient age.
 
-For example, a collector observing hint 8 and current manifest 10 keeps manifests 8–10 for discovery. It keeps the segments in manifest 10 and any pinned manifests. It does not keep every segment mentioned only by 8 or 9. Such a segment still needs to exceed the segment minimum age before deletion.
+For example, a collector observing hint 8 and current manifest 10 keeps manifests 8–10 for discovery. It keeps the segments in manifest 10, in any pinned manifest, and in any manifest whose successor is younger than `T`, such as 9 when 10 is recent. If 9 is older than `T`, a segment mentioned only by 8 is a candidate. Such a segment still needs to exceed the segment minimum age before deletion.
 
 ### 11.4 Clock and operation assumptions
 
@@ -951,7 +955,7 @@ Direct expiry checks do not add GC grace to the requested lifetime. A host ahead
 
 A new pin from the current head is acknowledged only after its manifest identity is checked again following the pin write. This closes the race between collection's current-manifest read and its complete pin listing. A snapshot fork is protected by the snapshot pin or by the new fork pin written before the snapshot recheck.
 
-A collector protects every WAL number above its captured folded boundary. Writers must refresh a cached tip within the publication budget before attempting its successor. They cannot treat a much later reclaimed WAL number as a free publication slot. Readers have the matching obligation: a cold discovery trusts an absent successor only within `READ_REVALIDATION_BOUND_MS` of its manifest probe, and a cached view only within that bound of its previous probe.
+A collector protects every WAL number above its captured folded boundary. Writers must refresh a cached tip within the publication budget before attempting its successor. They cannot treat a much later reclaimed WAL number as a free publication slot. Readers have the matching obligation: a cold discovery trusts an absent successor only within `READ_REVALIDATION_BOUND_MS` of its manifest probe, and a cached view only within that bound of its previous probe. Metadata segments have the matching guarantee. A view that revalidates within its bound never lists a collected segment, because its manifest was current at its last successor check and stays a root for at least one grace after its successor appeared (section 11.2).
 
 New metadata segments remain protected by their minimum age while a publisher writes and verifies them. Streaming compaction must initiate publication before its budget expires, and every compaction checks its epoch and selected inputs. These rules apply to output that is not yet listed by a root captured earlier in the pass.
 

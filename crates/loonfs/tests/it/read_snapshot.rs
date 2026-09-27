@@ -19,18 +19,25 @@ async fn read_during_compaction_and_collection(
     use std::sync::{Arc, Mutex};
 
     let directory = tempdir().expect("tempdir");
+    let namespace = NamespaceId::parse("reader-gc-probe").expect("namespace");
     let old_segments = Arc::new(Mutex::new(BTreeSet::<String>::new()));
     let selected = old_segments.clone();
+    // The old segments and every manifest report an ancient age. A superseded
+    // manifest roots its segments while its successor is younger than the
+    // grace, and this probe needs the collection to really remove them.
+    let manifest_prefix = loonfs_objectstore::keys::metadata_manifest_prefix(&namespace);
     let store = Arc::new(BlockingStore::new(
         MetadataMapStore::aged(
             LocalFsStore::new(directory.path()).expect("store"),
-            KeyPredicate::new(move |key| selected.lock().expect("old segments").contains(key)),
+            KeyPredicate::new(move |key| {
+                key.starts_with(&manifest_prefix)
+                    || selected.lock().expect("old segments").contains(key)
+            }),
         ),
         KeyPredicate::metadata_segment(),
         OperationClass::Get,
     ));
     let runtime = open_runtime_async(store.clone(), "reader-gc-probe").await;
-    let namespace = NamespaceId::parse("reader-gc-probe").expect("namespace");
     runtime
         .create_namespace(
             &namespace,

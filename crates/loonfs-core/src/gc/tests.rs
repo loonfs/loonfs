@@ -54,6 +54,7 @@ mod concurrent_retirement;
 mod fork_chain;
 mod many_pins;
 mod retirement;
+mod superseded_roots;
 
 const GRACE_MS: u64 = 60 * 60 * 1000;
 
