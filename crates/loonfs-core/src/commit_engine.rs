@@ -25,7 +25,7 @@ use loonfs_api::wire::control::AcquiredWriter;
 use loonfs_api::wire::wal::{MAX_WAL_INLINE_CONTENT_BYTES, MAX_WAL_SEGMENT_INLINE_CONTENT_BYTES};
 #[cfg(test)]
 use loonfs_api::ChangeSeq;
-use loonfs_api::{CommitId, ContentId, DeleteNamespaceResponse, NamespaceId};
+use loonfs_api::{CommitId, ContentId, DeleteNamespaceResponse, ManifestNo, NamespaceId};
 use loonfs_objectstore::ObjectStore;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
@@ -526,6 +526,9 @@ pub struct NamespaceCommitEngine {
     namespace_id: NamespaceId,
     publish_tail_projection: Option<PublishTailProjection>,
     projection_observed: Option<Observation>,
+    /// When a store observation last confirmed the projection's basis manifest
+    /// current: the discovery that loaded it, or a HEAD that found no successor.
+    basis_checked: Option<Observation>,
     /// This session's epoch and fencing for the namespace; see
     /// [`WriterSessionState`].
     session: SharedWriterSessionState,
@@ -542,6 +545,7 @@ impl NamespaceCommitEngine {
             namespace_id,
             publish_tail_projection: None,
             projection_observed: None,
+            basis_checked: None,
             session: SharedWriterSessionState::default(),
             timer: Arc::new(StdMonotonicTimer::default()),
             segment_cache: None,
@@ -579,6 +583,18 @@ impl NamespaceCommitEngine {
     pub fn invalidate_projection(&mut self) {
         self.publish_tail_projection = None;
         self.projection_observed = None;
+        self.basis_checked = None;
+    }
+
+    /// The basis manifest of a retained projection that no store observation
+    /// has confirmed within the last publication budget.
+    fn unconfirmed_basis(&self, attempt: &Observation) -> Option<ManifestNo> {
+        let projection = self.publish_tail_projection.as_ref()?;
+        let confirmed_recently = self
+            .basis_checked
+            .as_ref()
+            .is_some_and(|checked| checked.age_at(attempt) < crate::limits::WAL_PUBLISH_BUDGET_MS);
+        (!confirmed_recently).then(|| projection.basis().manifest_no())
     }
 
     /// Checks the cached WAL tail without store reads or writer acquisition.
@@ -738,6 +754,27 @@ impl NamespaceCommitEngine {
         }) {
             self.invalidate_projection();
         }
+        // A landed put confirms the tip, not the manifest the batch was planned
+        // against: another process may have flushed since. A basis unconfirmed
+        // for a budget is checked for a successor. A successor, a check that
+        // returns after the revalidation bound, or a failed check reloads the
+        // view instead.
+        if let Some(manifest_no) = self.unconfirmed_basis(&attempt) {
+            let successor = crate::namespace::read_anchor::manifest_has_successor(
+                store,
+                &self.namespace_id,
+                manifest_no,
+            )
+            .await;
+            if matches!(successor, Ok(false))
+                && attempt.age_ms() < crate::limits::READ_REVALIDATION_BOUND_MS
+            {
+                self.basis_checked = Some(attempt.clone());
+            } else {
+                self.invalidate_projection();
+            }
+        }
+        let cold = self.publish_tail_projection.is_none();
         let loaded = load_publish_metadata_view(
             store,
             self.segment_cache.as_deref(),
@@ -751,7 +788,14 @@ impl NamespaceCommitEngine {
             .clone()
             .unwrap_or_else(|| attempt.clone());
         let (publish_view, projection) = match loaded {
-            Ok(value) => value,
+            Ok(value) => {
+                if cold {
+                    // Discovery confirmed the basis current no earlier than this
+                    // attempt began.
+                    self.basis_checked = Some(attempt.clone());
+                }
+                value
+            }
             Err(error) => {
                 self.invalidate_projection();
                 if let CoreError::WriterFenced(fence) = &error {
@@ -930,8 +974,9 @@ mod deletion_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::checkpoint::fold_wal_tail;
     use crate::error::ErrorCode;
-    use crate::limits::WAL_PUBLISH_BUDGET_MS;
+    use crate::limits::{READ_REVALIDATION_BOUND_MS, WAL_PUBLISH_BUDGET_MS};
     use crate::namespace::control::load_namespace_read_state;
     use crate::test_support::ops::create;
     use futures::StreamExt;
@@ -942,7 +987,9 @@ mod tests {
     use loonfs_objectstore::keys::wal_segment_prefix;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_objectstore::ObjectStore;
-    use loonfs_test_support::stores::{OperationClass, RecordingStore};
+    use loonfs_test_support::stores::{
+        BlockingStore, KeyPredicate, OperationClass, RecordedOperation, RecordingStore,
+    };
     use std::collections::BTreeSet;
     use std::sync::atomic::{AtomicU64, Ordering};
     use tempfile::tempdir;
@@ -1471,14 +1518,193 @@ mod tests {
             published.results[0].as_ref().expect(name);
         }
         // Twice the budget has passed since the first observation, but less than
-        // the budget since the last landed put, so the third publish rediscovers nothing.
+        // the budget since the last landed put, so the third publish rediscovers
+        // nothing. Its basis has gone a budget unconfirmed, so before its put it
+        // makes one HEAD of the next manifest number and nothing else.
+        let operations = store.take();
         assert!(
-            !store
-                .take_get_keys()
+            !operations
                 .iter()
-                .any(|key| key == &loonfs_objectstore::keys::hint(&namespace_id)),
-            "the third publish rediscovered the namespace"
+                .any(|operation| operation.key() == loonfs_objectstore::keys::hint(&namespace_id)),
+            "the third publish rediscovered the namespace: {operations:?}"
         );
+        let heads: Vec<_> = operations
+            .iter()
+            .filter(|operation| matches!(operation, RecordedOperation::Head { .. }))
+            .collect();
+        assert!(
+            matches!(
+                heads.as_slice(),
+                [RecordedOperation::Head { key }]
+                    if key.starts_with(&loonfs_objectstore::keys::metadata_manifest_prefix(&namespace_id))
+            ),
+            "{operations:?}"
+        );
+    }
+
+    async fn publish_one<S: ObjectStore + ?Sized>(
+        engine: &mut NamespaceCommitEngine,
+        store: &S,
+        writer: &MutationContext,
+        name: &str,
+    ) -> NamespaceCommitEnginePublishResult {
+        let deadline = Deadline::start(Arc::clone(&engine.timer));
+        let published = engine
+            .publish_batch(
+                store,
+                vec![create_dir(name, name)],
+                writer,
+                &PublishTailOptions::default(),
+                &deadline,
+            )
+            .await;
+        published.results[0].as_ref().expect(name);
+        published
+    }
+
+    #[tokio::test]
+    async fn a_flush_by_another_process_is_found_at_the_basis_check() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = RecordingStore::new(
+            LocalFsStore::new(temp_dir.path()).expect("store"),
+            KeyPredicate::any(),
+        );
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let writer = context("writer-a");
+        create(&store, &namespace_id, &writer)
+            .await
+            .expect("bootstrap");
+        let timer = Arc::new(loonfs_test_support::clock::ManualClock::new(0));
+        let mut engine =
+            NamespaceCommitEngine::new(namespace_id.clone()).monotonic_timer(timer.clone());
+        let first = publish_one(&mut engine, &store, &writer, "alpha").await;
+        let basis = first
+            .resulting_read_state
+            .expect("landed")
+            .basis
+            .manifest_no();
+
+        // Another process flushes the tail into the next manifest.
+        fold_wal_tail(
+            &store,
+            None,
+            &namespace_id,
+            None,
+            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+        )
+        .await
+        .expect("flush");
+
+        // Within a budget of the load the basis is trusted, as before.
+        timer.advance_ms(WAL_PUBLISH_BUDGET_MS - 1);
+        store.reset();
+        let second = publish_one(&mut engine, &store, &writer, "beta").await;
+        assert_eq!(
+            second
+                .resulting_read_state
+                .expect("landed")
+                .basis
+                .manifest_no(),
+            basis
+        );
+        assert_eq!(store.count(OperationClass::Head), 0);
+
+        // A budget after the load the check finds the successor, and the view
+        // is reloaded from the hint before the put.
+        timer.advance_ms(WAL_PUBLISH_BUDGET_MS - 1);
+        store.reset();
+        let third = publish_one(&mut engine, &store, &writer, "gamma").await;
+        let operations = store.take();
+        assert_eq!(
+            third
+                .resulting_read_state
+                .expect("landed")
+                .basis
+                .manifest_no(),
+            basis.successor().expect("next manifest number")
+        );
+        let head = operations
+            .iter()
+            .position(|operation| matches!(operation, RecordedOperation::Head { .. }))
+            .expect("basis check");
+        assert!(
+            operations[head..]
+                .iter()
+                .any(|operation| operation.key() == loonfs_objectstore::keys::hint(&namespace_id)),
+            "{operations:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_basis_check_that_returns_after_the_bound_reloads_instead() {
+        let temp_dir = tempdir().expect("tempdir");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let store = RecordingStore::new(
+            BlockingStore::new(
+                LocalFsStore::new(temp_dir.path()).expect("store"),
+                KeyPredicate::prefix(loonfs_objectstore::keys::metadata_manifest_prefix(
+                    &namespace_id,
+                )),
+                OperationClass::Head,
+            ),
+            KeyPredicate::any(),
+        );
+        let writer = context("writer-a");
+        create(&store, &namespace_id, &writer)
+            .await
+            .expect("bootstrap");
+        let timer = Arc::new(loonfs_test_support::clock::ManualClock::new(0));
+        let mut engine =
+            NamespaceCommitEngine::new(namespace_id.clone()).monotonic_timer(timer.clone());
+        publish_one(&mut engine, &store, &writer, "alpha").await;
+        timer.advance_ms(WAL_PUBLISH_BUDGET_MS - 1);
+        publish_one(&mut engine, &store, &writer, "beta").await;
+
+        // The third publish owes a basis check. It pauses inside the HEAD for
+        // the revalidation bound, so its answer cannot be trusted: the view is
+        // reloaded, and the batch itself is then over its budget.
+        timer.advance_ms(WAL_PUBLISH_BUDGET_MS - 1);
+        store.reset();
+        store.inner().block_next();
+        let deadline = Deadline::start(Arc::clone(&engine.timer));
+        let tail_options = PublishTailOptions::default();
+        let (published, ()) = futures::join!(
+            engine.publish_batch(
+                &store,
+                vec![create_dir("gamma", "gamma")],
+                &writer,
+                &tail_options,
+                &deadline,
+            ),
+            async {
+                store.inner().wait_until_blocked().await;
+                timer.advance_ms(READ_REVALIDATION_BOUND_MS);
+                store.inner().release();
+            }
+        );
+        let error = published.results[0]
+            .as_ref()
+            .expect_err("a batch older than its budget writes nothing");
+        assert!(
+            matches!(
+                error,
+                CoreError::WalPublish(crate::commit::WalPublishError::PublishBudgetExceeded { .. })
+            ),
+            "unexpected error: {error:?}"
+        );
+        let operations = store.take();
+        let head = operations
+            .iter()
+            .position(|operation| matches!(operation, RecordedOperation::Head { .. }))
+            .expect("basis check");
+        assert!(
+            operations[head + 1..]
+                .iter()
+                .any(|operation| operation.key() == loonfs_objectstore::keys::hint(&namespace_id)),
+            "the late check was trusted: {operations:?}"
+        );
+        // The retry plans against the reloaded view.
+        publish_one(&mut engine, &store, &writer, "gamma").await;
     }
 
     #[tokio::test]
