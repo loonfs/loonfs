@@ -73,6 +73,7 @@ mod options;
 mod protocol;
 mod recency;
 mod storage;
+mod store_waves;
 mod wal;
 mod write_waves;
 

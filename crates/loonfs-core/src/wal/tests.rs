@@ -445,7 +445,8 @@ async fn a_number_published_during_a_window_is_read_again_not_reported_missing()
 
 #[tokio::test]
 async fn a_bounded_tail_load_overlaps_reads_and_matches_sequential_replay() {
-    use super::reader::{load_wal_segment, load_wal_tail, WalWalk, WAL_REPLAY_READ_CONCURRENCY};
+    use super::reader::{load_wal_segment, load_wal_tail, WalWalk};
+    use crate::store_waves::STORE_READ_WAVE;
 
     let directory = tempdir().expect("directory");
     let store = LocalFsStore::new(directory.path()).expect("store");
@@ -492,7 +493,7 @@ async fn a_bounded_tail_load_overlaps_reads_and_matches_sequential_replay() {
 
     assert_eq!(watched.reads().total, 20);
     assert!(watched.reads().peak_in_flight > 1);
-    assert!(watched.reads().peak_in_flight <= WAL_REPLAY_READ_CONCURRENCY);
+    assert!(watched.reads().peak_in_flight <= STORE_READ_WAVE);
     assert_eq!(tail, super::ValidatedWalTail::new(sequential));
 }
 

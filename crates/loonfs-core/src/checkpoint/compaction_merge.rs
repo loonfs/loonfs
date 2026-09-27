@@ -6,6 +6,7 @@ use super::data_block_load::load_segment_data_block_span;
 use super::streaming_compaction::manifest_load_failure;
 use super::validate::validate_manifest_row_seq_range;
 use crate::error::Result;
+use crate::store_waves::STORE_READ_WAVE;
 use loonfs_api::wire::manifest::{MetadataRow, MetadataRowFamily, MetadataSegmentRef};
 use loonfs_api::wire::sst_blocks::{DecodedDataBlock, SegmentIndexEntry};
 use loonfs_api::ChangeSeq;
@@ -21,8 +22,6 @@ pub(super) const ITERATOR_FETCH_TARGET_BYTES: usize = 2 * 1024 * 1024;
 /// Decoded input a merge holds across every open iterator; each iterator's
 /// share caps its refill below the target when many inputs are open.
 pub(super) const MAX_MERGE_DECODED_INPUT_BYTES: usize = 64 * 1024 * 1024;
-/// Iterators refilled in one wave, the merge's fan-out at the store.
-pub(super) const ITERATOR_FETCH_CONCURRENCY: usize = 8;
 
 /// Defines which adjacent rows a retention rule processes together.
 ///
@@ -322,7 +321,7 @@ where
         .iter_mut()
         .filter(|iterator| iterator.needs_fill())
         .collect();
-    for wave in hungry.chunks_mut(ITERATOR_FETCH_CONCURRENCY) {
+    for wave in hungry.chunks_mut(STORE_READ_WAVE) {
         futures::future::try_join_all(
             wave.iter_mut()
                 .map(|iterator| Box::pin(iterator.fill(loader, decoded_byte_limit))),

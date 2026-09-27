@@ -20,6 +20,7 @@ use crate::namespace::state::NamespaceReadState;
 use crate::storage::content::{
     content_object_key_for_ref, materialize_content, validate_loaded_content_bytes,
 };
+use crate::store_waves::STORE_WRITE_WAVE;
 use crate::time::{Deadline, StdMonotonicTimer};
 use crate::wal::replay_discovered_tail;
 use crate::wal::ProjectedWalTail;
@@ -191,7 +192,7 @@ async fn materialize_inline_content<S: ObjectStore + ?Sized>(
         .collect::<Result<Vec<_>>>()?;
     // In a live namespace, failed flushes leave committed content for the next flush.
     stream::iter(values.into_iter().map(Ok))
-        .try_for_each_concurrent(32, |(object_key, value)| async move {
+        .try_for_each_concurrent(STORE_WRITE_WAVE, |(object_key, value)| async move {
             materialize_content(store, &object_key, &value.content_ref, value.bytes.clone()).await
         })
         .await

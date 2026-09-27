@@ -10,6 +10,7 @@ use super::load::{
 use super::runs::{MetadataFamilySegments, MetadataRunManifest, CHECKPOINT_ROW_FAMILIES};
 #[cfg(test)]
 use crate::metadata::MetadataState;
+use crate::store_waves::STORE_READ_WAVE;
 use futures::future::try_join_all;
 use loonfs_api::wire::manifest::{
     MetadataRow, MetadataRowFamily, MetadataSegmentRef, NamespaceManifestEnvelope,
@@ -18,11 +19,6 @@ use loonfs_api::wire::sst_blocks::{key_range_may_intersect, string_prefix_upper_
 use loonfs_api::ChangeSeq;
 use loonfs_objectstore::ObjectStore;
 use std::sync::Arc;
-
-/// Segment fetches issued per wave during a scan. Wide directories touch
-/// hundreds of segments per page; deeper waves amortize the per-wave await
-/// without unbounded fan-out.
-pub(super) const MAX_MATERIALIZED_TABLE_LOADS: usize = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Readahead {
@@ -307,8 +303,8 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataSegments<'_, S> {
                 break;
             }
 
-            let chunk_end = (next_descriptor_index + MAX_MATERIALIZED_TABLE_LOADS)
-                .min(matching_descriptors.len());
+            let chunk_end =
+                (next_descriptor_index + STORE_READ_WAVE).min(matching_descriptors.len());
             let loaded_segments = try_join_all(
                 matching_descriptors[next_descriptor_index..chunk_end]
                     .iter()
@@ -359,7 +355,7 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataSegments<'_, S> {
             return Ok(descriptors);
         };
         let mut admitted = Vec::with_capacity(descriptors.len());
-        for chunk in descriptors.chunks(MAX_MATERIALIZED_TABLE_LOADS) {
+        for chunk in descriptors.chunks(STORE_READ_WAVE) {
             let checks =
                 try_join_all(chunk.iter().map(|descriptor| {
                     self.segment_filter_admits(descriptor.descriptor, filter_probe)

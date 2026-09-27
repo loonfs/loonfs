@@ -5,6 +5,7 @@ use loonfs::{
     FsWriter, PageRequest, PutFileOptions, SharedObjectStore, StatPathOptions,
 };
 use loonfs_api::wire::manifest::MetadataRowFamily;
+use loonfs_core::test_support::STORE_READ_WAVE;
 use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::{namespace_id, page_limit};
@@ -142,7 +143,10 @@ async fn directory_pages_use_bindings_and_load_revision_heads_concurrently() {
     }
     let concurrency = revisions.reads();
     assert!(concurrency.peak_in_flight > 1, "{concurrency:?}");
-    assert!(concurrency.peak_in_flight <= 16, "{concurrency:?}");
+    assert!(
+        concurrency.peak_in_flight <= STORE_READ_WAVE,
+        "{concurrency:?}"
+    );
     for entry in page.entries {
         let stat = reader
             .get_path_entry(

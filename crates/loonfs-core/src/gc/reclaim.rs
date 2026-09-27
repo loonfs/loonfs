@@ -3,13 +3,12 @@
 use super::fork_checkpoints::delete_source_checkpoint;
 use super::live_set::{LiveSet, RetirementState};
 use crate::error::{CoreError, Result};
+use crate::store_waves::STORE_WRITE_WAVE;
 use futures::{StreamExt, TryStreamExt};
 use loonfs_api::wire::manifest::NamespaceManifestPayload;
 use loonfs_api::GcResponse;
 use loonfs_objectstore::keys::content_prefix;
 use loonfs_objectstore::ObjectStore;
-
-const CONTENT_DELETE_CONCURRENCY: usize = 16;
 
 pub(super) async fn reclaim_namespace<S: ObjectStore + ?Sized>(
     store: &S,
@@ -48,7 +47,7 @@ async fn sweep_content<S: ObjectStore + ?Sized>(
                 .await
                 .map_err(|error| CoreError::store(&key, &error))
         })
-        .buffer_unordered(CONTENT_DELETE_CONCURRENCY);
+        .buffer_unordered(STORE_WRITE_WAVE);
     while deletions.try_next().await?.is_some() {
         report.deleted.retired_content_objects += 1;
     }
