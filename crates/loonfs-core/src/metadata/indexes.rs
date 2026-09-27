@@ -233,6 +233,9 @@ mod tests {
                 display_name: DisplayName::parse(name).expect("valid display name"),
             },
             child_inode_id: InodeId(child),
+            child_kind: loonfs_api::InodeKind::File,
+            child_created_by: loonfs_api::ActorId::loonfs(),
+            child_created_at_ms: 4_200,
             committed_seq: ChangeSeq(seq),
             delta_index: 0,
         }

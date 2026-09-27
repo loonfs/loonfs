@@ -65,6 +65,9 @@ mod tests {
                         display_name: loonfs_api::DisplayName::parse("docs")
                             .expect("valid display name"),
                         child_inode_id: InodeId(2),
+                        child_kind: loonfs_api::InodeKind::Directory,
+                        child_created_by: loonfs_api::ActorId::loonfs(),
+                        child_created_at_ms: 4_200,
                     },
                 },
             ],

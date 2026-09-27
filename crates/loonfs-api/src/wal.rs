@@ -109,6 +109,12 @@ pub enum WalDelta {
         display_name: DisplayName,
         /// Inode made reachable by the binding.
         child_inode_id: InodeId,
+        /// Classification copied from the child's inode.
+        child_kind: InodeKind,
+        /// Actor of the child's creating commit.
+        child_created_by: crate::ActorId,
+        /// Unix milliseconds of the child's creating commit.
+        child_created_at_ms: u64,
     },
     /// Removes one exact historical directory binding without affecting a later rebind.
     UnbindDirentry {
@@ -123,6 +129,12 @@ pub enum WalDelta {
         display_name: DisplayName,
         /// Child identity expected on the targeted binding.
         child_inode_id: InodeId,
+        /// Classification copied from the child's inode.
+        child_kind: InodeKind,
+        /// Actor of the child's creating commit.
+        child_created_by: crate::ActorId,
+        /// Unix milliseconds of the child's creating commit.
+        child_created_at_ms: u64,
         /// The exact bind event this delta retires.
         target: DeltaPosition,
     },

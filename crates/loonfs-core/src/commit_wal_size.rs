@@ -25,6 +25,9 @@ const BIND_BYTES: usize = delta_bytes(
         ("name_key", 0),
         ("display_name", 0),
         ("child_inode_id", INTEGER_BYTES),
+        ("child_kind", string_bytes("file".len())),
+        ("child_created_by", string_bytes(256)),
+        ("child_created_at_ms", INTEGER_BYTES),
     ],
 );
 const UNBIND_BYTES: usize = delta_bytes(
@@ -34,6 +37,9 @@ const UNBIND_BYTES: usize = delta_bytes(
         ("name_key", 0),
         ("display_name", 0),
         ("child_inode_id", INTEGER_BYTES),
+        ("child_kind", string_bytes("file".len())),
+        ("child_created_by", string_bytes(256)),
+        ("child_created_at_ms", INTEGER_BYTES),
         (
             "target",
             map_bytes(&[("seq", INTEGER_BYTES), ("delta_index", INDEX_BYTES)]),

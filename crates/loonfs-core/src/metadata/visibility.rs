@@ -314,6 +314,39 @@ pub(crate) async fn visible_child<R: MetadataVisibilityReads>(
     Ok(Some(direntry))
 }
 
+/// For a page that already checked its parent is a visible directory, the
+/// newest slot binding at the read sequence is equivalent to [`visible_child`]
+/// without an inode lookup: commit validation creates the child's inode row
+/// in the same commit as its first binding, and retention keeps every inode row.
+/// A bound binding therefore implies the child inode exists at that sequence,
+/// leaving a covering subtree tombstone as the only way it can be invisible.
+pub(crate) async fn visible_page_child<R: MetadataVisibilityReads>(
+    reads: &mut R,
+    direntry: DirentryBindingRecord,
+) -> Result<Option<DirentryBindingRecord>, R::Error> {
+    if !direntry.is_bound() {
+        trace_absent_leg(
+            AbsentVisibilityLeg::BindingUnbound,
+            direntry.parent_inode_id,
+            Some(&direntry),
+        );
+        return Ok(None);
+    }
+    if reads
+        .covering_subtree_tombstone(direntry.child_inode_id)
+        .await?
+        .is_some()
+    {
+        trace_absent_leg(
+            AbsentVisibilityLeg::ChildInode,
+            direntry.parent_inode_id,
+            Some(&direntry),
+        );
+        return Ok(None);
+    }
+    Ok(Some(direntry))
+}
+
 /// Resolves `absolute_path` component by component through visible
 /// directories and visible child bindings, starting at the canonical root
 /// inode.

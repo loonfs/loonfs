@@ -285,6 +285,12 @@ pub struct DirentryBindingRecord {
     pub name_key: NameKey,
     /// Child affected by this change.
     pub child_inode_id: InodeId,
+    /// Classification copied from the child's inode.
+    pub child_kind: InodeKind,
+    /// Actor of the child's creating commit.
+    pub child_created_by: crate::ActorId,
+    /// Unix milliseconds of the child's creating commit.
+    pub child_created_at_ms: u64,
     /// Commit that published this change.
     pub committed_seq: ChangeSeq,
     /// Order within the commit.
@@ -1660,6 +1666,9 @@ mod tests {
                 display_name: crate::DisplayName::parse("Report.txt").expect("valid display name"),
             },
             child_inode_id: InodeId(42),
+            child_kind: crate::InodeKind::File,
+            child_created_by: crate::ActorId::loonfs(),
+            child_created_at_ms: 4_200,
             committed_seq: ChangeSeq(17),
             delta_index: 3,
         });
@@ -1683,6 +1692,9 @@ mod tests {
                 display_name: crate::DisplayName::parse("report-2024").expect("valid display name"),
             },
             child_inode_id: InodeId(42),
+            child_kind: crate::InodeKind::File,
+            child_created_by: crate::ActorId::loonfs(),
+            child_created_at_ms: 4_200,
             committed_seq: ChangeSeq(17),
             delta_index: 3,
         });
@@ -1797,6 +1809,9 @@ mod tests {
                 display_name: display_name.clone(),
             },
             child_inode_id: InodeId(42),
+            child_kind: crate::InodeKind::File,
+            child_created_by: crate::ActorId::loonfs(),
+            child_created_at_ms: 4_200,
             committed_seq: ChangeSeq(17),
             delta_index: 3,
         });

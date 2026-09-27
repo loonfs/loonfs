@@ -63,6 +63,7 @@ pub(crate) async fn validate_ops<S: ObjectStore + ?Sized>(
                     *child_inode_id,
                     *parent_inode_id,
                     display_name,
+                    (actor, committed_at_ms),
                 )
                 .await?
             }
@@ -79,6 +80,7 @@ pub(crate) async fn validate_ops<S: ObjectStore + ?Sized>(
                     *parent_inode_id,
                     display_name,
                     content_ref,
+                    (actor, committed_at_ms),
                 )
                 .await?
             }
@@ -201,6 +203,7 @@ async fn validate_create_directory<S: ObjectStore + ?Sized>(
     child_inode_id: InodeId,
     parent_inode_id: InodeId,
     display_name: &DisplayName,
+    (created_by, created_at_ms): (&ActorId, u64),
 ) -> Result<Vec<WalDelta>, CoreError> {
     let name_key = validate_name_absent(
         view,
@@ -223,6 +226,9 @@ async fn validate_create_directory<S: ObjectStore + ?Sized>(
             name_key,
             display_name: display_name.clone(),
             child_inode_id,
+            child_kind: InodeKind::Directory,
+            child_created_by: created_by.clone(),
+            child_created_at_ms: created_at_ms,
         },
     ])
 }
@@ -234,6 +240,7 @@ async fn validate_create_file<S: ObjectStore + ?Sized>(
     parent_inode_id: InodeId,
     display_name: &DisplayName,
     content_ref: &ContentRef,
+    (created_by, created_at_ms): (&ActorId, u64),
 ) -> Result<Vec<WalDelta>, CoreError> {
     let name_key = validate_name_absent(
         view,
@@ -256,6 +263,9 @@ async fn validate_create_file<S: ObjectStore + ?Sized>(
             name_key,
             display_name: display_name.clone(),
             child_inode_id,
+            child_kind: InodeKind::File,
+            child_created_by: created_by.clone(),
+            child_created_at_ms: created_at_ms,
         },
         WalDelta::AppendFileRevision {
             delta_index: numbering.reserve_delta_index()?,
@@ -335,9 +345,10 @@ async fn validate_delete_file<S: ObjectStore + ?Sized>(
     source_binding: &ResolvedBinding,
 ) -> Result<Vec<WalDelta>, CoreError> {
     validate_source_binding(view, source_binding).await?;
-    validate_inode_kind(view, inode_id, InodeKind::File, CommitOperand::DeleteTarget).await?;
+    let inode =
+        validate_inode_kind(view, inode_id, InodeKind::File, CommitOperand::DeleteTarget).await?;
     validate_not_covered_by_tombstone(view, inode_id, CommitOperand::DeleteTarget).await?;
-    delete_deltas(numbering, inode_id, source_binding)
+    delete_deltas(numbering, &inode, source_binding)
 }
 
 async fn validate_rename<S: ObjectStore + ?Sized>(
@@ -370,13 +381,16 @@ async fn validate_rename<S: ObjectStore + ?Sized>(
     validate_not_covered_by_tombstone(view, new_parent_inode_id, CommitOperand::RenameTargetParent)
         .await?;
     Ok(vec![
-        unbind_delta(numbering, source_binding)?,
+        unbind_delta(numbering, source_binding, &inode)?,
         WalDelta::BindDirentry {
             delta_index: numbering.reserve_delta_index()?,
             parent_inode_id: new_parent_inode_id,
             name_key: new_name_key,
             display_name: new_display_name.clone(),
             child_inode_id: inode_id,
+            child_kind: inode.inode_kind,
+            child_created_by: inode.committed_by,
+            child_created_at_ms: inode.committed_at_ms,
         },
     ])
 }
@@ -394,7 +408,7 @@ async fn validate_delete_subtree<S: ObjectStore + ?Sized>(
     } else {
         CommitOperand::SubtreeRoot
     };
-    validate_inode_kind(view, root_inode_id, InodeKind::Directory, operand).await?;
+    let inode = validate_inode_kind(view, root_inode_id, InodeKind::Directory, operand).await?;
     if require_empty && view.view().has_visible_children(root_inode_id).await? {
         return Err(CommitValidationError::DirectoryNotEmpty {
             inode_id: root_inode_id,
@@ -402,7 +416,7 @@ async fn validate_delete_subtree<S: ObjectStore + ?Sized>(
         .into());
     }
     validate_not_covered_by_tombstone(view, root_inode_id, CommitOperand::SubtreeRoot).await?;
-    delete_deltas(numbering, root_inode_id, source_binding)
+    delete_deltas(numbering, &inode, source_binding)
 }
 
 async fn validate_undelete<S: ObjectStore + ?Sized>(
@@ -413,7 +427,7 @@ async fn validate_undelete<S: ObjectStore + ?Sized>(
     parent_inode_id: InodeId,
     display_name: &DisplayName,
 ) -> Result<Vec<WalDelta>, CoreError> {
-    let active = validate_undelete_target(view, inode_id, deletion_seq).await?;
+    let (inode, active) = validate_undelete_target(view, inode_id, deletion_seq).await?;
     let name_key = validate_name_absent(
         view,
         parent_inode_id,
@@ -435,6 +449,9 @@ async fn validate_undelete<S: ObjectStore + ?Sized>(
             name_key,
             display_name: display_name.clone(),
             child_inode_id: inode_id,
+            child_kind: inode.inode_kind,
+            child_created_by: inode.committed_by,
+            child_created_at_ms: inode.committed_at_ms,
         },
     ])
 }
@@ -483,6 +500,7 @@ async fn validate_update_access<S: ObjectStore + ?Sized>(
 fn unbind_delta(
     numbering: &mut CommitNumbering,
     binding: &ResolvedBinding,
+    inode: &InodeRecord,
 ) -> Result<WalDelta, CommitValidationError> {
     Ok(WalDelta::UnbindDirentry {
         delta_index: numbering.reserve_delta_index()?,
@@ -490,20 +508,23 @@ fn unbind_delta(
         name_key: binding.name_key.clone(),
         display_name: binding.display_name.clone(),
         child_inode_id: binding.child_inode_id,
+        child_kind: inode.inode_kind,
+        child_created_by: inode.committed_by.clone(),
+        child_created_at_ms: inode.committed_at_ms,
         target: binding.position,
     })
 }
 
 fn delete_deltas(
     numbering: &mut CommitNumbering,
-    root_inode_id: InodeId,
+    inode: &InodeRecord,
     binding: &ResolvedBinding,
 ) -> Result<Vec<WalDelta>, CoreError> {
     Ok(vec![
-        unbind_delta(numbering, binding)?,
+        unbind_delta(numbering, binding, inode)?,
         WalDelta::TombstoneSubtree {
             delta_index: numbering.reserve_delta_index()?,
-            root_inode_id,
+            root_inode_id: inode.inode_id,
             deleted_binding: DeletedBinding {
                 parent_inode_id: binding.parent_inode_id,
                 name_key: binding.name_key.clone(),
@@ -551,15 +572,16 @@ async fn validate_undelete_target<S: ObjectStore + ?Sized>(
     view: &PublishValidationView<'_, S>,
     inode_id: InodeId,
     deletion_seq: ChangeSeq,
-) -> Result<SubtreeTombstoneRecord, CoreError> {
+) -> Result<(InodeRecord, SubtreeTombstoneRecord), CoreError> {
     let committed_seq = view.committed_seq();
-    if view.view().inode_at_seq(inode_id).await?.is_none() {
-        return Err(CommitValidationError::InodeMissing {
-            operand: CommitOperand::UndeleteTarget,
-            inode_id,
-        }
-        .into());
-    }
+    let inode =
+        view.view()
+            .inode_at_seq(inode_id)
+            .await?
+            .ok_or(CommitValidationError::InodeMissing {
+                operand: CommitOperand::UndeleteTarget,
+                inode_id,
+            })?;
     if deletion_seq >= committed_seq {
         return Err(CommitValidationError::UndeleteTargetsCurrentCommit {
             inode_id,
@@ -579,7 +601,7 @@ async fn validate_undelete_target<S: ObjectStore + ?Sized>(
         .into());
     }
 
-    Ok(active)
+    Ok((inode, active))
 }
 
 async fn validate_attributes_target_visible<S: ObjectStore + ?Sized>(
