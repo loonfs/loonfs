@@ -203,14 +203,13 @@ pub(crate) async fn load_filter_block<S: ObjectStore + ?Sized>(
 
 pub(crate) async fn load_index_block<S: ObjectStore + ?Sized>(
     store: &S,
-    cache: &GrepBlockCache,
+    cache: Option<&GrepBlockCache>,
     object_key: &str,
     descriptor: &GrepSegmentRef,
 ) -> Result<Arc<Vec<SegmentIndexEntry>>> {
     let handle = &descriptor.index_block;
-    let key = cache_key(&descriptor.segment_id, GrepBlockKind::Index, handle);
-    let decoded = cache
-        .get_or_load(&key, || async {
+    let load = || async {
+        if let Some(cache) = cache {
             let object_len = segment_object_len(object_key, descriptor)?;
             if object_len <= WHOLE_SEGMENT_LOAD_MAX_BYTES {
                 let whole = load_and_publish_segment_sections(
@@ -233,17 +232,24 @@ pub(crate) async fn load_index_block<S: ObjectStore + ?Sized>(
                     decoded_bytes: handle.decoded_bytes as usize,
                 });
             }
-            let bytes = load_index_section_bytes(store, object_key, handle).await?;
-            let entries = Arc::new(
-                decode_index_block(&bytes, handle)
-                    .map_err(|error| index_segment_corrupt(object_key, "index block", &error))?,
-            );
-            Ok::<_, GrepError>(DecodedGrepBlock::Index {
-                entries,
-                decoded_bytes: handle.decoded_bytes as usize,
-            })
+        }
+        let bytes = load_index_section_bytes(store, object_key, handle).await?;
+        let entries = Arc::new(
+            decode_index_block(&bytes, handle)
+                .map_err(|error| index_segment_corrupt(object_key, "index block", &error))?,
+        );
+        Ok::<_, GrepError>(DecodedGrepBlock::Index {
+            entries,
+            decoded_bytes: handle.decoded_bytes as usize,
         })
-        .await?;
+    };
+    let decoded = match cache {
+        Some(cache) => {
+            let key = cache_key(&descriptor.segment_id, GrepBlockKind::Index, handle);
+            cache.get_or_load(&key, load).await?
+        }
+        None => load().await?,
+    };
     decoded
         .index()
         .ok_or_else(|| cache_kind_corrupt(object_key, "index"))
@@ -285,20 +291,22 @@ fn decode_data_cache_block(
 
 pub(crate) async fn load_data_block_span<S: ObjectStore + ?Sized>(
     store: &S,
-    cache: &GrepBlockCache,
+    cache: Option<&GrepBlockCache>,
     object_key: &str,
     segment_id: &IndexSegmentId,
     entries: &[SegmentIndexEntry],
 ) -> Result<Vec<Arc<DecodedDataBlock<IndexRow>>>> {
     let mut blocks = vec![None; entries.len()];
-    for (entry, block) in entries.iter().zip(&mut blocks) {
-        let key = cache_key(segment_id, GrepBlockKind::Data, &entry.block);
-        if let Some(decoded) = cache.get(&key) {
-            *block = Some(
-                decoded
-                    .data()
-                    .ok_or_else(|| cache_kind_corrupt(object_key, "data"))?,
-            );
+    if let Some(cache) = cache {
+        for (entry, block) in entries.iter().zip(&mut blocks) {
+            let key = cache_key(segment_id, GrepBlockKind::Data, &entry.block);
+            if let Some(decoded) = cache.get(&key) {
+                *block = Some(
+                    decoded
+                        .data()
+                        .ok_or_else(|| cache_kind_corrupt(object_key, "data"))?,
+                );
+            }
         }
     }
 
@@ -329,30 +337,24 @@ pub(crate) async fn load_data_block_span<S: ObjectStore + ?Sized>(
         spans.push((start..cursor, handle));
     }
 
-    let loaded = futures::future::try_join_all(spans.iter().map(|(range, handle)| async move {
-        let bytes = load_index_section_bytes(store, object_key, handle).await?;
-        let mut decoded_blocks = Vec::with_capacity(range.len());
-        for entry in &entries[range.clone()] {
+    for (range, handle) in spans {
+        let bytes = load_index_section_bytes(store, object_key, &handle).await?;
+        for (entry, block) in entries[range.clone()].iter().zip(&mut blocks[range]) {
             let start = (entry.block.offset - handle.offset) as usize;
             let stored = &bytes[start..start + entry.block.stored_bytes as usize];
-            let key = cache_key(segment_id, GrepBlockKind::Data, &entry.block);
-            let decoded = cache
-                .get_or_load(&key, || async {
-                    decode_data_cache_block(object_key, stored, &entry.block)
-                })
-                .await?;
-            decoded_blocks.push(
+            let load = || async { decode_data_cache_block(object_key, stored, &entry.block) };
+            let decoded = match cache {
+                Some(cache) => {
+                    let key = cache_key(segment_id, GrepBlockKind::Data, &entry.block);
+                    cache.get_or_load(&key, load).await?
+                }
+                None => load().await?,
+            };
+            *block = Some(
                 decoded
                     .data()
                     .ok_or_else(|| cache_kind_corrupt(object_key, "data"))?,
             );
-        }
-        Ok::<_, GrepError>(decoded_blocks)
-    }))
-    .await?;
-    for ((range, _), decoded_blocks) in spans.into_iter().zip(loaded) {
-        for (slot, block) in blocks[range].iter_mut().zip(decoded_blocks) {
-            *slot = Some(block);
         }
     }
     Ok(blocks
@@ -382,7 +384,9 @@ mod tests {
     use loonfs_api::{IndexSegmentId, InodeId, RevisionNo};
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_objectstore::{ByteRange, ObjectStore, PutMode, Result as StoreResult};
-    use loonfs_test_support::stores::{delegate_object_store, KeyPredicate, RecordingStore};
+    use loonfs_test_support::stores::{
+        delegate_object_store, ConcurrencyWatchStore, KeyPredicate, RecordingStore,
+    };
     use std::num::NonZeroUsize;
     use std::sync::Arc;
     use tempfile::tempdir;
@@ -390,10 +394,11 @@ mod tests {
     #[tokio::test]
     async fn data_spans_obey_the_byte_limit_and_skip_cached_blocks() {
         let temp_dir = tempdir().expect("tempdir");
-        let store = RecordingStore::new(
+        let watched = Arc::new(ConcurrencyWatchStore::new(
             LocalFsStore::new(temp_dir.path()).expect("store"),
             KeyPredicate::any(),
-        );
+        ));
+        let store = RecordingStore::new(Arc::clone(&watched), KeyPredicate::any());
         let object_key = "segments/span";
         let segment_id = IndexSegmentId::parse(format!("idx_{:032x}", 1)).expect("segment id");
         let mut builder = SegmentBlocksBuilder::new(NonZeroUsize::MIN);
@@ -442,9 +447,11 @@ mod tests {
                     .await
                     .expect("load middle block");
             store.reset();
-            let blocks = load_data_block_span(&store, &cache, object_key, &segment_id, &entries)
-                .await
-                .expect("load spans");
+            let blocks =
+                load_data_block_span(&store, Some(&cache), object_key, &segment_id, &entries)
+                    .await
+                    .expect("load spans");
+            assert_eq!(watched.reads().peak_in_flight, 1);
             assert_eq!(
                 blocks
                     .iter()
@@ -472,9 +479,10 @@ mod tests {
             }
             if budget > 0 {
                 assert!(Arc::ptr_eq(&cached, &blocks[2]));
-                let warm = load_data_block_span(&store, &cache, object_key, &segment_id, &entries)
-                    .await
-                    .expect("load cached spans");
+                let warm =
+                    load_data_block_span(&store, Some(&cache), object_key, &segment_id, &entries)
+                        .await
+                        .expect("load cached spans");
                 assert!(warm
                     .iter()
                     .zip(&blocks)
