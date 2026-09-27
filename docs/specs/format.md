@@ -534,7 +534,7 @@ The publication procedure is:
    If a candidate's evidence has expired, return its own error for that candidate and `stale_head` for the other accepted candidates so they can be planned again. Write no WAL for that batch.
 5. On success, update the local read state and acknowledge the requests.
 
-The publication budget is measured from observing the tip used to plan the batch until initiating its numbered put. A cached tip has the same time limit. An expired attempt reloads and re-plans before writing. Appendix C records the bound.
+The publication budget is measured from observing the tip used to plan the batch until initiating its numbered put. A cached tip has the same time limit. A successful put is itself an observation of the tip it created, so the budget for the next put runs from the start of the batch that made it. An expired attempt reloads and re-plans before writing. Appendix C records the bound.
 
 For example, three requests accepted after sequence 40 can be written together as sequences 41, 42, and 43 in WAL object 10. Creating that object commits all three. They remain separate logical commits, while a request containing several operations remains one commit.
 
@@ -637,7 +637,7 @@ Publication uses put-if-absent at `predecessor.manifest_no + 1`. A lost put load
 
 Successors preserve namespace identity and cannot lower head sequence, writer or compactor epoch, folded WAL number, the retention floor, allocators, or cumulative activity counters. A successor at the same head must preserve activity counters exactly. A tombstone has no successor.
 
-The bounded metadata publication budget runs from before the first output segment write until initiation of the manifest put. An expired attempt publishes nothing further. Its unreferenced output remains subject to segment-age collection rules. Streaming compaction has the longer bound in section 10.4.
+The bounded metadata publication budget runs from the start of the publication, before any output segment is written, until initiation of the manifest put. An expired attempt publishes nothing further. Its unreferenced output remains subject to segment-age collection rules. Streaming compaction has the longer bound in section 10.4.
 
 After publication, raise the hint within the publication budget. Failure to raise it does not undo the manifest. GC preserves manifest numbers at or above the hint observed for its pass so discovery can cross a lagging hint. Intermediate manifests retained for discovery do not independently retain their runs.
 
@@ -1540,7 +1540,7 @@ Publication and collection use the timing relationships below. Configurable sizi
 | --- | ---: | --- |
 | `WAL_PUBLISH_BUDGET_MS` | 60,000 | Observing the planning tip through initiation of its next numbered put. |
 | `PIN_VERIFY_BUDGET_MS` | 60,000 | Pin write through completion of post-write verification. |
-| `METADATA_PUBLICATION_BUDGET_MS` | 900,000 | First output through initiation of a bounded manifest publication. |
+| `METADATA_PUBLICATION_BUDGET_MS` | 900,000 | Start of a bounded manifest publication, including an epoch claim, through initiation of its put. |
 | `PROVIDER_OPERATION_DEADLINE_MS` | 120,000 | Shared client-operation retry budget. |
 | `PROVIDER_ATTEMPT_TIMEOUT_MS` | 30,000 | One control-operation attempt. |
 | `PROVIDER_PUBLICATION_REQUEST_BOUND_MS` | 255,000 | Retry budget, final backoff, and payload-sized final request. |

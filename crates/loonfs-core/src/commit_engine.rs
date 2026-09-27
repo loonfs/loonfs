@@ -775,7 +775,7 @@ impl NamespaceCommitEngine {
             &publish_view,
             crate::protocol::PublicationClock {
                 batch,
-                attempt,
+                attempt: attempt.clone(),
                 tip: projection_observed.clone(),
             },
         )
@@ -783,6 +783,11 @@ impl NamespaceCommitEngine {
         self.projection_observed = Some(projection_observed);
         let (wal_tail_segments, wal_tail_inline_bytes, resulting_read_state) =
             self.update_publish_tail_projection(projection, published.effect, tail_options);
+        // A put that landed is itself an observation of the tip it created, made no
+        // earlier than this attempt began; the next put's budget runs from it.
+        if resulting_read_state.is_some() && self.publish_tail_projection.is_some() {
+            self.projection_observed = Some(attempt);
+        }
         NamespaceCommitEnginePublishResult {
             results: published.results,
             wal_tail_segments,
@@ -1430,6 +1435,50 @@ mod tests {
             self.0
                 .fetch_add(WAL_PUBLISH_BUDGET_MS + 1_000, Ordering::SeqCst)
         }
+    }
+
+    #[tokio::test]
+    async fn a_landed_put_refreshes_the_observation_the_next_budget_runs_from() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = RecordingStore::new(
+            LocalFsStore::new(temp_dir.path()).expect("store"),
+            loonfs_test_support::stores::KeyPredicate::any(),
+        );
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let writer = context("writer-a");
+        create(&store, &namespace_id, &writer)
+            .await
+            .expect("bootstrap");
+        let timer = Arc::new(loonfs_test_support::clock::ManualClock::new(0));
+        let mut engine =
+            NamespaceCommitEngine::new(namespace_id.clone()).monotonic_timer(timer.clone());
+        for (name, advance_ms) in [
+            ("alpha", 0),
+            ("beta", WAL_PUBLISH_BUDGET_MS - 1),
+            ("gamma", WAL_PUBLISH_BUDGET_MS - 1),
+        ] {
+            timer.advance_ms(advance_ms);
+            store.reset();
+            let published = engine
+                .publish_batch(
+                    &store,
+                    vec![create_dir(name, name)],
+                    &writer,
+                    &PublishTailOptions::default(),
+                    &Deadline::start(Arc::clone(&engine.timer)),
+                )
+                .await;
+            published.results[0].as_ref().expect(name);
+        }
+        // Twice the budget has passed since the first observation, but less than
+        // the budget since the last landed put, so the third publish rediscovers nothing.
+        assert!(
+            !store
+                .take_get_keys()
+                .iter()
+                .any(|key| key == &loonfs_objectstore::keys::hint(&namespace_id)),
+            "the third publish rediscovered the namespace"
+        );
     }
 
     #[tokio::test]
