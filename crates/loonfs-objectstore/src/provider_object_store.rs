@@ -1170,10 +1170,15 @@ fn map_provider_error(object_key: &str, err: provider_store::Error) -> ObjectSto
                 format!("unknown {store} configuration key `{key}`"),
             )
         }
-        provider_store::Error::Generic { source, .. } => ObjectStoreError::retryable_transport(
-            object_key,
-            sanitize_provider_message(&source.to_string()),
-        ),
+        provider_store::Error::Generic { source, .. } => {
+            match source.downcast::<ObjectStoreError>() {
+                Ok(error) => *error,
+                Err(source) => ObjectStoreError::retryable_transport(
+                    object_key,
+                    sanitize_provider_message(&source.to_string()),
+                ),
+            }
+        }
         provider_store::Error::JoinError { source } => {
             ObjectStoreError::transport(object_key, sanitize_provider_message(&source.to_string()))
         }
@@ -1270,12 +1275,14 @@ fn mask_xml_element_text(message: &str, element: &str) -> String {
 #[allow(clippy::panic)]
 mod tests {
     use super::*;
+    use crate::aws_credentials::{aws_credentials_source, ObjectStoreAwsCredentialProvider};
     use crate::metrics::{
         InstrumentedObjectStore, ObjectStoreOperation, VecObjectStoreMetricsRecorder,
     };
-    use crate::test_support::SteppingTimer;
+    use crate::test_support::{aws_environment_lock, isolated_aws_environment, SteppingTimer};
     use futures::StreamExt;
     use loonfs_api::transport_retry_backoff;
+    use object_store::client::CredentialProvider;
     use object_store::memory::InMemory;
 
     fn memory_store() -> ProviderObjectStore {
@@ -1311,6 +1318,33 @@ mod tests {
         assert_eq!(
             map_provider_error("private-key", auth_rejection(&path)).class(),
             crate::ObjectStoreErrorClass::PermissionDenied
+        );
+    }
+
+    #[tokio::test]
+    async fn credential_provider_failures_preserve_configuration_class_and_public_message() {
+        let _lock = aws_environment_lock().await;
+        let tempdir =
+            tempfile::tempdir().expect("temporary AWS config directory should be created");
+        let _environment = isolated_aws_environment(&tempdir, None);
+        let source = aws_credentials_source(&crate::AwsS3Credentials::Ambient {}, "us-east-1")
+            .expect("ambient credential source should be constructed");
+        let provider = ObjectStoreAwsCredentialProvider::new(source);
+        let error = provider
+            .get_credential()
+            .await
+            .expect_err("isolated credential chain should be empty");
+
+        let error = map_provider_error("private-key", error);
+
+        assert_eq!(error.class(), crate::ObjectStoreErrorClass::Configuration);
+        assert_eq!(
+            error.to_string(),
+            "invalid object store configuration: could not resolve `store.credentials` through the standard AWS credential chain"
+        );
+        assert_eq!(
+            error.public_message(),
+            "object-store configuration is invalid; verify the provider, bucket, credentials, endpoint, and key prefix fields"
         );
     }
 

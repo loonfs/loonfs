@@ -66,15 +66,15 @@ pub(crate) fn render_error(failure: &CommandFailure, format: OutputFormat) -> io
         stderr.write_all(body.as_bytes())?;
         stderr.write_all(b"\n")?;
     } else {
-        stderr.write_all(human_error(&failure.error).as_bytes())?;
+        stderr.write_all(human_error(&failure.error, failure.mode.as_deref()).as_bytes())?;
         stderr.write_all(b"\n")?;
     }
     Ok(())
 }
 
-fn human_error(error: &CliError) -> String {
+fn human_error(error: &CliError, mode: Option<&str>) -> String {
     let mut rendered = error.message.clone();
-    rendered.push_str(&request_id_suffix(error.request_id.as_deref()));
+    rendered.push_str(&request_id_suffix(error.request_id.as_deref(), mode));
     if let Some(feature) = &error.feature {
         rendered.push_str(&format!("\nfeature: {feature}"));
     }
@@ -84,7 +84,10 @@ fn human_error(error: &CliError) -> String {
     rendered
 }
 
-fn request_id_suffix(request_id: Option<&str>) -> String {
+fn request_id_suffix(request_id: Option<&str>, mode: Option<&str>) -> String {
+    if mode == Some("embedded") {
+        return String::new();
+    }
     request_id.map_or_else(String::new, |request_id| {
         format!(" (request id: {request_id})")
     })
@@ -207,7 +210,7 @@ mod tests {
                 poison_permission_runtime_error(),
             )),
         };
-        let embedded_human = human_error(&embedded_failure.error);
+        let embedded_human = human_error(&embedded_failure.error, embedded_failure.mode.as_deref());
         let embedded_json = json_error(&embedded_failure).expect("embedded JSON error renders");
         for rendered in [&embedded_human, &embedded_json] {
             assert_provider_markers_absent(rendered);
@@ -233,7 +236,7 @@ mod tests {
             mode: Some("remote".to_owned()),
             error: Box::new(CliError::from(ClientError::from_api_error(503, body))),
         };
-        let remote_human = human_error(&remote_failure.error);
+        let remote_human = human_error(&remote_failure.error, remote_failure.mode.as_deref());
         let remote_json = json_error(&remote_failure).expect("remote JSON error renders");
         for rendered in [&remote_human, &remote_json] {
             assert_provider_markers_absent(rendered);
@@ -622,22 +625,40 @@ mod tests {
     }
 
     #[test]
-    fn human_errors_render_feature_and_param_diagnostics() {
+    fn errors_keep_diagnostics_and_show_request_ids_in_json_and_remote_human_output() {
         let mut error = CliError::new("not_supported", "grep is not served");
         error.feature = Some("query.grep".to_owned());
         error.param = Some("/pattern".to_owned());
         error.request_id = Some("req_human".to_owned());
 
-        let rendered = human_error(&error);
-        assert!(rendered.contains("grep is not served"), "{rendered}");
-        assert!(rendered.contains("request id: req_human"), "{rendered}");
-        assert!(rendered.contains("\nfeature: query.grep"), "{rendered}");
-        assert!(rendered.contains("\nparam: /pattern"), "{rendered}");
+        for mode in ["remote", "embedded"] {
+            let failure = CommandFailure {
+                kind: CommandKind::ConfigShow,
+                profile: Some("default".to_owned()),
+                mode: Some(mode.to_owned()),
+                error: Box::new(error.clone()),
+            };
+            let rendered = human_error(&failure.error, failure.mode.as_deref());
+            let suffix = if mode == "remote" {
+                " (request id: req_human)"
+            } else {
+                ""
+            };
+            assert_eq!(
+                rendered,
+                format!("grep is not served{suffix}\nfeature: query.grep\nparam: /pattern")
+            );
+            let json: serde_json::Value =
+                serde_json::from_str(&json_error(&failure).expect("JSON error should render"))
+                    .expect("rendered error should be valid JSON");
+            assert_eq!(json["mode"], mode);
+            assert_eq!(json["error"]["request_id"], "req_human");
+        }
     }
 
     #[test]
-    fn human_doctor_failure_has_one_detail_line_with_the_request_id() {
-        let output = CommandOutput {
+    fn doctor_failures_show_request_ids_in_json_and_remote_human_output() {
+        let mut output = CommandOutput {
             kind: CommandKind::Doctor,
             profile: Some("remote".to_owned()),
             mode: Some("remote".to_owned()),
@@ -652,14 +673,24 @@ mod tests {
             },
         };
 
-        let rendered = human_success(&output);
-        assert_eq!(rendered.lines().count(), 2, "{rendered}");
-        assert!(rendered.contains("auth: failed"), "{rendered}");
-        assert!(
-            rendered.contains("token rejected | check the profile"),
-            "{rendered}"
-        );
-        assert!(rendered.contains("request id: req_doctor"), "{rendered}");
+        for mode in ["remote", "embedded"] {
+            output.mode = Some(mode.to_owned());
+            let rendered = human_success(&output);
+            let suffix = if mode == "remote" {
+                " (request id: req_doctor)"
+            } else {
+                ""
+            };
+            assert_eq!(
+                rendered,
+                format!("auth: failed\n  detail: token rejected | check the profile{suffix}")
+            );
+            let json: serde_json::Value =
+                serde_json::from_str(&json_success(&output).expect("doctor JSON should render"))
+                    .expect("doctor output should be valid JSON");
+            assert_eq!(json["mode"], mode);
+            assert_eq!(json["data"]["checks"][0]["request_id"], "req_doctor");
+        }
     }
     #[test]
     fn gc_summaries_report_counts_retention_and_namespace_retirement() {

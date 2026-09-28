@@ -27,7 +27,7 @@ pub(crate) fn write_human_success(
                 writer,
                 "failed {}: {}",
                 failure.path,
-                human_error(&failure.error)
+                human_error(&failure.error, output.mode.as_deref())
             )?;
         }
     }
@@ -39,7 +39,7 @@ pub(crate) fn write_human_success(
 fn human_success_text(output: &CommandOutput) -> String {
     match &output.data {
         CommandData::Capabilities(document) => human_capabilities(document),
-        CommandData::Doctor { checks } => human_doctor(checks),
+        CommandData::Doctor { checks } => human_doctor(checks, output.mode.as_deref()),
         CommandData::Profile(profile) => human_profile(output, profile),
         CommandData::ProfileSummary(profile) => human_profile_summary(output.kind, profile),
         CommandData::ProfileList {
@@ -483,7 +483,7 @@ fn capability_group(heading: &str, rows: &[String]) -> String {
     lines.join("\n")
 }
 
-fn human_doctor(checks: &[DoctorCheck]) -> String {
+fn human_doctor(checks: &[DoctorCheck], mode: Option<&str>) -> String {
     let mut lines = Vec::new();
     for check in checks {
         if check.status == DoctorStatus::Failed {
@@ -499,7 +499,7 @@ fn human_doctor(checks: &[DoctorCheck]) -> String {
         if check.status == DoctorStatus::Failed {
             lines.push(format!("{}: failed", check.name));
             let detail = single_line(&check.message);
-            let request_id = request_id_suffix(check.request_id.as_deref());
+            let request_id = request_id_suffix(check.request_id.as_deref(), mode);
             lines.push(format!("  detail: {detail}{request_id}"));
         } else {
             lines.push(format!(
