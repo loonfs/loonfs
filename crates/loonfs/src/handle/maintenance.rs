@@ -26,6 +26,10 @@ pub struct FsMaintenance {
     /// [`Self::starve_reorganization_row_budget`].
     #[cfg(test)]
     pub(crate) reorganization_row_budget: Option<std::num::NonZeroUsize>,
+    /// A narrowed per-segment row budget for the tests that need many
+    /// compacted segments. See [`Self::narrow_segment_row_budget`].
+    #[cfg(test)]
+    pub(crate) segment_row_budget: Option<std::num::NonZeroUsize>,
 }
 
 impl FsMaintenance {
@@ -57,6 +61,8 @@ impl FsMaintenance {
             compactor_epochs: Arc::default(),
             #[cfg(test)]
             reorganization_row_budget: None,
+            #[cfg(test)]
+            segment_row_budget: None,
         })
     }
 
@@ -74,6 +80,21 @@ impl FsMaintenance {
         max_decoded_input_rows_per_step: std::num::NonZeroUsize,
     ) -> Self {
         self.reorganization_row_budget = Some(max_decoded_input_rows_per_step);
+        self
+    }
+
+    /// Narrows the rows one segment this handle's compaction writes may hold,
+    /// so a namespace a test can build in seconds compacts into many segments.
+    ///
+    /// Test-only: folds keep the shipped segment shape, and planning and
+    /// publishing are the shipped path either way.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn narrow_segment_row_budget(
+        mut self,
+        max_rows_per_segment: std::num::NonZeroUsize,
+    ) -> Self {
+        self.segment_row_budget = Some(max_rows_per_segment);
         self
     }
 
@@ -176,6 +197,8 @@ impl FsMaintenanceBuilder {
             compactor_epochs: Arc::default(),
             #[cfg(test)]
             reorganization_row_budget: None,
+            #[cfg(test)]
+            segment_row_budget: None,
         })
     }
 }
