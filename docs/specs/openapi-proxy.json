@@ -53,7 +53,7 @@
         "additionalProperties": {
           "$ref": "#/components/schemas/AccessRights"
         },
-        "description": "A validated map from principal to rights, limited to\n[`MAX_ACCESS_GRANT_ENTRIES`] entries and [`MAX_ACCESS_GRANTS_PRINCIPAL_BYTES`]\nbytes of principal ids. No entry has an empty set of rights. Decoding\nrejects repeated principals.",
+        "description": "A validated map from principal to rights, limited to 1,000 entries and\n65,536 bytes of principal ids. No entry has an empty set of rights. Decoding\nrejects repeated principals.",
         "propertyNames": {
           "type": "string"
         },
@@ -99,7 +99,7 @@
         "type": "string"
       },
       "AttributeValue": {
-        "description": "A validated inode attribute value of at most [`MAX_ATTRIBUTE_VALUE_BYTES`] UTF-8 bytes.\n\nEmpty strings and control characters are valid, and only an explicit remove\noperation deletes an attribute.",
+        "description": "A validated inode attribute value of at most 4,096 UTF-8 bytes.\n\nEmpty strings and control characters are valid, and only an explicit remove\noperation deletes an attribute.",
         "example": "platform",
         "type": "string"
       },
@@ -107,7 +107,7 @@
         "additionalProperties": {
           "$ref": "#/components/schemas/AttributeValue"
         },
-        "description": "A validated attribute map limited to [`MAX_ATTRIBUTE_ENTRIES`] entries and\n[`MAX_ATTRIBUTES_TOTAL_BYTES`] total key and value UTF-8 bytes.\n\nConstruction and decoding reject values over these limits; an empty map\nrepresents cleared attributes.",
+        "description": "A validated attribute map limited to 100 entries and 65,536 total key and\nvalue UTF-8 bytes.\n\nConstruction and decoding reject values over these limits; an empty map\nrepresents cleared attributes.",
         "propertyNames": {
           "type": "string"
         },
@@ -251,7 +251,7 @@
         "type": "object"
       },
       "CommitId": {
-        "description": "Client-supplied idempotency key for one logical commit.\n\nReuse the same `CommitId` when retrying the same request. The accepted\ngrammar is 1 to 128 lowercase ASCII letters, digits, dots, underscores,\nor hyphens, starting with a letter or digit. [`CommitId::generate`] returns\n`c_<32 lowercase hex>`, but callers may supply any value in that grammar.",
+        "description": "Client-supplied idempotency key for one logical commit.\n\nReuse the same `CommitId` when retrying the same request. The accepted\ngrammar is 1 to 128 lowercase ASCII letters, digits, dots, underscores,\nor hyphens, starting with a letter or digit. Generated commit ids have the\nform `c_<32 lowercase hex>`, but callers may supply any value in that grammar.",
         "example": "c_f3a9c2d4b6e8417a90c5d2f8e1b7a6c0",
         "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$",
         "type": "string"
@@ -663,7 +663,7 @@
           },
           "revision_no": {
             "$ref": "#/components/schemas/RevisionNo",
-            "description": "Revision to read, or `None` for the path's current revision.\nCannot be combined with `snapshot_id`."
+            "description": "Revision to read. Omit it for the path's current revision.\nCannot be combined with `snapshot_id`."
           },
           "snapshot_id": {
             "$ref": "#/components/schemas/PinId",
@@ -761,7 +761,7 @@
             "type": "string"
           },
           "part_size_bytes": {
-            "description": "The byte length of every part except the last, or `None` for the server default.",
+            "description": "The byte length of every part except the last. Omit it for the server default.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
@@ -871,7 +871,7 @@
         "type": "string"
       },
       "ErrorDetails": {
-        "description": "Optional machine-readable identifiers and state for an [`ApiError`].",
+        "description": "Optional machine-readable identifiers and state for an `ErrorResponse`.",
         "properties": {
           "active_acquired_at_ms": {
             "description": "The Unix-millisecond time when the current writer acquired its epoch, when available.",
@@ -1848,7 +1848,7 @@
           },
           "destination_path": {
             "$ref": "#/components/schemas/AbsolutePath",
-            "description": "The restore destination, or `None` to use the recorded binding."
+            "description": "The restore destination. Omit it to use the recorded binding."
           },
           "inode_id": {
             "$ref": "#/components/schemas/InodeId",
@@ -2074,11 +2074,11 @@
           },
           "next_after_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
-            "description": "Cursor to request when another page remains, or `None` at `through_seq`."
+            "description": "Cursor to request when another page remains, absent at `through_seq`."
           },
           "through_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
-            "description": "Snapshot head through which this page was evaluated."
+            "description": "Namespace head through which this page was evaluated."
           }
         },
         "required": [
@@ -2311,18 +2311,18 @@
             "description": "The attribute revision this projection represents."
           },
           "attributes_updated_at_ms": {
-            "description": "The latest attribute update time in Unix milliseconds, or `None` for the\ninitial empty state.",
+            "description": "The latest attribute update time in Unix milliseconds, absent for the\ninitial empty state.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
           },
           "attributes_updated_by": {
             "$ref": "#/components/schemas/ActorId",
-            "description": "The actor responsible for the latest attribute update, or `None` for the\ninitial empty state."
+            "description": "The actor responsible for the latest attribute update, absent for the\ninitial empty state."
           },
           "binding_version": {
             "$ref": "#/components/schemas/BindingVersion",
-            "description": "The opaque ID for the current parent and name binding, or `None` for the namespace root."
+            "description": "The opaque ID for the current parent and name binding, absent for the namespace root."
           },
           "created_at_ms": {
             "description": "The inode creation time in Unix milliseconds.",
@@ -2359,7 +2359,7 @@
           },
           "parent_inode_id": {
             "$ref": "#/components/schemas/InodeId",
-            "description": "Parent directory inode, or `None` for the root."
+            "description": "Parent directory inode, absent for the root."
           },
           "path": {
             "$ref": "#/components/schemas/AbsolutePath",
@@ -2389,18 +2389,18 @@
             "description": "The attribute revision this projection represents."
           },
           "attributes_updated_at_ms": {
-            "description": "The latest attribute update time in Unix milliseconds, or `None` for the\ninitial empty state.",
+            "description": "The latest attribute update time in Unix milliseconds, absent for the\ninitial empty state.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
           },
           "attributes_updated_by": {
             "$ref": "#/components/schemas/ActorId",
-            "description": "The actor responsible for the latest attribute update, or `None` for the\ninitial empty state."
+            "description": "The actor responsible for the latest attribute update, absent for the\ninitial empty state."
           },
           "binding_version": {
             "$ref": "#/components/schemas/BindingVersion",
-            "description": "The opaque ID for the current parent and name binding, or `None` for the namespace root."
+            "description": "The opaque ID for the current parent and name binding, absent for the namespace root."
           },
           "content_ref": {
             "$ref": "#/components/schemas/ContentRef",
@@ -2441,7 +2441,7 @@
           },
           "parent_inode_id": {
             "$ref": "#/components/schemas/InodeId",
-            "description": "Parent directory inode, or `None` for the root."
+            "description": "Parent directory inode, absent for the root."
           },
           "path": {
             "$ref": "#/components/schemas/AbsolutePath",
@@ -2774,7 +2774,7 @@
           },
           "content_token": {
             "$ref": "#/components/schemas/ContentToken",
-            "description": "Fresh proof for a later commit, or `None` after the token minting window closes."
+            "description": "Fresh proof for a later commit, absent after the token minting window closes."
           },
           "mode": {
             "$ref": "#/components/schemas/UploadMode",
@@ -3031,7 +3031,7 @@
                 }
               }
             },
-            "description": "The cursor is older than the retained change history and requires a fresh snapshot"
+            "description": "The cursor is older than the retained change history; restart from a fresh listing or checkpoint"
           },
           "410": {
             "content": {

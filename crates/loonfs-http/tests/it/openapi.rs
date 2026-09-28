@@ -1356,7 +1356,7 @@ fn openapi_names_tagged_one_of_alternatives() {
             ][..],
         ),
         (
-            "CheckpointOwnerSummary",
+            "CheckpointOwner",
             &[
                 "CheckpointOwnerUser",
                 "CheckpointOwnerFork",

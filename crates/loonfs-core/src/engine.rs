@@ -12,7 +12,7 @@ use crate::namespace::basis::MetadataBasis;
 use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::{bootstrap, fork};
-use crate::options::{BootstrapOptions, DeleteNamespaceOptions};
+use crate::options::{CreateNamespaceOptions, DeleteNamespaceOptions};
 use crate::path::read::{
     load_metadata_view, load_metadata_view_for_authorization, CurrentFileState,
     DirectDownloadByInodeTarget, DirectDownloadTarget, LoadedMetadataView, ReadLoadContext,
@@ -407,7 +407,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     ///
     /// Use this before normal reads and writes for a new namespace. Returns
     /// the namespace's status after manifest 1 is installed.
-    pub async fn bootstrap_namespace(&self, options: BootstrapOptions) -> Result<Namespace> {
+    pub async fn bootstrap_namespace(&self, options: CreateNamespaceOptions) -> Result<Namespace> {
         bootstrap::bootstrap_namespace(
             &self.store,
             &self.namespace_id,

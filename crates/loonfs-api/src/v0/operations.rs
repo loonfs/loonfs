@@ -37,7 +37,7 @@ pub struct ApiError {
     pub details: Option<Box<ErrorDetails>>,
 }
 
-/// Optional machine-readable identifiers and state for an [`ApiError`].
+/// Optional machine-readable identifiers and state for an `ErrorResponse`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ErrorDetails {
@@ -665,7 +665,7 @@ pub enum FilesystemOperation {
         inode_id: InodeId,
         /// Observed deletion sequence, which prevents cancelling a newer tombstone sequence.
         deletion_seq: ChangeSeq,
-        /// The restore destination, or `None` to use the recorded binding.
+        /// The restore destination. Omit it to use the recorded binding.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[cfg_attr(feature = "openapi", schema(nullable = false))]
         destination_path: Option<AbsolutePath>,
@@ -916,7 +916,7 @@ pub struct ListFileRevisionsResponse {
 pub struct CreateCheckpointRequest {
     /// The non-unique label recorded on the checkpoint.
     pub name: String,
-    /// The checkpoint lifetime in milliseconds, or `None` to keep the checkpoint until it is deleted.
+    /// The checkpoint lifetime in milliseconds. Omit it to keep the checkpoint until it is deleted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub ttl_ms: Option<u64>,
@@ -955,6 +955,7 @@ pub struct DeleteCheckpointResponse {
 /// The owner of a checkpoint record.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "openapi", schema(as = CheckpointOwner))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CheckpointOwnerSummary {
     /// An operator-created pin, deleted by id or by its own expiry.
@@ -1405,7 +1406,7 @@ pub struct RecoverAdministratorResponse {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct MetadataMaintenanceRequest {
-    /// The WAL-tail threshold for flushing, or `None` for the server default.
+    /// The WAL-tail threshold for flushing. Omit it for the server default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub max_wal_tail_segments: Option<u64>,

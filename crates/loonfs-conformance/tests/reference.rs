@@ -1191,7 +1191,7 @@ async fn run_inode_mutations(harness: &Harness, case: &Case) {
 
     let feed = harness
         .client
-        .list_changes(
+        .list_changes_page(
             &namespace,
             ChangeSeq(expected.moved_committed_seq - 1),
             &loonfs_client::ListChangesOptions {
@@ -1844,7 +1844,7 @@ async fn run_changes(harness: &Harness, case: &Case) {
     assert_eq!(committed.committed_seq.0, expected.committed_seq);
     let feed = harness
         .client
-        .list_changes(
+        .list_changes_page(
             &namespace,
             ChangeSeq(request.after_seq),
             &Default::default(),
@@ -1985,7 +1985,7 @@ async fn run_end_to_end(harness: &Harness, case: &Case) {
 
     let changes = harness
         .client
-        .list_changes(&namespace, ChangeSeq(0), &Default::default())
+        .list_changes_page(&namespace, ChangeSeq(0), &Default::default())
         .await
         .expect("list end-to-end changes before remove");
     assert_eq!(changes.changes.len(), expected.change_count - 1);
@@ -2000,7 +2000,7 @@ async fn run_end_to_end(harness: &Harness, case: &Case) {
 
     let changes = harness
         .client
-        .list_changes(&namespace, ChangeSeq(0), &Default::default())
+        .list_changes_page(&namespace, ChangeSeq(0), &Default::default())
         .await
         .expect("list complete end-to-end changes");
     assert_eq!(changes.changes.len(), expected.change_count);

@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 pub struct CreateDownloadRequest {
     /// Absolute path of the file to read.
     pub path: AbsolutePath,
-    /// Revision to read, or `None` for the path's current revision.
+    /// Revision to read. Omit it for the path's current revision.
     /// Cannot be combined with `snapshot_id`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]

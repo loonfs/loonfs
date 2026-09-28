@@ -556,7 +556,7 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
             );
             expect_code(
                 reader
-                    .list_changes(&source, ChangeSeq(0), Default::default())
+                    .list_changes_page(&source, ChangeSeq(0), Default::default())
                     .await,
                 ErrorCode::RebootstrapRequired,
             );

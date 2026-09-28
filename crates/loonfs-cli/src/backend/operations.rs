@@ -163,7 +163,7 @@ impl ResolvedTarget {
             .await?)
     }
 
-    pub(crate) async fn list_changes(
+    pub(crate) async fn list_changes_page(
         &self,
         namespace_id: &NamespaceId,
         after_seq: ChangeSeq,
@@ -172,7 +172,7 @@ impl ResolvedTarget {
     ) -> Result<ListChangesResponse, CliError> {
         Ok(self
             .client
-            .list_changes(
+            .list_changes_page(
                 namespace_id,
                 after_seq,
                 &ListChangesOptions {

@@ -54,7 +54,7 @@ async fn feed_message(
 ) -> Option<String> {
     let page = runtime
         .reader
-        .list_changes(namespace_id, ChangeSeq(0), ListChangesOptions::default())
+        .list_changes_page(namespace_id, ChangeSeq(0), ListChangesOptions::default())
         .await
         .expect("list changes");
     page.changes
@@ -156,7 +156,7 @@ async fn restart_replays_the_commit_actor_from_the_wal() {
     let reopened = open_runtime_async(store(temp_dir.path()), "writer-b").await;
     let page = reopened
         .reader
-        .list_changes(&namespace_id, ChangeSeq(0), ListChangesOptions::default())
+        .list_changes_page(&namespace_id, ChangeSeq(0), ListChangesOptions::default())
         .await
         .expect("replay change feed after restart");
     let change = page

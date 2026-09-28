@@ -1251,7 +1251,7 @@ pub(crate) async fn run_filesystem_restore(
     let result = context
         .target
         .client
-        .restore_file_revision(
+        .restore_revision(
             &spec,
             revision_no,
             &loonfs_client::RestoreRevisionOptions { commit },

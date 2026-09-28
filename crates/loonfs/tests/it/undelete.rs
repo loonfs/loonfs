@@ -516,7 +516,7 @@ fn change_feed_reports_the_deletion_position_an_undelete_takes() {
     ))
     .expect("undelete");
 
-    let changes = block_on(fs.reader.list_changes(
+    let changes = block_on(fs.reader.list_changes_page(
         &namespace_id,
         ChangeSeq(0),
         ListChangesOptions::default(),
@@ -573,7 +573,7 @@ fn the_feed_names_deleted_entries_and_their_writer() {
     )
     .expect("delete");
 
-    let changes = block_on(fs.reader.list_changes(
+    let changes = block_on(fs.reader.list_changes_page(
         &namespace_id,
         ChangeSeq(0),
         ListChangesOptions::default(),

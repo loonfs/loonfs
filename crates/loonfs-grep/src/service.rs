@@ -751,7 +751,7 @@ async fn candidate_content(
     }
     CandidateContent::Fetched(
         reads
-            .read_revision_content(
+            .get_file_revision_bytes_by_inode(
                 candidate.inode_id,
                 candidate.revision_no,
                 INDEX_GRAMS_MAX_FILE_BYTES,

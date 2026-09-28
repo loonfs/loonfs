@@ -346,7 +346,7 @@ async fn create_namespace(runtime: &TestRuntime, namespace_id: &NamespaceId) {
     runtime
         .core
         .writer_engine(&runtime.bits.identity, namespace_id)
-        .bootstrap_namespace(loonfs_core::BootstrapOptions {
+        .bootstrap_namespace(loonfs_core::CreateNamespaceOptions {
             actor_id: loonfs_test_support::test_actor(),
             access: loonfs_api::NamespaceAccess::Unrestricted {},
             allow_existing: false,
@@ -1857,7 +1857,7 @@ async fn publisher_batches_concurrent_distinct_commits_into_one_wal_segment() {
 
     let changes = writer
         .reader()
-        .list_changes(
+        .list_changes_page(
             &namespace_id,
             ChangeSeq(0),
             crate::ListChangesOptions::default(),

@@ -646,7 +646,7 @@ pub(super) async fn create_commit(
             (status = 400, description = "Invalid change cursor, limit, snapshot id, non-snapshot checkpoint, or after_seq above the snapshot sequence", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace or snapshot not found", body = ApiError),
-            (status = 409, description = "The cursor is older than the retained change history and requires a fresh snapshot", body = ApiError),
+            (status = 409, description = "The cursor is older than the retained change history; restart from a fresh listing or checkpoint", body = ApiError),
             (status = 410, description = "Namespace deleted or snapshot deleted or expired", body = ApiError),
             crate::http::openapi::UnavailableResponses
         )
@@ -664,20 +664,17 @@ pub(super) async fn list_changes(
     let limit = resolve_page_limit(query.limit)?;
     let snapshot_id = parse_optional_snapshot_id(query.snapshot_id)?;
     let target = pin_requested_snapshot(reader, &namespace_id, snapshot_id).await?;
+    let options = ListChangesOptions { limit: Some(limit) };
     let response = match target {
         ReadTarget::Snapshot(snapshot) => snapshot
-            .list_changes(after_seq, limit)
+            .list_changes_page(after_seq, options)
             .await
             .map_err(ApiResponseError::for_namespace(&namespace_id))?,
         ReadTarget::Live {
             reader,
             namespace_id,
         } => reader
-            .list_changes(
-                &namespace_id,
-                after_seq,
-                ListChangesOptions { limit: Some(limit) },
-            )
+            .list_changes_page(&namespace_id, after_seq, options)
             .await
             .map_err(ApiResponseError::for_namespace(&namespace_id))?,
     };

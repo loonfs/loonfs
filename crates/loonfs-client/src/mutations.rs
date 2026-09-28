@@ -428,7 +428,7 @@ impl Client {
     }
 
     /// Makes an earlier file revision the current revision.
-    pub async fn restore_file_revision(
+    pub async fn restore_revision(
         &self,
         spec: &NamespacePath,
         source_revision_no: RevisionNo,

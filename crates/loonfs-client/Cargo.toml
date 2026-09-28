@@ -6,6 +6,9 @@ license.workspace = true
 rust-version.workspace = true
 description = "Async HTTP client for a LoonFS server."
 repository.workspace = true
+homepage.workspace = true
+keywords = ["filesystem", "object-storage", "http-client"]
+categories = ["filesystem"]
 
 [dependencies]
 bytes.workspace = true

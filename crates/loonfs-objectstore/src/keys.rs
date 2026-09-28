@@ -1,6 +1,6 @@
 //! Key construction for every [durable object family].
 //!
-//! [durable object family]: ../../../docs/specs/format.md#a8-object-keys
+//! [durable object family]: https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a8-object-keys
 
 use loonfs_api::wire::manifest::MetadataSegmentRef;
 use loonfs_api::{ContentId, ManifestNo, MetadataSegmentId, NamespaceId, PinId, UploadId, WalNo};

@@ -20,16 +20,16 @@ use std::io::Read;
 /// spec fixes ("Standard mutation operations" and "Preconditions").
 pub const WAL_FORMAT_VERSION: u32 = 1;
 
-/// Largest decompressed WAL document allowed by [Appendix A.5](../../../docs/specs/format.md#a5-wal-records).
+/// Largest decompressed WAL document allowed by [Appendix A.5](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a5-wal-records).
 pub const MAX_WAL_SEGMENT_BYTES: usize = 512 * 1024 * 1024;
 
 /// Reader limit per inline value in
-/// [Appendix A.5](../../../docs/specs/format.md#a5-wal-records);
+/// [Appendix A.5](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a5-wal-records);
 /// writer thresholds are policy at or below this limit.
 pub const MAX_WAL_INLINE_CONTENT_BYTES: usize = 256 * 1024;
 
 /// Reader limit for total inline bytes in one WAL segment in
-/// [Appendix A.5](../../../docs/specs/format.md#a5-wal-records);
+/// [Appendix A.5](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a5-wal-records);
 /// writer thresholds are policy at or below this limit.
 pub const MAX_WAL_SEGMENT_INLINE_CONTENT_BYTES: usize = 4 * 1024 * 1024;
 
@@ -65,7 +65,7 @@ const fn cbor_map_bytes(fields: &[(&str, usize)]) -> usize {
 
 /// Identifies the durable payload family carried by a WAL envelope.
 ///
-/// See [WAL segment rules](../../../docs/specs/format.md#a5-wal-records).
+/// See [WAL segment rules](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a5-wal-records).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WalEnvelopeKind {
@@ -84,7 +84,7 @@ impl WalEnvelopeKind {
 
 /// Records one replayable metadata mutation materialized from a semantic commit operation.
 ///
-/// See [standard mutation operations](../../../docs/specs/format.md#66-operations-and-wal-deltas).
+/// See [standard mutation operations](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#66-operations-and-wal-deltas).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WalDelta {
@@ -148,7 +148,7 @@ pub enum WalDelta {
         revision_no: RevisionNo,
         /// Content of the new revision. Uploaded bytes are durable before
         /// publication; inline bytes travel in this commit's `inline_content`
-        /// ([format section 1.5](../../../docs/specs/format.md#15-file-contents-and-ownership)).
+        /// ([format section 1.5](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#15-file-contents-and-ownership)).
         content_ref: ContentRef,
     },
     /// Hides a rooted subtree from snapshots at this delta's sequence or later.
@@ -212,7 +212,7 @@ pub enum WalDelta {
 
 /// Associates a materialized WAL delta with the semantic operation that produced it.
 ///
-/// See [logical commits](../../../docs/specs/format.md#12-commits-and-revisions).
+/// See [logical commits](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#12-commits-and-revisions).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WalCommitDelta {
@@ -261,7 +261,7 @@ pub struct WalInlineContent {
 
 /// Carries one accepted logical commit inside a WAL segment.
 ///
-/// See [WAL segment rules](../../../docs/specs/format.md#a5-wal-records).
+/// See [WAL segment rules](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a5-wal-records).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WalCommitPayload {
@@ -283,14 +283,14 @@ pub struct WalCommitPayload {
     pub message: Option<String>,
     /// Materialized mutations in their authoritative `delta_index` order.
     pub deltas: Vec<WalCommitDelta>,
-    /// Content values governed by [Appendix A.5](../../../docs/specs/format.md#a5-wal-records).
+    /// Content values governed by [Appendix A.5](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a5-wal-records).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub inline_content: Vec<WalInlineContent>,
 }
 
 /// Carries the namespace identity, numbered range, and commits stored in one WAL object.
 ///
-/// See [WAL segment rules](../../../docs/specs/format.md#a5-wal-records).
+/// See [WAL segment rules](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a5-wal-records).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WalSegmentPayload {
@@ -306,15 +306,6 @@ pub struct WalSegmentPayload {
     pub next_inode_id: InodeId,
     /// Logical commits in contiguous ascending sequence order.
     pub records: Vec<WalCommitPayload>,
-}
-
-impl WalSegmentPayload {
-    /// Returns the preceding head, rejecting a data segment that starts at zero.
-    pub fn prior_head_seq(&self) -> Option<ChangeSeq> {
-        self.records.first().map_or(Some(self.head_seq), |record| {
-            record.committed_seq.0.checked_sub(1).map(ChangeSeq)
-        })
-    }
 }
 
 /// A WAL segment decoded through its checked durable codec.
@@ -376,7 +367,7 @@ pub fn encode_wal_segment_envelope_zstd(
 ///
 /// Decoding fails for invalid compression or CBOR, the wrong kind or version,
 /// a checksum mismatch, or an invalid payload. See
-/// [WAL segment rules](../../../docs/specs/format.md#a5-wal-records).
+/// [WAL segment rules](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a5-wal-records).
 pub fn decode_wal_segment_envelope_zstd(
     bytes: &[u8],
 ) -> Result<WalSegmentEnvelope, EnvelopeCodecError> {

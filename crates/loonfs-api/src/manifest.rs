@@ -1,6 +1,6 @@
 //! The namespace manifest format: the durable document naming the
 //! metadata segment runs that materialize one namespace file-set version
-//! ([manifest format](../../../docs/specs/format.md#71-manifests-runs-and-segments)).
+//! ([manifest format](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#71-manifests-runs-and-segments)).
 
 use crate::control::{ForkBasis, NamespaceStatus, WriterBlock};
 use crate::envelope::EnvelopeCodecError;
@@ -20,12 +20,12 @@ use std::fmt;
 /// a raw JSON fragment. `payload_checksum` covers the fragment's exact bytes.
 pub const NAMESPACE_MANIFEST_FORMAT_VERSION: u32 = 1;
 
-/// Version 1 uses the [block layout](../../../docs/specs/format.md#a7-block-segment-encoding).
+/// Version 1 uses the [block layout](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a7-block-segment-encoding).
 pub const METADATA_SEGMENT_ENCODING: u32 = 1;
 
 /// Identifies the durable payload family carried by a namespace-manifest envelope.
 ///
-/// See [durable object families](../../../docs/specs/format.md#a8-object-keys).
+/// See [durable object families](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a8-object-keys).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NamespaceManifestKind {
@@ -44,7 +44,7 @@ impl NamespaceManifestKind {
 
 /// Selects a metadata row family and its durable lookup ordering.
 ///
-/// See [metadata rows and row keys](../../../docs/specs/format.md#a6-metadata-rows-and-row-keys).
+/// See [metadata rows and row keys](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a6-metadata-rows-and-row-keys).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MetadataRowFamily {
@@ -166,7 +166,7 @@ pub enum RunTier {
 
 /// Reference to one immutable metadata run in a namespace manifest.
 ///
-/// See [control and manifest payloads](../../../docs/specs/format.md#a4-control-and-manifest-payloads).
+/// See [control and manifest payloads](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a4-control-and-manifest-payloads).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MetadataRunRef {
@@ -182,7 +182,7 @@ pub struct MetadataRunRef {
 
 /// Reference to one immutable metadata segment in a namespace manifest.
 ///
-/// See [control and manifest payloads](../../../docs/specs/format.md#a4-control-and-manifest-payloads).
+/// See [control and manifest payloads](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a4-control-and-manifest-payloads).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MetadataSegmentRef {
@@ -217,7 +217,7 @@ pub struct MetadataSegmentRef {
 
 /// One materialized metadata row stored in a segment.
 ///
-/// See [metadata rows and row keys](../../../docs/specs/format.md#a6-metadata-rows-and-row-keys).
+/// See [metadata rows and row keys](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a6-metadata-rows-and-row-keys).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum MetadataRow {
@@ -603,7 +603,7 @@ impl MetadataRowFamily {
 impl MetadataRow {
     /// Builds this row's canonical durable key in its primary row family.
     ///
-    /// See [metadata rows and row keys](../../../docs/specs/format.md#a6-metadata-rows-and-row-keys).
+    /// See [metadata rows and row keys](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a6-metadata-rows-and-row-keys).
     pub fn row_key(&self) -> String {
         self.row_key_for_family(match self {
             Self::Inode(_) => MetadataRowFamily::Inodes,
@@ -621,7 +621,7 @@ impl MetadataRow {
 
     /// Builds this row's durable key using the selected primary or secondary ordering.
     ///
-    /// See [metadata rows and row keys](../../../docs/specs/format.md#a6-metadata-rows-and-row-keys).
+    /// See [metadata rows and row keys](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a6-metadata-rows-and-row-keys).
     pub fn row_key_for_family(&self, family: MetadataRowFamily) -> String {
         match self {
             Self::Inode(record) => lookup_keys::inode_key(record.inode_id),
@@ -733,14 +733,14 @@ impl MetadataRow {
 
 /// Encodes an arbitrary string so it can occupy one component of a durable row key.
 ///
-/// See [metadata rows and row keys](../../../docs/specs/format.md#a6-metadata-rows-and-row-keys).
+/// See [metadata rows and row keys](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a6-metadata-rows-and-row-keys).
 pub fn hex_encode_row_key_component(value: &str) -> String {
     crate::hex::hex_encode_bytes(value.as_bytes())
 }
 
 /// Builders for metadata row keys, lookup prefixes, and Bloom filter probes.
 ///
-/// See [metadata rows and row keys](../../../docs/specs/format.md#a6-metadata-rows-and-row-keys).
+/// See [metadata rows and row keys](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a6-metadata-rows-and-row-keys).
 pub mod lookup_keys {
     use super::hex_encode_row_key_component;
     use crate::{
@@ -1123,7 +1123,7 @@ impl ManifestActivity {
 
 /// Carries one complete namespace file-set description inside a manifest envelope.
 ///
-/// See [manifest publication](../../../docs/specs/format.md#72-publishing-a-materialized-file-set).
+/// See [manifest publication](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#72-publishing-a-materialized-file-set).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NamespaceManifestPayload {
@@ -1350,7 +1350,7 @@ pub fn encode_namespace_manifest_json(
 ///
 /// Decoding fails for invalid JSON, the wrong kind or version, a checksum
 /// mismatch, or an invalid payload. See
-/// [manifest publication](../../../docs/specs/format.md#72-publishing-a-materialized-file-set).
+/// [manifest publication](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#72-publishing-a-materialized-file-set).
 pub fn decode_namespace_manifest_json(
     bytes: &[u8],
 ) -> Result<NamespaceManifestEnvelope, EnvelopeCodecError> {

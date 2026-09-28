@@ -134,7 +134,7 @@ async fn a_batch_commits_once_and_matches_the_same_batch_embedded() {
 
     let remote_changes = harness
         .client
-        .list_changes(&remote_ns, ChangeSeq(0), &Default::default())
+        .list_changes_page(&remote_ns, ChangeSeq(0), &Default::default())
         .await
         .expect("remote changes");
     assert_eq!(remote_changes.changes.len(), 1, "{remote_changes:?}");
@@ -200,7 +200,7 @@ async fn a_batch_commits_once_and_matches_the_same_batch_embedded() {
 
     let embedded_changes = writer
         .reader()
-        .list_changes(&embedded_ns, ChangeSeq(0), ListChangesOptions::default())
+        .list_changes_page(&embedded_ns, ChangeSeq(0), ListChangesOptions::default())
         .await
         .expect("embedded changes");
 
@@ -300,7 +300,7 @@ async fn a_commit_returns_the_change_it_committed_and_replays_it() {
     // The response is the feed's row for that commit, field for field.
     let feed = harness
         .client
-        .list_changes(&namespace, ChangeSeq(0), &Default::default())
+        .list_changes_page(&namespace, ChangeSeq(0), &Default::default())
         .await
         .expect("changes");
     assert_eq!(feed.changes.len(), 1, "{feed:?}");

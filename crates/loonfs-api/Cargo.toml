@@ -6,6 +6,9 @@ license.workspace = true
 rust-version.workspace = true
 description = "Wire types and durable-format codecs for LoonFS."
 repository.workspace = true
+homepage.workspace = true
+keywords = ["filesystem", "object-storage", "wire-format", "openapi"]
+categories = ["filesystem"]
 
 [dependencies]
 base64.workspace = true

@@ -52,7 +52,7 @@ impl MetadataState {
     /// Appends the metadata row encoded by one committed WAL delta.
     ///
     /// This is the only WAL-delta to metadata-row mapping in the crate:
-    /// durable replay ([`Self::apply_committed_wal_deltas_mut`]) and the
+    /// durable replay ([`Self::apply_committed_wal_record_mut`]) and the
     /// commit validation overlay (`commit::validate::view`) both append
     /// rows through it, so the effects a batch validates against cannot
     /// diverge from what replay later persists.

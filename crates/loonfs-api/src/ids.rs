@@ -515,8 +515,8 @@ string_id! {
     ///
     /// Reuse the same `CommitId` when retrying the same request. The accepted
     /// grammar is 1 to 128 lowercase ASCII letters, digits, dots, underscores,
-    /// or hyphens, starting with a letter or digit. [`CommitId::generate`] returns
-    /// `c_<32 lowercase hex>`, but callers may supply any value in that grammar.
+    /// or hyphens, starting with a letter or digit. Generated commit ids have the
+    /// form `c_<32 lowercase hex>`, but callers may supply any value in that grammar.
     CommitId,
     error = CommitIdValidationError,
     validate = validate_commit_id,

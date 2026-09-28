@@ -14,7 +14,7 @@ use std::num::NonZeroU64;
 
 /// Selects one independently versioned control-object family.
 ///
-/// See [control and manifest payloads](../../../docs/specs/format.md#a4-control-and-manifest-payloads).
+/// See [control and manifest payloads](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a4-control-and-manifest-payloads).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ControlObjectKind {
@@ -74,7 +74,7 @@ pub struct HintPayload {
 /// Durable objects embed this shape under `manifest`. It identifies the
 /// manifest and provides the checksum required to verify it.
 ///
-/// See [control and manifest payloads](../../../docs/specs/format.md#a4-control-and-manifest-payloads).
+/// See [control and manifest payloads](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a4-control-and-manifest-payloads).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ManifestRef {
@@ -171,7 +171,7 @@ pub struct WriterBlock {
 
 /// Captures the writer identity and fencing epoch a session must retain while publishing.
 ///
-/// See [control and manifest payloads](../../../docs/specs/format.md#a4-control-and-manifest-payloads).
+/// See [control and manifest payloads](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a4-control-and-manifest-payloads).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AcquiredWriter {
     /// Stable writer label copied into the manifest's writer block.
@@ -395,7 +395,7 @@ impl std::fmt::Display for UploadSessionRecordStatus {
 /// The tagged mode and status variants permit only valid field
 /// combinations.
 ///
-/// See [upload before publish](../../../docs/specs/format.md#5-uploading-content).
+/// See [upload before publish](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#5-uploading-content).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct UploadSessionPayload {
     /// Namespace authorized to consume the staged content.
@@ -613,7 +613,7 @@ pub fn encode_control_state<T: Serialize>(
 ///
 /// Decoding fails for invalid JSON, an unknown or mismatched kind, an
 /// unsupported family version, a checksum mismatch, or an invalid `T`. See
-/// [control and manifest payloads](../../../docs/specs/format.md#a4-control-and-manifest-payloads).
+/// [control and manifest payloads](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a4-control-and-manifest-payloads).
 pub fn decode_control_object<T>(
     bytes: &[u8],
     expected_kind: ControlObjectKind,

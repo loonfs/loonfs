@@ -26,7 +26,7 @@ fn path(absolute_path: &str) -> NamespacePath {
 async fn change_at(harness: &crate::common::TestServer, seq: ChangeSeq) -> loonfs_api::v0::Commit {
     harness
         .client
-        .list_changes(&namespace_id("demo"), ChangeSeq(0), &Default::default())
+        .list_changes_page(&namespace_id("demo"), ChangeSeq(0), &Default::default())
         .await
         .expect("list changes")
         .changes
@@ -122,7 +122,7 @@ async fn http_rows_project_the_commit_that_created_each_retained_fact() {
     let restorer = actor("restorer");
     harness
         .client
-        .restore_file_revision(
+        .restore_revision(
             &path("/implicit/parent/report.txt"),
             RevisionNo(1),
             &RestoreRevisionOptions::new(restorer.clone()),

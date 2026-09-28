@@ -428,7 +428,7 @@ impl Client {
             };
             async move {
                 client
-                    .list_changes(
+                    .list_changes_page(
                         &namespace_id,
                         after_seq.expect("change pager should carry a sequence"),
                         &options,
@@ -463,7 +463,8 @@ impl Client {
             .await
     }
 
-    /// Reads file content from a retained revision or snapshot.
+    /// Returns a file's bytes: the current revision by default, or a retained
+    /// revision or snapshot when the options name one.
     pub async fn get_file_bytes(
         &self,
         spec: &NamespacePath,
@@ -572,8 +573,9 @@ impl Client {
             .await
     }
 
-    /// Returns committed changes using the requested page and snapshot bounds.
-    pub async fn list_changes(
+    /// Returns one page of committed changes after `after_seq`, bounded by the
+    /// requested limit and snapshot.
+    pub async fn list_changes_page(
         &self,
         namespace_id: &NamespaceId,
         after_seq: ChangeSeq,

@@ -669,7 +669,7 @@ impl FsMaintenance {
     /// into a new manifest; this is not a request to compact metadata. The pin
     /// lasts until it is deleted, either explicitly or by garbage collection
     /// after its expiry plus grace
-    /// ([format section 8](../../../../docs/specs/format.md#8-pins)).
+    /// ([format section 8](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#8-pins)).
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.maintenance.checkpoint_create",

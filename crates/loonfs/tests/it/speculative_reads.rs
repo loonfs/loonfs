@@ -156,7 +156,7 @@ async fn buffered_inline_reads_request_no_content_object_on_either_branch() {
         CommitCandidate, CommitRequest, FilesystemOperation, InlineContent, NamespaceCommitEngine,
         PublishTailOptions,
     };
-    use loonfs_core::{BootstrapOptions, MutationContext, NamespaceEngine};
+    use loonfs_core::{CreateNamespaceOptions, MutationContext, NamespaceEngine};
     use loonfs_test_support::stores::KeyPredicate;
 
     let directory = tempdir().expect("directory");
@@ -168,7 +168,9 @@ async fn buffered_inline_reads_request_no_content_object_on_either_branch() {
     let namespace_id = NamespaceId::parse("inline-reads").expect("namespace");
     let writer_id = WriterId::parse("inline-writer").expect("writer");
     NamespaceEngine::writer(store.clone(), namespace_id.clone(), writer_id.clone())
-        .bootstrap_namespace(BootstrapOptions::new(loonfs_test_support::test_actor()))
+        .bootstrap_namespace(CreateNamespaceOptions::new(
+            loonfs_test_support::test_actor(),
+        ))
         .await
         .expect("bootstrap");
     let values: Vec<_> = [

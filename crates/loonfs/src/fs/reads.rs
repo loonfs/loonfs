@@ -111,11 +111,11 @@ impl FsReadSnapshot {
         Ok(())
     }
 
-    /// Reads the ordered change feed through this snapshot's captured head.
-    pub async fn list_changes(
+    /// Reads one page of the change feed through this snapshot's captured head.
+    pub async fn list_changes_page(
         &self,
         after_seq: ChangeSeq,
-        limit: EffectiveLimit,
+        options: ListChangesOptions,
     ) -> Result<ListChangesResponse> {
         self.read(async {
             if after_seq > self.head_seq() {
@@ -128,6 +128,7 @@ impl FsReadSnapshot {
                 });
             }
             self.engine.require_administrator(&self.context).await?;
+            let limit = changes_page_limit(options.limit)?;
             Ok(self
                 .engine
                 .list_changes_after(after_seq, limit, &self.context)
@@ -280,7 +281,7 @@ impl FsReadSnapshot {
     }
 
     /// Reads one inode revision through this snapshot's authorization.
-    pub async fn read_revision_content(
+    pub async fn get_file_revision_bytes_by_inode(
         &self,
         inode_id: InodeId,
         revision_no: RevisionNo,
@@ -1308,7 +1309,7 @@ impl FsReader {
             .await
     }
 
-    /// Reads the ordered change feed after the `after_seq` cursor.
+    /// Reads one page of the ordered change feed after the `after_seq` cursor.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.list_changes",
@@ -1316,12 +1317,13 @@ impl FsReader {
         skip_all,
         fields(
             operation = "list_changes",
+            method = "list_changes_page",
             namespace_id = %namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn list_changes(
+    pub async fn list_changes_page(
         &self,
         namespace_id: &NamespaceId,
         after_seq: ChangeSeq,
@@ -1331,12 +1333,7 @@ impl FsReader {
         self.core
             .read(namespace_id, |engine, context| async move {
                 engine.require_administrator(&context).await?;
-                let limit = match options.limit {
-                    Some(limit) => limit,
-                    None => PaginationPolicy::default()
-                        .resolve_limit(None)
-                        .map_err(|error| RuntimeError::Config(error.to_string()))?,
-                };
+                let limit = changes_page_limit(options.limit)?;
                 Ok(engine
                     .list_changes_after(after_seq, limit, &context)
                     .await?)
@@ -1359,7 +1356,7 @@ impl FsReader {
             let options = options.clone();
             async move {
                 reader
-                    .list_changes(
+                    .list_changes_page(
                         &namespace_id,
                         after_seq.expect("change pager should carry a sequence"),
                         options,
@@ -1367,5 +1364,14 @@ impl FsReader {
                     .await
             }
         })
+    }
+}
+
+fn changes_page_limit(limit: Option<EffectiveLimit>) -> Result<EffectiveLimit> {
+    match limit {
+        Some(limit) => Ok(limit),
+        None => PaginationPolicy::default()
+            .resolve_limit(None)
+            .map_err(|error| RuntimeError::Config(error.to_string())),
     }
 }

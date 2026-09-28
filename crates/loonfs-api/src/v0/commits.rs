@@ -175,9 +175,9 @@ pub struct ListChangesResponse {
     pub namespace_id: NamespaceId,
     /// Exclusive cursor supplied by the caller, or the endpoint's initial position.
     pub after_seq: ChangeSeq,
-    /// Snapshot head through which this page was evaluated.
+    /// Namespace head through which this page was evaluated.
     pub through_seq: ChangeSeq,
-    /// Cursor to request when another page remains, or `None` at `through_seq`.
+    /// Cursor to request when another page remains, absent at `through_seq`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub next_after_seq: Option<ChangeSeq>,

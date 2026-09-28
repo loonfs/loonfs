@@ -668,10 +668,11 @@ impl RuntimeTestExt for TestRuntime {
         namespace_id: &NamespaceId,
         after_seq: ChangeSeq,
     ) -> loonfs::Result<ListChangesResponse> {
-        block_on(
-            self.reader
-                .list_changes(namespace_id, after_seq, ListChangesOptions::default()),
-        )
+        block_on(self.reader.list_changes_page(
+            namespace_id,
+            after_seq,
+            ListChangesOptions::default(),
+        ))
     }
 
     fn create_checkpoint_blocking(&self, namespace_id: &NamespaceId) -> loonfs::Result<Checkpoint> {

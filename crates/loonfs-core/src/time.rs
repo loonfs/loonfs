@@ -8,6 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(crate) use loonfs_objectstore::timing::{MonotonicTimer, StdMonotonicTimer};
 
+/// The start of one bounded publication, measured on a monotonic timer.
 #[derive(Debug, Clone)]
 pub struct Deadline {
     timer: Arc<dyn MonotonicTimer>,
@@ -15,11 +16,13 @@ pub struct Deadline {
 }
 
 impl Deadline {
+    /// Starts a deadline at the timer's current time.
     pub fn start(timer: Arc<dyn MonotonicTimer>) -> Self {
         let started_ms = timer.monotonic_now_ms();
         Self { timer, started_ms }
     }
 
+    /// Returns the milliseconds elapsed since the deadline started.
     pub fn elapsed_ms(&self) -> u64 {
         self.now_ms().saturating_sub(self.started_ms)
     }
@@ -28,6 +31,7 @@ impl Deadline {
         self.timer.monotonic_now_ms()
     }
 
+    /// Returns an observation of the current time on this deadline's timer.
     pub fn observe(&self) -> Observation {
         Observation::now(Arc::clone(&self.timer))
     }
@@ -36,6 +40,8 @@ impl Deadline {
         observation.at_ms.saturating_sub(self.started_ms)
     }
 
+    /// Returns `MetadataPublicationBudgetExceeded` once more than
+    /// [`METADATA_PUBLICATION_BUDGET_MS`] has elapsed since the deadline started.
     pub fn ensure_metadata_publication_budget(&self, namespace_id: &NamespaceId) -> Result<()> {
         let elapsed_ms = self.elapsed_ms();
         if elapsed_ms <= METADATA_PUBLICATION_BUDGET_MS {
@@ -54,6 +60,7 @@ impl Deadline {
     }
 }
 
+/// One reading of a monotonic timer, used to measure the age of a check.
 #[derive(Debug, Clone)]
 pub struct Observation {
     timer: Arc<dyn MonotonicTimer>,
@@ -61,11 +68,13 @@ pub struct Observation {
 }
 
 impl Observation {
+    /// Reads the timer's current time.
     pub fn now(timer: Arc<dyn MonotonicTimer>) -> Self {
         let at_ms = timer.monotonic_now_ms();
         Self { timer, at_ms }
     }
 
+    /// Returns the milliseconds elapsed since this observation.
     pub fn age_ms(&self) -> u64 {
         self.timer.monotonic_now_ms().saturating_sub(self.at_ms)
     }

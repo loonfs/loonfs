@@ -71,7 +71,7 @@ pub(crate) mod commit_split_support {
         CommitCandidate, CommitRequest, FilesystemOperation, NamespaceCommitEngine,
         PublishTailOptions,
     };
-    use loonfs_core::{BootstrapOptions, Error as CoreError, MutationContext};
+    use loonfs_core::{CreateNamespaceOptions, Error as CoreError, MutationContext};
 
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_objectstore::{ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
@@ -88,7 +88,7 @@ pub(crate) mod commit_split_support {
         context: &MutationContext,
     ) -> Result<loonfs_api::Namespace, CoreError> {
         namespace_engine(store, namespace_id, context)
-            .bootstrap_namespace(BootstrapOptions {
+            .bootstrap_namespace(CreateNamespaceOptions {
                 actor_id: loonfs_test_support::test_actor(),
                 access: loonfs_api::NamespaceAccess::Unrestricted {},
                 allow_existing: false,
@@ -102,7 +102,7 @@ pub(crate) mod commit_split_support {
         context: &MutationContext,
     ) -> Result<loonfs_api::Namespace, CoreError> {
         namespace_engine(store, namespace_id, context)
-            .bootstrap_namespace(BootstrapOptions {
+            .bootstrap_namespace(CreateNamespaceOptions {
                 actor_id: loonfs_test_support::test_actor(),
                 access: loonfs_api::NamespaceAccess::Unrestricted {},
                 allow_existing: true,

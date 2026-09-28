@@ -275,9 +275,8 @@ impl<'de> Deserialize<'de> for AccessRights {
     }
 }
 
-/// A validated map from principal to rights, limited to
-/// [`MAX_ACCESS_GRANT_ENTRIES`] entries and [`MAX_ACCESS_GRANTS_PRINCIPAL_BYTES`]
-/// bytes of principal ids. No entry has an empty set of rights. Decoding
+/// A validated map from principal to rights, limited to 1,000 entries and
+/// 65,536 bytes of principal ids. No entry has an empty set of rights. Decoding
 /// rejects repeated principals.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]

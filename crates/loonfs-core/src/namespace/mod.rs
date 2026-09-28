@@ -1,8 +1,8 @@
 //! Namespace control helpers.
 //!
 //! A namespace is one durable filesystem history. Most callers should use
-//! [`crate::NamespaceEngine`]; these helpers are for runtime and admin code
-//! that needs direct namespace inspection.
+//! [`crate::NamespaceEngine`]; these helpers are for runtime and maintenance
+//! code that needs direct namespace inspection.
 
 pub(crate) mod basis;
 pub(crate) mod bootstrap;

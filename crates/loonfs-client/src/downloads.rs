@@ -122,7 +122,9 @@ impl Client {
             .supports(FEATURE_DOWNLOADS_DIRECT_GET))
     }
 
-    /// Requests short-lived direct access to a revision or snapshot.
+    /// Requests short-lived direct access to a file's content: the current
+    /// revision by default, or a retained revision or snapshot when the options
+    /// name one.
     pub async fn create_download(
         &self,
         spec: &NamespacePath,

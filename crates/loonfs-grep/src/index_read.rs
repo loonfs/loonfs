@@ -13,6 +13,10 @@ use loonfs_api::IndexSegmentId;
 use loonfs_objectstore::{ByteRange, ObjectStore};
 use std::sync::Arc;
 
+/// Largest index segment object fetched whole on first touch, in stored bytes.
+/// Below this, one GET costs less than separate ranged reads of the filter,
+/// index, and data blocks; 128 KiB covers a segment of one or two 64 KiB data
+/// blocks.
 const WHOLE_SEGMENT_LOAD_MAX_BYTES: u64 = 128 * 1024;
 // Matches the private metadata span limit in checkpoint/data_block_load.rs.
 const MAX_BULK_LOAD_BYTES: u64 = 4 * 1024 * 1024;

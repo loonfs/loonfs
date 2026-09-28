@@ -51,7 +51,8 @@ pub struct FsWriter {
 }
 
 impl FsWriter {
-    /// Returns `None` for an unscoped service handle.
+    /// Returns the subject this writer acts for, or `None` for an unscoped
+    /// service handle.
     pub fn subject(&self) -> Option<&loonfs_api::Subject> {
         self.core.subject.as_ref()
     }

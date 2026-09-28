@@ -2021,7 +2021,6 @@ dependencies = [
  "tokio",
  "toml",
  "tower",
- "ureq",
  "walkdir",
 ]
 
@@ -2095,7 +2094,6 @@ version = "0.3.1"
 dependencies = [
  "async-trait",
  "bytes",
- "ciborium",
  "crc32c",
  "futures",
  "loonfs",
@@ -2120,12 +2118,10 @@ version = "0.3.1"
 dependencies = [
  "async-trait",
  "axum",
- "base64 0.22.1",
  "bytes",
  "form_urlencoded",
  "futures",
  "http 1.4.0",
- "http-body 1.0.1",
  "loonfs",
  "loonfs-api",
  "loonfs-client",
@@ -2187,7 +2183,6 @@ version = "0.3.1"
 dependencies = [
  "async-trait",
  "axum",
- "base64 0.22.1",
  "bytes",
  "clap",
  "form_urlencoded",

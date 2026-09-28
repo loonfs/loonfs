@@ -44,25 +44,10 @@ impl FsWriter {
         self.core.record_trace_context(&tracing::Span::current());
         let result = self
             .engine(namespace_id)
-            .bootstrap_namespace(loonfs_core::BootstrapOptions {
-                actor_id: options.actor_id,
-                access: options.access,
-                allow_existing: options.allow_existing,
-            })
+            .bootstrap_namespace(options)
             .await
             .map_err(RuntimeError::from);
         self.finish_namespace_mutation(namespace_id, result)
-    }
-
-    /// Forks `source_namespace_id` into `new_namespace_id` at the selected current head or live snapshot.
-    pub async fn fork_namespace(
-        &self,
-        source_namespace_id: &NamespaceId,
-        new_namespace_id: &NamespaceId,
-        options: ForkNamespaceOptions,
-    ) -> Result<Namespace> {
-        self.fork_namespace_with(source_namespace_id, new_namespace_id, options)
-            .await
     }
 
     /// Forks `source_namespace_id` into `new_namespace_id` at the selected current head or live snapshot.
@@ -78,7 +63,7 @@ impl FsWriter {
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn fork_namespace_with(
+    pub async fn fork_namespace(
         &self,
         source_namespace_id: &NamespaceId,
         new_namespace_id: &NamespaceId,
@@ -105,7 +90,7 @@ impl FsWriter {
     }
 
     /// Ends the namespace after folding its final WAL tail.
-    /// See [namespace deletion](../../../../docs/specs/format.md#94-deleting-a-namespace).
+    /// See [namespace deletion](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#94-deleting-a-namespace).
     ///
     /// Sequenced as a barrier through the publication service: mutations
     /// admitted before the delete publish first, and mutations admitted

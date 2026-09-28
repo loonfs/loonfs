@@ -262,6 +262,8 @@ async fn serving_and_maintaining_enables_queries_nudges_and_disables_per_namespa
     )
     .await;
     assert_eq!(again.lifecycle, active.lifecycle);
+    // Re-enabling also schedules maintenance; finish it before the external write.
+    settle(&server).await;
 
     // The file lands through a writer of its own, so nothing in this server
     // observed the publish: the index stays where it was until a request

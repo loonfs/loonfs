@@ -6,6 +6,9 @@ license.workspace = true
 rust-version.workspace = true
 description = "The LoonFS full-text grep subsystem."
 repository.workspace = true
+homepage.workspace = true
+keywords = ["grep", "full-text", "search", "filesystem"]
+categories = ["filesystem"]
 readme = "README.md"
 
 [dependencies]
@@ -25,7 +28,6 @@ tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
-ciborium.workspace = true
 crc32c.workspace = true
 loonfs-test-support.workspace = true
 tempfile.workspace = true

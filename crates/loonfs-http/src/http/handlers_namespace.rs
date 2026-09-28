@@ -418,7 +418,7 @@ pub(super) async fn fork_namespace(
     let scoped_writer = subject.map(|subject| state.writer.as_subject(subject));
     let writer = scoped_writer.as_ref().unwrap_or(&state.writer);
     let namespace = writer
-        .fork_namespace_with(
+        .fork_namespace(
             &source_namespace_id,
             &request.new_namespace_id,
             loonfs::ForkNamespaceOptions {

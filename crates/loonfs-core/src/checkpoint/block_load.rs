@@ -17,6 +17,9 @@ use loonfs_objectstore::ObjectStore;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
+/// Most decoded and stored data-block bytes one view keeps. 64 MiB holds one
+/// page's working set plus read-ahead, and a runaway scan cannot hold
+/// gigabytes through the memo.
 const SESSION_BLOCK_MEMO_DATA_BYTES: usize = 64 * 1024 * 1024;
 
 /// The data blocks of one segment that can hold keys in

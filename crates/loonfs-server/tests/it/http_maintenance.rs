@@ -302,7 +302,7 @@ async fn http_maintenance_checkpoint_and_retention_are_idempotent_and_soft() {
     assert_eq!(bytes, b"hello maintenance\n");
 
     match client
-        .list_changes(&namespace, ChangeSeq(0), &Default::default())
+        .list_changes_page(&namespace, ChangeSeq(0), &Default::default())
         .await
     {
         Err(ClientError::Api { code, .. }) => assert_eq!(code, "rebootstrap_required"),
@@ -310,7 +310,7 @@ async fn http_maintenance_checkpoint_and_retention_are_idempotent_and_soft() {
     }
 
     let empty = client
-        .list_changes(&namespace, ChangeSeq(1), &Default::default())
+        .list_changes_page(&namespace, ChangeSeq(1), &Default::default())
         .await
         .expect("changes after floor");
     assert_eq!(empty.changes, Vec::new());

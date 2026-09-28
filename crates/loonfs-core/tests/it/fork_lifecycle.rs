@@ -10,17 +10,17 @@ use crate::common::commit_split_support::*;
 use crate::common::namespace_engine;
 use bytes::Bytes;
 use loonfs_api::{
-    wire::control::PinOwner,
+    wire::control::{decode_control_object, ControlObjectKind, PinOwner, PinPayload},
     wire::manifest::{
         decode_namespace_manifest_json, encode_namespace_manifest_json, MetadataRowFamily,
     },
-    AbsolutePath, ChangeSeq, CommitId, DestinationBehavior, ManifestNo, NamespaceId,
+    AbsolutePath, ChangeSeq, CommitId, DestinationBehavior, ManifestNo, NamespaceId, PinId,
 };
 use loonfs_core::content::store_bytes_as_content;
 use loonfs_core::control::load_namespace_read_state;
 use loonfs_core::publish::FilesystemOperation;
 use loonfs_core::{Error as CoreError, ErrorCode, MutationContext};
-use loonfs_objectstore::keys::{content_blob, hint, metadata_manifest_object};
+use loonfs_objectstore::keys::{checkpoint_record, content_blob, hint, metadata_manifest_object};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{ObjectStore, PutMode};
 use loonfs_test_support::ids::namespace_id;
@@ -40,6 +40,21 @@ async fn fork_namespace<S: ObjectStore + ?Sized>(
     namespace_engine(store, source_namespace_id, context)
         .fork_namespace(new_namespace_id, &loonfs_test_support::test_actor(), None)
         .await
+}
+
+async fn load_pin<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    pin_id: &PinId,
+) -> PinPayload {
+    let bytes = store
+        .get(&checkpoint_record(namespace_id, pin_id), None)
+        .await
+        .expect("read pin")
+        .expect("pin exists");
+    decode_control_object::<PinPayload>(&bytes, ControlObjectKind::Pin)
+        .expect("decode pin")
+        .into_payload()
 }
 
 async fn listed_names<S: ObjectStore + ?Sized>(
@@ -81,14 +96,7 @@ async fn snapshot_fork_keeps_its_view_after_source_compaction_collection_and_sna
         .create_snapshot("basis".to_owned(), u64::MAX / 2)
         .await
         .expect("snapshot");
-    let snapshot_record = loonfs_core::control::load_namespace_checkpoint_record_control(
-        &store,
-        &source,
-        &snapshot.checkpoint_id,
-    )
-    .await
-    .expect("load snapshot")
-    .expect("snapshot exists");
+    let snapshot_record = load_pin(&store, &source, &snapshot.checkpoint_id).await;
     write_file_bytes(
         &store,
         &source,
@@ -148,14 +156,7 @@ async fn snapshot_fork_keeps_its_view_after_source_compaction_collection_and_sna
         ["later.txt", "shared.txt"]
     );
     assert_eq!(
-        loonfs_core::control::load_namespace_checkpoint_record_control(
-            &store,
-            &source,
-            &snapshot.checkpoint_id,
-        )
-        .await
-        .expect("load snapshot")
-        .expect("snapshot exists"),
+        load_pin(&store, &source, &snapshot.checkpoint_id).await,
         snapshot_record
     );
     engine
@@ -559,14 +560,7 @@ async fn fork_namespace_reads_inherited_content_and_isolates_metadata() {
         fork_basis.manifest.manifest_no
     );
 
-    let source_record = loonfs_core::control::load_namespace_checkpoint_record_control(
-        &store,
-        &source_namespace_id,
-        &fork_basis.source_pin_id,
-    )
-    .await
-    .expect("read source pin")
-    .expect("source pin exists");
+    let source_record = load_pin(&store, &source_namespace_id, &fork_basis.source_pin_id).await;
     assert_eq!(source_record.head_seq, ChangeSeq(1));
     // The fork basis and pin must use the same manifest.
     assert_eq!(source_record.manifest(), fork_basis.manifest);
@@ -959,14 +953,7 @@ async fn fork_namespace_rejects_corrupt_source_manifest_descriptors() {
         .await
         .expect("create source checkpoint");
 
-    let source_record = loonfs_core::control::load_namespace_checkpoint_record_control(
-        &store,
-        &source_namespace_id,
-        &checkpoint.checkpoint_id,
-    )
-    .await
-    .expect("read source pin")
-    .expect("source pin exists");
+    let source_record = load_pin(&store, &source_namespace_id, &checkpoint.checkpoint_id).await;
     let manifest_key =
         metadata_manifest_object(&source_namespace_id, &source_record.pin_id.manifest_no());
     let manifest_bytes = store
