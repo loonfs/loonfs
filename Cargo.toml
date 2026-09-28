@@ -115,6 +115,15 @@ zstd = "0.13"
 # disk.
 debug = "line-tables-only"
 
+# Every durable object is zstd-compressed and SHA-256 checksummed. Unoptimized,
+# those two dominate the tests that write large segments; optimized, they
+# rebuild in seconds and leave the rest of the dev build untouched.
+[profile.dev.package.sha2]
+opt-level = 3
+
+[profile.dev.package.zstd-sys]
+opt-level = 3
+
 [workspace.lints.rust]
 # The clock_gettime boundary in loonfs-api needs one local unsafe allowance.
 unsafe_code = "deny"

@@ -112,6 +112,51 @@ pub(crate) async fn write_file_bytes<S: ObjectStore + ?Sized>(
     .await
 }
 
+/// Writes several files in one commit, for fixtures that need many rows but
+/// not a commit per row.
+pub(crate) async fn write_files_bytes<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    absolute_paths: &[String],
+    bytes: &[u8],
+    context: &MutationContext,
+) -> Result<Commit> {
+    let mut operations = Vec::with_capacity(absolute_paths.len());
+    let mut prepared = Vec::with_capacity(absolute_paths.len());
+    for absolute_path in absolute_paths {
+        let content =
+            store_file_bytes_before_metadata_publish(store, namespace_id, absolute_path, bytes)
+                .await?;
+        operations.push(FilesystemOperation::PutFile {
+            path: parse_mutation_path(absolute_path)?,
+            content_ref: Some(content.content_ref().clone()),
+            inline_content: None,
+            behavior: DestinationBehavior::Replace,
+            expected_inode_id: None,
+            expected_revision_no: None,
+        });
+        prepared.push(content);
+    }
+    let request = CommitRequest {
+        commit_id: CommitId::generate(),
+        actor_id: loonfs_test_support::test_actor(),
+        subject: None,
+        message: None,
+        operations,
+        preconditions: Vec::new(),
+    };
+    let mut results = crate::commit_engine::publish_namespace_commits_batch(
+        store,
+        namespace_id,
+        vec![CommitCandidate::prepared(request, prepared)],
+        context,
+    )
+    .await;
+    results
+        .pop()
+        .expect("single-candidate batch should hold exactly one result")
+}
+
 async fn put_prepared_file_content<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
