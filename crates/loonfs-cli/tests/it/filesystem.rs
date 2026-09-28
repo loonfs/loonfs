@@ -1852,8 +1852,7 @@ fn namespace_delete_reports_both_head_sequences_when_the_precondition_fails() {
     assert_failure(&human);
     assert!(error["request_id"].is_string());
     let message = stderr_string(&human);
-    assert!(message.starts_with("expected head sequence 0, found 1 (request id: req_"));
-    assert!(message.trim_end().ends_with(')'));
+    assert_eq!(message, "expected head sequence 0, found 1\n");
 
     // Refusing deleted nothing, so the namespace is still readable.
     assert_success(&harness.run(&["--json", "ls", "/"]));
