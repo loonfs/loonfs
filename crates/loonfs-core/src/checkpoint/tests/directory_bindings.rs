@@ -2,9 +2,85 @@
 
 use super::*;
 use crate::authorize::{Authorizer, ReadAccess};
+use crate::metadata::LeafRevisionPrefetch;
 use crate::namespace::read_anchor::load_read_anchor;
 use crate::path::read::{load_metadata_view, LoadedMetadataView, ReadLoadContext};
 use loonfs_api::{AttributeInclusion, DirectoryPageCursor, PageRequest};
+
+#[tokio::test]
+async fn a_cold_path_walk_reads_only_the_leaf_inode() {
+    let directory = tempdir().expect("tempdir");
+    let inner = LocalFsStore::new(directory.path()).expect("store");
+    let namespace_id = NamespaceId::parse("path-binding-reads").expect("namespace id");
+    let context = test_context();
+    bootstrap_namespace(&inner, &namespace_id, &context)
+        .await
+        .expect("bootstrap");
+    write_file_bytes(
+        &inner,
+        &namespace_id,
+        "/docs/reports/summary.txt",
+        b"summary",
+        &context,
+        None,
+    )
+    .await
+    .expect("create depth-three path");
+    checkpoint_then_reorganize(
+        &inner,
+        &namespace_id,
+        &context,
+        MetadataLsmPolicy {
+            max_rows_per_segment: NonZeroUsize::MIN,
+            ..MetadataLsmPolicy::default()
+        },
+    )
+    .await;
+    let manifest = load_current_manifest(&inner, &namespace_id)
+        .await
+        .expect("manifest");
+    let inode_segments = manifest
+        .state
+        .envelope
+        .payload()
+        .runs
+        .iter()
+        .flat_map(|run| &run.segments)
+        .filter(|descriptor| descriptor.family == ApiMetadataRowFamily::Inodes)
+        .map(|descriptor| {
+            assert_eq!(descriptor.row_count, 1);
+            (
+                metadata_segment_object_key(descriptor),
+                descriptor.min_row_key.clone(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(inode_segments.len(), 4);
+    let store = RecordingStore::metadata_segments(inner);
+    for prefetch in [LeafRevisionPrefetch::Skip, LeafRevisionPrefetch::Prefetch] {
+        let view = load_current_metadata_view(&store, &namespace_id)
+            .await
+            .expect("cold view");
+        store.reset();
+        let resolved = view
+            .metadata_view()
+            .session()
+            .resolve_visible_path(
+                &AbsolutePath::parse("/DOCS/REPORTS/SUMMARY.TXT").expect("path"),
+                prefetch,
+            )
+            .await
+            .expect("resolve path");
+        assert_eq!(resolved.absolute_path, "/docs/reports/summary.txt");
+        assert_eq!(resolved.inode_kind, loonfs_api::InodeKind::File);
+        let inode_reads = store
+            .take_gets()
+            .into_iter()
+            .filter_map(|(key, _)| inode_segments.get(&key).cloned())
+            .collect::<Vec<_>>();
+        assert_eq!(inode_reads, vec![lookup_keys::inode_key(resolved.inode_id)]);
+    }
+}
 
 async fn assert_names<S: ObjectStore + ?Sized>(
     view: &LoadedMetadataView<'_, S>,

@@ -553,6 +553,9 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
             let base = &self.base;
             let (inode, tombstone, parent_binding, bound_child, revision) = futures::try_join!(
                 async {
+                    if !is_leaf_wave {
+                        return Ok(None);
+                    }
                     match self.cached_inode_at_seq(current_inode_id) {
                         Some(inode) => Ok(inode),
                         None => fetch_inode_at_seq(base, current_inode_id).await,
@@ -595,7 +598,9 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
                 },
             )?;
 
-            self.inode_at_seq_cache.insert(current_inode_id, inode);
+            if is_leaf_wave {
+                self.inode_at_seq_cache.insert(current_inode_id, inode);
+            }
             self.active_tombstone_cache
                 .insert(current_inode_id, tombstone);
             self.latest_parent_binding_cache

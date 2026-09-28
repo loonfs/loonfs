@@ -90,18 +90,6 @@ pub(crate) trait MetadataVisibilityReads {
     {
         visible_inode(self, inode_id).await
     }
-
-    /// Composite rule; see [`visible_child`].
-    async fn visible_child(
-        &mut self,
-        parent_inode_id: InodeId,
-        name_key: &NameKey,
-    ) -> Result<Option<DirentryBindingRecord>, Self::Error>
-    where
-        Self: Sized,
-    {
-        visible_child(self, parent_inode_id, name_key).await
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -314,7 +302,7 @@ pub(crate) async fn visible_child<R: MetadataVisibilityReads>(
     Ok(Some(direntry))
 }
 
-/// For a page that already checked its parent is a visible directory, the
+/// For a page or walk that already checked its parent is a visible directory, the
 /// newest slot binding at the read sequence is equivalent to [`visible_child`]
 /// without an inode lookup: commit validation creates the child's inode row
 /// in the same commit as its first binding, and retention keeps every inode row.
@@ -359,11 +347,11 @@ where
     R::Error: From<VisiblePathError>,
 {
     let root_inode_id = ROOT_INODE_ID;
-    let root = reads
-        .visible_inode(root_inode_id)
-        .await?
-        .ok_or(VisiblePathError::RootMissing)?;
     if absolute_path.is_root() {
+        let root = reads
+            .visible_inode(root_inode_id)
+            .await?
+            .ok_or(VisiblePathError::RootMissing)?;
         return Ok(ResolvedVisiblePath {
             absolute_path: "/".to_owned(),
             inode_id: root_inode_id,
@@ -377,23 +365,18 @@ where
     }
 
     let mut current_inode_id = root_inode_id;
+    let mut current_inode_kind = InodeKind::Directory;
     let mut current_absolute_path = "/".to_owned();
     let mut current_parent_inode_id = None;
     let mut current_display_name = String::new();
     let mut current_binding_version = None;
 
     for component in absolute_path.components() {
-        let current_inode = reads
-            .visible_inode(current_inode_id)
-            .await?
-            .ok_or_else(|| VisiblePathError::PathNotFound {
-                absolute_path: current_absolute_path.clone(),
-            })?;
-        if current_inode.inode_kind != InodeKind::Directory {
+        if current_inode_kind != InodeKind::Directory {
             return Err(VisiblePathError::PathComponentNotDirectory {
                 absolute_path: current_absolute_path,
                 inode_id: current_inode_id,
-                inode_kind: current_inode.inode_kind,
+                inode_kind: current_inode_kind,
             }
             .into());
         }
@@ -402,13 +385,20 @@ where
         let display_name = component.to_display_name();
         let name_key = NameKey::for_display_name(&display_name);
         let direntry = reads
-            .visible_child(current_inode_id, &name_key)
+            .active_child_binding(current_inode_id, &name_key)
             .await?
-            .ok_or(VisiblePathError::PathNotFound {
-                absolute_path: requested_absolute_path,
+            .ok_or_else(|| VisiblePathError::PathNotFound {
+                absolute_path: requested_absolute_path.clone(),
             })?;
+        let direntry =
+            visible_page_child(reads, direntry)
+                .await?
+                .ok_or(VisiblePathError::PathNotFound {
+                    absolute_path: requested_absolute_path,
+                })?;
 
         current_inode_id = direntry.child_inode_id;
+        current_inode_kind = direntry.child_kind;
         current_parent_inode_id = Some(direntry.parent_inode_id);
         let bound_display_name = direntry
             .display_name()
