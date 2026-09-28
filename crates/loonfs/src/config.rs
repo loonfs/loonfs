@@ -12,9 +12,10 @@ pub(crate) const DEFAULT_MAX_CACHED_WAL_TAIL_PROJECTION_ROWS: usize =
 pub(crate) const DEFAULT_MAX_CACHED_WAL_TAIL_PROJECTION_DECODED_BYTES: usize =
     loonfs_core::cache::DEFAULT_WAL_TAIL_PROJECTION_DECODED_BYTES;
 /// Default minimum interval, in milliseconds, between publication starts
-/// for one namespace (see [`crate::publisher`]). A cold namespace
-/// publishes immediately; the interval only paces follow-up batches, so
-/// concurrent submissions amortize into fewer, larger WAL segments. Zero
+/// for one namespace (see [`crate::publisher`]). A request to an idle
+/// namespace publishes immediately; the interval only paces requests that
+/// queued behind a publish, so concurrent submissions amortize into fewer,
+/// larger WAL segments. Zero
 /// keeps only the batching that in-flight publications force.
 pub(crate) const DEFAULT_MIN_PUBLISH_INTERVAL_MS: u64 = 15;
 /// Default maximum writer sessions held at once.

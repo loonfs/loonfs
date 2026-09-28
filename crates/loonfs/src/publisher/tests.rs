@@ -1235,15 +1235,56 @@ async fn cold_submission_publishes_without_a_coalescing_delay() {
     assert_eq!(response.committed_seq, ChangeSeq(1));
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_request_queued_behind_a_publish_waits_out_the_pacing_interval() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let store = Arc::new(blocking_publication_store(temp_dir.path(), &namespace_id));
+    let runtime = test_runtime(store.clone() as SharedStore);
+    create_namespace(&runtime, &namespace_id).await;
+    let mut publisher = standalone_publisher(&namespace_id, &runtime);
+    let timer = Arc::new(ManualMonotonicTimer::default());
+    publisher.timer = timer.clone();
+    publisher.min_publish_interval = Duration::from_millis(400);
+
+    store.block_next();
+    let active = admit_commit(
+        &publisher,
+        &namespace_id,
+        create_directory_request("active", "active"),
+    );
+    store.wait_until_blocked().await;
+    let mut queued = admit_commit(
+        &publisher,
+        &namespace_id,
+        create_directory_request("queued", "queued"),
+    );
+    store.release();
+    recv_commit(active, "active").await;
+
+    // `queued` was waiting when `active` settled, so it is paced.
+    assert!(
+        timeout(Duration::from_millis(200), &mut queued)
+            .await
+            .is_err(),
+        "a request queued behind a publish must wait out the pacing interval"
+    );
+    timer.set(400);
+    timeout(Duration::from_secs(10), queued)
+        .await
+        .expect("queued request publishes at the interval boundary")
+        .expect("queued receiver")
+        .expect("queued commit");
+}
+
 #[tokio::test]
-async fn hot_submissions_wait_out_the_pacing_interval() {
+async fn a_sequential_follow_up_publishes_at_once() {
     tokio::time::pause();
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let mut writer = test_writer_with_interval(store.clone(), 400).await;
-    let timer = Arc::new(ManualMonotonicTimer::default());
-    writer.publisher.timer = timer.clone();
+    let mut writer = test_writer_with_interval(store, 400).await;
+    writer.publisher.timer = Arc::new(ManualMonotonicTimer::default());
     writer
         .create_namespace(
             &namespace_id,
@@ -1252,40 +1293,18 @@ async fn hot_submissions_wait_out_the_pacing_interval() {
         .await
         .expect("bootstrap");
     let registry = writer.publisher();
-
-    registry
-        .submit_candidate(
-            namespace_id.clone(),
-            CommitCandidate::new(create_directory_request("warmup", "warmup")),
+    for (commit_id, directory) in [("first", "first"), ("second", "second"), ("first", "first")] {
+        tokio::time::timeout(
+            Duration::from_millis(399),
+            registry.submit_candidate(
+                namespace_id.clone(),
+                CommitCandidate::new(create_directory_request(commit_id, directory)),
+            ),
         )
         .await
-        .expect("warmup commit");
-
-    let hot = tokio::spawn({
-        let registry = registry.clone();
-        let namespace_id = namespace_id.clone();
-        async move {
-            registry
-                .submit_candidate(
-                    namespace_id,
-                    CommitCandidate::new(create_directory_request("hot", "hot")),
-                )
-                .await
-        }
-    });
-    tokio::task::yield_now().await;
-    timer.set(399);
-    tokio::time::advance(Duration::from_millis(399)).await;
-    tokio::task::yield_now().await;
-    assert!(
-        !hot.is_finished(),
-        "a follow-up publication must remain paced before the interval boundary"
-    );
-    timer.set(400);
-    tokio::time::advance(Duration::from_millis(1)).await;
-    hot.await
-        .expect("join hot publication")
-        .expect("hot commit");
+        .expect("a request after its predecessor settled must not be paced")
+        .expect("commit");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
