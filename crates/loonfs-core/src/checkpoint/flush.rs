@@ -109,7 +109,14 @@ pub(super) async fn try_flush_wal<S: ObjectStore + ?Sized>(
             phase = "scan_namespace_state"
         ))
         .await?;
-    try_flush_wal_projection(store, namespace_id, &projection, deadline).await
+    try_flush_wal_projection(
+        store,
+        namespace_id,
+        &projection,
+        deadline,
+        MetadataLsmPolicy::default(),
+    )
+    .await
 }
 
 async fn try_flush_wal_projection<S: ObjectStore + ?Sized>(
@@ -117,6 +124,7 @@ async fn try_flush_wal_projection<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     projection: &ManifestProjection<'_, S>,
     deadline: &Deadline,
+    policy: MetadataLsmPolicy,
 ) -> Result<TryFlushWal> {
     let head_seq = projection.head.seq;
     let basis_manifest_no = projection.basis.manifest_no();
@@ -141,9 +149,14 @@ async fn try_flush_wal_projection<S: ObjectStore + ?Sized>(
     materialize_inline_content(store, projection).await?;
     deadline.ensure_metadata_publication_budget(namespace_id)?;
     let manifest_no = next_manifest_no_after(basis_manifest_no)?;
-    let manifest =
-        build_namespace_manifest_for_projection(store, namespace_id, projection, manifest_no)
-            .await?;
+    let manifest = build_namespace_manifest_for_projection(
+        store,
+        namespace_id,
+        projection,
+        manifest_no,
+        policy,
+    )
+    .await?;
     let manifest = encode_manifest(manifest)?;
     let manifest_bytes = manifest.as_bytes().len() as u64;
     // Written segments may outlive the GC grace if publication exceeds its budget.
@@ -224,7 +237,15 @@ pub async fn fold_wal_tail<S: ObjectStore + ?Sized>(
             tail_state: input.tail_state,
         };
         // A fold publishes metadata without updating the namespace head.
-        match try_flush_wal_projection(store, namespace_id, &manifest_projection, deadline).await? {
+        match try_flush_wal_projection(
+            store,
+            namespace_id,
+            &manifest_projection,
+            deadline,
+            MetadataLsmPolicy::default(),
+        )
+        .await?
+        {
             TryFlushWal::Settled(basis) => *basis,
             TryFlushWal::RaceLost => {
                 flush_wal_basis_with_deadline(store, namespace_id, deadline).await?
@@ -346,6 +367,7 @@ async fn build_namespace_manifest_for_projection<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     projection: &ManifestProjection<'_, S>,
     manifest_no: ManifestNo,
+    policy: MetadataLsmPolicy,
 ) -> Result<NamespaceManifestPayload> {
     let activity = projection
         .manifest_segments
@@ -377,13 +399,7 @@ async fn build_namespace_manifest_for_projection<S: ObjectStore + ?Sized>(
                 run_seq: head_seq,
                 tier: RunTier::Base,
                 segments: flatten_manifest_segments(
-                    build_manifest_segments(
-                        store,
-                        namespace_id,
-                        &tail_state,
-                        MetadataLsmPolicy::default(),
-                    )
-                    .await?,
+                    build_manifest_segments(store, namespace_id, &tail_state, policy).await?,
                 ),
             }],
             next_run_no_after(run_no)?,
@@ -406,7 +422,7 @@ async fn build_namespace_manifest_for_projection<S: ObjectStore + ?Sized>(
                         namespace_id,
                         previous_manifest.payload().head_seq,
                         &tail_state,
-                        MetadataLsmPolicy::default(),
+                        policy,
                     )
                     .await?,
                 ),
@@ -449,3 +465,7 @@ mod ordinal_tests {
         ));
     }
 }
+
+#[cfg(test)]
+#[path = "tests/segment_puts.rs"]
+mod segment_puts;

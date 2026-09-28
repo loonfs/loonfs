@@ -2,7 +2,7 @@
 //!
 //! [`GroupMerge`] merges runs in row-key order, applies retention rules, and
 //! writes bounded output segments. It buffers only input blocks, retention
-//! state, and one segment builder per family.
+//! state, one segment builder per family, and a bounded wave of encoded outputs.
 //!
 //! [`merge_group_in_step`] runs within a bounded maintenance pass.
 //! [`run_metadata_compaction_job`] writes direct output with epoch fencing.
@@ -11,7 +11,7 @@
 
 use super::block_fetch::segment_object_len;
 use super::block_load::SessionBlockMemo;
-use super::build::MetadataSegmentWriter;
+use super::build::{MetadataSegmentPuts, MetadataSegmentWriter};
 use super::compaction_merge::{
     locality_of, refill_iterators, select_next_iterator, LocalityGrouping,
     MetadataSegmentBlockLoader, MetadataSegmentRowIterator,
@@ -732,12 +732,14 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
         mut self,
         control: &mut MergeControl<'_>,
     ) -> Result<std::result::Result<MetadataMergeResult, MetadataCompactionJobOutcome>> {
+        let mut puts = MetadataSegmentPuts::new(self.store);
         for cluster in retention_clusters(self.group) {
-            if let Some(stopped) = self.run_cluster(cluster, control).await? {
+            if let Some(stopped) = self.run_cluster(cluster, control, &mut puts).await? {
                 return Ok(Err(stopped));
             }
         }
         self.refuse_a_run_whose_index_disagrees()?;
+        puts.finish().await?;
         // A token set after the final cluster still owns the outcome. The
         // caller must not re-derive cancellation from a stale Completed value.
         if let Some(stop) = control.cancellation() {
@@ -796,6 +798,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
         &mut self,
         cluster: &RetentionCluster,
         control: &mut MergeControl<'_>,
+        puts: &mut MetadataSegmentPuts<'_, S>,
     ) -> Result<Option<MetadataCompactionJobOutcome>> {
         // One iterator per input run and family. The planner caps run fan-in;
         // each iterator advances through that run's segments sequentially.
@@ -834,7 +837,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
             if let Some(stop) = control.cancellation() {
                 return Ok(Some(stop));
             }
-            self.refill(&mut iterators).await?;
+            puts.run(self.refill(&mut iterators)).await?;
             let Some(next) = select_next_iterator(&iterators, |family, row_key| {
                 locality_of(*family, row_key, cluster.locality)
             }) else {
@@ -853,7 +856,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
             };
             if opened.is_some() {
                 if let Some(kept) = operator.close_group(floor_seq)? {
-                    self.write_row(kept, &mut writers).await?;
+                    self.write_row(kept, &mut writers, puts).await?;
                 }
                 locality = opened;
             }
@@ -862,21 +865,21 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
             self.result.rows_read += 1;
             self.report_progress();
             if let Some(kept) = operator.take_floor_value_before(&row, floor_seq) {
-                self.write_row(kept, &mut writers).await?;
+                self.write_row(kept, &mut writers, puts).await?;
             }
             let kept = operator.push(family, row, floor_seq)?;
             self.result.peak_operator_rows =
                 self.result.peak_operator_rows.max(operator.held_rows());
             if let Some(kept) = kept {
-                self.write_row(kept, &mut writers).await?;
+                self.write_row(kept, &mut writers, puts).await?;
             }
         }
         if let Some(kept) = operator.close_group(floor_seq)? {
-            self.write_row(kept, &mut writers).await?;
+            self.write_row(kept, &mut writers, puts).await?;
         }
 
         for (_, writer) in writers {
-            let segments = writer.finish(self.store).await?;
+            let segments = writer.finish(puts).await?;
             self.result.output_bytes = self
                 .result
                 .output_bytes
@@ -932,6 +935,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
         &mut self,
         (family, row): KeptRow,
         writers: &mut BTreeMap<MetadataRowFamily, MetadataSegmentWriter<'_>>,
+        puts: &mut MetadataSegmentPuts<'_, S>,
     ) -> Result<()> {
         self.result.rows_written += 1;
         let writer = writers
@@ -946,7 +950,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
             }
             _ => writer.push(row, &mut |_| {})?,
         }
-        writer.roll_full_segments(self.store, self.policy).await
+        writer.roll_full_segments(puts, self.policy).await
     }
 
     /// Refuses to hand back a run whose secondary index does not hold the same

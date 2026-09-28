@@ -1,16 +1,16 @@
-//! Watches how many reads a path keeps in flight at once.
+//! Watches how many requests a path keeps in flight at once.
 //!
-//! A batched fetch's whole promise is that its round trips overlap, and the
-//! only place that is visible is the store boundary: request counts and
-//! call order both look identical whether a path fetched its objects one at
-//! a time or all at once. This wrapper counts matching reads as they enter
-//! and leave, and records the high-water mark, so a test can pin the width
-//! of a fetch wave rather than only its size.
+//! A batched fetch's or a write wave's whole promise is that its round trips
+//! overlap, and the only place that is visible is the store boundary: request
+//! counts and call order both look identical whether a path issued its
+//! requests one at a time or all at once. This wrapper counts matching reads
+//! and puts as they enter and leave, and records the high-water mark, so a
+//! test can pin the width of a wave rather than only its size.
 //!
-//! Each watched read yields once before it delegates. That is what makes the
-//! mark a measurement rather than a race: a batch polled onto the same task
-//! has all of its members inside the wrapper before the first of them can
-//! finish, whatever the wrapped store does.
+//! Each watched request yields once before it delegates. That is what makes
+//! the mark a measurement rather than a race: a batch polled onto the same
+//! task has all of its members inside the wrapper before the first of them
+//! can finish, whatever the wrapped store does.
 
 use super::KeyPredicate;
 use async_trait::async_trait;
@@ -23,12 +23,12 @@ use loonfs_objectstore::{
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// What one read path was observed to overlap.
+/// Concurrent requests observed for one operation class.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct ReadConcurrency {
-    /// Most matching reads in flight at any instant.
+pub struct StoreConcurrency {
+    /// Most matching requests in flight at any instant.
     pub peak_in_flight: usize,
-    /// Matching reads issued in total.
+    /// Matching requests issued in total.
     pub total: usize,
 }
 
@@ -39,7 +39,7 @@ struct InFlight {
     total: AtomicUsize,
 }
 
-/// Decrements on drop, so a cancelled or failed read leaves no phantom.
+/// Cancellation and failure release the count.
 struct InFlightGuard<'a>(&'a InFlight);
 
 impl Drop for InFlightGuard<'_> {
@@ -48,29 +48,39 @@ impl Drop for InFlightGuard<'_> {
     }
 }
 
-/// Wraps a store and records the reads it is asked for concurrently.
+/// Measures concurrency separately for reads and puts.
 #[derive(Debug)]
 pub struct ConcurrencyWatchStore<S> {
     inner: S,
     keys: KeyPredicate,
     reads: InFlight,
+    puts: InFlight,
 }
 
 impl<S> ConcurrencyWatchStore<S> {
-    /// Watches reads of keys `keys` selects.
+    /// Watches requests for keys selected by `keys`.
     pub fn new(inner: S, keys: KeyPredicate) -> Self {
         Self {
             inner,
             keys,
             reads: InFlight::default(),
+            puts: InFlight::default(),
         }
     }
 
     /// What has been observed so far.
-    pub fn reads(&self) -> ReadConcurrency {
-        ReadConcurrency {
+    pub fn reads(&self) -> StoreConcurrency {
+        StoreConcurrency {
             peak_in_flight: self.reads.peak.load(Ordering::SeqCst),
             total: self.reads.total.load(Ordering::SeqCst),
+        }
+    }
+
+    /// Includes cancelled and failed puts in `total`.
+    pub fn puts(&self) -> StoreConcurrency {
+        StoreConcurrency {
+            peak_in_flight: self.puts.peak.load(Ordering::SeqCst),
+            total: self.puts.total.load(Ordering::SeqCst),
         }
     }
 
@@ -79,15 +89,14 @@ impl<S> ConcurrencyWatchStore<S> {
         &self.inner
     }
 
-    /// Counts one read in, and holds the count up until the guard drops.
-    async fn enter(&self, key: &str) -> Option<InFlightGuard<'_>> {
+    async fn enter<'a>(&self, key: &str, requests: &'a InFlight) -> Option<InFlightGuard<'a>> {
         if !self.keys.matches(key) {
             return None;
         }
-        self.reads.total.fetch_add(1, Ordering::SeqCst);
-        let current = self.reads.current.fetch_add(1, Ordering::SeqCst) + 1;
-        self.reads.peak.fetch_max(current, Ordering::SeqCst);
-        let guard = InFlightGuard(&self.reads);
+        requests.total.fetch_add(1, Ordering::SeqCst);
+        let current = requests.current.fetch_add(1, Ordering::SeqCst) + 1;
+        requests.peak.fetch_max(current, Ordering::SeqCst);
+        let guard = InFlightGuard(requests);
         tokio::task::yield_now().await;
         Some(guard)
     }
@@ -96,7 +105,7 @@ impl<S> ConcurrencyWatchStore<S> {
 #[async_trait]
 impl<S: ObjectStore> ObjectStore for ConcurrencyWatchStore<S> {
     async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        let _in_flight = self.enter(key).await;
+        let _in_flight = self.enter(key, &self.reads).await;
         self.inner.head(key).await
     }
 
@@ -104,7 +113,7 @@ impl<S: ObjectStore> ObjectStore for ConcurrencyWatchStore<S> {
         &self,
         key: &str,
     ) -> Result<Option<StoredObjectChecksum>, ObjectStoreError> {
-        let _in_flight = self.enter(key).await;
+        let _in_flight = self.enter(key, &self.reads).await;
         self.inner.head_stored_checksum(key).await
     }
 
@@ -135,7 +144,7 @@ impl<S: ObjectStore> ObjectStore for ConcurrencyWatchStore<S> {
     }
 
     async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
-        let _in_flight = self.enter(key).await;
+        let _in_flight = self.enter(key, &self.reads).await;
         self.inner.get_with_metadata(key).await
     }
 
@@ -144,7 +153,7 @@ impl<S: ObjectStore> ObjectStore for ConcurrencyWatchStore<S> {
         key: &str,
         range: Option<ByteRange>,
     ) -> Result<Option<Bytes>, ObjectStoreError> {
-        let _in_flight = self.enter(key).await;
+        let _in_flight = self.enter(key, &self.reads).await;
         self.inner.get(key, range).await
     }
 
@@ -154,6 +163,7 @@ impl<S: ObjectStore> ObjectStore for ConcurrencyWatchStore<S> {
         bytes: Bytes,
         mode: PutMode,
     ) -> Result<ObjectMetadata, ObjectStoreError> {
+        let _in_flight = self.enter(key, &self.puts).await;
         self.inner.put(key, bytes, mode).await
     }
 
@@ -163,6 +173,7 @@ impl<S: ObjectStore> ObjectStore for ConcurrencyWatchStore<S> {
         body: ByteStream,
         mode: PutMode,
     ) -> Result<u64, ObjectStoreError> {
+        let _in_flight = self.enter(key, &self.puts).await;
         self.inner.put_streamed(key, body, mode).await
     }
 
