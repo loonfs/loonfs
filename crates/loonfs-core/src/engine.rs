@@ -133,6 +133,10 @@ pub struct NamespaceEngine<S, M> {
     /// See [`Self::starve_reorganization_row_budget`].
     #[cfg(any(test, feature = "test-support"))]
     reorganization_row_budget: Option<std::num::NonZeroUsize>,
+    /// A narrowed per-segment row budget, so a test can get many compacted
+    /// segments from a few thousand rows. See [`Self::narrow_segment_row_budget`].
+    #[cfg(any(test, feature = "test-support"))]
+    segment_row_budget: Option<std::num::NonZeroUsize>,
 }
 
 impl<S: ObjectStore, M> NamespaceEngine<S, M> {
@@ -351,6 +355,8 @@ impl<S: ObjectStore> NamespaceEngine<S, ReadOnly> {
             authorization_head: None,
             #[cfg(any(test, feature = "test-support"))]
             reorganization_row_budget: None,
+            #[cfg(any(test, feature = "test-support"))]
+            segment_row_budget: None,
         }
     }
 }
@@ -367,6 +373,8 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             authorization_head: None,
             #[cfg(any(test, feature = "test-support"))]
             reorganization_row_budget: None,
+            #[cfg(any(test, feature = "test-support"))]
+            segment_row_budget: None,
         }
     }
 
@@ -379,12 +387,15 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     fn metadata_lsm_policy(&self) -> crate::checkpoint::MetadataLsmPolicy {
         let policy = crate::checkpoint::MetadataLsmPolicy::default();
         #[cfg(any(test, feature = "test-support"))]
-        if let Some(max_decoded_input_rows_per_step) = self.reorganization_row_budget {
-            return crate::checkpoint::MetadataLsmPolicy {
-                max_decoded_input_rows_per_step,
-                ..policy
-            };
-        }
+        let policy = crate::checkpoint::MetadataLsmPolicy {
+            max_decoded_input_rows_per_step: self
+                .reorganization_row_budget
+                .unwrap_or(policy.max_decoded_input_rows_per_step),
+            max_rows_per_segment: self
+                .segment_row_budget
+                .unwrap_or(policy.max_rows_per_segment),
+            ..policy
+        };
         policy
     }
 
@@ -403,6 +414,22 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         max_decoded_input_rows_per_step: std::num::NonZeroUsize,
     ) -> Self {
         self.reorganization_row_budget = Some(max_decoded_input_rows_per_step);
+        self
+    }
+
+    /// Narrows the rows one compacted segment may hold, so a namespace a test
+    /// can build in seconds compacts into many segments.
+    ///
+    /// The shipped segment target is 8 MiB of decoded rows, which takes over
+    /// a hundred thousand rows to fill several times. Test-only: folds keep
+    /// the shipped segment shape, and planning and publishing are unchanged.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn narrow_segment_row_budget(
+        mut self,
+        max_rows_per_segment: std::num::NonZeroUsize,
+    ) -> Self {
+        self.segment_row_budget = Some(max_rows_per_segment);
         self
     }
 

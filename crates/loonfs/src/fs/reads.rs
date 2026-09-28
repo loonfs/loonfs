@@ -18,6 +18,9 @@ use loonfs_api::{
 };
 use loonfs_core::{NamespaceReaderEngine, RuntimeReadContext};
 
+#[cfg(test)]
+mod tests;
+
 fn validate_pinned_directory_cursor(
     cursor: Option<&DirectoryPageCursor>,
     pinned_head_seq: ChangeSeq,

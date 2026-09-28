@@ -86,6 +86,11 @@ impl FsMaintenance {
             Some(rows) => engine.starve_reorganization_row_budget(rows),
             None => engine,
         };
+        #[cfg(test)]
+        let engine = match self.segment_row_budget {
+            Some(rows) => engine.narrow_segment_row_budget(rows),
+            None => engine,
+        };
         engine
     }
 
