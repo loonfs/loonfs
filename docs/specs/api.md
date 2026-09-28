@@ -316,7 +316,7 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | `content_not_materialized` | 503 | The file is committed, but a direct download requires a content object that this deployment cannot create. Read through the proxied content route, or retry after a fold writes the object. |
 | `checkpoint_unavailable` | 503 | Required checkpoint state is unavailable: not yet published, deleted during the operation, or referenced material is missing. Retry after maintenance. |
 | `maintenance_required` | 503 | Namespace metadata requires maintenance before the request can be served; run maintenance and retry. The WAL write-stop threshold refuses new commits. A commit id the namespace already knows is still answered from its receipt. |
-| `index_lagging` | 503 | The grep index trails the head past the exhaustive-scan budget; let the grep worker catch up (or set `allow_stale`) and retry. |
+| `index_lagging` | 503 | The grep index trails the head past the exhaustive-scan budget or needs a rebuild. The message states which. Run maintenance or set `allow_stale`, then retry. |
 | `storage_permission_denied` | 503 | The backing object store rejected the deployment's storage credentials for this operation. Fix the storage credentials or bucket policy; an unchanged retry will not succeed. |
 | `index_corrupt` | 500 | The grep index's derived state failed validation. Disable and re-enable grep on the namespace to rebuild it; core filesystem state remains available. |
 | `namespace_corrupt` | 500 | Durable namespace state failed validation. |
@@ -3002,8 +3002,9 @@ postdates it are omitted entirely rather than mixed in.
 An undelete after the index watermark also returns `index_lagging` for an
 exact query: the restored entry may be a directory whose descendants were
 hidden from the checkpoint backfill, and the change event names only that
-root. With `allow_stale`, the query serves indexed-only results and reports
-`tail_scanned: false`. The worker starts a fresh checkpoint backfill
+root. The error message says the index needs a rebuild. With `allow_stale`,
+the query serves indexed-only results and reports `tail_scanned: false`.
+The grep index maintenance job starts a fresh checkpoint backfill
 before advancing its watermark past the undelete, so a later exact query
 includes the restored subtree.
 
