@@ -177,7 +177,12 @@ pub(crate) enum CommandData {
     Doctor {
         checks: Vec<DoctorCheck>,
     },
-    Profile(ProfileConfig),
+    Profile {
+        #[serde(flatten)]
+        profile: ProfileConfig,
+        #[serde(skip)]
+        default_profile: Option<String>,
+    },
     ProfileSummary(ProfileSummary),
     ProfileList {
         default_profile: Option<String>,
@@ -298,6 +303,8 @@ pub(crate) enum CommandData {
     },
     FileMutation {
         target: String,
+        #[serde(skip)]
+        human_target: Option<String>,
         committed_seq: ChangeSeq,
         commit_id: CommitId,
         /// Inode the mutation acted on, when the command resolved one —

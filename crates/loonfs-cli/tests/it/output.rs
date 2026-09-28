@@ -498,6 +498,24 @@ fn help_lists_the_context_commands() {
         .expect("run help");
     assert_success(&output);
     let stdout = stdout_string(&output);
+    assert!(
+        stdout.starts_with("A durable filesystem built on object storage.\n"),
+        "{stdout}"
+    );
+    for row in stdout
+        .split("Options:")
+        .next()
+        .expect("command rows")
+        .lines()
+        .filter(|line| line.starts_with("  "))
+    {
+        let description = row
+            .trim_start()
+            .find(char::is_whitespace)
+            .expect("description");
+        let column = row.len() - row[2 + description..].trim_start().len();
+        assert_eq!(column, 16, "{row}");
+    }
     for heading in ["Filesystem:", "Context and configuration:", "Inspection:"] {
         assert!(stdout.contains(heading), "{stdout}");
     }

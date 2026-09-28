@@ -15,47 +15,46 @@ const TOP_LEVEL_HELP_TEMPLATE: &str = "\
 {usage-heading} {usage}
 
 Filesystem:
-  ls          List a directory
-  cat         Print a file's content to stdout
-  grep        Search file content through the grep index
-  get         Download a file or directory tree
-  put         Upload a file or directory tree
-  restore     Restore a prior file revision
-  undelete    Recover a deleted file or directory
-  mkdir       Create a directory
-  rm          Delete a file or directory
-  mv          Move or rename a path
-  cp          Copy a file or directory tree
-  annotate    Write and remove attributes
-  access      Replace an item's access row
+  ls            List a directory
+  cat           Print a file's content to stdout
+  grep          Search file content through the grep index
+  get           Download a file or directory tree
+  put           Upload a file or directory tree
+  restore       Restore a prior file revision
+  undelete      Recover a deleted file or directory
+  mkdir         Create a directory
+  rm            Delete a file or directory
+  mv            Move or rename a path
+  cp            Copy a file or directory tree
+  annotate      Write and remove attributes
+  access        Replace an item's access row
 
 Context and configuration:
-  init        Interactively create a config and first profile
-  profile     Manage connection profiles
-  namespace   Manage namespaces
-  snapshot    Manage point-in-time snapshots
-  use         Set a profile's default namespace
-  current     Show the selected profile and namespace
-  config      Inspect the CLI config file
+  init          Interactively create a config and first profile
+  profile       Manage connection profiles
+  namespace     Manage namespaces
+  snapshot      Manage point-in-time snapshots
+  use           Set a profile's default namespace
+  current       Show the selected profile and namespace
+  config        Inspect the CLI config file
 
 Inspection:
-  stat        Describe one visible path or inode
-  revisions   List a file's revision history
-  trash       List recoverable deletions
-  changes     List committed changes
+  stat          Describe one visible path or inode
+  revisions     List a file's revision history
+  trash         List recoverable deletions
+  changes       List committed changes
   maintenance   Run maintenance operations
   capabilities  Show the selected deployment's protocol capabilities
-  doctor      Check the selected deployment without writing to it
-  completion  Print a shell completion script
-  version     Print version and build metadata
+  doctor        Check the selected deployment without writing to it
+  completion    Print a shell completion script
+  version       Print version and build metadata
 
 Options:
 {options}{after-help}\
 ";
 
-/// Defines the `loonfs` command-line interface.
 #[derive(Debug, Parser)]
-#[command(name = "loonfs", version, help_template = TOP_LEVEL_HELP_TEMPLATE)]
+#[command(name = "loonfs", version, about = "A durable filesystem built on object storage.", help_template = TOP_LEVEL_HELP_TEMPLATE)]
 pub(crate) struct Cli {
     /// Config file to use, ahead of LOONFS_CONFIG and the default location.
     #[arg(

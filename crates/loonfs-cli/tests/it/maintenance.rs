@@ -134,6 +134,15 @@ fn embedded_grep_works_after_index_enable() {
     let before = harness.run(&["--json", "grep", "TODO"]);
     assert_failure(&before);
     assert_eq!(json_error(&before)["code"], "not_supported");
+    assert_eq!(json_error(&before)["feature"], "query.grep");
+    let message = "feature `query.grep` is not enabled on this namespace; enable it with `loonfs maintenance index enable`";
+    assert_eq!(json_error(&before)["message"], message);
+    let before_human = harness.run(&["grep", "TODO"]);
+    assert_failure(&before_human);
+    assert_eq!(
+        stderr_string(&before_human),
+        format!("{message}\nfeature: query.grep\n")
+    );
 
     // Enable waits for the backfill in-process: the one-shot CLI is its own
     // grep maintenance, so the query works immediately — no server, no
@@ -152,6 +161,10 @@ fn embedded_grep_works_after_index_enable() {
             .len(),
         1
     );
+
+    let human = harness.run(&["grep", "TODO"]);
+    assert_success(&human);
+    assert!(stdout_string(&human).ends_with("1 match for `TODO`\n"));
 
     // Later writes catch up when enable is re-run.
     let more = harness.temp_dir.path().join("lib.rs");
