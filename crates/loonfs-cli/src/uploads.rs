@@ -1,8 +1,9 @@
 //! Durable recovery records for file-backed PUT attempts.
 
 use crate::config::absolute_env_path;
+use crate::error::CliError;
 use loonfs_api::v0::{CommitRequest, CompletedUploadPart, FilesystemOperation};
-use loonfs_api::{ActorId, Checksum, ChecksumAlgorithm, CommitId, UploadId};
+use loonfs_api::{ActorId, Checksum, ChecksumAlgorithm, Commit, CommitId, ErrorCode, UploadId};
 use loonfs_client::{MultipartUploadResume, NamespacePath, PutFileJournal, PutFileOptions};
 use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
@@ -12,6 +13,11 @@ use std::sync::Mutex;
 
 const XDG_STATE_SUBDIR: &str = "loonfs";
 const UPLOADS_SUBDIR: &str = "uploads";
+
+enum UploadOutcome {
+    Committed,
+    Refused,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -239,10 +245,52 @@ impl UploadJournal {
         }
     }
 
-    /// Removes ordinary attempts after acknowledgement. Explicit IDs keep their
-    /// exact request so repeating the same command can replay it without uploading.
-    pub(crate) fn acknowledge(&self) -> io::Result<()> {
-        if self.keep_after_ack {
+    pub(crate) fn finish(&self, result: Result<Commit, CliError>) -> Result<Commit, CliError> {
+        match result {
+            Ok(committed) => {
+                self.acknowledge(UploadOutcome::Committed).map_err(|error| {
+                    CliError::io_error(format!(
+                        "file commit `{}` succeeded at sequence {}, but its journal could not be removed: {error}",
+                        committed.commit_id, committed.committed_seq,
+                    ))
+                })?;
+                Ok(committed)
+            }
+            Err(mut error) => {
+                if matches!(self.lock().progress, UploadProgress::Prepared { .. })
+                    && matches!(
+                        ErrorCode::parse(&error.code),
+                        Some(
+                            ErrorCode::ContentNotPrepared
+                                | ErrorCode::PathNotFound
+                                | ErrorCode::InodeNotFound
+                                | ErrorCode::RevisionNotFound
+                                | ErrorCode::PathConflict
+                                | ErrorCode::DirectoryNotEmpty
+                                | ErrorCode::StaleHead
+                                | ErrorCode::StaleRevision
+                                | ErrorCode::StaleAttributes
+                                | ErrorCode::StaleAccess
+                                | ErrorCode::NamespaceUnrestricted
+                                | ErrorCode::BindingVersionMismatch
+                                | ErrorCode::NotDeleted
+                                | ErrorCode::WouldCycle
+                        )
+                    )
+                {
+                    if let Err(cleanup) = self.acknowledge(UploadOutcome::Refused) {
+                        error
+                            .message
+                            .push_str(&format!("; its journal could not be removed: {cleanup}"));
+                    }
+                }
+                Err(error)
+            }
+        }
+    }
+
+    fn acknowledge(&self, outcome: UploadOutcome) -> io::Result<()> {
+        if self.keep_after_ack && matches!(outcome, UploadOutcome::Committed) {
             return Ok(());
         }
         match std::fs::remove_file(&self.path) {
@@ -620,9 +668,85 @@ mod tests {
         assert!(replay
             .commit_prepared(&changed, &replay.options().commit.actor_id, None)
             .is_err());
-        replay.acknowledge().expect("acknowledged");
+        replay
+            .acknowledge(UploadOutcome::Committed)
+            .expect("acknowledged");
         assert!(!path.exists());
-        replay.acknowledge().expect("already removed");
+        replay
+            .acknowledge(UploadOutcome::Committed)
+            .expect("already removed");
+    }
+
+    #[test]
+    fn only_prepared_commit_refusals_remove_records() {
+        for explicit in [false, true] {
+            let directory = tempfile::tempdir().expect("directory");
+            let path = directory.path().join("upload.json");
+            let mut options = options();
+            if explicit {
+                options.commit.commit_id = Some(CommitId::generate());
+            }
+            let journal = UploadJournal::open_at(path.clone(), source(1024), &options, None)
+                .expect("journal");
+            begin(&journal);
+            journal.part_completed(&part(1)).expect("part");
+            let refused = CliError::new(ErrorCode::PathConflict.as_str(), "path conflict");
+            let uploading = std::fs::read(&path).expect("uploading record");
+            assert_eq!(journal.finish(Err(refused.clone())), Err(refused.clone()));
+            assert_eq!(std::fs::read(&path).expect("preserved progress"), uploading);
+            journal
+                .commit_prepared(&request(&journal), &options.commit.actor_id, None)
+                .expect("prepared request");
+            let prepared = std::fs::read(&path).expect("prepared record");
+            let kept = ErrorCode::ALL.into_iter().filter(|code| {
+                code.retryable_without_operator_action()
+                    || matches!(code.kind(), loonfs_api::ErrorKind::Unavailable)
+            });
+            for code in kept.chain([
+                ErrorCode::CommitOutcomeUnknown,
+                ErrorCode::CommitIdReuseConflict,
+                ErrorCode::DeadlineExceeded,
+                ErrorCode::WriterFenced,
+                ErrorCode::ServerError,
+                ErrorCode::NamespaceCorrupt,
+                ErrorCode::InvalidRequest,
+                ErrorCode::Unauthorized,
+                ErrorCode::Forbidden,
+                ErrorCode::UploadNotFound,
+            ]) {
+                let error = CliError::new(code.as_str(), "preserve this attempt");
+                assert_eq!(journal.finish(Err(error.clone())), Err(error));
+                assert_eq!(std::fs::read(&path).expect("preserved request"), prepared);
+            }
+            for error in [
+                CliError::client_error("connection closed"),
+                CliError::new("future_code", "unknown outcome"),
+            ] {
+                assert_eq!(journal.finish(Err(error.clone())), Err(error));
+                assert_eq!(std::fs::read(&path).expect("preserved request"), prepared);
+            }
+            assert_eq!(journal.finish(Err(refused.clone())), Err(refused));
+            assert!(!path.exists());
+        }
+    }
+
+    #[test]
+    fn refusal_cleanup_failure_preserves_the_server_error_and_names_the_journal() {
+        let directory = tempfile::tempdir().expect("directory");
+        let path = directory.path().join("upload.json");
+        let journal = open(&path);
+        journal
+            .commit_prepared(&request(&journal), &journal.options().commit.actor_id, None)
+            .expect("prepared request");
+        std::fs::rename(&path, directory.path().join("saved.json")).expect("save record");
+        std::fs::create_dir(&path).expect("block removal");
+        let mut refused = CliError::new(ErrorCode::PathConflict.as_str(), "path conflict");
+        refused.request_id = Some("req_refused".to_owned());
+        let error = journal.finish(Err(refused.clone())).expect_err("refused");
+        assert!(error.message.starts_with(&refused.message));
+        assert!(error.message.contains(path.to_str().expect("path")));
+        refused.message = error.message.clone();
+        assert_eq!(error, refused);
     }
 
     #[test]
@@ -637,7 +761,9 @@ mod tests {
         journal
             .commit_prepared(&expected, &journal.options().commit.actor_id, None)
             .expect("record");
-        journal.acknowledge().expect("acknowledged");
+        journal
+            .acknowledge(UploadOutcome::Committed)
+            .expect("acknowledged");
         drop(journal);
         assert!(path.exists());
         assert_eq!(
@@ -655,7 +781,9 @@ mod tests {
         let journal = open(&path);
         for removed in [false, true] {
             if removed {
-                journal.acknowledge().expect("remove record");
+                journal
+                    .acknowledge(UploadOutcome::Committed)
+                    .expect("remove record");
             }
             assert!(
                 UploadJournal::open_at(path.clone(), source(1024), &options(), None)

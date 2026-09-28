@@ -1049,36 +1049,35 @@ pub(super) async fn put_payload(
         .transpose()?;
     let retained_options = journal.as_ref().map(UploadJournal::options);
     let options = retained_options.as_ref().unwrap_or(options);
-    if let Some(journal) = journal.as_ref() {
-        if let Some(request) = journal.prepared_request() {
-            progress.phase("committing");
-            let committed = journal
-                .replay(
-                    &context.target.client,
-                    context.namespace(),
-                    &request,
-                    &options.commit.actor_id,
-                )
-                .await?;
-            acknowledge_committed_upload(journal, &committed)?;
-            return Ok(committed);
-        }
-        if let Some(committed) =
-            commit_a_finished_upload(context, spec, options, journal, progress).await?
-        {
-            return Ok(committed);
-        }
-    }
-    let result = context
-        .target
-        .put_file_stream(spec, payload, options, progress, journal.as_ref())
-        .await;
-    if let Ok(committed) = &result {
+    let result = async {
         if let Some(journal) = journal.as_ref() {
-            acknowledge_committed_upload(journal, committed)?;
+            if let Some(request) = journal.prepared_request() {
+                progress.phase("committing");
+                return journal
+                    .replay(
+                        &context.target.client,
+                        context.namespace(),
+                        &request,
+                        &options.commit.actor_id,
+                    )
+                    .await;
+            }
+            if let Some(committed) =
+                commit_a_finished_upload(context, spec, options, journal, progress).await?
+            {
+                return Ok(committed);
+            }
         }
+        context
+            .target
+            .put_file_stream(spec, payload, options, progress, journal.as_ref())
+            .await
     }
-    result
+    .await;
+    match journal {
+        Some(journal) => journal.finish(result),
+        None => result,
+    }
 }
 
 /// Opens the journal for a resumable file upload.
@@ -1141,21 +1140,7 @@ async fn commit_a_finished_upload(
         .client
         .commit_completed_upload(spec, content_ref, content_token, options, Some(journal))
         .await;
-    let committed = result?;
-    acknowledge_committed_upload(journal, &committed)?;
-    Ok(Some(committed))
-}
-
-fn acknowledge_committed_upload(
-    journal: &UploadJournal,
-    committed: &Commit,
-) -> Result<(), CliError> {
-    journal.acknowledge().map_err(|error| {
-        CliError::io_error(format!(
-        "file commit `{}` succeeded at sequence {}, but its journal could not be removed: {error}",
-        committed.commit_id, committed.committed_seq,
-    ))
-    })
+    Ok(Some(result?))
 }
 
 fn put_file_options(args: &FilesystemPutArgs, actor: &ActorId) -> Result<PutFileOptions, CliError> {

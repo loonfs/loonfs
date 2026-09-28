@@ -573,7 +573,10 @@ Interrupted transfers
   content token, the rerun takes a new token from the completed upload
   session, so the file is not uploaded again. The record is removed when
   the upload commits. A record made with an explicit --commit-id is kept
-  instead, so repeating the command replays the same request.
+  instead, so repeating the command replays the same request. A commit
+  refused against namespace state removes the record, even with an explicit
+  ID. Transport failures, unknown outcomes, admission pressure, and other
+  unavailable conditions keep it, as does commit_id_reuse_conflict.
   `loonfs put -` keeps no record, because a pipe cannot be read a second
   time.
 
