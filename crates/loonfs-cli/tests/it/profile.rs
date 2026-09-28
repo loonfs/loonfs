@@ -3,6 +3,174 @@
 use super::common::*;
 
 #[test]
+fn local_profile_roots_are_absolute_across_working_directories() {
+    let harness = Harness::new();
+    let directory_a = harness.temp_dir.path().join("a");
+    let directory_b = harness.temp_dir.path().join("b");
+    fs::create_dir(&directory_a).expect("create directory a");
+    fs::create_dir(&directory_b).expect("create directory b");
+    let root = directory_a
+        .canonicalize()
+        .expect("absolute directory a")
+        .join("store");
+    let run_from = |directory: &Path, args: &[&str]| {
+        harness
+            .command()
+            .current_dir(directory)
+            .args(args)
+            .output()
+            .expect("run loonfs")
+    };
+
+    let created = run_from(
+        &directory_a,
+        &[
+            "--no-input",
+            "profile",
+            "create",
+            "local",
+            "dev",
+            "--root",
+            "./store/.",
+        ],
+    );
+    assert_success(&created);
+    assert!(stdout_string(&created).contains(root.to_str().expect("utf-8 root")));
+    let config: toml::Value =
+        toml::from_str(&fs::read_to_string(&harness.config_path).expect("read config"))
+            .expect("parse config");
+    assert_eq!(
+        config["profiles"]["dev"]["store"]["root"].as_str(),
+        root.to_str()
+    );
+    assert_success(&run_from(&directory_b, &["doctor"]));
+    assert!(!root.exists());
+
+    assert_success(&run_from(&directory_a, &["namespace", "create", "demo"]));
+    assert_success(&run_from(&directory_a, &["use", "demo"]));
+    fs::write(directory_b.join("a.txt"), b"same store").expect("write payload");
+    assert_success(&run_from(&directory_b, &["put", "a.txt", "/a.txt"]));
+    let listed = run_from(&directory_b, &["ls", "/"]);
+    assert_success(&listed);
+    assert!(stdout_string(&listed).contains("a.txt"));
+    assert_success(&run_from(&directory_a, &["get", "/a.txt", "download.txt"]));
+    assert_eq!(
+        fs::read(directory_a.join("download.txt")).expect("read download"),
+        b"same store"
+    );
+
+    let updated = run_from(
+        &directory_b,
+        &[
+            "--no-input",
+            "profile",
+            "update",
+            "local",
+            "dev",
+            "--root",
+            "../a/store/.",
+        ],
+    );
+    assert_success(&updated);
+    let root = directory_b
+        .canonicalize()
+        .expect("absolute directory b")
+        .join("../a/store");
+    assert!(stdout_string(&updated).contains(root.to_str().expect("utf-8 root")));
+    let config: toml::Value =
+        toml::from_str(&fs::read_to_string(&harness.config_path).expect("read config"))
+            .expect("parse config");
+    assert_eq!(
+        config["profiles"]["dev"]["store"]["root"].as_str(),
+        root.to_str()
+    );
+    assert!(!directory_b.join("store").exists());
+}
+
+#[test]
+fn relative_local_roots_fail_at_use_and_can_be_repaired() {
+    let harness = Harness::new();
+    let original = r#"
+config_version = 1
+default_profile = "dev"
+
+[profiles.dev]
+mode = "embedded"
+
+[profiles.dev.store]
+kind = "local-fs"
+root = "./store"
+"#;
+    harness.write_cli_config(original);
+    let run = |args: &[&str]| {
+        harness
+            .command()
+            .current_dir(harness.temp_dir.path())
+            .args(args)
+            .output()
+            .expect("run loonfs")
+    };
+    let message = "profile `dev` has a relative local-fs root `./store`; set an absolute path with `loonfs profile update local dev --root <path>`";
+    let listed = run(&["--json", "ls", "/"]);
+    assert_failure(&listed);
+    assert_eq!(json_error(&listed)["code"], "invalid_config");
+    assert_eq!(json_error(&listed)["message"], message);
+
+    let doctor = run(&["--json", "doctor", "--write-check"]);
+    assert_failure(&doctor);
+    let data = json_data(&doctor);
+    let checks = data["checks"].as_array().expect("doctor checks");
+    let provider = checks
+        .iter()
+        .find(|check| check["name"] == "provider_config")
+        .expect("provider check");
+    assert_eq!(provider["status"], "failed");
+    assert_eq!(provider["message"], message);
+    assert!(checks
+        .iter()
+        .filter(|check| check["name"] == "config_decode" || check["name"] == "profile")
+        .all(|check| check["status"] == "ok"));
+    assert!(!harness.temp_dir.path().join("store").exists());
+    assert_eq!(
+        fs::read_to_string(&harness.config_path).expect("unchanged config"),
+        original
+    );
+
+    assert_success(&run(&["profile", "list"]));
+    assert_success(&run(&["profile", "show", "dev"]));
+    harness.add_embedded_profile("other");
+    assert_success(&run(&["namespace", "create", "demo", "--profile", "other"]));
+    assert_success(&run(&[
+        "ls",
+        "/",
+        "--namespace",
+        "demo",
+        "--profile",
+        "other",
+    ]));
+
+    let root = harness.store_root("dev");
+    let updated = run(&[
+        "--json",
+        "profile",
+        "update",
+        "local",
+        "dev",
+        "--root",
+        root.to_str().expect("utf-8 root"),
+    ]);
+    assert_success(&updated);
+    assert_eq!(
+        json_data(&updated)["store"]["root"],
+        root.to_str().expect("utf-8 root")
+    );
+    assert_success(&run(&["doctor"]));
+    assert!(!root.exists());
+    assert_success(&run(&["namespace", "create", "demo"]));
+    assert_success(&run(&["ls", "/", "--namespace", "demo"]));
+}
+
+#[test]
 fn profile_create_list_show_delete_work() {
     let harness = Harness::new();
 

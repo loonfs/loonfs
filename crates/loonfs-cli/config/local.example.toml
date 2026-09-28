@@ -11,5 +11,5 @@ writer_id = "example-local-writer"
 
 [profiles.local.store]
 kind = "local-fs"
-root = "./.loonfs-store"
+root = "/absolute/path/to/.loonfs-store"
 key_prefix = "local-example"

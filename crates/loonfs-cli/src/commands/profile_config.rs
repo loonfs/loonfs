@@ -7,13 +7,14 @@ use crate::args::{
     ProfileUpdateLocalArgs, ProfileUpdateR2Args, ProfileUpdateRemoteArgs, ProfileUpdateS3Args,
     RuntimeBehavior,
 };
-use crate::config::{validate_remote_client_config, ProfileConfig, StoreConfig};
+use crate::config::{absolute_env_path, validate_remote_client_config, ProfileConfig, StoreConfig};
 use crate::error::CliError;
 use crate::prompt;
 use loonfs_api::{ActorId, PrincipalId, PrincipalScope, SecretString, SubjectId};
 use loonfs_objectstore::{
     AwsS3Credentials, AzureAbsCredentials, CloudflareR2Credentials, GcpGcsCredentials,
 };
+use std::path::{Path, PathBuf};
 
 const AWS_REGIONS: &[&str] = &[
     "us-east-1",
@@ -475,7 +476,23 @@ pub(super) fn build_profile_interactive(
             "r2" => CreateProviderSpec::R2(ProfileCreateR2Spec::default()),
             "gcs" => CreateProviderSpec::Gcs(ProfileCreateGcsSpec::default()),
             "azure" => CreateProviderSpec::Azure(ProfileCreateAzureSpec::default()),
-            "local" => CreateProviderSpec::Local(ProfileCreateLocalSpec::default()),
+            "local" => {
+                let root = prompt::prompt_line("root")?;
+                let path = match root.strip_prefix("~/") {
+                    Some(relative) => absolute_env_path("HOME")
+                        .ok_or_else(|| {
+                            CliError::invalid_config(
+                            "unable to determine the home directory; enter an absolute root path",
+                        )
+                        })?
+                        .join(relative.trim_start_matches('/')),
+                    None => PathBuf::from(root),
+                };
+                CreateProviderSpec::Local(ProfileCreateLocalSpec {
+                    root: Some(absolute_local_root(&path)?),
+                    key_prefix: None,
+                })
+            }
             _ => CreateProviderSpec::Remote(ProfileCreateRemoteSpec::default()),
         };
     build_profile_from_create_spec(
@@ -660,6 +677,14 @@ fn required_secret(
     }
 }
 
+fn absolute_local_root(root: &Path) -> Result<String, CliError> {
+    std::path::absolute(root)
+        .map_err(CliError::io)?
+        .into_os_string()
+        .into_string()
+        .map_err(|_| CliError::invalid_config("local-fs root is not valid UTF-8"))
+}
+
 fn local_store(
     current: Option<&StoreConfig>,
     args: &ProfileCreateLocalSpec,
@@ -673,13 +698,20 @@ fn local_store(
             Some((root, key_prefix.as_ref()))
         })
         .map(|current| current.expect("local store builder should receive a local current store"));
+    let root = required_field(
+        args.root.as_ref(),
+        current.map(|value| value.0),
+        "root",
+        source,
+    )?;
+    let root = if args.root.is_some() || current.is_none() || matches!(source, FieldSource::Prompt)
+    {
+        absolute_local_root(Path::new(&root))?
+    } else {
+        root
+    };
     Ok(StoreConfig::LocalFs {
-        root: required_field(
-            args.root.as_ref(),
-            current.map(|value| value.0),
-            "root",
-            source,
-        )?,
+        root,
         key_prefix: optional_field(
             args.key_prefix.as_ref(),
             current.and_then(|value| value.1),
@@ -1478,6 +1510,27 @@ mod tests {
     use crate::config::{ProfileConfig, StoreConfig};
     use clap::Parser;
     use loonfs_objectstore::{AwsS3Credentials, AzureAbsCredentials, CloudflareR2Credentials};
+
+    #[cfg(unix)]
+    #[test]
+    fn relative_local_roots_remove_dots_and_keep_parents_without_creating_paths() {
+        let current_directory = std::env::current_dir().expect("current directory");
+        let name = loonfs_api::generated_id("local-root");
+        let missing_root = current_directory.join(&name);
+        let input = std::path::Path::new(&name).join("./child//../store");
+        assert!(!missing_root.exists());
+
+        let absolute = super::absolute_local_root(&input).expect("absolute root");
+        assert!(std::path::Path::new(&absolute).is_absolute());
+        assert_eq!(
+            absolute,
+            missing_root
+                .join("child/../store")
+                .to_str()
+                .expect("utf-8 root"),
+        );
+        assert!(!missing_root.exists());
+    }
 
     #[test]
     fn create_profile_supports_azure_abs() {

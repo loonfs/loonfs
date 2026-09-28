@@ -211,22 +211,23 @@ pub(crate) async fn run_doctor(
     };
     let mode = profile.mode_str().to_owned();
 
-    let mut target = match provider_check(&profile, args.target.request.no_retry).await {
-        Ok((message, target)) => {
-            checks.push(ok(DoctorCheckName::ProviderConfig, message));
-            target
-        }
-        Err(error) => {
-            checks.push(failed(DoctorCheckName::ProviderConfig, error));
-            skip_remaining(
-                &mut checks,
-                DoctorCheckName::ProviderConfig,
-                args.write_check,
-                "provider configuration is unusable",
-            );
-            return Ok(doctor_output(kind, Some(profile_name), Some(mode), checks));
-        }
-    };
+    let mut target =
+        match provider_check(&profile_name, &profile, args.target.request.no_retry).await {
+            Ok((message, target)) => {
+                checks.push(ok(DoctorCheckName::ProviderConfig, message));
+                target
+            }
+            Err(error) => {
+                checks.push(failed(DoctorCheckName::ProviderConfig, error));
+                skip_remaining(
+                    &mut checks,
+                    DoctorCheckName::ProviderConfig,
+                    args.write_check,
+                    "provider configuration is unusable",
+                );
+                return Ok(doctor_output(kind, Some(profile_name), Some(mode), checks));
+            }
+        };
 
     let remote = matches!(&profile, ProfileConfig::Remote { .. });
     if remote {
@@ -288,7 +289,7 @@ pub(crate) async fn run_doctor(
             "local store root is missing; doctor did not create it",
         ));
     } else if let ProfileConfig::Embedded { store, .. } = &profile {
-        match ResolvedTarget::resolve(&profile, args.target.request.no_retry).await {
+        match ResolvedTarget::resolve(&profile_name, &profile, args.target.request.no_retry).await {
             Ok(resolved) => {
                 let (check, healthy_target) = embedded_health_check(resolved, store).await;
                 checks.push(check);
@@ -363,21 +364,18 @@ async fn embedded_health_check(
 }
 
 async fn provider_check(
+    profile_name: &str,
     profile: &ProfileConfig,
     no_retry: bool,
 ) -> Result<(String, Option<ResolvedTarget>), CliError> {
+    profile.validate_store(profile_name)?;
     match profile {
-        ProfileConfig::Embedded { store, .. } => {
-            store.validate().map_err(|error| {
-                CliError::invalid_config(format!("invalid embedded store config: {error}"))
-            })?;
-            Ok((
-                format!("{} store configuration is valid", store.kind().as_str()),
-                None,
-            ))
-        }
+        ProfileConfig::Embedded { store, .. } => Ok((
+            format!("{} store configuration is valid", store.kind().as_str()),
+            None,
+        )),
         ProfileConfig::Remote { server_url, .. } => {
-            let target = ResolvedTarget::resolve(profile, no_retry).await?;
+            let target = ResolvedTarget::resolve(profile_name, profile, no_retry).await?;
             Ok((
                 format!("server URL and TLS configuration parsed for {server_url}"),
                 Some(target),
