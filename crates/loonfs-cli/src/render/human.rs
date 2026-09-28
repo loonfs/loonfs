@@ -6,6 +6,7 @@ use crate::commands::{TrashListing, TreeTransferFailures};
 use crate::config::{CliConfig, ProfileConfig};
 use crate::profiles::ProfileSummary;
 use loonfs_api::{ChangeSeq, CommitId, FileRevision, GrepMatch, PathEntry};
+use loonfs_objectstore::StoreConfig;
 
 use super::human_maintenance::*;
 
@@ -40,7 +41,10 @@ fn human_success_text(output: &CommandOutput) -> String {
     match &output.data {
         CommandData::Capabilities(document) => human_capabilities(document),
         CommandData::Doctor { checks } => human_doctor(checks, output.mode.as_deref()),
-        CommandData::Profile(profile) => human_profile(output, profile),
+        CommandData::Profile {
+            profile,
+            default_profile,
+        } => human_profile(output, profile, default_profile.as_deref()),
         CommandData::ProfileSummary(profile) => human_profile_summary(output.kind, profile),
         CommandData::ProfileList {
             default_profile,
@@ -129,13 +133,14 @@ fn human_success_text(output: &CommandOutput) -> String {
         } => format!("wrote {bytes_written} bytes to {destination}"),
         CommandData::FileMutation {
             target,
+            human_target,
             committed_seq,
             commit_id,
             recovery_command,
             ..
         } => human_file_mutation(
             output.kind,
-            target,
+            human_target.as_deref().unwrap_or(target),
             *committed_seq,
             commit_id,
             recovery_command.as_deref(),
@@ -159,7 +164,34 @@ fn human_success_text(output: &CommandOutput) -> String {
     }
 }
 
-fn human_profile(output: &CommandOutput, profile: &ProfileConfig) -> String {
+fn human_profile(
+    output: &CommandOutput,
+    profile: &ProfileConfig,
+    default_profile: Option<&str>,
+) -> String {
+    if matches!(
+        output.kind,
+        CommandKind::ProfileCreate | CommandKind::ProfileUpdate
+    ) {
+        let name = output.profile.as_deref().unwrap_or("<unknown>");
+        let verb = if output.kind == CommandKind::ProfileCreate {
+            "created"
+        } else {
+            "updated"
+        };
+        let mut rendered = format!("{verb} profile `{name}` ({})", profile_location(profile));
+        if output.kind == CommandKind::ProfileCreate {
+            let command_name = crate::commands::shell_quote(name);
+            let default = match default_profile {
+                Some(default) if default == name => format!("default profile: `{default}`"),
+                Some(default) => format!("default profile is still `{default}`; run `loonfs profile use {command_name}` to switch"),
+                None => format!("no default profile is set; run `loonfs profile use {command_name}` to switch"),
+            };
+            rendered.push('\n');
+            rendered.push_str(&default);
+        }
+        return rendered;
+    }
     let rendered = toml::to_string_pretty(profile)
         .unwrap_or_else(|_| format!("mode = \"{}\"", profile.mode_str()));
     if output.kind == CommandKind::ProfileShow {
@@ -168,6 +200,37 @@ fn human_profile(output: &CommandOutput, profile: &ProfileConfig) -> String {
     } else {
         rendered
     }
+}
+
+fn profile_location(profile: &ProfileConfig) -> String {
+    let store = match profile {
+        ProfileConfig::Remote { server_url, .. } => return format!("remote, server {server_url}"),
+        ProfileConfig::Embedded { store, .. } => store,
+    };
+    let kind = store.kind().as_str();
+    let (location, key_prefix) = match store {
+        StoreConfig::LocalFs { root, .. } => return format!("{kind}, root {root}"),
+        StoreConfig::AwsS3 {
+            bucket, key_prefix, ..
+        }
+        | StoreConfig::CloudflareR2 {
+            bucket, key_prefix, ..
+        }
+        | StoreConfig::GcpGcs {
+            bucket, key_prefix, ..
+        } => (format!("bucket {bucket}"), key_prefix),
+        StoreConfig::AzureAbs {
+            container_name,
+            key_prefix,
+            ..
+        } => (format!("container {container_name}"), key_prefix),
+    };
+    let prefix = key_prefix
+        .as_deref()
+        .filter(|prefix| !prefix.is_empty())
+        .map(|prefix| format!(", key prefix {prefix}"))
+        .unwrap_or_default();
+    format!("{kind}, {location}{prefix}")
 }
 
 fn human_profile_summary(kind: CommandKind, profile: &ProfileSummary) -> String {
@@ -249,14 +312,13 @@ fn human_grep_matches(
         .iter()
         .map(|found| format!("{}:{}:{}", found.path, found.line_number, found.line))
         .collect();
+    let count = matches.len();
+    let noun = if count == 1 { "match" } else { "matches" };
+    let mut summary = format!("{count} {noun} for `{pattern}`");
     if truncated {
-        lines.push(format!(
-            "{} matches for `{pattern}` (stopped at --limit; there are more)",
-            matches.len()
-        ));
-    } else {
-        lines.push(format!("{} matches for `{pattern}`", matches.len()));
+        summary.push_str(" (stopped at --limit; there are more)");
     }
+    lines.push(summary);
     if !tail_scanned {
         lines.push(
             "warning: recent commits were not scanned (allow_stale); results may be stale"

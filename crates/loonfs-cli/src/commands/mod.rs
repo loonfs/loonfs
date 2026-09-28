@@ -3,6 +3,7 @@
 mod access;
 mod config;
 mod context;
+pub(crate) use context::shell_quote;
 pub(crate) mod download;
 mod fs;
 mod inspection;

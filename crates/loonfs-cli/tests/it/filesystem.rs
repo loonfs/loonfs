@@ -369,6 +369,10 @@ fn embedded_profile_filesystem_flow_works_end_to_end() {
     let rm_dir = harness.run(&["--json", "rm", "/docs"]);
     assert_failure(&rm_dir);
     assert_eq!(json_error(&rm_dir)["code"], "directory_not_empty");
+    assert_eq!(json_error(&rm_dir)["message"], "directory `/docs` is not empty; use `loonfs rm -r /docs` to delete it and everything under it");
+    let rm_dir_human = harness.run(&["rm", "/docs"]);
+    assert_failure(&rm_dir_human);
+    assert_eq!(stderr_string(&rm_dir_human), "directory `/docs` is not empty; use `loonfs rm -r /docs` to delete it and everything under it\n");
 
     let rm = harness.run(&["--json", "rm", "/docs/final.txt"]);
     assert_success(&rm);
@@ -1630,7 +1634,6 @@ fn an_undelete_without_a_path_restores_in_place() {
     assert_success(&harness.run(&["mv", "/docs", "/archive"]));
 
     let recovered = harness.run(&[
-        "--json",
         "undelete",
         "--inode",
         &inode_id,
@@ -1638,7 +1641,7 @@ fn an_undelete_without_a_path_restores_in_place() {
         &deletion_seq.to_string(),
     ]);
     assert_success(&recovered);
-    assert_eq!(json_data(&recovered)["target"], "demo:(restored in place)");
+    assert!(stdout_string(&recovered).starts_with("recovered in place in `demo` @ seq "));
     let cat = harness.run(&["cat", "/archive/report.txt"]);
     assert_success(&cat);
     assert_eq!(cat.stdout, b"quarterly numbers");

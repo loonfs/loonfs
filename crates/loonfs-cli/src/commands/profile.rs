@@ -56,7 +56,10 @@ pub(crate) fn run_profile_command(
                 kind,
                 profile: Some(profile_name),
                 mode: Some(redacted.mode_str().to_owned()),
-                data: CommandData::Profile(redacted),
+                data: CommandData::Profile {
+                    profile: redacted,
+                    default_profile: None,
+                },
             })
         }
         ProfileCommand::Update { provider } => {
@@ -74,9 +77,12 @@ fn run_profile_create(
     runtime: RuntimeBehavior,
 ) -> Result<CommandOutput, CommandFailure> {
     let (name, spec) = create_profile_spec_from_create(command);
-    let result = (|| -> Result<(String, ProfileConfig), CliError> {
+    let (result, default_profile) = (|| {
         let profile = build_profile_from_create_spec(&name, spec, runtime)?;
-        mutate_config(config_path, |config| add_profile(config, &name, profile))
+        mutate_config(config_path, |config| {
+            let result = add_profile(config, &name, profile)?;
+            Ok((result, config.default_profile.clone()))
+        })
     })()
     .map_err(|error| fail(kind, Some(name.clone()), None, error))?;
 
@@ -84,7 +90,10 @@ fn run_profile_create(
         kind,
         profile: Some(result.0),
         mode: Some(result.1.mode_str().to_owned()),
-        data: CommandData::Profile(result.1),
+        data: CommandData::Profile {
+            profile: result.1,
+            default_profile,
+        },
     })
 }
 
@@ -127,7 +136,10 @@ fn run_profile_update(
         kind,
         profile: Some(result.0),
         mode: Some(result.1.mode_str().to_owned()),
-        data: CommandData::Profile(result.1),
+        data: CommandData::Profile {
+            profile: result.1,
+            default_profile: None,
+        },
     })
 }
 

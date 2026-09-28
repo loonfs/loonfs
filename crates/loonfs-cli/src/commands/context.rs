@@ -454,7 +454,7 @@ impl UndeleteHint {
 /// command that is meant to be pasted has to survive them. Single quotes take
 /// everything literally, which is why the one character they cannot hold — a
 /// single quote — is spliced in as an escaped one outside them.
-fn shell_quote(argument: &str) -> String {
+pub(crate) fn shell_quote(argument: &str) -> String {
     const SAFE: &str = "@%+=:,./-_";
     if !argument.is_empty()
         && argument

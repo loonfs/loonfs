@@ -53,7 +53,10 @@ pub enum PathError {
     #[error("absolute path must not be empty")]
     EmptyPath,
     /// Reports a path that does not begin at the namespace root.
-    #[error("path `{path:?}` is not absolute")]
+    #[error(
+        "path `{}` is not absolute; namespace paths start with `/`, for example `/{}`",
+        path.escape_debug(), path.escape_debug()
+    )]
     RelativePath {
         /// Rejected path, preserved for an escaped diagnostic.
         path: String,
@@ -649,6 +652,12 @@ mod tests {
             Err(PathError::RelativePath { .. })
         ));
         assert_eq!(AbsolutePath::parse(""), Err(PathError::EmptyPath));
+        for (path, escaped) in [("b.txt", "b.txt"), ("b\n\t\x1b.txt", r"b\n\t\u{1b}.txt")] {
+            assert_eq!(
+                AbsolutePath::parse(path).expect_err("relative path").to_string(),
+                format!("path `{escaped}` is not absolute; namespace paths start with `/`, for example `/{escaped}`")
+            );
+        }
     }
 
     #[test]

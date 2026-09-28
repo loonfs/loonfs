@@ -483,20 +483,80 @@ mod tests {
             kind: CommandKind::ProfileShow,
             profile: Some("default".to_owned()),
             mode: Some("embedded".to_owned()),
-            data: CommandData::Profile(ProfileConfig::Embedded {
-                store: StoreConfig::LocalFs {
-                    root: "/tmp/store".to_owned(),
-                    key_prefix: None,
+            data: CommandData::Profile {
+                profile: ProfileConfig::Embedded {
+                    store: StoreConfig::LocalFs {
+                        root: "/tmp/store".to_owned(),
+                        key_prefix: None,
+                    },
+                    actor_id: None,
+                    subject_id: None,
+                    principal_scope: None,
+                    principals: None,
+                    default_namespace: Some("demo".to_owned()),
+                    writer_id: None,
                 },
-                actor_id: None,
-                subject_id: None,
-                principal_scope: None,
-                principals: None,
-                default_namespace: Some("demo".to_owned()),
-                writer_id: None,
-            }),
+                default_profile: None,
+            },
         };
         assert_snapshot!(human_success(&output));
+    }
+
+    #[test]
+    fn profile_updates_show_store_locations_without_credentials() {
+        for (store, location) in [
+            (
+                serde_json::json!({
+                    "kind": "aws-s3", "bucket": "files", "region": "us-east-1", "force_path_style": false,
+                    "key_prefix": "team", "credentials": {
+                        "kind": "static", "access_key_id": "secret-id", "secret_access_key": "secret-key"
+                    }
+                }),
+                "aws-s3, bucket files, key prefix team",
+            ),
+            (
+                serde_json::json!({
+                    "kind": "cloudflare-r2", "bucket": "files", "account_id": "account",
+                    "endpoint_url": "https://account.r2.cloudflarestorage.com",
+                    "credentials": { "kind": "static", "access_key_id": "secret-id", "secret_access_key": "secret-key" }
+                }),
+                "cloudflare-r2, bucket files",
+            ),
+            (
+                serde_json::json!({
+                    "kind": "gcp-gcs", "bucket": "files", "key_prefix": "team",
+                    "credentials": { "kind": "service-account-file", "path": "/private/key.json" }
+                }),
+                "gcp-gcs, bucket files, key prefix team",
+            ),
+            (
+                serde_json::json!({
+                    "kind": "azure-abs", "account_name": "account", "container_name": "files",
+                    "key_prefix": "team", "credentials": { "kind": "access-key", "access_key": "secret-key" }
+                }),
+                "azure-abs, container files, key prefix team",
+            ),
+        ] {
+            let profile = serde_json::json!({ "mode": "embedded", "store": store });
+            let output = CommandOutput {
+                kind: CommandKind::ProfileUpdate,
+                profile: Some("dev".to_owned()),
+                mode: Some("embedded".to_owned()),
+                data: CommandData::Profile {
+                    profile: serde_json::from_value(profile.clone()).expect("profile"),
+                    default_profile: None,
+                },
+            };
+            assert_eq!(
+                human_success(&output),
+                format!("updated profile `dev` ({location})")
+            );
+            let mut expected = profile;
+            expected["kind"] = serde_json::json!("profile");
+            let json: serde_json::Value =
+                serde_json::from_str(&json_success(&output).expect("render JSON")).expect("JSON");
+            assert_eq!(json["data"], expected);
+        }
     }
 
     #[test]

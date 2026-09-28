@@ -1,5 +1,6 @@
 //! [`CliError`]: the structured failure every command surfaces.
 
+use crate::args::CommandKind;
 use crate::config::NAMESPACE_ENV;
 use loonfs_api::ErrorCode;
 use loonfs_client::ClientError;
@@ -127,6 +128,27 @@ impl CliError {
         self
     }
 
+    pub(crate) fn with_command_hint(mut self, kind: CommandKind, path: Option<&str>) -> Self {
+        match (kind, ErrorCode::parse(&self.code)) {
+            (CommandKind::FilesystemRm, Some(ErrorCode::DirectoryNotEmpty)) => {
+                if let Some(path) = path {
+                    let command_path = crate::commands::shell_quote(path);
+                    self.message = format!(
+                        "directory `{path}` is not empty; use `loonfs rm -r {command_path}` to delete it and everything under it"
+                    );
+                }
+            }
+            (CommandKind::FilesystemGrep, Some(ErrorCode::NotSupported))
+                if self.feature.as_deref() == Some("query.grep") =>
+            {
+                self.message
+                    .push_str("; enable it with `loonfs maintenance index enable`");
+            }
+            _ => {}
+        }
+        self
+    }
+
     pub(crate) fn with_invalid_request_param(self, param: impl Into<String>) -> Self {
         if self.code == ErrorCode::InvalidRequest.as_str() {
             self.with_param(param)
@@ -153,7 +175,7 @@ impl CliError {
         Self::new(
             CliErrorCode::NoDefaultNamespace.as_str(),
             format!(
-                "no default namespace is set for profile `{profile}`; use `--namespace`, `{NAMESPACE_ENV}`, or `loonfs use <namespace>`"
+                "no default namespace is set for profile `{profile}`; use `--namespace`, `{NAMESPACE_ENV}`, or `loonfs use <namespace>`; create one with `loonfs namespace create <namespace>`"
             ),
         )
     }

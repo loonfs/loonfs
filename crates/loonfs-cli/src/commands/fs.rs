@@ -331,6 +331,7 @@ pub(crate) async fn run_filesystem_annotate(
     Ok(context.output(
         kind,
         CommandData::FileMutation {
+            human_target: None,
             target: render_target(context.namespace(), spec.absolute_path()),
             committed_seq: result.committed_seq,
             commit_id: result.commit_id,
@@ -371,7 +372,9 @@ pub(crate) async fn run_filesystem_grep(
             .client
             .grep(context.namespace(), &request, plan.request_size())
             .await
-            .map_err(|error| context.fail(kind, error))?;
+            .map_err(|error| {
+                context.fail(kind, CliError::from(error).with_command_hint(kind, None))
+            })?;
         let snapshot = (
             response.namespace_id,
             response.head_seq,
@@ -1022,6 +1025,7 @@ async fn commit_put(
     Ok(context.output(
         kind,
         CommandData::FileMutation {
+            human_target: None,
             target: render_target(context.namespace(), spec.absolute_path()),
             committed_seq: result.committed_seq,
             commit_id: result.commit_id,
@@ -1198,7 +1202,13 @@ pub(crate) async fn run_filesystem_rm(
         .client
         .delete_path(&spec, &options)
         .await
-        .map_err(|error| context.fail(kind, error))?;
+        .map_err(|error| {
+            context.fail(
+                kind,
+                CliError::from(error)
+                    .with_command_hint(kind, (!args.recursive).then_some(args.path.as_str())),
+            )
+        })?;
 
     // A delete resolved through a path always records its binding, so the
     // printed command restores in place with no destination — and keeps
@@ -1211,6 +1221,7 @@ pub(crate) async fn run_filesystem_rm(
     Ok(context.output(
         kind,
         CommandData::FileMutation {
+            human_target: None,
             target: render_target(context.namespace(), spec.absolute_path()),
             committed_seq: result.committed_seq,
             commit_id: result.commit_id,
@@ -1247,6 +1258,7 @@ pub(crate) async fn run_filesystem_restore(
     Ok(context.output(
         kind,
         CommandData::FileMutation {
+            human_target: None,
             target: render_target(context.namespace(), spec.absolute_path()),
             committed_seq: result.committed_seq,
             commit_id: result.commit_id,
@@ -1296,6 +1308,9 @@ pub(crate) async fn run_filesystem_undelete(
     Ok(context.output(
         kind,
         CommandData::FileMutation {
+            human_target: spec
+                .is_none()
+                .then(|| format!("in place in `{}`", context.namespace())),
             target,
             committed_seq: result.committed_seq,
             commit_id: result.commit_id,
@@ -1349,6 +1364,7 @@ pub(crate) async fn run_filesystem_mkdir(
     Ok(context.output(
         kind,
         CommandData::FileMutation {
+            human_target: None,
             target: render_target(context.namespace(), spec.absolute_path()),
             committed_seq: result.committed_seq,
             commit_id: result.commit_id,

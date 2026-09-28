@@ -51,7 +51,10 @@ pub(crate) fn run_config_init(
         kind,
         profile: Some(result.0),
         mode: Some(result.1.mode_str().to_owned()),
-        data: CommandData::Profile(result.1),
+        data: CommandData::Profile {
+            profile: result.1,
+            default_profile: None,
+        },
     })
 }
 

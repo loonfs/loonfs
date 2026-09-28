@@ -175,7 +175,6 @@ fn profile_create_list_show_delete_work() {
     let harness = Harness::new();
 
     let add_embedded = harness.run(&[
-        "--json",
         "profile",
         "create",
         "local",
@@ -184,10 +183,15 @@ fn profile_create_list_show_delete_work() {
         harness.store_root("default").to_str().expect("utf-8 path"),
     ]);
     assert_success(&add_embedded);
-    assert_eq!(json_data(&add_embedded)["mode"], "embedded");
+    assert_eq!(
+        stdout_string(&add_embedded),
+        format!(
+            "created profile `default` (local-fs, root {})\ndefault profile: `default`\n",
+            harness.store_root("default").display()
+        )
+    );
 
     let add_remote = harness.run(&[
-        "--json",
         "profile",
         "create",
         "remote",
@@ -200,8 +204,20 @@ fn profile_create_list_show_delete_work() {
         "remote-user",
     ]);
     assert_success(&add_remote);
-    assert_eq!(json_data(&add_remote)["mode"], "remote");
-    assert_eq!(json_data(&add_remote)["actor_id"], "remote-user");
+    assert_eq!(stdout_string(&add_remote), "created profile `prod` (remote, server http://127.0.0.1:9400)\ndefault profile is still `default`; run `loonfs profile use prod` to switch\n");
+    let updated = harness.run(&[
+        "profile",
+        "update",
+        "remote",
+        "prod",
+        "--server-url",
+        "http://127.0.0.1:9500",
+    ]);
+    assert_success(&updated);
+    assert_eq!(
+        stdout_string(&updated),
+        "updated profile `prod` (remote, server http://127.0.0.1:9500)\n"
+    );
 
     let list = harness.run(&["--json", "profile", "list"]);
     assert_success(&list);
@@ -1309,6 +1325,10 @@ fn filesystem_requires_default_namespace_when_omitted() {
     assert_failure(&output);
     let error = json_error(&output);
     assert_eq!(error["code"], "no_default_namespace");
+    assert!(error["message"]
+        .as_str()
+        .expect("message")
+        .ends_with("; create one with `loonfs namespace create <namespace>`"));
 }
 
 #[test]

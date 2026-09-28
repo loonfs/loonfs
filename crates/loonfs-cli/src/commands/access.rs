@@ -35,6 +35,7 @@ pub(crate) async fn run_access_set(
     Ok(context.output(
         kind,
         CommandData::FileMutation {
+            human_target: None,
             target: render_target(context.namespace(), spec.absolute_path()),
             committed_seq: result.committed_seq,
             commit_id: result.commit_id,
