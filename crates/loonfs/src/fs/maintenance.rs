@@ -585,32 +585,11 @@ impl FsMaintenance {
             .instruments()
             .compaction_finished(&outcome, elapsed_ms);
         match &outcome {
-            Ok(loonfs_core::MetadataCompactionJobOutcome::Published {
-                manifest_no,
-                rows_read,
-                rows_written,
-                output_segments,
-                ..
-            }) => {
+            Ok(loonfs_core::MetadataCompactionJobOutcome::Published { .. }) => {
                 // Compaction changed the manifest, so cached views are stale.
                 self.invalidate_namespace(namespace_id);
-                tracing::info!(
-                    namespace_id = %namespace_id,
-                    families = ?spec.families(),
-                    rows_read,
-                    rows_written,
-                    output_segments,
-                    manifest_no = manifest_no.0,
-                    "streaming metadata compaction rebuilt a family group"
-                );
             }
-            Ok(outcome) => tracing::info!(
-                namespace_id = %namespace_id,
-                families = ?spec.families(),
-                outcome = ?outcome,
-                "streaming metadata compaction ended without publishing; a later step plans it \
-                 again"
-            ),
+            Ok(_) => {}
             Err(error) => tracing::warn!(
                 namespace_id = %namespace_id,
                 families = ?spec.families(),

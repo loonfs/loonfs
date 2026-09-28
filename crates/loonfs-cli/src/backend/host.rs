@@ -8,7 +8,10 @@ use loonfs::InlineContentOptions;
 use loonfs_api::SecretString;
 use loonfs_client::{Body, Client, ClientConfig, TransportError};
 use loonfs_grep::GrepService;
-use loonfs_http::{AuthPolicy, BindingOptions, BindingState, HttpMetrics};
+use loonfs_http::{
+    AuthPolicy, BindingOptions, BindingState, HttpMetrics, DEFAULT_MAX_CONCURRENT_DOWNLOADS,
+    DEFAULT_MAX_CONCURRENT_UPLOADS, DEFAULT_REQUEST_DEADLINE_MS,
+};
 use loonfs_objectstore::ConfiguredObjectStoreKind;
 use std::sync::{Arc, OnceLock};
 use tokio::sync::Semaphore;
@@ -30,13 +33,13 @@ pub(crate) fn client(
         snapshot_policy: loonfs::SnapshotPolicy::default(),
         max_download_bytes: u64::MAX,
         max_upload_bytes: u64::MAX,
-        max_concurrent_uploads: 8,
-        max_concurrent_downloads: 16,
+        max_concurrent_uploads: DEFAULT_MAX_CONCURRENT_UPLOADS,
+        max_concurrent_downloads: DEFAULT_MAX_CONCURRENT_DOWNLOADS,
         inline_content,
         content_token_secret: CONTENT_TOKEN_SECRET
             .get_or_init(|| loonfs_api::generated_id("content-token").into())
             .clone(),
-        request_deadline_ms: 60_000,
+        request_deadline_ms: DEFAULT_REQUEST_DEADLINE_MS,
         store_kind,
         auth_policy: AuthPolicy::Unauthenticated,
     });

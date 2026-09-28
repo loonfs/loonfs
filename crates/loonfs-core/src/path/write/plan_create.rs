@@ -2,9 +2,9 @@
 
 use super::ensure_expected_inode;
 use super::publish_path_planning::{
-    ensure_parent_directories, is_missing_visible_path, reject_tombstoned_path_ancestor,
-    require_vacant_path, resolve_parent_directory, resolve_visible_path_for_authorization,
-    CompiledFilesystemOperation, PublishPathPlanningView, ResolvedParents,
+    ensure_parent_directories, is_missing_visible_path, require_vacant_path,
+    resolve_parent_directory, resolve_visible_path_for_authorization, CompiledFilesystemOperation,
+    PublishPathPlanningView, ResolvedParents,
 };
 use crate::authorize::Absence;
 use crate::commit::{CandidateAllocation, CommitOp, CommitValidationError};
@@ -24,7 +24,6 @@ pub(super) async fn plan_create_directory<S: ObjectStore + ?Sized>(
     allocation: &mut CandidateAllocation,
 ) -> Result<CompiledFilesystemOperation> {
     ensure_mutation_path(absolute_path)?;
-    reject_tombstoned_path_ancestor(view, absolute_path).await?;
     let mut ops = Vec::new();
     let parents = if parents {
         ensure_parent_directories(absolute_path, view, &mut ops, allocation).await?
@@ -88,7 +87,6 @@ pub(super) async fn plan_undelete<S: ObjectStore + ?Sized>(
     let (parent_inode_id, display_name) = match absolute_path {
         Some(absolute_path) => {
             ensure_mutation_path(absolute_path)?;
-            reject_tombstoned_path_ancestor(view, absolute_path).await?;
             let parent_inode_id = resolve_parent_directory(
                 view,
                 absolute_path,
@@ -133,7 +131,6 @@ pub(super) async fn plan_put_file_content_ref<S: ObjectStore + ?Sized>(
     allocation: &mut CandidateAllocation,
 ) -> Result<CompiledFilesystemOperation> {
     ensure_mutation_path(absolute_path)?;
-    reject_tombstoned_path_ancestor(view, absolute_path).await?;
     let target = resolve_visible_path_for_authorization(
         view,
         absolute_path,

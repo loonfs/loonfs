@@ -373,38 +373,14 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         revision_no: Option<RevisionNo>,
         access: &ReadAccess<'_, S>,
     ) -> Result<DirectDownloadTarget> {
-        let entry = self
-            .resolve_path(absolute_path, AttributeInclusion::Omit, access)
+        let (entry, content_ref) = self
+            .resolve_file_content(absolute_path, revision_no, access)
             .await?;
-        let current_revision = match &entry.kind {
-            PathEntryKind::File {
-                revision_no,
-                content_ref,
-                ..
-            } => (*revision_no, content_ref.clone()),
-            PathEntryKind::Directory {} => {
-                return Err(CoreError::ExpectedFile {
-                    target: entry.path.to_string(),
-                    kind: InodeKind::Directory,
-                });
-            }
-        };
-        let (revision_no, content_ref) = match revision_no {
-            Some(requested) => {
-                if requested != current_revision.0 {
-                    access
-                        .require(
-                            &mut self.metadata_view().session(),
-                            entry.inode_id,
-                            AccessRights::from_iter([AccessRight::History]),
-                            Absence::Path(absolute_path),
-                        )
-                        .await?;
-                }
-                let revision = self.revision_for_inode(entry.inode_id, requested).await?;
-                (revision.revision_no, revision.content_ref)
-            }
-            None => current_revision,
+        let PathEntryKind::File { revision_no, .. } = entry.kind else {
+            return Err(CoreError::ExpectedFile {
+                target: entry.path.to_string(),
+                kind: InodeKind::Directory,
+            });
         };
         let object_key = self
             .resolve_content_location(&content_ref)?
@@ -707,32 +683,9 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         max_content_bytes: Option<u64>,
         access: &ReadAccess<'_, S>,
     ) -> Result<Vec<u8>> {
-        let mut session = self.metadata_view().session();
-        access
-            .require(
-                &mut session,
-                inode_id,
-                AccessRights::from_iter([AccessRight::Read]),
-                Absence::Inode,
-            )
+        let revision = self
+            .authorized_revision_for_inode(inode_id, revision_no, access)
             .await?;
-        if !access.is_unrestricted()
-            && self
-                .metadata_view()
-                .latest_revision_head(inode_id)
-                .await?
-                .is_none_or(|current| current.revision_no != revision_no)
-        {
-            access
-                .require(
-                    &mut session,
-                    inode_id,
-                    AccessRights::from_iter([AccessRight::History]),
-                    Absence::Inode,
-                )
-                .await?;
-        }
-        let revision = self.revision_for_inode(inode_id, revision_no).await?;
         ensure_within_read_limit(revision.content_ref.size_bytes, max_content_bytes)?;
         Ok(self
             .resolve_content_location(&revision.content_ref)?
@@ -915,7 +868,6 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             { METADATA_VIEW_SESSION_COUNTER_FIELDS[8].0 } = tracing::field::Empty,
             { METADATA_VIEW_SESSION_COUNTER_FIELDS[9].0 } = tracing::field::Empty,
             { METADATA_VIEW_SESSION_COUNTER_FIELDS[10].0 } = tracing::field::Empty,
-            { METADATA_VIEW_SESSION_COUNTER_FIELDS[11].0 } = tracing::field::Empty,
         );
         let entries = async {
             session.preload_revision_heads(&children).await?;

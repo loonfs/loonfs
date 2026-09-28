@@ -293,12 +293,22 @@ pub(crate) async fn run_metadata_compaction_job<S: ObjectStore + ?Sized>(
     let timer = Arc::new(StdMonotonicTimer::default());
     let compaction = Deadline::start(timer.clone());
     let Some(segments) = load_current_manifest_segments(store, namespace_id).await? else {
+        log_metadata_compaction_outcome(
+            namespace_id,
+            spec,
+            &MetadataCompactionJobOutcome::Abandoned,
+        );
         return Ok(MetadataCompactionJobOutcome::Abandoned);
     };
     // What the job is about to read, recorded before it reads anything.
     // Finalization compares the manifest against this, so the run it publishes
     // stands in for exactly the segments it merged.
     let Some(input_keys) = input_segment_keys(&segments, spec) else {
+        log_metadata_compaction_outcome(
+            namespace_id,
+            spec,
+            &MetadataCompactionJobOutcome::Abandoned,
+        );
         return Ok(MetadataCompactionJobOutcome::Abandoned);
     };
     tracing::info!(

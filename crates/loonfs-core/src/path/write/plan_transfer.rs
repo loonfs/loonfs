@@ -3,9 +3,9 @@
 use super::ensure_expected_inode;
 use super::publish_path_planning::ReplaceDestination;
 use super::publish_path_planning::{
-    classify_replace_destination, is_missing_visible_path, reject_tombstoned_path_ancestor,
-    resolve_parent_directory, resolve_visible_path_for_authorization, source_binding,
-    CompiledFilesystemOperation, PublishPathPlanningView,
+    classify_replace_destination, is_missing_visible_path, resolve_parent_directory,
+    resolve_visible_path_for_authorization, source_binding, CompiledFilesystemOperation,
+    PublishPathPlanningView,
 };
 use crate::authorize::{Absence, Replacement};
 use crate::commit::{CandidateAllocation, CommitOp, CommitValidationError};
@@ -27,8 +27,6 @@ pub(super) async fn plan_move_path<S: ObjectStore + ?Sized>(
 ) -> Result<CompiledFilesystemOperation> {
     ensure_mutation_path(from_path)?;
     ensure_mutation_path(to_path)?;
-    reject_tombstoned_path_ancestor(view, from_path).await?;
-    reject_tombstoned_path_ancestor(view, to_path).await?;
     let source = resolve_visible_path_for_authorization(
         view,
         from_path,
@@ -154,8 +152,6 @@ pub(super) async fn plan_copy_file_path<S: ObjectStore + ?Sized>(
 ) -> Result<CompiledFilesystemOperation> {
     ensure_mutation_path(from_path)?;
     ensure_mutation_path(to_path)?;
-    reject_tombstoned_path_ancestor(view, from_path).await?;
-    reject_tombstoned_path_ancestor(view, to_path).await?;
 
     let source = resolve_visible_path_for_authorization(
         view,

@@ -27,15 +27,15 @@ use loonfs::{
 };
 use loonfs_api::v0::{FilesystemChange, GrepIndex, GrepIndexLifecycle};
 use loonfs_api::wire::sst_blocks::{
-    DecodedDataBlock, SegmentBlocksBuilder, SegmentIndexEntry, DEFAULT_MAX_DELTA_RUNS,
-    DEFAULT_MAX_REORGANIZATION_INPUT_ROWS, DEFAULT_MAX_ROWS_PER_SEGMENT,
+    DecodedDataBlock, SegmentBlocksBuilder, SegmentIndexEntry, SstBlockCodecError,
+    DEFAULT_MAX_DELTA_RUNS, DEFAULT_MAX_REORGANIZATION_INPUT_ROWS, DEFAULT_MAX_ROWS_PER_SEGMENT,
 };
 use loonfs_api::{
     ChangeSeq, ContentRef, ErrorCode, IndexSegmentId, InodeId, ManifestNo, NamespaceId, PinId,
     RevisionNo, RunNo,
 };
 use loonfs_objectstore::timing::StdMonotonicTimer;
-use loonfs_objectstore::{ImmutableWriteError, ObjectStore, ObjectStoreError};
+use loonfs_objectstore::{ImmutableWriteError, ObjectStore};
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::sync::Arc;
@@ -932,21 +932,17 @@ async fn write_index_segment<S: ObjectStore + ?Sized>(
 ) -> Result<GrepSegmentRef> {
     let segment_id = IndexSegmentId::generate();
     let object_key = segment_key(namespace_id, &segment_id);
+    let codec_error = |error: SstBlockCodecError| CoreError::Codec {
+        object_key: object_key.clone(),
+        message: error.to_string(),
+    };
     let mut builder = SegmentBlocksBuilder::default();
     for row in &rows {
         builder
             .push(&row.row_key(), &row.filter_key(), row)
-            .map_err(|error| {
-                CoreError::Internal(format!(
-                    "failed to build index segment `{object_key}`: {error}"
-                ))
-            })?;
+            .map_err(codec_error)?;
     }
-    let built = builder.finish().map_err(|error| {
-        CoreError::Internal(format!(
-            "failed to build index segment `{object_key}`: {error}"
-        ))
-    })?;
+    let built = builder.finish().map_err(codec_error)?;
     let filter_inline = built.inline_filter_hex();
     store
         .put_immutable_verified(&object_key, bytes::Bytes::from(built.bytes))
@@ -1248,7 +1244,7 @@ impl<S: ObjectStore + ?Sized> SegmentBlockLoader<IndexRow, GrepSegmentRef>
         entries: Vec<SegmentIndexEntry>,
     ) -> Result<Vec<Arc<DecodedDataBlock<IndexRow>>>> {
         let object_key = segment_key(self.namespace_id, &segment.segment_id);
-        load_data_block_span(self.store, None, &object_key, &segment.segment_id, &entries).await
+        load_data_block_span(self.store, &object_key, &entries).await
     }
 }
 
@@ -1263,14 +1259,6 @@ fn core_state_error(
     .into()
 }
 
-fn core_store_error(object_key: &str, error: &ObjectStoreError) -> GrepError {
-    GrepError::StoreUnavailable {
-        object_key: object_key.to_owned(),
-        message: error.public_message().into_owned(),
-        class: StoreFailureClass::of(error),
-    }
-}
-
 fn grep_immutable_write_error(error: ImmutableWriteError) -> GrepError {
     let fallback_object_key = error.object_key().to_owned();
     match error {
@@ -1278,7 +1266,7 @@ fn grep_immutable_write_error(error: ImmutableWriteError) -> GrepError {
             message: format!("immutable object `{object_key}` already exists with different bytes"),
         },
         ImmutableWriteError::Transport { object_key, source } => {
-            core_store_error(&object_key, &source)
+            GrepError::store(object_key, &source)
         }
         error => GrepError::StoreUnavailable {
             object_key: fallback_object_key,

@@ -278,7 +278,7 @@ fn default_min_publish_interval_ms() -> u64 {
 }
 
 fn default_request_deadline_ms() -> u64 {
-    60_000
+    loonfs_http::DEFAULT_REQUEST_DEADLINE_MS
 }
 
 fn default_shutdown_deadline_ms() -> u64 {
@@ -311,7 +311,7 @@ fn default_snapshot_max_live_per_namespace() -> usize {
 }
 
 fn default_max_concurrent_uploads() -> usize {
-    8
+    loonfs_http::DEFAULT_MAX_CONCURRENT_UPLOADS
 }
 
 fn default_max_writer_sessions() -> usize {
@@ -323,7 +323,7 @@ fn default_max_concurrent_folds() -> usize {
 }
 
 fn default_max_concurrent_downloads() -> usize {
-    16
+    loonfs_http::DEFAULT_MAX_CONCURRENT_DOWNLOADS
 }
 
 fn default_max_concurrent_maintenance() -> usize {

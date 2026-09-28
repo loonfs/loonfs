@@ -3,6 +3,7 @@
 use crate::manifest::GrepManifestError;
 use loonfs::{CoreError, RuntimeError, StoreFailureClass};
 use loonfs_api::{ErrorCode, ErrorKind};
+use loonfs_objectstore::ObjectStoreError;
 use thiserror::Error;
 
 /// Failure returned by grep queries or maintenance.
@@ -62,6 +63,14 @@ impl From<CoreError> for GrepError {
 }
 
 impl GrepError {
+    pub(crate) fn store(object_key: impl Into<String>, error: &ObjectStoreError) -> Self {
+        Self::StoreUnavailable {
+            object_key: object_key.into(),
+            message: error.public_message().into_owned(),
+            class: StoreFailureClass::of(error),
+        }
+    }
+
     /// Preserves public error fields for embedded and HTTP callers.
     pub fn to_api_error(&self) -> loonfs_api::ApiError {
         if let Self::Runtime(error) = self {

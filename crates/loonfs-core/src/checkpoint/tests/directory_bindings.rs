@@ -5,7 +5,9 @@ use crate::authorize::{Authorizer, ReadAccess};
 use crate::metadata::LeafRevisionPrefetch;
 use crate::namespace::read_anchor::load_read_anchor;
 use crate::path::read::{load_metadata_view, LoadedMetadataView, ReadLoadContext};
+use crate::store_waves::STORE_READ_WAVE;
 use loonfs_api::{AttributeInclusion, DirectoryPageCursor, PageRequest};
+use loonfs_test_support::stores::ConcurrencyWatchStore;
 
 #[tokio::test]
 async fn a_cold_path_walk_reads_only_the_leaf_inode() {
@@ -80,6 +82,81 @@ async fn a_cold_path_walk_reads_only_the_leaf_inode() {
             .collect::<Vec<_>>();
         assert_eq!(inode_reads, vec![lookup_keys::inode_key(resolved.inode_id)]);
     }
+}
+
+#[tokio::test]
+async fn a_cold_checkpoint_files_page_bounds_its_parent_binding_reads() {
+    let directory = tempdir().expect("tempdir");
+    let inner = LocalFsStore::new(directory.path()).expect("store");
+    let namespace_id = NamespaceId::parse("checkpoint-file-reads").expect("namespace id");
+    let context = test_context();
+    bootstrap_namespace(&inner, &namespace_id, &context)
+        .await
+        .expect("bootstrap");
+    let files = 4 * STORE_READ_WAVE;
+    for file in 0..files {
+        write_file_bytes(
+            &inner,
+            &namespace_id,
+            &format!("/file-{file:03}"),
+            b"file",
+            &context,
+            None,
+        )
+        .await
+        .expect("create file");
+    }
+    checkpoint_then_reorganize(
+        &inner,
+        &namespace_id,
+        &context,
+        MetadataLsmPolicy {
+            max_rows_per_segment: NonZeroUsize::MIN,
+            ..MetadataLsmPolicy::default()
+        },
+    )
+    .await;
+    let checkpoint = create_checkpoint(&inner, &namespace_id, &context)
+        .await
+        .expect("pin the reorganized manifest");
+    let binding_segments: BTreeSet<_> = load_current_manifest(&inner, &namespace_id)
+        .await
+        .expect("manifest")
+        .state
+        .envelope
+        .payload()
+        .runs
+        .iter()
+        .flat_map(|run| &run.segments)
+        .filter(|descriptor| descriptor.family == ApiMetadataRowFamily::DirentryChildBinds)
+        .map(metadata_segment_object_key)
+        .collect();
+    assert!(binding_segments.len() >= files, "{binding_segments:?}");
+    let store = ConcurrencyWatchStore::new(
+        inner,
+        KeyPredicate::new(move |key| binding_segments.contains(key)),
+    );
+    let page = crate::checkpoint::list_checkpoint_files_page(
+        &store,
+        None,
+        &load_namespace_read_state(&store, &namespace_id)
+            .await
+            .expect("head"),
+        &checkpoint.checkpoint_id,
+        PageRequest {
+            cursor: None,
+            limit: EffectiveLimit::new(NonZeroU32::new(1000).expect("nonzero limit")),
+        },
+    )
+    .await
+    .expect("checkpoint files page");
+    assert_eq!(page.files.len(), files);
+    let concurrency = store.reads();
+    assert!(concurrency.peak_in_flight > 1, "{concurrency:?}");
+    assert!(
+        concurrency.peak_in_flight <= STORE_READ_WAVE,
+        "{concurrency:?}"
+    );
 }
 
 async fn assert_names<S: ObjectStore + ?Sized>(
