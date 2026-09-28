@@ -316,6 +316,7 @@ async fn create_compacted_directories(
 }
 
 #[tokio::test]
+#[ignore = "slow: builds a 128k-file fixture; CI runs it in the slow-tests job"]
 async fn compacted_directory_page_overlaps_revision_segment_reads() {
     compacted_directory_page_overlaps_segment_reads(
         MetadataRowFamily::Revisions,
@@ -326,6 +327,7 @@ async fn compacted_directory_page_overlaps_revision_segment_reads() {
 }
 
 #[tokio::test]
+#[ignore = "slow: builds a 128k-file fixture; CI runs it in the slow-tests job"]
 async fn compacted_directory_page_overlaps_access_segment_reads() {
     use loonfs_api::{PrincipalId, PrincipalScope, PrincipalSet, SubjectId};
 
