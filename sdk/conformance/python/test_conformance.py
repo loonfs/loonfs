@@ -1348,6 +1348,13 @@ def test_snapshots(cases: dict[str, ConformanceCase], harness: Harness) -> None:
     assert zero_ttl.value.body.code == expected.zero_ttl.code
 
 
+def test_proxy_requires_authorize() -> None:
+    with pytest.raises(TypeError, match="authorize"):
+        LoonFSProxy("http://upstream.invalid", "server-token", {})
+    with pytest.raises(TypeError, match="authorize"):
+        LoonFSProxy("http://upstream.invalid", "server-token", {}, authorize=None)
+
+
 def test_proxy(
     cases: dict[str, ConformanceCase],
     harness: Harness,
@@ -2132,10 +2139,17 @@ def test_proxy_forwards_every_documented_route(
     )
     stub_thread.start()
     stub_host, stub_port = stub.server_address
+
+    async def authorize(
+        _scope: dict[str, Any], _context: ProxyRouteContext
+    ) -> ProxyAuthorization:
+        return ProxyAuthorization()
+
     proxy = LoonFSProxy(
         f"http://{stub_host}:{stub_port}",
         "recording-stub-token",
         {fixture.namespace_alias: fixture.namespace_id},
+        authorize=authorize,
     )
 
     def instantiate(template: str) -> str:

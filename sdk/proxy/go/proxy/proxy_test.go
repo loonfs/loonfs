@@ -128,14 +128,20 @@ func TestAuthorizeRejectsPartialSubjectContextBeforeForwarding(t *testing.T) {
 	}
 }
 
-func TestActorHeaderIsRemovedWithoutAuthorize(t *testing.T) {
+func TestActorHeaderIsRemovedWithEmptyAuthorization(t *testing.T) {
 	upstream := recordingTransport{http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if actor := r.Header.Get("Loonfs-Actor"); actor != "" {
 			t.Errorf("forwarded actor = %q", actor)
 		}
 		w.WriteHeader(http.StatusAccepted)
 	})}
-	proxy, err := NewHandler(Config{ServerBaseURL: "http://upstream.invalid", Token: "server-token"})
+	proxy, err := NewHandler(Config{
+		ServerBaseURL: "http://upstream.invalid",
+		Token:         "server-token",
+		Authorize: func(_ *http.Request, _ RouteContext) (Authorization, error) {
+			return Authorization{}, nil
+		},
+	})
 	if err != nil {
 		t.Fatalf("create proxy: %v", err)
 	}

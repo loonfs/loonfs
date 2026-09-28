@@ -1998,6 +1998,26 @@ conformanceTest("snapshots", async (activeHarness, testCase) => {
     );
 });
 
+test("proxy requires an authorize function", () => {
+    const config = {
+        serverBaseUrl: "http://upstream.invalid",
+        token: "server-token",
+        namespaceAliases: {},
+    };
+    assert.throws(
+        // @ts-expect-error JavaScript callers can omit the required hook.
+        () => createProxyHandler(config),
+        { name: "TypeError", message: /authorize/ },
+    );
+    for (const authorize of [undefined, null, {}]) {
+        assert.throws(
+            // @ts-expect-error JavaScript callers can pass a non-function hook.
+            () => createProxyHandler({ ...config, authorize }),
+            { name: "TypeError", message: /authorize/ },
+        );
+    }
+});
+
 test("proxy", { skip: environmentSkip }, async (context) => {
     assert.ok(harness != null);
     assert.ok(cases != null);
@@ -2806,6 +2826,7 @@ test("proxy forwards every documented route", { skip: environmentSkip }, async (
         serverBaseUrl: stub.baseUrl,
         token: "recording-stub-token",
         namespaceAliases: { [fixture.namespace_alias]: fixture.namespace_id },
+        authorize: () => ({}),
     });
     const proxy = await startProxyServer(handler);
     context.after(() => proxy.close());

@@ -17,8 +17,11 @@ export interface ProxyConfig {
     serverBaseUrl: string;
     token: string;
     namespaceAliases: Record<string, string>;
-    /** Runs before every forwarded request. Return a Response to refuse it. */
-    authorize?: (
+    /**
+     * Runs before every forwarded request. Return a Response to refuse it.
+     * Required; returning an empty authorization forwards as the token holder.
+     */
+    authorize: (
         request: Request,
         context: ProxyRouteContext,
     ) => ProxyAuthorization | Response | Promise<ProxyAuthorization | Response>;
@@ -97,6 +100,9 @@ export function createProxyHandler(config: ProxyConfig): (request: Request) => P
     const token = config.token;
     const namespaceAliases = new Map(Object.entries(config.namespaceAliases));
     const authorize = config.authorize;
+    if (typeof authorize !== "function") {
+        throw new TypeError("authorize must be a function");
+    }
 
     return async (request: Request): Promise<Response> => {
         const requestUrl = new URL(request.url);
@@ -105,11 +111,11 @@ export function createProxyHandler(config: ProxyConfig): (request: Request) => P
             return notFound();
         }
 
-        const authorization = await authorize?.(request, resolved.context);
+        const authorization = await authorize(request, resolved.context);
         if (authorization instanceof Response) {
             return authorization;
         }
-        if ((authorization?.principalScope === undefined) !== (authorization?.principals === undefined)) {
+        if ((authorization.principalScope === undefined) !== (authorization.principals === undefined)) {
             return new Response("proxy authorization must set principalScope and principals together", {
                 status: 500,
             });
@@ -117,16 +123,16 @@ export function createProxyHandler(config: ProxyConfig): (request: Request) => P
 
         const headers = forwardedHeaders(request.headers, REQUEST_STRIPPED_HEADERS);
         headers.set("authorization", `Bearer ${token}`);
-        if (authorization?.actorId !== undefined) {
+        if (authorization.actorId !== undefined) {
             headers.set("Loonfs-Actor", authorization.actorId);
         }
-        if (authorization?.subjectId !== undefined) {
+        if (authorization.subjectId !== undefined) {
             headers.set("Loonfs-Subject", authorization.subjectId);
         }
-        if (authorization?.principalScope !== undefined) {
+        if (authorization.principalScope !== undefined) {
             headers.set("Loonfs-Principal-Scope", authorization.principalScope);
         }
-        if (authorization?.principals !== undefined) {
+        if (authorization.principals !== undefined) {
             headers.set("Loonfs-Principals", authorization.principals.join(","));
         }
         const init: RequestInit & { duplex?: "half" } = {

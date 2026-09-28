@@ -42,6 +42,7 @@ type Config struct {
 	NamespaceAliases map[string]string
 	// Authorize runs before every forwarded request. A *Refusal error is sent
 	// back as the response; any other error answers 500.
+	// Authorize is required; an empty authorization forwards as the token holder.
 	Authorize func(r *http.Request, c RouteContext) (Authorization, error)
 }
 
@@ -102,6 +103,9 @@ func NewHandler(config Config) (http.Handler, error) {
 	}
 	if strings.TrimSpace(config.Token) == "" {
 		return nil, fmt.Errorf("proxy: token is required")
+	}
+	if config.Authorize == nil {
+		return nil, fmt.Errorf("proxy: authorize is required")
 	}
 
 	namespaceAliases := make(map[string]string, len(config.NamespaceAliases))
@@ -171,19 +175,15 @@ func (h *handler) ServeHTTP(responseWriter http.ResponseWriter, request *http.Re
 		return
 	}
 
-	var authorization Authorization
-	if h.authorize != nil {
-		var err error
-		authorization, err = h.authorize(request, routeContext)
-		if err != nil {
-			var refusal *Refusal
-			if errors.As(err, &refusal) {
-				refusal.write(responseWriter)
-			} else {
-				responseWriter.WriteHeader(http.StatusInternalServerError)
-			}
-			return
+	authorization, err := h.authorize(request, routeContext)
+	if err != nil {
+		var refusal *Refusal
+		if errors.As(err, &refusal) {
+			refusal.write(responseWriter)
+		} else {
+			responseWriter.WriteHeader(http.StatusInternalServerError)
 		}
+		return
 	}
 	if (authorization.PrincipalScope == "") != (authorization.Principals == nil) {
 		responseWriter.WriteHeader(http.StatusInternalServerError)

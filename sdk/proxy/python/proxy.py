@@ -156,8 +156,15 @@ class LoonFSProxy:
         *,
         authorize: Callable[
             [dict[str, Any], ProxyRouteContext], Awaitable[ProxyAuthorization | ProxyRefusal]
-        ] | None = None,
+        ],
     ) -> None:
+        """The authorize hook is required and runs before every forwarded request.
+
+        Return a ProxyRefusal to refuse it.
+        Returning an empty ProxyAuthorization forwards as the token holder.
+        """
+        if authorize is None:
+            raise TypeError("authorize is required")
         self._server_base_url = server_base_url.rstrip("/")
         self._authorization = f"Bearer {token}".encode("latin-1")
         self._namespace_aliases = dict(namespace_aliases)
@@ -176,12 +183,10 @@ class LoonFSProxy:
             await self._not_found(send)
             return
         rewritten_path, context = resolved
-        authorization = ProxyAuthorization()
-        if self._authorize is not None:
-            authorization = await self._authorize(scope, context)
-            if isinstance(authorization, ProxyRefusal):
-                await self._refuse(send, authorization)
-                return
+        authorization = await self._authorize(scope, context)
+        if isinstance(authorization, ProxyRefusal):
+            await self._refuse(send, authorization)
+            return
         if (authorization.principal_scope is None) != (authorization.principals is None):
             await self._refuse(
                 send,

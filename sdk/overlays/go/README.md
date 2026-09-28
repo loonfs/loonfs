@@ -90,6 +90,7 @@ keeping the LoonFS credential on the server.
 
 Set `Authorize` to check each request and set `Loonfs-Actor` on forwarded
 requests. The proxy always removes the browser's actor header.
+The `Authorize` hook is required; returning `proxy.Authorization{}` with no error forwards as the token holder.
 Here, `authorizedActor` checks the application's session and namespace access.
 
 ```go
