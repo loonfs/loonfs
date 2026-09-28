@@ -13,11 +13,35 @@ use super::{
 };
 use crate::error::CoreError;
 use crate::store_waves::STORE_READ_WAVE;
-use futures::{StreamExt, TryStreamExt};
 use loonfs_api::wire::manifest::lookup_keys;
 use loonfs_api::{AbsolutePath, ChangeSeq, InodeId, InodeKind, NameKey, ROOT_INODE_ID};
 use loonfs_objectstore::ObjectStore;
 use std::collections::{HashMap, VecDeque};
+use std::future::Future;
+
+async fn preload_inode_groups<T, Lookup, LookupFuture>(
+    inode_ids: &[InodeId],
+    lookup: Lookup,
+) -> Result<Vec<(InodeId, T)>, CoreError>
+where
+    Lookup: Fn(InodeId) -> LookupFuture,
+    LookupFuture: Future<Output = Result<T, CoreError>>,
+{
+    // Adjacent inode ids often share a read. Separate ranges let each
+    // group start in a different part of the page's segments.
+    let group_size = inode_ids.len().div_ceil(STORE_READ_WAVE).max(1);
+    let lookup = &lookup;
+    let loaded =
+        futures::future::try_join_all(inode_ids.chunks(group_size).map(|group| async move {
+            let mut rows = Vec::with_capacity(group.len());
+            for &inode_id in group {
+                rows.push((inode_id, lookup(inode_id).await?));
+            }
+            Ok::<_, CoreError>(rows)
+        }))
+        .await?;
+    Ok(loaded.into_iter().flatten().collect())
+}
 
 pub(super) fn latest_visible_binding<'a>(
     rows: impl Iterator<Item = &'a DirentryBindingRecord>,
@@ -440,17 +464,13 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
         child_inode_ids.sort_unstable();
         child_inode_ids.dedup();
         let base = &self.base;
-        let pending = child_inode_ids
+        let pending: Vec<_> = child_inode_ids
             .into_iter()
-            .filter(|inode_id| !self.active_tombstone_cache.contains_key(inode_id));
-        let loaded: Vec<_> = futures::stream::iter(pending.map(|inode_id| async move {
-            Ok::<_, CoreError>((
-                inode_id,
-                fetch_active_subtree_tombstone(base, inode_id).await?,
-            ))
-        }))
-        .buffered(STORE_READ_WAVE)
-        .try_collect()
+            .filter(|inode_id| !self.active_tombstone_cache.contains_key(inode_id))
+            .collect();
+        let loaded = preload_inode_groups(&pending, |inode_id| {
+            fetch_active_subtree_tombstone(base, inode_id)
+        })
         .await?;
         self.counters.list_preload_child_lookups = self
             .counters
@@ -682,23 +702,11 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
         pending.sort_unstable();
         pending.dedup();
         let base = &self.base;
-        // Adjacent inode ids often share a read. Separate ranges let each
-        // worker start in a different part of the page's revision segments.
-        let group_size = pending.len().div_ceil(STORE_READ_WAVE).max(1);
-        let loaded =
-            futures::future::try_join_all(pending.chunks(group_size).map(|inode_ids| async move {
-                let mut revisions = Vec::with_capacity(inode_ids.len());
-                for &inode_id in inode_ids {
-                    revisions.push((
-                        inode_id,
-                        fetch_latest_revision_head_of_visible(base, inode_id).await?,
-                    ));
-                }
-                Ok::<_, CoreError>(revisions)
-            }))
-            .await?;
-        self.latest_revision_head_cache
-            .extend(loaded.into_iter().flatten());
+        let loaded = preload_inode_groups(&pending, |inode_id| {
+            fetch_latest_revision_head_of_visible(base, inode_id)
+        })
+        .await?;
+        self.latest_revision_head_cache.extend(loaded);
         Ok(())
     }
 
@@ -714,13 +722,9 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
         pending.sort_unstable();
         pending.dedup();
         let base = &self.base;
-        let loaded: Vec<_> =
-            futures::stream::iter(pending.into_iter().map(|inode_id| async move {
-                Ok::<_, CoreError>((inode_id, base.latest_access_revision(inode_id).await?))
-            }))
-            .buffered(STORE_READ_WAVE)
-            .try_collect()
-            .await?;
+        let loaded =
+            preload_inode_groups(&pending, |inode_id| base.latest_access_revision(inode_id))
+                .await?;
         self.access_row_cache.extend(loaded);
         Ok(())
     }
@@ -791,16 +795,10 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
             .saturating_add(pending.len() as u64);
 
         let base = &self.base;
-        let loaded: Vec<_> =
-            futures::stream::iter(pending.into_iter().map(|inode_id| async move {
-                Ok::<_, CoreError>((
-                    inode_id,
-                    base.attributes_projection_at_visible_seq(inode_id).await?,
-                ))
-            }))
-            .buffered(STORE_READ_WAVE)
-            .try_collect()
-            .await?;
+        let loaded = preload_inode_groups(&pending, |inode_id| {
+            base.attributes_projection_at_visible_seq(inode_id)
+        })
+        .await?;
         self.attributes_cache.extend(loaded);
         Ok(())
     }
