@@ -2,6 +2,8 @@
 
 use super::common::*;
 use loonfs_api::{CapabilityDocument, PROTOCOL_VERSION};
+#[cfg(unix)]
+use loonfs_objectstore::{probe::PROBE_RUN_PREFIX, ObjectStoreErrorClass};
 use std::collections::BTreeMap;
 
 const CHECK_NAMES: [&str; 9] = [
@@ -68,7 +70,7 @@ fn doctor_is_read_only_when_a_local_store_root_is_missing() {
 }
 
 #[test]
-fn doctor_opens_an_existing_embedded_store_without_writing_it() {
+fn doctor_reads_an_existing_embedded_store_without_writing_it() {
     let harness = Harness::new();
     harness.add_embedded_profile("default");
     let root = harness.store_root("default");
@@ -81,12 +83,63 @@ fn doctor_opens_an_existing_embedded_store_without_writing_it() {
         .expect("doctor checks")
         .clone();
     assert_eq!(check_status(&checks, "health"), "ok");
+    assert_eq!(
+        checks
+            .iter()
+            .find(|check| check["name"] == "health")
+            .expect("health check")["message"],
+        "listed the store"
+    );
     assert_eq!(check_status(&checks, "capabilities"), "ok");
     assert_eq!(check_status(&checks, "namespace"), "skipped");
     assert_eq!(
         fs::read_dir(&root).expect("read empty store root").count(),
         0,
         "doctor must not create store objects"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn doctor_fails_when_the_embedded_store_cannot_be_read() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let harness = Harness::new();
+    harness.add_embedded_profile("default");
+    let root = harness.store_root("default");
+    fs::create_dir_all(&root).expect("create empty store root");
+    let permissions = fs::metadata(&root).expect("store metadata").permissions();
+    assert!(!root.join(PROBE_RUN_PREFIX).exists());
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o000)).expect("make store unreadable");
+    if fs::read_dir(&root).is_ok() {
+        fs::set_permissions(&root, permissions).expect("restore store permissions");
+        return;
+    }
+
+    let output = harness.run(&["--json", "doctor", "--namespace", "demo"]);
+    fs::set_permissions(&root, permissions).expect("restore store permissions");
+
+    assert_failure(&output);
+    let checks = json_data(&output)["checks"]
+        .as_array()
+        .expect("doctor checks")
+        .clone();
+    assert_eq!(check_status(&checks, "provider_config"), "ok");
+    assert_eq!(check_status(&checks, "health"), "failed");
+    assert_eq!(
+        checks
+            .iter()
+            .find(|check| check["name"] == "health")
+            .expect("health check")["message"],
+        ObjectStoreErrorClass::PermissionDenied
+            .public_message()
+            .as_ref()
+    );
+    assert_eq!(check_status(&checks, "capabilities"), "skipped");
+    assert_eq!(check_status(&checks, "namespace"), "skipped");
+    assert_eq!(
+        fs::read_dir(&root).expect("read empty store root").count(),
+        0
     );
 }
 

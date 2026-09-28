@@ -349,10 +349,12 @@ Inspection and diagnostics
 
   loonfs doctor [--profile <name>] [--namespace <name>] [--write-check]
     Check the configuration, provider, connection, authentication, server
-    health, capabilities, and selected namespace. The command is read-only
-    unless --write-check is set. That option also tests the object store by
-    writing and deleting temporary objects. The command prints every result
-    and exits nonzero if a check fails
+    health, capabilities, and selected namespace. Embedded profiles list the
+    temporary probe prefix once within the configured key prefix.
+    An empty result is healthy. The command is read-only unless --write-check
+    is set. That option also tests the object store by writing and deleting
+    temporary objects. The command prints every result and exits nonzero if
+    a check fails
 
 Maintenance
   loonfs maintenance loop --namespaces <ns>[,<ns>...] [--namespaces <ns>]... [--jobs <job>[,<job>...]]... [--drain] [--max-steps <n>] [--deadline-ms <ms>] [--poll-interval-ms <ms>]

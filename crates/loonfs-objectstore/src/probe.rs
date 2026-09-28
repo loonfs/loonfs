@@ -19,7 +19,7 @@ use loonfs_api::v0::{StoreProbeCheckOutcome, StoreProbeCheckResult, StoreProbeRe
 use loonfs_api::{Checksum, ChecksumAlgorithm};
 
 /// Prefix for objects created by store probes.
-const PROBE_RUN_PREFIX: &str = "probe-runs";
+pub const PROBE_RUN_PREFIX: &str = "probe-runs";
 
 /// Results from one store probe.
 #[derive(Debug, Clone, PartialEq, Eq)]

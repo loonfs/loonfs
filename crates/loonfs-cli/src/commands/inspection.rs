@@ -11,8 +11,10 @@ use crate::error::CliError;
 use crate::profiles::resolve_profile;
 use crate::render::{store_probe_summary_line, store_probe_verdict, StoreProbeVerdict};
 use crate::resolve::{resolve_namespace, ResolvedTarget};
+use futures::TryStreamExt;
 use loonfs_api::v0::StoreProbeResponse;
 use loonfs_api::{CapabilityDocument, PROTOCOL_VERSION};
+use loonfs_objectstore::probe::PROBE_RUN_PREFIX;
 use std::path::Path;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -285,14 +287,12 @@ pub(crate) async fn run_doctor(
             DoctorCheckName::Health,
             "local store root is missing; doctor did not create it",
         ));
-    } else {
+    } else if let ProfileConfig::Embedded { store, .. } = &profile {
         match ResolvedTarget::resolve(&profile, args.target.request.no_retry).await {
             Ok(resolved) => {
-                target = Some(resolved);
-                checks.push(ok(
-                    DoctorCheckName::Health,
-                    "opened the embedded object store without writing to it",
-                ));
+                let (check, healthy_target) = embedded_health_check(resolved, store).await;
+                checks.push(check);
+                target = healthy_target;
             }
             Err(error) => checks.push(failed(DoctorCheckName::Health, error)),
         }
@@ -321,6 +321,45 @@ pub(crate) async fn run_doctor(
     append_write_check(&mut checks, args.write_check, target.as_ref()).await;
 
     Ok(doctor_output(kind, Some(profile_name), Some(mode), checks))
+}
+
+async fn embedded_health_check(
+    target: ResolvedTarget,
+    store_config: &StoreConfig,
+) -> (DoctorCheck, Option<ResolvedTarget>) {
+    let store = target
+        .maintenance
+        .as_ref()
+        .expect("embedded target should carry maintenance handles")
+        .writer
+        .object_store();
+    match store
+        .list_prefix_stream(&format!("{PROBE_RUN_PREFIX}/"))
+        .try_next()
+        .await
+    {
+        Ok(_) => {
+            let key_prefix = match store_config {
+                StoreConfig::LocalFs { key_prefix, .. }
+                | StoreConfig::AwsS3 { key_prefix, .. }
+                | StoreConfig::CloudflareR2 { key_prefix, .. }
+                | StoreConfig::GcpGcs { key_prefix, .. }
+                | StoreConfig::AzureAbs { key_prefix, .. } => key_prefix,
+            };
+            let message = match key_prefix
+                .as_deref()
+                .filter(|prefix| !prefix.trim().is_empty())
+            {
+                Some(prefix) => format!("listed the store (key prefix `{prefix}`)"),
+                None => "listed the store".to_owned(),
+            };
+            (ok(DoctorCheckName::Health, message), Some(target))
+        }
+        Err(error) => (
+            failed_message(DoctorCheckName::Health, error.public_message().into_owned()),
+            None,
+        ),
+    }
 }
 
 async fn provider_check(
@@ -565,7 +604,72 @@ fn doctor_output(
 mod tests {
     use super::*;
     use loonfs_api::v0::{StoreProbeCheckOutcome, StoreProbeCheckResult};
+    use loonfs_objectstore::local_fs_store::LocalFsStore;
+    use loonfs_objectstore::ObjectStoreError;
+    use loonfs_test_support::stores::{
+        FailStore, InjectedError, KeyPredicate, OperationClass, RecordedOperation, RecordingStore,
+    };
     use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn embedded_health_reads_once_and_reports_public_failures() {
+        for denied in [false, true] {
+            let directory = tempfile::tempdir().expect("store directory");
+            let probe_root = directory.path().join("tenant").join(PROBE_RUN_PREFIX);
+            std::fs::create_dir_all(&probe_root).expect("create probe prefix");
+            std::fs::write(probe_root.join("key"), b"unchanged").expect("write existing object");
+            let config = StoreConfig::LocalFs {
+                root: directory.path().to_str().expect("utf-8 root").to_owned(),
+                key_prefix: Some("tenant".to_owned()),
+            };
+            let failure = FailStore::new(
+                LocalFsStore::with_key_prefix(directory.path(), Some("tenant"))
+                    .expect("open scoped store"),
+                KeyPredicate::any(),
+                OperationClass::List,
+                InjectedError::PermissionDenied("private provider detail".to_owned()),
+            );
+            if denied {
+                failure.fail_all();
+            }
+            let store = Arc::new(RecordingStore::new(failure, KeyPredicate::any()));
+            let target = ResolvedTarget::over_store(
+                store.clone(),
+                None,
+                config.kind(),
+                loonfs::InlineContentOptions::default(),
+                false,
+            )
+            .await
+            .expect("resolve embedded target");
+
+            let (check, target) = embedded_health_check(target, &config).await;
+
+            assert_eq!(
+                store.snapshot(),
+                vec![RecordedOperation::List {
+                    prefix: format!("{PROBE_RUN_PREFIX}/"),
+                }]
+            );
+            if denied {
+                assert_eq!(check.status, DoctorStatus::Failed);
+                assert_eq!(
+                    check.message,
+                    ObjectStoreError::PermissionDenied {
+                        object_key: String::new(),
+                        message: "private provider detail".to_owned(),
+                    }
+                    .public_message()
+                );
+                assert!(target.is_none());
+            } else {
+                assert_eq!(check.status, DoctorStatus::Ok);
+                assert_eq!(check.message, "listed the store (key prefix `tenant`)");
+                assert!(target.is_some());
+            }
+        }
+    }
 
     fn capability_document(protocol_version: &str) -> CapabilityDocument {
         CapabilityDocument {
