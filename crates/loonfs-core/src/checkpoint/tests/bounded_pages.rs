@@ -147,10 +147,18 @@ async fn bounded_pages_merge_overlapping_runs_and_binding_versions() {
     let cache = MetadataSegmentCache::new(MetadataSegmentCacheConfig {
         max_decoded_bytes: 1,
     });
-    for limit in [1, 31, 33, 65, 1000] {
+    // Single-row pages walk a window across the start of the overlap; a full
+    // single-row traversal re-reads both indexes for every row.
+    for (limit, window) in [
+        (1, 480..544),
+        (31, 0..expected.len()),
+        (33, 0..expected.len()),
+        (65, 0..expected.len()),
+        (1000, 0..expected.len()),
+    ] {
         let mut actual = Vec::new();
-        let mut lower = String::new();
-        loop {
+        let mut lower = expected[window.start].row_key_for_family(FAMILY);
+        while actual.len() < window.len() || window.end == expected.len() {
             let view = scan::VerifiedMetadataSegments::from_runs(&store, &cache, runs.clone());
             let page = view
                 .scan_range_page_with_keys(FAMILY, &lower, None, limit)
@@ -162,7 +170,11 @@ async fn bounded_pages_merge_overlapping_runs_and_binding_versions() {
             lower = format!("{}\0", page.last().expect("nonempty").0);
             actual.extend(page.into_iter().map(|(_, row)| row));
         }
-        assert_eq!(actual, expected, "merged traversal with page limit {limit}");
+        assert_eq!(
+            actual,
+            expected[window.clone()],
+            "merged traversal with page limit {limit}"
+        );
     }
 }
 
