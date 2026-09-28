@@ -1177,6 +1177,16 @@ impl NamespacePublisher {
             self.trace_enqueue(queued_candidates(&state), "duplicate");
             return Ok(SubmissionAdmission::OwnOutcome);
         }
+        // A replay the cached tail answers needs no WAL put, so it skips the
+        // queue and its pacing. A busy engine leaves it to the queue.
+        if let Some(replayed) = self.engine.try_lock().ok().and_then(|slot| {
+            slot.engine
+                .as_ref()?
+                .replay_from_retained_tail(&commit_id, &semantic_identity)
+        }) {
+            let _ = waiter.send(replayed.map_err(Into::into));
+            return Ok(SubmissionAdmission::OwnOutcome);
+        }
 
         let queued = queued_candidates(&state);
         let wal_record_bytes_upper_bound = candidate.wal_record_bytes_upper_bound;
@@ -1310,6 +1320,7 @@ impl NamespacePublisher {
             let Some(item) = self.take_next_item() else {
                 return;
             };
+            let previous_publish = self.reserve_next_publish_slot();
 
             match item {
                 WorkItem::Batch(batch) => {
@@ -1326,7 +1337,10 @@ impl NamespacePublisher {
                         queue_depth_end = usize_to_u64(batch.candidates.len()),
                         collect_ms = self.elapsed_ms_since(collect_started)
                     );
-                    self.publish_batch(batch.candidates).await;
+                    if !self.publish_batch(batch.candidates).await {
+                        // Nothing was written, so the next put need not wait on this batch.
+                        self.lock_state().last_publish = previous_publish;
+                    }
                 }
                 WorkItem::Delete(pending) => {
                     if self.execute_delete(pending).await {
@@ -1351,7 +1365,6 @@ impl NamespacePublisher {
             return None;
         }
         let item = state.queue.pop_front();
-        self.reserve_next_publish_slot(&mut state);
         let queue_depth = queued_candidates(&state);
         drop(state);
         self.read_core
@@ -1367,17 +1380,19 @@ impl NamespacePublisher {
     /// because the panic may have occurred before or after the WAL put. Callers
     /// can retry with the same commit ID and use the durable receipt to resolve
     /// the outcome. The worker then continues with queued work.
-    async fn publish_batch(&self, candidates: Vec<BatchCandidate>) {
+    ///
+    /// Returns whether the batch may have written: `false` only when every
+    /// request was answered without a WAL put or a put attempt.
+    async fn publish_batch(&self, candidates: Vec<BatchCandidate>) -> bool {
         let taken_commit_ids = candidates
             .iter()
             .map(|candidate| candidate.commit_id.clone())
             .collect::<Vec<_>>();
-        if AssertUnwindSafe(self.publish_taken_batch(candidates))
+        if let Ok(wrote) = AssertUnwindSafe(self.publish_taken_batch(candidates))
             .catch_unwind()
             .await
-            .is_ok()
         {
-            return;
+            return wrote;
         }
         self.record_panic();
         // A panic can follow the WAL put, so the cached tail may omit committed bytes.
@@ -1402,9 +1417,10 @@ impl NamespacePublisher {
             ))
             .into()));
         }
+        true
     }
 
-    async fn publish_taken_batch(&self, candidates: Vec<BatchCandidate>) {
+    async fn publish_taken_batch(&self, candidates: Vec<BatchCandidate>) -> bool {
         let selected_at = self.timer.monotonic_now_ms();
         for candidate in &candidates {
             phase_event!(
@@ -1433,7 +1449,7 @@ impl NamespacePublisher {
             result = tracing::field::Empty,
             retry_count = tracing::field::Empty,
         );
-        let (results, retry_count) = async {
+        let (results, retry_count, put_landed) = async {
             let context = match self.writer.upgrade() {
                 Some(writer) => writer.identity.mutation_context(),
                 None => Err(CoreError::ShuttingDown.into()),
@@ -1441,7 +1457,11 @@ impl NamespacePublisher {
             let context = match context {
                 Ok(context) => context,
                 Err(error) => {
-                    return (candidates.iter().map(|_| Err(error.clone())).collect(), 0);
+                    return (
+                        candidates.iter().map(|_| Err(error.clone())).collect(),
+                        0,
+                        false,
+                    );
                 }
             };
             // The wall timestamp and elapsed-time origin describe one batch.
@@ -1450,6 +1470,7 @@ impl NamespacePublisher {
             let mut results = vec![None; candidates.len()];
             let mut pending: Vec<_> = candidates.into_iter().enumerate().collect();
             let mut retry_count = 0_u64;
+            let mut put_landed = false;
             for attempt in 0..CONTENTION_RETRY_LIMIT {
                 let (indices, candidates): (Vec<_>, Vec<_>) =
                     std::mem::take(&mut pending).into_iter().unzip();
@@ -1459,14 +1480,17 @@ impl NamespacePublisher {
                     .collect();
                 let observed = match self.writer.upgrade() {
                     Some(writer) => {
-                        self.publish_through_engine(
-                            &writer,
-                            &candidates,
-                            &attempt_permits,
-                            &context,
-                            &batch,
-                        )
-                        .await
+                        let (observed, landed) = self
+                            .publish_through_engine(
+                                &writer,
+                                &candidates,
+                                &attempt_permits,
+                                &context,
+                                &batch,
+                            )
+                            .await;
+                        put_landed |= landed;
+                        observed
                     }
                     None => candidates
                         .iter()
@@ -1492,7 +1516,7 @@ impl NamespacePublisher {
                 .into_iter()
                 .map(|result| result.expect("each candidate received a publication result"))
                 .collect::<Vec<_>>();
-            (results, retry_count)
+            (results, retry_count, put_landed)
         }
         .instrument(publish_span.clone())
         .await;
@@ -1500,7 +1524,11 @@ impl NamespacePublisher {
         publish_span.record("retry_count", retry_count);
         drop(publish_span);
 
+        // Rejections can follow a put attempt whose outcome is unknown, so
+        // only an all-replay batch is known to have written nothing.
+        let wrote = put_landed || retry_count > 0 || !results.iter().all(Result::is_ok);
         self.deliver_batch_results(commit_ids, results, selected_at);
+        wrote
     }
 
     /// Publishes through the publisher-owned engine: one namespace, one
@@ -1512,7 +1540,7 @@ impl NamespacePublisher {
         permits: &[Arc<AdmissionPermit>],
         context: &loonfs_core::MutationContext,
         batch: &Deadline,
-    ) -> Vec<CommitResult> {
+    ) -> (Vec<CommitResult>, bool) {
         let mut slot = self.engine.lock().await;
         let engine = self.engine_for(&mut slot);
         let publish = crate::fs::publish_batch_with_engine(
@@ -1554,7 +1582,7 @@ impl NamespacePublisher {
         if let Some(start) = fold_start {
             let _ = start.send(());
         }
-        publish.results
+        (publish.results, publish.wal_put_landed)
     }
 
     /// Returns the publisher's lazily created commit engine.
@@ -1849,11 +1877,14 @@ impl NamespacePublisher {
 
     async fn claim_publish_slot(&self) {
         self.await_publish_slot().await;
-        self.reserve_next_publish_slot(&mut self.lock_state());
+        self.reserve_next_publish_slot();
     }
 
-    fn reserve_next_publish_slot(&self, state: &mut NamespacePublisherState) {
-        state.last_publish = Some(Observation::now(Arc::clone(&self.timer)));
+    /// Starts the pacing interval at now and returns the reservation it replaced.
+    fn reserve_next_publish_slot(&self) -> Option<Observation> {
+        self.lock_state()
+            .last_publish
+            .replace(Observation::now(Arc::clone(&self.timer)))
     }
 
     fn elapsed_ms_since(&self, started_at_ms: u64) -> u64 {

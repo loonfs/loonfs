@@ -916,6 +916,9 @@ pub(crate) struct EnginePublishResult {
     pub(crate) wal_tail_segments: u64,
     pub(crate) wal_tail_inline_bytes: usize,
     pub(crate) wal_tail_observed: bool,
+    /// Whether this attempt's WAL put landed. A batch of replays and
+    /// rejections writes nothing.
+    pub(crate) wal_put_landed: bool,
 }
 
 /// Publishes already-classified candidates as one batch — one WAL
@@ -949,6 +952,7 @@ pub(crate) async fn publish_batch_with_engine(
     // crates) exceed rustc's type-recursion depth.
     let mut publish =
         Box::pin(engine.publish_batch(&store, candidates, context, &tail_options, batch)).await;
+    let wal_put_landed = publish.resulting_read_state.is_some();
     {
         let _span = phase_span!(core, "batch_update_cache", namespace_id, batch_size).entered();
         if let Some(state) = publish.resulting_read_state.take() {
@@ -977,6 +981,7 @@ pub(crate) async fn publish_batch_with_engine(
         wal_tail_segments,
         wal_tail_inline_bytes,
         wal_tail_observed,
+        wal_put_landed,
     }
 }
 

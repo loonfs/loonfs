@@ -620,6 +620,40 @@ impl NamespaceCommitEngine {
             })
     }
 
+    /// Answers a replay of a commit the cached WAL tail holds, without store
+    /// reads, writer acquisition, or a WAL put.
+    ///
+    /// A publish inside the publication budget answers the same replay from
+    /// the same projection, so this returns what that publish would. `None`
+    /// when the tail cannot answer: no projection, one older than the
+    /// budget, a session that is not acquired, or a receipt it does not hold.
+    pub fn replay_from_retained_tail(
+        &self,
+        commit_id: &CommitId,
+        semantic_identity: &CommitFingerprint,
+    ) -> Option<Result<Commit>> {
+        let projection = self.publish_tail_projection.as_ref()?;
+        let fresh = self
+            .projection_observed
+            .as_ref()
+            .is_some_and(|observed| observed.age_ms() < crate::limits::WAL_PUBLISH_BUDGET_MS);
+        if !fresh || !matches!(&*self.lock_session(), WriterSessionState::Acquired(_)) {
+            return None;
+        }
+        let rows = &projection.tail_state.rows;
+        let record = rows.find_commit_receipt(commit_id)?;
+        let commit = rows
+            .commits()
+            .iter()
+            .find(|commit| commit.committed_seq == record.committed_seq)?;
+        Some(crate::protocol::commit_response_for_receipt(
+            &self.namespace_id,
+            record,
+            commit,
+            semantic_identity,
+        ))
+    }
+
     /// Returns the retained tail projection's memory weight, or `None` when no
     /// projection is cached. Runtimes can sum this value across namespace engines
     /// to enforce a global cache limit.

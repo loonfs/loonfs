@@ -14,6 +14,7 @@ use crate::path::write::{CommitRequest, FilesystemOperation, PublishPlanningSess
 use crate::storage::content_admission::PreparedContent;
 use crate::storage::inline_content::InlineContent;
 use loonfs_api::v0::Commit;
+use loonfs_api::wire::wal::WalCommitPayload;
 use loonfs_api::{CommitId, ContentId, NamespaceId};
 use loonfs_objectstore::ObjectStore;
 use std::collections::{HashMap, HashSet};
@@ -215,6 +216,17 @@ async fn commit_response_from_commit_receipt<S: ObjectStore + ?Sized>(
         }
         Err(error) => return Err(error),
     };
+    commit_response_for_receipt(&view.head.namespace_id, record, &commit, semantic_identity)
+}
+
+/// Checks a receipt against the commit it names and builds the replay
+/// response: the original commit, or a conflict when the request differs.
+pub(crate) fn commit_response_for_receipt(
+    namespace_id: &NamespaceId,
+    record: &CommitReceiptRecord,
+    commit: &WalCommitPayload,
+    semantic_identity: &CommitFingerprint,
+) -> Result<Commit> {
     if commit.commit_id != record.commit_id {
         return Err(CoreError::Internal(format!(
             "commit receipt for `{}` names sequence `{}`, where the change feed reports commit `{}`",
@@ -228,7 +240,7 @@ async fn commit_response_from_commit_receipt<S: ObjectStore + ?Sized>(
             committed_fingerprint: Some(commit.semantic_commit_fingerprint.as_str().to_owned()),
         });
     }
-    super::changes::committed_change_from_wal_record(&view.head.namespace_id, &commit)
+    super::changes::committed_change_from_wal_record(namespace_id, commit)
 }
 
 pub(crate) fn validate_inline_content_references<'a>(

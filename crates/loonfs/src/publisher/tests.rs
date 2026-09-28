@@ -1288,6 +1288,121 @@ async fn hot_submissions_wait_out_the_pacing_interval() {
         .expect("hot commit");
 }
 
+/// A paced writer at monotonic time zero, after one committed `warmup`.
+async fn paced_writer_after_warmup(
+    store: SharedStore,
+    namespace_id: &NamespaceId,
+) -> (
+    crate::FsWriter,
+    Arc<ManualMonotonicTimer>,
+    loonfs_api::Commit,
+) {
+    let mut writer = test_writer_with_interval(store, 400).await;
+    let timer = Arc::new(ManualMonotonicTimer::default());
+    writer.publisher.timer = timer.clone();
+    writer
+        .create_namespace(
+            namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("bootstrap");
+    let warmup = writer
+        .publisher()
+        .submit_candidate(
+            namespace_id.clone(),
+            CommitCandidate::new(create_directory_request("warmup", "warmup")),
+        )
+        .await
+        .expect("warmup commit");
+    (writer, timer, warmup)
+}
+
+#[tokio::test]
+async fn a_replay_of_a_retained_commit_skips_the_pacing_interval() {
+    tokio::time::pause();
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let (writer, _timer, warmup) = paced_writer_after_warmup(store, &namespace_id).await;
+
+    // A paced request would sleep the full interval; the replay writes nothing.
+    let replayed = tokio::time::timeout(
+        Duration::from_millis(399),
+        writer.publisher().submit_candidate(
+            namespace_id.clone(),
+            CommitCandidate::new(create_directory_request("warmup", "warmup")),
+        ),
+    )
+    .await
+    .expect("a replay must not wait for the pacing interval")
+    .expect("replayed commit");
+    assert_eq!(replayed, warmup);
+}
+
+#[tokio::test]
+async fn a_retained_commit_id_reused_for_another_request_conflicts_at_once() {
+    tokio::time::pause();
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let (writer, _timer, warmup) = paced_writer_after_warmup(store, &namespace_id).await;
+
+    let error = tokio::time::timeout(
+        Duration::from_millis(399),
+        writer.publisher().submit_candidate(
+            namespace_id.clone(),
+            CommitCandidate::new(create_directory_request("warmup", "other")),
+        ),
+    )
+    .await
+    .expect("a reused commit id must not wait for the pacing interval")
+    .expect_err("a different request under a committed id conflicts");
+    assert!(
+        matches!(
+            &error,
+            RuntimeError::Core(CoreError::CommitIdReuseConflict {
+                committed_seq: Some(seq),
+                ..
+            }) if *seq == warmup.committed_seq
+        ),
+        "{error:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_queued_replay_does_not_delay_the_next_publication() {
+    tokio::time::pause();
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let (writer, timer, _warmup) = paced_writer_after_warmup(store, &namespace_id).await;
+    let registry = writer.publisher();
+    timer.set(400);
+    tokio::time::advance(Duration::from_millis(400)).await;
+
+    // Without a cached tail the replay publishes through the queue.
+    registry.invalidate_projection(&namespace_id);
+    registry
+        .submit_candidate(
+            namespace_id.clone(),
+            CommitCandidate::new(create_directory_request("warmup", "warmup")),
+        )
+        .await
+        .expect("replayed commit");
+    // The interval since the warmup put has passed, and the replay put nothing.
+    tokio::time::timeout(
+        Duration::from_millis(399),
+        registry.submit_candidate(
+            namespace_id.clone(),
+            CommitCandidate::new(create_directory_request("next", "next")),
+        ),
+    )
+    .await
+    .expect("a replay must not reserve the next publish slot")
+    .expect("next commit");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn publisher_resolves_unknown_head_outcome_by_replaying_receipt() {
     let temp_dir = tempdir().expect("tempdir");

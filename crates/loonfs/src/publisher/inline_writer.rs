@@ -109,16 +109,33 @@ async fn check_terminal_reload_failure(include_replay: bool) {
             .await
             .expect("hold publications");
         let publisher = registry.test_publisher_for(&namespace).expect("publisher");
+        // The cached tail answers a replay at admission unless the engine is
+        // busy, so holding it sends this replay into the failing batch.
+        let engine_held = tokio::sync::Notify::new();
         let (replayed, first, ()) = tokio::join!(
-            writer.create_directory(&namespace, "/warmup", warmup_options),
+            async {
+                engine_held.notified().await;
+                writer
+                    .create_directory(&namespace, "/warmup", warmup_options)
+                    .await
+            },
             first,
             async {
+                timeout(
+                    Duration::from_secs(10),
+                    wait_for_queued_candidates(&publisher, 1),
+                )
+                .await
+                .expect("first candidate queued");
+                let busy_engine = publisher.engine.lock().await;
+                engine_held.notify_one();
                 timeout(
                     Duration::from_secs(10),
                     wait_for_queued_candidates(&publisher, 2),
                 )
                 .await
                 .expect("both candidates queued");
+                drop(busy_engine);
                 assert_eq!(publisher.lock_state().queue.len(), 1);
                 drop(slots);
             }

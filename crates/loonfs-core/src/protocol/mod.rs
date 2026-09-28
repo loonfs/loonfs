@@ -5,7 +5,7 @@
 mod batch;
 mod candidates;
 
-pub(crate) use candidates::validate_inline_content_references;
+pub(crate) use candidates::{commit_response_for_receipt, validate_inline_content_references};
 mod changes;
 mod publish_view;
 mod uploads;
