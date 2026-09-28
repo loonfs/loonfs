@@ -171,9 +171,9 @@ pub mod publish {
 pub use checkpoint::{
     fold_wal_tail, next_run_no_after, refill_iterators, select_next_iterator, CheckpointFile,
     CheckpointFilesPage, CheckpointFilesPageCursor, CheckpointPageCursor, FoldedWalTail,
-    MetadataCompactionCancellation, MetadataCompactionJobOutcome, MetadataCompactionPolicy,
-    MetadataCompactionSpec, MetadataFamilyGroup, MetadataReorganizeOutcome, SegmentBlockLoader,
-    SegmentRowIterator,
+    ListCheckpointFilesOptions, MetadataCompactionCancellation, MetadataCompactionJobOutcome,
+    MetadataCompactionPolicy, MetadataCompactionSpec, MetadataFamilyGroup,
+    MetadataReorganizeOutcome, SegmentBlockLoader, SegmentRowIterator,
 };
 pub use checkpoint::{ManifestLoadError, ManifestLoadFailureClass};
 pub use context::MutationContext;

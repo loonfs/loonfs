@@ -451,6 +451,7 @@ async fn read_checkpoint_files<S: ObjectStore + ?Sized>(
             cursor: None,
             limit: EffectiveLimit::new(NonZeroU32::new(64).expect("nonzero")),
         },
+        crate::checkpoint::ListCheckpointFilesOptions::default(),
     )
     .await?;
     Ok(page.files.into_iter().map(|file| file.inode_id).collect())

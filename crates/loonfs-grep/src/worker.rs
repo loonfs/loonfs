@@ -25,7 +25,7 @@ use loonfs::{
     CheckpointFilesPageCursor, CoreError, CreateCheckpointOptions, FsMaintenance, FsReader,
     RuntimeError, SegmentBlockLoader, SegmentRowIterator, StoreFailureClass,
 };
-use loonfs_api::v0::{FilesystemChange, GrepIndex, GrepIndexLifecycle};
+use loonfs_api::v0::{GrepIndex, GrepIndexLifecycle};
 use loonfs_api::wire::sst_blocks::{
     DecodedDataBlock, SegmentBlocksBuilder, SegmentIndexEntry, SstBlockCodecError,
     DEFAULT_MAX_DELTA_RUNS, DEFAULT_MAX_REORGANIZATION_INPUT_ROWS, DEFAULT_MAX_ROWS_PER_SEGMENT,
@@ -342,9 +342,6 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                             built_through_seq: resume.built_through_seq(),
                         });
                     }
-                    Ok(IncrementalWork::Restart) => {
-                        return self.restart_backfill(namespace_id, &current).await;
-                    }
                     Err(error) if rebootstrap_required(&error) => {
                         return self.restart_backfill(namespace_id, &current).await;
                     }
@@ -625,7 +622,6 @@ struct CollectedIndexUnit {
 enum IncrementalWork {
     Unit(CollectedIndexUnit),
     UpToDate(ChangeFeedResume),
-    Restart,
 }
 
 struct IncrementalCursor {
@@ -688,9 +684,9 @@ enum CollectedProgress {
 /// Collects one backfill step from the files the checkpoint pins.
 ///
 /// The enumeration answers the checkpointed state directly — one current
-/// revision per visible file, in ascending inode order — so a step reads
-/// pages until one of its budgets is met and remembers the last inode it
-/// consumed. The budgets are the ones the step always had: at most
+/// revision per retained file, deleted or not, in ascending inode order — so
+/// a step reads pages until one of its budgets is met and remembers the last
+/// inode it consumed. The budgets are the ones the step always had: at most
 /// `max_files_per_step` files examined, and content planning stops once
 /// `max_content_bytes_per_step` is reached (the file that crosses it is
 /// still included, exactly as the row walk did).
@@ -805,9 +801,6 @@ async fn collect_incremental_unit(
             });
         }
         for (event_index, event) in events.iter().enumerate().skip(start_event_index) {
-            if matches!(event, FilesystemChange::Undeleted { .. }) {
-                return Ok(IncrementalWork::Restart);
-            }
             let Some(revision) = published_revision(event) else {
                 continue;
             };

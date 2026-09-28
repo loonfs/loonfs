@@ -31,15 +31,9 @@ async fn grep_allow_stale_serves_indexed_results_and_warns_for_jsonl() {
     assert_success(&harness.run(&["use", "demo"]));
     let payload = harness.temp_dir.path().join("payload.txt");
     fs::write(&payload, b"needle\n").expect("payload");
-    for path in ["/visible.txt", "/hidden.txt"] {
-        assert_success(&harness.run(&["put", payload.to_str().expect("utf-8 path"), path]));
-    }
-    assert_success(&harness.run(&["rm", "/hidden.txt"]));
-    let trash = harness.run(&["--json", "trash"]);
-    assert_success(&trash);
-    let entry = json_data(&trash)["entries"][0].clone();
+    assert_success(&harness.run(&["put", payload.to_str().expect("utf-8 path"), "/visible.txt"]));
     assert_success(&harness.run(&["maintenance", "index", "enable"]));
-    // CLI mutations drain grep maintenance, so leave this restore to a writer without a grep runner.
+    // CLI mutations drain grep maintenance, so leave these writes to a writer without a grep runner.
     let writer = loonfs::FsWriter::builder(loonfs_objectstore::StoreConfig::LocalFs {
         root: harness.store_root("default").display().to_string(),
         key_prefix: None,
@@ -48,17 +42,37 @@ async fn grep_allow_stale_serves_indexed_results_and_warns_for_jsonl() {
     .build()
     .await
     .expect("build writer");
+    let namespace_id = loonfs_api::NamespaceId::parse("demo").expect("namespace id");
+    let prepared = writer
+        .prepare_file_bytes(&namespace_id, b"needle\n")
+        .await
+        .expect("prepare content");
+    let operations = (0..=loonfs_grep::MAX_GREP_TAIL_FILES)
+        .map(|index| loonfs::publish::FilesystemOperation::PutFile {
+            path: loonfs_api::AbsolutePath::parse(format!("/unindexed/{index:04}.txt"))
+                .expect("path"),
+            content_ref: Some(prepared.content_ref().clone()),
+            inline_content: None,
+            behavior: loonfs_api::DestinationBehavior::NoReplace,
+            expected_inode_id: None,
+            expected_revision_no: None,
+        })
+        .collect();
     writer
-        .undelete(
-            &loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
-            loonfs_api::public_inode_id::decode(entry["inode_id"].as_str().expect("inode id"))
-                .expect("valid inode id"),
-            loonfs_api::ChangeSeq(entry["deletion_seq"].as_u64().expect("deletion sequence")),
-            None,
-            loonfs::UndeleteOptions::new(loonfs_test_support::test_actor()),
+        .commit_prepared(
+            &namespace_id,
+            loonfs::publish::CommitRequest {
+                commit_id: loonfs_api::CommitId::generate(),
+                actor_id: loonfs_test_support::test_actor(),
+                subject: None,
+                message: None,
+                operations,
+                preconditions: Vec::new(),
+            },
+            vec![prepared],
         )
         .await
-        .expect("restore without indexing");
+        .expect("write past the tail budget without indexing");
     let exact = harness.run(&["--json", "grep", "needle"]);
     assert_failure(&exact);
     assert_eq!(json_error(&exact)["code"], "index_lagging");

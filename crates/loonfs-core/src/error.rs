@@ -188,18 +188,10 @@ pub enum CoreError {
     #[error("the pattern requires no literal bytes and cannot use the index: {0}")]
     QueryUnindexable(String),
     #[error(
-        "the grep index trails the head by {behind_commits} commits{reason}; \
-         run maintenance or set allow_stale",
-        reason = if *.rebuild_required {
-            " and needs a rebuild"
-        } else {
-            ", past the exhaustive-scan budget"
-        }
+        "the grep index trails the head by {behind_commits} commits, past the \
+         exhaustive-scan budget; run maintenance or set allow_stale"
     )]
-    IndexLagging {
-        behind_commits: u64,
-        rebuild_required: bool,
-    },
+    IndexLagging { behind_commits: u64 },
     #[error("upload session `{upload_id}` was not found")]
     UploadNotFound { upload_id: UploadId },
     #[error("upload session `{upload_id}` is already completed")]

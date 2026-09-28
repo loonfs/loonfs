@@ -7,10 +7,10 @@ use crate::Result;
 use crate::{
     ChangeSeq, CheckpointFilesPage, CheckpointFilesPageCursor, ContentRef, CoreError,
     CurrentFileState, FileBytes, FileContentStream, InodeId, ListChangesOptions,
-    ListChangesResponse, ListFileRevisionsResponse, ListInodeChildrenOptions,
-    ListInodeChildrenResponse, ListPathEntriesOptions, ListPathEntriesResponse, Namespace,
-    NamespaceId, PathEntry, PinId, ReadFileStreamOptions, RevisionNo, RuntimeError,
-    SharedObjectStore, StatPathOptions,
+    ListChangesResponse, ListCheckpointFilesOptions, ListFileRevisionsResponse,
+    ListInodeChildrenOptions, ListInodeChildrenResponse, ListPathEntriesOptions,
+    ListPathEntriesResponse, Namespace, NamespaceId, PathEntry, PinId, ReadFileStreamOptions,
+    RevisionNo, RuntimeError, SharedObjectStore, StatPathOptions,
 };
 use loonfs_api::{
     AbsolutePath, DirectoryPageCursor, EffectiveLimit, FileRevisionsPageCursor, PageCursor,
@@ -911,8 +911,11 @@ impl FsReader {
     /// Lists files visible at a checkpoint in ascending inode-ID order.
     ///
     /// The pinned manifest is read without replaying later WAL entries.
-    /// Directories are omitted. An unavailable checkpoint returns
-    /// `checkpoint_unavailable` rather than falling back to current state.
+    /// Directories are omitted. With
+    /// [`ListCheckpointFilesOptions::include_deleted`], the page also lists
+    /// deleted files and files under a deleted directory. An unavailable
+    /// checkpoint returns `checkpoint_unavailable` rather than falling back to
+    /// current state.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.list_checkpoint_files_page",
@@ -930,11 +933,12 @@ impl FsReader {
         namespace_id: &NamespaceId,
         checkpoint_id: &PinId,
         request: PageRequest<CheckpointFilesPageCursor>,
+        options: ListCheckpointFilesOptions,
     ) -> Result<CheckpointFilesPage> {
         self.core.record_trace_context(&tracing::Span::current());
         let (engine, read_context) = self.core.pinned_read(namespace_id).await?;
         engine
-            .list_checkpoint_files_page(checkpoint_id, request, &read_context)
+            .list_checkpoint_files_page(checkpoint_id, request, options, &read_context)
             .await
             .map_err(crate::RuntimeError::from)
     }
