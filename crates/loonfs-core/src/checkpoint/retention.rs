@@ -2,9 +2,9 @@
 
 use super::error::ManifestLoadError;
 use super::publish::{update_manifest, ManifestChange};
-use super::runs::MAX_MAINTENANCE_SEGMENT_IO;
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::namespace::{control::ensure_namespace_live, state::NamespaceReadState};
+use crate::store_waves::STORE_READ_WAVE;
 use crate::time::{Deadline, StdMonotonicTimer};
 use loonfs_api::wire::manifest::NamespaceManifestPayload;
 use loonfs_api::{AdvanceRetentionResponse, NamespaceId};
@@ -26,7 +26,7 @@ async fn verify_manifest_segments_exist<S: ObjectStore + ?Sized>(
         .into_iter()
         .collect::<Vec<_>>();
 
-    for chunk in object_keys.chunks(MAX_MAINTENANCE_SEGMENT_IO) {
+    for chunk in object_keys.chunks(STORE_READ_WAVE) {
         futures::future::try_join_all(chunk.iter().map(|object_key| async move {
             match store
                 .head(object_key)

@@ -4,7 +4,6 @@
 use super::error::ApiResponseError;
 use super::extractors::{missing_actor, ActorHeader, OptionalActorHeader, SubjectHeaders};
 use super::handlers_query::{grep_index_not_maintained, map_grep_error};
-use super::handlers_uploads::current_unix_ms;
 use super::query_params::{parse_path_id, parse_public_ordinal, resolve_page_limit};
 use super::{AppJson, AppPath, AppQuery, BindingState, NamespaceIdPath, NoQuery};
 use axum::extract::State;
@@ -467,7 +466,8 @@ pub(super) async fn create_snapshot(
 ) -> Result<Json<SnapshotSummary>, ApiResponseError> {
     let scoped_writer = subject.map(|subject| state.writer.as_subject(subject));
     let writer = scoped_writer.as_ref().unwrap_or(&state.writer);
-    let now_ms = super::handlers_uploads::current_unix_ms()?;
+    let now_ms =
+        loonfs::current_time_ms().map_err(|error| ApiResponseError::runtime(error.into()))?;
     let expires_at_ms = snapshot_expiry_from_ttl(&state, now_ms, request.ttl_ms)?;
     let checkpoint = writer
         .create_snapshot_with_quota(
@@ -580,7 +580,8 @@ pub(super) async fn extend_snapshot(
     let scoped_writer = subject.map(|subject| state.writer.as_subject(subject));
     let writer = scoped_writer.as_ref().unwrap_or(&state.writer);
     let snapshot_id = super::query_params::parse_snapshot_id(&snapshot_id)?;
-    let now_ms = super::handlers_uploads::current_unix_ms()?;
+    let now_ms =
+        loonfs::current_time_ms().map_err(|error| ApiResponseError::runtime(error.into()))?;
     let requested_expires_at_ms = snapshot_expiry_from_ttl(&state, now_ms, request.ttl_ms)?;
     let response = writer
         .extend_snapshot(
@@ -848,10 +849,14 @@ pub(super) async fn run_maintenance(
         if !state.options.maintains_grep_index {
             return Err(grep_index_not_maintained().await);
         }
-        return loonfs_grep::run_grep_gc(state.grep_worker(), &namespace_id, current_unix_ms()?)
-            .await
-            .map(Json)
-            .map_err(|error| map_grep_error(&namespace_id, error));
+        return loonfs_grep::run_grep_gc(
+            state.grep_worker(),
+            &namespace_id,
+            loonfs::current_time_ms().map_err(|error| ApiResponseError::runtime(error.into()))?,
+        )
+        .await
+        .map(Json)
+        .map_err(|error| map_grep_error(&namespace_id, error));
     }
     if let RunMaintenanceRequest::RecoverAdministrator(request) = request {
         let actor_id = actor_id.ok_or_else(missing_actor)?;

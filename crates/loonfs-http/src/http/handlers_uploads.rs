@@ -33,7 +33,7 @@ use loonfs_objectstore::{
     presign::{DirectMultipartIssuer, PresignedPartRequest, PresignedPutRequest},
     ObjectStoreError,
 };
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime};
 
 /// Lifetime of one part-upload capability. Longer than a whole-object PUT's
 /// because a client works through a large file part by part and may not
@@ -465,26 +465,6 @@ fn with_content_token(
     Ok(response)
 }
 
-// Request timestamps enter wall time at this HTTP API boundary so core replay
-// stays deterministic.
-#[allow(clippy::disallowed_methods)]
-pub(super) fn current_unix_ms() -> Result<u64, ApiResponseError> {
-    let duration = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|error| {
-            ApiResponseError::new(
-                ErrorCode::ServerError,
-                &format!("system time is before unix epoch: {error}"),
-            )
-        })?;
-    u64::try_from(duration.as_millis()).map_err(|error| {
-        ApiResponseError::new(
-            ErrorCode::ServerError,
-            &format!("system time overflowed milliseconds: {error}"),
-        )
-    })
-}
-
 /// Forwards a proxied upload's body straight into object storage.
 ///
 /// The body is never held: it is hashed and written a piece at a time, so
@@ -600,7 +580,7 @@ pub(super) async fn complete_upload(
         completed.response,
         ContentTokenVerifier::new(state.options.content_token_secret.expose()),
         completed.receipt.as_ref(),
-        current_unix_ms()?,
+        loonfs::current_time_ms().map_err(|error| ApiResponseError::runtime(error.into()))?,
     )?))
 }
 
@@ -684,7 +664,7 @@ pub(super) async fn get_upload(
         view.session,
         ContentTokenVerifier::new(state.options.content_token_secret.expose()),
         view.receipt.as_ref(),
-        current_unix_ms()?,
+        loonfs::current_time_ms().map_err(|error| ApiResponseError::runtime(error.into()))?,
     )?))
 }
 

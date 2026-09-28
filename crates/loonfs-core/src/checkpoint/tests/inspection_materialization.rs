@@ -7,9 +7,7 @@ use super::super::cache::MetadataSegmentCache;
 use super::super::error::ManifestLoadError;
 use super::super::load::load_namespace_manifest_envelope_if_present;
 use super::super::row::manifest_row_kind;
-use super::super::runs::{
-    runs_in_materialization_order, MetadataFamilySegments, MAX_MAINTENANCE_SEGMENT_IO,
-};
+use super::super::runs::{runs_in_materialization_order, MetadataFamilySegments};
 use super::super::scan::{
     ordered_manifest_segments, ManifestMaterializationForInspection, Readahead,
 };
@@ -18,6 +16,7 @@ use super::super::validate::{
     validate_revision_rows_have_unique_keys,
 };
 use crate::metadata::{MetadataState, MetadataStateBuilder};
+use crate::store_waves::STORE_READ_WAVE;
 use futures::future::try_join_all;
 use loonfs_api::wire::manifest::{
     MetadataRow, MetadataRowFamily, MetadataSegmentRef, NamespaceManifestEnvelope,
@@ -118,7 +117,7 @@ where
     let mut revision_rows = Vec::new();
     for family_segments in ordered {
         let mut loaded_segments = Vec::with_capacity(family_segments.segments.len());
-        for chunk in family_segments.segments.chunks(MAX_MAINTENANCE_SEGMENT_IO) {
+        for chunk in family_segments.segments.chunks(STORE_READ_WAVE) {
             loaded_segments.extend(
                 try_join_all(
                     chunk

@@ -6,7 +6,7 @@ use super::download_body::streamed_download_response;
 use super::error::ApiResponseError;
 use super::extractors::{ActorHeader, SubjectHeaders};
 use super::handlers_uploads::{
-    content_preparation_for_puts, current_unix_ms, ContentTokenVerifier, PutContentPreparation,
+    content_preparation_for_puts, ContentTokenVerifier, PutContentPreparation,
 };
 use super::query_params::{
     decode_optional_cursor, parse_include_attributes, parse_public_ordinal, parse_revision_no,
@@ -572,7 +572,8 @@ pub(super) async fn create_commit(
                 &namespace_id,
                 &put_content_refs,
                 &content_tokens,
-                current_unix_ms()?,
+                loonfs::current_time_ms()
+                    .map_err(|error| ApiResponseError::runtime(error.into()))?,
             )
             .await?,
         ))

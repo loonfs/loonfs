@@ -7,11 +7,11 @@ use crate::manifest::load_current_grep_manifest;
 use crate::{GrepError, GrepWorker, Result};
 use futures::StreamExt as _;
 use loonfs::{
-    delete_if_aged, GraceAge, StoreFailureClass, GC_DEFAULT_GRACE_WINDOW_MS,
-    GC_MIN_GRACE_WINDOW_MS, METADATA_PUBLICATION_BUDGET_MS, UNREFERENCED_SEGMENT_MIN_AGE_MS,
+    delete_if_aged, GraceAge, GC_DEFAULT_GRACE_WINDOW_MS, GC_MIN_GRACE_WINDOW_MS,
+    METADATA_PUBLICATION_BUDGET_MS, UNREFERENCED_SEGMENT_MIN_AGE_MS,
 };
 use loonfs_api::{ErrorCode, ManifestNo, NamespaceId};
-use loonfs_objectstore::{ObjectStore, ObjectStoreError};
+use loonfs_objectstore::ObjectStore;
 use std::collections::BTreeSet;
 
 pub const GREP_GC_GRACE_WINDOW_MS: u64 = GC_DEFAULT_GRACE_WINDOW_MS;
@@ -51,7 +51,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             let prefix = grep_prefix(namespace_id);
             let mut keys = self.store().list_prefix_stream(&prefix);
             while let Some(key) = keys.next().await {
-                let key = key.map_err(|error| store_error(&prefix, &error))?;
+                let key = key.map_err(|error| GrepError::store(&prefix, &error))?;
                 collect_candidate(
                     self.store(),
                     &key,
@@ -78,7 +78,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         let prefix = manifests_prefix(namespace_id);
         let mut keys = self.store().list_prefix_stream(&prefix);
         while let Some(key) = keys.next().await {
-            let key = key.map_err(|error| store_error(&prefix, &error))?;
+            let key = key.map_err(|error| GrepError::store(&prefix, &error))?;
             let Some(parsed) = parse_key(&key) else {
                 report.retained_candidates += 1;
                 continue;
@@ -102,7 +102,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         let prefix = segments_prefix(namespace_id);
         let mut keys = self.store().list_prefix_stream(&prefix);
         while let Some(key) = keys.next().await {
-            let key = key.map_err(|error| store_error(&prefix, &error))?;
+            let key = key.map_err(|error| GrepError::store(&prefix, &error))?;
             if live_segments.contains(&key) || parse_key(&key).is_none() {
                 report.retained_candidates += 1;
                 continue;
@@ -129,7 +129,7 @@ async fn collect_candidate<S: ObjectStore + ?Sized>(
 ) -> Result<()> {
     let age = delete_if_aged(store, key, minimum_age_ms, now_ms)
         .await
-        .map_err(|error| store_error(key, &error))?;
+        .map_err(|error| GrepError::store(key, &error))?;
     match age {
         GraceAge::Aged => {
             if parse_key(key)
@@ -144,12 +144,4 @@ async fn collect_candidate<S: ObjectStore + ?Sized>(
         GraceAge::Gone => {}
     }
     Ok(())
-}
-
-fn store_error(object_key: &str, error: &ObjectStoreError) -> GrepError {
-    GrepError::StoreUnavailable {
-        object_key: object_key.to_owned(),
-        message: error.public_message().into_owned(),
-        class: StoreFailureClass::of(error),
-    }
 }

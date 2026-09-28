@@ -15,8 +15,6 @@ pub(super) use loonfs_api::wire::sst_blocks::{
 };
 pub use loonfs_api::MetadataFamilyGroup;
 
-pub(super) const MAX_MAINTENANCE_SEGMENT_IO: usize = 8;
-
 pub(super) const CHECKPOINT_ROW_FAMILIES: [MetadataRowFamily; 11] = [
     MetadataRowFamily::Inodes,
     MetadataRowFamily::DirentryBinds,

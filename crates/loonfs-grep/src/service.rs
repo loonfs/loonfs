@@ -110,11 +110,7 @@ impl GrepService {
                     store
                         .head(&object_key)
                         .await
-                        .map_err(|error| GrepError::StoreUnavailable {
-                            object_key,
-                            message: error.public_message().into_owned(),
-                            class: loonfs::StoreFailureClass::of(&error),
-                        })?
+                        .map_err(|error| GrepError::store(object_key, &error))?
                         .is_some()
                 }
                 Err(_) => false,

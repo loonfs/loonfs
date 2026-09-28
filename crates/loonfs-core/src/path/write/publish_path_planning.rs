@@ -164,54 +164,6 @@ pub(super) async fn source_binding<S: ObjectStore + ?Sized>(
     })
 }
 
-/// Rejects planning through a *visible* path component covered by a subtree
-/// tombstone. The walk observes only visible bindings, so its answer cannot
-/// change when compaction drops rows no retained sequence observes: a deleted
-/// (unbound) name simply ends the walk, and recreating it plans as a fresh
-/// subtree.
-///
-/// A visible-but-covered component cannot arise from legal writer histories:
-/// a delete unbinds and tombstones in one commit, and visibility already
-/// excludes a covered inode (`metadata::visibility`). Hitting one means the
-/// stored rows contradict themselves, so this reports corruption rather than
-/// a conflict a caller could resolve.
-pub(super) async fn reject_tombstoned_path_ancestor<S: ObjectStore + ?Sized>(
-    view: &PublishPathPlanningView<'_, '_, '_, S>,
-    absolute_path: &AbsolutePath,
-) -> Result<()> {
-    let mut current_inode = ROOT_INODE_ID;
-    let mut current_path = AbsolutePath::root();
-
-    for component in absolute_path.components() {
-        let display_name = component.to_display_name();
-        let name_key = NameKey::for_display_name(&display_name);
-        let Some(bound_child) = view.view.visible_child(current_inode, &name_key).await? else {
-            return Ok(());
-        };
-        let visible_component = bound_child
-            .display_name()
-            .expect("visible binding should be bound")
-            .clone();
-        let visible_path = current_path.join(&visible_component);
-        if let Some(tombstone) = view
-            .view
-            .covering_subtree_tombstone(bound_child.child_inode_id)
-            .await?
-        {
-            return Err(CoreError::NamespaceCorrupt(format!(
-                "path `{}` is visible but covered by the subtree tombstone rooted at inode \
-                 `{}` from seq `{}`",
-                visible_path.as_str(),
-                tombstone.root_inode_id,
-                tombstone.committed_seq,
-            )));
-        }
-        current_inode = bound_child.child_inode_id;
-        current_path = visible_path;
-    }
-    Ok(())
-}
-
 /// How the shared move/copy destination rule resolved.
 pub(super) enum ReplaceDestination {
     /// Nothing visible occupies the destination.
@@ -281,12 +233,7 @@ pub(super) async fn ensure_parent_directories<S: ObjectStore + ?Sized>(
         let name_key = NameKey::for_display_name(&display_name);
         if !creating_missing_ancestors {
             if let Some(child) = view.view.visible_child(current_inode, &name_key).await? {
-                let inode = view
-                    .view
-                    .visible_inode(child.child_inode_id)
-                    .await?
-                    .ok_or_else(|| CoreError::PathNotFound(component.as_str().to_owned()))?;
-                if inode.inode_kind != InodeKind::Directory {
+                if child.child_kind != InodeKind::Directory {
                     view.authorize(
                         child.child_inode_id,
                         AccessRights::from_iter([AccessRight::Create]),

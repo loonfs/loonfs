@@ -463,11 +463,10 @@ async fn validate_update_attributes<S: ObjectStore + ?Sized>(
     base_attributes_revision_no: AttributesRevisionNo,
     attributes: &Attributes,
 ) -> Result<Vec<WalDelta>, CoreError> {
-    validate_attributes_target_visible(view, inode_id).await?;
+    validate_target_visible(view, inode_id, CommitOperand::AttributeTarget).await?;
     validate_inode_attributes_revision_is(view, inode_id, base_attributes_revision_no).await?;
     let attributes_revision_no =
         next_attributes_revision_no(inode_id, base_attributes_revision_no)?;
-    validate_not_covered_by_tombstone(view, inode_id, CommitOperand::AttributeTarget).await?;
     Ok(vec![WalDelta::AppendAttributesRevision {
         delta_index: numbering.reserve_delta_index()?,
         inode_id,
@@ -484,10 +483,9 @@ async fn validate_update_access<S: ObjectStore + ?Sized>(
     boundary: bool,
     grants: &AccessGrants,
 ) -> Result<Vec<WalDelta>, CoreError> {
-    validate_access_target_visible(view, inode_id).await?;
+    validate_target_visible(view, inode_id, CommitOperand::AccessTarget).await?;
     validate_inode_access_revision_is(view, inode_id, base_access_revision_no).await?;
     let access_revision_no = next_access_revision_no(inode_id, base_access_revision_no)?;
-    validate_not_covered_by_tombstone(view, inode_id, CommitOperand::AccessTarget).await?;
     Ok(vec![WalDelta::AppendAccessRevision {
         delta_index: numbering.reserve_delta_index()?,
         inode_id,
@@ -604,16 +602,13 @@ async fn validate_undelete_target<S: ObjectStore + ?Sized>(
     Ok((inode, active))
 }
 
-async fn validate_attributes_target_visible<S: ObjectStore + ?Sized>(
+async fn validate_target_visible<S: ObjectStore + ?Sized>(
     view: &PublishValidationView<'_, S>,
     inode_id: InodeId,
+    operand: CommitOperand,
 ) -> Result<(), CoreError> {
     if view.view().visible_inode(inode_id).await?.is_none() {
-        return Err(CommitValidationError::InodeMissing {
-            operand: CommitOperand::AttributeTarget,
-            inode_id,
-        }
-        .into());
+        return Err(CommitValidationError::InodeMissing { operand, inode_id }.into());
     }
     Ok(())
 }
@@ -636,20 +631,6 @@ async fn validate_inode_attributes_revision_is<S: ObjectStore + ?Sized>(
         );
     }
     Ok(attributes)
-}
-
-async fn validate_access_target_visible<S: ObjectStore + ?Sized>(
-    view: &PublishValidationView<'_, S>,
-    inode_id: InodeId,
-) -> Result<(), CoreError> {
-    if view.view().visible_inode(inode_id).await?.is_none() {
-        return Err(CommitValidationError::InodeMissing {
-            operand: CommitOperand::AccessTarget,
-            inode_id,
-        }
-        .into());
-    }
-    Ok(())
 }
 
 async fn validate_inode_access_revision_is<S: ObjectStore + ?Sized>(

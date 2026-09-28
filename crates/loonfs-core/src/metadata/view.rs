@@ -21,7 +21,7 @@ use loonfs_api::wire::sst_blocks::string_prefix_upper_bound;
 use loonfs_api::wire::wal::WalCommitPayload;
 use loonfs_api::{
     AbsolutePath, AccessRevisionNo, Attributes, AttributesRevisionNo, ChangeSeq, CommitId, InodeId,
-    InodeKind, NameKey, RevisionNo,
+    InodeKind, NameKey, RevisionNo, ROOT_INODE_ID,
 };
 #[cfg(test)]
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -634,10 +634,13 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         visibility::current_parent_binding_for_child(&mut self.reads(), child_inode_id).await
     }
 
-    async fn latest_parent_binding_for_child(
+    pub(super) async fn latest_parent_binding_for_child(
         &self,
         child_inode_id: InodeId,
     ) -> Result<Option<DirentryBindingRecord>, CoreError> {
+        if child_inode_id == ROOT_INODE_ID {
+            return Ok(None);
+        }
         let bindings = self.direntry_binds_for_child(child_inode_id).await?;
         let latest = latest_visible_binding(bindings.iter(), self.visible_seq());
         Ok(latest)

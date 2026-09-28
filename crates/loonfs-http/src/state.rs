@@ -18,6 +18,10 @@ pub enum AuthPolicy {
     BearerToken(SecretString),
 }
 
+pub const DEFAULT_MAX_CONCURRENT_UPLOADS: usize = 8;
+pub const DEFAULT_MAX_CONCURRENT_DOWNLOADS: usize = 16;
+pub const DEFAULT_REQUEST_DEADLINE_MS: u64 = 60_000;
+
 #[derive(Clone, Debug)]
 pub struct BindingOptions {
     pub serves_grep: bool,
