@@ -164,6 +164,7 @@ auth_token = "{AUTH_TOKEN}"
 content_token_secret = "conformance-content-token-secret"
 writer_id = "loonfs-conformance"
 max_upload_bytes = {PROXY_UPLOAD_MAX_BYTES}
+min_publish_interval_ms = 0
 
 [store]
 kind = "local-fs"

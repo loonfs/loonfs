@@ -2005,22 +2005,14 @@ async fn a_merge_above_the_base_keeps_the_rows_that_shadow_it() {
         .await
         .expect("seed file");
     }
-    for index in 0..512 {
-        write_file_bytes(
-            &store,
-            &namespace_id,
-            &format!("/docs/retained-{index}.txt"),
-            b"body",
-            &context,
-            None,
-        )
-        .await
-        .expect("grow the base");
-        if index % 32 == 31 {
-            create_checkpoint(&store, &namespace_id, &context)
-                .await
-                .expect("bound the WAL tail");
-        }
+    // A base far larger than the delta runs, written 32 files per commit.
+    for batch in 0..16 {
+        let paths: Vec<_> = (batch * 32..(batch + 1) * 32)
+            .map(|index| format!("/docs/retained-{index}.txt"))
+            .collect();
+        write_files_bytes(&store, &namespace_id, &paths, b"body", &context)
+            .await
+            .expect("grow the base");
     }
     create_checkpoint(&store, &namespace_id, &context)
         .await

@@ -65,6 +65,7 @@ use crate::publish::{
 use crate::storage::content::{prepare_stored_content, store_bytes_as_content};
 use crate::test_support::ops::{
     create, delete_path, move_path, put_file_bytes, restore_file_revision, write_file_bytes,
+    write_files_bytes,
 };
 use crate::test_support::{RecordedStoredMetadataBlockCall, RecordingStoredMetadataBlockCache};
 use crate::time::{Deadline, StdMonotonicTimer};
