@@ -336,12 +336,8 @@ impl ResolvedTarget {
         let grep_block_cache = Arc::new(GrepBlockCache::new(
             DecodedBlockCacheConfig::with_max_decoded_bytes(DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES),
         ));
-        let grep_worker = GrepWorker::with_block_cache(
-            writer.object_store(),
-            reader.clone(),
-            maintenance.clone(),
-            Arc::clone(&grep_block_cache),
-        );
+        let grep_worker =
+            GrepWorker::new(writer.object_store(), reader.clone(), maintenance.clone());
         let jobs = MaintenanceRegistry::new();
         jobs.register(Arc::new(MetadataMaintenanceJob::new(maintenance.clone())))
             .map_err(CliError::from)?;

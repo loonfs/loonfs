@@ -200,28 +200,19 @@ pub async fn app(
     )
     .await?;
     let probe_store = writer.object_store();
-    let grep_block_cache = Arc::new(new_grep_block_cache(
-        DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
-        metrics.recorder().as_ref(),
-    ));
     // A deployment that maintains the index needs a worker whether or not it
     // answers queries with one. It runs on the writer's own instrumented
     // client, so the grep-owned traffic is measured like every other
     // request instead of escaping on a second, raw client.
-    let grep_worker =
-        (config.grep.mode.serves_grep() || config.grep.mode.maintains_index()).then(|| {
-            GrepWorker::with_block_cache(
-                writer.object_store(),
-                reader.clone(),
-                maintenance.clone(),
-                Arc::clone(&grep_block_cache),
-            )
-        });
-    let grep_service = config
-        .grep
-        .mode
-        .serves_grep()
-        .then(|| Arc::new(GrepService::new(Arc::clone(&grep_block_cache))));
+    let grep_worker = (config.grep.mode.serves_grep() || config.grep.mode.maintains_index())
+        .then(|| GrepWorker::new(writer.object_store(), reader.clone(), maintenance.clone()));
+    let grep_service = config.grep.mode.serves_grep().then(|| {
+        let grep_block_cache = Arc::new(new_grep_block_cache(
+            DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
+            metrics.recorder().as_ref(),
+        ));
+        Arc::new(GrepService::new(grep_block_cache))
+    });
     let jobs = MaintenanceRegistry::new();
     jobs.register(Arc::new(MetadataMaintenanceJob::new(maintenance.clone())))
         .map_err(maintenance_config_error)?;

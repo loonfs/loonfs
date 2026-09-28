@@ -576,11 +576,10 @@ async fn enable_creates_no_checkpoint_when_the_manifest_load_fails() {
         InjectedError::Transport("injected grep-manifest reload failure".to_owned()),
     ));
     failing_store.fail_all();
-    let worker = GrepWorker::with_block_cache(
+    let worker = GrepWorker::new(
         failing_store.clone(),
         host.reader.clone(),
         host.maintenance.clone(),
-        Arc::clone(&host.block_cache),
     );
 
     let error = worker
@@ -650,11 +649,10 @@ async fn enable_confirms_its_checkpoint_after_an_ambiguous_manifest_write() {
         .apply_then_fail(),
     );
     failing_store.fail_next(1);
-    let worker = GrepWorker::with_block_cache(
+    let worker = GrepWorker::new(
         failing_store.clone(),
         host.reader.clone(),
         host.maintenance.clone(),
-        Arc::clone(&host.block_cache),
     );
 
     let outcome = worker
@@ -720,11 +718,10 @@ async fn restart_confirms_its_checkpoint_after_an_ambiguous_manifest_write() {
         .apply_then_fail(),
     );
     failing_store.fail_next(1);
-    let worker = GrepWorker::with_block_cache(
+    let worker = GrepWorker::new(
         failing_store.clone(),
         host.reader.clone(),
         host.maintenance.clone(),
-        Arc::clone(&host.block_cache),
     );
 
     let outcome = worker

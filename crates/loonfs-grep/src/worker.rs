@@ -6,7 +6,6 @@
 //! many gram posting lists. The mid level absorbs frequent delta merges
 //! without rewriting most of the base on every step.
 
-use crate::cache::GrepBlockCache;
 use crate::codec::{
     extract_grams, lookup::GRAM_ROW_PREFIX, Gram, GramPosting, IndexRow, INDEX_GRAMS_MAX_FILE_BYTES,
 };
@@ -185,16 +184,6 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             reader,
             maintenance,
         }
-    }
-
-    /// Accepts the host's query cache; reorganization reads bypass it.
-    pub fn with_block_cache(
-        store: S,
-        reader: FsReader,
-        maintenance: FsMaintenance,
-        _block_cache: Arc<GrepBlockCache>,
-    ) -> Self {
-        Self::new(store, reader, maintenance)
     }
 
     /// This worker's filesystem reads for one namespace.
