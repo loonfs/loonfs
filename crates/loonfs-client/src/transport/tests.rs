@@ -210,7 +210,7 @@ async fn services_receive_identical_body_and_identity_on_retries_but_not_provide
             }
         }
     });
-    let mut client = service_client(service, None).with_subject(Subject {
+    let mut client = service_client(service, None).as_subject(Subject {
         principal_scope: PrincipalScope::parse("org_demo").expect("scope"),
         subject_id: SubjectId::parse("usr_demo").expect("subject"),
         principals: PrincipalSet::new(BTreeSet::from([

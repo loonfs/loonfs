@@ -62,8 +62,9 @@ impl Client {
         })
     }
 
-    /// Lists one bounded page of existing pins, including expired pins that
-    /// garbage collection has not yet deleted (maintenance API group).
+    /// Lists one bounded page of existing checkpoints, including expired
+    /// checkpoints that garbage collection has not yet deleted (maintenance API
+    /// group).
     pub async fn list_checkpoints_page(
         &self,
         namespace_id: &NamespaceId,
@@ -131,7 +132,8 @@ impl Client {
     }
 
     /// Returns whether the namespace's grep index is disabled, being built,
-    /// or active. This operation does not change the index.
+    /// or active (maintenance API group). This operation does not change the
+    /// index.
     pub async fn get_grep_index(&self, namespace_id: &NamespaceId) -> Result<GrepIndex> {
         let url = format!(
             "{}/v0/maintenance/namespaces/{namespace_id}/grep/index",
@@ -154,8 +156,8 @@ impl Client {
             .await
     }
 
-    /// Disables the namespace's grep manifest (maintenance API group); garbage collection
-    /// reclaims the segments. Idempotent.
+    /// Disables the namespace's grep index (maintenance API group); garbage
+    /// collection reclaims the segments. Idempotent.
     pub async fn disable_grep_index(&self, namespace_id: &NamespaceId) -> Result<GrepIndex> {
         let url = format!(
             "{}/v0/maintenance/namespaces/{namespace_id}/grep/index/disable",

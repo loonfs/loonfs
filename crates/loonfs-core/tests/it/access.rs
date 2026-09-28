@@ -14,7 +14,7 @@ use loonfs_api::{
     TrashEntry, TrashPageCursor,
 };
 use loonfs_core::publish::{CommitRequest, FilesystemOperation};
-use loonfs_core::{BootstrapOptions, MutationContext};
+use loonfs_core::{CreateNamespaceOptions, MutationContext};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::namespace_id;
 use tempfile::tempdir;
@@ -48,12 +48,12 @@ async fn setup() -> (
     let namespace_id = namespace_id("demo");
     let context = crate::common::mutation_context("writer", 1);
     namespace_engine(&store, &namespace_id, &context)
-        .bootstrap_namespace(BootstrapOptions {
+        .bootstrap_namespace(CreateNamespaceOptions {
             access: NamespaceAccess::Acl {
                 principal_scope: PrincipalScope::parse("org_demo").expect("scope"),
                 root_grants: grants("prn_root", &[AccessRight::Admin]),
             },
-            ..BootstrapOptions::new(loonfs_test_support::test_actor())
+            ..CreateNamespaceOptions::new(loonfs_test_support::test_actor())
         })
         .await
         .expect("bootstrap ACL namespace");

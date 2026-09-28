@@ -471,7 +471,7 @@ async fn http_namespace_fork_shares_content_and_diverges() {
 
     match harness
         .client
-        .list_changes(&namespace_id("clone"), ChangeSeq(0), &Default::default())
+        .list_changes_page(&namespace_id("clone"), ChangeSeq(0), &Default::default())
         .await
     {
         Err(ClientError::Api { code, .. }) => assert_eq!(code, "rebootstrap_required"),
@@ -479,7 +479,7 @@ async fn http_namespace_fork_shares_content_and_diverges() {
     }
     let clone_changes = harness
         .client
-        .list_changes(&namespace_id("clone"), ChangeSeq(1), &Default::default())
+        .list_changes_page(&namespace_id("clone"), ChangeSeq(1), &Default::default())
         .await
         .expect("clone changes");
     assert_eq!(clone_changes.changes.len(), 1);

@@ -287,7 +287,7 @@ async fn recovery_restores_an_administrator_and_keeps_the_other_root_grants() {
     .expect("administrator again");
     let feed = writer
         .reader()
-        .list_changes(&namespace, ChangeSeq(0), ListChangesOptions { limit: None })
+        .list_changes_page(&namespace, ChangeSeq(0), ListChangesOptions { limit: None })
         .await
         .expect("feed");
     let root_rows: Vec<_> = feed
@@ -496,7 +496,7 @@ async fn snapshot_admin_reads_reject_a_revoked_administrator() {
     let revoked = reader.as_subject(subject("root", "prn_root"));
     assert_eq!(
         revoked
-            .list_changes(&namespace, ChangeSeq(0), ListChangesOptions::default())
+            .list_changes_page(&namespace, ChangeSeq(0), ListChangesOptions::default())
             .await
             .expect_err("live feed rejects the old administrator")
             .code(),
@@ -515,9 +515,13 @@ async fn snapshot_admin_reads_reject_a_revoked_administrator() {
         ErrorCode::PathNotFound
     );
     let changes = snapshot
-        .list_changes(
+        .list_changes_page(
             ChangeSeq(0),
-            loonfs_api::EffectiveLimit::new(std::num::NonZeroU32::new(10).expect("limit")),
+            ListChangesOptions {
+                limit: Some(loonfs_api::EffectiveLimit::new(
+                    std::num::NonZeroU32::new(10).expect("limit"),
+                )),
+            },
         )
         .await;
     let bytes = snapshot.read_content_ref(&content, 100).await;
@@ -538,9 +542,13 @@ async fn snapshot_admin_reads_accept_the_current_administrator() {
         .await
         .expect("load historical view");
     let changes = snapshot
-        .list_changes(
+        .list_changes_page(
             ChangeSeq(0),
-            loonfs_api::EffectiveLimit::new(std::num::NonZeroU32::new(10).expect("limit")),
+            ListChangesOptions {
+                limit: Some(loonfs_api::EffectiveLimit::new(
+                    std::num::NonZeroU32::new(10).expect("limit"),
+                )),
+            },
         )
         .await
         .expect("current administrator can read historical changes");

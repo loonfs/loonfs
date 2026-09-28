@@ -2,9 +2,9 @@
 
 use loonfs_api::ChangeSeq;
 
-/// Options for namespace bootstrap.
+/// Options for creating a namespace.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BootstrapOptions {
+pub struct CreateNamespaceOptions {
     /// Application-supplied actor creating the namespace.
     pub actor_id: loonfs_api::ActorId,
     /// Access mode the namespace is created with.
@@ -13,7 +13,7 @@ pub struct BootstrapOptions {
     pub allow_existing: bool,
 }
 
-impl BootstrapOptions {
+impl CreateNamespaceOptions {
     /// Requires an absent namespace.
     pub fn new(actor_id: loonfs_api::ActorId) -> Self {
         Self {

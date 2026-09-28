@@ -149,7 +149,7 @@ Registered limit keys:
 | `snapshot.max_lifetime_ms` | Largest snapshot lifetime measured from the record's creation time. Extension never moves the expiry past this ceiling. |
 | `snapshot.max_live_per_namespace` | Most live, unexpired snapshots one namespace may hold. Creation past this limit returns `snapshot_quota_exceeded`. |
 | `query.grep.default_limit` | Matches per grep page when the request omits `limit`. |
-| `query.grep.max_limit` | Largest accepted grep page limit; invalid limits are rejected as `invalid_request`. The query keys identify the operation's contract even though grep now shares the standard pagination values. |
+| `query.grep.max_limit` | Largest accepted grep page limit; invalid limits are rejected as `invalid_request`. The query keys identify the operation's contract even though grep shares the standard pagination values. |
 | `query.grep.scan_budget_files` | Files a plan-less `allow_scan` grep will scan before refusing with `query_unindexable`. |
 | `query.grep.tail_budget_files` | Unindexed-tail revisions one grep scans exhaustively before failing with `index_lagging`. |
 

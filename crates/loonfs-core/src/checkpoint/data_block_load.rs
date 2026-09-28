@@ -190,7 +190,7 @@ pub(super) async fn load_segment_data_block_span<S: ObjectStore + ?Sized>(
 ) -> Result<Vec<Arc<DecodedDataBlock>>, ManifestLoadError> {
     let mut blocks: Vec<Option<Arc<DecodedDataBlock>>> = vec![None; entries.len()];
     // One probe key reused across the span: a fresh key per block would
-    // clone the segment checksum once per block on every warm scan.
+    // build the segment object key once per block on every warm scan.
     let mut probe_key = segment_block_cache_key(descriptor, MetadataSegmentBlockKind::Data, 0);
     for (position, entry) in entries.iter().enumerate() {
         let handle = entry.block;

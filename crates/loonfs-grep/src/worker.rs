@@ -54,6 +54,9 @@ const GREP_BACKFILL_CHECKPOINT_NAME: &str = "loonfs-grep-backfill";
 /// so a compaction policy change cannot silently change backfill behavior.
 const GREP_BACKFILL_MAX_CONTENT_BYTES_PER_STEP: u64 = 64 * 1024 * 1024;
 const GRAM_POSTING_BATCH_TARGET: usize = 256;
+/// Content reads and index segment writes the worker runs at once. Eight
+/// reads of files at the 8 MiB eligibility cap hold at most 64 MiB, the same
+/// as one backfill step's content budget.
 const MAX_GREP_WORKER_IO: usize = 8;
 const INDEX_GRAMS_DELTA_LEVEL: u32 = 0;
 const INDEX_GRAMS_MID_LEVEL: u32 = 1;

@@ -6,6 +6,9 @@ license.workspace = true
 rust-version.workspace = true
 description = "Core LoonFS engine: namespace metadata, commits, replay, and maintenance."
 repository.workspace = true
+homepage.workspace = true
+keywords = ["filesystem", "object-storage", "wal", "metadata"]
+categories = ["filesystem"]
 
 [dependencies]
 loonfs-api.workspace = true

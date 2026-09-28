@@ -6,6 +6,9 @@ license.workspace = true
 rust-version.workspace = true
 description = "The LoonFS object-store boundary: contract, key layout, and providers."
 repository.workspace = true
+homepage.workspace = true
+keywords = ["object-storage", "s3", "gcs", "azure-blob", "r2"]
+categories = ["filesystem"]
 
 [dependencies]
 async-trait.workspace = true

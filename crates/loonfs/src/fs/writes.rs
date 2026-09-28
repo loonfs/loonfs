@@ -652,13 +652,13 @@ impl FsWriter {
         skip_all,
         fields(
             operation = "apply_commit",
-            method = "restore_file_revision",
+            method = "restore_revision",
             namespace_id = %namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn restore_file_revision(
+    pub async fn restore_revision(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,

@@ -31,7 +31,8 @@ impl Default for SnapshotPolicy {
 }
 
 impl SnapshotPolicy {
-    /// Validates a requested lifetime before any snapshot write.
+    /// Returns the expiry for a snapshot created at `now_ms` with `ttl_ms`,
+    /// rejecting a lifetime outside this policy's limits.
     pub fn expires_at_ms(&self, now_ms: u64, ttl_ms: u64) -> Result<u64> {
         let message = if ttl_ms == 0 || ttl_ms > self.max_ttl_ms {
             Some(format!("ttl_ms must be greater than zero and may not exceed the `snapshot.max_ttl_ms` limit of {} milliseconds", self.max_ttl_ms))

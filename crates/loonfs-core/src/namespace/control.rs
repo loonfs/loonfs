@@ -269,18 +269,6 @@ pub async fn load_namespace_read_state<S: ObjectStore + ?Sized>(
     )
 }
 
-pub async fn load_namespace_checkpoint_record_control<S: ObjectStore + ?Sized>(
-    store: &S,
-    expected_namespace_id: &NamespaceId,
-    checkpoint_id: &loonfs_api::PinId,
-) -> Result<Option<loonfs_api::wire::control::PinPayload>, crate::error::CoreError> {
-    Ok(
-        crate::checkpoint::load_checkpoint_record(store, expected_namespace_id, checkpoint_id)
-            .await?
-            .map(|loaded| loaded.state),
-    )
-}
-
 pub async fn load_namespace_current_manifest<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace_id: &NamespaceId,

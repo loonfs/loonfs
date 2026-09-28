@@ -6,6 +6,9 @@ license.workspace = true
 rust-version.workspace = true
 description = "Embedded LoonFS runtime: a durable, agent-native filesystem on object storage."
 repository.workspace = true
+homepage.workspace = true
+keywords = ["filesystem", "object-storage", "s3", "embedded"]
+categories = ["filesystem"]
 
 [dependencies]
 async-trait.workspace = true

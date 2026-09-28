@@ -24,8 +24,6 @@ rust-version = "1.88"
 description = "Spec-locked object-store-backed file service"
 repository = "https://github.com/loonfs/loonfs"
 homepage = "https://github.com/loonfs/loonfs"
-keywords = ["object-storage", "files", "r2"]
-categories = ["filesystem", "command-line-utilities"]
 
 [workspace.dependencies]
 async-trait = "0.1"
@@ -44,7 +42,6 @@ http-body = "1"
 http-body-util = "0.1"
 icu_casemap = "=2.1.1"
 icu_normalizer = "=2.1.1"
-indexmap = { version = "2", features = ["serde"] }
 libc = "0.2"
 # The `serde` feature makes foyer encode keys and values through their serde
 # impls, which is how the server's cache key reaches foyer's storage traits.

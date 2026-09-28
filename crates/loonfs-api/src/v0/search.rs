@@ -102,7 +102,7 @@ pub enum GrepIndexLifecycle {
     Backfilling {
         /// The namespace sequence that completes the backfill when reached.
         captured_seq: ChangeSeq,
-        /// The inode after which the scan resumes, or `None` before the first page.
+        /// The inode after which the scan resumes, absent before the first page.
         #[serde(
             default,
             skip_serializing_if = "Option::is_none",

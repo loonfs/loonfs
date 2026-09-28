@@ -14,7 +14,7 @@ use loonfs_api::{
 use loonfs_core::content::{prepare_stored_content, store_bytes_as_content};
 use loonfs_core::publish::{CommitCandidate, CommitRequest, FilesystemOperation};
 use loonfs_core::{
-    BootstrapOptions, Error as CoreError, ErrorCode, MetadataReorganizeOutcome,
+    CreateNamespaceOptions, Error as CoreError, ErrorCode, MetadataReorganizeOutcome,
     NamespaceWriterEngine, RuntimeReadContext,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -38,7 +38,9 @@ impl VisibilityHarness {
             loonfs_api::WriterId::parse("visibility-equivalence").expect("writer id"),
         );
         engine
-            .bootstrap_namespace(BootstrapOptions::new(loonfs_test_support::test_actor()))
+            .bootstrap_namespace(CreateNamespaceOptions::new(
+                loonfs_test_support::test_actor(),
+            ))
             .await
             .expect("bootstrap namespace");
         let results = engine

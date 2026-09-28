@@ -29,7 +29,7 @@ pub struct PathEntry {
     pub kind: PathEntryKind,
     /// Namespace head sequence this answer was read from.
     pub head_seq: ChangeSeq,
-    /// Parent directory inode, or `None` for the root.
+    /// Parent directory inode, absent for the root.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -41,7 +41,7 @@ pub struct PathEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub display_name: Option<DisplayName>,
-    /// The opaque ID for the current parent and name binding, or `None` for the namespace root.
+    /// The opaque ID for the current parent and name binding, absent for the namespace root.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub binding_version: Option<BindingVersion>,
@@ -147,12 +147,12 @@ pub struct AttributesProjection {
     /// The attribute revision this projection represents.
     #[cfg_attr(feature = "openapi", schema(required = false))]
     pub attributes_revision_no: AttributesRevisionNo,
-    /// The actor responsible for the latest attribute update, or `None` for the
+    /// The actor responsible for the latest attribute update, absent for the
     /// initial empty state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub attributes_updated_by: Option<ActorId>,
-    /// The latest attribute update time in Unix milliseconds, or `None` for the
+    /// The latest attribute update time in Unix milliseconds, absent for the
     /// initial empty state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]

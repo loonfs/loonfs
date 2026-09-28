@@ -73,7 +73,7 @@ validation_error!(
 );
 
 string_id! {
-    /// A validated inode attribute value of at most [`MAX_ATTRIBUTE_VALUE_BYTES`] UTF-8 bytes.
+    /// A validated inode attribute value of at most 4,096 UTF-8 bytes.
     ///
     /// Empty strings and control characters are valid, and only an explicit remove
     /// operation deletes an attribute.
@@ -104,8 +104,8 @@ impl AttributeValue {
     }
 }
 
-/// A validated attribute map limited to [`MAX_ATTRIBUTE_ENTRIES`] entries and
-/// [`MAX_ATTRIBUTES_TOTAL_BYTES`] total key and value UTF-8 bytes.
+/// A validated attribute map limited to 100 entries and 65,536 total key and
+/// value UTF-8 bytes.
 ///
 /// Construction and decoding reject values over these limits; an empty map
 /// represents cleared attributes.

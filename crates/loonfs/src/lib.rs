@@ -89,15 +89,16 @@ pub use loonfs_core::time::{current_time_ms, Deadline, Observation, WallClock};
 pub use loonfs_core::{
     delete_if_aged, next_run_no_after, refill_iterators, select_next_iterator,
     write_segments_in_waves, CheckpointFile, CheckpointFilesPage, CheckpointFilesPageCursor,
-    CheckpointPageCursor, CurrentFileState, DeleteNamespaceOptions, Error as CoreError, ErrorCode,
-    ErrorKind, FileContentStream, GcConfig, GraceAge, MetadataCompactionJobOutcome,
-    MetadataCompactionPolicy, MetadataViewError, SegmentBlockLoader, SegmentRowIterator,
-    StoreFailureClass, WriterFence, CONTENT_READ_CHUNK_BYTES, MAX_RESOLVE_CURRENT_FILES,
+    CheckpointPageCursor, CreateNamespaceOptions, CurrentFileState, DeleteNamespaceOptions,
+    Error as CoreError, ErrorCode, ErrorKind, FileContentStream, GcConfig, GraceAge,
+    MetadataCompactionJobOutcome, MetadataCompactionPolicy, MetadataViewError, SegmentBlockLoader,
+    SegmentRowIterator, StoreFailureClass, WriterFence, CONTENT_READ_CHUNK_BYTES,
+    MAX_RESOLVE_CURRENT_FILES,
 };
 pub use publisher::{NamespaceAdvanceHint, NamespaceAdvanceObserver};
 
 /// Request shapes a serving host decodes before converting them to runtime options.
-pub mod wire {
+pub mod requests {
     pub use loonfs_api::{
         AdvanceRetentionRequest, CreateCheckpointRequest, CreateSnapshotRequest,
         ExtendSnapshotRequest, GcRequest, MetadataCompactionRequest, MetadataMaintenanceRequest,
@@ -196,8 +197,8 @@ pub use maintenance::{
 };
 pub use options::{
     CommitOptions, CopyOptions, CreateCheckpointOptions, CreateDirectoryOptions,
-    CreateNamespaceOptions, CreateSnapshotOptions, DeleteOptions, DirectMultipartUploadOptions,
-    ForkNamespaceOptions, ListChangesOptions, ListInodeChildrenOptions, ListPathEntriesOptions,
+    CreateSnapshotOptions, DeleteOptions, DirectMultipartUploadOptions, ForkNamespaceOptions,
+    ListChangesOptions, ListInodeChildrenOptions, ListPathEntriesOptions,
     MetadataMaintenanceOptions, MoveOptions, PutFileOptions, ReadFileStreamOptions,
     RestoreRevisionOptions, StatPathOptions, UndeleteOptions, UpdateAccessOptions,
     UpdateAttributesOptions,
@@ -242,7 +243,7 @@ pub enum RuntimeError {
 }
 
 impl RuntimeError {
-    /// Preserves public error fields for embedded and HTTP callers.
+    /// Returns this error as the public API error body.
     pub fn to_api_error(&self) -> loonfs_api::ApiError {
         loonfs_api::ApiError {
             code: self.code().as_str().to_owned(),

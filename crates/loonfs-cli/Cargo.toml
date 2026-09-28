@@ -6,6 +6,9 @@ license.workspace = true
 rust-version.workspace = true
 description = "The LoonFS command-line interface."
 repository.workspace = true
+homepage.workspace = true
+keywords = ["filesystem", "object-storage", "cli", "s3"]
+categories = ["command-line-utilities"]
 readme = "README.md"
 
 [[bin]]
@@ -39,7 +42,6 @@ toml.workspace = true
 
 [dev-dependencies]
 walkdir.workspace = true
-ureq.workspace = true
 insta = { version = "1.39", features = ["json"] }
 loonfs-core = { workspace = true, features = ["test-support"] }
 # The store wrappers that make "this transfer never held the file" a

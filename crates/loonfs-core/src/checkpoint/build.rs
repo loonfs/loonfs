@@ -19,6 +19,10 @@ use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::ObjectStore;
 use std::future::Future;
 
+/// Most encoded segment bytes one fold or compaction holds while their puts
+/// run. The `STORE_WRITE_WAVE` count alone allows 128 MiB of 8 MiB segments;
+/// 32 MiB is about four such segments and still admits a fold's usual seven
+/// small segments at once.
 const MAX_PENDING_SEGMENT_BYTES: usize = 32 * 1024 * 1024;
 
 pub(super) async fn build_manifest_segments<S: ObjectStore + ?Sized>(
@@ -146,6 +150,8 @@ fn prepare_manifest_segment(
     (descriptor, Bytes::from(built.bytes))
 }
 
+/// The segment puts in flight for one fold or compaction, bounded by
+/// `STORE_WRITE_WAVE` puts and `MAX_PENDING_SEGMENT_BYTES` of bodies.
 pub(super) struct MetadataSegmentPuts<'a, S: ObjectStore + ?Sized> {
     store: &'a S,
     pending: FuturesUnordered<BoxFuture<'a, Result<usize>>>,
@@ -178,6 +184,8 @@ impl<'a, S: ObjectStore + ?Sized> MetadataSegmentPuts<'a, S> {
         Ok(())
     }
 
+    /// Awaits `work` while polling pending puts, so puts progress while the
+    /// merge waits for input reads. A failed put fails the call.
     pub(super) async fn run<T>(&mut self, work: impl Future<Output = Result<T>>) -> Result<T> {
         tokio::pin!(work);
         loop {

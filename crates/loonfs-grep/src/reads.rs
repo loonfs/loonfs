@@ -99,7 +99,7 @@ impl<'a> NamespaceReads<'a> {
     ) -> Result<ListChangesResponse> {
         Ok(self
             .reader
-            .list_changes(
+            .list_changes_page(
                 self.namespace_id,
                 after_seq,
                 ListChangesOptions {
@@ -167,7 +167,7 @@ impl PinnedNamespaceReads<'_> {
         }
         let mut page = self
             .reader
-            .list_changes(
+            .list_changes_page(
                 self.namespace_id(),
                 after_seq,
                 ListChangesOptions {
@@ -243,7 +243,7 @@ impl PinnedNamespaceReads<'_> {
     }
 
     /// Reads an authorized inode revision from the pinned view.
-    pub(crate) async fn read_revision_content(
+    pub(crate) async fn get_file_revision_bytes_by_inode(
         &self,
         inode_id: InodeId,
         revision_no: RevisionNo,
@@ -251,7 +251,7 @@ impl PinnedNamespaceReads<'_> {
     ) -> Result<Vec<u8>> {
         Ok(self
             .snapshot
-            .read_revision_content(inode_id, revision_no, max_bytes)
+            .get_file_revision_bytes_by_inode(inode_id, revision_no, max_bytes)
             .await?)
     }
 }

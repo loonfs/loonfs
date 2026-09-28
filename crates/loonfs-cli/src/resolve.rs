@@ -268,7 +268,7 @@ impl ResolvedTarget {
     }
 
     pub(crate) fn scope_to_subject(&mut self, subject: &Subject) {
-        self.client = self.client.clone().with_subject(subject.clone());
+        self.client = self.client.as_subject(subject.clone());
     }
 }
 

@@ -383,7 +383,7 @@ async fn completion_content_token_passes_unchanged_into_http_commit() {
 
     let changes = harness
         .client
-        .list_changes(&namespace, ChangeSeq(0), &Default::default())
+        .list_changes_page(&namespace, ChangeSeq(0), &Default::default())
         .await
         .expect("list changes");
     assert_eq!(changes.namespace_id, namespace);
@@ -411,7 +411,7 @@ async fn completion_content_token_passes_unchanged_into_http_commit() {
 
     let empty = harness
         .client
-        .list_changes(&namespace, commit.committed_seq, &Default::default())
+        .list_changes_page(&namespace, commit.committed_seq, &Default::default())
         .await
         .expect("list changes after head");
     assert_eq!(empty.changes, Vec::new());

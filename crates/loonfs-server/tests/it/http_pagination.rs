@@ -437,7 +437,7 @@ async fn http_restore_revision_appends_new_head_and_reports_change() {
 
     let restore = harness
         .client
-        .restore_file_revision(
+        .restore_revision(
             &target,
             RevisionNo(1),
             &RestoreRevisionOptions {
@@ -471,7 +471,7 @@ async fn http_restore_revision_appends_new_head_and_reports_change() {
 
     let changes = harness
         .client
-        .list_changes(&namespace, ChangeSeq(0), &Default::default())
+        .list_changes_page(&namespace, ChangeSeq(0), &Default::default())
         .await
         .expect("list changes");
     assert_eq!(changes.changes.len(), 3);
@@ -494,7 +494,7 @@ async fn http_restore_revision_appends_new_head_and_reports_change() {
 
     let first_page = harness
         .client
-        .list_changes(
+        .list_changes_page(
             &namespace,
             ChangeSeq(0),
             &loonfs_client::ListChangesOptions {
@@ -511,7 +511,7 @@ async fn http_restore_revision_appends_new_head_and_reports_change() {
 
     let second_page = harness
         .client
-        .list_changes(
+        .list_changes_page(
             &namespace,
             first_page.next_after_seq.expect("next page"),
             &loonfs_client::ListChangesOptions {
@@ -634,7 +634,7 @@ async fn http_revision_routes_list_read_and_restore_by_path() {
 
     harness
         .client
-        .restore_file_revision(
+        .restore_revision(
             &moved,
             RevisionNo(1),
             &RestoreRevisionOptions::new(loonfs_test_support::test_actor()),
@@ -686,7 +686,7 @@ async fn http_restore_revision_missing_source_returns_revision_not_found() {
 
     match harness
         .client
-        .restore_file_revision(
+        .restore_revision(
             &target,
             RevisionNo(99),
             &RestoreRevisionOptions {

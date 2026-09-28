@@ -19,7 +19,7 @@
 //! use loonfs_core::time::Deadline;
 //! use loonfs_objectstore::timing::StdMonotonicTimer;
 //! use std::sync::Arc;
-//! use loonfs_core::{BootstrapOptions, MutationContext, NamespaceEngine};
+//! use loonfs_core::{CreateNamespaceOptions, MutationContext, NamespaceEngine};
 //! use loonfs_api::WriterId;
 //! use loonfs_objectstore::local_fs_store::LocalFsStore;
 //!
@@ -30,7 +30,7 @@
 //! let writer_id = WriterId::parse("example-writer").expect("valid writer id");
 //! let engine = NamespaceEngine::writer(store, namespace.clone(), writer_id.clone());
 //! let actor_id = ActorId::parse("example-actor").expect("valid actor id");
-//! let _ = engine.bootstrap_namespace(BootstrapOptions::new(actor_id));
+//! let _ = engine.bootstrap_namespace(CreateNamespaceOptions::new(actor_id));
 //!
 //! let publish_store = LocalFsStore::new(std::env::temp_dir())
 //!     .expect("a temporary-directory-backed store should initialize");
@@ -140,8 +140,8 @@ pub mod control {
         load_namespace_catalog_entry, VerifiedNamespaceCatalogEntry,
     };
     pub use crate::namespace::control::{
-        load_namespace_checkpoint_record_control, load_namespace_current_manifest,
-        load_namespace_read_state, CurrentManifest, LoadedHint, LoadedManifest,
+        load_namespace_current_manifest, load_namespace_read_state, CurrentManifest, LoadedHint,
+        LoadedManifest,
     };
     pub use crate::namespace::read_anchor::{
         load_read_anchor, manifest_has_successor, project_anchor_tail, NamespaceReadAnchor,
@@ -187,7 +187,7 @@ pub use error::{
     WriterFence,
 };
 pub use gc::{delete_if_aged, gc_namespace, GcConfig, GraceAge};
-pub use options::{BootstrapOptions, DeleteNamespaceOptions};
+pub use options::{CreateNamespaceOptions, DeleteNamespaceOptions};
 pub use path::read::{
     CurrentFileState, DirectDownloadByInodeTarget, DirectDownloadTarget, MAX_RESOLVE_CURRENT_FILES,
 };

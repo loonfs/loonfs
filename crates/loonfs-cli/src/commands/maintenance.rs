@@ -481,7 +481,7 @@ pub(crate) async fn run_changes(
         async |cursor, limit| {
             context
                 .target
-                .list_changes(
+                .list_changes_page(
                     context.namespace(),
                     cursor.expect("change page collection should carry a sequence"),
                     limit,

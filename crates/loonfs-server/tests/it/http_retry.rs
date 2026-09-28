@@ -341,7 +341,7 @@ async fn http_put_conflict_stands_when_only_the_message_changed() {
 
     let changes = harness
         .client
-        .list_changes(&namespace, ChangeSeq(0), &Default::default())
+        .list_changes_page(&namespace, ChangeSeq(0), &Default::default())
         .await
         .expect("list changes");
     let committed = changes

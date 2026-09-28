@@ -115,15 +115,18 @@ pub struct Client {
 }
 
 impl Client {
-    /// Returns `None` when requests carry no subject headers.
+    /// Returns the subject sent with every request, or `None` when requests
+    /// carry no subject headers.
     pub fn subject(&self) -> Option<&loonfs_api::Subject> {
         self.subject.as_ref()
     }
 
-    /// Sets the subject attached to every server request.
-    pub fn with_subject(mut self, subject: loonfs_api::Subject) -> Self {
-        self.subject = Some(subject);
-        self
+    /// Clones this client with the subject sent with every request.
+    pub fn as_subject(&self, subject: loonfs_api::Subject) -> Self {
+        Self {
+            subject: Some(subject),
+            ..self.clone()
+        }
     }
 
     /// The configured server URL, without a trailing slash.

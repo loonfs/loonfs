@@ -61,7 +61,7 @@ pub enum CreateUploadBody {
     /// Write the object in parts through presigned part uploads.
     #[cfg_attr(feature = "openapi", schema(title = "CreateUploadBodyDirectMultipart"))]
     DirectMultipart {
-        /// The byte length of every part except the last, or `None` for the server default.
+        /// The byte length of every part except the last. Omit it for the server default.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[cfg_attr(feature = "openapi", schema(nullable = false))]
         part_size_bytes: Option<u64>,
@@ -256,7 +256,7 @@ pub enum UploadSessionStatus {
         completed_at_ms: u64,
         /// Verified content selected by this session.
         content_ref: ContentRef,
-        /// Fresh proof for a later commit, or `None` after the token minting window closes.
+        /// Fresh proof for a later commit, absent after the token minting window closes.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[cfg_attr(feature = "openapi", schema(nullable = false))]
         content_token: Option<ContentToken>,

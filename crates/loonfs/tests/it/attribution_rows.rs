@@ -69,7 +69,7 @@ fn embedded_reads_project_commit_attribution_without_rewriting_inode_creation() 
     assert_eq!(replaced.kind.revision_committed_by(), Some(&replacer));
 
     let restorer = actor("restorer");
-    block_on(fs.writer.restore_file_revision(
+    block_on(fs.writer.restore_revision(
         &namespace_id,
         "/implicit/parent/report.txt",
         RevisionNo(1),
