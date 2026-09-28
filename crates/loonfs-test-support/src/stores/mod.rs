@@ -16,7 +16,7 @@ mod recording_store;
 pub use crate::delegate_object_store;
 pub use blocking_store::{BlockingInterceptor, BlockingStore};
 pub use buffer_watch_store::{BufferPeaks, BufferWatchStore};
-pub use concurrency_watch_store::{ConcurrencyWatchStore, ReadConcurrency};
+pub use concurrency_watch_store::{ConcurrencyWatchStore, StoreConcurrency};
 pub use fail_store::{FailInterceptor, FailStore, FailureMode, InjectedError};
 pub use fake_multipart_store::{FakeMultipartStore, MultipartChecksumEnforcement};
 pub use intercept_store::{Intercept, InterceptStore, Interceptor, Outcome};
