@@ -858,7 +858,8 @@ struct NamespacePublisherState {
     worker: Option<WorkerHandle>,
     fold: Option<FoldHandle>,
     next_fold_id: u64,
-    /// The last reserved WAL put. `None` is a cold namespace: it publishes
+    /// The last reserved WAL put. `None` is an idle namespace: nothing was
+    /// queued when its last batch settled, so the next request publishes
     /// immediately.
     last_publish: Option<Observation>,
 }
@@ -1295,8 +1296,8 @@ impl NamespacePublisher {
         loop {
             let collect_started = self.timer.monotonic_now_ms();
             let queue_depth_start = queued_candidates(&self.lock_state());
-            // Do not add a separate batching delay. The first request for an idle
-            // namespace publishes immediately; requests arriving during a publish or
+            // Do not add a separate batching delay. A request for an idle namespace
+            // publishes immediately; requests that queue during a publish or its
             // pacing interval form the next batch.
             self.await_publish_slot().await;
             // Queue ownership and admission remain intact while another
@@ -1870,6 +1871,11 @@ impl NamespacePublisher {
         let mut wait_traces = Vec::new();
         {
             let mut state = self.lock_state();
+            // Nothing queued behind this publish means no load to batch, and the
+            // next request may answer these results: it publishes at once.
+            if state.queue.is_empty() {
+                state.last_publish = None;
+            }
             // Positional pairing is meaningless once lengths differ, so a
             // count mismatch fails every candidate instead of delivering
             // misaligned results to the earlier ones.

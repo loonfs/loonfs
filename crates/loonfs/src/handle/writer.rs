@@ -310,9 +310,9 @@ impl FsWriterBuilder {
     /// Sets the minimum interval between publication starts per namespace,
     /// in milliseconds (see [`crate::publisher`]).
     ///
-    /// A cold namespace publishes immediately; the interval only paces
-    /// follow-up batches, so concurrent publishes amortize into fewer,
-    /// larger WAL segments — with each caller still awaiting its own
+    /// A request to an idle namespace publishes immediately; the interval
+    /// only paces requests that queued behind a publish, so concurrent
+    /// publishes amortize into fewer, larger WAL segments — with each caller still awaiting its own
     /// durable, visible result. Defaults to 15 ms; zero keeps only the
     /// batching that in-flight publications force.
     pub fn min_publish_interval_ms(mut self, min_publish_interval_ms: u64) -> Self {
