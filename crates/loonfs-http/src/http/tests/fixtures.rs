@@ -70,21 +70,15 @@ pub(super) async fn test_app(
         .await?;
     let reader = writer.reader();
     let maintenance = writer.maintenance_handle(format!("{}-maintenance", config.writer_id))?;
-    let cache = Arc::new(new_grep_block_cache(
-        DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
-        metrics.recorder().as_ref(),
-    ));
-    let grep_worker = (options.serves_grep || options.maintains_grep_index).then(|| {
-        GrepWorker::with_block_cache(
-            writer.object_store(),
-            reader.clone(),
-            maintenance.clone(),
-            cache.clone(),
-        )
+    let grep_worker = (options.serves_grep || options.maintains_grep_index)
+        .then(|| GrepWorker::new(writer.object_store(), reader.clone(), maintenance.clone()));
+    let grep_service = options.serves_grep.then(|| {
+        let cache = Arc::new(new_grep_block_cache(
+            DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
+            metrics.recorder().as_ref(),
+        ));
+        Arc::new(GrepService::new(cache))
     });
-    let grep_service = options
-        .serves_grep
-        .then(|| Arc::new(GrepService::new(cache)));
     let state = BindingState {
         upload_permits: Arc::new(Semaphore::new(options.max_concurrent_uploads)),
         download_permits: Arc::new(Semaphore::new(options.max_concurrent_downloads)),

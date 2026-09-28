@@ -59,12 +59,7 @@ impl GrepHost {
             reader: reader.clone(),
             maintenance: maintenance.clone(),
             service: GrepService::new(Arc::clone(&block_cache)),
-            worker: GrepWorker::with_block_cache(
-                store.clone(),
-                reader,
-                maintenance,
-                Arc::clone(&block_cache),
-            ),
+            worker: GrepWorker::new(store.clone(), reader, maintenance),
             block_cache,
         }
     }
