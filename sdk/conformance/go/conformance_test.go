@@ -2978,6 +2978,19 @@ func proxyTemplateForServer(template string) string {
 	return template
 }
 
+func TestProxyRequiresAuthorize(t *testing.T) {
+	handler, err := loonfsproxy.NewHandler(loonfsproxy.Config{
+		ServerBaseURL: "http://upstream.invalid",
+		Token:         "server-token",
+	})
+	if err == nil || err.Error() != "proxy: authorize is required" {
+		t.Fatalf("error = %v, want proxy: authorize is required", err)
+	}
+	if handler != nil {
+		t.Fatal("expected no handler without authorize")
+	}
+}
+
 // Every proxy route must reach the server.
 // Every excluded server route must stop at the proxy.
 func TestProxyForwardsEveryDocumentedRoute(t *testing.T) {
@@ -3047,6 +3060,9 @@ func TestProxyForwardsEveryDocumentedRoute(t *testing.T) {
 		Token:         "recording-stub-token",
 		NamespaceAliases: map[string]string{
 			fixture.NamespaceAlias: fixture.NamespaceID,
+		},
+		Authorize: func(_ *http.Request, _ loonfsproxy.RouteContext) (loonfsproxy.Authorization, error) {
+			return loonfsproxy.Authorization{}, nil
 		},
 	})
 	if err != nil {
@@ -3157,6 +3173,9 @@ func TestProxyPreservesAnAbortedUpstreamBody(t *testing.T) {
 	defer upstream.Close()
 	handler, err := loonfsproxy.NewHandler(loonfsproxy.Config{
 		ServerBaseURL: upstream.URL, Token: "test-token", NamespaceAliases: map[string]string{"app": "demo"},
+		Authorize: func(_ *http.Request, _ loonfsproxy.RouteContext) (loonfsproxy.Authorization, error) {
+			return loonfsproxy.Authorization{}, nil
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
