@@ -249,11 +249,12 @@ impl GrepService {
                 TailScan::OverBudget | TailScan::RebuildRequired if request.allow_stale => {
                     tail_scanned = false;
                 }
-                TailScan::OverBudget | TailScan::RebuildRequired => {
+                tail @ (TailScan::OverBudget | TailScan::RebuildRequired) => {
                     return Err(CoreError::IndexLagging {
                         behind_commits: head_seq
                             .0
                             .saturating_sub(snapshot.resume.built_through_seq().0),
+                        rebuild_required: matches!(tail, TailScan::RebuildRequired),
                     }
                     .into());
                 }
@@ -599,7 +600,7 @@ async fn tail_revisions(
     }
 }
 
-/// The unindexed tail, or the fact that it is larger than one query scans.
+/// The unindexed tail, or why one query cannot scan it.
 enum TailScan {
     /// Every file whose content changed after the index watermark.
     Within(BTreeSet<InodeId>),

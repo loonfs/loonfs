@@ -1462,6 +1462,11 @@ async fn undeleting_a_subtree_hidden_from_backfill_restarts_the_projection() {
         .await
         .expect_err("an exact query cannot project an unseen restored subtree");
     assert_eq!(exact_error.code(), ErrorCode::IndexLagging);
+    assert_eq!(
+        exact_error.to_string(),
+        "the grep index trails the head by 1 commits and needs a rebuild; \
+         run maintenance or set allow_stale"
+    );
 
     let mut stale_request = request("restored needle");
     stale_request.allow_stale = true;
