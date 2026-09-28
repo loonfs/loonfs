@@ -60,14 +60,57 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - id: rust
+        run: echo "version=$(rustc --version)" >> "$GITHUB_OUTPUT"
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: cargo-${{ runner.os }}-${{ github.job }}-${{ hashFiles('Cargo.lock') }}
-          restore-keys: cargo-${{ runner.os }}-${{ github.job }}-
-      - run: cargo test --all --locked
+            target
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ steps.rust.outputs.version }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml', '.cargo/config.toml') }}
+          restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ steps.rust.outputs.version }}-
+      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
+        with:
+          tool: cargo-nextest
+      # Nextest runs every test binary at once; it does not run doctests.
+      - run: cargo nextest run --workspace --locked
+      - run: cargo test --workspace --doc --locked
+
+  # Tests too slow for the default run; each builds a large fixture in a debug build.
+  slow-tests:
+    name: slow tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - id: rust
+        run: echo "version=$(rustc --version)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ steps.rust.outputs.version }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml', '.cargo/config.toml') }}
+          restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ steps.rust.outputs.version }}-
+      - run: cargo test -p loonfs --test it --locked compacted_directory_page_overlaps -- --ignored
+
+  openapi:
+    name: openapi
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - id: rust
+        run: echo "version=$(rustc --version)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ steps.rust.outputs.version }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml', '.cargo/config.toml') }}
+          restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ steps.rust.outputs.version }}-
       - run: cargo test -p loonfs-http --features openapi --locked openapi
 
   # Builds the conformance server once; the three language legs download it.
