@@ -3,6 +3,43 @@
 use super::common::*;
 
 #[test]
+fn a_refused_put_allows_force_with_the_same_or_changed_source() {
+    for (explicit, changed) in [(false, false), (false, true), (true, false), (true, true)] {
+        let harness = Harness::new();
+        harness.add_embedded_profile("default");
+        assert_success(&harness.run(&["namespace", "create", "demo"]));
+        assert_success(&harness.run(&["use", "demo"]));
+        let payload = harness.temp_dir.path().join("hello.txt");
+        fs::write(&payload, b"hello").expect("payload");
+        let mut args = vec![
+            "--json",
+            "put",
+            payload.to_str().expect("path"),
+            "/greeting.txt",
+        ];
+        assert_success(&harness.run(&args));
+        let commit_id = loonfs_api::CommitId::generate();
+        if explicit {
+            args.extend(["--commit-id", commit_id.as_str()]);
+        }
+        let refused = harness.run(&args);
+        assert_failure(&refused);
+        assert_eq!(json_error(&refused)["code"], "path_conflict");
+        if changed {
+            fs::write(&payload, b"changed greeting").expect("changed payload");
+        }
+        args.push("--force");
+        assert_success(&harness.run(&args));
+        let stat = harness.run(&["--json", "stat", "/greeting.txt"]);
+        assert_success(&stat);
+        assert_eq!(json_data(&stat)["revision_no"], 2);
+        let content = harness.run(&["cat", "/greeting.txt"]);
+        assert_success(&content);
+        assert_eq!(content.stdout, fs::read(&payload).expect("payload bytes"));
+    }
+}
+
+#[test]
 fn annotate_expected_attributes_revision_rejects_a_stale_update() {
     let harness = Harness::new();
     harness.add_embedded_profile("default");

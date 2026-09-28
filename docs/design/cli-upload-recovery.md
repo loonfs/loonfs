@@ -2,17 +2,17 @@
 
 A file upload can fail before all of its bytes reach the server, or after the bytes are durable but before the client receives a commit response. Those cases require different retries. An interrupted multipart transfer should resume from the accepted parts. An uncertain commit should be retried with the original request, without uploading another copy of the file.
 
-For file-backed remote PUTs, the CLI records enough local state to distinguish these cases across commands. The recovery record is written before any content is sent and updated as a multipart transfer progresses. Before submitting the commit, the CLI persists the complete request.
+For file-backed PUTs, the CLI records enough local state to distinguish these cases across commands. The recovery record is written before any content is sent and updated as a multipart transfer progresses. Before submitting the commit, the CLI persists the complete request.
 
 This document describes local recovery. The server's upload-session lifecycle and commit-idempotency rules are defined in the [storage format](../specs/format.md).
 
 ## Which uploads can be recovered
 
-Recovery records are used for remote PUTs that read from a local file. They are stored in `$XDG_STATE_HOME/loonfs/uploads`, or `$HOME/.local/state/loonfs/uploads` when `XDG_STATE_HOME` is not set to an absolute path.
+Recovery records are used for embedded and remote PUTs that read from a local file. They are stored in `$XDG_STATE_HOME/loonfs/uploads`, or `$HOME/.local/state/loonfs/uploads` when `XDG_STATE_HOME` is not set to an absolute path.
 
-The record key includes the profile, server URL, namespace, remote path, canonical local path, and any explicit commit ID. Local path bytes are encoded without lossy Unicode conversion. Commands against different destinations therefore do not accidentally reuse the same recovery record.
+The record key includes the profile, target identity, namespace, remote path, canonical local path, and any explicit commit ID. Local path bytes are encoded without lossy Unicode conversion. Commands against different destinations therefore do not accidentally reuse the same recovery record.
 
-Embedded CLI uploads and standard-input streams do not use these records. Repeating either command prepares the content again. Content above the inline threshold is uploaded as a new object, so a rerun under an already committed explicit commit ID conflicts with the earlier request even when the bytes are identical. Content at or under the threshold is identified by its bytes, so the same rerun returns the original commit. The embedded Rust API supports publication retries through retained prepared content, but the embedded CLI does not persist prepared content between commands.
+Embedded profiles host the HTTP binding in memory and use the same recovery records. Standard-input streams have no record because the input cannot be read again.
 
 ## What the record contains
 
@@ -45,7 +45,7 @@ Each update is written to a private temporary file in the journal directory. The
 
 In-memory progress is updated only after persistence succeeds. A failure after the atomic replacement is an uncertain local outcome: the new record may already be present even though the operation reported an error. Recovery must use the persisted record rather than assume the earlier version is still current.
 
-These writes are performed for all file-backed remote PUTs, including small files. For a file sent inline, the prepared record holds the file's bytes and keeps its commit ID stable across reruns. Local durability adds I/O, but it gives the same recovery behavior across file sizes and transfer modes.
+These writes are performed for all file-backed PUTs, including small files. For a file sent inline, the prepared record holds the file's bytes and keeps its commit ID stable across reruns. Local durability adds I/O, but it gives the same recovery behavior across file sizes and transfer modes.
 
 ## Concurrent commands
 
@@ -55,10 +55,12 @@ The lock file remains after completion. Deleting and recreating it could allow a
 
 ## Completion and cleanup
 
-An ordinary attempt removes its recovery record after the commit is acknowledged. An attempt with an explicit commit ID retains the prepared request, so a later invocation with that ID can retry publication without another upload.
+An ordinary attempt removes its recovery record after the commit is acknowledged. After a successful commit, an attempt with an explicit commit ID retains the prepared request, so a later invocation with that ID can retry publication without another upload.
+
+A prepared commit refused against namespace state removes its record, including attempts with an explicit commit ID. Transport failures, unknown outcomes, admission pressure, and other unavailable conditions keep the record. A `commit_id_reuse_conflict` also keeps it as evidence of the attempted request. Errors before receipt resolution and unrecognized errors keep the record.
 
 Retained records and sidecar files consume local storage until they are deliberately removed. Removing a record discards the local recovery information. It does not extend server receipt retention or convert a committed ID into an unused one. Server-side retention still limits the period during which the original commit result is available.
 
 Transfer errors preserve multipart progress for resume or explicit abort. Abandoned server sessions remain until expiry and garbage collection. This can temporarily retain upload parts, but an incomplete upload is never published as a visible file.
 
-A local cleanup error after a successful commit reports the committed ID and sequence. That error concerns the recovery record, not whether the filesystem mutation committed.
+A local cleanup error after a successful commit reports the committed ID and sequence. That error concerns the recovery record, not whether the filesystem mutation committed. If cleanup after a refusal fails, the CLI returns the original server error with the journal path added to its message.
