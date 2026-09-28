@@ -643,7 +643,6 @@ async fn grep_service_pins_query_semantics_response_shapes_and_budgets() {
             &stale_request,
             &CoreError::IndexLagging {
                 behind_commits: 530,
-                rebuild_required: false,
             },
         )
         .await;

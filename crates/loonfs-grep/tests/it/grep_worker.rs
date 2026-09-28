@@ -1277,7 +1277,7 @@ async fn a_move_reindexes_nothing_and_answers_the_new_path() {
 }
 
 #[tokio::test]
-async fn a_recursive_delete_hides_matches_and_an_undelete_rebuild_restores_them() {
+async fn a_recursive_delete_hides_matches_and_an_undelete_restores_them() {
     let temp_dir = tempdir().expect("tempdir");
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
@@ -1362,34 +1362,22 @@ async fn a_recursive_delete_hides_matches_and_an_undelete_rebuild_restores_them(
         )
         .await
         .expect("undelete the subtree");
-    let restart = worker
-        .build_step(&namespace_id, GramIndexBuildPolicy::default())
-        .await
-        .expect("restart after undelete");
-    assert!(matches!(
-        restart,
-        GrepBuildOutcome::BackfillRestarted { .. }
-    ));
     drive_worker_to_current(&worker, &namespace_id, GramIndexBuildPolicy::default()).await;
 
     let restored = new_query(&store, &namespace_id, &request("subtree needle"))
         .await
         .expect("query after the undelete");
+    assert_eq!(matched_paths(&restored), vec!["/docs/a.txt", "/docs/b.txt"]);
     assert_eq!(
-        matched_paths(&restored),
-        vec!["/docs/a.txt", "/docs/b.txt"],
-        "the fresh checkpoint must index the restored subtree"
-    );
-    assert_ne!(
         grep_segment_ids(&store, &namespace_id).await,
         segments_before,
-        "an undelete must replace the old projection"
+        "an undelete must write no new postings"
     );
     writer.shutdown().await.expect("shutdown");
 }
 
 #[tokio::test]
-async fn undeleting_a_subtree_hidden_from_backfill_restarts_the_projection() {
+async fn undeleting_a_subtree_deleted_before_backfill_needs_no_rebuild() {
     let temp_dir = tempdir().expect("tempdir");
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
@@ -1446,8 +1434,9 @@ async fn undeleting_a_subtree_hidden_from_backfill_restarts_the_projection() {
             .matches
             .is_empty()
     );
+    let segments_before = grep_segment_ids(&store, &namespace_id).await;
 
-    writer
+    let undeleted = writer
         .undelete(
             &namespace_id,
             docs_inode_id,
@@ -1458,38 +1447,34 @@ async fn undeleting_a_subtree_hidden_from_backfill_restarts_the_projection() {
         .await
         .expect("undelete subtree after backfill");
 
-    let exact_error = new_query(&store, &namespace_id, &request("restored needle"))
-        .await
-        .expect_err("an exact query cannot project an unseen restored subtree");
-    assert_eq!(exact_error.code(), ErrorCode::IndexLagging);
-    assert_eq!(
-        exact_error.to_string(),
-        "the grep index trails the head by 1 commits and needs a rebuild; \
-         run maintenance or set allow_stale"
-    );
-
-    let mut stale_request = request("restored needle");
-    stale_request.allow_stale = true;
-    let stale = new_query(&store, &namespace_id, &stale_request)
-        .await
-        .expect("indexed-only query across undelete");
-    assert!(!stale.tail_scanned);
-    assert!(stale.matches.is_empty());
-
-    let restart = worker
-        .build_step(&namespace_id, GramIndexBuildPolicy::default())
-        .await
-        .expect("restart after undelete");
-    assert!(matches!(
-        restart,
-        GrepBuildOutcome::BackfillRestarted { .. }
-    ));
-    drive_worker_to_current(&worker, &namespace_id, GramIndexBuildPolicy::default()).await;
-
     let restored = new_query(&store, &namespace_id, &request("restored needle"))
         .await
-        .expect("query rebuilt restored tree");
+        .expect("an exact query across the undelete");
+    assert!(restored.tail_scanned);
     assert_eq!(matched_paths(&restored), vec!["/docs/a.txt", "/docs/b.txt"]);
+
+    let step = worker
+        .build_step(&namespace_id, GramIndexBuildPolicy::default())
+        .await
+        .expect("build step after undelete");
+    assert!(
+        matches!(
+            step,
+            GrepBuildOutcome::Published {
+                segments_written: 0,
+                ..
+            }
+        ),
+        "an undelete only advances the watermark: {step:?}"
+    );
+    assert_eq!(
+        grep_built_through_seq(&store, &namespace_id).await,
+        undeleted.committed_seq
+    );
+    assert_eq!(
+        grep_segment_ids(&store, &namespace_id).await,
+        segments_before
+    );
     writer.shutdown().await.expect("shutdown");
 }
 

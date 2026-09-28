@@ -147,6 +147,7 @@ async fn a_cold_checkpoint_files_page_bounds_its_parent_binding_reads() {
             cursor: None,
             limit: EffectiveLimit::new(NonZeroU32::new(1000).expect("nonzero limit")),
         },
+        crate::checkpoint::ListCheckpointFilesOptions::default(),
     )
     .await
     .expect("checkpoint files page");

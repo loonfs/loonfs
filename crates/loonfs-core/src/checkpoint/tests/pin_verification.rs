@@ -66,6 +66,7 @@ async fn pin_creation_retries_after_compaction_and_collection() {
                 cursor: None,
                 limit: loonfs_test_support::ids::page_limit(10),
             },
+            crate::checkpoint::ListCheckpointFilesOptions::default(),
         )
         .await
         .expect("acknowledged checkpoint remains readable");

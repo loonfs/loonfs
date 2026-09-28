@@ -19,8 +19,8 @@ pub struct CheckpointFilesPageCursor {
     pub after_inode_id: InodeId,
 }
 
-/// One file visible in the checkpointed state, with the content the
-/// checkpoint pinned for it.
+/// One file in the checkpointed state, with the content the checkpoint
+/// pinned for it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckpointFile {
     /// The file's inode id.
@@ -31,6 +31,14 @@ pub struct CheckpointFile {
     pub content_ref: ContentRef,
     /// The file size in bytes.
     pub size_bytes: u64,
+}
+
+/// Options for listing the files a checkpoint pins.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ListCheckpointFilesOptions {
+    /// Whether to include deleted files and files under a deleted directory,
+    /// disabled by default.
+    pub include_deleted: bool,
 }
 
 /// One page of the files a checkpoint pins.
@@ -44,7 +52,8 @@ pub struct CheckpointFilesPage {
     pub next_cursor: Option<CheckpointFilesPageCursor>,
 }
 
-/// Lists files visible in the state pinned by `checkpoint_id`.
+/// Lists files visible in the state pinned by `checkpoint_id`, or every file
+/// it retains with `include_deleted`.
 ///
 /// Later WAL entries are not replayed. Directories are omitted. Missing or
 /// deleted checkpoints return `checkpoint_unavailable`.
@@ -54,6 +63,7 @@ pub(crate) async fn list_checkpoint_files_page<S: ObjectStore + ?Sized>(
     head: &crate::namespace::state::NamespaceReadState,
     checkpoint_id: &PinId,
     request: PageRequest<CheckpointFilesPageCursor>,
+    options: ListCheckpointFilesOptions,
 ) -> Result<CheckpointFilesPage> {
     let namespace_id = &head.namespace_id;
     let PinnedCheckpointBasis { manifest, segments } =
@@ -108,12 +118,18 @@ pub(crate) async fn list_checkpoint_files_page<S: ObjectStore + ?Sized>(
             .filter(|(_, inode_kind)| *inode_kind == InodeKind::File)
             .map(|(inode_id, _)| *inode_id)
             .collect::<Vec<_>>();
-        session.preload_visibility(&file_inode_ids).await?;
+        if !options.include_deleted {
+            session.preload_visibility(&file_inode_ids).await?;
+        }
         for inode_id in file_inode_ids {
-            if session.visible_inode(inode_id).await?.is_none() {
-                continue;
-            }
-            let Some(revision) = session.latest_revision_head_of_visible(inode_id).await? else {
+            let revision = if options.include_deleted {
+                view.latest_revision_record(inode_id).await?
+            } else if session.visible_inode(inode_id).await?.is_some() {
+                session.latest_revision_head_of_visible(inode_id).await?
+            } else {
+                None
+            };
+            let Some(revision) = revision else {
                 continue;
             };
             files.push(CheckpointFile {

@@ -92,7 +92,7 @@ Disabling the index publishes a `disabled` manifest with no segment references. 
 
 Enablement creates an expiring user checkpoint at the namespace head, then publishes a backfilling manifest with that checkpoint ID, target sequence, and no inode cursor.
 
-Each bounded build step enumerates files from the checkpoint in ascending inode order. It reads one current revision per visible file, applies the eligibility rule, extracts grams, and writes new delta segments. The segment set and last-consumed inode are published together in the next numbered grep manifest.
+Each bounded build step enumerates files from the checkpoint in ascending inode order. It reads one current revision per retained file, including deleted files, applies the eligibility rule, extracts grams, and writes new delta segments. The segment set and last-consumed inode are published together in the next numbered grep manifest.
 
 The final backfill step changes the lifecycle to `active` at the captured sequence and releases the checkpoint. Writes committed after that sequence are then processed through the change feed. They do not change the fixed target of the backfill already in progress.
 

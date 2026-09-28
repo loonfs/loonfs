@@ -6,7 +6,8 @@
 use crate::{GrepError, Result};
 use loonfs::{
     CheckpointFilesPage, CheckpointFilesPageCursor, CoreError, CurrentFileState, FsReadSnapshot,
-    FsReader, ListChangesOptions, StatPathOptions, MAX_RESOLVE_CURRENT_FILES,
+    FsReader, ListChangesOptions, ListCheckpointFilesOptions, StatPathOptions,
+    MAX_RESOLVE_CURRENT_FILES,
 };
 use loonfs_api::v0::{FilesystemChange, ListChangesResponse};
 use loonfs_api::{
@@ -64,7 +65,8 @@ impl<'a> NamespaceReads<'a> {
     }
 
     /// Reads one page of the files a checkpoint pins, in ascending inode-id
-    /// order.
+    /// order. Deleted files are included so an undelete needs no new
+    /// postings; queries decide visibility.
     ///
     /// Returns `checkpoint_unavailable` if the checkpoint was deleted,
     /// expired, or removed. The caller must then restart the backfill from a
@@ -83,6 +85,9 @@ impl<'a> NamespaceReads<'a> {
                 PageRequest {
                     limit: page_limit(limit).map_err(invalid_page_limit)?,
                     cursor,
+                },
+                ListCheckpointFilesOptions {
+                    include_deleted: true,
                 },
             )
             .await?)

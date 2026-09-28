@@ -18,7 +18,6 @@ use crate::reads::{published_revision, resolve_batch_size, NamespaceReads, Pinne
 use crate::{GrepError, Result};
 use futures::future::{join_all, try_join_all};
 use loonfs::{CoreError, CurrentFileState, MetadataViewError};
-use loonfs_api::v0::FilesystemChange;
 use loonfs_api::wire::hex::hex_decode_bytes;
 use loonfs_api::wire::sst_blocks::{
     decode_filter_block, index_blocks_for_key_range, key_range_may_intersect,
@@ -242,15 +241,14 @@ impl GrepService {
         if let Some(tail_resume) = tail_resume {
             match tail_revisions(&reads, tail_resume).await? {
                 TailScan::Within(inodes) => candidates.unfiltered.extend(inodes),
-                TailScan::OverBudget | TailScan::RebuildRequired if request.allow_stale => {
+                TailScan::OverBudget if request.allow_stale => {
                     tail_scanned = false;
                 }
-                tail @ (TailScan::OverBudget | TailScan::RebuildRequired) => {
+                TailScan::OverBudget => {
                     return Err(CoreError::IndexLagging {
                         behind_commits: head_seq
                             .0
                             .saturating_sub(snapshot.resume.built_through_seq().0),
-                        rebuild_required: matches!(tail, TailScan::RebuildRequired),
                     }
                     .into());
                 }
@@ -578,9 +576,6 @@ async fn tail_revisions(
                 });
             }
             for event in events.iter().skip(start_event_index) {
-                if matches!(event, FilesystemChange::Undeleted { .. }) {
-                    return Ok(TailScan::RebuildRequired);
-                }
                 if let Some(revision) = published_revision(event) {
                     inodes.insert(revision.inode_id);
                 }
@@ -596,14 +591,10 @@ async fn tail_revisions(
     }
 }
 
-/// The unindexed tail, or why one query cannot scan it.
+/// The unindexed tail, or the fact that it is larger than one query scans.
 enum TailScan {
     /// Every file whose content changed after the index watermark.
     Within(BTreeSet<InodeId>),
-    /// An undelete may expose files absent from the checkpoint index. The
-    /// event names only the restored root, so an exact query must wait for
-    /// the worker to rebuild the projection from the now-visible tree.
-    RebuildRequired,
     /// More files changed after the watermark than the tail budget allows;
     /// enumeration stopped there, so no set is carried.
     OverBudget,

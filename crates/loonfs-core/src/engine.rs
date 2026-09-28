@@ -3,7 +3,10 @@
 
 use crate::authorize::{Authorizer, CommitAuthority, ReadAccess};
 use crate::cache::{MetadataSegmentCache, WalTailProjectionCache};
-use crate::checkpoint::{CheckpointFilesPage, CheckpointFilesPageCursor, CheckpointPageCursor};
+use crate::checkpoint::{
+    CheckpointFilesPage, CheckpointFilesPageCursor, CheckpointPageCursor,
+    ListCheckpointFilesOptions,
+};
 use crate::commit_engine::CommitCandidate;
 use crate::context::MutationContext;
 use crate::error::{CoreError, Result};
@@ -666,6 +669,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         &self,
         checkpoint_id: &PinId,
         request: PageRequest<CheckpointFilesPageCursor>,
+        options: ListCheckpointFilesOptions,
         context: &RuntimeReadContext,
     ) -> Result<CheckpointFilesPage> {
         // Rejects a mismatched or deleted namespace before any read work.
@@ -676,6 +680,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             &context.head,
             checkpoint_id,
             request,
+            options,
         )
         .await
     }

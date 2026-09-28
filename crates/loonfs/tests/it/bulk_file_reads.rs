@@ -9,8 +9,9 @@ use crate::common::*;
 use loonfs::{
     CheckpointFile, CheckpointFilesPageCursor, ContentRef, CreateCheckpointOptions,
     CreateNamespaceOptions, CurrentFileState, DeleteDirectoryBehavior, DeleteOptions,
-    DestinationBehavior, ErrorCode, FsReader, InodeId, MoveOptions, NamespaceId, PageRequest,
-    PutFileOptions, RevisionNo, RuntimeError, SharedObjectStore, StoreConfig, UndeleteOptions,
+    DestinationBehavior, ErrorCode, FsReader, InodeId, ListCheckpointFilesOptions, MoveOptions,
+    NamespaceId, PageRequest, PutFileOptions, RevisionNo, RuntimeError, SharedObjectStore,
+    StoreConfig, UndeleteOptions,
 };
 use loonfs_test_support::ids::{namespace_id, page_limit};
 use loonfs_test_support::stores::{KeyPredicate, OperationClass, RecordingStore};
@@ -96,6 +97,7 @@ async fn checkpoint_files(
                     limit: page_limit(limit),
                     cursor,
                 },
+                ListCheckpointFilesOptions::default(),
             )
             .await
             .expect("read a checkpoint files page");
@@ -313,6 +315,35 @@ async fn checkpoint_enumeration_answers_the_state_it_pinned() {
          deleted subtree nor anything written later"
     );
 
+    let retained = fs
+        .reader
+        .list_checkpoint_files_page(
+            &namespace_id,
+            &checkpoint.checkpoint_id,
+            PageRequest {
+                limit: page_limit(100),
+                cursor: None,
+            },
+            ListCheckpointFilesOptions {
+                include_deleted: true,
+            },
+        )
+        .await
+        .expect("list the files the checkpoint retains");
+    let (visible, deleted): (Vec<_>, Vec<_>) = retained
+        .files
+        .into_iter()
+        .partition(|file| at_checkpoint.contains_key(&file.inode_id));
+    assert_eq!(visible, enumerated);
+    assert_eq!(
+        deleted
+            .iter()
+            .map(|file| file.size_bytes)
+            .collect::<Vec<_>>(),
+        vec![b"discarded".len() as u64],
+        "include_deleted adds only the file under the deleted subtree"
+    );
+
     // The live namespace has moved on; the checkpoint has not.
     let now = listed_files(&fs.reader, &namespace_id).await;
     assert!(
@@ -393,6 +424,7 @@ async fn checkpoint_files_page_without_gaps_or_duplicates() {
                         after_inode_id: file.inode_id,
                     }),
                 },
+                ListCheckpointFilesOptions::default(),
             )
             .await
             .expect("resume from a cursor");
@@ -427,6 +459,7 @@ async fn an_empty_namespace_answers_one_empty_page() {
                 limit: page_limit(10),
                 cursor: None,
             },
+            ListCheckpointFilesOptions::default(),
         )
         .await
         .expect("enumerate an empty namespace");
@@ -573,6 +606,7 @@ async fn a_deleted_checkpoint_refuses_enumeration_instead_of_answering_current_s
                 limit: page_limit(10),
                 cursor: None,
             },
+            ListCheckpointFilesOptions::default(),
         )
         .await
         .expect_err("a deleted checkpoint pins nothing to enumerate");
@@ -589,6 +623,7 @@ async fn a_deleted_checkpoint_refuses_enumeration_instead_of_answering_current_s
                 limit: page_limit(10),
                 cursor: None,
             },
+            ListCheckpointFilesOptions::default(),
         )
         .await
         .expect_err("a checkpoint that never existed pins nothing either");
