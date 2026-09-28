@@ -237,6 +237,23 @@ impl ProfileConfig {
         }
     }
 
+    pub(crate) fn validate_store(&self, name: &str) -> Result<(), CliError> {
+        if let Self::Embedded { store, .. } = self {
+            if let StoreConfig::LocalFs { root, .. } = store {
+                if !Path::new(root).is_absolute() {
+                    return Err(CliError::invalid_config(format!(
+                        "profile `{name}` has a relative local-fs root `{root}`; \
+                         set an absolute path with `loonfs profile update local {name} --root <path>`"
+                    )));
+                }
+            }
+            store
+                .validate()
+                .map_err(|error| profile_store_error(name, &error))?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn redacted(&self) -> Self {
         match self {
             ProfileConfig::Embedded {

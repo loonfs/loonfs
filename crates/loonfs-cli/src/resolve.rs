@@ -236,7 +236,12 @@ impl ResolvedTarget {
         Ok(())
     }
 
-    pub(crate) async fn resolve(profile: &ProfileConfig, no_retry: bool) -> Result<Self, CliError> {
+    pub(crate) async fn resolve(
+        profile_name: &str,
+        profile: &ProfileConfig,
+        no_retry: bool,
+    ) -> Result<Self, CliError> {
+        profile.validate_store(profile_name)?;
         match profile {
             ProfileConfig::Embedded {
                 store, writer_id, ..

@@ -164,7 +164,7 @@ pub(crate) async fn resolve_profile_context_from_config<'a>(
 ) -> Result<(CommandContext, &'a crate::config::ProfileConfig), CommandFailure> {
     let (profile_name, profile) = crate::profiles::resolve_profile(config, explicit_profile)
         .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
-    let mut target = ResolvedTarget::resolve(profile, no_retry)
+    let mut target = ResolvedTarget::resolve(profile_name, profile, no_retry)
         .await
         .map_err(|error| fail(kind, Some(profile_name.to_owned()), None, error))?;
     let mode = target.mode_str().to_owned();
@@ -235,9 +235,10 @@ async fn resolve_command_context_with_actor(
         crate::profiles::resolve_profile(&loaded.config, explicit_profile)
             .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
     let profile_name = profile_name.to_owned();
-    let mut resolved_target = ResolvedTarget::resolve(profile, target.request.no_retry)
-        .await
-        .map_err(|error| fail(kind, Some(profile_name.clone()), None, error))?;
+    let mut resolved_target =
+        ResolvedTarget::resolve(&profile_name, profile, target.request.no_retry)
+            .await
+            .map_err(|error| fail(kind, Some(profile_name.clone()), None, error))?;
     let mode = resolved_target.mode_str().to_owned();
     let attribute = |error| fail(kind, Some(profile_name.clone()), Some(mode.clone()), error);
     let actor = resolve_actor(profile, actor.and_then(|actor| actor.actor_id.as_deref()))
