@@ -76,24 +76,22 @@ where
 }
 
 /// Creates a control object and reports a generated-ID collision as an internal error.
+///
+/// A precondition failure is read back like a transport failure: an earlier
+/// attempt's put can land after its own read-back found nothing.
 pub(crate) async fn create_control_object_under_generated_id<S: ObjectStore + ?Sized>(
     store: &S,
     object_key: &str,
     encoded: Bytes,
 ) -> crate::error::Result<ObjectMetadata> {
-    let collision = || {
-        CoreError::Internal(format!(
-            "a generated id collided with the existing control object `{object_key}`"
-        ))
-    };
     retry_while_contended(
         || async {
             match store.put_if_absent(object_key, encoded.clone()).await {
                 Ok(metadata) => Ok(CasAttempt::Settled(metadata)),
-                Err(ObjectStoreError::PreconditionFailed { .. }) => Err(collision()),
-                Err(error @ ObjectStoreError::Transport { .. }) => {
-                    Ok(CasAttempt::Ambiguous(error, ()))
-                }
+                Err(
+                    error @ (ObjectStoreError::PreconditionFailed { .. }
+                    | ObjectStoreError::Transport { .. }),
+                ) => Ok(CasAttempt::Ambiguous(error, ())),
                 Err(error) => Err(CoreError::store(object_key, &error)),
             }
         },
@@ -105,7 +103,9 @@ pub(crate) async fn create_control_object_under_generated_id<S: ObjectStore + ?S
                     Ok(Some(stored)) if stored.bytes == *encoded => {
                         Ok(WriteEvidence::Landed(stored.metadata))
                     }
-                    Ok(Some(_)) => Err(collision()),
+                    Ok(Some(_)) => Err(CoreError::Internal(format!(
+                        "a generated id collided with the existing control object `{object_key}`"
+                    ))),
                     Ok(None) => Ok(WriteEvidence::Lost(failed)),
                     Err(error) => Err(CoreError::store(object_key, &error)),
                 }
@@ -289,7 +289,9 @@ async fn load_upload_session_object<S: ObjectStore + ?Sized>(
 mod tests {
     use super::*;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
-    use loonfs_test_support::stores::{FailStore, InjectedError, KeyPredicate, OperationClass};
+    use loonfs_test_support::stores::{
+        BlockingStore, FailStore, InjectedError, KeyPredicate, OperationClass,
+    };
     use tempfile::tempdir;
 
     #[tokio::test]
@@ -321,19 +323,64 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn generated_id_create_does_not_adopt_an_existing_identical_record() {
+    async fn generated_id_create_adopts_its_own_put_that_lands_after_the_read_back() {
+        let temp_dir = tempdir().expect("tempdir");
+        let object_key = "namespaces/demo/pins/pin_00000000000000000001-0000000000000001.json";
+        let payload = Bytes::from_static(b"generated control record");
+        let store = FailStore::new(
+            BlockingStore::new(
+                LocalFsStore::new(temp_dir.path()).expect("store"),
+                KeyPredicate::exact(object_key),
+                OperationClass::PutCreateIfAbsent,
+            ),
+            KeyPredicate::exact(object_key),
+            OperationClass::PutCreateIfAbsent,
+            InjectedError::Transport("lost write request".to_owned()),
+        );
+        store.fail_next(1);
+        let gate = store.inner();
+        gate.block_next();
+
+        let (created, ()) = tokio::join!(
+            create_control_object_under_generated_id(&store, object_key, payload.clone()),
+            async {
+                gate.wait_until_blocked().await;
+                gate.inner()
+                    .put_if_absent(object_key, payload.clone())
+                    .await
+                    .expect("the first put lands late");
+                gate.release();
+            },
+        );
+
+        let metadata = created.expect("the create adopts its own late-landed put");
+        assert_eq!(store.attempts(), 2);
+        let stored = store
+            .get_with_metadata(object_key)
+            .await
+            .expect("read record")
+            .expect("record exists");
+        assert_eq!(stored.bytes, payload);
+        assert_eq!(metadata, stored.metadata);
+    }
+
+    #[tokio::test]
+    async fn generated_id_create_reports_other_bytes_as_a_collision() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let object_key = "namespaces/demo/pins/pin_00000000000000000001-0000000000000001.json";
-        let payload = Bytes::from_static(b"generated control record");
         store
-            .put_if_absent(object_key, payload.clone())
+            .put_if_absent(object_key, Bytes::from_static(b"another control record"))
             .await
             .expect("seed colliding record");
 
-        let error = create_control_object_under_generated_id(&store, object_key, payload)
-            .await
-            .expect_err("an immediate precondition failure remains a collision");
+        let error = create_control_object_under_generated_id(
+            &store,
+            object_key,
+            Bytes::from_static(b"generated control record"),
+        )
+        .await
+        .expect_err("other bytes under the generated id are a collision");
 
         assert!(matches!(
             error,
