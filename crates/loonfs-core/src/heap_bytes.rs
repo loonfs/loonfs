@@ -60,22 +60,29 @@ pub(crate) fn hash_map_table_bytes<K, V>(map: &HashMap<K, V>) -> usize {
 }
 
 /// The nodes of a B-tree map filled by sorted inserts, which is how
-/// decoding fills one. Each full leaf of eleven slots splits into six and
-/// five, so the leaves after the first hold about seven entries each.
+/// decoding fills one. A full node of eleven slots splits into six and five
+/// and moves one entry up to its parent. So each node after the first on a
+/// level takes seven entries: six it keeps and one its parent holds. The
+/// parents form the next level and fill the same way, up to a single root.
 fn btree_map_node_bytes<K, V>(map: &BTreeMap<K, V>) -> usize {
-    const LEAF_SLOTS: usize = 11;
+    const NODE_SLOTS: usize = 11;
     let leaf = (size_of::<usize>()
         + 2 * size_of::<u16>()
-        + LEAF_SLOTS * (size_of::<K>() + size_of::<V>()))
+        + NODE_SLOTS * (size_of::<K>() + size_of::<V>()))
     .next_multiple_of(size_of::<usize>());
-    match map.len() {
+    let internal = leaf + (NODE_SLOTS + 1) * size_of::<usize>();
+    let nodes = |entries: usize| match entries {
         0 => 0,
-        len if len <= LEAF_SLOTS => leaf,
-        len => {
-            let leaves = 2 + (len - LEAF_SLOTS - 1) / 7;
-            leaves * leaf + leaf + (LEAF_SLOTS + 1) * size_of::<usize>()
-        }
+        entries if entries <= NODE_SLOTS => 1,
+        entries => 2 + (entries - NODE_SLOTS - 1) / 7,
+    };
+    let mut level = nodes(map.len());
+    let mut bytes = level * leaf;
+    while level > 1 {
+        level = nodes(level - 1);
+        bytes += level * internal;
     }
+    bytes
 }
 
 impl HeapBytes for String {
@@ -364,5 +371,40 @@ impl HeapBytes for MetadataSegmentRef {
 impl HeapBytes for SegmentIndexEntry {
     fn heap_bytes(&self) -> usize {
         self.last_row_key.heap_bytes()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::HeapBytes;
+    use loonfs_api::AccessGrants;
+
+    #[test]
+    fn a_decoded_grant_map_is_charged_for_every_level_of_nodes() {
+        // A counting allocator measured these counts, with leaves of 288
+        // bytes and internal nodes of 384, on maps built by sorted inserts.
+        // The sizes sit on both sides of each point where the tree gains a
+        // level.
+        for (entries, leaves, internal_nodes) in [
+            (11, 1, 0),
+            (12, 2, 1),
+            (88, 12, 1),
+            (89, 13, 3),
+            (627, 89, 13),
+            (628, 90, 16),
+            (1_000, 143, 24),
+        ] {
+            let json = (0..entries)
+                .map(|entry| format!("\"p{entry:04}\":[\"read\"]"))
+                .collect::<Vec<_>>()
+                .join(",");
+            let grants: AccessGrants =
+                serde_json::from_str(&format!("{{{json}}}")).expect("grants");
+            assert_eq!(
+                grants.heap_bytes(),
+                leaves * 288 + internal_nodes * 384 + 5 * entries,
+                "{entries} entries"
+            );
+        }
     }
 }

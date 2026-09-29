@@ -16,9 +16,17 @@ use loonfs::{
     MetadataSegmentCacheConfig, NamespaceId, PageRequest, RuntimeCacheConfig, SharedObjectStore,
     StatPathOptions,
 };
+use loonfs_api::{
+    AccessGrants, AccessRight, AccessRights, AttributeKey, AttributeValue, NamespaceAccess,
+    PrincipalId, PrincipalScope, PrincipalSet, Subject, SubjectId, MAX_ACCESS_GRANT_ENTRIES,
+    MAX_ATTRIBUTE_ENTRIES,
+};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
-use loonfs_test_support::ids::{namespace_id, page_limit, test_actor};
+use loonfs_test_support::ids::{
+    attribute_key, attribute_text, namespace_id, page_limit, test_actor,
+};
 use std::alloc::{GlobalAlloc, Layout, System};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -66,22 +74,35 @@ unsafe impl GlobalAlloc for CountingAllocator {
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator;
 
-const NAMESPACES: usize = 8;
 const DIRECTORIES: usize = 16;
 const SEGMENT_BUDGET_BYTES: usize = 2 * 1024 * 1024;
 const TOLERANCE: f64 = 0.10;
+const PRINCIPAL_SCOPE: &str = "org_dense";
+
+/// What each entry is.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Rows {
+    /// Short directories.
+    Directories,
+    /// Files with 200-byte names, a 200-byte actor id, 120-byte commit ids,
+    /// and 2 KiB of inline content per file in the tail.
+    Large,
+    /// Files with 100 attributes each, under directories whose access rows
+    /// hold 1,000 grants each, in a namespace with access control. Listing
+    /// leaves the attributes out, so the segment cache holds the access
+    /// rows; a projection holds both.
+    Dense,
+}
 
 /// One dataset shape. Every namespace holds `folded_entries` in metadata
 /// segments and `tail_commits` unfolded WAL segments on top.
 struct Shape {
     label: &'static str,
+    namespaces: usize,
     folded_entries: usize,
     tail_commits: usize,
     tail_entries_per_commit: usize,
-    /// Files with 200-byte names, a 200-byte actor id, 120-byte commit ids,
-    /// and 2 KiB of inline content per file in the tail, instead of short
-    /// directories.
-    large_rows: bool,
+    rows: Rows,
 }
 
 impl Shape {
@@ -95,7 +116,7 @@ impl Shape {
 
     fn entry_path(&self, entry: usize) -> String {
         let directory = entry % DIRECTORIES;
-        if self.large_rows {
+        if self.rows == Rows::Large {
             format!("/d-{directory:04}/{:x<200}", format!("file-{entry:05}-"))
         } else {
             format!("/d-{directory:04}/entry-{entry:05}")
@@ -103,7 +124,7 @@ impl Shape {
     }
 
     fn actor(&self) -> ActorId {
-        if self.large_rows {
+        if self.rows == Rows::Large {
             ActorId::parse(format!("{:a<200}", "actor-")).expect("actor id")
         } else {
             test_actor()
@@ -111,20 +132,31 @@ impl Shape {
     }
 
     fn commit_id(&self, label: &str) -> CommitId {
-        if self.large_rows {
+        if self.rows == Rows::Large {
             CommitId::parse(format!("{:x<120}", format!("c-{label}-"))).expect("commit id")
         } else {
             CommitId::parse(label).expect("commit id")
         }
     }
 
+    /// Reads a namespace with access control as a subject whose `read`
+    /// comes from the grants, so every read walks the access rows.
+    fn reader(&self, reader: FsReader) -> FsReader {
+        match self.rows {
+            Rows::Dense => reader.as_subject(subject(1)),
+            Rows::Directories | Rows::Large => reader,
+        }
+    }
+
     /// Files share one small inline value unless `distinct_bytes` gives each
     /// file its own; a shared value keeps the flush to one content write.
+    /// A dense commit also replaces the grants of `directories`.
     fn candidate(
         &self,
         namespace_id: &NamespaceId,
         label: &str,
         entries: std::ops::Range<usize>,
+        directories: std::ops::Range<usize>,
         distinct_bytes: Option<usize>,
     ) -> CommitCandidate {
         let inline = |bytes: usize| {
@@ -136,14 +168,14 @@ impl Shape {
         };
         let shared = inline(64);
         let mut inline_content = Vec::new();
-        let operations = entries
-            .map(|entry| {
+        let mut operations: Vec<_> = entries
+            .flat_map(|entry| {
                 let path = parse_mutation_path(&self.entry_path(entry)).expect("path");
-                if !self.large_rows {
-                    return FilesystemOperation::CreateDirectory {
+                if self.rows == Rows::Directories {
+                    return vec![FilesystemOperation::CreateDirectory {
                         path,
                         parents: true,
-                    };
+                    }];
                 }
                 let content_ref = match distinct_bytes {
                     Some(bytes) => {
@@ -154,32 +186,97 @@ impl Shape {
                     }
                     None => shared.content_ref().clone(),
                 };
-                FilesystemOperation::PutFile {
-                    path,
+                let put = FilesystemOperation::PutFile {
+                    path: path.clone(),
                     content_ref: Some(content_ref),
                     inline_content: None,
                     behavior: DestinationBehavior::NoReplace,
                     expected_inode_id: None,
                     expected_revision_no: None,
+                };
+                if self.rows == Rows::Large {
+                    return vec![put];
                 }
+                vec![
+                    put,
+                    FilesystemOperation::UpdateAttributes {
+                        path,
+                        set: full_attributes(),
+                        remove: Vec::new(),
+                        expected_inode_id: None,
+                        expected_attributes_revision_no: None,
+                    },
+                ]
             })
             .collect();
+        if self.rows == Rows::Dense {
+            operations.extend(
+                directories.map(|directory| FilesystemOperation::UpdateAccess {
+                    path: parse_mutation_path(&format!("/d-{directory:04}")).expect("path"),
+                    boundary: false,
+                    grants: full_grants(false),
+                    expected_inode_id: None,
+                    expected_access_revision_no: None,
+                }),
+            );
+        }
         CommitCandidate::with_inline_content(
             CommitRequest {
                 commit_id: self.commit_id(label),
                 actor_id: self.actor(),
-                subject: None,
+                subject: (self.rows == Rows::Dense).then(|| subject(0)),
                 message: None,
                 operations,
                 preconditions: Vec::new(),
             },
             Vec::new(),
             match distinct_bytes {
-                None if self.large_rows => vec![shared],
+                None if self.rows != Rows::Directories => vec![shared],
                 _ => inline_content,
             },
         )
     }
+}
+
+fn principal(index: usize) -> PrincipalId {
+    PrincipalId::parse(format!("p{index:04}")).expect("principal id")
+}
+
+fn subject(index: usize) -> Subject {
+    Subject {
+        principal_scope: PrincipalScope::parse(PRINCIPAL_SCOPE).expect("principal scope"),
+        subject_id: SubjectId::parse(principal(index).as_str()).expect("subject id"),
+        principals: PrincipalSet::new(BTreeSet::from([principal(index)])).expect("principals"),
+    }
+}
+
+/// A grant map at the entry limit. On the root the first principal holds
+/// `admin`. Every other grant holds four rights, whose names put at most two
+/// access rows in a data block, so no one block is a large part of the
+/// segment budget.
+fn full_grants(root: bool) -> AccessGrants {
+    let rights = AccessRights::from_iter([
+        AccessRight::Read,
+        AccessRight::History,
+        AccessRight::Create,
+        AccessRight::Remove,
+    ]);
+    AccessGrants::new(
+        (0..MAX_ACCESS_GRANT_ENTRIES)
+            .map(|index| match index {
+                0 if root => (principal(index), AccessRights::ADMIN),
+                _ => (principal(index), rights),
+            })
+            .collect(),
+    )
+    .expect("grants")
+}
+
+/// An attribute map at the entry limit.
+fn full_attributes() -> BTreeMap<AttributeKey, AttributeValue> {
+    (0..MAX_ATTRIBUTE_ENTRIES)
+        .map(|index| (attribute_key(&format!("k{index:02}")), attribute_text("v")))
+        .collect()
 }
 
 async fn seed(store: &SharedObjectStore, shape: &Shape) {
@@ -198,16 +295,29 @@ async fn seed(store: &SharedObjectStore, shape: &Shape) {
         max_wal_tail_segments: std::num::NonZeroU64::MIN,
         ..Default::default()
     };
-    for index in 0..NAMESPACES {
+    for index in 0..shape.namespaces {
         let namespace_id = shape.namespace(index);
+        let mut options = CreateNamespaceOptions::new(shape.actor());
+        if shape.rows == Rows::Dense {
+            options.access = NamespaceAccess::Acl {
+                principal_scope: PrincipalScope::parse(PRINCIPAL_SCOPE).expect("principal scope"),
+                root_grants: full_grants(true),
+            };
+        }
         writer
-            .create_namespace(&namespace_id, CreateNamespaceOptions::new(shape.actor()))
+            .create_namespace(&namespace_id, options)
             .await
             .expect("create namespace");
         writer
             .commit_candidate(
                 &namespace_id,
-                shape.candidate(&namespace_id, "seed", 0..shape.folded_entries, None),
+                shape.candidate(
+                    &namespace_id,
+                    "seed",
+                    0..shape.folded_entries,
+                    0..DIRECTORIES,
+                    None,
+                ),
             )
             .await
             .expect("seed commit");
@@ -225,6 +335,7 @@ async fn seed(store: &SharedObjectStore, shape: &Shape) {
                         &namespace_id,
                         &format!("tail-{commit}"),
                         next..end,
+                        commit..commit + 1,
                         Some(2048),
                     ),
                 )
@@ -254,7 +365,8 @@ where
 }
 
 async fn list_every_directory(shape: &Shape, reader: FsReader) {
-    for index in 0..NAMESPACES {
+    let reader = shape.reader(reader);
+    for index in 0..shape.namespaces {
         let namespace_id = shape.namespace(index);
         for directory in 0..DIRECTORIES {
             reader
@@ -274,7 +386,8 @@ async fn list_every_directory(shape: &Shape, reader: FsReader) {
 }
 
 async fn stat_one_path_per_namespace(shape: &Shape, reader: FsReader) {
-    for index in 0..NAMESPACES {
+    let reader = shape.reader(reader);
+    for index in 0..shape.namespaces {
         reader
             .get_path_entry(
                 &shape.namespace(index),
@@ -295,17 +408,27 @@ async fn cache_budgets_charge_the_heap_their_contents_hold() {
     let shapes = [
         Shape {
             label: "directories",
+            namespaces: 8,
             folded_entries: 640,
             tail_commits: 4,
             tail_entries_per_commit: 96,
-            large_rows: false,
+            rows: Rows::Directories,
         },
         Shape {
             label: "large",
+            namespaces: 8,
             folded_entries: 256,
             tail_commits: 4,
             tail_entries_per_commit: 48,
-            large_rows: true,
+            rows: Rows::Large,
+        },
+        Shape {
+            label: "dense",
+            namespaces: 3,
+            folded_entries: 16,
+            tail_commits: 1,
+            tail_entries_per_commit: 8,
+            rows: Rows::Dense,
         },
     ];
     let mut failures = Vec::new();
@@ -343,7 +466,7 @@ async fn cache_budgets_charge_the_heap_their_contents_hold() {
         drop(reader);
 
         let projections = RuntimeCacheConfig {
-            max_cached_namespaces: NAMESPACES,
+            max_cached_namespaces: shape.namespaces,
             metadata_segment_cache: MetadataSegmentCacheConfig {
                 max_decoded_bytes: 0,
             },
