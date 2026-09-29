@@ -87,7 +87,7 @@ pub use loonfs_core::limits::{
 };
 pub use loonfs_core::time::{current_time_ms, Deadline, Observation, WallClock};
 pub use loonfs_core::{
-    delete_if_aged, next_run_no_after, refill_iterators, select_next_iterator,
+    delete_if_aged, grace_age, next_run_no_after, refill_iterators, select_next_iterator,
     write_segments_in_waves, CheckpointFile, CheckpointFilesPage, CheckpointFilesPageCursor,
     CheckpointPageCursor, CreateNamespaceOptions, CurrentFileState, DeleteNamespaceOptions,
     Error as CoreError, ErrorCode, ErrorKind, FileContentStream, GcConfig, GraceAge,

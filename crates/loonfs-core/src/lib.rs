@@ -187,7 +187,7 @@ pub use error::{
     Error, ErrorCode, ErrorKind, MetadataProjectionLoadError, MetadataViewError, StoreFailureClass,
     WriterFence,
 };
-pub use gc::{delete_if_aged, gc_namespace, GcConfig, GraceAge};
+pub use gc::{delete_if_aged, gc_namespace, grace_age, GcConfig, GraceAge};
 pub use options::{CreateNamespaceOptions, DeleteNamespaceOptions};
 pub use path::read::{
     CurrentFileState, DirectDownloadByInodeTarget, DirectDownloadTarget, MAX_RESOLVE_CURRENT_FILES,

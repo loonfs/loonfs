@@ -14,4 +14,4 @@ mod uploads;
 
 pub use collect::gc_namespace;
 pub use config::GcConfig;
-pub use reap::{delete_if_aged, GraceAge};
+pub use reap::{delete_if_aged, grace_age, GraceAge};

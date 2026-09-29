@@ -1,13 +1,16 @@
 //! Complete collection passes over one namespace's grep objects.
 
 use crate::keyspace::{
-    grep_prefix, manifests_prefix, parse_key, segment_key, segments_prefix, GrepKeyKind,
+    grep_prefix, manifest_key, manifests_prefix, parse_key, segment_key, segments_prefix,
+    GrepKeyKind,
 };
-use crate::manifest::load_current_grep_manifest;
+use crate::manifest::{
+    load_current_grep_manifest, load_grep_manifest, GrepManifestEnvelope, GrepManifestState,
+};
 use crate::{GrepError, GrepWorker, Result};
 use futures::StreamExt as _;
 use loonfs::{
-    delete_if_aged, GraceAge, GC_DEFAULT_GRACE_WINDOW_MS, GC_MIN_GRACE_WINDOW_MS,
+    delete_if_aged, grace_age, GraceAge, GC_DEFAULT_GRACE_WINDOW_MS, GC_MIN_GRACE_WINDOW_MS,
     METADATA_PUBLICATION_BUDGET_MS, UNREFERENCED_SEGMENT_MIN_AGE_MS,
 };
 use loonfs_api::{ErrorCode, ManifestNo, NamespaceId};
@@ -69,12 +72,31 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         let observed_hint = current
             .as_ref()
             .map_or(ManifestNo(1), |current| current.hint.state.manifest_no);
-        let live_segments: BTreeSet<_> = current
-            .as_ref()
-            .into_iter()
-            .flat_map(|current| current.manifest_state().segments())
-            .map(|segment| segment_key(namespace_id, &segment.segment_id))
-            .collect();
+        let mut live_segments = BTreeSet::new();
+        let mut kept_manifests = BTreeSet::new();
+        let mut root = current.map(|current| current.manifest_state().clone());
+        while let Some(state) = root.take() {
+            live_segments.extend(
+                state
+                    .segments()
+                    .iter()
+                    .map(|segment| segment_key(namespace_id, &segment.segment_id)),
+            );
+            if state.manifest_no() <= ManifestNo(1) {
+                break;
+            }
+            let successor = manifest_key(namespace_id, &state.manifest_no());
+            let age = grace_age(self.store(), &successor, GREP_GC_GRACE_WINDOW_MS, now_ms)
+                .await
+                .map_err(|error| GrepError::store(&successor, &error))?;
+            if matches!(age, GraceAge::Young | GraceAge::Unknown) {
+                let predecessor = ManifestNo(state.manifest_no().0 - 1);
+                root = load_grep_manifest(self.store(), namespace_id, predecessor)
+                    .await?
+                    .map(GrepManifestEnvelope::into_payload);
+                kept_manifests.extend(root.as_ref().map(GrepManifestState::manifest_no));
+            }
+        }
         let prefix = manifests_prefix(namespace_id);
         let mut keys = self.store().list_prefix_stream(&prefix);
         while let Some(key) = keys.next().await {
@@ -86,7 +108,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             let GrepKeyKind::Manifest { manifest_no } = parsed.kind else {
                 continue;
             };
-            if manifest_no >= observed_hint {
+            if manifest_no >= observed_hint || kept_manifests.contains(&manifest_no) {
                 report.retained_candidates += 1;
                 continue;
             }

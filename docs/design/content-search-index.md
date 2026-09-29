@@ -68,7 +68,7 @@ The hint records a manifest number from which discovery starts. A reader loads t
 
 Enablement writes the hint naming manifest 1 before creating manifest 1. Later publications write completed segments, then the next manifest with put-if-absent. A publisher that loses the race stops, and its next scheduled step loads the winner and plans again. Successful publication raises the hint by CAS; a failed raise does not undo publication.
 
-Queries check for a successor to their cached manifest on every request. A present successor requires discovery again. The hint can lag and does not replace this freshness check. The [grep format](../specs/format.md#appendix-d-grep-extension-format) defines identity and checksum validation.
+Queries check for a successor to their cached manifest on every request. A present successor requires discovery again, and so does an answer that arrives `READ_REVALIDATION_BOUND_MS` or more after the manifest's previous check. The hint can lag and does not replace this freshness check. The [grep format](../specs/format.md#appendix-d-grep-extension-format) defines identity and checksum validation.
 
 ## Index lifecycle
 
@@ -77,7 +77,7 @@ The lifecycle has three states:
 | State | Position and behavior |
 | --- | --- |
 | `disabled` | No query-visible segment set and no pending reorganization. |
-| `backfilling` | A checkpoint ID, captured `target_seq`, and optional last-consumed `cursor_inode_id`. Queries are unavailable. |
+| `backfilling` | A checkpoint ID, `captured_seq`, and optional last-consumed `cursor_inode_id`. Queries are unavailable. |
 | `active` | An incremental cursor consisting of `built_through_seq` and `next_event_index`. Queries can use the completed index plus the unindexed tail. |
 
 A zero `next_event_index` denotes a completed commit boundary. A nonzero value identifies the next event to process within `built_through_seq`; that commit is only partly indexed. Consumers must not interpret the sequence alone as complete coverage of that commit. HTTP status serialization may omit a zero event index; the durable encoding has its own field-presence rules.
@@ -200,7 +200,7 @@ Grep GC is namespace-scoped. It runs through `loonfs maintenance grep-gc`, `POST
 
 Each call loads the current manifest, builds its live segment set, and scans the manifest and segment collections from beginning to end. It uses a fixed call clock and stores no progress cursor. Invalid or unreadable roots fail before deletion.
 
-Manifest numbers at or above the observed hint remain for discovery. Earlier manifests require both their own and their immediate successor’s provider age to meet ordinary grace; an absent successor does not prevent deletion. Only the current manifest retains its listed segments, including pending reorganization inputs and outputs. An unreferenced segment must be strictly older than 24 hours.
+Manifest numbers at or above the observed hint remain for discovery. A manifest below the current one, and every segment it lists, stays while its immediate successor is younger than ordinary grace. A successor without a provider timestamp counts as young. Once that rule releases a manifest below the hint, its own provider age must meet ordinary grace. The current manifest retains its listed segments, including pending reorganization inputs and outputs. An unreferenced segment must be strictly older than 24 hours.
 
 Every output-producing step checks the bounded metadata publication budget before creating its next manifest. That budget and the collection age gates protect concurrent builds. A failed or interrupted step can leave segments for later collection.
 

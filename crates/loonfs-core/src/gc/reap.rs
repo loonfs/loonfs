@@ -101,7 +101,8 @@ impl GraceAge {
     }
 }
 
-pub(super) async fn grace_age<S: ObjectStore + ?Sized>(
+/// Reads where one object stands against the grace window by its provider timestamp.
+pub async fn grace_age<S: ObjectStore + ?Sized>(
     store: &S,
     key: &str,
     grace_window_ms: u64,
