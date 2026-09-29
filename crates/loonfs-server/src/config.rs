@@ -351,7 +351,8 @@ pub struct LocalCacheConfig {
     /// Directory the cache owns. Created if missing; locked while this
     /// process runs, so two servers cannot share one.
     pub path: String,
-    /// Bytes of memory the cache's in-memory tier may hold.
+    /// Bytes of memory the cache's in-memory tier may hold. The disk tier's
+    /// write buffers and queued inserts are not counted here.
     pub memory_bytes: u64,
     /// Bytes of disk the cache's disk tier may hold. The tier claims this
     /// much space up front, in whole blocks, one file per block under
