@@ -36,6 +36,14 @@ impl Deadline {
         Observation::now(Arc::clone(&self.timer))
     }
 
+    /// Returns the observation this deadline started from.
+    pub(crate) fn origin(&self) -> Observation {
+        Observation {
+            timer: Arc::clone(&self.timer),
+            at_ms: self.started_ms,
+        }
+    }
+
     pub(crate) fn elapsed_at(&self, observation: &Observation) -> u64 {
         observation.at_ms.saturating_sub(self.started_ms)
     }

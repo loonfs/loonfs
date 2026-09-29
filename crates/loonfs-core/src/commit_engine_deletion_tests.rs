@@ -26,7 +26,7 @@ async fn deletion_budget_includes_writer_acquisition() {
             KeyPredicate::any(),
         ),
         KeyPredicate::exact(hint(&namespace_id)),
-        OperationClass::Read,
+        OperationClass::CompareAndSwap,
     );
     let context = context();
     create(&store, &namespace_id, &context)

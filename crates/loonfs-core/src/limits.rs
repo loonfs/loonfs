@@ -131,9 +131,12 @@ pub const METADATA_COMPACTION_BUDGET_MS: u64 =
 /// Lifetime of a direct download or upload capability.
 pub const DIRECT_TRANSFER_URL_TTL_MS: u64 = 15 * 60 * 1000;
 
-/// Covers tombstone publication, outstanding reads, and direct capabilities
-/// from the deletion call's clock.
+/// Minimum retirement grace from the deletion call's clock. The tombstone put
+/// starts within the publication budget, and the provider applies it within
+/// its request bound. Outstanding reads and direct capabilities run from that
+/// landing.
 pub const NAMESPACE_RETIREMENT_GRACE_MS: u64 = METADATA_PUBLICATION_BUDGET_MS
+    + PROVIDER_PUBLICATION_REQUEST_BOUND_MS
     + max_u64(
         GC_MIN_GRACE_WINDOW_MS,
         DIRECT_TRANSFER_URL_TTL_MS + PROVIDER_PUBLICATION_REQUEST_BOUND_MS + GC_SAFETY_MARGIN_MS,

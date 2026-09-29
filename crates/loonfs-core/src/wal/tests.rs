@@ -5,7 +5,9 @@
 
 use crate::commit_engine::{CommitCandidate, NamespaceCommitEngine};
 use crate::context::MutationContext;
-use crate::namespace::{control::load_current_manifest, writer_epoch::acquire_writer_epoch};
+use crate::limits::READ_REVALIDATION_BOUND_MS;
+use crate::namespace::control::load_current_manifest;
+use crate::namespace::writer_epoch::{acquire_writer, acquire_writer_epoch};
 use crate::path::read::load_current_metadata_view;
 use crate::protocol::PublishTailOptions;
 use crate::test_support::ops::create;
@@ -15,7 +17,7 @@ use loonfs_api::{
     AbsolutePath, AttributeInclusion, ChangeSeq, CommitId, ErrorCode, InodeId, ManifestNo,
     NamespaceId, WalNo, WriterEpoch, WriterId,
 };
-use loonfs_objectstore::keys::{hint, wal_segment, wal_segment_prefix};
+use loonfs_objectstore::keys::{hint, metadata_manifest_object, wal_segment, wal_segment_prefix};
 use loonfs_objectstore::{local_fs_store::LocalFsStore, ObjectStore};
 use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::stores::{
@@ -219,6 +221,64 @@ async fn a_same_sequence_writer_acquisition_does_not_cover_a_fence_flush() {
         .expect("manifest");
     assert_eq!(current.state.envelope.payload().head_seq, ChangeSeq(0));
     assert_eq!(current.state.envelope.payload().folded_wal_no, WalNo(2));
+}
+
+#[tokio::test]
+async fn an_acquisition_held_past_the_revalidation_bound_reloads_before_fencing() {
+    let directory = tempdir().expect("directory");
+    let namespace_id = NamespaceId::parse("late-claim").expect("namespace");
+    let store = BlockingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::exact(hint(&namespace_id)),
+        OperationClass::CompareAndSwap,
+    );
+    let setup = context(1_000);
+    create(&store, &namespace_id, &setup).await.expect("create");
+    acquire_writer_epoch(&store, &namespace_id, &setup)
+        .await
+        .expect("first fence");
+    let timer = Arc::new(ManualClock::new(0));
+    store.block_next();
+    let (acquired, ()) = futures::join!(
+        acquire_writer(&store, &namespace_id, &setup, timer.clone()),
+        async {
+            // The claim has landed and its hint raise is held. Meanwhile a flush
+            // folds the first fence, a compactor claim supersedes the flush, and
+            // collection removes the flushed manifest and the folded fence.
+            store.wait_until_blocked().await;
+            let claim = load_current_manifest(store.inner(), &namespace_id)
+                .await
+                .expect("claim")
+                .state
+                .manifest()
+                .manifest_no;
+            crate::checkpoint::flush_wal(store.inner(), &namespace_id)
+                .await
+                .expect("flush");
+            crate::checkpoint::claim_compactor(store.inner(), &namespace_id)
+                .await
+                .expect("compactor claim");
+            for key in [
+                metadata_manifest_object(&namespace_id, &claim.successor().expect("next")),
+                wal_segment(&namespace_id, &WalNo(1)),
+            ] {
+                store.inner().delete(&key).await.expect("collect");
+            }
+            timer.advance_ms(READ_REVALIDATION_BOUND_MS);
+            store.release();
+        }
+    );
+    let (_, anchor) = acquired.expect("acquire");
+    let current = load_current_manifest(&store, &namespace_id)
+        .await
+        .expect("manifest");
+    assert_eq!(anchor.manifest.state.manifest(), current.state.manifest());
+    assert_eq!(anchor.read_state.wal_no, WalNo(2));
+    assert!(store
+        .head(&wal_segment(&namespace_id, &WalNo(1)))
+        .await
+        .expect("head")
+        .is_none());
 }
 
 fn directory(name: &str) -> CommitCandidate {

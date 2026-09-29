@@ -7,7 +7,7 @@ use crate::namespace::read_anchor::{
     load_read_anchor, load_read_anchor_from_manifest, NamespaceReadAnchor,
 };
 use crate::namespace::state::NamespaceReadState;
-use crate::time::{Deadline, StdMonotonicTimer};
+use crate::time::{Deadline, MonotonicTimer};
 use crate::wal::{prepare_segment, publish_segment};
 use loonfs_api::wire::control::{AcquiredWriter, WriterBlock};
 use loonfs_api::NamespaceId;
@@ -20,15 +20,17 @@ pub(crate) async fn acquire_writer_epoch<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     context: &MutationContext,
 ) -> Result<AcquiredWriter> {
-    Ok(acquire_writer(store, namespace_id, context).await?.0)
+    let timer = Arc::new(crate::time::StdMonotonicTimer::default());
+    Ok(acquire_writer(store, namespace_id, context, timer).await?.0)
 }
 
 pub(crate) async fn acquire_writer<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     context: &MutationContext,
+    timer: Arc<dyn MonotonicTimer>,
 ) -> Result<(AcquiredWriter, NamespaceReadAnchor)> {
-    let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
+    let deadline = Deadline::start(timer);
     let (acquired, manifest, hint) =
         update_manifest(store, namespace_id, &deadline, |mut payload| async move {
             super::control::ensure_namespace_live(&NamespaceReadState::from(&payload))?;
@@ -49,7 +51,8 @@ pub(crate) async fn acquire_writer<S: ObjectStore + ?Sized>(
         .await?;
     let mut tip = deadline.observe();
     let mut anchor =
-        load_read_anchor_from_manifest(store, namespace_id, manifest, hint, tip.clone()).await?;
+        load_read_anchor_from_manifest(store, namespace_id, manifest, hint, deadline.origin())
+            .await?;
     loop {
         let head = &anchor.read_state;
         ensure_writer_not_fenced(head, &acquired)?;
