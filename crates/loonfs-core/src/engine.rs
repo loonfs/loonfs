@@ -128,6 +128,7 @@ pub struct NamespaceEngine<S, M> {
     wall_clock: Arc<dyn crate::time::WallClock>,
     subject: Option<Subject>,
     authorization_head: Option<RuntimeReadContext>,
+    lsm_policy: crate::checkpoint::MetadataLsmPolicy,
     /// A narrowed per-step row budget, so a test can reach a frozen base
     /// without writing the hundred thousand rows the shipped budget admits.
     /// See [`Self::starve_reorganization_row_budget`].
@@ -353,6 +354,7 @@ impl<S: ObjectStore> NamespaceEngine<S, ReadOnly> {
             wall_clock: Arc::new(crate::time::SystemWallClock),
             subject: None,
             authorization_head: None,
+            lsm_policy: crate::checkpoint::MetadataLsmPolicy::default(),
             #[cfg(any(test, feature = "test-support"))]
             reorganization_row_budget: None,
             #[cfg(any(test, feature = "test-support"))]
@@ -371,6 +373,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             wall_clock: Arc::new(crate::time::SystemWallClock),
             subject: None,
             authorization_head: None,
+            lsm_policy: crate::checkpoint::MetadataLsmPolicy::default(),
             #[cfg(any(test, feature = "test-support"))]
             reorganization_row_budget: None,
             #[cfg(any(test, feature = "test-support"))]
@@ -383,9 +386,19 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         &self.mode.writer_id
     }
 
+    /// Sets the budgets this engine's WAL flushes, reorganizations, and
+    /// compactions run under.
+    pub fn with_metadata_lsm_policy(
+        mut self,
+        policy: crate::checkpoint::MetadataLsmPolicy,
+    ) -> Self {
+        self.lsm_policy = policy;
+        self
+    }
+
     /// The reorganization budgets this engine plans and compacts under.
     fn metadata_lsm_policy(&self) -> crate::checkpoint::MetadataLsmPolicy {
-        let policy = crate::checkpoint::MetadataLsmPolicy::default();
+        let policy = self.lsm_policy;
         #[cfg(any(test, feature = "test-support"))]
         let policy = crate::checkpoint::MetadataLsmPolicy {
             max_decoded_input_rows_per_step: self
@@ -1268,7 +1281,13 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// candidates once nothing pins them.
     pub async fn flush_wal(&self) -> Result<FlushWalResponse> {
         self.mutation_context()?;
-        crate::checkpoint::flush_wal(&self.store, &self.namespace_id).await
+        crate::checkpoint::flush_wal_with_deadline(
+            &self.store,
+            &self.namespace_id,
+            &crate::time::Deadline::start(Arc::new(crate::time::StdMonotonicTimer::default())),
+            self.metadata_lsm_policy(),
+        )
+        .await
     }
 
     /// Claims the namespace compactor epoch for a maintenance runtime.

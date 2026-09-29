@@ -5,6 +5,7 @@
 //! node-local cache of the same blocks in their encoded form; see
 //! [`stored_block_cache`](super::stored_block_cache).
 
+use super::block_load::DEFAULT_BLOCK_MEMO_BYTES;
 use super::runs::MetadataRunManifest;
 use super::stored_block_cache::StoredMetadataBlockCache;
 use crate::block_cache::{
@@ -26,12 +27,16 @@ pub(crate) const DEFAULT_METADATA_SEGMENT_CACHE_DECODED_BYTES: usize = 256 * 102
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MetadataSegmentCacheConfig {
     pub max_decoded_bytes: usize,
+    /// Data-block bytes one read, publication, or fold keeps in its own block
+    /// memo, on top of this cache. Zero keeps none.
+    pub max_block_memo_bytes: usize,
 }
 
 impl Default for MetadataSegmentCacheConfig {
     fn default() -> Self {
         Self {
             max_decoded_bytes: DEFAULT_METADATA_SEGMENT_CACHE_DECODED_BYTES,
+            max_block_memo_bytes: DEFAULT_BLOCK_MEMO_BYTES,
         }
     }
 }
@@ -62,8 +67,15 @@ pub(super) type DecodedMetadataSegmentBlock = DecodedSegmentBlock<
     ),
 >;
 
+/// The block memo budget of a view or WAL flush that reads through
+/// `segment_cache`, or the default without one.
+pub(super) fn block_memo_bytes(segment_cache: Option<&MetadataSegmentCache>) -> usize {
+    segment_cache.map_or(DEFAULT_BLOCK_MEMO_BYTES, |cache| cache.max_block_memo_bytes)
+}
+
 pub struct MetadataSegmentCache {
     blocks: DecodedBlockCache<MetadataSegmentCacheKey, DecodedMetadataSegmentBlock>,
+    max_block_memo_bytes: usize,
     stats: MetadataSegmentFilterStatsInner,
     observer: Option<Arc<dyn DecodedBlockCacheObserver>>,
     /// Optional node-local cache for encoded blocks. Keeping it with the
@@ -76,6 +88,7 @@ impl std::fmt::Debug for MetadataSegmentCache {
         formatter
             .debug_struct("MetadataSegmentCache")
             .field("blocks", &self.blocks)
+            .field("max_block_memo_bytes", &self.max_block_memo_bytes)
             .field("stats", &self.stats)
             .field("stored_block_cache", &self.stored_block_cache)
             .finish_non_exhaustive()
@@ -105,6 +118,7 @@ impl MetadataSegmentCache {
                 max_entries: None,
                 observer: observer.clone(),
             }),
+            max_block_memo_bytes: config.max_block_memo_bytes,
             stats: MetadataSegmentFilterStatsInner::default(),
             observer,
             stored_block_cache,
@@ -401,6 +415,7 @@ mod tests {
     fn byte_budget_evicts_the_oldest_block() {
         let cache = MetadataSegmentCache::new(MetadataSegmentCacheConfig {
             max_decoded_bytes: 1000,
+            ..MetadataSegmentCacheConfig::default()
         });
         cache.insert(key("a"), block(600));
         cache.insert(key("b"), block(600));
@@ -416,6 +431,7 @@ mod tests {
     fn replacing_a_block_reaccounts_its_decoded_bytes() {
         let cache = MetadataSegmentCache::new(MetadataSegmentCacheConfig {
             max_decoded_bytes: 1000,
+            ..MetadataSegmentCacheConfig::default()
         });
         cache.insert(key("a"), block(600));
         cache.insert(key("a"), block(100));

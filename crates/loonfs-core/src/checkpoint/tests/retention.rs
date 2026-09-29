@@ -804,6 +804,7 @@ async fn checkpoint_verification_rejects_a_deleted_namespace() {
         acquired,
         &context,
         &crate::time::Deadline::start(Arc::new(crate::time::StdMonotonicTimer::default())),
+        MetadataLsmPolicy::default(),
     )
     .await
     .expect("delete");
@@ -1711,9 +1712,14 @@ async fn over_budget_wal_flush_aborts_without_publishing() {
     // Every reading advances 20 minutes against the 15-minute budget: the
     // pre-CAS check observes the publication as over budget.
     let overrun = Deadline::start(Arc::new(SteppingTimer::new(20 * 60 * 1000)));
-    let error = super::flush::flush_wal_with_deadline(&store, &namespace_id, &overrun)
-        .await
-        .expect_err("over-budget publication must abort");
+    let error = super::flush::flush_wal_with_deadline(
+        &store,
+        &namespace_id,
+        &overrun,
+        MetadataLsmPolicy::default(),
+    )
+    .await
+    .expect_err("over-budget publication must abort");
     assert!(
         matches!(error, CoreError::MetadataPublicationBudgetExceeded { .. }),
         "expected budget error, got {error:?}"

@@ -22,6 +22,7 @@ mod snapshot_fork_gc;
 mod snapshot_renewal;
 mod streaming_compaction;
 
+use super::block_load::DEFAULT_BLOCK_MEMO_BYTES;
 use super::build::{build_manifest_segments, build_manifest_segments_from_rows};
 use super::cache::{MetadataSegmentBlockKind, MetadataSegmentCache, MetadataSegmentCacheConfig};
 use super::compaction_merge::locality_of;
@@ -105,7 +106,9 @@ async fn load_checkpoint_projection_metadata_state<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> crate::error::Result<(NamespaceReadState, MetadataState)> {
-    let projection = super::flush::load_manifest_projection(store, namespace_id).await?;
+    let projection =
+        super::flush::load_manifest_projection(store, namespace_id, DEFAULT_BLOCK_MEMO_BYTES)
+            .await?;
     let tail_state = projection.tail_with_deletion_inodes().await?;
     let mut metadata_state = MetadataStateBuilder::default();
     for family in CHECKPOINT_ROW_FAMILIES {

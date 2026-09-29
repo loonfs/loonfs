@@ -355,6 +355,17 @@ impl FsWriterBuilder {
         self
     }
 
+    /// Sets the decoded metadata bytes one maintenance step may merge. A step
+    /// merges inline only the runs that fit; a larger window runs as a
+    /// streaming compaction that holds at most this much at once. Applies to
+    /// the maintenance handles this writer derives. Defaults to 64 MiB.
+    pub fn max_merge_input_bytes(mut self, max_merge_input_bytes: NonZeroUsize) -> Self {
+        self.core
+            .metadata_lsm_policy
+            .max_decoded_input_bytes_per_step = max_merge_input_bytes;
+        self
+    }
+
     /// Sets the shared admission and concurrency limits for publications.
     pub fn publication_limits(mut self, limits: crate::PublicationLimits) -> Self {
         self.publication_limits = limits;

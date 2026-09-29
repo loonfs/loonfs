@@ -70,6 +70,11 @@ writer_id = "loonfs-server-local"
 # namespace pair runs at most once concurrently. Defaults to 2.
 #max_concurrent_maintenance = 2
 
+# Decoded metadata bytes one maintenance step may merge. A step merges only
+# the runs that fit; a larger window runs as a streaming compaction that holds
+# at most this much at once. Defaults to 64 MiB.
+#max_merge_input_bytes = 67108864
+
 # Direct-put needs no configuration. It is offered only where the adapter can
 # presign a create-only PUT and report a durable checksum, and the endpoint is
 # a first-party AWS S3 or Cloudflare R2 domain, so it is unavailable on this
@@ -90,6 +95,9 @@ writer_id = "loonfs-server-local"
 #max_cached_wal_tail_projection_decoded_bytes = 67108864
 # Decoded-byte budget for the metadata segment cache. Defaults to 256 MiB.
 #metadata_segment_cache_max_decoded_bytes = 268435456
+# Metadata blocks one read, publication, fold, or WAL flush keeps for itself
+# on top of that cache. Zero keeps none. Defaults to 64 MiB.
+#max_block_memo_bytes = 67108864
 
 # Optional node-local cache of encoded metadata blocks, on this machine's own
 # disk. Omit the table and there is none: every metadata block the decoded

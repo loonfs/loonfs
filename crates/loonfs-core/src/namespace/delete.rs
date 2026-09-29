@@ -17,6 +17,7 @@ pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
     acquired_writer: AcquiredWriter,
     context: &crate::context::MutationContext,
     deadline: &Deadline,
+    flush_policy: crate::checkpoint::MetadataLsmPolicy,
 ) -> Result<DeleteNamespaceResponse> {
     update_manifest(store, namespace_id, deadline, |mut payload| {
         let acquired_writer = &acquired_writer;
@@ -36,7 +37,13 @@ pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
             }
             if payload.folded_wal_no < head.wal_no {
                 deadline.ensure_metadata_publication_budget(namespace_id)?;
-                crate::checkpoint::flush_wal_with_deadline(store, namespace_id, deadline).await?;
+                crate::checkpoint::flush_wal_with_deadline(
+                    store,
+                    namespace_id,
+                    deadline,
+                    flush_policy,
+                )
+                .await?;
                 return Ok(ManifestChange::Again);
             }
             payload.status = NamespaceStatus::Deleted {

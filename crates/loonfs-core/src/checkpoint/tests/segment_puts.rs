@@ -1,12 +1,14 @@
 //! Segment write concurrency, ordering, and publication failures.
 
 use super::*;
+use crate::checkpoint::block_load::DEFAULT_BLOCK_MEMO_BYTES;
 use crate::checkpoint::row::manifest_rows_for_family;
 use crate::checkpoint::runs::CHECKPOINT_ROW_FAMILIES;
 use crate::namespace::control::load_current_manifest;
 use crate::namespace::writer_epoch::acquire_writer_epoch;
 use crate::store_waves::STORE_WRITE_WAVE;
 use crate::test_support::ops::{create, write_file_bytes};
+use crate::time::StdMonotonicTimer;
 use crate::MutationContext;
 use loonfs_api::wire::manifest::{
     decode_namespace_manifest_json, MetadataRow, MetadataRowFamily, MetadataSegmentRef,
@@ -134,7 +136,7 @@ async fn a_fold_puts_segments_in_a_bounded_wave_before_publishing_in_builder_ord
                 }
             },
         );
-        let projection = load_manifest_projection(&store, &namespace_id)
+        let projection = load_manifest_projection(&store, &namespace_id, DEFAULT_BLOCK_MEMO_BYTES)
             .await
             .expect("projection");
         let expected = CHECKPOINT_ROW_FAMILIES
@@ -243,7 +245,7 @@ async fn a_failed_segment_put_prevents_fold_publication() {
         ConcurrencyWatchStore::new(failing, KeyPredicate::metadata_segment()),
         KeyPredicate::any(),
     );
-    let projection = load_manifest_projection(&store, &namespace_id)
+    let projection = load_manifest_projection(&store, &namespace_id, DEFAULT_BLOCK_MEMO_BYTES)
         .await
         .expect("projection");
     store.reset();

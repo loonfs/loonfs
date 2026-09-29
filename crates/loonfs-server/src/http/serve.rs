@@ -369,6 +369,10 @@ pub(super) async fn build_handles(
             std::num::NonZeroUsize::new(config.max_concurrent_folds)
                 .expect("validated maximum concurrent folds should be nonzero"),
         )
+        .max_merge_input_bytes(
+            std::num::NonZeroUsize::new(config.max_merge_input_bytes)
+                .expect("validated merge input budget should be nonzero"),
+        )
         // The reader below shares this core, so the read cap covers every
         // proxied content read the server serves.
         .max_read_content_bytes(config.max_download_bytes)

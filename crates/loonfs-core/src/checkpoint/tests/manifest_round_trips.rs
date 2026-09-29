@@ -57,7 +57,7 @@ async fn a_publish_projection_fold_writes_the_replayed_tail_rows() {
         .await
         .expect("build WAL tail");
     let expected_tail = Arc::clone(
-        &flush::load_manifest_projection(&store, &namespace_id)
+        &flush::load_manifest_projection(&store, &namespace_id, DEFAULT_BLOCK_MEMO_BYTES)
             .await
             .expect("load store projection")
             .tail_state,

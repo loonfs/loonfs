@@ -17,10 +17,10 @@ use loonfs_objectstore::ObjectStore;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
-/// Most decoded and stored data-block bytes one view keeps. 64 MiB holds one
-/// page's working set plus read-ahead, and a runaway scan cannot hold
-/// gigabytes through the memo.
-const SESSION_BLOCK_MEMO_DATA_BYTES: usize = 64 * 1024 * 1024;
+/// Default for the decoded and stored data-block bytes one view keeps.
+/// 64 MiB holds one page's working set plus read-ahead, and a runaway scan
+/// cannot hold gigabytes through the memo.
+pub(crate) const DEFAULT_BLOCK_MEMO_BYTES: usize = 64 * 1024 * 1024;
 
 /// The data blocks of one segment that can hold keys in
 /// `[lower_bound, upper_bound)`, shared straight from the decoded-block
@@ -69,9 +69,16 @@ impl SegmentKeyRangeBlocks {
 }
 
 /// This memo stays separate because it uses FIFO eviction for one operation.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(super) struct SessionBlockMemo {
+    max_data_bytes: usize,
     inner: Mutex<SessionBlockMemoInner>,
+}
+
+impl Default for SessionBlockMemo {
+    fn default() -> Self {
+        Self::new(DEFAULT_BLOCK_MEMO_BYTES)
+    }
 }
 
 #[derive(Debug, Default)]
@@ -100,6 +107,13 @@ impl MemoBlock {
 }
 
 impl SessionBlockMemo {
+    pub(super) fn new(max_data_bytes: usize) -> Self {
+        Self {
+            max_data_bytes,
+            inner: Mutex::default(),
+        }
+    }
+
     pub(super) fn get(
         &self,
         cache_key: &MetadataSegmentCacheKey,
@@ -161,7 +175,7 @@ impl SessionBlockMemo {
             inner.data_insertion_order.push_back(cache_key);
         }
         inner.data_bytes = inner.data_bytes.saturating_add(data_bytes);
-        while inner.data_bytes > SESSION_BLOCK_MEMO_DATA_BYTES {
+        while inner.data_bytes > self.max_data_bytes {
             let oldest = inner
                 .data_insertion_order
                 .pop_front()
@@ -337,14 +351,8 @@ mod tests {
         let oldest_data_key = key(MetadataSegmentBlockKind::Data, 4);
         let newer_data_key = key(MetadataSegmentBlockKind::Data, 5);
         let newest_data_key = key(MetadataSegmentBlockKind::Data, 6);
-        memo.record(
-            &oldest_data_key,
-            &data_block(SESSION_BLOCK_MEMO_DATA_BYTES / 2),
-        );
-        memo.record(
-            &newer_data_key,
-            &data_block(SESSION_BLOCK_MEMO_DATA_BYTES / 2),
-        );
+        memo.record(&oldest_data_key, &data_block(DEFAULT_BLOCK_MEMO_BYTES / 2));
+        memo.record(&newer_data_key, &data_block(DEFAULT_BLOCK_MEMO_BYTES / 2));
         memo.record(&newest_data_key, &data_block(1));
 
         assert!(memo.get(&oldest_data_key).is_none());

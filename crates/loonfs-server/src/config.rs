@@ -241,6 +241,11 @@ pub struct ServerConfig {
     /// for a permit takes the next one that frees.
     #[serde(default = "default_max_concurrent_maintenance")]
     pub max_concurrent_maintenance: usize,
+    /// Decoded metadata bytes one maintenance step may merge. A step merges
+    /// inline only the runs that fit; a larger window runs as a streaming
+    /// compaction that holds at most this much at once. Defaults to 64 MiB.
+    #[serde(default = "default_max_merge_input_bytes")]
+    pub max_merge_input_bytes: usize,
     /// Allows serving on a non-loopback address with `auth_token` unset.
     /// Off by default: exposing every endpoint unauthenticated is almost
     /// always a misconfiguration, so validation rejects it unless this is
@@ -332,6 +337,10 @@ fn default_max_concurrent_maintenance() -> usize {
     loonfs::DEFAULT_MAX_CONCURRENT_MAINTENANCE
 }
 
+fn default_max_merge_input_bytes() -> usize {
+    loonfs_api::wire::sst_blocks::DEFAULT_MAX_REORGANIZATION_INPUT_BYTES
+}
+
 /// The server's `[local_cache]` table: where the node-local cache of encoded
 /// metadata blocks lives, and how much memory and disk it may use.
 ///
@@ -371,6 +380,7 @@ pub struct RuntimeCacheConfigOverrides {
     pub max_cached_wal_tail_projection_rows: Option<usize>,
     pub max_cached_wal_tail_projection_decoded_bytes: Option<usize>,
     pub metadata_segment_cache_max_decoded_bytes: Option<usize>,
+    pub max_block_memo_bytes: Option<usize>,
 }
 
 /// What this server does about maintenance: serve the API group, run the
@@ -520,6 +530,9 @@ impl ServerConfig {
         if let Some(value) = self.runtime_cache.metadata_segment_cache_max_decoded_bytes {
             config.metadata_segment_cache.max_decoded_bytes = value;
         }
+        if let Some(value) = self.runtime_cache.max_block_memo_bytes {
+            config.metadata_segment_cache.max_block_memo_bytes = value;
+        }
         config
     }
 
@@ -612,6 +625,7 @@ impl ServerConfig {
                 "max_concurrent_downloads",
                 self.max_concurrent_downloads as u64,
             ),
+            ("max_merge_input_bytes", self.max_merge_input_bytes as u64),
         ] {
             require_positive(field, value, None)?;
         }
@@ -1465,6 +1479,7 @@ root = "/tmp/loonfs-server"
             "max_concurrent_uploads",
             "max_concurrent_downloads",
             "max_concurrent_maintenance",
+            "max_merge_input_bytes",
         ] {
             let path = write_config(&format!(
                 r#"
@@ -1783,6 +1798,7 @@ manifest_revalidation_interval_ms = 250
 max_cached_namespaces = 2
 max_cached_wal_tail_projection_rows = 10
 max_cached_wal_tail_projection_decoded_bytes = 4096
+max_block_memo_bytes = 8192
 
 [store]
 kind = "local-fs"
@@ -1797,6 +1813,7 @@ root = "/tmp/loonfs-server"
         assert_eq!(config.max_cached_namespaces, 2);
         assert_eq!(config.max_cached_wal_tail_projection_rows, 10);
         assert_eq!(config.max_cached_wal_tail_projection_decoded_bytes, 4096);
+        assert_eq!(config.metadata_segment_cache.max_block_memo_bytes, 8192);
     }
 
     #[test]

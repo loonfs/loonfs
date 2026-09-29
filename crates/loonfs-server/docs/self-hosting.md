@@ -327,8 +327,8 @@ counted in any budget and sit on top.
 | Publication queue | `publication.max_estimated_bytes` | 64 MiB | Estimated bytes of admitted commit requests | Steady |
 | Proxied uploads | `max_concurrent_uploads` | 8 uploads | At most one 8 MiB transfer part per upload body | Per request |
 | Proxied downloads | `max_concurrent_downloads` | 16 streams | One 8 MiB read chunk per content stream | Per request |
-| Block memo | None | 64 MiB | Metadata blocks one read, publication, or fold keeps | Per operation |
-| Merge input | None | 64 MiB | Decoded blocks one compaction or maintenance step merges | Per operation |
+| Block memo | `runtime_cache.max_block_memo_bytes` | 64 MiB | Metadata blocks one read, publication, fold, or WAL flush keeps | Per operation |
+| Merge input | `max_merge_input_bytes` | 64 MiB | Decoded blocks one compaction or maintenance step merges | Per operation |
 | Segment output | None | 32 MiB | Encoded segments one fold, compaction, or maintenance step holds while it writes them | Per operation |
 | WAL folds | `max_concurrent_folds` | 2 | Folds running at once | Concurrency |
 | Maintenance runs | `max_concurrent_maintenance` | 2 | Scheduled maintenance runs at once, including compactions and grep indexing | Concurrency |
@@ -336,8 +336,20 @@ counted in any budget and sit on top.
 | Publications | `publication.max_concurrent_publications` | 8 | Publications running at once | Concurrency |
 
 A fold holds a block memo and its segment output, so it can use up to 96 MiB.
-A maintenance step holds its merge input and its segment output, also up to
-96 MiB. Maintenance requests sent to the API run outside
+A maintenance run can flush the WAL tail and then merge, one after the other.
+It holds the larger of its block memo and its merge input, plus its segment
+output, so it can also use up to 96 MiB.
+
+A maintenance step merges only the runs that fit in `max_merge_input_bytes`.
+A larger window runs as a streaming compaction, which holds at most that much
+decoded input at once. A lower value therefore moves work from maintenance
+steps to compactions.
+
+The segment output budget has no setting. A segment larger than the budget
+is written alone. A checkpoint, snapshot, or fork that has to flush the WAL
+tail first runs that flush with the default 64 MiB block memo.
+
+Maintenance requests sent to the API run outside
 `max_concurrent_maintenance`. Writer sessions and head anchors are limited by
 count, not by bytes.
 
@@ -361,8 +373,8 @@ process-wide limit add up to 1,024 MiB by default:
 The total leaves out writer sessions, head anchors, the block memos of reads
 and publications, WAL tails that an operation replays because no projection
 holds them, and maintenance requests sent to the API. Eight running
-publications can hold up to 512 MiB of block memos. Reads have no
-concurrency limit, so their block memos have no total.
+publications can hold up to 512 MiB of block memos at the default budget.
+Reads have no concurrency limit, so their block memos have no total.
 
 Grep adds a 256 MiB block cache on a server that answers queries. The cache
 has no setting. A query reads up to 32 candidate files of at most 8 MiB each
@@ -374,39 +386,48 @@ The local cache adds `memory_bytes`, 64 MiB of write buffers for its disk
 tier, and up to 256 MiB of inserts waiting for the disk tier. The last two
 have no setting.
 
-This config for a 256 MiB container uses a 96 MiB segment cache, 32 MiB of
-WAL-tail projections per side, one fold, and one maintenance run:
+This config for a 256 MiB container uses a 64 MiB segment cache, 16 MiB of
+WAL-tail projections per side, 8 MiB block memos, an 8 MiB merge input, two
+running publications, one fold, and one maintenance run:
 
 ```toml
 max_concurrent_folds = 1
 max_concurrent_maintenance = 1
 max_concurrent_uploads = 2
-max_concurrent_downloads = 4
+max_concurrent_downloads = 2
+max_merge_input_bytes = 8388608
 
 [publication]
 max_estimated_bytes = 8388608
+max_concurrent_publications = 2
 
 [runtime_cache]
-max_cached_wal_tail_projection_decoded_bytes = 33554432
-metadata_segment_cache_max_decoded_bytes = 100663296
+max_cached_wal_tail_projection_decoded_bytes = 16777216
+metadata_segment_cache_max_decoded_bytes = 67108864
+max_block_memo_bytes = 8388608
 ```
 
 | Budget | Ceiling |
 | --- | --- |
-| Metadata segment cache | 96 MiB |
-| WAL-tail projections, both sides | 64 MiB |
+| Metadata segment cache | 64 MiB |
+| WAL-tail projections, both sides | 32 MiB |
 | Publication queue | 8 MiB |
 | 2 uploads at 8 MiB | 16 MiB |
-| 4 downloads at 8 MiB | 32 MiB |
-| Budgets with a setting | 216 MiB |
-| 1 fold at 96 MiB | 96 MiB |
-| 1 maintenance run at 96 MiB | 96 MiB |
-| Total | 408 MiB |
+| 2 downloads at 8 MiB | 16 MiB |
+| 2 publications at an 8 MiB block memo | 16 MiB |
+| 1 fold: 8 MiB block memo and 32 MiB segment output | 40 MiB |
+| 1 maintenance run: 8 MiB block memo or merge input, and 32 MiB segment output | 40 MiB |
+| Total | 232 MiB |
 
-The budgets with a setting leave 40 MiB of the 256 MiB. The fold and
-maintenance budgets have no setting, and at their ceilings they bring the
-total to 408 MiB. A 256 MiB limit therefore holds only while folds and
-maintenance steps stay well below their ceilings.
+64 + 32 + 8 + 16 + 16 + 16 + 40 + 40 = 232 MiB, which leaves 24 MiB of the
+256 MiB for allocator overhead, HTTP buffers, and the block memos of reads.
+Each read keeps at most 8 MiB. Three cases can still pass the limit:
+
+- Many large reads at once, because reads have no concurrency limit.
+- A namespace delete that flushes the WAL tail. It runs as a publication and
+  adds a 32 MiB segment output.
+- A checkpoint, snapshot, or fork that flushes the WAL tail. That flush keeps
+  the default 64 MiB block memo.
 
 `max_writer_sessions` defaults to 1,024. At the limit, a request for another
 namespace closes the least recently used idle session, and answers

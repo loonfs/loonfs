@@ -204,6 +204,7 @@ fn test_read_core(store: SharedStore) -> ReadCore {
         ReadConfig {
             max_read_content_bytes: None,
             runtime_cache: RuntimeCacheConfig::default(),
+            metadata_lsm_policy: loonfs_core::MetadataLsmPolicy::default(),
             trace_mode: TraceMode::Remote,
             trace_store_kind: TraceStoreKind::LocalFs,
         },

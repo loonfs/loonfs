@@ -55,6 +55,7 @@ async fn uncached_segment_reader(
             max_cached_namespaces,
             metadata_segment_cache: MetadataSegmentCacheConfig {
                 max_decoded_bytes: 0,
+                ..MetadataSegmentCacheConfig::default()
             },
             ..RuntimeCacheConfig::default()
         })

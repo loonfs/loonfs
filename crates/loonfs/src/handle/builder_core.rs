@@ -11,6 +11,7 @@ use crate::{
     TraceStoreKind,
 };
 use loonfs_core::cache::{MetadataSegmentCache, StoredMetadataBlockCache};
+use loonfs_core::MetadataLsmPolicy;
 use loonfs_objectstore::metrics::InstrumentedObjectStore;
 use std::sync::Arc;
 
@@ -29,6 +30,9 @@ pub(super) struct HandleBuilderCore {
     pub(super) source: StoreSource,
     pub(super) max_read_content_bytes: Option<u64>,
     pub(super) runtime_cache: RuntimeCacheConfig,
+    /// Carries the merge input budget; the block memo budget comes from
+    /// `runtime_cache` when the core opens.
+    pub(super) metadata_lsm_policy: MetadataLsmPolicy,
     pub(super) timer: Arc<dyn loonfs_api::MonotonicTimer>,
     /// An existing decoded-block cache to share instead of sizing a fresh
     /// one from `runtime_cache`; see [`ReadCore::open`].
@@ -56,6 +60,7 @@ impl HandleBuilderCore {
             source,
             max_read_content_bytes: None,
             runtime_cache: RuntimeCacheConfig::default(),
+            metadata_lsm_policy: MetadataLsmPolicy::default(),
             timer: Arc::new(loonfs_api::StdMonotonicTimer::default()),
             shared_metadata_segment_cache: None,
             stored_metadata_block_cache: None,
@@ -100,6 +105,13 @@ impl HandleBuilderCore {
             store,
             ReadConfig {
                 max_read_content_bytes: self.max_read_content_bytes,
+                metadata_lsm_policy: MetadataLsmPolicy {
+                    max_block_memo_bytes: self
+                        .runtime_cache
+                        .metadata_segment_cache
+                        .max_block_memo_bytes,
+                    ..self.metadata_lsm_policy
+                },
                 runtime_cache: self.runtime_cache,
                 trace_mode: self.trace_mode,
                 trace_store_kind,
