@@ -690,7 +690,8 @@ impl NamespaceCommitEngine {
         if let Some(acquired_writer) = already_acquired {
             return Ok(acquired_writer);
         }
-        let (acquired_writer, anchor) = acquire_writer(store, &self.namespace_id, context).await?;
+        let (acquired_writer, anchor) =
+            acquire_writer(store, &self.namespace_id, context, Arc::clone(&self.timer)).await?;
         self.acquired_anchor = Some(anchor);
         let mut session = self.lock_session();
         if let WriterSessionState::Fenced(fence) = &*session {
@@ -976,6 +977,7 @@ pub(crate) async fn publish_namespace_commits_batch<S: ObjectStore + ?Sized>(
                 result,
                 Err(CoreError::WalPublish(
                     crate::commit::WalPublishError::StaleHead
+                        | crate::commit::WalPublishError::PublishBudgetExceeded { .. }
                 ))
             )
         }) {
@@ -1758,12 +1760,13 @@ mod tests {
         create(&store, &namespace_id, &writer)
             .await
             .expect("bootstrap");
-        let mut over_budget = NamespaceCommitEngine::new(namespace_id.clone())
-            .monotonic_timer(Arc::new(ExpiredBudgetTimer(AtomicU64::new(0))));
+        let mut over_budget = NamespaceCommitEngine::new(namespace_id.clone());
         over_budget
             .session_writer_epoch(&store, &writer)
             .await
             .expect("acquire");
+        let mut over_budget =
+            over_budget.monotonic_timer(Arc::new(ExpiredBudgetTimer(AtomicU64::new(0))));
         let head_before = load_namespace_read_state(&store, &namespace_id)
             .await
             .expect("head");

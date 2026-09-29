@@ -2142,13 +2142,15 @@ fn take_queued_waiters(state: &mut NamespacePublisherState) -> QueuedWaiters {
 /// Returns whether publication should retry the batch.
 ///
 /// Retrying with the same commit IDs is safe because committed candidates
-/// replay their durable receipts. Both stale-head and unknown-outcome errors
-/// are retried to obtain a definite result.
+/// replay their durable receipts. Stale-head, expired-budget, and
+/// unknown-outcome errors are retried to obtain a definite result.
 fn is_retryable_wal_publish(result: &CommitResult) -> bool {
     matches!(
         result,
         Err(RuntimeError::Core(CoreError::WalPublish(
-            WalPublishError::StaleHead | WalPublishError::OutcomeUnknown(_)
+            WalPublishError::StaleHead
+                | WalPublishError::PublishBudgetExceeded { .. }
+                | WalPublishError::OutcomeUnknown(_)
         )))
     )
 }

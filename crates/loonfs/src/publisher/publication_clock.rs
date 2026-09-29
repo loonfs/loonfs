@@ -1,4 +1,5 @@
-//! Runtime wall timestamps stay paired with the retry clock's origin.
+//! Runtime retries keep wall timestamps paired with the retry clock's origin
+//! and re-plan an attempt whose publish budget expired.
 
 use super::*;
 
@@ -116,4 +117,40 @@ async fn runtime_retry_replays_a_landed_commit_after_its_content_proof_expires()
     publish_after_retry_delay(5, true)
         .await
         .expect("expiry after the put starts must not undo the landed commit");
+}
+
+#[tokio::test]
+async fn a_first_publish_that_outlasts_a_slow_claim_replans() {
+    let directory = tempdir().expect("directory");
+    let namespace_id = NamespaceId::parse("slow-claim").expect("namespace");
+    let store = Arc::new(BlockingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::exact(loonfs_objectstore::keys::hint(&namespace_id)),
+        OperationClass::CompareAndSwap,
+    ));
+    let runtime = test_runtime(store.clone());
+    create_namespace(&runtime, &namespace_id).await;
+    let clock = Arc::new(ManualMonotonicTimer::default());
+    let mut publisher = standalone_publisher(&namespace_id, &runtime);
+    publisher.timer = clock.clone();
+    publisher.min_publish_interval = Duration::ZERO;
+    // The first publish observes its tip before the claim, whose hint raise
+    // is held past the publish budget.
+    store.block_next();
+    let (published, ()) = futures::join!(
+        publisher.submit(CommitCandidate::new(create_directory_request(
+            "first", "first"
+        ))),
+        async {
+            store.wait_until_blocked().await;
+            clock.set(loonfs_core::limits::WAL_PUBLISH_BUDGET_MS + 1);
+            store.release();
+        }
+    );
+    assert_eq!(
+        published
+            .expect("an expired attempt re-plans")
+            .committed_seq,
+        ChangeSeq(1)
+    );
 }

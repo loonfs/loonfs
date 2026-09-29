@@ -1557,7 +1557,7 @@ Publication and collection use the timing relationships below. Configurable sizi
 | `UNREFERENCED_SEGMENT_MIN_AGE_MS` | 86,400,000 | Segments must be strictly older than this before unreferenced collection. |
 | `METADATA_COMPACTION_BUDGET_MS` | 85,065,000 | Maximum elapsed time before initiating streaming publication. |
 | `DIRECT_TRANSFER_URL_TTL_MS` | 900,000 | Lifetime of a direct transfer capability. |
-| `NAMESPACE_RETIREMENT_GRACE_MS` | 2,235,000 | Minimum grace from the deletion call clock. |
+| `NAMESPACE_RETIREMENT_GRACE_MS` | 2,490,000 | Minimum grace from the deletion call clock. |
 
 A provider retry can be admitted before its operation deadline, wait up to 15 seconds of backoff, then take up to 120 seconds for a payload-sized request. Conditional WAL and manifest writes can exceed the payload threshold even though they use a single request. The publication allowance therefore reserves 120 + 15 + 120 seconds, not the 30-second small-request timeout. This is a request-phase allowance, not a bound on response-body consumption. It retains the relative-clock and scheduling assumptions and does not prove that a timed-out remote mutation had no effect.
 
@@ -1578,6 +1578,7 @@ METADATA_COMPACTION_BUDGET_MS
 
 NAMESPACE_RETIREMENT_GRACE_MS
     = METADATA_PUBLICATION_BUDGET_MS
+      + PROVIDER_PUBLICATION_REQUEST_BOUND_MS
       + max(GC_MIN_GRACE_WINDOW_MS,
             DIRECT_TRANSFER_URL_TTL_MS + PROVIDER_PUBLICATION_REQUEST_BOUND_MS
             + GC_SAFETY_MARGIN_MS)
