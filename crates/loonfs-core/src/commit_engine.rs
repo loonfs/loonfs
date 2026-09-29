@@ -4,7 +4,7 @@
 
 use crate::authorize::CommitAuthority;
 use crate::checkpoint::MetadataSegmentCache;
-use crate::commit::CommitFingerprint;
+use crate::commit::{CommitFingerprint, WalPublishError};
 use crate::context::MutationContext;
 use crate::error::{CoreError, Result, WriterFence};
 use crate::namespace::basis::MetadataBasis;
@@ -470,7 +470,8 @@ pub struct NamespaceCommitEnginePublishResult {
     /// maintenance scheduling. Zero when no projection was loaded.
     pub wal_tail_segments: u64,
     pub wal_tail_inline_bytes: usize,
-    /// Whether this attempt loaded a tail that makes the two counts current.
+    /// Whether this attempt loaded the tail. The inline count then includes
+    /// the inline bytes of a put whose outcome is unknown.
     pub wal_tail_observed: bool,
     /// Whether this attempt read the WAL tail from the store instead of
     /// reusing the retained projection.
@@ -872,6 +873,18 @@ impl NamespaceCommitEngine {
         )
         .await;
         self.projection_observed = Some(projection_observed);
+        // A put whose outcome is unknown counts as landed.
+        let unknown_inline_bytes: usize = candidates
+            .iter()
+            .zip(&published.results)
+            .filter(|(_, result)| {
+                matches!(
+                    result,
+                    Err(CoreError::WalPublish(WalPublishError::OutcomeUnknown(_)))
+                )
+            })
+            .map(|(candidate, _)| candidate.inline_content_bytes())
+            .sum();
         let (wal_tail_segments, wal_tail_inline_bytes, resulting_read_state) =
             self.update_publish_tail_projection(projection, published.effect, tail_options);
         // A put that landed is itself an observation of the tip it created, made no
@@ -882,7 +895,7 @@ impl NamespaceCommitEngine {
         NamespaceCommitEnginePublishResult {
             results: published.results,
             wal_tail_segments,
-            wal_tail_inline_bytes,
+            wal_tail_inline_bytes: wal_tail_inline_bytes + unknown_inline_bytes,
             wal_tail_observed: true,
             wal_tail_discovered,
             resulting_read_state,

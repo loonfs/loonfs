@@ -57,7 +57,13 @@ impl PublisherRegistry {
         }
         let kept = {
             let slot = publisher.engine.lock().await;
-            let unfolded_bytes = slot.wal_tail_inline_bytes().unwrap_or(0);
+            // Until a publish observes the tail, admit at most one segment budget.
+            let unfolded_bytes = slot.wal_tail_inline_bytes().unwrap_or(
+                publisher
+                    .inline_content
+                    .inline_content_tail_limit_bytes
+                    .saturating_sub(publisher.inline_content.inline_content_segment_budget_bytes),
+            );
             permit.reserve_inline(
                 plan.ordered_inline_content[..plan.segment_inline_values]
                     .iter()
