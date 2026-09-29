@@ -501,14 +501,15 @@ and `InlineContentOptions`. These settings do not change reader format limits.
 | `inline_content_threshold_bytes` | 64 KiB | Prepares content at or under this size inline; `None` in embedded options or `false` in server TOML disables inline writes. |
 | `inline_content_segment_budget_bytes` | 1 MiB | Limits inline bytes in one WAL segment and stages overflow in operation order. |
 | `inline_content_fold_at_bytes` | 2 MiB | Makes an automatic fold due when unfolded inline bytes reach this size. |
-| `inline_content_tail_limit_bytes` | 32 MiB | Stages new content when known unfolded and admitted inline bytes would exceed this size. |
+| `inline_content_tail_limit_bytes` | 32 MiB | Stages new content when unfolded and admitted inline bytes would exceed this size. |
 
-The tail limit uses the loaded projection, or the last tail size this publisher
-observed after that projection is invalidated. Only a publisher that has never
-observed the namespace counts the tail as zero. Its first inline commit can
-exceed the limit by at most that commit's inline bytes, which is at most the
-segment budget, once during that publisher's lifetime. Another writer can make
-the remembered size stale until this publisher's next publish. The
+The tail limit uses the loaded projection, or the last tail size this session
+observed after that projection is invalidated. That size counts a WAL put whose
+outcome is unknown as landed. A session that has not observed the tail admits
+at most the segment budget, and its first publish observes the tail. The tail
+can exceed the limit by at most the segment budget: for a new session's first
+inline commit, and after a put whose outcome is unknown. Another writer can make
+the remembered size stale until this session's next publish. The
 `MAX_UNFLUSHED_WAL_SEGMENTS` write stop refuses new commits regardless of the
 inline tail limit.
 

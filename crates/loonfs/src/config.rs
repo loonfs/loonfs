@@ -82,10 +82,12 @@ pub struct InlineContentOptions {
     pub inline_content_segment_budget_bytes: usize,
     /// Unfolded inline bytes that make a fold due; defaults to 2 MiB.
     pub inline_content_fold_at_bytes: usize,
-    /// Limit on known unfolded and admitted inline bytes; defaults to 32 MiB.
-    /// Projection invalidation keeps the last count this publisher observed.
-    /// A publisher that has never observed the namespace counts zero, so its
-    /// first inline commit can exceed the limit by at most the segment budget.
+    /// Limit on unfolded and admitted inline bytes; defaults to 32 MiB.
+    /// Projection invalidation keeps the last count this session observed, and
+    /// that count includes a put whose outcome is unknown. A session that has
+    /// not observed the tail admits at most the segment budget. The tail can
+    /// exceed the limit by at most the segment budget: for a new session's
+    /// first inline commit, and after a put whose outcome is unknown.
     /// `MAX_UNFLUSHED_WAL_SEGMENTS` stops new commits regardless of this limit.
     pub inline_content_tail_limit_bytes: usize,
 }

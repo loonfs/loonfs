@@ -139,6 +139,11 @@ async fn check_terminal_reload_failure(include_replay: bool) {
             .await
             .expect("raw durable tail");
     assert_eq!(durable.wal_tail_inline_bytes, 4);
+    assert!(writer
+        .publisher()
+        .wal_tail_inline_bytes(&namespace)
+        .await
+        .is_some_and(|bytes| bytes >= durable.wal_tail_inline_bytes));
     assert_eq!(writer.publisher().shared.admission.used_requests(), 0);
     assert_eq!(first_error.code(), ErrorCode::CommitOutcomeUnknown);
 
@@ -181,6 +186,81 @@ async fn check_terminal_reload_failure(include_replay: bool) {
         b"next"
     );
     drop(permits);
+    writer.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn a_new_session_keeps_one_segment_budget_inline_until_it_observes_the_tail() {
+    let (_directory, store, writer, namespace) = writer_with_policy(InlineContentOptions {
+        inline_content_segment_budget_bytes: 4,
+        inline_content_fold_at_bytes: 8,
+        inline_content_tail_limit_bytes: 8,
+        ..policy()
+    })
+    .await;
+    for (path, bytes) in [("/four", b"four".as_slice()), ("/three", b"abc")] {
+        writer
+            .put_file_bytes(&namespace, path, bytes, put_options(&path[1..]))
+            .await
+            .expect("fill tail below the fold trigger");
+    }
+    writer
+        .close_namespace(&namespace)
+        .await
+        .expect("close session");
+    let folds = writer
+        .bits
+        .wal_fold_permits
+        .acquire_many(crate::DEFAULT_MAX_CONCURRENT_FOLDS as u32)
+        .await
+        .expect("hold folds");
+    let registry = writer.publisher();
+    let slots = registry
+        .shared
+        .admission
+        .publications
+        .acquire_many(8)
+        .await
+        .expect("hold publications");
+    store.reset();
+    let (first, second, third, ()) = tokio::join!(
+        writer.put_file_bytes(&namespace, "/a", b"aaaa", put_options("a")),
+        writer.put_file_bytes(&namespace, "/b", b"bbbb", put_options("b")),
+        writer.put_file_bytes(&namespace, "/c", b"cccc", put_options("c")),
+        async {
+            let publisher = registry
+                .test_publisher_for(&namespace)
+                .expect("new session");
+            timeout(
+                Duration::from_secs(10),
+                wait_for_queued_candidates(&publisher, 3),
+            )
+            .await
+            .expect("all three admitted before the first publish");
+            drop(slots);
+        }
+    );
+    for result in [first, second, third] {
+        result.expect("put");
+    }
+    let inline_bytes: usize = written_records(&store)
+        .await
+        .iter()
+        .flat_map(|record| &record.inline_content)
+        .map(|value| value.bytes.len())
+        .sum();
+    assert_eq!(inline_bytes, 4);
+    let staged = store
+        .snapshot()
+        .into_iter()
+        .filter(|operation| {
+            matches!(operation, RecordedOperation::Put { key, .. }
+                if parse_object_key(key)
+                    .is_some_and(|parsed| parsed.family() == DurableObjectFamily::ContentBlob))
+        })
+        .count();
+    assert_eq!(staged, 2);
+    drop(folds);
     writer.shutdown().await.expect("shutdown");
 }
 
