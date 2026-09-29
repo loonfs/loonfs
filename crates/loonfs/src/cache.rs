@@ -545,19 +545,26 @@ impl ReadCore {
         let head_seq = state.head.seq;
         let manifest_no = state.basis.manifest_no();
         let mut cache = self.inner.control_cache();
-        let (last_control_check, validation) = cache
+        let (cached_check, validation) = cache
             .namespaces
             .get(namespace_id)
-            .map(|(head, _)| {
+            .map(|(cached, _)| {
+                // The cached check also confirms the seeded view only if it checked
+                // the same basis and the seeded tip is not behind the cached one.
+                // Otherwise it says nothing about the seeded basis, or about the WAL
+                // numbers just after the seeded tip.
+                let confirms_seed =
+                    cached.basis == state.basis && cached.head.wal_no <= state.head.wal_no;
                 (
-                    head.last_control_check.clone(),
-                    Arc::clone(&head.validation),
+                    cached.last_control_check.clone().filter(|_| confirms_seed),
+                    Arc::clone(&cached.validation),
                 )
             })
             .unwrap_or_default();
-        // The publish that seeds this anchor is its first control check.
-        let last_control_check =
-            last_control_check.or_else(|| Some(Observation::now(Arc::clone(&self.inner.timer))));
+        let last_control_check = cached_check
+            .into_iter()
+            .chain([state.basis_checked])
+            .min_by_key(Observation::age_ms);
         cache.insert_namespace_head(
             namespace_id,
             CachedNamespaceAnchor {

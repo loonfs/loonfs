@@ -500,6 +500,10 @@ pub struct ResultingReadState {
     /// basis, so a seeded read cache matches the next store-backed read.
     pub basis: MetadataBasis,
     pub tail: Arc<ProjectedWalTail>,
+    /// When the writer last confirmed `basis` current, which may be well
+    /// before the put. A read view seeded from this state takes it as its
+    /// last check.
+    pub basis_checked: Observation,
 }
 
 /// Tracks writer state for one namespace session: unacquired, acquired, or
@@ -937,11 +941,17 @@ impl NamespaceCommitEngine {
                     );
                 }
                 projection.reanchor(head.clone());
-                Some(ResultingReadState {
-                    head,
-                    basis: projection.basis().clone(),
-                    tail: Arc::clone(&projection.tail_state),
-                })
+                // A put lands only from a view whose basis was confirmed, so this is
+                // always present. If it ever is not, no read state is offered: a
+                // reader must not take a check that did not happen.
+                self.basis_checked
+                    .clone()
+                    .map(|basis_checked| ResultingReadState {
+                        head,
+                        basis: projection.basis().clone(),
+                        tail: Arc::clone(&projection.tail_state),
+                        basis_checked,
+                    })
             }
         };
         let count = projection.wal_tail_segments;
