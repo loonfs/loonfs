@@ -14,17 +14,11 @@ use super::block_load::SessionBlockMemo;
 use super::cache::{DecodedMetadataSegmentBlock, MetadataSegmentBlockKind, MetadataSegmentCache};
 use super::error::ManifestLoadError;
 use super::stored_block_cache::StoredMetadataBlockKind;
-use loonfs_api::wire::manifest::{
-    AccessRevisionRecord, ActiveDeletionRecord, ActiveDeletionRowAction, AttributesRevisionRecord,
-    CommitReceiptRecord, ContentPublicationRecord, DeletedBinding, DirentryBindingRecord,
-    InodeRecord, MetadataRow, MetadataSegmentRef, RevisionRecord, SubtreeTombstoneRecord,
-    TombstoneRowAction,
-};
+use crate::heap_bytes::data_block_heap_bytes;
+use loonfs_api::wire::manifest::MetadataSegmentRef;
 use loonfs_api::wire::sst_blocks::{
     decode_data_block, BlockHandle, DecodedDataBlock, SegmentIndexEntry,
 };
-use loonfs_api::wire::wal::{WalCommitPayload, WalDelta};
-use loonfs_api::ActorId;
 use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::ObjectStore;
 use std::sync::Arc;
@@ -171,7 +165,7 @@ fn decode_stored_data(
 
 pub(super) fn decoded_data_cache_block(block: DecodedDataBlock) -> DecodedMetadataSegmentBlock {
     DecodedMetadataSegmentBlock::Data {
-        decoded_bytes: decoded_manifest_block_weight(&block),
+        decoded_bytes: data_block_heap_bytes(&block),
         block: Arc::new(block),
     }
 }
@@ -362,7 +356,7 @@ async fn load_and_publish_span<S: ObjectStore + ?Sized>(
             let cache_key =
                 segment_block_cache_key(descriptor, MetadataSegmentBlockKind::Data, handle.offset);
             let cache_block = DecodedMetadataSegmentBlock::Data {
-                decoded_bytes: decoded_manifest_block_weight(&decoded),
+                decoded_bytes: data_block_heap_bytes(&decoded),
                 block: Arc::clone(&decoded),
             };
             if let Some(memo) = memo {
@@ -381,184 +375,4 @@ async fn load_and_publish_span<S: ObjectStore + ?Sized>(
     }
     *winner_decodes = Some(retained);
     Ok(first_block)
-}
-
-pub(super) fn decoded_manifest_block_weight(block: &DecodedDataBlock) -> usize {
-    // Approximate decoded map/vector bookkeeping beyond owned row payloads.
-    const BLOCK_ENTRY_OVERHEAD: usize = 64;
-    const BLOCK_ALLOCATION_OVERHEAD: usize = 128;
-    let row_weight = block
-        .rows
-        .iter()
-        .zip(&block.row_keys)
-        .map(|(row, row_key)| BLOCK_ENTRY_OVERHEAD + row_key.len() + row.decoded_weight())
-        .sum::<usize>();
-    row_weight.saturating_add(BLOCK_ALLOCATION_OVERHEAD)
-}
-
-/// The approximate decoded size of one row. The block cache and the
-/// WAL-tail projection both charge rows with this.
-pub(crate) trait DecodedRowWeight {
-    fn decoded_weight(&self) -> usize;
-}
-
-// Approximate inline row storage and heap allocation metadata.
-const FIXED_ROW_OVERHEAD: usize = 32;
-const ALLOCATED_ROW_OVERHEAD: usize = 96;
-
-fn actor_bytes(actor: &ActorId) -> usize {
-    actor.as_str().len()
-}
-
-fn binding_bytes(binding: &DeletedBinding) -> usize {
-    binding.name_key.as_str().len() + binding.display_name.as_str().len()
-}
-
-fn content_ref_bytes(content_ref: &loonfs_api::ContentRef) -> usize {
-    content_ref.content_id.as_str().len() + content_ref.checksum.value.len()
-}
-
-impl DecodedRowWeight for MetadataRow {
-    fn decoded_weight(&self) -> usize {
-        match self {
-            MetadataRow::Inode(record) => record.decoded_weight(),
-            MetadataRow::DirentryBinding(record) => record.decoded_weight(),
-            MetadataRow::FileRevision(record) => record.decoded_weight(),
-            MetadataRow::Tombstone(record) => record.decoded_weight(),
-            MetadataRow::ActiveDeletion(record) => record.decoded_weight(),
-            MetadataRow::CommitReceipt(record) => record.decoded_weight(),
-            MetadataRow::Commit(record) => record.decoded_weight(),
-            MetadataRow::ContentPublication(record) => record.decoded_weight(),
-            MetadataRow::AttributesRevision(record) => record.decoded_weight(),
-            MetadataRow::AccessRevision(record) => record.decoded_weight(),
-        }
-    }
-}
-
-impl DecodedRowWeight for InodeRecord {
-    fn decoded_weight(&self) -> usize {
-        ALLOCATED_ROW_OVERHEAD + self.commit_id.as_str().len() + actor_bytes(&self.committed_by)
-    }
-}
-
-impl DecodedRowWeight for DirentryBindingRecord {
-    fn decoded_weight(&self) -> usize {
-        ALLOCATED_ROW_OVERHEAD
-            + self.name_key.as_str().len()
-            + actor_bytes(&self.child_created_by)
-            + self.display_name().map_or(0, |name| name.as_str().len())
-    }
-}
-
-impl DecodedRowWeight for RevisionRecord {
-    fn decoded_weight(&self) -> usize {
-        ALLOCATED_ROW_OVERHEAD
-            + self.commit_id.as_str().len()
-            + actor_bytes(&self.committed_by)
-            + content_ref_bytes(&self.content_ref)
-    }
-}
-
-impl DecodedRowWeight for SubtreeTombstoneRecord {
-    fn decoded_weight(&self) -> usize {
-        let action_bytes = match &self.action {
-            TombstoneRowAction::Set { deleted_binding } => binding_bytes(deleted_binding),
-            TombstoneRowAction::Revoke { .. } => 0,
-        };
-        ALLOCATED_ROW_OVERHEAD
-            + self.commit_id.as_str().len()
-            + actor_bytes(&self.committed_by)
-            + action_bytes
-    }
-}
-
-impl DecodedRowWeight for ActiveDeletionRecord {
-    fn decoded_weight(&self) -> usize {
-        match &self.action {
-            ActiveDeletionRowAction::Listed {
-                deleted_by,
-                deleted_binding,
-                ..
-            } => ALLOCATED_ROW_OVERHEAD + actor_bytes(deleted_by) + binding_bytes(deleted_binding),
-            ActiveDeletionRowAction::Removed { .. } => FIXED_ROW_OVERHEAD,
-        }
-    }
-}
-
-impl DecodedRowWeight for ContentPublicationRecord {
-    fn decoded_weight(&self) -> usize {
-        ALLOCATED_ROW_OVERHEAD + self.content_id.as_str().len()
-    }
-}
-
-impl DecodedRowWeight for CommitReceiptRecord {
-    fn decoded_weight(&self) -> usize {
-        ALLOCATED_ROW_OVERHEAD + self.commit_id.as_str().len()
-    }
-}
-
-impl DecodedRowWeight for WalCommitPayload {
-    fn decoded_weight(&self) -> usize {
-        let delta_bytes = self
-            .deltas
-            .iter()
-            .map(|delta| {
-                let variable_bytes = match &delta.delta {
-                    WalDelta::CreateInode { .. } | WalDelta::RevokeSubtreeTombstone { .. } => 0,
-                    WalDelta::BindDirentry {
-                        name_key,
-                        display_name,
-                        child_created_by,
-                        ..
-                    }
-                    | WalDelta::UnbindDirentry {
-                        name_key,
-                        display_name,
-                        child_created_by,
-                        ..
-                    } => {
-                        name_key.as_str().len()
-                            + display_name.as_str().len()
-                            + actor_bytes(child_created_by)
-                    }
-                    WalDelta::AppendFileRevision { content_ref, .. } => {
-                        content_ref_bytes(content_ref)
-                    }
-                    WalDelta::TombstoneSubtree {
-                        deleted_binding, ..
-                    } => binding_bytes(deleted_binding),
-                    WalDelta::AppendAttributesRevision { attributes, .. } => {
-                        attributes.logical_bytes()
-                    }
-                    WalDelta::AppendAccessRevision { grants, .. } => grants.logical_bytes(),
-                };
-                ALLOCATED_ROW_OVERHEAD + variable_bytes
-            })
-            .fold(0usize, usize::saturating_add);
-        FIXED_ROW_OVERHEAD
-            + ALLOCATED_ROW_OVERHEAD
-            + self.commit_id.as_str().len()
-            + actor_bytes(&self.committed_by)
-            + self.semantic_commit_fingerprint.as_str().len()
-            + self.message.as_ref().map_or(0, String::len)
-            + delta_bytes
-    }
-}
-
-impl DecodedRowWeight for AttributesRevisionRecord {
-    fn decoded_weight(&self) -> usize {
-        ALLOCATED_ROW_OVERHEAD
-            + self.commit_id.as_str().len()
-            + actor_bytes(&self.committed_by)
-            + self.attributes.logical_bytes()
-    }
-}
-
-impl DecodedRowWeight for AccessRevisionRecord {
-    fn decoded_weight(&self) -> usize {
-        ALLOCATED_ROW_OVERHEAD
-            + self.commit_id.as_str().len()
-            + actor_bytes(&self.committed_by)
-            + self.grants.logical_bytes()
-    }
 }

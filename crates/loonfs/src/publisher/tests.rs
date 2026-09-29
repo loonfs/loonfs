@@ -2376,7 +2376,10 @@ async fn a_runtime_fold_materializes_inline_content_and_reanchors_to_an_empty_ta
         .expect("reanchored projection");
     assert_eq!(input.wal_tail_segments, 0);
     assert_eq!(input.tail_state.weight().rows, 0);
-    assert_eq!(input.tail_state.weight().bytes, 0);
+    assert_eq!(
+        input.tail_state.weight(),
+        Arc::new(loonfs_core::cache::ProjectedWalTail::default()).weight()
+    );
     store.reset();
     registry
         .submit_candidate(namespace_id.clone(), candidate)

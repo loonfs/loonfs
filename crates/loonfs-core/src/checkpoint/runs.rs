@@ -2,8 +2,10 @@
 
 use super::block_load::DEFAULT_BLOCK_MEMO_BYTES;
 use super::cache::{block_memo_bytes, MetadataSegmentCache};
+use crate::heap_bytes::{arc_bytes, HeapBytes};
 use loonfs_api::wire::manifest::{
-    MetadataRowFamily, MetadataRunRef, MetadataSegmentRef, NamespaceManifestPayload, RunTier,
+    MetadataRowFamily, MetadataRunRef, MetadataSegmentRef, NamespaceManifestEnvelope,
+    NamespaceManifestPayload, RunTier,
 };
 use loonfs_api::{ChangeSeq, RunNo};
 use serde::{Deserialize, Serialize};
@@ -120,6 +122,30 @@ pub(super) fn delta_run_count(payload: &NamespaceManifestPayload) -> usize {
 /// writes its output beside the runs it did not consume. They hold different
 /// families in that case, and the later-allocated run number keeps the order
 /// total.
+impl HeapBytes for MetadataFamilySegments {
+    fn heap_bytes(&self) -> usize {
+        self.segments.heap_bytes()
+    }
+}
+
+impl HeapBytes for MetadataRunManifest {
+    fn heap_bytes(&self) -> usize {
+        self.segments.heap_bytes()
+    }
+}
+
+/// A cached manifest: the decoded envelope and its scan-ordered runs, each
+/// behind its own `Arc`. The runs copy every segment descriptor.
+pub(super) fn manifest_cache_heap_bytes(
+    envelope: &NamespaceManifestEnvelope,
+    scan_runs: &Vec<MetadataRunManifest>,
+) -> usize {
+    arc_bytes::<NamespaceManifestEnvelope>()
+        + envelope.heap_bytes()
+        + arc_bytes::<Vec<MetadataRunManifest>>()
+        + scan_runs.heap_bytes()
+}
+
 pub(super) fn runs_in_reorganization_order(
     payload: &NamespaceManifestPayload,
 ) -> Vec<MetadataRunManifest> {

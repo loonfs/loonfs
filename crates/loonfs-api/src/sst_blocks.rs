@@ -496,6 +496,10 @@ pub fn decode_data_block_rows<R: serde::de::DeserializeOwned>(
             "restart array contains unused offsets".to_owned(),
         ));
     }
+    // Growth by doubling reserves up to twice the slots a block fills, and
+    // a cached block keeps them for as long as it lives.
+    row_keys.shrink_to_fit();
+    rows.shrink_to_fit();
     Ok(DecodedDataBlock { row_keys, rows })
 }
 

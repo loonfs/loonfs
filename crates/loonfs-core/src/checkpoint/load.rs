@@ -10,7 +10,7 @@ use super::cache::{
     MetadataSegmentCacheKey,
 };
 use super::error::ManifestLoadError;
-use super::runs::runs_in_reorganization_order;
+use super::runs::{manifest_cache_heap_bytes, runs_in_reorganization_order};
 use super::scan::VerifiedMetadataSegments;
 use super::validate::{validate_manifest, validate_namespace_manifest};
 use crate::error::{CoreError, MetadataProjectionLoadError};
@@ -129,12 +129,12 @@ pub(crate) fn metadata_basis_from_manifest<'a, S: ObjectStore + ?Sized>(
                 block_offset: 0,
             },
             DecodedMetadataSegmentBlock::Manifest {
+                decoded_bytes: manifest_cache_heap_bytes(&manifest.state.envelope, &scan_runs),
                 manifest: (
                     Arc::clone(&manifest.state.envelope),
                     Arc::clone(&scan_runs),
                     manifest.manifest_bytes,
                 ),
-                decoded_bytes: (manifest.manifest_bytes as usize).saturating_mul(2),
             },
         );
     }
@@ -244,9 +244,8 @@ pub(crate) async fn load_manifest_segments_for_inspection<'a, S: ObjectStore + ?
             decode_manifest_at(namespace_id, *manifest_no, &manifest_key, &manifest_bytes)?;
         let scan_runs = Arc::new(runs_in_reorganization_order(manifest.payload()));
         Ok(DecodedMetadataSegmentBlock::Manifest {
+            decoded_bytes: manifest_cache_heap_bytes(&manifest, &scan_runs),
             manifest: (Arc::new(manifest), scan_runs, manifest_bytes.len() as u64),
-            // The entry retains the envelope plus its scan-ordered run list.
-            decoded_bytes: manifest_bytes.len().saturating_mul(2),
         })
     };
     let decoded = match segment_cache {
