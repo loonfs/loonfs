@@ -302,7 +302,7 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | `would_cycle` | 409 | The rename would create a directory cycle. |
 | `commit_id_reuse_conflict` | 409 | The commit id was reused with different content. |
 | `upload_already_completed` | 409 | The upload session is already completed, so it cannot select other content and cannot be aborted. |
-| `upload_content_conflict` | 409 | Different bytes were staged under this upload id. |
+| `upload_content_conflict` | 409 | Different bytes were staged under this upload id, or another staging request holds the session's staging claim: one still in flight, one that was cancelled, or one whose write may still land. Open a new session. |
 | `query_unindexable` | 400 | The pattern has no run of at least 3 literal bytes, so the trigram index cannot narrow candidates; rewrite the pattern, or set `allow_scan` (capped by `query.grep.scan_budget_files`). |
 | `rebootstrap_required` | 409 | The resume position is unanswerable — a change cursor below the retention floor, or a listing cursor minted ahead of the serving head; restart from a fresh listing or checkpoint. |
 | `not_supported` | 501 | The deployment does not implement the requested op or feature. |

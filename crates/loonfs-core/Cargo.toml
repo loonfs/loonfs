@@ -34,7 +34,7 @@ test-support = []
 loonfs-model.workspace = true
 loonfs-test-support.workspace = true
 tempfile.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
 
 # The integration harness uses this crate's test-support helpers, which a bare
 # `cargo test -p loonfs-core` does not enable; declaring the requirement makes

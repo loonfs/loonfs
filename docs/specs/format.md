@@ -454,7 +454,7 @@ Every staged or completed reference must match the session's content identity an
 
 A staging request conditionally changes the session's staging state from `idle` to `claimed` before writing content. A concurrent staging request that finds the claim cannot write the same object. When staging succeeds, the request stores the verified reference and releases its claim in the same record update.
 
-A retry against already staged content compares the incoming content with the staged reference rather than overwriting the object. The same bytes can be accepted as a retry; different bytes conflict. The claim has no independent expiry. After a request is cancelled, the claim can remain active for the remainder of the session lease.
+A retry against already staged content compares the incoming content with the staged reference rather than overwriting the object. The same bytes can be accepted as a retry; different bytes conflict. The claim has no independent expiry. A failed write releases the claim only if it failed before its final request was sent. Once that request may have been sent, the write can still land, so the claim stays until the session is aborted or its lease ends. After a request is cancelled, the claim can remain active for the remainder of the session lease.
 
 Completion clears service-proxied staging to `idle` in the same CAS that records the terminal completed reference. Abort also clears staging to `idle`. A terminal record must not retain a second staged content description, even if the two references would agree.
 
