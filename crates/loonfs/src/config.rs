@@ -18,7 +18,9 @@ pub(crate) const DEFAULT_MAX_CACHED_WAL_TAIL_PROJECTION_DECODED_BYTES: usize =
 /// larger WAL segments. Zero
 /// keeps only the batching that in-flight publications force.
 pub(crate) const DEFAULT_MIN_PUBLISH_INTERVAL_MS: u64 = 15;
-/// Default maximum writer sessions held at once.
+/// Default maximum writer sessions held at once. A full table closes its
+/// least recently used idle session to open another (see
+/// [`FsWriterBuilder::max_writer_sessions`](crate::FsWriterBuilder::max_writer_sessions)).
 pub const DEFAULT_MAX_WRITER_SESSIONS: usize = 10_000;
 /// Default maximum WAL-tail folds one writer runs concurrently.
 pub const DEFAULT_MAX_CONCURRENT_FOLDS: usize = 2;
@@ -157,17 +159,22 @@ pub struct RuntimeCacheConfig {
     /// Minimum monotonic interval between checks for a successor to the cached manifest.
     /// Defaults to 1000 milliseconds; zero checks on every read.
     pub manifest_revalidation_interval_ms: u64,
-    /// Maximum namespaces retained by entry-counted runtime caches. Zero
-    /// disables those caches. This does not affect maintenance scheduling.
+    /// Maximum namespaces retained by entry-counted runtime caches: head
+    /// anchors and read-side WAL-tail projections. Zero disables those
+    /// caches. This does not affect maintenance scheduling.
     ///
-    /// Writer session state is retained separately because an evicted fenced
-    /// session could otherwise reacquire the epoch (see
-    /// [`WriterSessionState`](loonfs_core::publish::WriterSessionState)).
+    /// It does not count the WAL-tail projections a writer's publishers
+    /// retain, which only the two projection budgets bound, or writer
+    /// sessions, which
+    /// [`FsWriterBuilder::max_writer_sessions`](crate::FsWriterBuilder::max_writer_sessions)
+    /// bounds.
     pub max_cached_namespaces: usize,
     /// Maximum metadata rows retained across WAL-tail projections. The read
     /// cache and the publish side each hold their own total against it, so
-    /// this is the ceiling per side rather than for the process. Zero
-    /// disables the projection cache.
+    /// this is the ceiling per side rather than for the process. On the
+    /// publish side this and the byte budget are the only bound, and the
+    /// least recently published projection goes first. Zero disables the
+    /// projection cache.
     pub max_cached_wal_tail_projection_rows: usize,
     /// Approximate decoded-byte budget for WAL-tail projections, per side
     /// like the row budget. Both budgets also cap one projection: a publish

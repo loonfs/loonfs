@@ -23,6 +23,7 @@ use loonfs_api::{AbsolutePath, ActorId, ChangeSeq, DestinationBehavior};
 use loonfs_core::test_support::append_wal_segments;
 use loonfs_core::MutationContext;
 use loonfs_objectstore::keys::{metadata_manifest_prefix, wal_segment_prefix};
+use loonfs_objectstore::layout::DurableObjectFamily;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
 use loonfs_test_support::stores::{
@@ -2967,18 +2968,20 @@ async fn delete_queued_mid_publish_waits_behind_admitted_work() {
     registry.drain().await.expect("drain settles both units");
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn retained_tail_projections_stay_within_the_namespace_count_cap() {
+#[tokio::test]
+async fn retained_tail_projections_are_not_bounded_by_the_namespace_count() {
     const NAMESPACES: usize = 12;
-    const RETAINED: usize = 3;
 
     let temp_dir = tempdir().expect("tempdir");
-    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
+    let recording = Arc::new(RecordingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyPredicate::family(DurableObjectFamily::WalSegment),
+    ));
     let recorder = Arc::new(DefaultMetricsRecorder::new());
     let writer = test_writer_with_cache(
-        store,
+        recording.clone(),
         RuntimeCacheConfig {
-            max_cached_namespaces: RETAINED,
+            max_cached_namespaces: 3,
             ..RuntimeCacheConfig::default()
         },
         recorder.clone(),
@@ -2989,34 +2992,30 @@ async fn retained_tail_projections_stay_within_the_namespace_count_cap() {
 
     publish_once_into_each(&writer, &namespaces).await;
 
-    let totals = retained_projections(&registry);
     assert_eq!(
-        totals.projections, RETAINED,
-        "the count cap bounds retained projections across namespaces"
-    );
-    assert!(
-        totals.rows > 0 && totals.decoded_bytes > 0,
-        "the surviving projections must be real ones: {totals:?}"
-    );
-    assert_eq!(
-        retained_namespaces(&registry),
-        namespaces[NAMESPACES - RETAINED..].to_vec(),
-        "eviction takes the least recently published namespaces first"
-    );
-    assert_eq!(
-        registry.shared.lock_state().publishers.len(),
+        retained_projections(&registry).projections,
         NAMESPACES,
-        "bounding the projections must not evict a publisher or its session"
+        "every projection fits the byte budget, so none is evicted"
     );
-
     assert_eq!(
         gauge(&recorder, "loonfs.publisher.retained_projections"),
-        i64::try_from(RETAINED).expect("small count"),
-        "the gauge reports what the registry retains"
+        i64::try_from(NAMESPACES).expect("small count"),
     );
+
+    recording.reset();
+    for namespace_id in &namespaces {
+        registry
+            .submit_candidate(
+                namespace_id.clone(),
+                CommitCandidate::new(create_directory_request("second", "more")),
+            )
+            .await
+            .expect("commit");
+    }
     assert_eq!(
-        gauge(&recorder, "loonfs.publisher.retained_projection_bytes"),
-        i64::try_from(totals.decoded_bytes).expect("small byte total"),
+        recording.count(OperationClass::Read),
+        0,
+        "a commit with a retained projection reads no WAL segment"
     );
 
     registry.close_admission();
@@ -3088,6 +3087,11 @@ async fn retained_tail_projections_stay_within_the_shared_byte_budget() {
     assert!(
         (1..=ADMITTED).contains(&totals.projections),
         "the budget admits {ADMITTED} projections of this size, no more: {totals:?}"
+    );
+    assert_eq!(
+        retained_namespaces(&registry),
+        namespaces[NAMESPACES - totals.projections..].to_vec(),
+        "eviction takes the least recently published namespaces first"
     );
     assert_eq!(
         gauge(&recorder, "loonfs.publisher.retained_projection_bytes"),
@@ -3178,21 +3182,26 @@ async fn a_landed_delete_forgets_the_namespace_projection() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_skipped_eviction_leaves_the_namespace_accounted() {
+    let budget_bytes = one_projection_decoded_bytes().await;
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
     let recorder = Arc::new(DefaultMetricsRecorder::new());
     let writer = test_writer_with_cache(
         store,
         RuntimeCacheConfig {
-            max_cached_namespaces: 1,
+            max_cached_wal_tail_projection_decoded_bytes: budget_bytes,
             ..RuntimeCacheConfig::default()
         },
         recorder.clone(),
     )
     .await;
     let registry = writer.publisher();
-    let namespaces = test_namespaces(2);
-    let (busy, other) = (namespaces[0].clone(), namespaces[1].clone());
+    let namespaces = test_namespaces(3);
+    let (busy, other, last) = (
+        namespaces[0].clone(),
+        namespaces[1].clone(),
+        namespaces[2].clone(),
+    );
 
     publish_once_into_each(&writer, &namespaces[..1]).await;
     assert_eq!(retained_namespaces(&registry), vec![busy.clone()]);
@@ -3208,20 +3217,7 @@ async fn a_skipped_eviction_leaves_the_namespace_accounted() {
         .clone();
     let held_engine = busy_publisher.engine.lock().await;
 
-    writer
-        .create_namespace(
-            &other,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
-        .await
-        .expect("bootstrap");
-    registry
-        .submit_candidate(
-            other.clone(),
-            CommitCandidate::new(create_directory_request("seed", "docs")),
-        )
-        .await
-        .expect("commit while the other engine is held");
+    publish_once_into_each(&writer, &namespaces[1..2]).await;
 
     let skipped = retained_projections(&registry);
     assert_eq!(
@@ -3236,17 +3232,11 @@ async fn a_skipped_eviction_leaves_the_namespace_accounted() {
     );
 
     drop(held_engine);
-    registry
-        .submit_candidate(
-            other.clone(),
-            CommitCandidate::new(create_directory_request("second", "more")),
-        )
-        .await
-        .expect("commit once the engine is free");
+    publish_once_into_each(&writer, &namespaces[2..]).await;
 
     assert_eq!(
         retained_namespaces(&registry),
-        vec![other],
+        vec![last],
         "the next sweep evicts what the previous one skipped"
     );
 

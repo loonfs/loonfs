@@ -54,18 +54,54 @@ async fn writer_with_cache_and_metrics(
         .expect("build writer")
 }
 
-/// The WAL-tail projections the writer's namespace publishers retain, read
-/// off the gauge that reports them.
-fn retained_projections(recorder: &DefaultMetricsRecorder) -> i64 {
+/// What the writer's namespace publishers retain, read off one of the
+/// gauges that report it.
+fn retention_gauge(recorder: &DefaultMetricsRecorder, name: &str) -> i64 {
     let snapshot = recorder.snapshot();
     let entry = snapshot
-        .by_name("loonfs.publisher.retained_projections")
+        .by_name(name)
         .next()
         .expect("the publisher registers its retention gauges");
     match entry.value {
         MetricValue::Gauge(value) => value,
         ref other => panic!("retention is reported as a gauge, found {other:?}"),
     }
+}
+
+/// Decoded bytes the publishers retain once `fence` and `other` each hold
+/// the first file the fencing test publishes, with nothing evicted.
+async fn first_projections_decoded_bytes(ns_fence: &NamespaceId, ns_other: &NamespaceId) -> usize {
+    let temp_dir = tempdir().expect("tempdir");
+    let store: SharedObjectStore =
+        Arc::new(LocalFsStore::new(temp_dir.path()).expect("create local-fs store"));
+    let recorder = Arc::new(DefaultMetricsRecorder::new());
+    let writer = writer_with_cache_and_metrics(
+        &store,
+        "writer-a",
+        RuntimeCacheConfig::default(),
+        recorder.clone(),
+    )
+    .await;
+    for (namespace_id, path) in [(ns_fence, "/a1.txt"), (ns_other, "/spill.txt")] {
+        writer
+            .create_namespace(
+                namespace_id,
+                CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+            )
+            .await
+            .expect("create namespace");
+        writer
+            .put_file_bytes(
+                namespace_id,
+                path,
+                b"a",
+                PutFileOptions::new(loonfs_test_support::test_actor()),
+            )
+            .await
+            .expect("first put");
+    }
+    let bytes = retention_gauge(&recorder, "loonfs.publisher.retained_projection_bytes");
+    usize::try_from(bytes).expect("retained bytes are positive")
 }
 
 /// Asserts a terminal fencing refusal and hands back the fence it carries.
@@ -277,10 +313,11 @@ async fn fenced_writer_stays_fenced_after_its_tail_projection_is_evicted() {
     ));
     let store: SharedObjectStore = counting.clone();
 
-    // Room for one projection: publishing to either namespace evicts the
-    // other's.
+    // Room for either projection but not both: publishing to either
+    // namespace evicts the other's.
+    let both_projections = first_projections_decoded_bytes(&ns_fence, &ns_other).await;
     let single_projection_cache = RuntimeCacheConfig {
-        max_cached_namespaces: 1,
+        max_cached_wal_tail_projection_decoded_bytes: both_projections - 1,
         ..RuntimeCacheConfig::default()
     };
     let recorder = Arc::new(DefaultMetricsRecorder::new());
@@ -328,7 +365,7 @@ async fn fenced_writer_stays_fenced_after_its_tail_projection_is_evicted() {
         .await
         .expect("writer a publishes to the other namespace");
     assert_eq!(
-        retained_projections(&recorder),
+        retention_gauge(&recorder, "loonfs.publisher.retained_projections"),
         1,
         "the budget admits one namespace's projection at a time"
     );

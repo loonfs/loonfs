@@ -300,13 +300,14 @@ async fn fencing_is_sticky_until_the_session_is_closed() {
 }
 
 #[tokio::test]
-async fn capacity_refuses_without_eviction_and_close_releases_it() {
+async fn explicit_open_capacity_refuses_without_eviction_and_close_releases_it() {
     let temp_dir = tempdir().expect("tempdir");
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("create store"));
     let writer = FsWriter::builder_with_store(store)
         .writer_id("bounded")
         .min_publish_interval_ms(0)
+        .namespace_sessions(NamespaceSessionPolicy::ExplicitOpen)
         .max_writer_sessions(NonZeroUsize::new(2).expect("nonzero capacity"))
         .build()
         .await
@@ -321,9 +322,7 @@ async fn capacity_refuses_without_eviction_and_close_releases_it() {
     writer.open_namespace(&second).expect("open second session");
 
     expect_code(
-        writer
-            .create_directory(&third, "/refused", directory_options())
-            .await,
+        writer.open_namespace(&third),
         ErrorCode::WriterCapacityExceeded,
     );
     writer
@@ -339,9 +338,12 @@ async fn capacity_refuses_without_eviction_and_close_releases_it() {
         .await
         .expect("close first session");
     writer
+        .open_namespace(&third)
+        .expect("third session opens after close");
+    writer
         .create_directory(&third, "/third", directory_options())
         .await
-        .expect("third session opens after close");
+        .expect("third session publishes");
     writer
         .close_namespace(&second)
         .await
@@ -368,4 +370,178 @@ async fn capacity_refuses_without_eviction_and_close_releases_it() {
             .expect("close cycled session");
     }
     assert_eq!(writer.writer_session_stats().open, 0);
+}
+
+async fn bounded_writer(store: SharedObjectStore, writer_id: &str, capacity: usize) -> FsWriter {
+    FsWriter::builder_with_store(store)
+        .writer_id(writer_id)
+        .min_publish_interval_ms(0)
+        .max_writer_sessions(NonZeroUsize::new(capacity).expect("nonzero capacity"))
+        .build()
+        .await
+        .expect("build bounded writer")
+}
+
+#[tokio::test]
+async fn a_full_table_closes_the_least_recently_used_idle_session() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store: SharedObjectStore =
+        Arc::new(LocalFsStore::new(temp_dir.path()).expect("create store"));
+    let writer = bounded_writer(store, "evicting", 2).await;
+    let namespaces =
+        ["lru-one", "lru-two", "lru-three"].map(|name| NamespaceId::parse(name).expect("id"));
+    for namespace_id in &namespaces {
+        create_namespace(&writer, namespace_id).await;
+    }
+
+    for (index, namespace_id) in namespaces.iter().chain([&namespaces[0]]).enumerate() {
+        writer
+            .create_directory(
+                namespace_id,
+                &format!("/written-{index}"),
+                directory_options(),
+            )
+            .await
+            .expect("a full table makes room for the write");
+        assert!(writer.writer_session_stats().open <= 2);
+    }
+
+    assert_eq!(
+        writer.namespace_session_state(&namespaces[1]),
+        NamespaceSessionState::Closed,
+        "the least recently used idle session is the one closed"
+    );
+    for namespace_id in [&namespaces[0], &namespaces[2]] {
+        assert!(matches!(
+            writer.namespace_session_state(namespace_id),
+            NamespaceSessionState::Open { fenced: false, .. }
+        ));
+    }
+}
+
+#[tokio::test]
+async fn a_full_table_of_busy_sessions_refuses_until_one_settles() {
+    let temp_dir = tempdir().expect("tempdir");
+    let first = NamespaceId::parse("busy-one").expect("namespace id");
+    let second = NamespaceId::parse("busy-two").expect("namespace id");
+    let third = NamespaceId::parse("busy-three").expect("namespace id");
+    let gates = Arc::new(BlockingStore::matching(
+        BlockingStore::matching(
+            LocalFsStore::new(temp_dir.path()).expect("create store"),
+            crate::common::data_wal_put_for(&second),
+        ),
+        crate::common::data_wal_put_for(&first),
+    ));
+    let store: SharedObjectStore = gates.clone();
+    let writer = bounded_writer(store, "busy", 2).await;
+    for namespace_id in [&first, &second, &third] {
+        create_namespace(&writer, namespace_id).await;
+    }
+
+    gates.block_next();
+    gates.inner().block_next();
+    let first_write = tokio::spawn({
+        let writer = writer.clone();
+        let first = first.clone();
+        async move {
+            writer
+                .create_directory(&first, "/first", directory_options())
+                .await
+        }
+    });
+    gates.wait_until_blocked().await;
+    let second_write = tokio::spawn({
+        let writer = writer.clone();
+        let second = second.clone();
+        async move {
+            writer
+                .create_directory(&second, "/second", directory_options())
+                .await
+        }
+    });
+    gates.inner().wait_until_blocked().await;
+
+    expect_code(
+        writer
+            .create_directory(&third, "/refused", directory_options())
+            .await,
+        ErrorCode::WriterCapacityExceeded,
+    );
+
+    gates.release();
+    first_write
+        .await
+        .expect("join first write")
+        .expect("first write lands");
+    writer
+        .create_directory(&third, "/third", directory_options())
+        .await
+        .expect("the settled session makes room");
+    assert_eq!(
+        writer.namespace_session_state(&first),
+        NamespaceSessionState::Closed
+    );
+
+    gates.inner().release();
+    second_write
+        .await
+        .expect("join second write")
+        .expect("the busy session was kept and its write lands");
+}
+
+#[tokio::test]
+async fn a_full_table_never_closes_a_fenced_session() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store: SharedObjectStore =
+        Arc::new(LocalFsStore::new(temp_dir.path()).expect("create store"));
+    let writer_a = bounded_writer(store.clone(), "fenced-a", 2).await;
+    let writer_b = writer(store, "fenced-b").await;
+    let fenced = NamespaceId::parse("fenced").expect("namespace id");
+    let idle = NamespaceId::parse("idle").expect("namespace id");
+    let third = NamespaceId::parse("third").expect("namespace id");
+    for namespace_id in [&fenced, &idle, &third] {
+        create_namespace(&writer_a, namespace_id).await;
+    }
+    writer_a
+        .create_directory(&fenced, "/a-one", directory_options())
+        .await
+        .expect("writer A acquires its session");
+    writer_b
+        .create_directory(&fenced, "/b-one", directory_options())
+        .await
+        .expect("writer B takes over");
+    expect_code(
+        writer_a
+            .create_directory(&fenced, "/a-two", directory_options())
+            .await,
+        ErrorCode::WriterFenced,
+    );
+    writer_a
+        .create_directory(&idle, "/idle", directory_options())
+        .await
+        .expect("the second session fills the table");
+
+    writer_a
+        .create_directory(&third, "/third", directory_options())
+        .await
+        .expect("the idle session makes room");
+
+    assert_eq!(
+        writer_a.namespace_session_state(&idle),
+        NamespaceSessionState::Closed,
+        "the idle session is closed although the fenced one was used less recently"
+    );
+    assert_eq!(
+        writer_a.namespace_session_state(&fenced),
+        NamespaceSessionState::Open {
+            fenced: true,
+            queued_commits: 0,
+        }
+    );
+    expect_code(
+        writer_a
+            .create_directory(&fenced, "/a-three", directory_options())
+            .await,
+        ErrorCode::WriterFenced,
+    );
 }
