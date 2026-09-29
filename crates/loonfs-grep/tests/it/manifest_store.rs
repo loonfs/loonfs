@@ -343,7 +343,7 @@ async fn ambiguous_manifest_puts_reconcile_the_exact_landed_state() {
         if apply {
             assert_eq!(result.expect("landed manifest").manifest_state(), &next);
         } else {
-            assert!(matches!(result, Err(GrepError::PublicationConflict { .. })));
+            assert!(matches!(result, Err(GrepError::StoreUnavailable { .. })));
             let current = load_current_grep_manifest(&store, &namespace_id)
                 .await
                 .expect("reload")

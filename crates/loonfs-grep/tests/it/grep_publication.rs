@@ -1,8 +1,8 @@
-//! Publication recovery must not clean up resources retained by a successor.
+//! Publication recovery must not clean up resources a manifest may name.
 
-use crate::common::{control, GrepHost};
+use crate::common::{control, default_page_limit, GrepHost};
 use loonfs::{CreateNamespaceOptions, FsWriter, PutFileOptions, SharedObjectStore};
-use loonfs_api::ManifestNo;
+use loonfs_api::{ManifestNo, PageRequest};
 use loonfs_grep::keyspace::manifest_key;
 use loonfs_grep::manifest::{load_current_grep_manifest, GrepIndexStatus};
 use loonfs_grep::{GramIndexBuildPolicy, GrepError, GREP_GC_GRACE_WINDOW_MS};
@@ -112,4 +112,57 @@ async fn a_collected_publication_does_not_abandon_a_successors_backfill_checkpoi
         "uncertain publication cleanup must preserve the successor's checkpoint"
     );
     assert!(matches!(outcome, Err(GrepError::StoreUnavailable { .. })));
+}
+
+#[tokio::test]
+async fn an_enable_whose_put_reads_back_absent_fails_and_keeps_its_checkpoint() {
+    let directory = tempfile::tempdir().expect("directory");
+    let base: SharedObjectStore = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
+    let namespace_id = namespace_id("unknown-enable");
+    let writer = FsWriter::builder_with_store(base.clone())
+        .writer_id("unknown-enable")
+        .build()
+        .await
+        .expect("writer");
+    writer
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("namespace");
+    let failing = FailStore::new(
+        base.clone(),
+        KeyPredicate::exact(manifest_key(&namespace_id, &ManifestNo(1))),
+        OperationClass::PutCreateIfAbsent,
+        InjectedError::Transport("lost enable request".to_owned()),
+    );
+    failing.fail_next(1);
+    let failing: SharedObjectStore = Arc::new(failing);
+    let host = GrepHost::new(&failing, "unknown-enable").await;
+
+    let outcome = host.worker.enable(&namespace_id).await;
+
+    assert!(matches!(outcome, Err(GrepError::StoreUnavailable { .. })));
+    assert!(load_current_grep_manifest(&base, &namespace_id)
+        .await
+        .expect("load")
+        .is_none());
+    let checkpoints = host
+        .maintenance
+        .list_checkpoints_page(
+            &namespace_id,
+            PageRequest {
+                limit: default_page_limit(),
+                cursor: None,
+            },
+        )
+        .await
+        .expect("list checkpoints")
+        .checkpoints;
+    assert_eq!(
+        checkpoints.len(),
+        1,
+        "an unknown outcome must keep the backfill checkpoint the put may name"
+    );
 }

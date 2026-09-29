@@ -201,30 +201,13 @@ pub async fn publish_grep_manifest<S: ObjectStore + ?Sized>(
             return Err(GrepManifestError::Conflict { object_key }.into())
         }
         Err(error @ ObjectStoreError::Transport { .. }) => {
-            let current = load_current_grep_manifest(store, namespace_id).await?;
-            let landed = match &current {
-                Some(current) if current.manifest_no() == next.manifest_no() => {
-                    Some(current.manifest.clone())
-                }
-                _ => load_grep_manifest(store, namespace_id, next.manifest_no()).await?,
-            };
-            if landed.is_none()
-                && current
-                    .as_ref()
-                    .is_some_and(|current| current.manifest_no() > next.manifest_no())
-            {
-                // A successor can outlive the manifest that proves whether this
-                // attempt landed. Keep its resources until that uncertainty resolves.
-                return Err(store_error(&object_key, &error).into());
-            }
             // New segments and backfill pins have fresh ids, so an identical payload
             // cannot claim a competing publisher's new output. Core successors can
             // encode identical changes to shared inputs.
-            if landed
-                .as_ref()
-                .is_none_or(|landed| landed.payload() != next)
-            {
-                return Err(GrepManifestError::Conflict { object_key }.into());
+            match load_grep_manifest(store, namespace_id, next.manifest_no()).await? {
+                Some(landed) if landed.payload() == next => {}
+                Some(_) => return Err(GrepManifestError::Conflict { object_key }.into()),
+                None => return Err(store_error(&object_key, &error).into()),
             }
         }
         Err(error) => return Err(store_error(&object_key, &error).into()),
