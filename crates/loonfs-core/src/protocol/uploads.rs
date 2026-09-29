@@ -575,12 +575,12 @@ async fn claim_staging_slot<S: ObjectStore + ?Sized>(
     .await
 }
 
-/// Gives the staging claim back after a write that will never be recorded.
+/// Gives the staging claim back after a write that failed before its final
+/// request was sent.
 ///
-/// Best effort on purpose. The claim is bounded by the session's own lease,
-/// so a release lost to a crash costs the session the rest of that lease and
-/// nothing more; failing the caller's request over it would replace a
-/// recoverable error with a worse one.
+/// A write whose final request may have been sent can still land, so its
+/// claim stays until the session is aborted or its lease ends. The release is
+/// best effort: a lost release costs the session the rest of its lease.
 async fn release_staging_claim<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -745,7 +745,7 @@ pub(crate) async fn upload_proxied_content<S: ObjectStore + ?Sized>(
         StagingSlot::Claimed => {}
     }
 
-    let mut release_claim = true;
+    let mut final_request_may_be_sent = matches!(payload, ProxiedPayload::Bytes(_));
     let staged = match payload {
         ProxiedPayload::Bytes(bytes) => stage_bytes_under_content_id(
             store,
@@ -762,16 +762,15 @@ pub(crate) async fn upload_proxied_content<S: ObjectStore + ?Sized>(
             body,
             StreamedPayloadKind::Request,
             async {
-                let checked = check_staging_ownership(
+                final_request_may_be_sent = true;
+                check_staging_ownership(
                     store,
                     namespace_id,
                     upload_id,
                     &loaded.content_id,
                     ProxiedStaging::Claimed,
                 )
-                .await;
-                release_claim = checked.is_ok();
-                checked
+                .await
             },
         )
         .await
@@ -780,7 +779,7 @@ pub(crate) async fn upload_proxied_content<S: ObjectStore + ?Sized>(
     let (content_ref, already_present) = match staged {
         Ok(staged) => staged,
         Err(error) => {
-            if release_claim {
+            if !final_request_may_be_sent {
                 release_staging_claim(store, namespace_id, upload_id).await;
             }
             return Err(error);
@@ -1667,6 +1666,44 @@ mod tests {
         let loaded = load_upload_session_state(&recording, &namespace_id, &session.upload_id)
             .await
             .expect("load retained claim");
+        assert!(matches!(
+            loaded.mode,
+            UploadSessionMode::ServiceProxied {
+                staging: ProxiedStaging::Claimed
+            }
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_buffered_write_that_may_have_landed_keeps_the_claim() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = FailStore::new(
+            LocalFsStore::new(temp_dir.path()).expect("store"),
+            KeyPredicate::content_blob(),
+            OperationClass::Put,
+            InjectedError::Transport("content write timed out".to_owned()),
+        );
+        store.fail_all();
+        let namespace_id = NamespaceId::parse("failed-buffered-write").expect("namespace id");
+        let context = context(1_000);
+        create(&store, &namespace_id, &context)
+            .await
+            .expect("bootstrap");
+        let session = begin_service_proxied_upload(&store, &namespace_id, None, &context)
+            .await
+            .expect("begin upload");
+
+        upload_content(&store, &namespace_id, &session.upload_id, None, BYTES)
+            .await
+            .expect_err("the content write fails");
+        let retry = upload_content(&store, &namespace_id, &session.upload_id, None, BYTES)
+            .await
+            .expect_err("the failed write still holds the claim");
+
+        assert!(matches!(retry, CoreError::UploadContentConflict { .. }));
+        let loaded = load_upload_session_state(&store, &namespace_id, &session.upload_id)
+            .await
+            .expect("load session");
         assert!(matches!(
             loaded.mode,
             UploadSessionMode::ServiceProxied {

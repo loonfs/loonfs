@@ -779,10 +779,6 @@ pub(crate) async fn stage_bytes_under_content_id<S: ObjectStore + ?Sized>(
 ) -> Result<StoredContent, CoreError> {
     let content_ref = ContentRef::blob_v1(owner_namespace_id, content_id, bytes);
     let object_key = content_blob(&content_ref.owner_namespace_id, &content_ref.content_id);
-    // Create-only plus the byte check stay on this write even though a
-    // random id cannot collide: if this key is ever occupied by different
-    // bytes, that is corruption, and it must fail loudly rather than be
-    // overwritten.
     store
         .put_immutable_verified(&object_key, Bytes::copy_from_slice(bytes))
         .await?;
