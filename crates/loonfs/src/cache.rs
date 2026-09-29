@@ -22,10 +22,10 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use tracing::Instrument;
 
-#[derive(Debug, Default)]
 pub(crate) struct RuntimeControlCache {
     namespaces: HashMap<NamespaceId, (CachedNamespaceAnchor, u64)>,
     namespace_order: Recency<NamespaceId>,
+    instruments: Arc<RuntimeInstruments>,
 }
 
 /// A head snapshot and the metadata basis it authorized at that point.
@@ -154,6 +154,14 @@ impl RuntimeCacheStatsInner {
 }
 
 impl RuntimeControlCache {
+    pub(crate) fn new(instruments: Arc<RuntimeInstruments>) -> Self {
+        Self {
+            namespaces: HashMap::new(),
+            namespace_order: Recency::default(),
+            instruments,
+        }
+    }
+
     fn cached_namespace_head(
         &mut self,
         namespace_id: &NamespaceId,
@@ -161,6 +169,20 @@ impl RuntimeControlCache {
         let head = self.namespaces.get(namespace_id)?.0.clone();
         self.touch_namespace(namespace_id);
         Some(head)
+    }
+
+    /// Looks up the head for a load and counts the hit or miss. A
+    /// speculative read peeks first and then loads, so only the load counts.
+    fn lookup_namespace_head(
+        &mut self,
+        namespace_id: &NamespaceId,
+    ) -> Option<CachedNamespaceAnchor> {
+        let head = self.cached_namespace_head(namespace_id);
+        match head {
+            Some(_) => self.instruments.namespace_head_cache_hit(),
+            None => self.instruments.namespace_head_cache_miss(),
+        }
+        head
     }
 
     fn insert_namespace_head(
@@ -178,6 +200,7 @@ impl RuntimeControlCache {
         let Self {
             namespaces,
             namespace_order,
+            instruments,
         } = self;
         while namespaces.len() > max_cached_namespaces {
             let Some(evicted) = namespace_order
@@ -186,14 +209,18 @@ impl RuntimeControlCache {
                 break;
             };
             namespaces.remove(&evicted);
+            instruments.namespace_head_cache_eviction();
         }
         namespace_order.compact(namespaces.len(), |key, stamp| {
             namespace_slot_is_live(namespaces, key, stamp)
         });
+        instruments.namespace_head_cache_entries(namespaces.len());
     }
 
     fn invalidate_namespace(&mut self, namespace_id: &NamespaceId) {
         self.namespaces.remove(namespace_id);
+        self.instruments
+            .namespace_head_cache_entries(self.namespaces.len());
     }
 
     fn touch_namespace(&mut self, namespace_id: &NamespaceId) {
@@ -263,7 +290,7 @@ impl ReadCore {
                 // write completed. Local publication is not a remote proof.
                 return tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "validation_reuse")
                     .in_scope(|| Ok(cache
-                        .cached_namespace_head(namespace_id)
+                        .lookup_namespace_head(namespace_id)
                         .expect("checked cached head")));
             }
         }
@@ -304,7 +331,7 @@ impl ReadCore {
         let cached = self
             .inner
             .control_cache()
-            .cached_namespace_head(namespace_id);
+            .lookup_namespace_head(namespace_id);
         if let Some(mut head) = cached {
             // A HEAD of the successor after a long gap cannot see a successor that was
             // collected in the meantime, whether the gap came before the probe or while

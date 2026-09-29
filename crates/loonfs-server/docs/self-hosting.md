@@ -285,6 +285,29 @@ Health and readiness do not contact the object store. Use
 Prometheus must send the API token as
 `Authorization: Bearer <LOONFS_AUTH_TOKEN>` when scraping `/metrics`.
 
+These metrics show whether the limits in [Resource sizing](#resource-sizing)
+fit the namespaces a server serves. A maintenance key is one job for one
+namespace.
+
+| Metric | Type | What moves it |
+| --- | --- | --- |
+| `loonfs.namespace_head_cache.gets` | Counter, `result` label | A read looks up its namespace head: `hit` or `miss`. |
+| `loonfs.namespace_head_cache.evictions` | Counter | A head is evicted at the `runtime_cache.max_cached_namespaces` limit. |
+| `loonfs.namespace_head_cache.entries` | Gauge | Heads in the cache now. |
+| `loonfs.metadata_segment_cache.retained_decoded_bytes` | Gauge | Decoded bytes the metadata segment cache holds, up to `runtime_cache.metadata_segment_cache_max_decoded_bytes`. |
+| `loonfs.publisher.projection_evictions` | Counter | A publish-side WAL-tail projection is evicted at the projection budget. |
+| `loonfs.publisher.tail_replays` | Counter | A publish rereads the WAL tail from the store instead of using a retained projection. This happens on a session's first publish, after an eviction or a failed publish, when the namespace's last write was more than a minute ago, and when a flush the publisher did not run has published a new manifest. |
+| `loonfs.publisher.idle_sessions_closed` | Counter | An idle session closes to make room at the `max_writer_sessions` limit. |
+| `loonfs.publisher.session_refusals` | Counter | A request fails with `writer_capacity_exceeded`. |
+| `loonfs.maintenance.keys_admitted` | Gauge | Keys the runner reconciles. |
+| `loonfs.maintenance.keys_queued` | Gauge | Keys waiting for a `max_concurrent_maintenance` permit. |
+| `loonfs.maintenance.oldest_queued_ms` | Gauge | How long the oldest queued key has waited. |
+| `loonfs.maintenance.reconcile_sweeps` | Counter | A reconciliation sweep runs, once a minute. |
+| `loonfs.maintenance.reconcile_probes` | Counter | A sweep probes a key, at most 64 per sweep. |
+| `loonfs.maintenance.reconcile_re_admitted` | Counter | A probe finds work and queues its key. |
+| `loonfs.maintenance.step_failures` | Counter, `job` label | A step fails and schedules one backoff retry. |
+| `loonfs.object_store.operations` | Counter, `operation`, `result`, and `key_class` labels | A store call finishes. `key_class` is `content`, `wal_segment`, `namespace_manifest` (manifests and the hint), `metadata_segment`, `gc_control` (pins), `metadata` (upload sessions), or `unknown`. |
+
 ## Logs
 
 The server writes JSON logs to standard output.

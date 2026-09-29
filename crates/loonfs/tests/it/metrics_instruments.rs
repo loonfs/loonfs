@@ -9,9 +9,9 @@ use crate::common::*;
 use loonfs::metrics::{DefaultMetricsRecorder, MetricValue, MetricsSnapshot};
 use loonfs::{
     maintenance_hint_relay, CreateCheckpointOptions, CreateNamespaceOptions, CreateSnapshotOptions,
-    GarbageCollectionJob, MaintenanceConclusion, MaintenanceJobId, MaintenanceRegistry,
+    FsReader, GarbageCollectionJob, MaintenanceConclusion, MaintenanceJobId, MaintenanceRegistry,
     MaintenanceRunner, MetadataCompactionJob, MetadataMaintenanceJob, MetadataMaintenanceOptions,
-    PutFileOptions,
+    PutFileOptions, RuntimeCacheConfig,
 };
 use loonfs_test_support::block_on::block_on;
 use loonfs_test_support::ids::namespace_id;
@@ -116,13 +116,18 @@ fn a_writer_with_a_recorder_reports_stores_publications_and_steps() {
         snapshot
     });
 
-    // The bridge: writes went out and their latency was filed.
+    // The bridge: writes went out, classified by the key they wrote, and
+    // their latency was filed.
     assert!(
         counter(
             &snapshot,
             "loonfs.object_store.operations",
-            &[("operation", "put"), ("result", "ok")],
-        ) > 0
+            &[
+                ("key_class", "wal_segment"),
+                ("operation", "put"),
+                ("result", "ok")
+            ],
+        ) >= writes
     );
     assert!(
         counter(
@@ -293,6 +298,69 @@ fn snapshot_pins_report_the_snapshot_view_counter() {
     assert_eq!(
         counter(&snapshot, "loonfs.runtime_cache.snapshot_view_reads", &[],),
         1
+    );
+}
+
+#[test]
+fn reads_report_head_cache_lookups_and_retained_segment_bytes() {
+    let temp_dir = tempdir().expect("tempdir");
+    let recorder = Arc::new(DefaultMetricsRecorder::new());
+    let (first, second) = (namespace_id("first"), namespace_id("second"));
+    let snapshot = block_on(async {
+        let setup = writer(store(temp_dir.path()), "head-cache-setup").await;
+        for namespace_id in [&first, &second] {
+            setup
+                .create_namespace(
+                    namespace_id,
+                    CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+                )
+                .await
+                .expect("create namespace");
+        }
+        let reader = FsReader::builder_with_store(store(temp_dir.path()))
+            .runtime_cache(RuntimeCacheConfig {
+                max_cached_namespaces: 1,
+                ..RuntimeCacheConfig::default()
+            })
+            .metrics_recorder(recorder.clone())
+            .build()
+            .await
+            .expect("build reader");
+        for namespace_id in [&first, &first, &second] {
+            reader
+                .get_path_entry(namespace_id, "/", Default::default())
+                .await
+                .expect("stat the root");
+        }
+        recorder.snapshot()
+    });
+
+    for (labels, count) in [
+        (&[("result", "miss")][..], 2),
+        (&[("result", "hit")][..], 1),
+    ] {
+        assert_eq!(
+            counter(&snapshot, "loonfs.namespace_head_cache.gets", labels),
+            count,
+            "{labels:?}"
+        );
+    }
+    assert_eq!(
+        counter(&snapshot, "loonfs.namespace_head_cache.evictions", &[]),
+        1,
+        "the second namespace takes the only slot"
+    );
+    assert_eq!(
+        gauge(&snapshot, "loonfs.namespace_head_cache.entries", &[]),
+        1
+    );
+    assert!(
+        gauge(
+            &snapshot,
+            "loonfs.metadata_segment_cache.retained_decoded_bytes",
+            &[]
+        ) > 0,
+        "the head loads cached the manifests they decoded"
     );
 }
 

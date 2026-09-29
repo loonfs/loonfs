@@ -99,7 +99,8 @@ async fn a_scrape_reports_requests_object_store_calls_and_cache_metrics() {
     assert!(
         series(
             &first,
-            "loonfs_object_store_operations_total{operation=\"put\",result=\"ok\"}"
+            "loonfs_object_store_operations_total{key_class=\"wal_segment\",\
+             operation=\"put\",result=\"ok\"}"
         ) > 0.0
     );
     assert!(

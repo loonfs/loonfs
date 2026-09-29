@@ -290,6 +290,18 @@ fn gauge(recorder: &DefaultMetricsRecorder, name: &str) -> i64 {
     }
 }
 
+fn counter(recorder: &DefaultMetricsRecorder, name: &str) -> u64 {
+    let snapshot = recorder.snapshot();
+    let entry = snapshot
+        .by_name(name)
+        .next()
+        .unwrap_or_else(|| panic!("no `{name}` counter registered"));
+    match entry.value {
+        MetricValue::Counter(value) => value,
+        ref other => panic!("expected a counter, found {other:?}"),
+    }
+}
+
 fn retained_projections(registry: &PublisherRegistry) -> RetainedProjectionTotals {
     registry.shared.lock_state().projections.totals()
 }
@@ -3096,6 +3108,76 @@ async fn retained_tail_projections_stay_within_the_shared_byte_budget() {
     assert_eq!(
         gauge(&recorder, "loonfs.publisher.retained_projection_bytes"),
         i64::try_from(totals.decoded_bytes).expect("small byte total"),
+    );
+    assert_eq!(
+        counter(&recorder, "loonfs.publisher.projection_evictions"),
+        u64::try_from(NAMESPACES - totals.projections).expect("small count"),
+    );
+    assert_eq!(
+        counter(&recorder, "loonfs.publisher.tail_replays"),
+        u64::try_from(NAMESPACES).expect("small count"),
+        "each session's first publish has no projection to start from"
+    );
+
+    for (namespace_id, replays) in [(&namespaces[NAMESPACES - 1], 0), (&namespaces[0], 1)] {
+        let before = counter(&recorder, "loonfs.publisher.tail_replays");
+        registry
+            .submit_candidate(
+                namespace_id.clone(),
+                CommitCandidate::new(create_directory_request("again", "again")),
+            )
+            .await
+            .expect("commit");
+        assert_eq!(
+            counter(&recorder, "loonfs.publisher.tail_replays") - before,
+            replays,
+            "only the evicted namespace replays its tail"
+        );
+    }
+
+    registry.close_admission();
+    registry
+        .drain()
+        .await
+        .expect("drain settles every publisher");
+}
+
+#[tokio::test]
+async fn a_publish_past_the_publish_budget_counts_a_tail_replay() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
+    let recorder = Arc::new(DefaultMetricsRecorder::new());
+    let mut writer =
+        test_writer_with_cache(store, RuntimeCacheConfig::default(), recorder.clone()).await;
+    let timer = Arc::new(ManualMonotonicTimer::default());
+    writer.publisher.timer = timer.clone();
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    writer
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("bootstrap");
+    let registry = writer.publisher();
+
+    for (commit_id, now_ms) in [
+        ("first", 0),
+        ("second", loonfs_core::limits::WAL_PUBLISH_BUDGET_MS + 1_000),
+    ] {
+        timer.set(now_ms);
+        registry
+            .submit_candidate(
+                namespace_id.clone(),
+                CommitCandidate::new(create_directory_request(commit_id, commit_id)),
+            )
+            .await
+            .expect("commit");
+    }
+    assert_eq!(
+        counter(&recorder, "loonfs.publisher.tail_replays"),
+        2,
+        "the engine drops a projection older than the publish budget and rereads the tail"
     );
 
     registry.close_admission();

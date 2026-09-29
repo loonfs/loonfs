@@ -643,16 +643,26 @@ fn dispatch_ready(inner: &Arc<RunnerInner>) {
         dispatched += 1;
         spawn_chain(inner, dispatch);
     }
-    if dispatched > 0 {
-        // Report the queue remaining after dispatch. Sustained queue growth or rising
-        // wait time indicates that the shared permit limit is too low. Metrics are
-        // aggregate and do not include namespace IDs.
-        let now_ms = inner.clock.now_ms();
+    // Report the queue remaining after dispatch. Sustained queue growth or rising
+    // wait time indicates that the shared permit limit is too low. Metrics are
+    // aggregate and do not include namespace IDs.
+    let now_ms = inner.clock.now_ms();
+    let (keys_admitted, ready_queued, oldest_queued_ms) = {
         let state = inner.lock_state();
+        (
+            state.admission.keys_admitted(),
+            state.admission.ready_queued(),
+            state.admission.oldest_queued_ms(now_ms),
+        )
+    };
+    inner
+        .instruments
+        .admission(keys_admitted, ready_queued, oldest_queued_ms);
+    if dispatched > 0 {
         tracing::debug!(
             dispatched,
-            ready_queued = state.admission.ready_queued(),
-            oldest_queued_ms = state.admission.oldest_queued_ms(now_ms),
+            ready_queued,
+            oldest_queued_ms,
             "maintenance keys dispatched"
         );
     }
@@ -947,6 +957,7 @@ async fn reconcile(inner: &Arc<RunnerInner>) {
             }
         }
     }
+    inner.instruments.reconcile_swept(probes, re_admitted);
     // What one sweep cost, against the probe budget above: a sweep that
     // keeps hitting the cap is an admitted set larger than one interval can
     // walk.

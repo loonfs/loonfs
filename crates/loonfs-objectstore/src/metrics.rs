@@ -217,6 +217,22 @@ pub enum KeyClass {
     Unknown,
 }
 
+impl KeyClass {
+    /// The label an aggregating recorder groups by. Identical to the serde
+    /// name: one class has one spelling wherever it is reported.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Content => "content",
+            Self::Metadata => "metadata",
+            Self::WalSegment => "wal_segment",
+            Self::NamespaceManifest => "namespace_manifest",
+            Self::MetadataSegment => "metadata_segment",
+            Self::GcControl => "gc_control",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 /// Classifies the shape of bytes requested by a get or listing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

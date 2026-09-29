@@ -652,6 +652,70 @@ async fn a_lease_obligation_survives_a_quiet_probe() {
     );
 }
 
+fn metric(snapshot: &crate::metrics::MetricsSnapshot, name: &str) -> crate::metrics::MetricValue {
+    snapshot
+        .by_name(name)
+        .next()
+        .unwrap_or_else(|| panic!("no `{name}` registered"))
+        .value
+        .clone()
+}
+
+#[tokio::test]
+async fn the_runner_reports_its_queue_and_its_reconciliation_sweeps() {
+    use crate::metrics::{DefaultMetricsRecorder, MetricValue};
+
+    let clock = ManualClock::at(1_000_000);
+    let job = TestJob::gated([], ScriptedStep::Conclude(MaintenanceConclusion::Idle));
+    let recorder = Arc::new(DefaultMetricsRecorder::new());
+    let registry = MaintenanceRegistry::new();
+    registry
+        .register(job.clone())
+        .expect("register the test job");
+    let runner = MaintenanceRunner::builder(registry)
+        .max_concurrent(nonzero_usize(1))
+        .clock(clock.clone())
+        .metrics_recorder(recorder.clone())
+        .build()
+        .expect("build the runner");
+    let (running, queued) = (namespace_id("running"), namespace_id("queued"));
+
+    runner.handle().nudge(TEST_JOB, &running);
+    job.gate().wait_entered(1).await;
+    runner.handle().nudge(TEST_JOB, &queued);
+    clock.advance_to(1_007_000);
+    runner.dispatch_now();
+
+    let snapshot = recorder.snapshot();
+    for (name, level) in [
+        ("loonfs.maintenance.keys_admitted", 2),
+        ("loonfs.maintenance.keys_queued", 1),
+        ("loonfs.maintenance.oldest_queued_ms", 7_000),
+    ] {
+        assert_eq!(metric(&snapshot, name), MetricValue::Gauge(level), "{name}");
+    }
+
+    job.gate().release(2);
+    runner.drain().await.expect("both steps settle");
+    job.set_probe(MaintenanceProbe::Due);
+    runner.reconcile_now().await;
+    job.gate().release(2);
+    runner.drain().await.expect("the re-admitted steps settle");
+
+    let snapshot = recorder.snapshot();
+    for (name, count) in [
+        ("loonfs.maintenance.reconcile_sweeps", 1),
+        ("loonfs.maintenance.reconcile_probes", 2),
+        ("loonfs.maintenance.reconcile_re_admitted", 2),
+    ] {
+        assert_eq!(
+            metric(&snapshot, name),
+            MetricValue::Counter(count),
+            "{name}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn shutdown_clears_pending_work_and_refuses_later_nudges() {
     let job = TestJob::gated([], ScriptedStep::Conclude(MaintenanceConclusion::Idle));
