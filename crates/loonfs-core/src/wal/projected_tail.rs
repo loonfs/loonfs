@@ -1,6 +1,7 @@
 //! Metadata rows and inline content from the unfolded WAL tail.
 
 use super::frame::WalSegmentError;
+use crate::heap_bytes::{arc_bytes, hash_map_table_bytes, HeapBytes};
 use crate::metadata::MetadataState;
 use bytes::Bytes;
 use loonfs_api::wire::manifest::ManifestActivity;
@@ -17,6 +18,9 @@ pub struct ProjectedWalTail {
     pub(crate) activity: ManifestActivity,
     inline_content: HashMap<ContentId, ProjectedInlineContent>,
     inline_bytes: usize,
+    /// What the inline entries own besides their bytes: content ids and
+    /// references.
+    inline_entry_heap_bytes: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,18 +64,24 @@ impl ProjectedWalTail {
         self.inline_bytes
     }
 
+    /// The heap the projection holds behind the `Arc` every holder shares.
     pub(crate) fn decoded_bytes(&self) -> usize {
-        self.rows
-            .decoded_bytes()
-            .saturating_add(self.inline_bytes())
+        arc_bytes::<Self>()
+            + self.rows.decoded_bytes()
+            + hash_map_table_bytes(&self.inline_content)
+            + self.inline_entry_heap_bytes
+            + self.inline_bytes()
     }
 
     pub(crate) fn insert_inline_content(&mut self, content_ref: ContentRef, bytes: Bytes) {
         self.inline_bytes += bytes.len();
         let content_id = content_ref.content_id.clone();
+        let key_heap_bytes = content_id.heap_bytes();
+        self.inline_entry_heap_bytes += key_heap_bytes + content_ref.heap_bytes();
         let value = ProjectedInlineContent { content_ref, bytes };
         if let Some(previous) = self.inline_content.insert(content_id, value) {
             self.inline_bytes -= previous.bytes.len();
+            self.inline_entry_heap_bytes -= key_heap_bytes + previous.content_ref.heap_bytes();
         }
     }
 }

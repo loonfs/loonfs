@@ -2,7 +2,7 @@
 //! indexes and decoded-size totals in step with its rows.
 
 use super::indexes::MetadataIndexes;
-use crate::checkpoint::DecodedRowWeight;
+use crate::heap_bytes::HeapBytes;
 use loonfs_api::wire::manifest::{
     AccessRevisionRecord, ActiveDeletionRecord, ActiveDeletionRowAction, AttributesRevisionRecord,
     CommitReceiptRecord, ContentPublicationRecord, DeletedBinding, DirentryBindingRecord,
@@ -10,6 +10,7 @@ use loonfs_api::wire::manifest::{
 };
 use loonfs_api::wire::wal::WalCommitPayload;
 use loonfs_api::{ActorId, ChangeSeq, CommitId, InodeId, InodeKind};
+use std::mem::size_of;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataState {
@@ -23,7 +24,7 @@ pub struct MetadataState {
     pub(super) attributes_revisions: Vec<AttributesRevisionRecord>,
     pub(super) access_revisions: Vec<AccessRevisionRecord>,
     pub(super) row_count: usize,
-    pub(super) decoded_bytes: usize,
+    pub(super) row_heap_bytes: usize,
     pub(super) indexes: MetadataIndexes,
 }
 
@@ -160,7 +161,7 @@ impl MetadataState {
             access_revisions,
             content_publications,
             row_count: 0,
-            decoded_bytes: 0,
+            row_heap_bytes: 0,
             indexes: MetadataIndexes::default(),
         };
         state.rebuild_indexes();
@@ -215,7 +216,7 @@ impl MetadataState {
 
     pub(crate) fn push_content_publication_record(&mut self, record: ContentPublicationRecord) {
         self.indexes.record_content_publication(&record);
-        self.record_row_weight(record.decoded_weight());
+        self.record_row_weight(record.heap_bytes());
         self.content_publications.push(record);
     }
 
@@ -231,8 +232,20 @@ impl MetadataState {
         self.row_count
     }
 
+    /// The heap the state holds outside its own inline size: every slot its
+    /// row vectors reserved, what the rows own, and the at-head indexes.
     pub fn decoded_bytes(&self) -> usize {
-        self.decoded_bytes
+        self.inodes.capacity() * size_of::<InodeRecord>()
+            + self.direntry_binds.capacity() * size_of::<DirentryBindingRecord>()
+            + self.revisions.capacity() * size_of::<RevisionRecord>()
+            + self.subtree_tombstones.capacity() * size_of::<SubtreeTombstoneRecord>()
+            + self.commit_receipts.capacity() * size_of::<CommitReceiptRecord>()
+            + self.commits.capacity() * size_of::<WalCommitPayload>()
+            + self.content_publications.capacity() * size_of::<ContentPublicationRecord>()
+            + self.attributes_revisions.capacity() * size_of::<AttributesRevisionRecord>()
+            + self.access_revisions.capacity() * size_of::<AccessRevisionRecord>()
+            + self.row_heap_bytes
+            + self.indexes.heap_bytes()
     }
 
     pub fn find_commit_receipt(&self, commit_id: &CommitId) -> Option<&CommitReceiptRecord> {
@@ -241,60 +254,60 @@ impl MetadataState {
 
     fn rebuild_indexes(&mut self) {
         self.row_count = metadata_row_count(self);
-        self.decoded_bytes = metadata_decoded_bytes(self);
+        self.row_heap_bytes = metadata_row_heap_bytes(self);
         self.indexes = MetadataIndexes::rebuild(self);
     }
 
     pub(crate) fn push_inode_record(&mut self, record: InodeRecord) {
         self.indexes.record_inode(&record);
-        self.record_row_weight(record.decoded_weight());
+        self.record_row_weight(record.heap_bytes());
         self.inodes.push(record);
     }
 
     pub(crate) fn push_direntry_binding_record(&mut self, record: DirentryBindingRecord) {
         self.indexes.record_binding(&record);
-        self.record_row_weight(record.decoded_weight());
+        self.record_row_weight(record.heap_bytes());
         self.direntry_binds.push(record);
     }
 
     pub(crate) fn push_revision_record(&mut self, record: RevisionRecord) {
         self.indexes.record_revision(&record);
-        self.record_row_weight(record.decoded_weight());
+        self.record_row_weight(record.heap_bytes());
         self.revisions.push(record);
     }
 
     pub(crate) fn push_subtree_tombstone_record(&mut self, record: SubtreeTombstoneRecord) {
         self.indexes.record_tombstone(&record);
-        self.record_row_weight(record.decoded_weight());
+        self.record_row_weight(record.heap_bytes());
         self.subtree_tombstones.push(record);
     }
 
     pub(crate) fn push_commit_receipt_record(&mut self, record: CommitReceiptRecord) {
         self.indexes.record_commit_receipt(&record);
-        self.record_row_weight(record.decoded_weight());
+        self.record_row_weight(record.heap_bytes());
         self.commit_receipts.push(record);
     }
 
     pub(crate) fn push_commit_record(&mut self, record: WalCommitPayload) {
-        self.record_row_weight(record.decoded_weight());
+        self.record_row_weight(record.heap_bytes());
         self.commits.push(record);
     }
 
     pub(crate) fn push_attributes_revision_record(&mut self, record: AttributesRevisionRecord) {
         self.indexes.record_attributes_revision(&record);
-        self.record_row_weight(record.decoded_weight());
+        self.record_row_weight(record.heap_bytes());
         self.attributes_revisions.push(record);
     }
 
     pub(crate) fn push_access_revision_record(&mut self, record: AccessRevisionRecord) {
         self.indexes.record_access_revision(&record);
-        self.record_row_weight(record.decoded_weight());
+        self.record_row_weight(record.heap_bytes());
         self.access_revisions.push(record);
     }
 
-    fn record_row_weight(&mut self, decoded_bytes: usize) {
+    fn record_row_weight(&mut self, heap_bytes: usize) {
         self.row_count = self.row_count.saturating_add(1);
-        self.decoded_bytes = self.decoded_bytes.saturating_add(decoded_bytes);
+        self.row_heap_bytes = self.row_heap_bytes.saturating_add(heap_bytes);
     }
 }
 
@@ -362,11 +375,11 @@ fn metadata_row_count(state: &MetadataState) -> usize {
         .saturating_add(state.access_revisions.len())
 }
 
-fn metadata_decoded_bytes(state: &MetadataState) -> usize {
-    fn total<R: DecodedRowWeight>(records: &[R]) -> usize {
+fn metadata_row_heap_bytes(state: &MetadataState) -> usize {
+    fn total<R: HeapBytes>(records: &[R]) -> usize {
         records
             .iter()
-            .map(DecodedRowWeight::decoded_weight)
+            .map(HeapBytes::heap_bytes)
             .fold(0, usize::saturating_add)
     }
     total(&state.inodes)

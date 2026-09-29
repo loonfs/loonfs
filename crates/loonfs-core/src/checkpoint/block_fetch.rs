@@ -16,6 +16,7 @@ use super::error::ManifestLoadError;
 use super::stored_block_cache::{
     StoredMetadataBlockCache, StoredMetadataBlockKey, StoredMetadataBlockKind,
 };
+use crate::heap_bytes::index_block_heap_bytes;
 use bytes::Bytes;
 use loonfs_api::wire::hex::hex_decode_bytes;
 use loonfs_api::wire::manifest::MetadataSegmentRef;
@@ -237,14 +238,10 @@ async fn load_and_publish_segment_sections<S: ObjectStore + ?Sized>(
                 &index_handle,
                 stored,
             );
-            let entries = Arc::new(
+            let block = index_cache_block(
                 decode_index_block(stored, &index_handle)
                     .map_err(|err| segment_codec_error(&object_key, err))?,
             );
-            let block = DecodedMetadataSegmentBlock::Index {
-                decoded_bytes: index_handle.decoded_bytes as usize,
-                entries: Arc::clone(&entries),
-            };
             publish_segment_block(
                 segment_cache,
                 memo,
@@ -344,6 +341,13 @@ async fn load_and_publish_segment_sections<S: ObjectStore + ?Sized>(
     })
 }
 
+fn index_cache_block(entries: Vec<SegmentIndexEntry>) -> DecodedMetadataSegmentBlock {
+    DecodedMetadataSegmentBlock::Index {
+        decoded_bytes: index_block_heap_bytes(&entries),
+        entries: Arc::new(entries),
+    }
+}
+
 fn publish_segment_block(
     segment_cache: Option<&MetadataSegmentCache>,
     memo: Option<&SessionBlockMemo>,
@@ -408,10 +412,7 @@ async fn load_segment_index_inner<S: ObjectStore + ?Sized>(
         )
         .await
         {
-            return Ok(DecodedMetadataSegmentBlock::Index {
-                decoded_bytes: handle.decoded_bytes as usize,
-                entries: Arc::new(entries),
-            });
+            return Ok(index_cache_block(entries));
         }
         if load_small_segment_whole {
             load_and_publish_segment_sections(
@@ -433,10 +434,7 @@ async fn load_segment_index_inner<S: ObjectStore + ?Sized>(
             .await?;
             let entries = decode_index_block(&stored, &handle)
                 .map_err(|err| segment_codec_error(&object_key, err))?;
-            Ok(DecodedMetadataSegmentBlock::Index {
-                decoded_bytes: handle.decoded_bytes as usize,
-                entries: Arc::new(entries),
-            })
+            Ok(index_cache_block(entries))
         }
     };
     let block = match segment_cache {

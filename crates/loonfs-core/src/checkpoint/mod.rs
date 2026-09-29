@@ -67,7 +67,6 @@ pub use self::streaming_compaction::{
 
 pub(crate) use self::compactor::claim_compactor;
 pub(crate) use self::create::create_checkpoint;
-pub(crate) use self::data_block_load::DecodedRowWeight;
 pub(crate) use self::delete::delete_checkpoint;
 pub(crate) use self::files::list_checkpoint_files_page;
 #[cfg(test)]

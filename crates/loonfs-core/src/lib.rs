@@ -68,6 +68,7 @@ mod control_update;
 mod engine;
 mod error;
 mod gc;
+mod heap_bytes;
 mod namespace;
 mod options;
 mod protocol;

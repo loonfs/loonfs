@@ -6,6 +6,7 @@ use super::{
     DirentryBindingRecord, InodeRecord, MetadataState, RevisionRecord, SubtreeTombstoneRecord,
     TombstoneRowAction,
 };
+use crate::heap_bytes::{hash_map_table_bytes, HeapBytes};
 use loonfs_api::{ChangeSeq, CommitId, InodeId, NameKey};
 use std::collections::HashMap;
 
@@ -18,6 +19,9 @@ pub(super) struct MetadataIndexes {
     tombstone_by_root: HashMap<InodeId, SubtreeTombstoneRecord>,
     commit_receipt_by_id: HashMap<CommitId, CommitReceiptRecord>,
     content_publication_by_id: HashMap<loonfs_api::ContentId, ChangeSeq>,
+    /// What the indexed keys and records own, since each index holds its
+    /// own copy of a row.
+    owned_heap_bytes: usize,
 }
 
 impl Default for MetadataIndexes {
@@ -30,6 +34,7 @@ impl Default for MetadataIndexes {
             tombstone_by_root: HashMap::new(),
             commit_receipt_by_id: HashMap::new(),
             content_publication_by_id: HashMap::new(),
+            owned_heap_bytes: 0,
         }
     }
 }
@@ -74,6 +79,17 @@ impl MetadataIndexes {
 
     pub(super) fn indexed_seq(&self) -> ChangeSeq {
         self.indexed_seq
+    }
+
+    /// The index tables plus what their keys and records own.
+    pub(super) fn heap_bytes(&self) -> usize {
+        hash_map_table_bytes(&self.inode_by_id)
+            + hash_map_table_bytes(&self.latest_bind_by_parent_name)
+            + hash_map_table_bytes(&self.latest_binding_by_child)
+            + hash_map_table_bytes(&self.tombstone_by_root)
+            + hash_map_table_bytes(&self.commit_receipt_by_id)
+            + hash_map_table_bytes(&self.content_publication_by_id)
+            + self.owned_heap_bytes
     }
 
     pub(super) fn inode(&self, inode_id: InodeId) -> Option<InodeRecord> {
@@ -127,19 +143,24 @@ impl MetadataIndexes {
 
     pub(super) fn record_inode(&mut self, record: &InodeRecord) {
         self.indexed_seq = self.indexed_seq.max(record.committed_seq);
-        self.inode_by_id.insert(record.inode_id, record.clone());
+        self.owned_heap_bytes += record.heap_bytes();
+        if let Some(replaced) = self.inode_by_id.insert(record.inode_id, record.clone()) {
+            self.owned_heap_bytes -= replaced.heap_bytes();
+        }
     }
 
     pub(super) fn record_binding(&mut self, record: &DirentryBindingRecord) {
         self.indexed_seq = self.indexed_seq.max(record.committed_seq);
         replace_if_newer(
             &mut self.latest_bind_by_parent_name,
+            &mut self.owned_heap_bytes,
             (record.parent_inode_id, record.name_key.clone()),
             record.clone(),
             DirentryBindingRecord::position,
         );
         replace_if_newer(
             &mut self.latest_binding_by_child,
+            &mut self.owned_heap_bytes,
             record.child_inode_id,
             record.clone(),
             DirentryBindingRecord::position,
@@ -157,6 +178,7 @@ impl MetadataIndexes {
         self.indexed_seq = self.indexed_seq.max(record.committed_seq);
         replace_if_newer(
             &mut self.tombstone_by_root,
+            &mut self.owned_heap_bytes,
             record.root_inode_id,
             record.clone(),
             tombstone_order_key,
@@ -172,16 +194,21 @@ impl MetadataIndexes {
 
     pub(super) fn record_content_publication(&mut self, record: &ContentPublicationRecord) {
         self.indexed_seq = self.indexed_seq.max(record.committed_seq);
-        self.content_publication_by_id
-            .entry(record.content_id.clone())
-            .and_modify(|seq| *seq = (*seq).max(record.committed_seq))
-            .or_insert(record.committed_seq);
+        match self.content_publication_by_id.get_mut(&record.content_id) {
+            Some(seq) => *seq = (*seq).max(record.committed_seq),
+            None => {
+                self.owned_heap_bytes += record.content_id.heap_bytes();
+                self.content_publication_by_id
+                    .insert(record.content_id.clone(), record.committed_seq);
+            }
+        }
     }
 
     pub(super) fn record_commit_receipt(&mut self, record: &CommitReceiptRecord) {
         self.indexed_seq = self.indexed_seq.max(record.committed_seq);
         replace_if_newer(
             &mut self.commit_receipt_by_id,
+            &mut self.owned_heap_bytes,
             record.commit_id.clone(),
             record.clone(),
             |receipt| receipt.committed_seq,
@@ -203,16 +230,28 @@ impl MetadataIndexes {
     }
 }
 
-fn replace_if_newer<K, V, O>(map: &mut HashMap<K, V>, key: K, value: V, order: impl Fn(&V) -> O)
-where
-    K: Eq + std::hash::Hash,
+fn replace_if_newer<K, V, O>(
+    map: &mut HashMap<K, V>,
+    owned_heap_bytes: &mut usize,
+    key: K,
+    value: V,
+    order: impl Fn(&V) -> O,
+) where
+    K: Eq + std::hash::Hash + HeapBytes,
+    V: HeapBytes,
     O: Ord,
 {
-    let should_replace = map
-        .get(&key)
-        .is_none_or(|existing| order(&value) > order(existing));
-    if should_replace {
-        map.insert(key, value);
+    match map.get_mut(&key) {
+        Some(existing) if order(&value) > order(existing) => {
+            *owned_heap_bytes += value.heap_bytes();
+            *owned_heap_bytes -= existing.heap_bytes();
+            *existing = value;
+        }
+        Some(_) => {}
+        None => {
+            *owned_heap_bytes += key.heap_bytes() + value.heap_bytes();
+            map.insert(key, value);
+        }
     }
 }
 
