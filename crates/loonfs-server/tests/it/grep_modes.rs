@@ -770,6 +770,7 @@ fn test_config(store_root: &Path, mode: GrepMode) -> ServerConfig {
         max_concurrent_downloads: 2,
         max_concurrent_maintenance: 2,
         max_merge_input_bytes: loonfs_api::wire::sst_blocks::DEFAULT_MAX_REORGANIZATION_INPUT_BYTES,
+        idle_fold_after_ms: loonfs::MetadataMaintenanceOptions::default().idle_fold_after_ms,
         allow_unauthenticated_remote: false,
         allow_remote_without_tls: false,
         tls: None,

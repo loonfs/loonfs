@@ -451,6 +451,86 @@ async fn http_metadata_run_reports_outcomes_not_errors() {
     harness.server.abort();
 }
 
+#[derive(Debug)]
+struct FixedWallClock(u64);
+
+impl loonfs::WallClock for FixedWallClock {
+    fn now_ms(&self) -> Result<u64, loonfs::CoreError> {
+        Ok(self.0)
+    }
+}
+
+#[tokio::test]
+async fn http_metadata_run_folds_an_idle_tail_unless_the_server_turns_the_idle_rule_off() {
+    let default_idle_ms = loonfs::MetadataMaintenanceOptions::default().idle_fold_after_ms;
+    for (idle_fold_after_ms, expected) in [
+        (0, loonfs_api::WalFlushStepOutcome::NotNeeded),
+        (
+            default_idle_ms,
+            loonfs_api::WalFlushStepOutcome::Flushed {
+                manifest_head_seq: ChangeSeq(1),
+            },
+        ),
+    ] {
+        let temp_dir = tempdir().expect("tempdir");
+        let store_root = temp_dir.path().join("store");
+        let key_prefix = "http-maintenance-idle";
+        let store = ConfiguredObjectStore::local_fs(&store_root, Some(key_prefix))
+            .expect("construct store")
+            .into_shared();
+        // The server reads commit age on its own clock, so a commit stamped
+        // by a writer whose clock is long past is idle on arrival.
+        let writer = loonfs::FsWriter::builder_with_store(store)
+            .writer_id("departed-writer")
+            .wall_clock(std::sync::Arc::new(FixedWallClock(1_750_000_000_000)))
+            .build()
+            .await
+            .expect("writer");
+        let namespace = namespace_id("idle");
+        writer
+            .create_namespace(
+                &namespace,
+                loonfs::CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+            )
+            .await
+            .expect("create namespace");
+        writer
+            .put_file_bytes(
+                &namespace,
+                "/file.txt",
+                b"body",
+                loonfs::PutFileOptions::new(loonfs_test_support::test_actor()),
+            )
+            .await
+            .expect("write file");
+        writer.shutdown().await.expect("writer shutdown");
+
+        let harness = start_server(loonfs_server::ServerConfig {
+            idle_fold_after_ms,
+            maintenance: loonfs_server::MaintenanceMode::ServeOnly,
+            ..test_config(store_root, "loonfs-server-idle", key_prefix)
+        })
+        .await;
+        let response = harness
+            .client
+            .run_maintenance(
+                &namespace,
+                &loonfs_api::RunMaintenanceRequest::Metadata(
+                    loonfs_api::MetadataMaintenanceRequest::default(),
+                ),
+                None,
+            )
+            .await
+            .expect("metadata run");
+        assert_eq!(
+            upkeep(&response).wal_flush,
+            expected,
+            "idle_fold_after_ms = {idle_fold_after_ms}"
+        );
+        harness.server.abort();
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn http_maintenance_retention_advance_uses_initial_manifest_after_create() {
     let temp_dir = tempdir().expect("tempdir");

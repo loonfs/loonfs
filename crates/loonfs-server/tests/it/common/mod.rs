@@ -324,6 +324,7 @@ pub(crate) fn test_config(
         max_concurrent_downloads: 16,
         max_concurrent_maintenance: loonfs::DEFAULT_MAX_CONCURRENT_MAINTENANCE,
         max_merge_input_bytes: loonfs_api::wire::sst_blocks::DEFAULT_MAX_REORGANIZATION_INPUT_BYTES,
+        idle_fold_after_ms: loonfs::MetadataMaintenanceOptions::default().idle_fold_after_ms,
         allow_unauthenticated_remote: false,
         allow_remote_without_tls: false,
         tls: None,

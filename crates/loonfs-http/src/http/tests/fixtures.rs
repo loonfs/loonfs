@@ -44,6 +44,7 @@ pub(super) fn test_options(root: &Path, writer_id: &str) -> TestOptions {
             inline_content: Default::default(),
             content_token_secret: "test-content-token-secret".into(),
             request_deadline_ms: 60_000,
+            idle_fold_after_ms: loonfs::MetadataMaintenanceOptions::default().idle_fold_after_ms,
             store_kind: ConfiguredObjectStoreKind::LocalFs,
             auth_policy: AuthPolicy::BearerToken("test-token".into()),
         },
