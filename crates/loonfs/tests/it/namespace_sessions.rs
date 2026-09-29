@@ -3,6 +3,7 @@
 #![allow(clippy::panic)]
 
 use crate::common::{directory_options, expect_code, writer};
+use loonfs::metrics::{DefaultMetricsRecorder, MetricValue};
 use loonfs::{
     CreateNamespaceOptions, ErrorCode, FsWriter, NamespaceId, NamespaceSessionPolicy,
     NamespaceSessionState, SharedObjectStore,
@@ -433,7 +434,15 @@ async fn a_full_table_of_busy_sessions_refuses_until_one_settles() {
         crate::common::data_wal_put_for(&first),
     ));
     let store: SharedObjectStore = gates.clone();
-    let writer = bounded_writer(store, "busy", 2).await;
+    let recorder = Arc::new(DefaultMetricsRecorder::new());
+    let writer = FsWriter::builder_with_store(store)
+        .writer_id("busy")
+        .min_publish_interval_ms(0)
+        .max_writer_sessions(NonZeroUsize::new(2).expect("nonzero capacity"))
+        .metrics_recorder(recorder.clone())
+        .build()
+        .await
+        .expect("build bounded writer");
     for namespace_id in [&first, &second, &third] {
         create_namespace(&writer, namespace_id).await;
     }
@@ -481,6 +490,14 @@ async fn a_full_table_of_busy_sessions_refuses_until_one_settles() {
         writer.namespace_session_state(&first),
         NamespaceSessionState::Closed
     );
+    let snapshot = recorder.snapshot();
+    for (name, count) in [
+        ("loonfs.publisher.session_refusals", 1),
+        ("loonfs.publisher.idle_sessions_closed", 1),
+    ] {
+        let entry = snapshot.by_name(name).next().expect("registered counter");
+        assert_eq!(entry.value, MetricValue::Counter(count), "{name}");
+    }
 
     gates.inner().release();
     second_write

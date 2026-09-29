@@ -247,6 +247,7 @@ impl RegistryShared {
         namespace_id: &NamespaceId,
         weight: Option<PublishTailWeight>,
         budget: &RuntimeCacheConfig,
+        instruments: &crate::metrics::RuntimeInstruments,
     ) -> RetainedProjectionTotals {
         let mut state = self.lock_state();
         state.projections.record(namespace_id, weight);
@@ -264,6 +265,7 @@ impl RegistryShared {
                 .is_none_or(NamespacePublisher::invalidate_projection)
             {
                 state.projections.remove_entry(&victim);
+                instruments.publisher_projection_evicted();
             } else {
                 state.projections.retain(&victim);
             }
@@ -527,6 +529,7 @@ impl PublisherRegistry {
             });
         }
         if state.publishers.len() >= state.capacity.get() && !self.close_idle_session(state) {
+            self.read_core.instruments().publisher_session_refusal();
             return Err(CoreError::WriterCapacityExceeded {
                 max_writer_sessions: state.capacity.get(),
             });
@@ -563,8 +566,9 @@ impl PublisherRegistry {
                     .is_some_and(NamespacePublisher::close_session_admission_if_idle);
             if closed {
                 let totals = state.remove_closed_session(&namespace_id);
-                self.read_core
-                    .instruments()
+                let instruments = self.read_core.instruments();
+                instruments.publisher_idle_session_closed();
+                instruments
                     .publisher_retained_projections(totals.projections, totals.decoded_bytes);
                 return true;
             }
@@ -1215,7 +1219,12 @@ impl NamespacePublisher {
             return;
         };
         let budget = self.read_core.runtime_cache_config();
-        let totals = shared.settle_projection(&self.namespace_id, weight, budget);
+        let totals = shared.settle_projection(
+            &self.namespace_id,
+            weight,
+            budget,
+            self.read_core.instruments(),
+        );
         self.report_retained_projections(totals);
     }
 
@@ -1618,6 +1627,7 @@ impl NamespacePublisher {
     ) -> Vec<CommitResult> {
         let mut slot = self.engine.lock().await;
         let engine = self.engine_for(&mut slot);
+        let retained_projection = engine.retained_tail_weight().is_some();
         let publish = crate::fs::publish_batch_with_engine(
             &self.read_core,
             writer,
@@ -1628,6 +1638,9 @@ impl NamespacePublisher {
             batch,
         )
         .await;
+        if publish.wal_tail_observed && !retained_projection {
+            self.read_core.instruments().publisher_tail_replay();
+        }
         if !publish.results.iter().any(is_retryable_wal_publish) {
             for permit in permits {
                 permit.release_inline();

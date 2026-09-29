@@ -168,6 +168,12 @@ struct InstalledMaintenance {
     compactions_waiting: Arc<dyn GaugeHandle>,
     follow_ups: Arc<dyn CounterHandle>,
     hints_dropped: Arc<dyn CounterHandle>,
+    reconcile_sweeps: Arc<dyn CounterHandle>,
+    reconcile_probes: Arc<dyn CounterHandle>,
+    reconcile_re_admitted: Arc<dyn CounterHandle>,
+    keys_admitted: Arc<dyn GaugeHandle>,
+    keys_queued: Arc<dyn GaugeHandle>,
+    oldest_queued_ms: Arc<dyn GaugeHandle>,
 }
 
 impl MaintenanceInstruments {
@@ -193,6 +199,39 @@ impl MaintenanceInstruments {
                 hints_dropped: recorder.register_counter(
                     "loonfs.maintenance.hints_dropped",
                     "Maintenance hints dropped by bounded relays",
+                    &[],
+                ),
+                reconcile_sweeps: recorder.register_counter(
+                    "loonfs.maintenance.reconcile_sweeps",
+                    "Reconciliation sweeps over admitted maintenance keys",
+                    &[],
+                ),
+                reconcile_probes: recorder.register_counter(
+                    "loonfs.maintenance.reconcile_probes",
+                    "Probes made by reconciliation sweeps",
+                    &[],
+                ),
+                reconcile_re_admitted: recorder.register_counter(
+                    "loonfs.maintenance.reconcile_re_admitted",
+                    "Keys a reconciliation probe found due and queued again",
+                    &[],
+                ),
+                // Sampled each time the runner looks for work to dispatch,
+                // which every timer wake does, so a reading is at most one
+                // reconciliation interval old.
+                keys_admitted: recorder.register_gauge(
+                    "loonfs.maintenance.keys_admitted",
+                    "Job and namespace keys in reconciliation scope",
+                    &[],
+                ),
+                keys_queued: recorder.register_gauge(
+                    "loonfs.maintenance.keys_queued",
+                    "Admitted keys waiting for a maintenance permit",
+                    &[],
+                ),
+                oldest_queued_ms: recorder.register_gauge(
+                    "loonfs.maintenance.oldest_queued_ms",
+                    "Milliseconds the longest-waiting queued key has waited",
                     &[],
                 ),
                 recorder,
@@ -263,6 +302,33 @@ impl MaintenanceInstruments {
                 .increment(total.saturating_sub(previous));
         }
     }
+
+    pub(crate) fn reconcile_swept(&self, probes: usize, re_admitted: usize) {
+        let Some(installed) = &self.installed else {
+            return;
+        };
+        installed.reconcile_sweeps.increment(1);
+        installed.reconcile_probes.increment(metric_count(probes));
+        installed
+            .reconcile_re_admitted
+            .increment(metric_count(re_admitted));
+    }
+
+    pub(crate) fn admission(
+        &self,
+        keys_admitted: usize,
+        keys_queued: usize,
+        oldest_queued_ms: u64,
+    ) {
+        let Some(installed) = &self.installed else {
+            return;
+        };
+        installed.keys_admitted.set(metric_level(keys_admitted));
+        installed.keys_queued.set(metric_level(keys_queued));
+        installed
+            .oldest_queued_ms
+            .set(i64::try_from(oldest_queued_ms).unwrap_or(i64::MAX));
+    }
 }
 
 impl InstalledMaintenance {
@@ -315,6 +381,34 @@ impl RuntimeInstruments {
     pub(crate) fn snapshot_view_read(&self) {
         if let Some(installed) = &self.installed {
             installed.cache.snapshot_view_reads.increment(1);
+        }
+    }
+
+    pub(crate) fn namespace_head_cache_hit(&self) {
+        if let Some(installed) = &self.installed {
+            installed.cache.namespace_head.hits.increment(1);
+        }
+    }
+
+    pub(crate) fn namespace_head_cache_miss(&self) {
+        if let Some(installed) = &self.installed {
+            installed.cache.namespace_head.misses.increment(1);
+        }
+    }
+
+    pub(crate) fn namespace_head_cache_eviction(&self) {
+        if let Some(installed) = &self.installed {
+            installed.cache.namespace_head.evictions.increment(1);
+        }
+    }
+
+    pub(crate) fn namespace_head_cache_entries(&self, entries: usize) {
+        if let Some(installed) = &self.installed {
+            installed
+                .cache
+                .namespace_head
+                .entries
+                .set(metric_level(entries));
         }
     }
 
@@ -478,6 +572,34 @@ impl RuntimeInstruments {
         installed.publisher.write_stop_refusals.increment(1);
     }
 
+    pub(crate) fn publisher_projection_evicted(&self) {
+        let Some(installed) = &self.installed else {
+            return;
+        };
+        installed.publisher.projection_evictions.increment(1);
+    }
+
+    pub(crate) fn publisher_tail_replay(&self) {
+        let Some(installed) = &self.installed else {
+            return;
+        };
+        installed.publisher.tail_replays.increment(1);
+    }
+
+    pub(crate) fn publisher_idle_session_closed(&self) {
+        let Some(installed) = &self.installed else {
+            return;
+        };
+        installed.publisher.idle_sessions_closed.increment(1);
+    }
+
+    pub(crate) fn publisher_session_refusal(&self) {
+        let Some(installed) = &self.installed else {
+            return;
+        };
+        installed.publisher.session_refusals.increment(1);
+    }
+
     /// Reports one publication result delivered to its caller.
     pub(crate) fn publisher_publish(&self, outcome: PublishOutcome) {
         let Some(installed) = &self.installed else {
@@ -515,7 +637,11 @@ impl RuntimeInstruments {
             let instruments = registry.entry(operation).or_insert_with(|| {
                 ObjectStoreOperationInstruments::register(installed.recorder.as_ref(), operation)
             });
-            instruments.reading(installed.recorder.as_ref(), sample.result.as_str())
+            instruments.reading(
+                installed.recorder.as_ref(),
+                sample.result.as_str(),
+                sample.key_class.as_str(),
+            )
         };
         instruments.outcome.increment(1);
         instruments
@@ -577,15 +703,15 @@ impl ObjectStoreMetricsRecorder for FanOutRecorder {
     }
 }
 
-/// The instruments one object-store operation reports, plus the per-outcome
-/// counters that operation has seen.
+/// The instruments one object-store operation reports, plus the counters for
+/// each outcome and key class that operation has seen.
 struct ObjectStoreOperationInstruments {
     operation: &'static str,
     seconds: Arc<dyn HistogramHandle>,
     bytes_in: Arc<dyn CounterHandle>,
     bytes_out: Arc<dyn CounterHandle>,
     retries: Arc<dyn CounterHandle>,
-    outcomes: HashMap<&'static str, Arc<dyn CounterHandle>>,
+    outcomes: HashMap<(&'static str, &'static str), Arc<dyn CounterHandle>>,
 }
 
 /// One sample's worth of handles, cloned out from under the registry lock so
@@ -632,16 +758,21 @@ impl ObjectStoreOperationInstruments {
         &mut self,
         recorder: &dyn MetricsRecorder,
         result: &'static str,
+        key_class: &'static str,
     ) -> ObjectStoreReading {
         let operation = self.operation;
         let outcome = self
             .outcomes
-            .entry(result)
+            .entry((result, key_class))
             .or_insert_with(|| {
                 recorder.register_counter(
                     "loonfs.object_store.operations",
-                    "Object-store calls by operation and outcome",
-                    &[("operation", operation), ("result", result)],
+                    "Object-store calls by operation, outcome, and key class",
+                    &[
+                        ("operation", operation),
+                        ("result", result),
+                        ("key_class", key_class),
+                    ],
                 )
             })
             .clone();
@@ -684,7 +815,7 @@ impl MaintenanceJobInstruments {
             ),
             failures: recorder.register_counter(
                 "loonfs.maintenance.step_failures",
-                "Maintenance passes that failed before concluding",
+                "Maintenance passes that failed before concluding, each scheduling one backoff retry",
                 &[("job", job)],
             ),
             probe_failures: recorder.register_counter(
@@ -712,8 +843,16 @@ impl MaintenanceJobInstruments {
 struct RuntimeCacheInstruments {
     latest_metadata_view_reads: Arc<dyn CounterHandle>,
     snapshot_view_reads: Arc<dyn CounterHandle>,
+    namespace_head: NamespaceHeadCacheInstruments,
     metadata_segment: Arc<MetadataSegmentCacheInstruments>,
     wal_tail_projection: Arc<WalTailProjectionCacheInstruments>,
+}
+
+struct NamespaceHeadCacheInstruments {
+    hits: Arc<dyn CounterHandle>,
+    misses: Arc<dyn CounterHandle>,
+    evictions: Arc<dyn CounterHandle>,
+    entries: Arc<dyn GaugeHandle>,
 }
 
 struct MetadataSegmentCacheInstruments {
@@ -723,6 +862,7 @@ struct MetadataSegmentCacheInstruments {
     evictions: Arc<dyn CounterHandle>,
     filter_skips: Arc<dyn CounterHandle>,
     filter_false_positives: Arc<dyn CounterHandle>,
+    retained_decoded_bytes: Arc<dyn GaugeHandle>,
 }
 
 struct WalTailProjectionCacheInstruments {
@@ -752,8 +892,35 @@ impl RuntimeCacheInstruments {
                 "Snapshot-backed metadata views created by the runtime",
                 &[],
             ),
+            namespace_head: NamespaceHeadCacheInstruments::register(recorder),
             metadata_segment: Arc::new(MetadataSegmentCacheInstruments::register(recorder)),
             wal_tail_projection: Arc::new(WalTailProjectionCacheInstruments::register(recorder)),
+        }
+    }
+}
+
+impl NamespaceHeadCacheInstruments {
+    fn register(recorder: &dyn MetricsRecorder) -> Self {
+        let get = |result| {
+            recorder.register_counter(
+                "loonfs.namespace_head_cache.gets",
+                "Namespace head cache lookups, by outcome",
+                &[("result", result)],
+            )
+        };
+        Self {
+            hits: get(RESULT_HIT),
+            misses: get(RESULT_MISS),
+            evictions: recorder.register_counter(
+                "loonfs.namespace_head_cache.evictions",
+                "Namespace heads evicted to stay within the cached namespace limit",
+                &[],
+            ),
+            entries: recorder.register_gauge(
+                "loonfs.namespace_head_cache.entries",
+                "Namespace heads currently cached",
+                &[],
+            ),
         }
     }
 }
@@ -790,6 +957,11 @@ impl MetadataSegmentCacheInstruments {
                 "Filter admissions that matched no metadata rows",
                 &[],
             ),
+            retained_decoded_bytes: recorder.register_gauge(
+                "loonfs.metadata_segment_cache.retained_decoded_bytes",
+                "Decoded bytes currently retained in the metadata-segment cache",
+                &[],
+            ),
         }
     }
 }
@@ -817,6 +989,10 @@ impl DecodedBlockCacheObserver for MetadataSegmentCacheInstruments {
 
     fn filter_false_positive(&self) {
         self.filter_false_positives.increment(1);
+    }
+
+    fn retained(&self, weight: DecodedBlockWeight) {
+        self.retained_decoded_bytes.set(metric_level(weight.bytes));
     }
 }
 
@@ -987,6 +1163,10 @@ struct PublisherInstruments {
     wal_folds_waiting: Arc<dyn GaugeHandle>,
     wal_fold_seconds: Arc<dyn HistogramHandle>,
     write_stop_refusals: Arc<dyn CounterHandle>,
+    projection_evictions: Arc<dyn CounterHandle>,
+    tail_replays: Arc<dyn CounterHandle>,
+    idle_sessions_closed: Arc<dyn CounterHandle>,
+    session_refusals: Arc<dyn CounterHandle>,
     batch_size: Arc<dyn HistogramHandle>,
     queue_depth: Arc<dyn GaugeHandle>,
     sessions_open: Arc<dyn GaugeHandle>,
@@ -1023,6 +1203,26 @@ impl PublisherInstruments {
             write_stop_refusals: recorder.register_counter(
                 "loonfs.publisher.write_stop_refusals",
                 "Mutation batches refused because the WAL tail reached its write-stop bound",
+                &[],
+            ),
+            projection_evictions: recorder.register_counter(
+                "loonfs.publisher.projection_evictions",
+                "Retained WAL-tail projections evicted to stay within the writer's budget",
+                &[],
+            ),
+            tail_replays: recorder.register_counter(
+                "loonfs.publisher.tail_replays",
+                "Publishes that replayed the WAL tail because no projection was retained",
+                &[],
+            ),
+            idle_sessions_closed: recorder.register_counter(
+                "loonfs.publisher.idle_sessions_closed",
+                "Idle writer sessions closed to make room for another namespace",
+                &[],
+            ),
+            session_refusals: recorder.register_counter(
+                "loonfs.publisher.session_refusals",
+                "Writer sessions refused because the session limit was reached",
                 &[],
             ),
             batch_size: recorder.register_histogram(
@@ -1130,6 +1330,15 @@ mod tests {
         result: ObjectStoreResultClass,
         attempts: u32,
     ) -> ObjectStoreMetricSample {
+        classified_sample(operation, result, KeyClass::Content, attempts)
+    }
+
+    fn classified_sample(
+        operation: ObjectStoreOperation,
+        result: ObjectStoreResultClass,
+        key_class: KeyClass,
+        attempts: u32,
+    ) -> ObjectStoreMetricSample {
         ObjectStoreMetricSample {
             operation,
             elapsed_micros: 250_000,
@@ -1138,7 +1347,7 @@ mod tests {
             bytes_in: Some(64),
             bytes_out: Some(16),
             item_count: None,
-            key_class: KeyClass::Content,
+            key_class,
             range_class: None,
             put_mode: Some(PutModeClass::Overwrite),
             store_kind: None,
@@ -1183,6 +1392,10 @@ mod tests {
         metadata.evict(DecodedBlockWeight::default());
         metadata.filter_skip();
         metadata.filter_false_positive();
+        metadata.retained(DecodedBlockWeight {
+            rows: 0,
+            bytes: 170,
+        });
 
         let wal = instruments
             .wal_tail_projection_cache_observer()
@@ -1259,6 +1472,13 @@ mod tests {
             assert_eq!(counter(&snapshot, name, labels), value, "counter `{name}`");
         }
         assert_eq!(
+            gauge(
+                &snapshot,
+                "loonfs.metadata_segment_cache.retained_decoded_bytes"
+            ),
+            170
+        );
+        assert_eq!(
             gauge(&snapshot, "loonfs.wal_tail_projection_cache.retained_rows"),
             13
         );
@@ -1290,7 +1510,11 @@ mod tests {
             counter(
                 &snapshot,
                 "loonfs.object_store.operations",
-                &[("operation", "put"), ("result", "ok")],
+                &[
+                    ("key_class", "content"),
+                    ("operation", "put"),
+                    ("result", "ok")
+                ],
             ),
             1
         );
@@ -1333,44 +1557,45 @@ mod tests {
     }
 
     #[test]
-    fn outcomes_of_one_operation_count_separately() {
+    fn outcomes_and_key_classes_of_one_operation_count_separately() {
         let recorder = Arc::new(DefaultMetricsRecorder::new());
         let instruments = RuntimeInstruments::new(Some(recorder.clone()));
         let bridge = instruments.object_store_recorder().expect("bridge");
 
-        bridge.record(sample(
-            ObjectStoreOperation::Get,
-            ObjectStoreResultClass::Ok,
-            1,
-        ));
-        bridge.record(sample(
-            ObjectStoreOperation::Get,
-            ObjectStoreResultClass::NotFound,
-            1,
-        ));
-        bridge.record(sample(
-            ObjectStoreOperation::Get,
-            ObjectStoreResultClass::NotFound,
-            1,
-        ));
+        for (result, key_class) in [
+            (ObjectStoreResultClass::Ok, KeyClass::WalSegment),
+            (ObjectStoreResultClass::NotFound, KeyClass::WalSegment),
+            (ObjectStoreResultClass::NotFound, KeyClass::WalSegment),
+            (ObjectStoreResultClass::Ok, KeyClass::NamespaceManifest),
+        ] {
+            bridge.record(classified_sample(
+                ObjectStoreOperation::Get,
+                result,
+                key_class,
+                1,
+            ));
+        }
 
         let snapshot = recorder.snapshot();
-        assert_eq!(
-            counter(
-                &snapshot,
-                "loonfs.object_store.operations",
-                &[("operation", "get"), ("result", "ok")],
-            ),
-            1
-        );
-        assert_eq!(
-            counter(
-                &snapshot,
-                "loonfs.object_store.operations",
-                &[("operation", "get"), ("result", "not_found")],
-            ),
-            2
-        );
+        for (result, key_class, count) in [
+            ("ok", "wal_segment", 1),
+            ("not_found", "wal_segment", 2),
+            ("ok", "namespace_manifest", 1),
+        ] {
+            assert_eq!(
+                counter(
+                    &snapshot,
+                    "loonfs.object_store.operations",
+                    &[
+                        ("key_class", key_class),
+                        ("operation", "get"),
+                        ("result", result)
+                    ],
+                ),
+                count,
+                "{result} {key_class}"
+            );
+        }
         assert_eq!(
             snapshot
                 .by_name("loonfs.object_store.operation_seconds")
@@ -1402,7 +1627,11 @@ mod tests {
             counter(
                 &recorder.snapshot(),
                 "loonfs.object_store.operations",
-                &[("operation", "delete"), ("result", "ok")],
+                &[
+                    ("key_class", "content"),
+                    ("operation", "delete"),
+                    ("result", "ok")
+                ],
             ),
             1
         );

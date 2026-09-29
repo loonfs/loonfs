@@ -125,8 +125,8 @@ impl FsReaderBuilder {
     }
 
     /// Installs the metrics recorder this handle reports its instruments to
-    /// (see [`crate::metrics`]). A reader registers the object-store
-    /// instruments; it schedules nothing, so it reports nothing else.
+    /// (see [`crate::metrics`]). A reader reports its object-store calls
+    /// and its caches; it schedules nothing, so it reports nothing else.
     pub fn metrics_recorder(mut self, recorder: Arc<dyn MetricsRecorder>) -> Self {
         self.core.metrics_recorder = Some(recorder);
         self

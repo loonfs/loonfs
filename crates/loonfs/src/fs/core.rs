@@ -201,7 +201,7 @@ impl ReadCore {
                 store,
                 config,
                 timer,
-                control_cache: Mutex::new(RuntimeControlCache::default()),
+                control_cache: Mutex::new(RuntimeControlCache::new(Arc::clone(&instruments))),
                 metadata_segment_cache,
                 wal_tail_projection_cache,
                 cache_stats: RuntimeCacheStatsInner::new(Arc::clone(&instruments)),

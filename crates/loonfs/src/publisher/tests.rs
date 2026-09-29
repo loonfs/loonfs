@@ -290,6 +290,18 @@ fn gauge(recorder: &DefaultMetricsRecorder, name: &str) -> i64 {
     }
 }
 
+fn counter(recorder: &DefaultMetricsRecorder, name: &str) -> u64 {
+    let snapshot = recorder.snapshot();
+    let entry = snapshot
+        .by_name(name)
+        .next()
+        .unwrap_or_else(|| panic!("no `{name}` counter registered"));
+    match entry.value {
+        MetricValue::Counter(value) => value,
+        ref other => panic!("expected a counter, found {other:?}"),
+    }
+}
+
 fn retained_projections(registry: &PublisherRegistry) -> RetainedProjectionTotals {
     registry.shared.lock_state().projections.totals()
 }
@@ -3097,6 +3109,31 @@ async fn retained_tail_projections_stay_within_the_shared_byte_budget() {
         gauge(&recorder, "loonfs.publisher.retained_projection_bytes"),
         i64::try_from(totals.decoded_bytes).expect("small byte total"),
     );
+    assert_eq!(
+        counter(&recorder, "loonfs.publisher.projection_evictions"),
+        u64::try_from(NAMESPACES - totals.projections).expect("small count"),
+    );
+    assert_eq!(
+        counter(&recorder, "loonfs.publisher.tail_replays"),
+        u64::try_from(NAMESPACES).expect("small count"),
+        "each session's first publish has no projection to start from"
+    );
+
+    for (namespace_id, replays) in [(&namespaces[NAMESPACES - 1], 0), (&namespaces[0], 1)] {
+        let before = counter(&recorder, "loonfs.publisher.tail_replays");
+        registry
+            .submit_candidate(
+                namespace_id.clone(),
+                CommitCandidate::new(create_directory_request("again", "again")),
+            )
+            .await
+            .expect("commit");
+        assert_eq!(
+            counter(&recorder, "loonfs.publisher.tail_replays") - before,
+            replays,
+            "only the evicted namespace replays its tail"
+        );
+    }
 
     registry.close_admission();
     registry
