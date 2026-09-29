@@ -177,8 +177,10 @@ pub struct RuntimeCacheConfig {
     /// projection cache.
     pub max_cached_wal_tail_projection_rows: usize,
     /// Approximate decoded-byte budget for WAL-tail projections, per side
-    /// like the row budget. Both budgets also cap one projection: a publish
-    /// whose tail outgrows either keeps nothing.
+    /// like the row budget. Defaults to 64 MiB. Both budgets also cap one
+    /// projection: a publish whose tail outgrows either keeps nothing, so
+    /// each later publish replays the tail from the store until a fold
+    /// shortens it.
     pub max_cached_wal_tail_projection_decoded_bytes: usize,
     /// Cache settings for decoded metadata segments.
     pub metadata_segment_cache: MetadataSegmentCacheConfig,
