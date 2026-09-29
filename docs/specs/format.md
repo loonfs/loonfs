@@ -650,6 +650,8 @@ After the corresponding WAL is reclaimed, metadata segments are required recover
 
 Implementations can flush automatically as the WAL grows. The reference defaults request a flush at 32 unflushed WAL objects and reject new commits with `maintenance_required` at 128. The commit that triggers a flush can finish before the flush completes. Reads and retained-receipt lookup remain available at the threshold.
 
+The reference maintenance also requests a flush of a shorter tail once it has gone idle: the tail holds a commit, and the newest commit's `committed_at_ms` is at least 15 minutes older than the maintenance clock. A tail of fences alone is never idle. The timestamp only decides when to flush; a flush is valid at any time.
+
 Flushing does not advance retention. An operator separately decides when older replay history may be discarded. Appendix C lists the reference implementation's sizing defaults.
 
 ### 7.4 Statistics
@@ -1626,6 +1628,7 @@ These are reference producer and runtime defaults. A target size can be exceeded
 | Maximum bounded reorganization input rows | 131,072 |
 | Maximum bounded reorganization decoded input | 64 MiB |
 | Automatic WAL-flush threshold | 32 segments |
+| Idle WAL-flush period | 15 minutes |
 | Unflushed-tail write rejection threshold | 128 segments |
 | `RuntimeCacheConfig::manifest_revalidation_interval_ms` | 1,000 ms |
 | Maximum commit-message size | 4,096 bytes |

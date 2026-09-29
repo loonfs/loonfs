@@ -150,12 +150,13 @@ impl MaintenanceHandle {
         match hint {
             MaintenanceHint::Published(publication) => {
                 for id in inner.registry.job_ids() {
-                    if inner
-                        .registry
-                        .get(id)
-                        .is_some_and(|job| job.should_run_after_publication(&publication))
-                    {
+                    let Some(job) = inner.registry.get(id) else {
+                        continue;
+                    };
+                    if job.should_run_after_publication(&publication) {
                         nudge_if_inactive(&inner, id, &publication.namespace_id);
+                    } else if let Some(delay_ms) = job.wake_after_publication_ms(&publication) {
+                        move_next_wake(&inner, id, &publication.namespace_id, delay_ms);
                     }
                 }
             }
@@ -629,6 +630,31 @@ fn nudge_if_inactive(inner: &Arc<RunnerInner>, job: MaintenanceJobId, namespace_
     ensure_scheduler(inner);
     dispatch_ready(inner);
     inner.wake.notify_one();
+}
+
+fn move_next_wake(
+    inner: &Arc<RunnerInner>,
+    job: MaintenanceJobId,
+    namespace_id: &NamespaceId,
+    delay_ms: u64,
+) {
+    let at_ms = inner.clock.now_ms().saturating_add(delay_ms);
+    let sooner_than_the_timer = {
+        let mut state = inner.lock_state();
+        if state.admission.is_closed() {
+            return;
+        }
+        state
+            .admission
+            .move_next_wake(MaintenanceKey::new(job, namespace_id), at_ms);
+        at_ms < state.next_reconcile_ms
+    };
+    ensure_scheduler(inner);
+    // The timer never sleeps past the next sweep, so only a sooner wake
+    // interrupts it, and a busy writer does not wake it on every publication.
+    if sooner_than_the_timer {
+        inner.wake.notify_one();
+    }
 }
 
 /// Claims every permit the ready keys can fill and spawns a chain for each.

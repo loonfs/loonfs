@@ -50,6 +50,12 @@ impl MaintenanceClock for ManualClock {
     }
 }
 
+impl crate::WallClock for ManualClock {
+    fn now_ms(&self) -> std::result::Result<u64, crate::CoreError> {
+        Ok(self.now_ms.load(Ordering::SeqCst))
+    }
+}
+
 /// What one scripted step does.
 #[derive(Debug, Clone)]
 enum ScriptedStep {
@@ -982,4 +988,110 @@ async fn retired_fork_collection_schedules_the_source_namespace() {
     assert!(store.counts().lists > 0);
     runner.shutdown().await.expect("shutdown runner");
     writer.shutdown().await.expect("shutdown writer");
+}
+
+async fn write_file(writer: &crate::FsWriter, namespace_id: &NamespaceId, path: &str) {
+    writer
+        .put_file_bytes(
+            namespace_id,
+            path,
+            b"body",
+            crate::PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("write a file");
+}
+
+#[tokio::test]
+async fn an_idle_tail_folds_once_and_again_only_after_a_write() {
+    use loonfs_objectstore::local_fs_store::LocalFsStore;
+    use loonfs_test_support::stores::{KeyPredicate, RecordingStore};
+
+    const START_MS: u64 = 1_750_000_000_000;
+    let idle_ms = crate::MetadataMaintenanceOptions::default().idle_fold_after_ms;
+    let clock = ManualClock::at(START_MS);
+    let directory = tempfile::tempdir().expect("tempdir");
+    let store = Arc::new(RecordingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::any(),
+    ));
+    let (observer, receiver) = maintenance_hint_relay(nonzero_usize(64));
+    let writer = crate::FsWriter::builder_with_store(store.clone())
+        .writer_id("idle-fold")
+        .wall_clock(clock.clone())
+        .maintenance_hint_observer(move |hint| observer(hint))
+        .build()
+        .await
+        .expect("writer");
+    let maintenance = writer.maintenance_handle("idle-fold").expect("maintenance");
+    let registry = MaintenanceRegistry::new();
+    registry
+        .register(Arc::new(MetadataMaintenanceJob::new(maintenance.clone())))
+        .expect("metadata job");
+    let runner = MaintenanceRunner::builder(registry)
+        .clock(clock.clone())
+        .build()
+        .expect("runner");
+    runner.attach_hints(receiver);
+    let namespace_id = namespace_id("idle");
+    writer
+        .create_namespace(
+            &namespace_id,
+            crate::CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("namespace");
+
+    write_file(&writer, &namespace_id, "/first").await;
+    runner.drain().await.expect("the first hint settles");
+    assert_eq!(
+        runner.not_before_ms(MaintenanceJobId::METADATA, &namespace_id),
+        Some(START_MS + idle_ms)
+    );
+    clock.advance_to(START_MS + 1_000);
+    write_file(&writer, &namespace_id, "/second").await;
+    runner.drain().await.expect("the second hint settles");
+    assert_eq!(
+        runner.not_before_ms(MaintenanceJobId::METADATA, &namespace_id),
+        Some(START_MS + 1_000 + idle_ms),
+        "a later write replaces the wake an earlier one planted"
+    );
+    store.reset();
+    runner.reconcile_now().await;
+    assert!(
+        store.take().is_empty(),
+        "a namespace waiting for its wake is not probed"
+    );
+
+    clock.advance_to(START_MS + 1_000 + idle_ms);
+    runner.dispatch_now();
+    runner.drain().await.expect("the idle fold settles");
+    let folded = maintenance
+        .get_namespace_diagnostics(&namespace_id)
+        .await
+        .expect("diagnostics");
+    assert_eq!(folded.wal_tail_segments, 0, "the wake folded the idle tail");
+    runner.reconcile_now().await;
+    runner.drain().await.expect("the sweep settles");
+    assert_eq!(
+        runner.stats().keys_admitted,
+        0,
+        "a folded namespace owes nothing until it is written again"
+    );
+
+    clock.advance_to(START_MS + 1_000 + 3 * idle_ms);
+    write_file(&writer, &namespace_id, "/third").await;
+    runner.drain().await.expect("the third hint settles");
+    clock.advance_to(START_MS + 1_000 + 4 * idle_ms);
+    runner.dispatch_now();
+    runner.drain().await.expect("the second idle fold settles");
+    let refolded = maintenance
+        .get_namespace_diagnostics(&namespace_id)
+        .await
+        .expect("diagnostics");
+    assert_eq!(refolded.wal_tail_segments, 0);
+    assert!(refolded.current_manifest_no > folded.current_manifest_no);
+
+    runner.shutdown().await.expect("runner shutdown");
+    writer.shutdown().await.expect("writer shutdown");
 }

@@ -83,6 +83,11 @@ impl MaintenanceJob for MetadataMaintenanceJob {
         )
     }
 
+    fn wake_after_publication_ms(&self, publication: &NamespacePublication) -> Option<u64> {
+        (publication.committed_through_seq.is_some() && self.options.idle_fold_after_ms > 0)
+            .then_some(self.options.idle_fold_after_ms)
+    }
+
     fn should_run_after_fold(&self) -> bool {
         true
     }

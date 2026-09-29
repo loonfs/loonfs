@@ -158,6 +158,13 @@ pub trait MaintenanceJob: Send + Sync + 'static {
         false
     }
 
+    /// Returns how long after a publication that did not nudge this job it
+    /// should run for the namespace. A later publication's wake replaces an
+    /// earlier one.
+    fn wake_after_publication_ms(&self, _publication: &NamespacePublication) -> Option<u64> {
+        None
+    }
+
     /// Returns whether a finished WAL-fold attempt should nudge this job.
     fn should_run_after_fold(&self) -> bool {
         false

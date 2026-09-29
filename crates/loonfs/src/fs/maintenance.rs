@@ -197,10 +197,8 @@ impl FsMaintenance {
     async fn load_maintenance_status(
         &self,
         namespace_id: &NamespaceId,
-    ) -> Result<NamespaceDiagnostics> {
-        let diagnostics =
-            loonfs_core::cache::load_namespace_diagnostics(self.core.store(), namespace_id).await?;
-        Ok(Self::namespace_diagnostics(diagnostics, 0, 0))
+    ) -> Result<NamespaceStorageDiagnostics> {
+        Ok(loonfs_core::cache::load_namespace_diagnostics(self.core.store(), namespace_id).await?)
     }
 
     /// Runs one maintenance job for one namespace.
@@ -269,8 +267,10 @@ impl FsMaintenance {
         }
     }
 
-    /// Flushes the WAL tail at the segment threshold or, when the writer knows
-    /// the count, the inline byte threshold. Then runs one bounded reorganization step.
+    /// Flushes the WAL tail at the segment threshold, at the inline byte
+    /// threshold when the writer knows the count, or once the tail's newest
+    /// commit is `idle_fold_after_ms` old on this handle's wall clock. Then
+    /// runs one bounded reorganization step.
     pub async fn maintain_metadata(
         &self,
         namespace_id: &NamespaceId,
@@ -284,7 +284,11 @@ impl FsMaintenance {
                 .unwrap_or(0),
             _ => 0,
         };
-        let flush = options.flush_is_due(status.wal_tail_segments, inline_bytes);
+        let flush = options.flush_is_due(status.wal_tail_segments, inline_bytes)
+            || options.idle_flush_is_due(
+                status.wal_tail_newest_commit_at_ms,
+                self.actor.wall_clock.now_ms()?,
+            );
         let response = self
             .flush_then_reorganize(
                 namespace_id,
@@ -302,22 +306,27 @@ impl FsMaintenance {
         Ok(response)
     }
 
-    /// Checks the WAL segment threshold and manifest descriptors without replaying the tail.
+    /// Checks the WAL segment threshold, the age of the tail's newest commit,
+    /// and manifest descriptors without replaying the tail.
     ///
-    /// Inline byte thresholds use publication hints instead. Active leases may
-    /// prevent an eligible merge from running until their expiry.
+    /// The age is measured on this handle's wall clock. Inline byte thresholds
+    /// use publication hints instead. Active leases may prevent an eligible
+    /// merge from running until their expiry.
     pub async fn metadata_probe(
         &self,
         namespace_id: &NamespaceId,
         options: &MetadataMaintenanceOptions,
     ) -> Result<MaintenanceProbe> {
-        let threshold = options.max_wal_tail_segments.get();
+        let now_ms = self.actor.wall_clock.now_ms()?;
         let cache = self.core.metadata_segment_cache();
         loonfs_core::cache::metadata_maintenance_due(
             self.core.store(),
             Some(cache.as_ref()),
             namespace_id,
-            threshold,
+            |wal_tail_segments, wal_tail_newest_commit_at_ms| {
+                wal_tail_segments >= options.max_wal_tail_segments.get()
+                    || options.idle_flush_is_due(wal_tail_newest_commit_at_ms, now_ms)
+            },
             options.compaction_policy,
         )
         .await
@@ -438,7 +447,7 @@ impl FsMaintenance {
                 self.core.store(),
                 Some(self.core.metadata_segment_cache().as_ref()),
                 namespace_id,
-                u64::MAX,
+                |_, _| false,
                 compaction_policy,
             )
             .await

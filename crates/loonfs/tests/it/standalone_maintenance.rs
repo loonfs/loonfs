@@ -2,7 +2,8 @@
 
 use loonfs::{
     CreateCheckpointOptions, CreateDirectoryOptions, CreateNamespaceOptions, FsMaintenance,
-    FsWriter, GarbageCollectionJob, MaintenanceAssignment, MaintenanceJobId, MaintenanceRegistry,
+    FsWriter, GarbageCollectionJob, MaintenanceAssignment, MaintenanceCancellation,
+    MaintenanceConclusion, MaintenanceJob, MaintenanceJobId, MaintenanceProbe, MaintenanceRegistry,
     MetadataCompactionJob, MetadataMaintenanceJob, MetadataMaintenanceOptions, PutFileOptions,
     SharedObjectStore, WallClock,
 };
@@ -10,6 +11,7 @@ use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{KeyPredicate, RecordedOperation, RecordingStore};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 #[derive(Debug)]
@@ -19,6 +21,96 @@ impl WallClock for FixedWallClock {
     fn now_ms(&self) -> Result<u64, loonfs::CoreError> {
         Ok(self.0)
     }
+}
+
+#[derive(Debug)]
+struct SettableWallClock(AtomicU64);
+
+impl WallClock for SettableWallClock {
+    fn now_ms(&self) -> Result<u64, loonfs::CoreError> {
+        Ok(self.0.load(Ordering::SeqCst))
+    }
+}
+
+#[tokio::test]
+async fn a_fresh_runtime_folds_a_short_tail_once_its_newest_commit_is_idle() {
+    const COMMITTED_AT_MS: u64 = 1_750_000_000_000;
+    let directory = tempfile::tempdir().expect("directory");
+    let store: SharedObjectStore =
+        Arc::new(LocalFsStore::new(directory.path()).expect("local store"));
+    let clock = Arc::new(SettableWallClock(AtomicU64::new(COMMITTED_AT_MS)));
+    let namespace_id = namespace_id("idle-tail");
+    let writer = FsWriter::builder_with_store(store.clone())
+        .writer_id("departed-writer")
+        .wall_clock(clock.clone())
+        .build()
+        .await
+        .expect("writer");
+    writer
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("namespace");
+    writer
+        .put_file_bytes(
+            &namespace_id,
+            "/file.txt",
+            b"body",
+            PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("write file");
+    writer.shutdown().await.expect("writer shutdown");
+    drop(writer);
+
+    let maintenance = FsMaintenance::builder_with_store(store)
+        .actor_id("fresh-worker")
+        .wall_clock(clock.clone())
+        .build()
+        .await
+        .expect("maintenance");
+    let job = MetadataMaintenanceJob::new(maintenance.clone());
+    let disabled =
+        MetadataMaintenanceJob::new(maintenance.clone()).options(MetadataMaintenanceOptions {
+            idle_fold_after_ms: 0,
+            ..MetadataMaintenanceOptions::default()
+        });
+    let idle_ms = MetadataMaintenanceOptions::default().idle_fold_after_ms;
+
+    clock
+        .0
+        .store(COMMITTED_AT_MS + idle_ms - 1, Ordering::SeqCst);
+    assert_eq!(
+        job.probe(&namespace_id).await.expect("probe"),
+        MaintenanceProbe::Idle,
+        "a tail younger than the idle period waits"
+    );
+    clock.0.store(COMMITTED_AT_MS + idle_ms, Ordering::SeqCst);
+    assert_eq!(
+        disabled.probe(&namespace_id).await.expect("probe"),
+        MaintenanceProbe::Idle,
+        "zero turns the idle rule off"
+    );
+    assert_eq!(
+        job.probe(&namespace_id).await.expect("probe"),
+        MaintenanceProbe::Due
+    );
+    let report = job
+        .run(&namespace_id, &MaintenanceCancellation::new())
+        .await
+        .expect("idle fold");
+    assert_eq!(report.conclusion, MaintenanceConclusion::Progressed);
+    let diagnostics = maintenance
+        .get_namespace_diagnostics(&namespace_id)
+        .await
+        .expect("diagnostics");
+    assert_eq!(diagnostics.wal_tail_segments, 0, "{diagnostics:?}");
+    assert_eq!(
+        job.probe(&namespace_id).await.expect("probe"),
+        MaintenanceProbe::Idle
+    );
 }
 
 #[tokio::test]

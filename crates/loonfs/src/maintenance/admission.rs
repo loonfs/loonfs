@@ -190,8 +190,9 @@ impl KeyState {
         }
     }
 
-    fn is_parked(&self) -> bool {
-        matches!(self.run, KeyRunState::Parked)
+    /// Nothing asked for, nothing running, and no deadline to wait for.
+    fn is_unscheduled(&self) -> bool {
+        matches!(self.run, KeyRunState::Parked) && self.obligations.is_none()
     }
 
     fn is_running(&self) -> bool {
@@ -391,6 +392,19 @@ impl Admission {
         });
     }
 
+    /// Moves the key's next wake to `at_ms`, dropping an earlier one. A later
+    /// deadline stays armed.
+    pub(crate) fn move_next_wake(&mut self, key: MaintenanceKey, at_ms: u64) {
+        if self.closed {
+            return;
+        }
+        let owed = &mut self.keys.entry(key).or_default().obligations;
+        *owed = Some(TimedObligations {
+            earliest_at_ms: at_ms,
+            latest_at_ms: owed.map_or(at_ms, |existing| existing.latest_at_ms.max(at_ms)),
+        });
+    }
+
     /// Queues keys whose earliest deadline has arrived.
     ///
     /// If a key also has a later deadline, that deadline remains armed. Returns
@@ -475,11 +489,7 @@ impl Admission {
     /// obligation — a lease-dated GC key outlives any number of quiet
     /// probes.
     pub(crate) fn forget_if_idle(&mut self, key: &MaintenanceKey) {
-        let forgettable = self
-            .keys
-            .get(key)
-            .is_some_and(|state| state.is_parked() && state.obligations.is_none());
-        if forgettable {
+        if self.keys.get(key).is_some_and(KeyState::is_unscheduled) {
             self.keys.remove(key);
         }
     }
@@ -512,8 +522,9 @@ impl Admission {
     }
 
     /// The next slice of admitted keys to probe, resuming where the last
-    /// sweep stopped and skipping keys that are already running or already
-    /// queued — probing those would only ask a question the queue answers.
+    /// sweep stopped and skipping keys that are running, queued, or waiting
+    /// for a deadline — probing those would only ask a question the queue or
+    /// the deadline answers.
     pub(crate) fn reconcile_batch(&mut self, budget: usize) -> Vec<MaintenanceKey> {
         if self.closed || budget == 0 {
             return Vec::new();
@@ -523,14 +534,14 @@ impl Admission {
                 .keys
                 .range((Bound::Excluded(cursor.clone()), Bound::Unbounded))
                 .chain(self.keys.range((Bound::Unbounded, Bound::Included(cursor))))
-                .filter(|(_, state)| state.is_parked())
+                .filter(|(_, state)| state.is_unscheduled())
                 .map(|(key, _)| key.clone())
                 .take(budget)
                 .collect(),
             None => self
                 .keys
                 .iter()
-                .filter(|(_, state)| state.is_parked())
+                .filter(|(_, state)| state.is_unscheduled())
                 .map(|(key, _)| key.clone())
                 .take(budget)
                 .collect(),
@@ -1387,9 +1398,13 @@ mod tests {
         admission.forget_if_idle(&leased);
 
         assert_eq!(
-            admission.reconcile_batch(16),
-            vec![leased.clone()],
+            admission.keys_admitted(),
+            1,
             "the key that owed nothing is forgotten; the lease-dated one is not"
+        );
+        assert!(
+            admission.reconcile_batch(16).is_empty(),
+            "a key waiting for its deadline is not probed"
         );
         assert_eq!(
             admission.not_before_ms(&leased),

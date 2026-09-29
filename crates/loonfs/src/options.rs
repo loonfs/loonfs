@@ -26,6 +26,10 @@ pub struct MetadataMaintenanceOptions {
     /// Flush once unfolded inline bytes reach this size; defaults to 2 MiB.
     /// Applies only when the writer's publisher knows the count.
     pub inline_content_fold_at_bytes: NonZeroUsize,
+    /// Flush a WAL tail of any size once its newest commit is this old on
+    /// the maintenance handle's wall clock; defaults to 15 minutes. Zero
+    /// turns this off.
+    pub idle_fold_after_ms: u64,
     /// Whether run sizes must justify the rewrite before maintenance merges them.
     pub compaction_policy: MetadataCompactionPolicy,
 }
@@ -38,6 +42,7 @@ impl Default for MetadataMaintenanceOptions {
                 crate::InlineContentOptions::default().inline_content_fold_at_bytes,
             )
             .expect("default inline fold threshold should be nonzero"),
+            idle_fold_after_ms: 15 * 60 * 1_000,
             compaction_policy: MetadataCompactionPolicy::SizeTiered,
         }
     }
@@ -75,6 +80,19 @@ impl MetadataMaintenanceOptions {
     pub fn flush_is_due(&self, wal_tail_segments: u64, wal_tail_inline_bytes: usize) -> bool {
         wal_tail_segments >= self.max_wal_tail_segments.get()
             || wal_tail_inline_bytes >= self.inline_content_fold_at_bytes.get()
+    }
+
+    /// Returns whether a WAL tail has gone idle: it holds a commit, and the
+    /// newest one is at least `idle_fold_after_ms` old at `now_ms`.
+    pub(crate) fn idle_flush_is_due(
+        &self,
+        wal_tail_newest_commit_at_ms: Option<u64>,
+        now_ms: u64,
+    ) -> bool {
+        self.idle_fold_after_ms > 0
+            && wal_tail_newest_commit_at_ms.is_some_and(|committed_at_ms| {
+                now_ms.saturating_sub(committed_at_ms) >= self.idle_fold_after_ms
+            })
     }
 }
 
