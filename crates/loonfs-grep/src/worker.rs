@@ -204,6 +204,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
     /// backfilling manifest. Enabling an active manifest is idempotent.
     pub async fn enable(&self, namespace_id: &NamespaceId) -> Result<GrepEnableOutcome> {
         self.reads(namespace_id).head().await?;
+        let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
         let current = load_current_grep_manifest(&self.store, namespace_id).await?;
         if let Some(current) = &current {
             if !matches!(
@@ -234,7 +235,6 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                 return Err(error);
             }
         };
-        let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
         let published =
             publish_grep_manifest(&self.store, current.as_ref(), &next, &deadline).await;
         match published {
@@ -257,6 +257,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
     /// candidates and are never deleted synchronously.
     pub async fn disable(&self, namespace_id: &NamespaceId) -> Result<GrepDisableOutcome> {
         self.reads(namespace_id).head().await?;
+        let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
         let Some(current) = load_current_grep_manifest(&self.store, namespace_id).await? else {
             return Ok(GrepDisableOutcome::NotEnabled);
         };
@@ -281,7 +282,6 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             Vec::new(),
         )
         .map_err(|error| core_state_error(namespace_id, error))?;
-        let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
         match publish_grep_manifest(&self.store, Some(&current), &next, &deadline).await {
             Ok(_) => {
                 if let Some(checkpoint_id) = checkpoint_id {
@@ -301,6 +301,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         namespace_id: &NamespaceId,
         policy: GramIndexBuildPolicy,
     ) -> Result<GrepBuildOutcome> {
+        let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
         let Some(current) = load_current_grep_manifest(&self.store, namespace_id).await? else {
             return Ok(GrepBuildOutcome::NotEnabled);
         };
@@ -328,7 +329,9 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             {
                 Ok(unit) => unit,
                 Err(error) if rebootstrap_required(&error) => {
-                    return self.restart_backfill(namespace_id, &current).await;
+                    return self
+                        .restart_backfill(namespace_id, &current, &deadline)
+                        .await;
                 }
                 Err(error) => return Err(error),
             },
@@ -344,7 +347,9 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                         });
                     }
                     Err(error) if rebootstrap_required(&error) => {
-                        return self.restart_backfill(namespace_id, &current).await;
+                        return self
+                            .restart_backfill(namespace_id, &current, &deadline)
+                            .await;
                     }
                     Err(error) => return Err(error),
                 }
@@ -352,7 +357,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             GrepIndexStatus::Disabled {} => return Ok(GrepBuildOutcome::NotEnabled),
         };
 
-        self.publish_build_unit(namespace_id, current, unit, policy)
+        self.publish_build_unit(namespace_id, current, unit, policy, &deadline)
             .await
     }
 
@@ -431,6 +436,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         &self,
         namespace_id: &NamespaceId,
         current: &LoadedGrepManifest,
+        deadline: &Deadline,
     ) -> Result<GrepBuildOutcome> {
         let previous_checkpoint_id = match current.manifest_state().status() {
             GrepIndexStatus::Backfilling { checkpoint_id, .. } => Some(checkpoint_id.clone()),
@@ -452,8 +458,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                 return Err(error);
             }
         };
-        let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
-        match publish_grep_manifest(&self.store, Some(current), &next, &deadline).await {
+        match publish_grep_manifest(&self.store, Some(current), &next, deadline).await {
             Ok(_) => {
                 if let Some(previous_checkpoint_id) = previous_checkpoint_id {
                     self.delete_checkpoint_if_present(namespace_id, &previous_checkpoint_id)
@@ -481,6 +486,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         current: LoadedGrepManifest,
         unit: CollectedIndexUnit,
         policy: GramIndexBuildPolicy,
+        deadline: &Deadline,
     ) -> Result<GrepBuildOutcome> {
         let CollectedIndexUnit {
             postings,
@@ -495,7 +501,6 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             next_run_no_after(current_run_no)?
         };
         let manifest_no = next_manifest_no(Some(&current))?;
-        let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
         let new_segments = write_index_segments(
             &self.store,
             namespace_id,
@@ -557,8 +562,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             segments,
         )
         .map_err(|error| core_state_error(namespace_id, error))?;
-        deadline.ensure_metadata_publication_budget(namespace_id)?;
-        match publish_grep_manifest(&self.store, Some(&current), &next, &deadline).await {
+        match publish_grep_manifest(&self.store, Some(&current), &next, deadline).await {
             Ok(_) => {
                 if let Some(checkpoint_id) = completed_checkpoint_id {
                     self.delete_checkpoint_if_present(namespace_id, &checkpoint_id)
@@ -967,6 +971,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         namespace_id: &NamespaceId,
         policy: GramIndexBuildPolicy,
     ) -> Result<GrepReorganizeOutcome> {
+        let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
         let Some(current) = load_current_grep_manifest(&self.store, namespace_id).await? else {
             return Ok(GrepReorganizeOutcome::NotEnabled);
         };
@@ -1055,7 +1060,6 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         .await?;
         let rows = gram_postings_rows(merged.postings)?;
         let manifest_no = next_manifest_no(Some(&current))?;
-        let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
         let new_segments = write_index_segments(
             &self.store,
             namespace_id,
@@ -1095,7 +1099,6 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             segments,
         )
         .map_err(|error| core_state_error(namespace_id, error))?;
-        deadline.ensure_metadata_publication_budget(namespace_id)?;
         match publish_grep_manifest(&self.store, Some(&current), &next, &deadline).await {
             Ok(_) => Ok(GrepReorganizeOutcome::UnitPublished {
                 merged_rows: merged.rows,
