@@ -326,9 +326,11 @@ a 256 MiB transfer limit per proxied download. Content reads use 8 MiB chunks;
 the transfer limit does not reserve that much memory. Set a memory limit
 comfortably above the calculated minimum to allow for HTTP and store buffers.
 
-`max_writer_sessions` defaults to 10,000. A request that needs another writer
-session answers `writer_capacity_exceeded`; raise the limit if the deployment
-must keep more namespaces writable at once.
+`max_writer_sessions` defaults to 10,000. At the limit, a request for another
+namespace closes the least recently used idle session, and answers
+`writer_capacity_exceeded` only when every session is busy. A closed
+namespace acquires a new writer epoch on its next write, so raise the limit if
+the deployment writes more namespaces than this at once.
 
 `max_concurrent_folds` defaults to 2. A sustained
 `loonfs.publisher.wal_folds_waiting` gauge means WAL folds are waiting at the

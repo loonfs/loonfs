@@ -309,7 +309,7 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | `commit_outcome_unknown` | 503 | The publish outcome was not observed; the commit may or may not be visible. Retry with the same commit id or reconcile. |
 | `commit_queue_full` | 503 | The namespace write queue is full; back off and retry. |
 | `writer_session_closed` | 503 | This node holds no open writer session for the namespace. The request was not admitted; retry on the node the namespace is assigned to. |
-| `writer_capacity_exceeded` | 503 | This node holds its maximum number of writer sessions. The request was not admitted; retry on another node, or wait for a session to close in a single-node deployment. |
+| `writer_capacity_exceeded` | 503 | This node holds its maximum number of writer sessions and every one is busy, so none can be closed to make room (section 5.3). The request was not admitted; retry on another node, or wait for a session to settle in a single-node deployment. |
 | `server_busy` | 503 | The server is at its configured concurrency limit for this kind of work (proxied upload bodies or proxied content reads); back off and retry. |
 | `shutting_down` | 503 | The serving process closed admission for shutdown; work admitted earlier still settles. Retry against a live instance. |
 | `deadline_exceeded` | 503 | The server cancelled a bounded request at its configured `request_deadline_ms`. A commit may still land after this response; reconcile it by commit id before retrying. |
@@ -831,8 +831,11 @@ one namespace.
 A node closes a session to hand a namespace off. Closing writes nothing durable.
 The next node's first publish acquires the next writer epoch. A request sent to
 a node without the namespace's open session fails with `writer_session_closed`.
-A node holds a bounded number of sessions and refuses to open one beyond that
-limit with `writer_capacity_exceeded`.
+A node holds a bounded number of sessions. At the limit, opening another
+closes the least recently used idle session. A session is idle when it has no
+admitted work or running fold and is neither closing nor fenced. The node
+refuses with `writer_capacity_exceeded` when no session is idle, or at the
+limit when it opens sessions only on explicit assignment.
 
 The standard mutation operations are defined in [the format specification](format.md#66-operations-and-wal-deltas). `POST /commits` (section 6.8) exposes those operations
 over HTTP. The same identity, durability, and visibility rules apply to every

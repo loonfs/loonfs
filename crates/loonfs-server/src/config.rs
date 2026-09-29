@@ -144,8 +144,10 @@ pub struct ServerConfig {
     #[serde(default)]
     pub content_token_secret: SecretString,
     pub writer_id: String,
-    /// Maximum writer sessions held by this server. Requests that need a new
-    /// session past the cap answer `writer_capacity_exceeded`.
+    /// Maximum writer sessions held by this server. When the table is full,
+    /// a request for another namespace closes the least recently used idle
+    /// session first. Requests answer `writer_capacity_exceeded` only when
+    /// every session is busy.
     #[serde(default = "default_max_writer_sessions")]
     pub max_writer_sessions: usize,
     /// Maximum WAL folds this server runs concurrently. A sustained

@@ -158,6 +158,7 @@ struct RegistryState {
     publishers: HashMap<NamespaceId, NamespacePublisher>,
     closing: HashMap<NamespaceId, CloseCompletion>,
     projections: RetainedProjections,
+    session_order: SessionOrder,
 }
 
 impl RegistryState {
@@ -166,6 +167,45 @@ impl RegistryState {
             self.publishers.len() - self.closing.len(),
             self.closing.len(),
         )
+    }
+
+    /// Drops a session whose close has nothing left to drain, with the
+    /// projection it retained.
+    fn remove_closed_session(&mut self, namespace_id: &NamespaceId) -> RetainedProjectionTotals {
+        self.publishers.remove(namespace_id);
+        self.closing.remove(namespace_id);
+        self.projections.forget(namespace_id);
+        self.session_order.forget(namespace_id);
+        self.projections.totals()
+    }
+}
+
+/// The order this writer last used its sessions in, so a full table can
+/// close the least recently used idle one.
+#[derive(Debug, Default)]
+struct SessionOrder {
+    last_used: HashMap<NamespaceId, u64>,
+    order: Recency<NamespaceId>,
+}
+
+impl SessionOrder {
+    fn touch(&mut self, namespace_id: &NamespaceId) {
+        let stamp = self.order.touch(namespace_id);
+        self.last_used.insert(namespace_id.clone(), stamp);
+        let last_used = &self.last_used;
+        self.order.compact(last_used.len(), |namespace_id, stamp| {
+            last_used.get(namespace_id) == Some(&stamp)
+        });
+    }
+
+    fn forget(&mut self, namespace_id: &NamespaceId) {
+        self.last_used.remove(namespace_id);
+    }
+
+    fn oldest(&mut self) -> Option<NamespaceId> {
+        let last_used = &self.last_used;
+        self.order
+            .pop_oldest(|namespace_id, stamp| last_used.get(namespace_id) == Some(&stamp))
     }
 }
 
@@ -187,6 +227,7 @@ impl RegistryShared {
         let mut state = self.lock_state();
         if !state.closing.contains_key(namespace_id) {
             state.publishers.remove(namespace_id);
+            state.session_order.forget(namespace_id);
         }
         state.projections.forget(namespace_id);
         let (open, closing) = state.session_counts();
@@ -303,8 +344,7 @@ impl RetainedProjections {
     }
 
     fn is_over_budget(&self, budget: &RuntimeCacheConfig) -> bool {
-        self.entries.len() > budget.max_cached_namespaces
-            || self.rows > budget.max_cached_wal_tail_projection_rows
+        self.rows > budget.max_cached_wal_tail_projection_rows
             || self.decoded_bytes > budget.max_cached_wal_tail_projection_decoded_bytes
     }
 
@@ -353,6 +393,7 @@ impl PublisherRegistry {
                     publishers: HashMap::new(),
                     closing: HashMap::new(),
                     projections: RetainedProjections::default(),
+                    session_order: SessionOrder::default(),
                 }),
                 panicked_units: AtomicUsize::new(0),
             }),
@@ -394,11 +435,17 @@ impl PublisherRegistry {
             publisher
         };
         let candidate = self.plan_inline_candidate(&namespace_id, candidate, &publisher)?;
-        let permit = {
+        // The permit marks the session busy, so it is taken under the
+        // registry lock that closes idle sessions, against a fresh lookup.
+        let (publisher, permit) = {
+            let mut state = self.shared.lock_state();
+            let publisher = self.publisher_for(&mut state, &namespace_id, false)?;
             publisher.check_admission(&publisher.lock_state())?;
-            self.shared
+            let permit = self
+                .shared
                 .admission
-                .acquire_candidate(&namespace_id, &candidate.candidate)?
+                .acquire_candidate(&namespace_id, &candidate.candidate)?;
+            (publisher, permit)
         };
         let candidate = self
             .stage_inline_candidate(&namespace_id, candidate, &publisher, &permit)
@@ -470,14 +517,16 @@ impl PublisherRegistry {
             });
         }
         if let Some(publisher) = state.publishers.get(namespace_id) {
-            return Ok(publisher.clone());
+            let publisher = publisher.clone();
+            state.session_order.touch(namespace_id);
+            return Ok(publisher);
         }
         if !explicit_open && state.policy == NamespaceSessionPolicy::ExplicitOpen {
             return Err(CoreError::WriterSessionClosed {
                 namespace_id: namespace_id.clone(),
             });
         }
-        if state.publishers.len() >= state.capacity.get() {
+        if state.publishers.len() >= state.capacity.get() && !self.close_idle_session(state) {
             return Err(CoreError::WriterCapacityExceeded {
                 max_writer_sessions: state.capacity.get(),
             });
@@ -486,9 +535,42 @@ impl PublisherRegistry {
         state
             .publishers
             .insert(namespace_id.clone(), publisher.clone());
+        state.session_order.touch(namespace_id);
         let (open, closing) = state.session_counts();
         self.report_session_counts(open, closing);
         Ok(publisher)
+    }
+
+    /// Closes the least recently used idle session to make room for another.
+    ///
+    /// Returns false when every session is busy, or when the host opens and
+    /// closes sessions itself under
+    /// [`NamespaceSessionPolicy::ExplicitOpen`]. An idle session has nothing
+    /// to drain, so it settles here as a finished `close_namespace` would,
+    /// without store I/O.
+    fn close_idle_session(&self, state: &mut RegistryState) -> bool {
+        if state.policy == NamespaceSessionPolicy::ExplicitOpen {
+            return false;
+        }
+        for _ in 0..state.publishers.len() {
+            let Some(namespace_id) = state.session_order.oldest() else {
+                return false;
+            };
+            let closed = !state.closing.contains_key(&namespace_id)
+                && state
+                    .publishers
+                    .get(&namespace_id)
+                    .is_some_and(NamespacePublisher::close_session_admission_if_idle);
+            if closed {
+                let totals = state.remove_closed_session(&namespace_id);
+                self.read_core
+                    .instruments()
+                    .publisher_retained_projections(totals.projections, totals.decoded_bytes);
+                return true;
+            }
+            state.session_order.touch(&namespace_id);
+        }
+        false
     }
 
     pub(crate) fn open_namespace(&self, namespace_id: &NamespaceId) -> Result<(), CoreError> {
@@ -755,15 +837,13 @@ async fn finish_namespace_close(
     };
     let totals = {
         let mut state = shared.lock_state();
-        state.publishers.remove(&namespace_id);
-        state.projections.forget(&namespace_id);
-        state.closing.remove(&namespace_id);
+        let totals = state.remove_closed_session(&namespace_id);
         let (open, closing) = state.session_counts();
         publisher
             .read_core
             .instruments()
             .publisher_sessions(open, closing);
-        state.projections.totals()
+        totals
     };
     publisher.report_retained_projections(totals);
     let _ = sender.send(Some(CloseNamespaceReport {
@@ -1061,6 +1141,28 @@ impl NamespacePublisher {
             state.admission = PublisherAdmissionState::SessionClosed;
         }
         state.in_flight.len()
+    }
+
+    /// Closes admission only when a close would have nothing to drain: no
+    /// admitted work, no running or requested fold, and a session that is
+    /// open and not fenced. Reports whether it closed.
+    ///
+    /// Admitted work counts from the permit on, so a caller still staging
+    /// content keeps its session. A fenced session stays so its namespace
+    /// keeps failing with `writer_fenced` instead of reacquiring the epoch.
+    fn close_session_admission_if_idle(&self) -> bool {
+        let mut state = self.lock_state();
+        let idle = matches!(state.admission, PublisherAdmissionState::Open)
+            && state
+                .fold
+                .as_ref()
+                .is_none_or(|fold| fold.task.is_finished())
+            && !self.admission.has_admitted_work(&self.namespace_id)
+            && !self.session_is_fenced();
+        if idle {
+            state.admission = PublisherAdmissionState::SessionClosed;
+        }
+        idle
     }
 
     /// Returns the error for the current admission state, or succeeds when open.
@@ -1543,9 +1645,6 @@ impl NamespacePublisher {
         } else {
             None
         };
-        if !self.read_core.control_cache_enabled() {
-            engine.invalidate_projection();
-        }
         let retained_tail_weight = engine.retained_tail_weight();
         if publish.wal_tail_observed {
             slot.last_known_wal_tail_inline_bytes = Some(publish.wal_tail_inline_bytes);

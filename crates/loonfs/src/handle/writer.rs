@@ -119,7 +119,9 @@ impl FsWriter {
 
     /// Opens a session for `namespace_id`, or returns if one is open.
     ///
-    /// Fails with `writer_capacity_exceeded` at the limit, with
+    /// Fails with `writer_capacity_exceeded` when the table is full and no
+    /// session can be closed to make room (see
+    /// [`FsWriterBuilder::max_writer_sessions`]), with
     /// `writer_session_closed` while a close is draining, and with
     /// `shutting_down` after shutdown begins. Opening acquires no writer
     /// epoch; the first publish does.
@@ -329,8 +331,18 @@ impl FsWriterBuilder {
 
     /// Sets the maximum number of writer sessions held at once.
     ///
-    /// Opening past the limit fails with `writer_capacity_exceeded`. The
-    /// default is [`crate::DEFAULT_MAX_WRITER_SESSIONS`].
+    /// At the limit, opening a session for another namespace closes the
+    /// least recently used idle session. A session is idle when it has no
+    /// admitted work or running fold and is neither closing nor fenced.
+    /// Opening fails with `writer_capacity_exceeded` only when no session is
+    /// idle. A closed namespace gets a fresh session and the next writer
+    /// epoch on its next write.
+    ///
+    /// A fenced session is never closed this way, because a fresh session
+    /// for its namespace would reacquire the epoch. Under
+    /// [`NamespaceSessionPolicy::ExplicitOpen`] the host owns session
+    /// lifetime, so nothing is closed and a full table refuses. The default
+    /// is [`crate::DEFAULT_MAX_WRITER_SESSIONS`].
     pub fn max_writer_sessions(mut self, limit: NonZeroUsize) -> Self {
         self.max_writer_sessions = limit;
         self
