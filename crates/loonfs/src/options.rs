@@ -89,10 +89,23 @@ impl MetadataMaintenanceOptions {
         wal_tail_newest_commit_at_ms: Option<u64>,
         now_ms: u64,
     ) -> bool {
-        self.idle_fold_after_ms > 0
-            && wal_tail_newest_commit_at_ms.is_some_and(|committed_at_ms| {
-                now_ms.saturating_sub(committed_at_ms) >= self.idle_fold_after_ms
-            })
+        self.idle_flush_due_in_ms(wal_tail_newest_commit_at_ms, now_ms) == Some(0)
+    }
+
+    /// Returns how long after `now_ms` a WAL tail goes idle, or zero once it
+    /// has. A commit stamped after `now_ms` counts as zero milliseconds old.
+    /// Returns `None` when the tail holds no commit or the rule is off.
+    pub(crate) fn idle_flush_due_in_ms(
+        &self,
+        wal_tail_newest_commit_at_ms: Option<u64>,
+        now_ms: u64,
+    ) -> Option<u64> {
+        let committed_at_ms =
+            wal_tail_newest_commit_at_ms.filter(|_| self.idle_fold_after_ms > 0)?;
+        Some(
+            self.idle_fold_after_ms
+                .saturating_sub(now_ms.saturating_sub(committed_at_ms)),
+        )
     }
 }
 

@@ -276,6 +276,20 @@ impl FsMaintenance {
         namespace_id: &NamespaceId,
         options: MetadataMaintenanceOptions,
     ) -> Result<MetadataMaintenanceResponse> {
+        self.maintain_metadata_step(namespace_id, options)
+            .await
+            .map(|(response, _)| response)
+    }
+
+    /// Does what [`Self::maintain_metadata`] does, and also returns when a
+    /// tail this step did not flush goes idle on this handle's wall clock.
+    /// That time is after the step's clock reading and at most
+    /// `idle_fold_after_ms` past it.
+    pub(crate) async fn maintain_metadata_step(
+        &self,
+        namespace_id: &NamespaceId,
+        options: MetadataMaintenanceOptions,
+    ) -> Result<(MetadataMaintenanceResponse, Option<u64>)> {
         let status = self.load_maintenance_status(namespace_id).await?;
         let inline_bytes = match &self.publisher {
             Some(publisher) if status.wal_tail_segments > 0 => publisher
@@ -284,11 +298,14 @@ impl FsMaintenance {
                 .unwrap_or(0),
             _ => 0,
         };
+        let now_ms = self.actor.wall_clock.now_ms()?;
+        let idle_flush_due_in_ms =
+            options.idle_flush_due_in_ms(status.wal_tail_newest_commit_at_ms, now_ms);
         let flush = options.flush_is_due(status.wal_tail_segments, inline_bytes)
-            || options.idle_flush_is_due(
-                status.wal_tail_newest_commit_at_ms,
-                self.actor.wall_clock.now_ms()?,
-            );
+            || idle_flush_due_in_ms == Some(0);
+        let idle_flush_at_ms = idle_flush_due_in_ms
+            .filter(|_| !flush)
+            .map(|due_in_ms| now_ms.saturating_add(due_in_ms));
         let response = self
             .flush_then_reorganize(
                 namespace_id,
@@ -303,7 +320,7 @@ impl FsMaintenance {
             reorganize = ?response.reorganize,
             "metadata maintenance pass concluded"
         );
-        Ok(response)
+        Ok((response, idle_flush_at_ms))
     }
 
     /// Checks the WAL segment threshold, the age of the tail's newest commit,

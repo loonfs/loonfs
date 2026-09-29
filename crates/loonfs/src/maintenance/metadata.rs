@@ -45,11 +45,14 @@ impl MaintenanceJob for MetadataMaintenanceJob {
     ) -> Result<MaintenanceRunReport> {
         match self
             .maintenance
-            .maintain_metadata(namespace_id, self.options.clone())
+            .maintain_metadata_step(namespace_id, self.options.clone())
             .await
         {
-            Ok(metadata) => {
+            Ok((metadata, idle_flush_at_ms)) => {
                 let mut report = MaintenanceRunReport::concluded(metadata_conclusion(&metadata));
+                // A publication's wake can arrive before the tail is idle: the
+                // clock moved back, or a later publication's hint was dropped.
+                report.not_before_ms = idle_flush_at_ms;
                 if metadata.reorganize == (ReorganizeStepOutcome::CompactionRequired {}) {
                     report.conclusion = MaintenanceConclusion::Blocked;
                     report.follow_up =
