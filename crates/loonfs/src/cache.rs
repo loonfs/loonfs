@@ -333,9 +333,11 @@ impl ReadCore {
             .control_cache()
             .lookup_namespace_head(namespace_id);
         if let Some(mut head) = cached {
-            // A HEAD of the successor after a long gap cannot see a successor that was
-            // collected in the meantime, whether the gap came before the probe or while
-            // it waited; rediscover instead of trusting it.
+            // Measure every answer against the previous check, not against the probe
+            // it answers. A successor published after that check cannot be collected
+            // within the bound. An answer that arrives later may miss one, however
+            // recently its probe was sent, so the new check replaces the previous one
+            // only after both answers are in.
             let fresh = |checked: &Option<Observation>| {
                 checked.as_ref().is_some_and(|checked| {
                     checked.age_ms() < loonfs_core::limits::READ_REVALIDATION_BOUND_MS
@@ -354,13 +356,13 @@ impl ReadCore {
                     .instrument(tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "validation_manifest_probe"))
                     .await.map_err(MetadataProjectionLoadError::LoadHead)?;
                 if matches {
-                    if check_due {
-                        head.last_control_check = Some(observed);
-                    }
                     let mut context = self.runtime_read_context(&head);
                     if loonfs_core::control::probe_namespace_wal(self.store(), &mut context)
                         .instrument(tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "validation_wal_probe"))
                     .await.map_err(MetadataProjectionLoadError::LoadHead)? && fresh(&head.last_control_check) {
+                        if check_due {
+                            head.last_control_check = Some(observed);
+                        }
                         head.head = context.head;
                         return Ok(head);
                     }
@@ -543,19 +545,26 @@ impl ReadCore {
         let head_seq = state.head.seq;
         let manifest_no = state.basis.manifest_no();
         let mut cache = self.inner.control_cache();
-        let (last_control_check, validation) = cache
+        let (cached_check, validation) = cache
             .namespaces
             .get(namespace_id)
-            .map(|(head, _)| {
+            .map(|(cached, _)| {
+                // The cached check also confirms the seeded view only if it checked
+                // the same basis and the seeded tip is not behind the cached one.
+                // Otherwise it says nothing about the seeded basis, or about the WAL
+                // numbers just after the seeded tip.
+                let confirms_seed =
+                    cached.basis == state.basis && cached.head.wal_no <= state.head.wal_no;
                 (
-                    head.last_control_check.clone(),
-                    Arc::clone(&head.validation),
+                    cached.last_control_check.clone().filter(|_| confirms_seed),
+                    Arc::clone(&cached.validation),
                 )
             })
             .unwrap_or_default();
-        // The publish that seeds this anchor is its first control check.
-        let last_control_check =
-            last_control_check.or_else(|| Some(Observation::now(Arc::clone(&self.inner.timer))));
+        let last_control_check = cached_check
+            .into_iter()
+            .chain([state.basis_checked])
+            .min_by_key(Observation::age_ms);
         cache.insert_namespace_head(
             namespace_id,
             CachedNamespaceAnchor {

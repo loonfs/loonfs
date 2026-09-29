@@ -6,12 +6,13 @@
 
 use loonfs::metrics::{DefaultMetricsRecorder, MetricValue};
 use loonfs::{
-    CreateNamespaceOptions, CreateSnapshotOptions, DeleteNamespaceOptions, FsReader, FsWriter,
-    NamespaceId, PutFileOptions, RuntimeCacheConfig, RuntimeError, SharedObjectStore, WriterFence,
-    READ_REVALIDATION_BOUND_MS,
+    CreateNamespaceOptions, CreateSnapshotOptions, DeleteNamespaceOptions, FsMaintenance, FsReader,
+    FsWriter, NamespaceId, PutFileOptions, RuntimeCacheConfig, RuntimeError, SharedObjectStore,
+    WriterFence, READ_REVALIDATION_BOUND_MS,
 };
 use loonfs_api::wire::control::NamespaceStatus;
 use loonfs_core::control::NamespaceReadState;
+use loonfs_core::limits::WAL_PUBLISH_BUDGET_MS;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::stores::{
@@ -597,19 +598,38 @@ async fn a_cached_view_older_than_the_revalidation_bound_rediscovers() {
     ));
 }
 
+async fn read_across_a_held_successor_probe(
+    reader: &FsReader,
+    store: &RecordingStore<BlockingStore<LocalFsStore>>,
+    timer: &ManualClock,
+    namespace_id: &NamespaceId,
+    pause_ms: u64,
+) {
+    store.inner().block_next();
+    let (entry, ()) = futures::join!(
+        reader.get_path_entry(namespace_id, "/file.txt", Default::default()),
+        async {
+            store.inner().wait_until_blocked().await;
+            timer.advance_ms(pause_ms);
+            store.inner().release();
+        }
+    );
+    entry.expect("read across the held successor probe");
+}
+
 #[tokio::test]
-async fn a_pause_during_the_successor_probe_rediscovers() {
+async fn warm_answers_are_measured_against_the_previous_check() {
     let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("probe-pause").expect("namespace");
     let blocking = BlockingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
         KeyPredicate::prefix(loonfs_objectstore::keys::metadata_manifest_prefix(
-            &NamespaceId::parse("probe-pause").expect("namespace"),
+            &namespace_id,
         )),
         OperationClass::Head,
     );
     let recording = Arc::new(RecordingStore::new(blocking, KeyPredicate::any()));
     let store: SharedObjectStore = recording.clone();
-    let namespace_id = NamespaceId::parse("probe-pause").expect("namespace");
     let timer = Arc::new(ManualClock::new(0));
     let interval_ms = 1_000;
     let reader = FsReader::builder_with_store(store.clone())
@@ -642,32 +662,289 @@ async fn a_pause_during_the_successor_probe_rediscovers() {
     reader
         .get_path_entry(&namespace_id, "/file.txt", Default::default())
         .await
-        .expect("seed reader cache");
+        .expect("cache a view");
+    let manifest_no = loonfs_core::control::load_namespace_current_manifest(&store, &namespace_id)
+        .await
+        .expect("current manifest")
+        .state
+        .manifest()
+        .manifest_no;
+    let next_wal_no = head_state(&store, &namespace_id)
+        .await
+        .wal_no
+        .successor()
+        .expect("next WAL number");
+    let warm_check = [
+        RecordedOperation::Head {
+            key: loonfs_objectstore::keys::metadata_manifest_object(
+                &namespace_id,
+                &manifest_no.successor().expect("next manifest number"),
+            ),
+        },
+        crate::common::wal_probe(&namespace_id, next_wal_no),
+    ];
 
-    timer.advance_ms(interval_ms);
+    // The check falls due just inside the bound, and both answers arrive inside it.
+    timer.advance_ms(READ_REVALIDATION_BOUND_MS - 2);
     recording.reset();
+    read_across_a_held_successor_probe(&reader, &recording, &timer, &namespace_id, 1).await;
+    assert_eq!(recording.take(), warm_check);
+
+    // That check replaced the first one, which is now past the bound. A read
+    // inside the interval still probes only the WAL.
+    timer.advance_ms(interval_ms - 2);
+    reader
+        .get_path_entry(&namespace_id, "/file.txt", Default::default())
+        .await
+        .expect("read inside the interval");
+    crate::common::assert_wal_probe(recording.take(), &namespace_id, next_wal_no);
+
+    // The next HEAD is sent just inside the bound of that check and answered
+    // at the bound. Both answers find nothing, and the view is not served.
+    timer.advance_ms(READ_REVALIDATION_BOUND_MS - interval_ms);
+    read_across_a_held_successor_probe(&reader, &recording, &timer, &namespace_id, 1).await;
+    let operations = recording.take();
+    assert_eq!(operations[..2], warm_check, "{operations:?}");
+    assert!(
+        matches!(
+            operations.get(2),
+            Some(RecordedOperation::GetWithMetadata { key, .. })
+                if key == &loonfs_objectstore::keys::hint(&namespace_id)
+        ),
+        "the late answer was trusted: {operations:?}"
+    );
+}
+
+async fn writer_with_timer(
+    store: &SharedObjectStore,
+    writer_id: &str,
+    timer: &Arc<ManualClock>,
+    runtime_cache: RuntimeCacheConfig,
+) -> FsWriter {
+    FsWriter::builder_with_store(store.clone())
+        .writer_id(writer_id)
+        .min_publish_interval_ms(0)
+        .monotonic_timer(timer.clone())
+        .runtime_cache(runtime_cache)
+        .build()
+        .await
+        .expect("build writer")
+}
+
+#[tokio::test]
+async fn a_seeded_view_carries_the_writers_basis_confirmation() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("seeded-check").expect("namespace");
+    let other_id = NamespaceId::parse("other").expect("namespace");
+    let blocking = BlockingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyPredicate::prefix(loonfs_objectstore::keys::metadata_manifest_prefix(
+            &namespace_id,
+        )),
+        OperationClass::Head,
+    );
+    let recording = Arc::new(RecordingStore::new(blocking, KeyPredicate::any()));
+    let store: SharedObjectStore = recording.clone();
+    let timer = Arc::new(ManualClock::new(0));
+    let interval_ms = 1_000;
+    let writer = writer_with_timer(
+        &store,
+        "seeded-check-writer",
+        &timer,
+        RuntimeCacheConfig {
+            manifest_revalidation_interval_ms: interval_ms,
+            max_cached_namespaces: 1,
+            ..Default::default()
+        },
+    )
+    .await;
+    let reader = writer.reader();
+    for id in [&namespace_id, &other_id] {
+        writer
+            .create_namespace(
+                id,
+                CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+            )
+            .await
+            .expect("create namespace");
+    }
+    let put = |path: &'static str| {
+        writer.put_file_bytes(
+            &namespace_id,
+            path,
+            b"file",
+            PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
+    };
+    let read = || reader.get_path_entry(&namespace_id, "/file.txt", Default::default());
+    let next_wal_no = || async {
+        head_state(&store, &namespace_id)
+            .await
+            .wal_no
+            .successor()
+            .expect("next WAL number")
+    };
+
+    // The first put discovers the namespace, which confirms its basis, and
+    // the read right after it probes only the WAL.
+    put("/file.txt").await.expect("first put");
+    writer.publisher().drain().await.expect("finish hints");
+    let wal_no = next_wal_no().await;
+    recording.reset();
+    read().await.expect("read after the first put");
+    crate::common::assert_wal_probe(recording.take(), &namespace_id, wal_no);
+
+    // A seed on the same basis keeps a later check by the reader, so a read
+    // right after a put in a busy writer still probes only the WAL.
+    timer.advance_ms(WAL_PUBLISH_BUDGET_MS - 2 * interval_ms);
+    read().await.expect("a due check");
+    timer.advance_ms(interval_ms - 1);
+    put("/two.txt").await.expect("second put");
+    writer.publisher().drain().await.expect("finish hints");
+    let wal_no = next_wal_no().await;
+    recording.reset();
+    read().await.expect("read after the second put");
+    crate::common::assert_wal_probe(recording.take(), &namespace_id, wal_no);
+
+    // Reading another namespace evicts the cached view. The third put still
+    // plans against the basis confirmed at zero, and seeds a new view.
+    reader
+        .get_path_entry(&other_id, "/", Default::default())
+        .await
+        .expect("evict the cached view");
+    timer.advance_ms(interval_ms);
+    put("/three.txt").await.expect("third put");
+    writer.publisher().drain().await.expect("finish hints");
+    let manifest_no = loonfs_core::control::load_namespace_current_manifest(&store, &namespace_id)
+        .await
+        .expect("current manifest")
+        .state
+        .manifest()
+        .manifest_no;
+    let wal_no = next_wal_no().await;
+
+    // The seeded view is younger than the bound, but its basis was confirmed
+    // a bound before the answers arrive, so the view is not served.
+    timer.advance_ms(READ_REVALIDATION_BOUND_MS - WAL_PUBLISH_BUDGET_MS);
+    recording.reset();
+    read_across_a_held_successor_probe(&reader, &recording, &timer, &namespace_id, 1).await;
+    let operations = recording.take();
+    assert_eq!(
+        operations[..2],
+        [
+            RecordedOperation::Head {
+                key: loonfs_objectstore::keys::metadata_manifest_object(
+                    &namespace_id,
+                    &manifest_no.successor().expect("next manifest number"),
+                ),
+            },
+            crate::common::wal_probe(&namespace_id, wal_no),
+        ],
+        "{operations:?}"
+    );
+    assert!(
+        matches!(
+            operations.get(2),
+            Some(RecordedOperation::GetWithMetadata { key, .. })
+                if key == &loonfs_objectstore::keys::hint(&namespace_id)
+        ),
+        "the seed claimed a later check: {operations:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_seed_on_another_basis_does_not_keep_the_cached_check() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("reseeded").expect("namespace");
+    let hint_key = loonfs_objectstore::keys::hint(&namespace_id);
+    let blocking = BlockingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyPredicate::exact(hint_key.clone()),
+        OperationClass::GetWithMetadata,
+    );
+    let recording = Arc::new(RecordingStore::new(blocking, KeyPredicate::any()));
+    let store: SharedObjectStore = recording.clone();
+    let timer = Arc::new(ManualClock::new(0));
+    let writer = writer_with_timer(
+        &store,
+        "reseeded-writer",
+        &timer,
+        RuntimeCacheConfig {
+            manifest_revalidation_interval_ms: 1_000,
+            ..Default::default()
+        },
+    )
+    .await;
+    let reader = writer.reader();
+    let maintenance = FsMaintenance::builder_with_store(store.clone())
+        .actor_id("reseeded-maintenance")
+        .build()
+        .await
+        .expect("build maintenance");
+    writer
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("create namespace");
+    writer
+        .put_file_bytes(
+            &namespace_id,
+            "/a.txt",
+            b"a",
+            PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("first put");
+    writer.publisher().drain().await.expect("finish hints");
+
+    // The next put starts a budget later, so it discovers the namespace
+    // again, and that discovery is held at the hint. Meanwhile the reader
+    // checks the old basis, and a flush publishes a new one.
+    let check_after_attempt_ms = 10_000;
+    timer.advance_ms(WAL_PUBLISH_BUDGET_MS);
     recording.inner().block_next();
-    let (entry, ()) = futures::join!(
-        reader.get_path_entry(&namespace_id, "/file.txt", Default::default()),
+    let (put, ()) = futures::join!(
+        writer.put_file_bytes(
+            &namespace_id,
+            "/b.txt",
+            b"b",
+            PutFileOptions::new(loonfs_test_support::test_actor()),
+        ),
         async {
             recording.inner().wait_until_blocked().await;
-            timer.advance_ms(READ_REVALIDATION_BOUND_MS);
+            timer.advance_ms(check_after_attempt_ms);
+            reader
+                .get_path_entry(&namespace_id, "/a.txt", Default::default())
+                .await
+                .expect("check the old basis");
+            maintenance
+                .flush_wal(&namespace_id)
+                .await
+                .expect("publish a new basis");
             recording.inner().release();
         }
     );
-    entry.expect("read across the pause");
+    put.expect("put on the new basis");
+    writer.publisher().drain().await.expect("finish hints");
+
+    // The seeded view stands on the new basis, confirmed when the put's
+    // attempt began. A bound after that, it is rediscovered, although the
+    // reader checked the old basis later.
+    timer.advance_ms(READ_REVALIDATION_BOUND_MS - check_after_attempt_ms);
+    recording.reset();
+    reader
+        .get_path_entry(&namespace_id, "/b.txt", Default::default())
+        .await
+        .expect("read on the new basis");
     let operations = recording.take();
-    let probe = operations
-        .iter()
-        .position(|operation| matches!(operation, RecordedOperation::Head { .. }))
-        .expect("successor probe");
     assert!(
-        operations[probe..].iter().any(|operation| matches!(
-            operation,
-            RecordedOperation::GetWithMetadata { key, .. }
-                if key == &loonfs_objectstore::keys::hint(&namespace_id)
-        )),
-        "{operations:?}"
+        matches!(
+            operations.first(),
+            Some(RecordedOperation::GetWithMetadata { key, .. }) if key == &hint_key
+        ),
+        "the seed kept the old basis's check: {operations:?}"
     );
 }
 

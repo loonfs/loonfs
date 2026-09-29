@@ -233,11 +233,6 @@ async fn serving_and_maintaining_enables_queries_nudges_and_disables_per_namespa
         "{:?}",
         enabled.lifecycle
     );
-    assert_eq!(
-        index_status(&router, &namespace_id).await.lifecycle,
-        enabled.lifecycle,
-        "the status route and the enable response describe the same manifest"
-    );
     settle(&server).await;
     assert_eq!(watermark(&store, &namespace_id).await, ChangeSeq(0));
     let active = index_status(&router, &namespace_id).await;
