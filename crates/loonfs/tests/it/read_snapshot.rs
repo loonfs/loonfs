@@ -330,6 +330,101 @@ async fn durable_pinned_reads_keep_missing_segments_corrupt_after_manifest_advan
 }
 
 #[tokio::test]
+async fn pinned_reads_report_their_deleted_pin_when_a_segment_is_missing() {
+    use loonfs_api::wire::manifest::MetadataRowFamily;
+    use loonfs_core::control::load_namespace_current_manifest;
+    use loonfs_objectstore::{keys, ObjectStore};
+
+    let directory = tempdir().expect("tempdir");
+    let store = store(directory.path());
+    let namespace_id = NamespaceId::parse("deleted-pin-segment").expect("namespace");
+    let runtime = open_runtime_async(store.clone(), "deleted-pin-segment").await;
+    runtime
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("namespace");
+    runtime
+        .put_file_bytes(
+            &namespace_id,
+            "/file",
+            b"content",
+            PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("file");
+    let snapshot = runtime
+        .writer
+        .create_snapshot(
+            &namespace_id,
+            CreateSnapshotOptions {
+                name: "deleted".to_owned(),
+                expires_at_ms: loonfs::current_time_ms().expect("time") + 60_000,
+            },
+        )
+        .await
+        .expect("snapshot");
+    let checkpoint = runtime
+        .create_checkpoint(&namespace_id)
+        .await
+        .expect("checkpoint");
+    let reader = loonfs::FsReader::builder_with_store(store.clone())
+        .build()
+        .await
+        .expect("cold reader");
+    let pinned_snapshot = reader
+        .pin_namespace_at_snapshot(&namespace_id, &snapshot.checkpoint_id)
+        .await
+        .expect("snapshot view");
+    let pinned_checkpoint = reader
+        .pin_namespace_at_checkpoint(&namespace_id, &checkpoint.checkpoint_id)
+        .await
+        .expect("checkpoint view");
+    runtime
+        .writer
+        .delete_snapshot(&namespace_id, &snapshot.checkpoint_id)
+        .await
+        .expect("delete snapshot");
+    runtime
+        .maintenance
+        .delete_checkpoint(&namespace_id, &checkpoint.checkpoint_id)
+        .await
+        .expect("delete checkpoint");
+    let manifest = load_namespace_current_manifest(store.as_ref(), &namespace_id)
+        .await
+        .expect("manifest");
+    let segment = manifest
+        .state
+        .envelope
+        .payload()
+        .runs
+        .iter()
+        .flat_map(|run| &run.segments)
+        .find(|segment| segment.family == MetadataRowFamily::Inodes)
+        .expect("inode segment");
+    store
+        .delete(&keys::metadata_segment_object_key(segment))
+        .await
+        .expect("delete pinned segment");
+
+    assert_core_error_kind(
+        pinned_snapshot
+            .get_path_entry("/file", Default::default())
+            .await,
+        ErrorCode::SnapshotNotFound,
+    );
+    assert_core_error_kind(
+        pinned_checkpoint
+            .get_path_entry("/file", Default::default())
+            .await,
+        ErrorCode::CheckpointUnavailable,
+    );
+    runtime.writer.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
 async fn snapshot_directory_cursor_resumes_only_at_its_snapshot() {
     let temp_dir = tempdir().expect("tempdir");
     let runtime = open_runtime_async(store(temp_dir.path()), "snapshot-cursor-test").await;
