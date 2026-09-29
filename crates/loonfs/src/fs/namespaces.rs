@@ -6,7 +6,7 @@ use crate::{
     CreateNamespaceOptions, DeleteNamespaceOptions, DeleteNamespaceResponse, ForkNamespaceOptions,
     Namespace, NamespaceId,
 };
-use crate::{FsWriter, MaintenanceHint, MaintenanceJobId};
+use crate::{ErrorCode, FsWriter, MaintenanceHint, MaintenanceJobId};
 use crate::{Result, RuntimeError};
 
 impl FsWriter {
@@ -137,10 +137,13 @@ pub(crate) async fn delete_namespace_with_engine(
         .delete_namespace(core.store(), options, &context)
         .await
         .map_err(RuntimeError::from);
-    if result.is_ok() {
-        // Only a namespace that is actually gone drops its cached state:
-        // a failed delete (a fenced deleter, say) leaves the namespace
-        // live, and its cached reads valid.
+    // What follows a deletion depends on the namespace being deleted, not on
+    // which call deleted it.
+    if result
+        .as_ref()
+        .err()
+        .is_none_or(|error| error.code() == ErrorCode::NamespaceDeleted)
+    {
         core.invalidate_namespace_read_cache(namespace_id);
         writer.send_maintenance_hint(
             namespace_id,

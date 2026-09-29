@@ -1815,44 +1815,38 @@ impl NamespacePublisher {
                 Err(CoreError::Internal("delete task aborted mid-delete".to_owned()).into())
             }
         };
-        match outcome {
-            Ok(response) => {
-                // Tombstone first, then fail everything that queued behind
-                // the delete; admissions from here on fail fast.
-                let queued = {
-                    let mut state = self.lock_state();
-                    state.admission = PublisherAdmissionState::Deleted;
-                    take_queued_waiters(&mut state)
-                };
-                // The publisher is terminal; drop it from the registry map
-                // so the map stays bounded by live namespaces. Clones still
-                // in flight fail fast on `Deleted`, and a later submission
-                // gets a fresh publisher whose publish fails on the durable
-                // tombstone.
-                if let Some(shared) = self.shared.upgrade() {
-                    let totals = shared.evict(&self.namespace_id, self.read_core.instruments());
-                    self.report_retained_projections(totals);
-                }
-                for waiter in waiters {
-                    let _ = waiter.send(Ok(response.clone()));
-                }
-                for waiter in queued.commits {
-                    let _ = waiter.send(Err(self.namespace_deleted().into()));
-                }
-                for waiter in queued.deletes {
-                    let _ = waiter.send(Err(self.namespace_deleted().into()));
-                }
-                true
+        let deleted = outcome
+            .as_ref()
+            .err()
+            .is_none_or(|error| error.code() == loonfs_core::ErrorCode::NamespaceDeleted);
+        if deleted {
+            // Tombstone first, then fail everything that queued behind
+            // the delete; admissions from here on fail fast.
+            let queued = {
+                let mut state = self.lock_state();
+                state.admission = PublisherAdmissionState::Deleted;
+                take_queued_waiters(&mut state)
+            };
+            // The publisher is terminal; drop it from the registry map
+            // so the map stays bounded by live namespaces. Clones still
+            // in flight fail fast on `Deleted`, and a later submission
+            // gets a fresh publisher whose publish fails on the durable
+            // tombstone.
+            if let Some(shared) = self.shared.upgrade() {
+                let totals = shared.evict(&self.namespace_id, self.read_core.instruments());
+                self.report_retained_projections(totals);
             }
-            Err(error) => {
-                // The namespace was not deleted (stale precondition, fencing
-                // conflict, ...). Report it and let queued work publish.
-                for waiter in waiters {
-                    let _ = waiter.send(Err(error.clone()));
-                }
-                false
+            for waiter in queued.commits {
+                let _ = waiter.send(Err(self.namespace_deleted().into()));
+            }
+            for waiter in queued.deletes {
+                let _ = waiter.send(Err(self.namespace_deleted().into()));
             }
         }
+        for waiter in waiters {
+            let _ = waiter.send(outcome.clone());
+        }
+        deleted
     }
 
     async fn delete_through_engine(&self, options: DeleteNamespaceOptions) -> DeleteResult {
