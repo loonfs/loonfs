@@ -449,6 +449,7 @@ async fn cache_budgets_charge_the_heap_their_contents_hold() {
                 max_cached_namespaces: 0,
                 metadata_segment_cache: MetadataSegmentCacheConfig {
                     max_decoded_bytes: SEGMENT_BUDGET_BYTES,
+                    ..MetadataSegmentCacheConfig::default()
                 },
                 ..RuntimeCacheConfig::default()
             },
@@ -469,6 +470,7 @@ async fn cache_budgets_charge_the_heap_their_contents_hold() {
             max_cached_namespaces: shape.namespaces,
             metadata_segment_cache: MetadataSegmentCacheConfig {
                 max_decoded_bytes: 0,
+                ..MetadataSegmentCacheConfig::default()
             },
             ..RuntimeCacheConfig::default()
         };
