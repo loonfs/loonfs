@@ -466,7 +466,7 @@ A direct upload transfers bytes from the client to the provider under a short-li
 
 Direct PUT uses the algorithm selected when the session begins. Direct multipart uses the algorithm retained in the session, currently CRC-64/NVME. The provider must enforce the signed transfer constraints and expose the stored whole-object checksum in the supported algorithm.
 
-At completion, the server compares the provider's stored size and checksum with the completion claim. A client-supplied digest alone is not sufficient. A rejected claim must not trigger deletion of content that a concurrent completion has already made eligible for publication. Cleanup of unusable content follows the session's conditional terminal transition.
+At completion, the server compares the provider's stored size and checksum with the completion claim. A client-supplied digest alone is not sufficient. After the completion call, the object at the key is the only evidence, whatever the provider answered. A claim that the stored object does not match is rejected and changes nothing: the session stays open and nothing is deleted. A session that cannot complete ends by an explicit abort or by its lease (section 11.6). The rule is the same for direct PUT and direct multipart.
 
 Provider-specific checksum headers, completion APIs, and response encodings belong in the provider adapter. A LoonFS checksum has the same canonical representation regardless of whether the provider returned hexadecimal or base64 data.
 

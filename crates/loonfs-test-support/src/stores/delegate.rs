@@ -146,10 +146,7 @@ macro_rules! __delegate_object_store_method {
             checksum: &'checksum ::loonfs_api::Checksum,
         ) -> ::core::pin::Pin<::std::boxed::Box<
             dyn ::core::future::Future<
-                    Output = Result<
-                        ::loonfs_objectstore::MultipartCompletion,
-                        ::loonfs_objectstore::ObjectStoreError,
-                    >,
+                    Output = Result<(), ::loonfs_objectstore::ObjectStoreError>,
                 > + Send
                 + 'future,
         >>

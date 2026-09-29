@@ -21,8 +21,8 @@ use crate::signed_request::{
 };
 use crate::store_io_runtime::StoreIoRuntime;
 use crate::{
-    MultipartCompletion, MultipartPart, ObjectStoreError, ProviderObjectStore,
-    ProviderObjectStoreConfig, StoredObjectChecksum,
+    MultipartPart, ObjectStoreError, ProviderObjectStore, ProviderObjectStoreConfig,
+    StoredObjectChecksum,
 };
 use async_trait::async_trait;
 use base64::Engine as _;
@@ -322,7 +322,7 @@ impl MultipartController for S3RequestSigner {
         provider_upload_id: &str,
         parts: &[MultipartPart],
         checksum: &Checksum,
-    ) -> Result<MultipartCompletion> {
+    ) -> Result<()> {
         let signed = self
             .request_signer
             .presign_complete_multipart(
@@ -342,11 +342,11 @@ impl MultipartController for S3RequestSigner {
         .await?;
         let code = response.provider_error_code();
         if code.as_deref() == Some("NoSuchUpload") {
-            return Ok(MultipartCompletion::UnknownUpload);
+            return Ok(());
         }
         match classify_signed_response(key, response.status, code.as_deref()) {
             Some(error) => Err(error),
-            None => Ok(MultipartCompletion::Assembled),
+            None => Ok(()),
         }
     }
 
