@@ -8,7 +8,6 @@ use crate::commit::CommitFingerprint;
 use crate::context::MutationContext;
 use crate::error::{CoreError, Result, WriterFence};
 use crate::namespace::basis::MetadataBasis;
-use crate::namespace::control::LoadedManifest;
 use crate::namespace::read_anchor::NamespaceReadAnchor;
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::writer_epoch::acquire_writer;
@@ -536,7 +535,6 @@ pub struct NamespaceCommitEngine {
     publish_tail_projection: Option<PublishTailProjection>,
     projection_observed: Option<Observation>,
     acquired_anchor: Option<NamespaceReadAnchor>,
-    folded_basis: Option<LoadedManifest>,
     fold_observed: Option<Observation>,
     /// When a store observation last confirmed the projection's basis manifest
     /// current: the discovery that loaded it, or a HEAD that found no successor.
@@ -558,7 +556,6 @@ impl NamespaceCommitEngine {
             publish_tail_projection: None,
             projection_observed: None,
             acquired_anchor: None,
-            folded_basis: None,
             fold_observed: None,
             basis_checked: None,
             session: SharedWriterSessionState::default(),
@@ -598,7 +595,6 @@ impl NamespaceCommitEngine {
     pub fn invalidate_projection(&mut self) {
         self.publish_tail_projection = None;
         self.acquired_anchor = None;
-        self.folded_basis = None;
         self.projection_observed = None;
         self.basis_checked = None;
     }
@@ -658,26 +654,21 @@ impl NamespaceCommitEngine {
     }
 
     pub fn record_wal_fold(&mut self, folded: Option<&crate::checkpoint::FoldedWalTail>) {
-        if let Some(folded) = folded {
-            if folded.response.outcome == loonfs_api::FlushWalOutcome::Published
-                && self.fold_observed.is_some()
+        let fold_observed = self.fold_observed.take();
+        let reanchored = match (folded, &mut self.publish_tail_projection) {
+            (Some(folded), Some(projection))
+                if fold_observed.is_some()
+                    && folded.response.outcome == loonfs_api::FlushWalOutcome::Published =>
             {
-                if let Some(projection) = &mut self.publish_tail_projection {
-                    if projection.reanchor_after_fold(folded.basis.clone()) {
-                        self.basis_checked = self.fold_observed.take();
-                        return;
-                    }
-                }
-                self.folded_basis = folded.published_manifest.clone();
-                self.basis_checked = self.fold_observed.take();
-                if self.projection_observed.is_none() {
-                    self.projection_observed = self.basis_checked.clone();
-                }
-                return;
+                projection.reanchor_after_fold(folded.basis.clone())
             }
+            _ => false,
+        };
+        if reanchored {
+            self.basis_checked = fold_observed;
+        } else {
+            self.invalidate_projection();
         }
-        self.invalidate_projection();
-        self.fold_observed = None;
     }
 
     /// Returns the session's writer epoch, acquiring it on first use. A fenced
@@ -779,13 +770,6 @@ impl NamespaceCommitEngine {
             }
         };
 
-        if self.folded_basis.is_some()
-            && self.basis_checked.as_ref().is_none_or(|observed| {
-                observed.age_at(&attempt) >= crate::limits::WAL_PUBLISH_BUDGET_MS
-            })
-        {
-            self.invalidate_projection();
-        }
         if self.projection_observed.as_ref().is_some_and(|observed| {
             observed.age_at(&attempt) >= crate::limits::WAL_PUBLISH_BUDGET_MS
         }) {
@@ -811,8 +795,6 @@ impl NamespaceCommitEngine {
                 self.invalidate_projection();
             }
         }
-        let cold = self.publish_tail_projection.is_none() && self.folded_basis.is_none();
-        let folded_basis = self.folded_basis.take();
         let loaded = load_publish_metadata_view(
             store,
             self.segment_cache.as_deref(),
@@ -820,18 +802,10 @@ impl NamespaceCommitEngine {
             acquired_writer,
             self.publish_tail_projection.as_ref(),
             self.acquired_anchor.take(),
-            folded_basis.as_ref(),
         )
         .await;
         let (publish_view, projection) = match loaded {
-            Ok(value) => {
-                if cold {
-                    // Discovery confirmed the basis current no earlier than this
-                    // attempt began.
-                    self.basis_checked = Some(attempt.clone());
-                }
-                value
-            }
+            Ok(value) => value,
             Err(error) => {
                 self.invalidate_projection();
                 if let CoreError::WriterFenced(fence) = &error {
@@ -849,8 +823,9 @@ impl NamespaceCommitEngine {
         };
         let wal_tail_discovered = publish_view.tail_discovered;
         let projection_observed = if wal_tail_discovered {
-            // Tail discovery observed the tip during this attempt, even when
-            // the basis came from an earlier fold.
+            // Discovery confirmed the basis and observed the tip no earlier
+            // than this attempt began.
+            self.basis_checked = Some(attempt.clone());
             attempt.clone()
         } else {
             self.projection_observed

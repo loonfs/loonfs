@@ -70,6 +70,7 @@ async fn an_own_fold_replays_only_later_objects_after_projection_invalidation() 
     .await
     .expect("fold");
     engine.record_wal_fold(Some(&folded));
+    assert!(engine.publish_tail_projection.is_none());
     store.reset();
     publish(&mut engine, &store, &context, during)
         .await
@@ -85,15 +86,14 @@ async fn an_own_fold_replays_only_later_objects_after_projection_invalidation() 
         })
         .map(RecordedOperation::key)
         .collect::<Vec<_>>();
-    assert_eq!(wal_gets, vec![expected.as_str()]);
+    assert!(wal_gets.contains(&expected.as_str()), "{operations:?}");
+    assert!(wal_gets.iter().all(|key| {
+        loonfs_objectstore::layout::wal_no_of(key).expect("WAL number") > input.head.wal_no
+    }));
     assert!(
         !operations
             .iter()
-            .any(|operation| operation.key().ends_with("hint.json")
-                || matches!(
-                    operation,
-                    RecordedOperation::Head { .. } | RecordedOperation::Put { .. }
-                )),
+            .any(|operation| matches!(operation, RecordedOperation::Put { .. })),
         "{operations:?}"
     );
     assert_eq!(
@@ -108,7 +108,7 @@ async fn an_own_fold_replays_only_later_objects_after_projection_invalidation() 
 #[tokio::test]
 async fn an_own_fold_discovers_later_commits_after_the_projection_is_dropped() {
     // A receipt replay does not land a put, so it also tests that discovery
-    // itself refreshes the tip observation independently of the fold's basis.
+    // itself refreshes the tip and basis observations.
     for replay_receipt in [false, true] {
         let (_directory, store, mut engine, context) = setup().await;
         let directory = |name: &str| {
@@ -188,14 +188,34 @@ async fn an_own_fold_discovers_later_commits_after_the_projection_is_dropped() {
             .collect::<Vec<_>>();
         assert!(wal_gets.contains(&input.head.wal_no.successor().expect("next WAL")));
         assert!(wal_gets.iter().all(|number| *number > input.head.wal_no));
-        assert!(
-            !operations.iter().any(|operation| {
-                matches!(
-                    family(operation),
-                    Some(DurableObjectFamily::Hint | DurableObjectFamily::MetadataManifest)
-                ) || matches!(operation, RecordedOperation::Head { .. })
-            }),
-            "{operations:?}"
+        let gets = |wanted: DurableObjectFamily| {
+            operations
+                .iter()
+                .filter(|operation| {
+                    matches!(
+                        operation,
+                        RecordedOperation::Get { .. } | RecordedOperation::GetWithMetadata { .. }
+                    ) && family(operation) == Some(wanted)
+                })
+                .count()
+        };
+        assert_eq!(
+            gets(DurableObjectFamily::Hint),
+            2,
+            "discovery and its GC recheck read the hint; {operations:?}"
+        );
+        assert_eq!(
+            gets(DurableObjectFamily::MetadataManifest),
+            2,
+            "the fold's manifest and its absent successor; {operations:?}"
+        );
+        assert_eq!(
+            operations
+                .iter()
+                .filter(|operation| matches!(operation, RecordedOperation::Head { .. }))
+                .count(),
+            1,
+            "one successor probe; {operations:?}"
         );
         if replay_receipt {
             assert!(!operations
@@ -206,8 +226,51 @@ async fn an_own_fold_discovers_later_commits_after_the_projection_is_dropped() {
             engine.projection_observed.as_ref().expect("tip").age_ms(),
             0
         );
-        assert_eq!(engine.basis_checked.as_ref().expect("basis").age_ms(), 100);
+        assert_eq!(engine.basis_checked.as_ref().expect("basis").age_ms(), 0);
     }
+}
+
+#[tokio::test]
+async fn a_takeover_after_an_own_fold_fences_the_writer_without_a_view() {
+    let (_directory, store, mut engine, context) = setup().await;
+    let before = candidate(
+        "before",
+        vec![inline(&engine.namespace_id, Bytes::from_static(b"before"))],
+    );
+    publish(&mut engine, &store, &context, before)
+        .await
+        .expect("before fold");
+    let input = engine.begin_wal_fold().expect("fold input");
+    engine.invalidate_projection();
+    let folded = fold_wal_tail(
+        &store,
+        None,
+        &engine.namespace_id,
+        Some(input),
+        &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+    )
+    .await
+    .expect("fold");
+    assert_eq!(folded.response.outcome, FlushWalOutcome::Published);
+    engine.record_wal_fold(Some(&folded));
+    NamespaceCommitEngine::new(engine.namespace_id.clone())
+        .session_writer_epoch(
+            &store,
+            &MutationContext {
+                writer_id: WriterId::parse("successor").expect("writer"),
+                now_ms: 1_000,
+            },
+        )
+        .await
+        .expect("claim and fence");
+    let after = candidate(
+        "after",
+        vec![inline(&engine.namespace_id, Bytes::from_static(b"after"))],
+    );
+    let error = publish(&mut engine, &store, &context, after)
+        .await
+        .expect_err("fenced");
+    assert_eq!(error.code(), ErrorCode::WriterFenced, "{error:?}");
 }
 
 pub(super) fn assert_content_before_metadata(store: &RecordingStore<LocalFsStore>, count: usize) {
