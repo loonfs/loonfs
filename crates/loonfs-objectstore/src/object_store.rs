@@ -68,20 +68,6 @@ pub struct MultipartPart {
     pub checksum: Checksum,
 }
 
-/// What a provider said about an attempt to assemble a multipart upload.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MultipartCompletion {
-    /// The provider accepted the assembly on this call.
-    Assembled,
-    /// The provider has no such upload. It was already consumed — by an
-    /// earlier completion whose response was lost, or by an abort — so the
-    /// object at the key, if any, is the only remaining evidence of what
-    /// happened. Providers disagree about this case (AWS S3 replays a
-    /// success carrying no checksum, Cloudflare R2 answers `NoSuchUpload`),
-    /// which is exactly why the caller resolves it from the object instead.
-    UnknownUpload,
-}
-
 /// Full object bytes returned with metadata from the same read operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObjectBody {
@@ -420,13 +406,17 @@ pub trait ObjectStore: Send + Sync + Debug {
     /// Cloudflare R2 accepts a wrong claim, assembles the object, and
     /// reports the true checksum, so a caller must read the object's stored
     /// checksum back before believing anything about its bytes.
+    ///
+    /// An upload the provider no longer knows was consumed by an earlier
+    /// completion or by an abort, so completing it again succeeds. The
+    /// object at `key` is the only evidence of what that earlier call did.
     async fn complete_multipart_upload(
         &self,
         key: &str,
         provider_upload_id: &str,
         parts: &[MultipartPart],
         checksum: &Checksum,
-    ) -> Result<MultipartCompletion> {
+    ) -> Result<()> {
         let (_, _, _, _) = (key, provider_upload_id, parts, checksum);
         Err(ObjectStoreError::Unsupported(
             "client-driven multipart upload",
@@ -592,7 +582,7 @@ impl<T: ObjectStore + ?Sized> ObjectStore for Arc<T> {
         provider_upload_id: &str,
         parts: &[MultipartPart],
         checksum: &Checksum,
-    ) -> Result<MultipartCompletion> {
+    ) -> Result<()> {
         self.as_ref()
             .complete_multipart_upload(key, provider_upload_id, parts, checksum)
             .await
@@ -688,7 +678,7 @@ impl<T: ObjectStore + ?Sized> ObjectStore for &T {
         provider_upload_id: &str,
         parts: &[MultipartPart],
         checksum: &Checksum,
-    ) -> Result<MultipartCompletion> {
+    ) -> Result<()> {
         (*self)
             .complete_multipart_upload(key, provider_upload_id, parts, checksum)
             .await

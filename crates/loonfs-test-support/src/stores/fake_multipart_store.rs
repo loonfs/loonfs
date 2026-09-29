@@ -6,9 +6,9 @@
 //!
 //! - a part upload is not create-only, so re-uploading one replaces it and
 //!   the assembled object follows the last write;
-//! - a completed upload is *consumed*, so replaying its completion reports
-//!   an upload the provider has never heard of while the object it produced
-//!   sits there correct — the lost-completion case;
+//! - a completed upload is *consumed*, so replaying its completion succeeds
+//!   and changes nothing, and the object it produced is the only evidence of
+//!   what happened: the lost-completion case;
 //! - the whole-object checksum supplied at completion is not necessarily
 //!   enforced (Cloudflare R2 accepts a wrong one and stores the true value),
 //!   which is why LoonFS reads the object back;
@@ -19,8 +19,8 @@ use bytes::Bytes;
 use futures::stream::BoxStream;
 use loonfs_api::Checksum;
 use loonfs_objectstore::{
-    ByteRange, ByteStream, MultipartCompletion, MultipartPart, ObjectBody, ObjectMetadata,
-    ObjectStore, ObjectStoreError, PutMode, Result, StoredObjectChecksum,
+    ByteRange, ByteStream, MultipartPart, ObjectBody, ObjectMetadata, ObjectStore,
+    ObjectStoreError, PutMode, Result, StoredObjectChecksum,
 };
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -185,11 +185,9 @@ impl<S: ObjectStore> ObjectStore for FakeMultipartStore<S> {
         provider_upload_id: &str,
         parts: &[MultipartPart],
         full_object_checksum: &Checksum,
-    ) -> Result<MultipartCompletion> {
+    ) -> Result<()> {
         let Some(upload) = self.lock().remove(provider_upload_id) else {
-            // Consumed already. The object, if any, is the only evidence
-            // left — exactly what the caller reconciles from.
-            return Ok(MultipartCompletion::UnknownUpload);
+            return Ok(());
         };
         if upload.object_key != key {
             return Err(ObjectStoreError::transport(
@@ -240,7 +238,7 @@ impl<S: ObjectStore> ObjectStore for FakeMultipartStore<S> {
             .lock()
             .expect("stored checksum lock should not be poisoned")
             .insert(key.to_owned(), stored_checksum);
-        Ok(MultipartCompletion::Assembled)
+        Ok(())
     }
 
     async fn abort_multipart_upload(&self, key: &str, provider_upload_id: &str) -> Result<()> {

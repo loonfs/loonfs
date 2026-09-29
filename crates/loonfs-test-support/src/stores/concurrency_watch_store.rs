@@ -18,8 +18,8 @@ use bytes::Bytes;
 use futures::stream::BoxStream;
 use loonfs_api::Checksum;
 use loonfs_objectstore::{
-    ByteRange, ByteStream, MultipartCompletion, MultipartPart, ObjectBody, ObjectMetadata,
-    ObjectStore, ObjectStoreError, PutMode, StoredObjectChecksum,
+    ByteRange, ByteStream, MultipartPart, ObjectBody, ObjectMetadata, ObjectStore,
+    ObjectStoreError, PutMode, StoredObjectChecksum,
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -127,7 +127,7 @@ impl<S: ObjectStore> ObjectStore for ConcurrencyWatchStore<S> {
         provider_upload_id: &str,
         parts: &[MultipartPart],
         checksum: &Checksum,
-    ) -> Result<MultipartCompletion, ObjectStoreError> {
+    ) -> Result<(), ObjectStoreError> {
         self.inner
             .complete_multipart_upload(key, provider_upload_id, parts, checksum)
             .await

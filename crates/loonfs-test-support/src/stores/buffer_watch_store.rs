@@ -10,8 +10,8 @@ use bytes::Bytes;
 use futures::stream::{BoxStream, StreamExt};
 use loonfs_api::Checksum;
 use loonfs_objectstore::{
-    ByteRange, ByteStream, MultipartCompletion, MultipartPart, ObjectBody, ObjectMetadata,
-    ObjectStore, ObjectStoreError, PutMode, StoredObjectChecksum,
+    ByteRange, ByteStream, MultipartPart, ObjectBody, ObjectMetadata, ObjectStore,
+    ObjectStoreError, PutMode, StoredObjectChecksum,
 };
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -146,7 +146,7 @@ impl<S: ObjectStore> ObjectStore for BufferWatchStore<S> {
         provider_upload_id: &str,
         parts: &[MultipartPart],
         checksum: &Checksum,
-    ) -> Result<MultipartCompletion, ObjectStoreError> {
+    ) -> Result<(), ObjectStoreError> {
         self.inner
             .complete_multipart_upload(key, provider_upload_id, parts, checksum)
             .await

@@ -1354,9 +1354,13 @@ difference answers `invalid_request`. The server builds the final content
 reference from the session's namespace id and content id, plus the completion
 claim. The session's namespace is the owner. It
 then compares the claimed size and checksum with the object in storage. A
-mismatch makes the session unusable, and the server deletes the unpublished
-object. Completion verifies the stored content against the client's claim; it
-does not reapply the provider's upload limit.
+claim that the stored object does not match returns `invalid_request` and
+changes nothing: the session stays open and nothing is deleted. The client may
+complete again with a claim that matches the object, or abort. A session that
+never completes ends when upload collection aborts it after its lease passes
+([format: upload cleanup](format.md#116-upload-session-cleanup)). Completion
+verifies the stored content against the client's claim; it does not reapply
+the provider's upload limit.
 If the provider metadata request fails, the server returns `server_error`
 without changing the object or session, so the client can retry. The server
 does not download the object during this check.
@@ -1439,12 +1443,15 @@ and checksum, as shown in the previous section.
 The server asks the provider to assemble the object, then reads its stored size
 and checksum and compares them with the completion request. This read is
 required because providers do not handle an incorrect assembled checksum in
-the same way.
+the same way. After the provider call, the object at the key is the only
+evidence, whatever the provider answered.
 
-If the stored values do not match, the server aborts the session, deletes the
-object, and returns failure. The client must start a new session. If assembly
-or the metadata read fails before a comparison can be made, the server returns
-`server_error` and keeps the session open so completion can be retried.
+If the stored values do not match, the server returns `invalid_request` and
+changes nothing, as for direct PUT: the session stays open and nothing is
+deleted. The client may complete again with a claim that matches the object,
+or abort. If assembly or the metadata read fails before a comparison can be
+made, the server returns `server_error` and keeps the session open so
+completion can be retried.
 
 If completion fails without a clear response, resend the same completion
 request:
@@ -1457,17 +1464,17 @@ request:
 A caller that cannot resend the same request reads the upload status instead;
 a completed status returns the same stored result.
 
-When an `open` multipart upload no longer exists at the provider, the server
-checks whether the completed object matches the request. A match completes the
-session. If the upload and a matching object are both missing, the server
-aborts the session and returns an error.
+When the provider upload of an `open` session no longer exists, for example
+because the response to an earlier completion was lost, the server checks the
+object at the key against the request. A match completes the session. A
+missing or different object returns `invalid_request` and leaves the session
+open.
 
 **Cleanup.** The session record carries the provider's upload id, so a
-session that is aborted — by the client, by a failed verification, or by
-upload garbage collection after its lease passes — abandons the provider's
-upload along with the object it was writing. Aborting an upload that already
-assembled its object is safe on every supported provider: it succeeds and
-leaves the object alone.
+session that is aborted, by the client or by upload garbage collection after
+its lease passes, abandons the provider's upload along with the object it was
+writing. Aborting an upload that already assembled its object is safe on every
+supported provider: it succeeds and leaves the object alone.
 
 A content reference contains `kind`, `owner_namespace_id`, `content_id`, `size_bytes`, and `checksum`. The owner names the namespace that originally wrote the bytes. Clients echo the complete reference unchanged. The owner does not change on a fork or restore.
 

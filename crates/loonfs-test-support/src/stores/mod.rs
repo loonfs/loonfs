@@ -33,7 +33,7 @@ mod tests {
     use futures::TryStreamExt;
     use loonfs_api::Checksum;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
-    use loonfs_objectstore::{MultipartCompletion, ObjectStore};
+    use loonfs_objectstore::ObjectStore;
 
     #[tokio::test]
     async fn wrappers_preserve_the_start_after_contract() {
@@ -94,10 +94,9 @@ mod tests {
             .await
             .expect("create multipart upload");
         let checksum = Checksum::crc64nvme(&[]);
-        let completion = store
+        store
             .complete_multipart_upload(multipart_key, &provider_upload_id, &[], &checksum)
             .await
             .expect("complete multipart upload");
-        assert_eq!(completion, MultipartCompletion::Assembled);
     }
 }

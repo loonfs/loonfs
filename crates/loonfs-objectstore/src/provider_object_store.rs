@@ -11,8 +11,8 @@ use crate::retry::{provider_transport_retryable, with_transport_retry, DEFAULT};
 use crate::store_io_runtime::StoreIoRuntime;
 use crate::timing::{MonotonicTimer, StdMonotonicTimer};
 use crate::{
-    ByteRange, ByteStream, ConfiguredObjectStoreKind, MultipartCompletion, MultipartPart,
-    ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode, StoredObjectChecksum,
+    ByteRange, ByteStream, ConfiguredObjectStoreKind, MultipartPart, ObjectBody, ObjectMetadata,
+    ObjectStore, ObjectStoreError, PutMode, StoredObjectChecksum,
 };
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -182,7 +182,7 @@ pub(crate) trait MultipartController: Send + Sync {
         provider_upload_id: &str,
         parts: &[MultipartPart],
         checksum: &Checksum,
-    ) -> Result<MultipartCompletion>;
+    ) -> Result<()>;
 
     async fn abort_multipart_upload(&self, key: &str, provider_upload_id: &str) -> Result<()>;
 }
@@ -824,7 +824,7 @@ impl ObjectStore for ProviderObjectStore {
         provider_upload_id: &str,
         parts: &[MultipartPart],
         checksum: &Checksum,
-    ) -> Result<MultipartCompletion> {
+    ) -> Result<()> {
         match &self.multipart_controller {
             Some(controller) => {
                 controller

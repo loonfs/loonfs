@@ -1044,7 +1044,7 @@ mod direct_multipart {
     }
 
     #[tokio::test]
-    async fn a_completion_that_does_not_verify_ends_the_session_and_deletes_the_object() {
+    async fn a_completion_that_does_not_verify_is_rejected_and_changes_nothing() {
         let temp_dir = tempdir().expect("tempdir");
         let store = FakeMultipartStore::new(LocalFsStore::new(temp_dir.path()).expect("store"));
         let context = mutation_context();
@@ -1081,35 +1081,18 @@ mod direct_multipart {
                 session_state(&store, &session.namespace_id, &session.upload_id)
                     .await
                     .status,
-                UploadSessionRecordStatus::Aborted { .. }
+                UploadSessionRecordStatus::Open { .. }
             ),
-            "a failed verification is terminal, not retryable"
+            "a rejected claim leaves the session open"
         );
         assert!(
             store
                 .head(&session.object_key)
                 .await
                 .expect("head")
-                .is_none(),
-            "the wrong object is deleted, not left publishable"
+                .is_some(),
+            "a rejected claim deletes nothing"
         );
-
-        // And the terminal state holds: a second completion reports absence.
-        let parts = vec![CompletedUploadPart {
-            part_number: 1,
-            etag: "\"whatever\"".to_owned(),
-            checksum: Checksum::crc64nvme(PART),
-        }];
-        let error = complete_upload(
-            &store,
-            &session.namespace_id,
-            &session.upload_id,
-            &complete_request(&session, parts),
-            &context,
-        )
-        .await
-        .expect_err("an aborted session cannot complete");
-        assert_eq!(error.code(), ErrorCode::UploadNotFound);
     }
 
     #[tokio::test]

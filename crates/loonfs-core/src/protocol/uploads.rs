@@ -46,8 +46,7 @@ use loonfs_api::{
 };
 use loonfs_objectstore::keys::{content_blob, upload_session};
 use loonfs_objectstore::{
-    ByteStream, MultipartCompletion, MultipartPart, ObjectMetadata, ObjectStore,
-    PROVIDER_MULTIPART_PART_BYTES,
+    ByteStream, MultipartPart, ObjectMetadata, ObjectStore, PROVIDER_MULTIPART_PART_BYTES,
 };
 use std::num::NonZeroU64;
 
@@ -908,33 +907,7 @@ where
         return Ok(completed);
     }
 
-    let verified = match completion_outcome(store, plan).await? {
-        CompletionOutcome::Verified(content_ref) => content_ref,
-        // The provider upload was already consumed, so this request cannot
-        // establish what consumed it. Reject only this claim: a retry with
-        // the claim that describes the assembled object may still recover
-        // a completion whose response was lost.
-        CompletionOutcome::Rejected(reason) => {
-            return Err(CoreError::InvalidUploadContent(reason));
-        }
-        // The bytes that landed are not the bytes that were promised, and
-        // the provider upload that could have produced them is consumed.
-        // Nothing can rescue this session, so it stops here rather than
-        // waiting for its lease to pass: aborting is what deletes the wrong
-        // object and releases the provider state.
-        CompletionOutcome::Unusable(reason) => {
-            if let Err(error) = abort_upload(store, &catalog, upload_id, subject, context).await {
-                tracing::warn!(
-                    namespace_id = %namespace_id,
-                    upload_id = %upload_id,
-                    error = %error,
-                    "failed to abandon an upload session whose completion did not verify"
-                );
-            }
-            return Err(CoreError::InvalidUploadContent(reason));
-        }
-    };
-
+    let verified = verify_completion(store, plan).await?;
     freeze_completed_session(store, &catalog, upload_id, &verified, now_ms).await
 }
 
@@ -1453,17 +1426,6 @@ fn replay_terminal_completion(
     }
 }
 
-/// What a completion attempt established about the session's content.
-enum CompletionOutcome {
-    /// The stored object matches the completion claim.
-    Verified(ContentRef),
-    /// This claim does not match the evidence left by an upload that was
-    /// already consumed. Another claim may still recover the session.
-    Rejected(String),
-    /// The upload is invalid and must be aborted.
-    Unusable(String),
-}
-
 /// Information needed to verify an upload before completion.
 enum CompletionPlan<'a> {
     /// Content previously staged through the server.
@@ -1565,22 +1527,19 @@ fn completion_plan<'a>(
 /// verify the provider-stored object because the bytes bypassed this server.
 /// A checksum-bearing metadata request verifies size and checksum without
 /// downloading the object.
-async fn completion_outcome<S: ObjectStore + ?Sized>(
+async fn verify_completion<S: ObjectStore + ?Sized>(
     store: &S,
     plan: CompletionPlan<'_>,
-) -> Result<CompletionOutcome> {
+) -> Result<ContentRef> {
     match plan {
-        CompletionPlan::Proxied { staged } => {
-            let staged = staged.ok_or_else(|| {
-                CoreError::InvalidUploadContent("upload content has not been staged".to_owned())
-            })?;
-            Ok(CompletionOutcome::Verified(staged.clone()))
-        }
+        CompletionPlan::Proxied { staged } => staged.cloned().ok_or_else(|| {
+            CoreError::InvalidUploadContent("upload content has not been staged".to_owned())
+        }),
         CompletionPlan::DirectPut { requested } => {
-            match verify_durable_content_checksum(store, &requested).await {
-                Ok(()) => Ok(CompletionOutcome::Verified(requested)),
-                Err(err) => Ok(CompletionOutcome::Unusable(content_failure_reason(err)?)),
-            }
+            verify_durable_content_checksum(store, &requested)
+                .await
+                .map_err(content_failure)?;
+            Ok(requested)
         }
         CompletionPlan::DirectMultipart {
             requested,
@@ -1595,61 +1554,46 @@ async fn completion_outcome<S: ObjectStore + ?Sized>(
                 parts,
                 &requested,
             )
-            .await
+            .await?;
+            Ok(requested)
         }
     }
 }
 
 /// Asks the provider to assemble the uploaded parts, then verifies the
-/// resulting object.
+/// object at the target key.
 ///
-/// Provider behavior differs: some reject an incorrect whole-object checksum,
-/// while others assemble the object and report the actual checksum. LoonFS
-/// therefore verifies the stored object after every completion.
-///
-/// The same verification also recovers from a lost completion response. An
-/// unknown or already-consumed provider upload is accepted only when the
-/// object at the target key passes verification.
+/// Providers differ in whether they enforce the whole-object checksum and in
+/// how they answer an upload that is already consumed, so the stored object
+/// is the only evidence. The same check recovers a completion whose response
+/// was lost.
 async fn assemble_multipart_upload<S: ObjectStore + ?Sized>(
     store: &S,
     provider_upload_id: &str,
     checksum_algorithm: ChecksumAlgorithm,
     parts: &[CompletedUploadPart],
     expected: &ContentRef,
-) -> Result<CompletionOutcome> {
+) -> Result<()> {
     let parts = multipart_parts(parts, checksum_algorithm)?;
     let object_key = content_blob(&expected.owner_namespace_id, &expected.content_id);
-    let completion = store
+    store
         .complete_multipart_upload(&object_key, provider_upload_id, &parts, &expected.checksum)
         .await
         .map_err(|error| CoreError::store(&object_key, &error))?;
-
-    match verify_durable_content_checksum(store, expected).await {
-        Ok(()) => Ok(CompletionOutcome::Verified(expected.clone())),
-        Err(err) => {
-            let reason = content_failure_reason(err)?;
-            Ok(match completion {
-                // This call consumed the provider upload, so a confirmed
-                // mismatch makes the session unusable.
-                MultipartCompletion::Assembled => CompletionOutcome::Unusable(reason),
-                // An earlier completion or abort consumed the upload. A
-                // mismatch rejects this request but is not evidence that a
-                // different completion claim cannot describe the object.
-                MultipartCompletion::UnknownUpload => CompletionOutcome::Rejected(reason),
-            })
-        }
-    }
+    verify_durable_content_checksum(store, expected)
+        .await
+        .map_err(content_failure)
 }
 
 /// Classifies a content-verification failure.
 ///
-/// A confirmed absence, length mismatch, or checksum mismatch makes the
-/// upload unusable. A storage access failure is returned unchanged so the
-/// session remains open and completion can be retried.
-fn content_failure_reason(error: DurableContentValidationError) -> Result<String> {
+/// A confirmed absence, length mismatch, or checksum mismatch rejects the
+/// completion claim. A storage access failure is returned unchanged. Neither
+/// changes the session, so completion can be retried.
+fn content_failure(error: DurableContentValidationError) -> CoreError {
     match error {
-        DurableContentValidationError::Store { .. } => Err(CoreError::DurableContent(error)),
-        error => Ok(error.to_string()),
+        DurableContentValidationError::Store { .. } => CoreError::DurableContent(error),
+        error => CoreError::InvalidUploadContent(error.to_string()),
     }
 }
 
@@ -2155,7 +2099,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_failed_direct_put_completion_aborts_and_retries_as_terminal() {
+    async fn a_mismatched_direct_put_claim_is_rejected_and_a_matching_one_completes() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("namespace id");
@@ -2172,14 +2116,15 @@ mod tests {
         )
         .await
         .expect("begin direct put");
+        let written = vec![b'x'; BYTES.len()];
         store
             .put(
                 &begin.object_key,
-                Bytes::from(vec![b'x'; BYTES.len()]),
+                Bytes::from(written.clone()),
                 PutMode::CreateIfAbsent,
             )
             .await
-            .expect("write mismatched direct-put bytes");
+            .expect("write direct-put bytes");
 
         let error = complete_upload(
             &store,
@@ -2195,39 +2140,44 @@ mod tests {
             &context(2_000),
         )
         .await
-        .expect_err("mismatched bytes cannot complete");
+        .expect_err("a claim the object does not match cannot complete");
         assert!(matches!(error, CoreError::InvalidUploadContent(_)));
         let state = load_upload_session_state(&store, &namespace_id, &begin.session.upload_id)
             .await
             .expect("session remains readable");
         assert!(matches!(
             state.status,
-            UploadSessionRecordStatus::Aborted {
-                aborted_at_ms: 2_000
-            }
+            UploadSessionRecordStatus::Open { .. }
         ));
         assert!(store
             .head(&begin.object_key)
             .await
-            .expect("head mismatched content")
-            .is_none());
+            .expect("head direct-put content")
+            .is_some());
 
-        let retry = complete_upload(
+        let completed = complete_upload(
             &store,
             &namespace_id,
             &begin.session.upload_id,
             None,
             ResolvedUploadCompletion::DirectPut {
                 content: UploadContentClaim {
-                    size_bytes: BYTES.len() as u64,
-                    checksum: Checksum::sha256(BYTES),
+                    size_bytes: written.len() as u64,
+                    checksum: Checksum::sha256(&written),
                 },
             },
             &context(3_000),
         )
         .await
-        .expect_err("an aborted direct put stays terminal");
-        assert!(matches!(retry, CoreError::UploadNotFound { .. }));
+        .expect("the matching claim completes the session");
+        assert_eq!(
+            completed
+                .response
+                .content_ref()
+                .expect("completed content ref")
+                .checksum,
+            Checksum::sha256(&written)
+        );
     }
 
     #[tokio::test]

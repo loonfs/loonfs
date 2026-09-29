@@ -5,8 +5,8 @@ use crate::attempts::counting_attempts;
 use crate::layout::{parse_object_key, DurableObjectFamily};
 use crate::object_store::Result;
 use crate::{
-    ByteRange, ByteStream, MultipartCompletion, MultipartPart, ObjectBody, ObjectMetadata,
-    ObjectStore, ObjectStoreErrorClass, PutMode, StoredObjectChecksum,
+    ByteRange, ByteStream, MultipartPart, ObjectBody, ObjectMetadata, ObjectStore,
+    ObjectStoreErrorClass, PutMode, StoredObjectChecksum,
 };
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -443,7 +443,7 @@ where
         provider_upload_id: &str,
         parts: &[MultipartPart],
         checksum: &Checksum,
-    ) -> Result<MultipartCompletion> {
+    ) -> Result<()> {
         let start = sample_clock();
         let (result, attempts) = counting_attempts(self.inner.complete_multipart_upload(
             key,

@@ -226,7 +226,7 @@ fn direct_put_completion_rejects_a_mis_declared_size() {
 }
 
 #[test]
-fn direct_put_completion_rejects_and_removes_bytes_that_do_not_match_the_claim() {
+fn direct_put_completion_rejects_bytes_that_do_not_match_the_claim_and_keeps_them() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "direct-put-checksum-test");
     let namespace_id = namespace_id("demo");
@@ -257,8 +257,8 @@ fn direct_put_completion_rejects_and_removes_bytes_that_do_not_match_the_claim()
     assert!(
         block_on(direct_store.head(&begin.object_key))
             .expect("head rejected object")
-            .is_none(),
-        "a rejected completion leaves no orphan behind"
+            .is_some(),
+        "a rejected completion deletes nothing"
     );
 }
 
