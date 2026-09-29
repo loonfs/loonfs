@@ -86,7 +86,7 @@ writer_id = "loonfs-server-local"
 #manifest_revalidation_interval_ms = 1000
 #max_cached_namespaces = 64
 #max_cached_wal_tail_projection_rows = 1000000
-#max_cached_wal_tail_projection_decoded_bytes = 268435456
+#max_cached_wal_tail_projection_decoded_bytes = 67108864
 # Decoded-byte budget for the metadata segment cache; unlimited by default.
 #metadata_segment_cache_max_decoded_bytes = 268435456
 

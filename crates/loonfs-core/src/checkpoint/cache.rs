@@ -169,7 +169,7 @@ impl MetadataSegmentCache {
 /// Default bounds for WAL-tail projections, shared by the read-side
 /// projection cache and the publish-side tail reuse check.
 pub const DEFAULT_WAL_TAIL_PROJECTION_ROWS: usize = 1_000_000;
-pub const DEFAULT_WAL_TAIL_PROJECTION_DECODED_BYTES: usize = 256 * 1024 * 1024;
+pub const DEFAULT_WAL_TAIL_PROJECTION_DECODED_BYTES: usize = 64 * 1024 * 1024;
 
 /// Zero entries disables the cache; the row and byte limits bound what one
 /// entry may hold and what the cache may retain in total.
