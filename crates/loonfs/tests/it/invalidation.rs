@@ -597,19 +597,38 @@ async fn a_cached_view_older_than_the_revalidation_bound_rediscovers() {
     ));
 }
 
+async fn read_across_a_held_successor_probe(
+    reader: &FsReader,
+    store: &RecordingStore<BlockingStore<LocalFsStore>>,
+    timer: &ManualClock,
+    namespace_id: &NamespaceId,
+    pause_ms: u64,
+) {
+    store.inner().block_next();
+    let (entry, ()) = futures::join!(
+        reader.get_path_entry(namespace_id, "/file.txt", Default::default()),
+        async {
+            store.inner().wait_until_blocked().await;
+            timer.advance_ms(pause_ms);
+            store.inner().release();
+        }
+    );
+    entry.expect("read across the held successor probe");
+}
+
 #[tokio::test]
-async fn a_pause_during_the_successor_probe_rediscovers() {
+async fn warm_answers_are_measured_against_the_previous_check() {
     let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("probe-pause").expect("namespace");
     let blocking = BlockingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
         KeyPredicate::prefix(loonfs_objectstore::keys::metadata_manifest_prefix(
-            &NamespaceId::parse("probe-pause").expect("namespace"),
+            &namespace_id,
         )),
         OperationClass::Head,
     );
     let recording = Arc::new(RecordingStore::new(blocking, KeyPredicate::any()));
     let store: SharedObjectStore = recording.clone();
-    let namespace_id = NamespaceId::parse("probe-pause").expect("namespace");
     let timer = Arc::new(ManualClock::new(0));
     let interval_ms = 1_000;
     let reader = FsReader::builder_with_store(store.clone())
@@ -642,32 +661,56 @@ async fn a_pause_during_the_successor_probe_rediscovers() {
     reader
         .get_path_entry(&namespace_id, "/file.txt", Default::default())
         .await
-        .expect("seed reader cache");
+        .expect("cache a view");
+    let manifest_no = loonfs_core::control::load_namespace_current_manifest(&store, &namespace_id)
+        .await
+        .expect("current manifest")
+        .state
+        .manifest()
+        .manifest_no;
+    let next_wal_no = head_state(&store, &namespace_id)
+        .await
+        .wal_no
+        .successor()
+        .expect("next WAL number");
+    let warm_check = [
+        RecordedOperation::Head {
+            key: loonfs_objectstore::keys::metadata_manifest_object(
+                &namespace_id,
+                &manifest_no.successor().expect("next manifest number"),
+            ),
+        },
+        crate::common::wal_probe(&namespace_id, next_wal_no),
+    ];
 
-    timer.advance_ms(interval_ms);
+    // The check falls due just inside the bound, and both answers arrive inside it.
+    timer.advance_ms(READ_REVALIDATION_BOUND_MS - 2);
     recording.reset();
-    recording.inner().block_next();
-    let (entry, ()) = futures::join!(
-        reader.get_path_entry(&namespace_id, "/file.txt", Default::default()),
-        async {
-            recording.inner().wait_until_blocked().await;
-            timer.advance_ms(READ_REVALIDATION_BOUND_MS);
-            recording.inner().release();
-        }
-    );
-    entry.expect("read across the pause");
+    read_across_a_held_successor_probe(&reader, &recording, &timer, &namespace_id, 1).await;
+    assert_eq!(recording.take(), warm_check);
+
+    // That check replaced the first one, which is now past the bound. A read
+    // inside the interval still probes only the WAL.
+    timer.advance_ms(interval_ms - 2);
+    reader
+        .get_path_entry(&namespace_id, "/file.txt", Default::default())
+        .await
+        .expect("read inside the interval");
+    crate::common::assert_wal_probe(recording.take(), &namespace_id, next_wal_no);
+
+    // The next HEAD is sent just inside the bound of that check and answered
+    // at the bound. Both answers find nothing, and the view is not served.
+    timer.advance_ms(READ_REVALIDATION_BOUND_MS - interval_ms);
+    read_across_a_held_successor_probe(&reader, &recording, &timer, &namespace_id, 1).await;
     let operations = recording.take();
-    let probe = operations
-        .iter()
-        .position(|operation| matches!(operation, RecordedOperation::Head { .. }))
-        .expect("successor probe");
+    assert_eq!(operations[..2], warm_check, "{operations:?}");
     assert!(
-        operations[probe..].iter().any(|operation| matches!(
-            operation,
-            RecordedOperation::GetWithMetadata { key, .. }
+        matches!(
+            operations.get(2),
+            Some(RecordedOperation::GetWithMetadata { key, .. })
                 if key == &loonfs_objectstore::keys::hint(&namespace_id)
-        )),
-        "{operations:?}"
+        ),
+        "the late answer was trusted: {operations:?}"
     );
 }
 

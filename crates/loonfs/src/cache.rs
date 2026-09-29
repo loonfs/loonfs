@@ -333,9 +333,11 @@ impl ReadCore {
             .control_cache()
             .lookup_namespace_head(namespace_id);
         if let Some(mut head) = cached {
-            // A HEAD of the successor after a long gap cannot see a successor that was
-            // collected in the meantime, whether the gap came before the probe or while
-            // it waited; rediscover instead of trusting it.
+            // Measure every answer against the previous check, not against the probe
+            // it answers. A successor published after that check cannot be collected
+            // within the bound. An answer that arrives later may miss one, however
+            // recently its probe was sent, so the new check replaces the previous one
+            // only after both answers are in.
             let fresh = |checked: &Option<Observation>| {
                 checked.as_ref().is_some_and(|checked| {
                     checked.age_ms() < loonfs_core::limits::READ_REVALIDATION_BOUND_MS
@@ -354,13 +356,13 @@ impl ReadCore {
                     .instrument(tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "validation_manifest_probe"))
                     .await.map_err(MetadataProjectionLoadError::LoadHead)?;
                 if matches {
-                    if check_due {
-                        head.last_control_check = Some(observed);
-                    }
                     let mut context = self.runtime_read_context(&head);
                     if loonfs_core::control::probe_namespace_wal(self.store(), &mut context)
                         .instrument(tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "validation_wal_probe"))
                     .await.map_err(MetadataProjectionLoadError::LoadHead)? && fresh(&head.last_control_check) {
+                        if check_due {
+                            head.last_control_check = Some(observed);
+                        }
                         head.head = context.head;
                         return Ok(head);
                     }

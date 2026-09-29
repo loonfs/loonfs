@@ -23,19 +23,24 @@ use loonfs_test_support::stores::{
 use std::path::Path;
 use std::sync::Arc;
 
+/// The GET of a WAL number that finds nothing.
+pub(crate) fn wal_probe(
+    namespace_id: &NamespaceId,
+    wal_no: loonfs_api::WalNo,
+) -> loonfs_test_support::stores::RecordedOperation {
+    loonfs_test_support::stores::RecordedOperation::Get {
+        key: format!("namespaces/{namespace_id}/wal/{:020}.wal.zst", wal_no.0),
+        range: None,
+        result_bytes: 0,
+    }
+}
+
 pub(crate) fn assert_wal_probe(
     operations: Vec<loonfs_test_support::stores::RecordedOperation>,
     namespace_id: &NamespaceId,
     wal_no: loonfs_api::WalNo,
 ) {
-    assert_eq!(
-        operations,
-        vec![loonfs_test_support::stores::RecordedOperation::Get {
-            key: format!("namespaces/{namespace_id}/wal/{:020}.wal.zst", wal_no.0),
-            range: None,
-            result_bytes: 0,
-        }]
-    );
+    assert_eq!(operations, vec![wal_probe(namespace_id, wal_no)]);
 }
 
 pub(crate) fn data_wal_put_for(
