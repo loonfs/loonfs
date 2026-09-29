@@ -10,8 +10,8 @@ writer_id = "loonfs-server-local"
 # Maximum writer sessions held by this server. When the table is full, a
 # request for another namespace closes the least recently used idle session
 # first; requests answer `writer_capacity_exceeded` only when every session
-# is busy. Defaults to 10000.
-#max_writer_sessions = 10000
+# is busy. Defaults to 1024.
+#max_writer_sessions = 1024
 
 # Maximum WAL folds this server runs at once. A sustained
 # `loonfs.publisher.wal_folds_waiting` gauge means the cap is too low.
@@ -60,8 +60,9 @@ writer_id = "loonfs-server-local"
 
 # How many proxied upload bodies the server will stream at once and how many
 # content streams it will serve at once. Requests past a cap answer 503
-# `server_busy`. Upload memory tracks one transfer part per admitted body.
-# Download memory tracks the bounded file size of each admitted read.
+# `server_busy`. Upload memory tracks at most one 8 MiB transfer part per
+# admitted body. Download memory tracks one 8 MiB read chunk per admitted
+# stream.
 #max_concurrent_uploads = 8
 #max_concurrent_downloads = 16
 
@@ -87,7 +88,7 @@ writer_id = "loonfs-server-local"
 #max_cached_namespaces = 64
 #max_cached_wal_tail_projection_rows = 1000000
 #max_cached_wal_tail_projection_decoded_bytes = 67108864
-# Decoded-byte budget for the metadata segment cache; unlimited by default.
+# Decoded-byte budget for the metadata segment cache. Defaults to 256 MiB.
 #metadata_segment_cache_max_decoded_bytes = 268435456
 
 # Optional node-local cache of encoded metadata blocks, on this machine's own

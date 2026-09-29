@@ -312,21 +312,103 @@ defaults, like metadata compaction. The accepted input limits are
 
 `request_deadline_ms` defaults to 60000 ms for metadata and query requests; streamed content and long-running operator work are exempt.
 
-Start with enough memory for:
+Each cache, queue, and unit of work has its own memory budget. The values
+below are ceilings, not allocations. Memory grows toward a ceiling only as a
+cache fills or as work runs. Allocator overhead and HTTP buffers are not
+counted in any budget and sit on top.
 
-```text
-max_concurrent_uploads × 8 MiB
-+ max_concurrent_downloads × 8 MiB
-+ local_cache.memory_bytes
-+ memory for metadata maintenance and the server
+| Budget | Setting | Default | What it bounds | Kind |
+| --- | --- | --- | --- | --- |
+| Metadata segment cache | `runtime_cache.metadata_segment_cache_max_decoded_bytes` | 256 MiB | Decoded metadata blocks and manifests | Steady |
+| Read-side WAL-tail projections | `runtime_cache.max_cached_wal_tail_projection_decoded_bytes` and `runtime_cache.max_cached_wal_tail_projection_rows` | 64 MiB and 1,000,000 rows | WAL tails replayed for reads | Steady |
+| Publish-side WAL-tail projections | The same two settings | 64 MiB and 1,000,000 rows | WAL tails the namespace publishers keep | Steady |
+| Head anchors | `runtime_cache.max_cached_namespaces` | 64 namespaces | Cached namespace heads, and the number of read-side projections | Steady, by count |
+| Writer sessions | `max_writer_sessions` | 1,024 sessions | Sessions held at once | Steady, by count |
+| Publication queue | `publication.max_estimated_bytes` | 64 MiB | Estimated bytes of admitted commit requests | Steady |
+| Proxied uploads | `max_concurrent_uploads` | 8 uploads | At most one 8 MiB transfer part per upload body | Per request |
+| Proxied downloads | `max_concurrent_downloads` | 16 streams | One 8 MiB read chunk per content stream | Per request |
+| Block memo | None | 64 MiB | Metadata blocks one read, publication, or fold keeps | Per operation |
+| Merge input | None | 64 MiB | Decoded blocks one compaction or maintenance step merges | Per operation |
+| Segment output | None | 32 MiB | Encoded segments one fold, compaction, or maintenance step holds while it writes them | Per operation |
+| WAL folds | `max_concurrent_folds` | 2 | Folds running at once | Concurrency |
+| Maintenance runs | `max_concurrent_maintenance` | 2 | Scheduled maintenance runs at once, including compactions and grep indexing | Concurrency |
+| Compactions | None | 2 | Scheduled compactions at once, inside the maintenance limit | Concurrency |
+| Publications | `publication.max_concurrent_publications` | 8 | Publications running at once | Concurrency |
+
+A fold holds a block memo and its segment output, so it can use up to 96 MiB.
+A maintenance step holds its merge input and its segment output, also up to
+96 MiB. Maintenance requests sent to the API run outside
+`max_concurrent_maintenance`. Writer sessions and head anchors are limited by
+count, not by bytes.
+
+`max_upload_bytes` and `max_download_bytes` limit the size of one proxied
+transfer. Both default to 256 MiB. They do not reserve memory.
+
+Without grep and without the local cache, the budgets that have a
+process-wide limit add up to 1,024 MiB by default:
+
+| Budget | Ceiling |
+| --- | --- |
+| Metadata segment cache | 256 MiB |
+| WAL-tail projections, both sides | 128 MiB |
+| Publication queue | 64 MiB |
+| 8 uploads at 8 MiB | 64 MiB |
+| 16 downloads at 8 MiB | 128 MiB |
+| 2 folds at 96 MiB | 192 MiB |
+| 2 maintenance runs at 96 MiB | 192 MiB |
+| Total | 1,024 MiB |
+
+The total leaves out writer sessions, head anchors, the block memos of reads
+and publications, WAL tails that an operation replays because no projection
+holds them, and maintenance requests sent to the API. Eight running
+publications can hold up to 512 MiB of block memos. Reads have no
+concurrency limit, so their block memos have no total.
+
+Grep adds a 256 MiB block cache on a server that answers queries. The cache
+has no setting. A query reads up to 32 candidate files of at most 8 MiB each
+at once, so one query can hold up to 256 MiB. Queries have no concurrency
+limit. Index building runs as a maintenance run, and each step reads at most
+`max_content_bytes_per_step` of content.
+
+The local cache adds `memory_bytes`, 64 MiB of write buffers for its disk
+tier, and up to 256 MiB of inserts waiting for the disk tier. The last two
+have no setting.
+
+This config for a 256 MiB container uses a 96 MiB segment cache, 32 MiB of
+WAL-tail projections per side, one fold, and one maintenance run:
+
+```toml
+max_concurrent_folds = 1
+max_concurrent_maintenance = 1
+max_concurrent_uploads = 2
+max_concurrent_downloads = 4
+
+[publication]
+max_estimated_bytes = 8388608
+
+[runtime_cache]
+max_cached_wal_tail_projection_decoded_bytes = 33554432
+metadata_segment_cache_max_decoded_bytes = 100663296
 ```
 
-The defaults allow 8 concurrent uploads, 16 concurrent downloads, and
-a 256 MiB transfer limit per proxied download. Content reads use 8 MiB chunks;
-the transfer limit does not reserve that much memory. Set a memory limit
-comfortably above the calculated minimum to allow for HTTP and store buffers.
+| Budget | Ceiling |
+| --- | --- |
+| Metadata segment cache | 96 MiB |
+| WAL-tail projections, both sides | 64 MiB |
+| Publication queue | 8 MiB |
+| 2 uploads at 8 MiB | 16 MiB |
+| 4 downloads at 8 MiB | 32 MiB |
+| Budgets with a setting | 216 MiB |
+| 1 fold at 96 MiB | 96 MiB |
+| 1 maintenance run at 96 MiB | 96 MiB |
+| Total | 408 MiB |
 
-`max_writer_sessions` defaults to 10,000. At the limit, a request for another
+The budgets with a setting leave 40 MiB of the 256 MiB. The fold and
+maintenance budgets have no setting, and at their ceilings they bring the
+total to 408 MiB. A 256 MiB limit therefore holds only while folds and
+maintenance steps stay well below their ceilings.
+
+`max_writer_sessions` defaults to 1,024. At the limit, a request for another
 namespace closes the least recently used idle session, and answers
 `writer_capacity_exceeded` only when every session is busy. A closed
 namespace acquires a new writer epoch on its next write, so raise the limit if

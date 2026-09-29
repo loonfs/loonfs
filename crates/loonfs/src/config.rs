@@ -21,7 +21,7 @@ pub(crate) const DEFAULT_MIN_PUBLISH_INTERVAL_MS: u64 = 15;
 /// Default maximum writer sessions held at once. A full table closes its
 /// least recently used idle session to open another (see
 /// [`FsWriterBuilder::max_writer_sessions`](crate::FsWriterBuilder::max_writer_sessions)).
-pub const DEFAULT_MAX_WRITER_SESSIONS: usize = 10_000;
+pub const DEFAULT_MAX_WRITER_SESSIONS: usize = 1_024;
 /// Default maximum WAL-tail folds one writer runs concurrently.
 pub const DEFAULT_MAX_CONCURRENT_FOLDS: usize = 2;
 /// Default maximum streaming metadata compactions one job runs concurrently.
@@ -182,7 +182,8 @@ pub struct RuntimeCacheConfig {
     /// each later publish replays the tail from the store until a fold
     /// shortens it.
     pub max_cached_wal_tail_projection_decoded_bytes: usize,
-    /// Cache settings for decoded metadata segments.
+    /// Cache settings for decoded metadata segments. The byte budget
+    /// defaults to 256 MiB.
     pub metadata_segment_cache: MetadataSegmentCacheConfig,
 }
 
