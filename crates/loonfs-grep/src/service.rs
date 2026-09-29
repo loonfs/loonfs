@@ -17,7 +17,9 @@ use crate::query::{plan_pattern, GramPlanOutcome, GramQueryPlan};
 use crate::reads::{published_revision, resolve_batch_size, NamespaceReads, PinnedNamespaceReads};
 use crate::{GrepError, Result};
 use futures::future::{join_all, try_join_all};
-use loonfs::{CoreError, CurrentFileState, MetadataViewError};
+use loonfs::{
+    CoreError, CurrentFileState, MetadataViewError, Observation, READ_REVALIDATION_BOUND_MS,
+};
 use loonfs_api::wire::hex::hex_decode_bytes;
 use loonfs_api::wire::sst_blocks::{
     decode_filter_block, index_blocks_for_key_range, key_range_may_intersect,
@@ -28,6 +30,7 @@ use loonfs_api::{
     GrepPageCursor, GrepRequest, GrepResponse, InodeId, InodeKind, NamespaceId, PathEntry,
     RevisionNo,
 };
+use loonfs_objectstore::timing::StdMonotonicTimer;
 use loonfs_objectstore::ObjectStore;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex, Weak};
@@ -73,7 +76,7 @@ pub(crate) const MAX_GREP_CONTENT_IO: usize = 32;
 #[derive(Debug)]
 pub struct GrepService {
     block_cache: Arc<GrepBlockCache>,
-    current_manifests: Mutex<BTreeMap<NamespaceId, Weak<GrepManifestState>>>,
+    current_manifests: Mutex<BTreeMap<NamespaceId, (Weak<GrepManifestState>, Observation)>>,
 }
 
 #[derive(Debug, Clone)]
@@ -96,59 +99,73 @@ impl GrepService {
         store: &S,
         namespace_id: &NamespaceId,
     ) -> Result<MaterializedGrepIndexSnapshot> {
+        // An absent successor confirms the cached manifest only if the answer
+        // arrives within the bound of the previous check, not of this probe.
+        let fresh = |checked: &Observation| checked.age_ms() < READ_REVALIDATION_BOUND_MS;
         let cached = self
             .current_manifests
             .lock()
             .expect("grep manifest cache lock should not be poisoned")
             .get(namespace_id)
-            .and_then(Weak::upgrade);
-        if let Some(state) = cached {
-            let successor_present = match state.manifest_no().successor() {
-                Ok(next) => {
-                    let object_key = manifest_key(namespace_id, &next);
-                    store
-                        .head(&object_key)
-                        .await
-                        .map_err(|error| GrepError::store(object_key, &error))?
-                        .is_some()
-                }
-                Err(_) => false,
-            };
-            if !successor_present {
-                return materialized_snapshot_from_state(state);
+            .filter(|(_, checked)| fresh(checked))
+            .and_then(|(state, checked)| Some((state.upgrade()?, checked.clone())));
+        let observed = Observation::now(Arc::new(StdMonotonicTimer::default()));
+        let confirmed = match cached {
+            Some((state, checked)) => {
+                let successor_present = match state.manifest_no().successor() {
+                    Ok(next) => {
+                        let object_key = manifest_key(namespace_id, &next);
+                        store
+                            .head(&object_key)
+                            .await
+                            .map_err(|error| GrepError::store(object_key, &error))?
+                            .is_some()
+                    }
+                    Err(_) => false,
+                };
+                (!successor_present && fresh(&checked)).then_some(state)
             }
-        }
-        let current = load_current_grep_manifest(store, namespace_id)
-            .await?
-            .ok_or(GrepError::NotEnabled)?;
-        let state = Arc::new(current.manifest_state().clone());
-        let decoded_bytes = serde_json::to_vec(current.manifest_state())
-            .map_err(|error| {
-                CoreError::Internal(format!("failed to size decoded grep manifest: {error}"))
-            })?
-            .len()
-            .saturating_mul(2);
-        self.block_cache.insert(
-            GrepBlockCacheKey {
-                identity: manifest_key(namespace_id, &state.manifest_no()),
-                block_kind: GrepBlockKind::Manifest,
-                block_offset: 0,
-            },
-            DecodedGrepBlock::Manifest {
-                manifest: state.clone(),
-                decoded_bytes,
-            },
-        );
+            None => None,
+        };
+        let state = match confirmed {
+            Some(state) => state,
+            None => {
+                let current = load_current_grep_manifest(store, namespace_id)
+                    .await?
+                    .ok_or(GrepError::NotEnabled)?;
+                let state = Arc::new(current.manifest_state().clone());
+                let decoded_bytes = serde_json::to_vec(current.manifest_state())
+                    .map_err(|error| {
+                        CoreError::Internal(format!(
+                            "failed to size decoded grep manifest: {error}"
+                        ))
+                    })?
+                    .len()
+                    .saturating_mul(2);
+                self.block_cache.insert(
+                    GrepBlockCacheKey {
+                        identity: manifest_key(namespace_id, &state.manifest_no()),
+                        block_kind: GrepBlockKind::Manifest,
+                        block_offset: 0,
+                    },
+                    DecodedGrepBlock::Manifest {
+                        manifest: state.clone(),
+                        decoded_bytes,
+                    },
+                );
+                state
+            }
+        };
         let mut manifests = self
             .current_manifests
             .lock()
             .expect("grep manifest cache lock should not be poisoned");
-        let entry = manifests.entry(namespace_id.clone()).or_default();
-        if entry
-            .upgrade()
-            .is_none_or(|current| current.manifest_no() < state.manifest_no())
+        if manifests
+            .get(namespace_id)
+            .and_then(|(cached, _)| cached.upgrade())
+            .is_none_or(|cached| cached.manifest_no() <= state.manifest_no())
         {
-            *entry = Arc::downgrade(&state);
+            manifests.insert(namespace_id.clone(), (Arc::downgrade(&state), observed));
         }
         materialized_snapshot_from_state(state)
     }
@@ -1086,5 +1103,68 @@ mod tests {
             path_within_scope(&path("/anything"), &AbsolutePath::root()),
             "the root scope holds everything"
         );
+    }
+
+    #[tokio::test]
+    async fn a_cached_manifest_checked_longer_ago_than_the_bound_is_discovered_again() {
+        use crate::manifest::{publish_grep_manifest, GrepIndexState};
+        use loonfs_api::{ManifestNo, RunNo};
+        use loonfs_objectstore::local_fs_store::LocalFsStore;
+        use loonfs_test_support::clock::ManualClock;
+
+        let directory = tempfile::tempdir().expect("directory");
+        let store = LocalFsStore::new(directory.path()).expect("store");
+        let namespace_id = loonfs_test_support::ids::namespace_id("grep-revalidation");
+        let deadline = loonfs::Deadline::start(Arc::new(StdMonotonicTimer::default()));
+        let manifest = |manifest_no| {
+            GrepManifestState::new(
+                namespace_id.clone(),
+                ManifestNo(manifest_no),
+                GrepIndexStatus::Active {
+                    built_through_seq: ChangeSeq(0),
+                    next_event_index: 0,
+                },
+                GrepIndexState {
+                    next_run_no: RunNo(0),
+                    reorganize: None,
+                },
+                Vec::new(),
+            )
+            .expect("manifest")
+        };
+        let mut current = publish_grep_manifest(&store, None, &manifest(1), &deadline)
+            .await
+            .expect("publish");
+        let service = GrepService::default();
+        let snapshot = || async {
+            service
+                .load_index_snapshot(&store, &namespace_id)
+                .await
+                .expect("snapshot")
+                .state
+                .manifest_no()
+        };
+        assert_eq!(snapshot().await, ManifestNo(1));
+        for manifest_no in 2..=3 {
+            current =
+                publish_grep_manifest(&store, Some(&current), &manifest(manifest_no), &deadline)
+                    .await
+                    .expect("publish");
+        }
+        store
+            .delete(&manifest_key(&namespace_id, &ManifestNo(2)))
+            .await
+            .expect("collect");
+        assert_eq!(snapshot().await, ManifestNo(1));
+        let clock = Arc::new(ManualClock::new(0));
+        service
+            .current_manifests
+            .lock()
+            .expect("lock")
+            .get_mut(&namespace_id)
+            .expect("cached manifest")
+            .1 = Observation::now(clock.clone());
+        clock.advance_ms(READ_REVALIDATION_BOUND_MS);
+        assert_eq!(snapshot().await, ManifestNo(3));
     }
 }

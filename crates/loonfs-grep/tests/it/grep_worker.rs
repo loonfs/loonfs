@@ -2567,6 +2567,105 @@ async fn gc_preserves_discovery_and_applies_manifest_and_segment_age_rules() {
 }
 
 #[tokio::test]
+async fn gc_keeps_a_superseded_manifest_and_its_segments_while_its_successor_is_young() {
+    use loonfs::UNREFERENCED_SEGMENT_MIN_AGE_MS;
+    use loonfs_api::ManifestNo;
+    use loonfs_grep::manifest::encode_grep_manifest;
+    let directory = tempdir().expect("directory");
+    let namespace_id = NamespaceId::parse("superseded-gc").expect("namespace");
+    let now_ms = UNREFERENCED_SEGMENT_MIN_AGE_MS + 1;
+    let base: SharedObjectStore = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
+    let aged = MetadataMapStore::aged(base, KeyPredicate::prefix(grep_prefix(&namespace_id)));
+    let store: SharedObjectStore = Arc::new(MetadataMapStore::new(
+        aged,
+        KeyPredicate::exact(manifest_key(&namespace_id, &ManifestNo(2))),
+        move |mut metadata| {
+            metadata.last_modified_ms = Some(now_ms - GREP_GC_GRACE_WINDOW_MS + 1);
+            metadata
+        },
+    ));
+    let writer = FsWriter::builder_with_store(store.clone())
+        .writer_id("superseded-grep-gc")
+        .build()
+        .await
+        .expect("writer");
+    writer
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("namespace");
+    let superseded = crate::golden_formats::segment_ref(1, 1, 0);
+    let current = crate::golden_formats::segment_ref(2, 2, 0);
+    for (number, segment) in [(1, &superseded), (2, &current)] {
+        store
+            .put_if_absent(
+                &segment_key(&namespace_id, &segment.segment_id),
+                Bytes::from_static(b"segment"),
+            )
+            .await
+            .expect("segment");
+        let state = GrepManifestState::new(
+            namespace_id.clone(),
+            ManifestNo(number),
+            GrepIndexStatus::Active {
+                built_through_seq: ChangeSeq(0),
+                next_event_index: 0,
+            },
+            GrepIndexState {
+                reorganize: None,
+                next_run_no: RunNo(3),
+            },
+            vec![segment.clone()],
+        )
+        .expect("manifest state");
+        store
+            .put_if_absent(
+                &manifest_key(&namespace_id, &ManifestNo(number)),
+                Bytes::from(
+                    encode_grep_manifest(state)
+                        .expect("encode manifest")
+                        .into_bytes(),
+                ),
+            )
+            .await
+            .expect("manifest");
+    }
+    write_hint(&*store, &namespace_id, ManifestNo(2)).await;
+    let collector = worker(&store).await;
+    let superseded_keys = [
+        manifest_key(&namespace_id, &ManifestNo(1)),
+        segment_key(&namespace_id, &superseded.segment_id),
+    ];
+    let young = collector
+        .garbage_collect_namespace(&namespace_id, now_ms)
+        .await
+        .expect("young successor pass");
+    assert_eq!(
+        (young.deleted_segments, young.deleted_other_objects),
+        (0, 0)
+    );
+    for key in &superseded_keys {
+        assert!(store.head(key).await.expect("head").is_some(), "{key}");
+    }
+    let aged = collector
+        .garbage_collect_namespace(&namespace_id, now_ms + 1)
+        .await
+        .expect("aged successor pass");
+    assert_eq!((aged.deleted_segments, aged.deleted_other_objects), (1, 1));
+    for key in &superseded_keys {
+        assert!(store.head(key).await.expect("head").is_none(), "{key}");
+    }
+    assert!(store
+        .head(&segment_key(&namespace_id, &current.segment_id))
+        .await
+        .expect("head")
+        .is_some());
+    writer.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
 async fn grep_filters_candidates_the_subject_cannot_read() {
     use loonfs::publish::{CommitRequest, FilesystemOperation};
     use loonfs_api::{
