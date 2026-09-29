@@ -16,6 +16,7 @@ use loonfs_api::wire::manifest::{
 use loonfs_api::{ManifestNo, NamespaceId};
 use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
+use std::collections::HashSet;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ManifestPublicationOutcome {
@@ -115,11 +116,24 @@ async fn publish_manifest_from<S: ObjectStore + ?Sized>(
         .checked_sub(1)
         .filter(|number| *number > 0)
         .map(ManifestNo);
-    // A fork's first manifest names its source pin, which no other publisher
-    // holds. Every other payload can be rebuilt byte for byte by a rival, so
-    // identical bytes prove nothing about who wrote them.
-    let names_own_pin = manifest.envelope().payload().manifest_no == ManifestNo(1)
-        && manifest.envelope().payload().fork_basis.is_some();
+    // Identical bytes prove authorship only when the manifest names an object
+    // this attempt created: a fork's source pin, or a segment its predecessor
+    // does not list. A rival can rebuild any other manifest byte for byte.
+    let names_own_object = {
+        let payload = manifest.envelope().payload();
+        let listed = current
+            .iter()
+            .flat_map(|current| &current.state.envelope.payload().runs)
+            .flat_map(|run| &run.segments)
+            .map(|segment| &segment.segment_id)
+            .collect::<HashSet<_>>();
+        (payload.manifest_no == ManifestNo(1) && payload.fork_basis.is_some())
+            || payload
+                .runs
+                .iter()
+                .flat_map(|run| &run.segments)
+                .any(|segment| !listed.contains(&segment.segment_id))
+    };
     let candidate = CurrentManifest {
         envelope: std::sync::Arc::new(manifest.envelope().clone()),
     };
@@ -196,7 +210,7 @@ async fn publish_manifest_from<S: ObjectStore + ?Sized>(
                             &landed.state,
                             &candidate,
                             expected_predecessor,
-                            names_own_pin,
+                            names_own_object,
                         ),
                         None => {
                             classify_current_manifest(
@@ -204,7 +218,7 @@ async fn publish_manifest_from<S: ObjectStore + ?Sized>(
                                 namespace_id,
                                 &candidate,
                                 expected_predecessor,
-                                names_own_pin,
+                                names_own_object,
                             )
                             .await?
                         }

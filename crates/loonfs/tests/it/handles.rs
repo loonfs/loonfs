@@ -20,7 +20,9 @@ use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::block_on::block_on;
 use loonfs_test_support::ids::namespace_id;
-use loonfs_test_support::stores::{BlockingStore, FailStore, InjectedError};
+use loonfs_test_support::stores::{
+    BlockingStore, FailStore, InjectedError, KeyPredicate, OperationClass,
+};
 use std::num::NonZeroUsize;
 use std::path::Path;
 use std::sync::Arc;
@@ -1038,56 +1040,95 @@ fn maintenance_checkpoint_and_retention_are_explicit_one_shot_calls() {
 }
 
 #[tokio::test]
-async fn namespace_deletion_schedules_gc_at_its_retirement_deadline() {
+async fn namespace_deletion_drops_cached_reads_and_schedules_gc_even_when_its_answer_is_lost() {
     use loonfs::{MaintenanceHint, MaintenanceJobId};
     use loonfs_core::limits::{GC_SAFETY_MARGIN_MS, NAMESPACE_RETIREMENT_GRACE_MS};
     use std::sync::Mutex;
 
-    let directory = tempdir().expect("directory");
-    let store = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
-    let hints = Arc::new(Mutex::new(Vec::new()));
-    let observed = hints.clone();
-    let writer = FsWriter::builder_with_store(store.clone())
-        .writer_id("delete-hint")
-        .maintenance_hint_observer(move |hint| observed.lock().expect("hints").push(hint))
-        .build()
-        .await
-        .expect("writer");
-    let namespace_id = namespace_id("delete-hint");
-    writer
-        .create_namespace(
-            &namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
-        .await
-        .expect("namespace");
-    hints.lock().expect("hints").clear();
-    writer
-        .delete_namespace(&namespace_id, Default::default())
-        .await
-        .expect("delete");
-    let state = loonfs_core::control::load_namespace_read_state(store.as_ref(), &namespace_id)
-        .await
-        .expect("tombstone");
-    let expected = state.status.deleted_at_ms().expect("deletion stamp")
-        + loonfs::GcConfig::default()
-            .grace_window_ms
-            .max(NAMESPACE_RETIREMENT_GRACE_MS)
-        + GC_SAFETY_MARGIN_MS;
-    assert!(
-        matches!(hints.lock().expect("hints").as_slice(), [MaintenanceHint::DueAt {
-        namespace_id: actual_namespace, job: MaintenanceJobId::GC, not_before_ms,
-    }] if actual_namespace == &namespace_id && *not_before_ms == expected)
-    );
-    hints.lock().expect("hints").clear();
-    assert_eq!(
-        writer
-            .delete_namespace(&namespace_id, Default::default())
+    for lost_answer in [false, true] {
+        let directory = tempdir().expect("directory");
+        let namespace_id = namespace_id("delete-hint");
+        let store = Arc::new(
+            FailStore::new(
+                LocalFsStore::new(directory.path()).expect("store"),
+                KeyPredicate::manifest(&namespace_id),
+                OperationClass::PutCreateIfAbsent,
+                InjectedError::Transport("lost acknowledgement".to_owned()),
+            )
+            .apply_then_fail(),
+        );
+        let hints = Arc::new(Mutex::new(Vec::new()));
+        let observed = hints.clone();
+        let writer = FsWriter::builder_with_store(store.clone())
+            .writer_id("delete-hint")
+            .runtime_cache(RuntimeCacheConfig {
+                manifest_revalidation_interval_ms: u64::MAX,
+                ..Default::default()
+            })
+            .maintenance_hint_observer(move |hint| observed.lock().expect("hints").push(hint))
+            .build()
             .await
-            .expect_err("already deleted")
-            .code(),
-        ErrorCode::NamespaceDeleted
-    );
-    assert!(hints.lock().expect("hints").is_empty());
-    writer.shutdown().await.expect("shutdown");
+            .expect("writer");
+        writer
+            .create_namespace(
+                &namespace_id,
+                CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+            )
+            .await
+            .expect("namespace");
+        writer
+            .put_file_bytes(
+                &namespace_id,
+                "/file",
+                b"data",
+                PutFileOptions::new(loonfs_test_support::test_actor()),
+            )
+            .await
+            .expect("put");
+        writer
+            .maintenance_handle("delete-hint")
+            .expect("maintenance")
+            .flush_wal(&namespace_id)
+            .await
+            .expect("fold the tail so the tombstone is the only manifest put");
+        let reader = writer.reader();
+        reader
+            .get_path_entry(&namespace_id, "/file", Default::default())
+            .await
+            .expect("warm read");
+        hints.lock().expect("hints").clear();
+        if lost_answer {
+            store.fail_next(1);
+        }
+        let deleted = writer
+            .delete_namespace(&namespace_id, Default::default())
+            .await;
+        assert_eq!(store.remaining(), 0);
+        if let Err(error) = &deleted {
+            assert!(lost_answer, "unexpected error: {error:?}");
+            assert_eq!(error.code(), ErrorCode::NamespaceDeleted);
+        }
+        let state = loonfs_core::control::load_namespace_read_state(store.as_ref(), &namespace_id)
+            .await
+            .expect("tombstone");
+        let expected = state.status.deleted_at_ms().expect("deletion stamp")
+            + loonfs::GcConfig::default()
+                .grace_window_ms
+                .max(NAMESPACE_RETIREMENT_GRACE_MS)
+            + GC_SAFETY_MARGIN_MS;
+        assert!(
+            matches!(hints.lock().expect("hints").as_slice(), [MaintenanceHint::DueAt {
+            namespace_id: actual_namespace, job: MaintenanceJobId::GC, not_before_ms,
+        }] if actual_namespace == &namespace_id && *not_before_ms == expected)
+        );
+        assert_eq!(
+            reader
+                .get_path_entry(&namespace_id, "/file", Default::default())
+                .await
+                .expect_err("the cached view is dropped")
+                .code(),
+            ErrorCode::NamespaceDeleted
+        );
+        writer.shutdown().await.expect("shutdown");
+    }
 }

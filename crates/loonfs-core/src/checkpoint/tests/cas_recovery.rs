@@ -503,6 +503,42 @@ async fn manifest_publication_recovers_an_ambiguous_put_and_tolerates_a_failed_h
 }
 
 #[tokio::test]
+async fn a_flush_whose_manifest_put_lands_without_an_answer_reports_published() {
+    let directory = tempdir().expect("directory");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace");
+    let store = FailStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::manifest(&namespace_id),
+        OperationClass::PutCreateIfAbsent,
+        InjectedError::Transport("lost acknowledgement".to_owned()),
+    )
+    .apply_then_fail();
+    let context = test_context();
+    create(&store, &namespace_id, &context)
+        .await
+        .expect("bootstrap");
+    write_file_bytes(&store, &namespace_id, "/file", b"data", &context, None)
+        .await
+        .expect("write");
+    let predecessor = load_current_manifest(&store, &namespace_id)
+        .await
+        .expect("current")
+        .state
+        .manifest()
+        .manifest_no;
+    store.fail_next(1);
+    let flushed = flush::flush_wal(&store, &namespace_id)
+        .await
+        .expect("flush");
+    assert_eq!(store.remaining(), 0);
+    assert_eq!(flushed.outcome, loonfs_api::FlushWalOutcome::Published);
+    assert_eq!(
+        flushed.manifest_no,
+        predecessor.successor().expect("next number")
+    );
+}
+
+#[tokio::test]
 async fn a_checkpoint_losing_manifest_publication_pins_the_winner() {
     let directory = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("demo").expect("namespace");
