@@ -1627,7 +1627,6 @@ impl NamespacePublisher {
     ) -> Vec<CommitResult> {
         let mut slot = self.engine.lock().await;
         let engine = self.engine_for(&mut slot);
-        let retained_projection = engine.retained_tail_weight().is_some();
         let publish = crate::fs::publish_batch_with_engine(
             &self.read_core,
             writer,
@@ -1638,7 +1637,7 @@ impl NamespacePublisher {
             batch,
         )
         .await;
-        if publish.wal_tail_observed && !retained_projection {
+        if publish.wal_tail_discovered {
             self.read_core.instruments().publisher_tail_replay();
         }
         if !publish.results.iter().any(is_retryable_wal_publish) {

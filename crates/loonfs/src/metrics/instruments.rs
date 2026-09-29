@@ -1212,7 +1212,7 @@ impl PublisherInstruments {
             ),
             tail_replays: recorder.register_counter(
                 "loonfs.publisher.tail_replays",
-                "Publishes that replayed the WAL tail because no projection was retained",
+                "Publishes that reread the WAL tail from the store instead of using a retained projection",
                 &[],
             ),
             idle_sessions_closed: recorder.register_counter(

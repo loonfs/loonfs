@@ -472,6 +472,9 @@ pub struct NamespaceCommitEnginePublishResult {
     pub wal_tail_inline_bytes: usize,
     /// Whether this attempt loaded a tail that makes the two counts current.
     pub wal_tail_observed: bool,
+    /// Whether this attempt read the WAL tail from the store instead of
+    /// reusing the retained projection.
+    pub wal_tail_discovered: bool,
     /// Read state produced by a successful, unambiguous WAL put. Callers can
     /// use it to update read caches without reloading from object storage.
     pub resulting_read_state: Option<ResultingReadState>,
@@ -751,6 +754,7 @@ impl NamespaceCommitEngine {
                 wal_tail_segments: 0,
                 wal_tail_inline_bytes: 0,
                 wal_tail_observed: false,
+                wal_tail_discovered: false,
                 resulting_read_state: None,
             };
         }
@@ -764,6 +768,7 @@ impl NamespaceCommitEngine {
                     wal_tail_segments: 0,
                     wal_tail_inline_bytes: 0,
                     wal_tail_observed: false,
+                    wal_tail_discovered: false,
                     resulting_read_state: None,
                 };
             }
@@ -832,11 +837,13 @@ impl NamespaceCommitEngine {
                     wal_tail_segments: 0,
                     wal_tail_inline_bytes: 0,
                     wal_tail_observed: false,
+                    wal_tail_discovered: false,
                     resulting_read_state: None,
                 };
             }
         };
-        let projection_observed = if publish_view.tail_discovered {
+        let wal_tail_discovered = publish_view.tail_discovered;
+        let projection_observed = if wal_tail_discovered {
             // Tail discovery observed the tip during this attempt, even when
             // the basis came from an earlier fold.
             attempt.clone()
@@ -872,6 +879,7 @@ impl NamespaceCommitEngine {
             wal_tail_segments,
             wal_tail_inline_bytes,
             wal_tail_observed: true,
+            wal_tail_discovered,
             resulting_read_state,
         }
     }

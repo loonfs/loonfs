@@ -3142,6 +3142,51 @@ async fn retained_tail_projections_stay_within_the_shared_byte_budget() {
         .expect("drain settles every publisher");
 }
 
+#[tokio::test]
+async fn a_publish_past_the_publish_budget_counts_a_tail_replay() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
+    let recorder = Arc::new(DefaultMetricsRecorder::new());
+    let mut writer =
+        test_writer_with_cache(store, RuntimeCacheConfig::default(), recorder.clone()).await;
+    let timer = Arc::new(ManualMonotonicTimer::default());
+    writer.publisher.timer = timer.clone();
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    writer
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("bootstrap");
+    let registry = writer.publisher();
+
+    for (commit_id, now_ms) in [
+        ("first", 0),
+        ("second", loonfs_core::limits::WAL_PUBLISH_BUDGET_MS + 1_000),
+    ] {
+        timer.set(now_ms);
+        registry
+            .submit_candidate(
+                namespace_id.clone(),
+                CommitCandidate::new(create_directory_request(commit_id, commit_id)),
+            )
+            .await
+            .expect("commit");
+    }
+    assert_eq!(
+        counter(&recorder, "loonfs.publisher.tail_replays"),
+        2,
+        "the engine drops a projection older than the publish budget and rereads the tail"
+    );
+
+    registry.close_admission();
+    registry
+        .drain()
+        .await
+        .expect("drain settles every publisher");
+}
+
 /// What one namespace's tail projection weighs after a single publish, so a
 /// budget can be stated in whole projections instead of a guessed constant.
 async fn one_projection_decoded_bytes() -> usize {
