@@ -73,6 +73,7 @@ async fn bounded_pages_match_full_rows_across_windows_ranges_and_eviction() {
     for budget in [1, 8 * 1024 * 1024] {
         let cache = MetadataSegmentCache::new(MetadataSegmentCacheConfig {
             max_decoded_bytes: budget,
+            ..MetadataSegmentCacheConfig::default()
         });
         for (start, end, limit) in [
             (0, 1024, 0),
@@ -146,6 +147,7 @@ async fn bounded_pages_merge_overlapping_runs_and_binding_versions() {
         .collect();
     let cache = MetadataSegmentCache::new(MetadataSegmentCacheConfig {
         max_decoded_bytes: 1,
+        ..MetadataSegmentCacheConfig::default()
     });
     // Single-row pages walk a window across the start of the overlap; a full
     // single-row traversal re-reads both indexes for every row.

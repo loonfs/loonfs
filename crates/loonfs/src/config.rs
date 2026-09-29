@@ -146,6 +146,8 @@ pub(crate) struct ReadConfig {
     pub max_read_content_bytes: Option<u64>,
     /// Cache configuration.
     pub runtime_cache: RuntimeCacheConfig,
+    /// Budgets for WAL flushes and metadata reorganizations.
+    pub metadata_lsm_policy: loonfs_core::MetadataLsmPolicy,
     /// Tracing mode label.
     pub trace_mode: TraceMode,
     /// Object-store kind label used by tracing.
@@ -183,12 +185,15 @@ pub struct RuntimeCacheConfig {
     /// shortens it.
     pub max_cached_wal_tail_projection_decoded_bytes: usize,
     /// Cache settings for decoded metadata segments. The byte budget
-    /// defaults to 256 MiB.
+    /// defaults to 256 MiB. The block memo budget, 64 MiB by default, bounds
+    /// the data blocks one read, publication, fold, or WAL flush keeps for
+    /// itself on top of the shared cache.
     pub metadata_segment_cache: MetadataSegmentCacheConfig,
 }
 
 impl RuntimeCacheConfig {
-    /// Disables runtime caches by zeroing every budget.
+    /// Disables the shared runtime caches by zeroing their budgets. The block
+    /// memo each operation keeps for itself stays at its default.
     pub fn disabled() -> Self {
         Self {
             manifest_revalidation_interval_ms: 1000,
@@ -197,6 +202,7 @@ impl RuntimeCacheConfig {
             max_cached_wal_tail_projection_decoded_bytes: 0,
             metadata_segment_cache: MetadataSegmentCacheConfig {
                 max_decoded_bytes: 0,
+                ..MetadataSegmentCacheConfig::default()
             },
         }
     }

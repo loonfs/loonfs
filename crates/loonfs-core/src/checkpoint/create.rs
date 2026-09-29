@@ -5,6 +5,7 @@ use super::record::{
     delete_checkpoint_record, verify_checkpoint_basis, write_checkpoint_record,
     CheckpointBasisVerification,
 };
+use super::runs::MetadataLsmPolicy;
 use crate::commit::WalPublishError;
 use crate::context::MutationContext;
 use crate::control_update::{retry_while_contended, CasAttempt};
@@ -34,14 +35,17 @@ pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
     let owner = &owner;
     let created = retry_while_contended(
         || async move {
-            let basis = match try_flush_wal(store, namespace_id, deadline).await? {
-                TryFlushWal::Settled(basis) => basis,
-                TryFlushWal::RaceLost => {
-                    return Ok(CasAttempt::Contended(CoreError::WalPublish(
-                        WalPublishError::StaleHead,
-                    )))
-                }
-            };
+            let basis =
+                match try_flush_wal(store, namespace_id, deadline, MetadataLsmPolicy::default())
+                    .await?
+                {
+                    TryFlushWal::Settled(basis) => basis,
+                    TryFlushWal::RaceLost => {
+                        return Ok(CasAttempt::Contended(CoreError::WalPublish(
+                            WalPublishError::StaleHead,
+                        )))
+                    }
+                };
 
             match create_checkpoint_at_basis(
                 store,

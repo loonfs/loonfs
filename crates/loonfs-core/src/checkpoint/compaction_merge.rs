@@ -19,9 +19,6 @@ use std::sync::Arc;
 /// Stored bytes one refill asks for in a single ranged read; at object-store
 /// latency the round trip, not the bytes, is what a refill costs.
 pub(super) const ITERATOR_FETCH_TARGET_BYTES: usize = 2 * 1024 * 1024;
-/// Decoded input a merge holds across every open iterator; each iterator's
-/// share caps its refill below the target when many inputs are open.
-pub(super) const MAX_MERGE_DECODED_INPUT_BYTES: usize = 64 * 1024 * 1024;
 
 /// Defines which adjacent rows a retention rule processes together.
 ///
@@ -308,15 +305,19 @@ impl<S: ObjectStore + ?Sized> SegmentBlockLoader<MetadataRow, MetadataSegmentInp
 
 /// Fills every iterator that has run out of rows, a bounded wave at a time,
 /// and answers with the decoded blocks they then hold together.
+///
+/// The iterators share `max_decoded_input_bytes` equally; each share caps a
+/// refill below the fetch target when many inputs are open.
 pub async fn refill_iterators<Row, Segment, SortKey, Loader>(
     loader: &Loader,
     iterators: &mut [SegmentRowIterator<Row, Segment, SortKey>],
+    max_decoded_input_bytes: usize,
 ) -> std::result::Result<usize, Loader::Error>
 where
     Segment: Clone,
     Loader: SegmentBlockLoader<Row, Segment>,
 {
-    let decoded_byte_limit = MAX_MERGE_DECODED_INPUT_BYTES / iterators.len().max(1);
+    let decoded_byte_limit = max_decoded_input_bytes / iterators.len().max(1);
     let mut hungry: Vec<&mut SegmentRowIterator<Row, Segment, SortKey>> = iterators
         .iter_mut()
         .filter(|iterator| iterator.needs_fill())

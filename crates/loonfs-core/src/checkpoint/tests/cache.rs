@@ -127,6 +127,7 @@ async fn a_byte_budgeted_cache_admits_wide_scans_and_holds_to_its_budget() {
 
     let degenerate = MetadataSegmentCache::new(MetadataSegmentCacheConfig {
         max_decoded_bytes: 1,
+        ..MetadataSegmentCacheConfig::default()
     });
     let degenerate_segments = super::load_manifest_segments_for_inspection(
         &store,
@@ -521,6 +522,72 @@ async fn a_view_reuses_decoded_blocks_without_a_shared_cache() {
         first_lookup_gets,
         "later lookups through the same view should reuse decoded blocks"
     );
+}
+
+#[tokio::test]
+async fn a_zero_block_memo_refetches_data_blocks_for_reads_and_flushes() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store =
+        RecordingStore::metadata_segments(LocalFsStore::new(temp_dir.path()).expect("store"));
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context)
+        .await
+        .expect("bootstrap");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/hello.txt",
+        b"hello\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write hello");
+    checkpoint_then_reorganize(
+        &store,
+        &namespace_id,
+        &context,
+        MetadataLsmPolicy::default(),
+    )
+    .await;
+    let manifest_number = current_manifest_number(&store, &namespace_id).await;
+
+    let cache = MetadataSegmentCache::new(MetadataSegmentCacheConfig {
+        max_decoded_bytes: 0,
+        max_block_memo_bytes: 0,
+    });
+    let read_view = super::load_manifest_segments_for_inspection(
+        &store,
+        Some(&cache),
+        &namespace_id,
+        &manifest_number,
+    )
+    .await
+    .expect("read view");
+    let flush_view = flush::load_manifest_projection(&store, &namespace_id, 0)
+        .await
+        .expect("flush view")
+        .manifest_segments;
+    let key = "inode-00000000000000000001";
+    for segments in [&read_view, &flush_view] {
+        store.reset();
+        assert!(segments
+            .get_for_lookup(ApiMetadataRowFamily::Inodes, key, key)
+            .await
+            .expect("first lookup")
+            .is_some());
+        let first_lookup_reads = store.count(OperationClass::Read);
+        assert!(segments
+            .get_for_lookup(ApiMetadataRowFamily::Inodes, key, key)
+            .await
+            .expect("repeated lookup")
+            .is_some());
+        assert!(
+            store.count(OperationClass::Read) > first_lookup_reads,
+            "a zero memo should keep no data block for the repeated lookup"
+        );
+    }
 }
 
 #[tokio::test]

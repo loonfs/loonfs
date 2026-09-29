@@ -1850,10 +1850,10 @@ async fn large_compaction_inputs(
 }
 
 #[tokio::test]
-async fn a_merge_reads_byte_sized_spans_concurrently_with_bounded_decoded_input() {
+async fn a_merge_reads_byte_sized_spans_concurrently_within_its_configured_decoded_input() {
     use super::super::compaction_merge::{
         refill_iterators, MetadataSegmentBlockLoader, MetadataSegmentRowIterator,
-        ITERATOR_FETCH_TARGET_BYTES, MAX_MERGE_DECODED_INPUT_BYTES,
+        ITERATOR_FETCH_TARGET_BYTES,
     };
 
     let directory = tempdir().expect("directory");
@@ -1941,9 +1941,11 @@ async fn a_merge_reads_byte_sized_spans_concurrently_with_bounded_decoded_input(
             )
         })
         .collect();
+    let max_decoded_input_bytes = 32 * 1024 * 1024;
     refill_iterators(
         &MetadataSegmentBlockLoader::new(&store, None),
         &mut iterators,
+        max_decoded_input_bytes,
     )
     .await
     .expect("wide refill");
@@ -1965,8 +1967,8 @@ async fn a_merge_reads_byte_sized_spans_concurrently_with_bounded_decoded_input(
         }
     }
     assert_eq!(data_gets, iterators.len());
-    assert!(decoded_bytes <= MAX_MERGE_DECODED_INPUT_BYTES);
-    assert!(decoded_bytes > MAX_MERGE_DECODED_INPUT_BYTES / 2);
+    assert!(decoded_bytes <= max_decoded_input_bytes);
+    assert!(decoded_bytes > max_decoded_input_bytes / 2);
     assert!(store.reads().peak_in_flight <= STORE_READ_WAVE);
 }
 

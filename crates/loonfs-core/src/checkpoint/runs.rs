@@ -1,5 +1,7 @@
 //! The LSM run model: ordered manifest runs, row families, and layout policy.
 
+use super::block_load::DEFAULT_BLOCK_MEMO_BYTES;
+use super::cache::{block_memo_bytes, MetadataSegmentCache};
 use loonfs_api::wire::manifest::{
     MetadataRowFamily, MetadataRunRef, MetadataSegmentRef, NamespaceManifestPayload, RunTier,
 };
@@ -43,8 +45,10 @@ pub(super) struct MetadataRunManifest {
     pub(super) segments: Vec<MetadataFamilySegments>,
 }
 
+/// How folds and reorganizations shape runs, and the memory one of them may
+/// hold while it works.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct MetadataLsmPolicy {
+pub struct MetadataLsmPolicy {
     pub max_delta_runs: NonZeroUsize,
     /// Runs up to this stored-byte size may merge without a size ratio.
     pub small_run_bytes: NonZeroUsize,
@@ -55,8 +59,13 @@ pub(crate) struct MetadataLsmPolicy {
     pub max_input_runs_per_step: NonZeroUsize,
     /// Row payloads one reorganization step may decode across its selected runs.
     pub max_decoded_input_rows_per_step: NonZeroUsize,
-    /// Decoded SST data-block bytes one reorganization step may materialize.
+    /// Decoded data-block bytes one reorganization merges. A bounded step
+    /// takes only the runs that fit. A streaming merge holds at most this much
+    /// across its open inputs, though each input always holds one whole block.
     pub max_decoded_input_bytes_per_step: NonZeroUsize,
+    /// Data-block bytes one WAL flush keeps in its block memo. Zero keeps
+    /// none.
+    pub max_block_memo_bytes: usize,
 }
 
 impl Default for MetadataLsmPolicy {
@@ -80,6 +89,18 @@ impl Default for MetadataLsmPolicy {
             max_decoded_input_bytes_per_step: const {
                 NonZeroUsize::new(DEFAULT_MAX_REORGANIZATION_INPUT_BYTES).unwrap()
             },
+            max_block_memo_bytes: DEFAULT_BLOCK_MEMO_BYTES,
+        }
+    }
+}
+
+impl MetadataLsmPolicy {
+    /// The default policy with the block memo budget of the segment cache a
+    /// fold or WAL flush reads through.
+    pub(crate) fn for_segment_cache(segment_cache: Option<&MetadataSegmentCache>) -> Self {
+        Self {
+            max_block_memo_bytes: block_memo_bytes(segment_cache),
+            ..Self::default()
         }
     }
 }

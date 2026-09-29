@@ -52,8 +52,7 @@ pub use self::flush::{fold_wal_tail, next_run_no_after, FoldedWalTail};
 pub use self::list::CheckpointPageCursor;
 pub use self::read_basis::{load_checkpoint_read_basis, CheckpointReadBasis};
 pub use self::reorganize::{MetadataCompactionPolicy, MetadataReorganizeOutcome};
-pub use self::runs::MetadataFamilyGroup;
-pub(crate) use self::runs::MetadataLsmPolicy;
+pub use self::runs::{MetadataFamilyGroup, MetadataLsmPolicy};
 pub use self::snapshot::load_snapshot_read_basis;
 pub use self::statistics::{
     load_checkpoint_statistics, load_namespace_statistics, NamespaceStatistics,
@@ -71,7 +70,9 @@ pub(crate) use self::create::create_checkpoint;
 pub(crate) use self::data_block_load::DecodedRowWeight;
 pub(crate) use self::delete::delete_checkpoint;
 pub(crate) use self::files::list_checkpoint_files_page;
-pub(crate) use self::flush::{flush_wal, flush_wal_with_deadline};
+#[cfg(test)]
+pub(crate) use self::flush::flush_wal;
+pub(crate) use self::flush::flush_wal_with_deadline;
 pub(crate) use self::list::list_checkpoints_page;
 pub(crate) use self::load::{
     ensure_manifest_reference_matches, load_basis_metadata_segments,

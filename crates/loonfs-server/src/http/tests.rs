@@ -1017,6 +1017,7 @@ fn test_config(root: &Path, writer_id: &str) -> ServerConfig {
         max_concurrent_uploads: 8,
         max_concurrent_downloads: 16,
         max_concurrent_maintenance: loonfs::DEFAULT_MAX_CONCURRENT_MAINTENANCE,
+        max_merge_input_bytes: loonfs_api::wire::sst_blocks::DEFAULT_MAX_REORGANIZATION_INPUT_BYTES,
         allow_unauthenticated_remote: false,
         allow_remote_without_tls: false,
         tls: None,

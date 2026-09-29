@@ -28,7 +28,8 @@ use loonfs::{
 use loonfs_api::v0::{GrepIndex, GrepIndexLifecycle};
 use loonfs_api::wire::sst_blocks::{
     DecodedDataBlock, SegmentBlocksBuilder, SegmentIndexEntry, SstBlockCodecError,
-    DEFAULT_MAX_DELTA_RUNS, DEFAULT_MAX_REORGANIZATION_INPUT_ROWS, DEFAULT_MAX_ROWS_PER_SEGMENT,
+    DEFAULT_MAX_DELTA_RUNS, DEFAULT_MAX_REORGANIZATION_INPUT_BYTES,
+    DEFAULT_MAX_REORGANIZATION_INPUT_ROWS, DEFAULT_MAX_ROWS_PER_SEGMENT,
 };
 use loonfs_api::{
     ChangeSeq, ContentRef, ErrorCode, IndexSegmentId, InodeId, ManifestNo, NamespaceId, PinId,
@@ -1153,7 +1154,12 @@ async fn merge_snapshot_range<S: ObjectStore + ?Sized>(
     };
     let mut last_key = String::new();
     while merged.rows < max_rows as u64 {
-        refill_iterators(&loader, &mut readers).await?;
+        refill_iterators(
+            &loader,
+            &mut readers,
+            DEFAULT_MAX_REORGANIZATION_INPUT_BYTES,
+        )
+        .await?;
         let Some(position) = select_next_iterator(&readers, |_, row_key| row_key) else {
             merged.exhausted = true;
             return Ok(merged);
@@ -1167,7 +1173,12 @@ async fn merge_snapshot_range<S: ObjectStore + ?Sized>(
         let row = readers[position].take_head();
         reorganize_snapshot_row(&mut merged, row, &object_key)?;
         loop {
-            refill_iterators(&loader, &mut readers).await?;
+            refill_iterators(
+                &loader,
+                &mut readers,
+                DEFAULT_MAX_REORGANIZATION_INPUT_BYTES,
+            )
+            .await?;
             let mut found = false;
             for reader in &mut readers {
                 while reader.head().is_some_and(|(row_key, _)| row_key == key) {
@@ -1183,7 +1194,12 @@ async fn merge_snapshot_range<S: ObjectStore + ?Sized>(
         }
         last_key = key;
     }
-    refill_iterators(&loader, &mut readers).await?;
+    refill_iterators(
+        &loader,
+        &mut readers,
+        DEFAULT_MAX_REORGANIZATION_INPUT_BYTES,
+    )
+    .await?;
     if readers.iter().any(|reader| reader.head().is_some()) {
         merged.next_cursor = format!("{last_key}\0");
     } else {

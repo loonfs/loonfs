@@ -2,7 +2,7 @@
 
 use super::build::{build_manifest_delta_run_segments, build_manifest_segments};
 use super::cache::MetadataSegmentCache;
-use super::load::load_basis_metadata_segments;
+use super::load::{load_basis_metadata_segments, SessionBlockMemo};
 use super::publish::{encode_manifest, publish_manifest, ManifestPublicationOutcome};
 use super::runs::{flatten_manifest_segments, MetadataLsmPolicy};
 use super::scan::VerifiedMetadataSegments;
@@ -21,7 +21,7 @@ use crate::storage::content::{
     content_object_key_for_ref, materialize_content, validate_loaded_content_bytes,
 };
 use crate::store_waves::STORE_WRITE_WAVE;
-use crate::time::{Deadline, StdMonotonicTimer};
+use crate::time::Deadline;
 use crate::wal::replay_discovered_tail;
 use crate::wal::ProjectedWalTail;
 use futures::{stream, TryStreamExt};
@@ -62,20 +62,22 @@ pub(super) enum TryFlushWal {
 }
 
 /// Flushes the visible WAL tail into segments and publishes the next manifest.
+#[cfg(test)]
 pub(crate) async fn flush_wal<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> Result<FlushWalResponse> {
-    let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
-    flush_wal_with_deadline(store, namespace_id, &deadline).await
+    let deadline = Deadline::start(Arc::new(crate::time::StdMonotonicTimer::default()));
+    flush_wal_with_deadline(store, namespace_id, &deadline, MetadataLsmPolicy::default()).await
 }
 
 pub(crate) async fn flush_wal_with_deadline<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     deadline: &Deadline,
+    policy: MetadataLsmPolicy,
 ) -> Result<FlushWalResponse> {
-    let basis = flush_wal_basis_with_deadline(store, namespace_id, deadline).await?;
+    let basis = flush_wal_basis_with_deadline(store, namespace_id, deadline, policy).await?;
     Ok(flush_wal_response(namespace_id, basis))
 }
 
@@ -83,15 +85,18 @@ async fn flush_wal_basis_with_deadline<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     deadline: &Deadline,
+    policy: MetadataLsmPolicy,
 ) -> Result<FlushedBasis> {
     retry_while_contended(
         || async move {
-            Result::Ok(match try_flush_wal(store, namespace_id, deadline).await? {
-                TryFlushWal::Settled(basis) => CasAttempt::Settled(*basis),
-                TryFlushWal::RaceLost => {
-                    CasAttempt::Contended(CoreError::WalPublish(WalPublishError::StaleHead))
-                }
-            })
+            Result::Ok(
+                match try_flush_wal(store, namespace_id, deadline, policy).await? {
+                    TryFlushWal::Settled(basis) => CasAttempt::Settled(*basis),
+                    TryFlushWal::RaceLost => {
+                        CasAttempt::Contended(CoreError::WalPublish(WalPublishError::StaleHead))
+                    }
+                },
+            )
         },
         |_, ()| async { Ok(WriteEvidence::Unknown) },
     )
@@ -102,21 +107,15 @@ pub(super) async fn try_flush_wal<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     deadline: &Deadline,
+    policy: MetadataLsmPolicy,
 ) -> Result<TryFlushWal> {
-    let projection = load_manifest_projection(store, namespace_id)
+    let projection = load_manifest_projection(store, namespace_id, policy.max_block_memo_bytes)
         .instrument(tracing::debug_span!(
             "loonfs.phase",
             phase = "scan_namespace_state"
         ))
         .await?;
-    try_flush_wal_projection(
-        store,
-        namespace_id,
-        &projection,
-        deadline,
-        MetadataLsmPolicy::default(),
-    )
-    .await
+    try_flush_wal_projection(store, namespace_id, &projection, deadline, policy).await
 }
 
 async fn try_flush_wal_projection<S: ObjectStore + ?Sized>(
@@ -228,6 +227,7 @@ pub async fn fold_wal_tail<S: ObjectStore + ?Sized>(
     input: Option<WalFoldInput>,
     deadline: &Deadline,
 ) -> Result<FoldedWalTail> {
+    let policy = MetadataLsmPolicy::for_segment_cache(segment_cache);
     let flushed = if let Some(input) = input {
         let loaded_basis = load_basis_metadata_segments(store, segment_cache, &input.basis).await?;
         let manifest_projection = ManifestProjection {
@@ -237,22 +237,16 @@ pub async fn fold_wal_tail<S: ObjectStore + ?Sized>(
             tail_state: input.tail_state,
         };
         // A fold publishes metadata without updating the namespace head.
-        match try_flush_wal_projection(
-            store,
-            namespace_id,
-            &manifest_projection,
-            deadline,
-            MetadataLsmPolicy::default(),
-        )
-        .await?
+        match try_flush_wal_projection(store, namespace_id, &manifest_projection, deadline, policy)
+            .await?
         {
             TryFlushWal::Settled(basis) => *basis,
             TryFlushWal::RaceLost => {
-                flush_wal_basis_with_deadline(store, namespace_id, deadline).await?
+                flush_wal_basis_with_deadline(store, namespace_id, deadline, policy).await?
             }
         }
     } else {
-        flush_wal_basis_with_deadline(store, namespace_id, deadline).await?
+        flush_wal_basis_with_deadline(store, namespace_id, deadline, policy).await?
     };
     Ok(FoldedWalTail {
         basis: MetadataBasis(flushed.manifest.clone()),
@@ -315,6 +309,7 @@ impl<S: ObjectStore + ?Sized> ManifestProjection<'_, S> {
 pub(super) async fn load_manifest_projection<'a, S: ObjectStore + ?Sized>(
     store: &'a S,
     namespace_id: &NamespaceId,
+    max_block_memo_bytes: usize,
 ) -> Result<ManifestProjection<'a, S>> {
     let anchor = load_read_anchor(store, namespace_id)
         .await
@@ -330,7 +325,10 @@ pub(super) async fn load_manifest_projection<'a, S: ObjectStore + ?Sized>(
     }
     let loaded_basis = super::load::metadata_basis_from_manifest(store, None, &anchor.manifest);
     let manifest_head = loaded_basis.replay_head(&head);
-    let manifest_segments = loaded_basis.segments;
+    let manifest_segments = VerifiedMetadataSegments {
+        block_memo: SessionBlockMemo::new(max_block_memo_bytes),
+        ..loaded_basis.segments
+    };
     let replayed = replay_discovered_tail(
         &manifest_head,
         &head,

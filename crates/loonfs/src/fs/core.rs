@@ -338,6 +338,7 @@ impl ReadCore {
             actor.writer_id.clone(),
         )
         .with_wall_clock(actor.wall_clock.clone())
+        .with_metadata_lsm_policy(self.inner.config.metadata_lsm_policy)
     }
 }
 

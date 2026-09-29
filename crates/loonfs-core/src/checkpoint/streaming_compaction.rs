@@ -933,6 +933,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
         let resident = refill_iterators(
             &MetadataSegmentBlockLoader::new(self.store, self.index_memo),
             iterators,
+            self.policy.max_decoded_input_bytes_per_step.get(),
         )
         .await?;
         self.result.peak_resident_blocks = self.result.peak_resident_blocks.max(resident);

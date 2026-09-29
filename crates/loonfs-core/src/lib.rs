@@ -172,7 +172,7 @@ pub use checkpoint::{
     fold_wal_tail, next_run_no_after, refill_iterators, select_next_iterator, CheckpointFile,
     CheckpointFilesPage, CheckpointFilesPageCursor, CheckpointPageCursor, FoldedWalTail,
     ListCheckpointFilesOptions, MetadataCompactionCancellation, MetadataCompactionJobOutcome,
-    MetadataCompactionPolicy, MetadataCompactionSpec, MetadataFamilyGroup,
+    MetadataCompactionPolicy, MetadataCompactionSpec, MetadataFamilyGroup, MetadataLsmPolicy,
     MetadataReorganizeOutcome, SegmentBlockLoader, SegmentRowIterator,
 };
 pub use checkpoint::{ManifestLoadError, ManifestLoadFailureClass};

@@ -845,6 +845,7 @@ async fn a_writer_resuming_after_its_fence_was_collected_does_not_acknowledge_it
                 blocked.inner(),
                 &namespace_id,
                 &Deadline::start(timer_b.clone()),
+                crate::checkpoint::MetadataLsmPolicy::default(),
             )
             .await
             .expect("fold takeover and commit");

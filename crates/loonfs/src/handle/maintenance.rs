@@ -149,6 +149,17 @@ impl FsMaintenanceBuilder {
         self
     }
 
+    /// Sets the decoded metadata bytes one maintenance step may merge. A step
+    /// merges inline only the runs that fit; a larger window runs as a
+    /// streaming compaction that holds at most this much at once. Defaults
+    /// to 64 MiB.
+    pub fn max_merge_input_bytes(mut self, max_merge_input_bytes: std::num::NonZeroUsize) -> Self {
+        self.core
+            .metadata_lsm_policy
+            .max_decoded_input_bytes_per_step = max_merge_input_bytes;
+        self
+    }
+
     /// Sets the tracing mode label.
     pub fn trace_mode(mut self, trace_mode: TraceMode) -> Self {
         self.core.trace_mode = trace_mode;
