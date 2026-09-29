@@ -87,6 +87,16 @@ impl ValidatedWalTail {
         &self.segments
     }
 
+    /// The `committed_at_ms` of the newest commit in the tail. A tail of
+    /// fences alone has none.
+    pub(crate) fn newest_commit_at_ms(&self) -> Option<u64> {
+        self.segments
+            .iter()
+            .rev()
+            .find_map(|segment| segment.envelope().payload().records.last())
+            .map(|commit| commit.committed_at_ms)
+    }
+
     #[allow(
         clippy::disallowed_methods,
         reason = "published WAL framing owns its numbered object key"

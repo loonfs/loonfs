@@ -233,20 +233,25 @@ pub(super) async fn reorganize_metadata_step_with_deadline<S: ObjectStore + ?Siz
 }
 
 /// Checks WAL and manifest descriptors without decoding segment rows.
+///
+/// `wal_tail_due` gets the unfolded WAL segment count and the newest tail
+/// commit's `committed_at_ms`, and says whether the tail alone makes
+/// maintenance due.
 pub async fn metadata_maintenance_due<S: ObjectStore + ?Sized>(
     store: &S,
     segment_cache: Option<&super::cache::MetadataSegmentCache>,
     namespace_id: &NamespaceId,
-    max_wal_tail_segments: u64,
+    wal_tail_due: impl FnOnce(u64, Option<u64>) -> bool,
     compaction_policy: MetadataCompactionPolicy,
 ) -> Result<bool> {
     let anchor = load_read_anchor(store, namespace_id)
         .await
         .map_err(CoreError::ControlObjectLoad)?;
     crate::namespace::control::ensure_namespace_live(&anchor.read_state)?;
-    let head = &anchor.read_state;
-    let wal_tail_segments = head.unfolded_wal_segments();
-    if wal_tail_segments >= max_wal_tail_segments {
+    if wal_tail_due(
+        anchor.read_state.unfolded_wal_segments(),
+        anchor.tail.newest_commit_at_ms(),
+    ) {
         return Ok(true);
     }
     let current_manifest = anchor.manifest;

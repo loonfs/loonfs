@@ -62,6 +62,7 @@ pub struct NamespaceStorageDiagnostics {
     pub retention_floor_seq: ChangeSeq,
     pub current_manifest_no: ManifestNo,
     pub wal_tail_segments: u64,
+    pub wal_tail_newest_commit_at_ms: Option<u64>,
 }
 
 impl NamespaceStorageDiagnostics {
@@ -70,6 +71,7 @@ impl NamespaceStorageDiagnostics {
         retention_floor_seq: ChangeSeq,
         current_manifest_no: ManifestNo,
         wal_tail_segments: u64,
+        wal_tail_newest_commit_at_ms: Option<u64>,
     ) -> Self {
         Self {
             created_at_ms: head.created_at_ms,
@@ -80,6 +82,7 @@ impl NamespaceStorageDiagnostics {
             retention_floor_seq,
             current_manifest_no,
             wal_tail_segments,
+            wal_tail_newest_commit_at_ms,
         }
     }
 }
@@ -120,11 +123,13 @@ pub async fn load_namespace_diagnostics<S: ObjectStore + ?Sized>(
     let wal_tail_segments = loaded.read_state.unfolded_wal_segments();
     let retention_floor_seq = loaded.retention_floor_seq();
     let manifest_no = loaded.manifest.state.manifest().manifest_no;
+    let wal_tail_newest_commit_at_ms = loaded.tail.newest_commit_at_ms();
     Ok(NamespaceStorageDiagnostics::new(
         loaded.read_state,
         retention_floor_seq,
         manifest_no,
         wal_tail_segments,
+        wal_tail_newest_commit_at_ms,
     ))
 }
 

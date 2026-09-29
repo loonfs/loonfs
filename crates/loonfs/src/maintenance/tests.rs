@@ -12,7 +12,7 @@ use crate::{ChangeSeq, NamespaceId, Result, RuntimeError};
 use loonfs_test_support::ids::{namespace_id, nonzero_usize};
 use std::collections::VecDeque;
 use std::num::NonZeroUsize;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use tokio::sync::{watch, Semaphore};
@@ -47,6 +47,12 @@ impl MaintenanceClock for ManualClock {
         // The whole window, deterministically: these tests assert on when a
         // key comes back, and admission's own tests cover the draw.
         span_ms.saturating_sub(1)
+    }
+}
+
+impl crate::WallClock for ManualClock {
+    fn now_ms(&self) -> std::result::Result<u64, crate::CoreError> {
+        Ok(self.now_ms.load(Ordering::SeqCst))
     }
 }
 
@@ -1046,4 +1052,272 @@ async fn retired_fork_collection_schedules_the_source_namespace() {
     assert!(store.counts().lists > 0);
     runner.shutdown().await.expect("shutdown runner");
     writer.shutdown().await.expect("shutdown writer");
+}
+
+async fn write_file(writer: &crate::FsWriter, namespace_id: &NamespaceId, path: &str) {
+    writer
+        .put_file_bytes(
+            namespace_id,
+            path,
+            b"body",
+            crate::PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("write a file");
+}
+
+#[tokio::test]
+async fn an_idle_tail_folds_once_and_again_only_after_a_write() {
+    use loonfs_objectstore::local_fs_store::LocalFsStore;
+    use loonfs_test_support::stores::{KeyPredicate, RecordingStore};
+
+    const START_MS: u64 = 1_750_000_000_000;
+    let idle_ms = crate::MetadataMaintenanceOptions::default().idle_fold_after_ms;
+    let clock = ManualClock::at(START_MS);
+    let directory = tempfile::tempdir().expect("tempdir");
+    let store = Arc::new(RecordingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::any(),
+    ));
+    let (observer, receiver) = maintenance_hint_relay(nonzero_usize(64));
+    let writer = crate::FsWriter::builder_with_store(store.clone())
+        .writer_id("idle-fold")
+        .wall_clock(clock.clone())
+        .maintenance_hint_observer(move |hint| observer(hint))
+        .build()
+        .await
+        .expect("writer");
+    let maintenance = writer.maintenance_handle("idle-fold").expect("maintenance");
+    let registry = MaintenanceRegistry::new();
+    registry
+        .register(Arc::new(MetadataMaintenanceJob::new(maintenance.clone())))
+        .expect("metadata job");
+    let runner = MaintenanceRunner::builder(registry)
+        .clock(clock.clone())
+        .build()
+        .expect("runner");
+    runner.attach_hints(receiver);
+    let namespace_id = namespace_id("idle");
+    writer
+        .create_namespace(
+            &namespace_id,
+            crate::CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("namespace");
+
+    write_file(&writer, &namespace_id, "/first").await;
+    runner.drain().await.expect("the first hint settles");
+    assert_eq!(
+        runner.not_before_ms(MaintenanceJobId::METADATA, &namespace_id),
+        Some(START_MS + idle_ms)
+    );
+    clock.advance_to(START_MS + 1_000);
+    write_file(&writer, &namespace_id, "/second").await;
+    runner.drain().await.expect("the second hint settles");
+    assert_eq!(
+        runner.not_before_ms(MaintenanceJobId::METADATA, &namespace_id),
+        Some(START_MS + 1_000 + idle_ms),
+        "a later write replaces the wake an earlier one planted"
+    );
+    store.reset();
+    runner.reconcile_now().await;
+    assert!(
+        store.take().is_empty(),
+        "a namespace waiting for its wake is not probed"
+    );
+
+    clock.advance_to(START_MS + 1_000 + idle_ms);
+    runner.dispatch_now();
+    runner.drain().await.expect("the idle fold settles");
+    let folded = maintenance
+        .get_namespace_diagnostics(&namespace_id)
+        .await
+        .expect("diagnostics");
+    assert_eq!(folded.wal_tail_segments, 0, "the wake folded the idle tail");
+    runner.reconcile_now().await;
+    runner.drain().await.expect("the sweep settles");
+    assert_eq!(
+        runner.stats().keys_admitted,
+        0,
+        "a folded namespace owes nothing until it is written again"
+    );
+
+    clock.advance_to(START_MS + 1_000 + 3 * idle_ms);
+    write_file(&writer, &namespace_id, "/third").await;
+    runner.drain().await.expect("the third hint settles");
+    clock.advance_to(START_MS + 1_000 + 4 * idle_ms);
+    runner.dispatch_now();
+    runner.drain().await.expect("the second idle fold settles");
+    let refolded = maintenance
+        .get_namespace_diagnostics(&namespace_id)
+        .await
+        .expect("diagnostics");
+    assert_eq!(refolded.wal_tail_segments, 0);
+    assert!(refolded.current_manifest_no > folded.current_manifest_no);
+
+    runner.shutdown().await.expect("runner shutdown");
+    writer.shutdown().await.expect("writer shutdown");
+}
+
+/// A writer, its metadata job, and a runner on one manual clock. Hints reach
+/// the runner only while `forward_hints` is set.
+struct IdleFoldHarness {
+    _directory: tempfile::TempDir,
+    clock: Arc<ManualClock>,
+    forward_hints: Arc<AtomicBool>,
+    writer: crate::FsWriter,
+    maintenance: crate::FsMaintenance,
+    runner: MaintenanceRunner,
+    namespace_id: NamespaceId,
+}
+
+impl IdleFoldHarness {
+    async fn start(start_ms: u64) -> Self {
+        let clock = ManualClock::at(start_ms);
+        let directory = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(
+            loonfs_objectstore::local_fs_store::LocalFsStore::new(directory.path()).expect("store"),
+        );
+        let forward_hints = Arc::new(AtomicBool::new(true));
+        let forward = Arc::clone(&forward_hints);
+        let (observer, receiver) = maintenance_hint_relay(nonzero_usize(64));
+        let writer = crate::FsWriter::builder_with_store(store)
+            .writer_id("idle-fold")
+            .wall_clock(clock.clone())
+            .maintenance_hint_observer(move |hint| {
+                if forward.load(Ordering::SeqCst) {
+                    observer(hint);
+                }
+            })
+            .build()
+            .await
+            .expect("writer");
+        let maintenance = writer.maintenance_handle("idle-fold").expect("maintenance");
+        let registry = MaintenanceRegistry::new();
+        registry
+            .register(Arc::new(MetadataMaintenanceJob::new(maintenance.clone())))
+            .expect("metadata job");
+        let runner = MaintenanceRunner::builder(registry)
+            .clock(clock.clone())
+            .build()
+            .expect("runner");
+        runner.attach_hints(receiver);
+        let namespace_id = namespace_id("idle");
+        writer
+            .create_namespace(
+                &namespace_id,
+                crate::CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+            )
+            .await
+            .expect("namespace");
+        Self {
+            _directory: directory,
+            clock,
+            forward_hints,
+            writer,
+            maintenance,
+            runner,
+            namespace_id,
+        }
+    }
+
+    async fn write(&self, path: &str) {
+        write_file(&self.writer, &self.namespace_id, path).await;
+        self.runner.drain().await.expect("the hint settles");
+    }
+
+    /// Moves the clock to `now_ms`, then runs every step due by then.
+    async fn run_due(&self, now_ms: u64) {
+        self.clock.advance_to(now_ms);
+        self.runner.dispatch_now();
+        self.runner.drain().await.expect("the due steps settle");
+    }
+
+    fn wake_at_ms(&self) -> Option<u64> {
+        self.runner
+            .not_before_ms(MaintenanceJobId::METADATA, &self.namespace_id)
+    }
+
+    async fn wal_tail_segments(&self) -> u64 {
+        self.maintenance
+            .get_namespace_diagnostics(&self.namespace_id)
+            .await
+            .expect("diagnostics")
+            .wal_tail_segments
+    }
+
+    async fn shutdown(self) {
+        self.runner.shutdown().await.expect("runner shutdown");
+        self.writer.shutdown().await.expect("writer shutdown");
+    }
+}
+
+#[tokio::test]
+async fn a_wake_that_runs_after_the_clock_moves_back_waits_for_the_tail_to_go_idle() {
+    const START_MS: u64 = 1_750_000_000_000;
+    let idle_ms = crate::MetadataMaintenanceOptions::default().idle_fold_after_ms;
+    let harness = IdleFoldHarness::start(START_MS).await;
+    harness.write("/first").await;
+
+    harness.clock.advance_to(START_MS + idle_ms);
+    harness.runner.dispatch_now();
+    // The queued step reads the clock only once this test yields to it.
+    harness.clock.advance_to(START_MS + idle_ms - 60_000);
+    harness
+        .runner
+        .drain()
+        .await
+        .expect("the early step settles");
+    assert_ne!(
+        harness.wal_tail_segments().await,
+        0,
+        "a tail that is not idle is not folded"
+    );
+    assert_eq!(
+        harness.wake_at_ms(),
+        Some(START_MS + idle_ms),
+        "the step asks to run again when the tail goes idle"
+    );
+
+    harness.run_due(START_MS + idle_ms).await;
+    assert_eq!(
+        harness.wal_tail_segments().await,
+        0,
+        "the tail folds without another write"
+    );
+    harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_wake_left_early_by_a_dropped_hint_waits_for_the_newest_commit_to_go_idle() {
+    const START_MS: u64 = 1_750_000_000_000;
+    let idle_ms = crate::MetadataMaintenanceOptions::default().idle_fold_after_ms;
+    let harness = IdleFoldHarness::start(START_MS).await;
+    harness.write("/first").await;
+    harness.clock.advance_to(START_MS + 1_000);
+    harness.forward_hints.store(false, Ordering::SeqCst);
+    harness.write("/second").await;
+    harness.forward_hints.store(true, Ordering::SeqCst);
+    assert_eq!(
+        harness.wake_at_ms(),
+        Some(START_MS + idle_ms),
+        "the second write's hint never reached the runner"
+    );
+
+    harness.run_due(START_MS + idle_ms).await;
+    assert_ne!(
+        harness.wal_tail_segments().await,
+        0,
+        "the second commit is not idle yet"
+    );
+    assert_eq!(
+        harness.wake_at_ms(),
+        Some(START_MS + 1_000 + idle_ms),
+        "the step asks to run again when the second commit goes idle"
+    );
+
+    harness.run_due(START_MS + 1_000 + idle_ms).await;
+    assert_eq!(harness.wal_tail_segments().await, 0);
+    harness.shutdown().await;
 }

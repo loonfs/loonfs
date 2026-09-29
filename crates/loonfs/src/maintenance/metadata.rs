@@ -45,11 +45,14 @@ impl MaintenanceJob for MetadataMaintenanceJob {
     ) -> Result<MaintenanceRunReport> {
         match self
             .maintenance
-            .maintain_metadata(namespace_id, self.options.clone())
+            .maintain_metadata_step(namespace_id, self.options.clone())
             .await
         {
-            Ok(metadata) => {
+            Ok((metadata, idle_flush_at_ms)) => {
                 let mut report = MaintenanceRunReport::concluded(metadata_conclusion(&metadata));
+                // A publication's wake can arrive before the tail is idle: the
+                // clock moved back, or a later publication's hint was dropped.
+                report.not_before_ms = idle_flush_at_ms;
                 if metadata.reorganize == (ReorganizeStepOutcome::CompactionRequired {}) {
                     report.conclusion = MaintenanceConclusion::Blocked;
                     report.follow_up =
@@ -81,6 +84,11 @@ impl MaintenanceJob for MetadataMaintenanceJob {
             publication.wal_tail_segments,
             publication.wal_tail_inline_bytes,
         )
+    }
+
+    fn wake_after_publication_ms(&self, publication: &NamespacePublication) -> Option<u64> {
+        (publication.committed_through_seq.is_some() && self.options.idle_fold_after_ms > 0)
+            .then_some(self.options.idle_fold_after_ms)
     }
 
     fn should_run_after_fold(&self) -> bool {

@@ -502,7 +502,8 @@ trigger cannot exceed the tail limit. Inline payloads count toward the existing
 publication byte limits. Explicit metadata maintenance uses
 `MetadataMaintenanceOptions::inline_content_fold_at_bytes`, also 2 MiB by default,
 when a writer-derived handle has an observed tail count. Maintenance probes use
-the segment threshold and manifest descriptors; they do not replay the tail.
+the segment threshold, the time of the tail's newest commit, and manifest
+descriptors; they do not replay the tail.
 
 ## Optional local cache
 
@@ -582,6 +583,23 @@ for the blockers.
 
 `compaction_required` asks the registered `metadata_compaction` job to run.
 The self-hosted server schedules that follow-up automatically.
+
+A namespace that stops writing below the fold thresholds is folded once its
+newest commit is 15 minutes old. After each write that leaves a short tail,
+the server schedules one metadata pass for that namespace 15 minutes later,
+and each later write moves that pass back. A namespace written more often than
+every 15 minutes is therefore never folded this way. One idle fold costs about
+55 store requests for a one-commit tail and about 90 for a ten-commit tail,
+counting the pass that confirms nothing is left and the probe after it. Most
+are reads, and each WAL object in the tail is read twice. The writes are one
+segment per metadata family, one content object per inline file, the manifest,
+and the hint. The server schedules only namespaces it has written since it
+started. A namespace that was written before a restart and has only been read
+since keeps its tail until its next write, or until
+`loonfs maintenance flush --namespace <id>` folds it. The server has no
+setting for the idle period. Embedded hosts set
+`MetadataMaintenanceOptions::idle_fold_after_ms` through
+`MetadataMaintenanceJob::options`, where zero turns the rule off.
 
 ## Current limitations
 

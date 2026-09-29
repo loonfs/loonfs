@@ -1006,7 +1006,7 @@ Races and supersessions are outcomes, not errors.
 
 A deleted namespace accepts only a run with `kind` set to `gc` or `grep_gc`; other jobs return `namespace_deleted`. Retirement follows [format section 9.5](format.md#95-retirement).
 
-`wal_flush.outcome` has four values. `not_needed` means the WAL tail was below the threshold. `flushed` means this step published the next current manifest. `already_published` means the current manifest already covered the captured WAL tail, so this step published no manifest. `retries_exhausted` means concurrent updates prevented every attempt from publishing; nothing was flushed, and a later step can try again.
+`wal_flush.outcome` has four values. `not_needed` means the WAL tail was below the threshold and its newest commit was less than 15 minutes old. `flushed` means this step published the next current manifest. `already_published` means the current manifest already covered the captured WAL tail, so this step published no manifest. `retries_exhausted` means concurrent updates prevented every attempt from publishing; nothing was flushed, and a later step can try again.
 
 `reorganize.outcome` has five values. `not_needed` means no bounded merge is
 due. `unit_published` means this run published one bounded merge.
@@ -1029,7 +1029,7 @@ byte, and segment counts. `cancelled` means the caller cancelled the job.
 or all publication attempts lost. `fenced` means another process advanced
 the manifest's compactor epoch. These last three outcomes publish no manifest.
 
-For `metadata`, `max_wal_tail_segments` overrides the flush threshold. Zero and values above the write-rejection threshold return `invalid_request`. Replay history is retained unless the request uses `kind: "retention"`. For `gc`, `grace_window_ms` overrides the grace window. A grace window below the derived safety floor returns `invalid_request`. Upload sessions keep their leases and completed content keeps its derived reclamation grace ([format: upload cleanup](format.md#116-upload-session-cleanup)).
+For `metadata`, `max_wal_tail_segments` overrides the flush threshold. Zero and values above the write-rejection threshold return `invalid_request`. A tail below the threshold is still flushed once its newest commit is 15 minutes old on the server's clock ([format: maintenance policy](format.md#73-recovery-material-and-maintenance-policy)). Replay history is retained unless the request uses `kind: "retention"`. For `gc`, `grace_window_ms` overrides the grace window. A grace window below the derived safety floor returns `invalid_request`. Upload sessions keep their leases and completed content keeps its derived reclamation grace ([format: upload cleanup](format.md#116-upload-session-cleanup)).
 
 Responses contain counts for that call. Concurrent calls can overlap deletion
 attempts, so these counts are operational summaries. No collection state is
