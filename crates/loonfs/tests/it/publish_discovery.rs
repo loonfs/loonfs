@@ -216,16 +216,32 @@ async fn a_directory_created_during_a_fold_is_seen_after_the_projection_is_dropp
         })
         .expect("child WAL put");
     let before_put = &requests[..put];
-    assert!(
-        !before_put.iter().any(|request| {
-            is_get(request, &hint(&namespace_id))
-                || (is_get(request, request.key())
-                    && request
-                        .key()
-                        .starts_with(&metadata_manifest_prefix(&namespace_id)))
-                || matches!(request, RecordedOperation::Head { .. })
-        }),
-        "{requests:?}"
+    assert_eq!(
+        before_put
+            .iter()
+            .filter(|request| is_get(request, &hint(&namespace_id)))
+            .count(),
+        2,
+        "discovery and its GC recheck read the hint; {requests:?}"
+    );
+    assert_eq!(
+        before_put
+            .iter()
+            .filter(|request| is_get(request, request.key())
+                && request
+                    .key()
+                    .starts_with(&metadata_manifest_prefix(&namespace_id)))
+            .count(),
+        2,
+        "the fold's manifest and its absent successor; {requests:?}"
+    );
+    assert_eq!(
+        before_put
+            .iter()
+            .filter(|request| matches!(request, RecordedOperation::Head { .. }))
+            .count(),
+        1,
+        "one successor probe; {requests:?}"
     );
     assert!(
         before_put

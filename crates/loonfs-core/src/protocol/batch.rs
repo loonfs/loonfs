@@ -376,7 +376,7 @@ mod tests {
             .await
             .expect("acquire writer");
         let (view, _projection) =
-            load_publish_metadata_view(&store, None, &namespace_id, acquired, None, None, None)
+            load_publish_metadata_view(&store, None, &namespace_id, acquired, None, None)
                 .await
                 .expect("publish view");
         let candidates = [("expired", 1_000), ("valid", 2_000)].map(|(name, expires_at_ms)| {
@@ -457,17 +457,10 @@ mod tests {
         let acquired_writer = acquire_writer_epoch(&store, &namespace_id, &context)
             .await
             .expect("acquire writer");
-        let (mut view, _projection) = load_publish_metadata_view(
-            &store,
-            None,
-            &namespace_id,
-            acquired_writer,
-            None,
-            None,
-            None,
-        )
-        .await
-        .expect("load publish view");
+        let (mut view, _projection) =
+            load_publish_metadata_view(&store, None, &namespace_id, acquired_writer, None, None)
+                .await
+                .expect("load publish view");
 
         let hint_key = hint(&namespace_id);
         let hint_before = store

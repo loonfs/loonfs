@@ -9,7 +9,6 @@ use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::limits::MAX_UNFLUSHED_WAL_SEGMENTS;
 use crate::metadata::{CommitReceiptRecord, MetadataView};
 use crate::namespace::basis::MetadataBasis;
-use crate::namespace::control::LoadedManifest;
 use crate::namespace::read_anchor::{load_read_anchor, NamespaceReadAnchor};
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::writer_epoch::ensure_writer_not_fenced;
@@ -164,7 +163,6 @@ impl PublishTailProjection {
 enum ViewSource<'p> {
     Cached(&'p PublishTailProjection),
     Cold(Box<NamespaceReadAnchor>),
-    Folded(&'p LoadedManifest),
 }
 
 pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
@@ -174,57 +172,25 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
     acquired_writer: AcquiredWriter,
     cached_projection: Option<&PublishTailProjection>,
     acquired_anchor: Option<NamespaceReadAnchor>,
-    folded_basis: Option<&LoadedManifest>,
 ) -> Result<(PublishMetadataView<'a, S>, PublishTailProjection)> {
     let source = if let Some(anchor) = acquired_anchor {
         ViewSource::Cold(Box::new(anchor))
-    } else if let Some(basis) = folded_basis {
-        ViewSource::Folded(basis)
     } else if let Some(cached) = cached_projection {
         ViewSource::Cached(cached)
     } else {
         ViewSource::Cold(Box::new(load_read_anchor(store, namespace_id).await?))
     };
-    let basis = match &source {
-        ViewSource::Cached(cached) => cached.basis().clone(),
-        ViewSource::Cold(anchor) => anchor.basis(),
-        ViewSource::Folded(manifest) => MetadataBasis(manifest.state.manifest()),
-    };
-    let loaded_basis = match &source {
-        ViewSource::Cold(anchor) => {
-            metadata_basis_from_manifest(store, segment_cache, &anchor.manifest)
+    let (basis, loaded_basis, head) = match &source {
+        ViewSource::Cached(cached) => {
+            let basis = cached.basis().clone();
+            let loaded_basis = load_basis_metadata_segments(store, segment_cache, &basis).await?;
+            (basis, loaded_basis, cached.head.clone())
         }
-        ViewSource::Folded(manifest) => {
-            metadata_basis_from_manifest(store, segment_cache, manifest)
-        }
-        ViewSource::Cached(_) => load_basis_metadata_segments(store, segment_cache, &basis).await?,
-    };
-    let discovered_tail = match &source {
-        ViewSource::Folded(manifest)
-            if cached_projection
-                .is_none_or(|cached| cached.head.wal_no <= manifest.state.folded_wal_no()) =>
-        {
-            Some(crate::wal::discover_tail(store, namespace_id, manifest).await?)
-        }
-        _ => None,
-    };
-    let tail_discovered = matches!(source, ViewSource::Cold(_)) || discovered_tail.is_some();
-    let head = match &source {
-        ViewSource::Cached(cached) => cached.head.clone(),
-        ViewSource::Cold(anchor) => anchor.read_state.clone(),
-        ViewSource::Folded(_) => {
-            let mut head = NamespaceReadState::from(loaded_basis.segments.manifest().payload());
-            if let Some(discovered) = &discovered_tail {
-                head = discovered.head.clone();
-            } else if let Some(cached) =
-                cached_projection.filter(|cached| cached.head.wal_no > head.wal_no)
-            {
-                head.seq = cached.head.seq;
-                head.wal_no = cached.head.wal_no;
-                head.next_inode_id = cached.head.next_inode_id;
-            }
-            head
-        }
+        ViewSource::Cold(anchor) => (
+            anchor.basis(),
+            metadata_basis_from_manifest(store, segment_cache, &anchor.manifest),
+            anchor.read_state.clone(),
+        ),
     };
     ensure_writer_not_fenced(&head, &acquired_writer)?;
     if head.status.is_deleted() {
@@ -234,31 +200,11 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
             },
         ));
     }
+    let tail_discovered = matches!(source, ViewSource::Cold(_));
     let projection = match source {
         ViewSource::Cached(cached) => cached.clone(),
         ViewSource::Cold(anchor) => {
             load_publish_tail_projection(&head, basis, &loaded_basis, &anchor.tail)?
-        }
-        ViewSource::Folded(_) => {
-            if let Some(discovered) = discovered_tail {
-                load_publish_tail_projection(&head, basis, &loaded_basis, &discovered.segments)?
-            } else {
-                let replayed = crate::wal::load_replayed_wal_tail(
-                    store,
-                    &loaded_basis.replay_head(&head),
-                    &head,
-                    &loaded_basis.base_state,
-                )
-                .await
-                .map_err(CoreError::MetadataProjection)?;
-                PublishTailProjection {
-                    basis,
-                    head: head.clone(),
-                    wal_tail_segments: head.unfolded_wal_segments(),
-                    tail_state: Arc::new(replayed.projected_tail),
-                    fold: None,
-                }
-            }
         }
     };
 
