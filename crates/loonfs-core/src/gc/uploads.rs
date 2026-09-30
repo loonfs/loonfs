@@ -195,16 +195,22 @@ async fn abort_expired_session<S: ObjectStore + ?Sized>(
         },
     )
     .await;
+    let aborted = match aborted {
+        Ok(aborted) => aborted,
+        // Another pass removed the record after this one listed it.
+        Err(CoreError::UploadNotFound { .. }) => return Ok(retain_undated()),
+        Err(error) => return Err(error),
+    };
     match aborted {
         // Keep the newly aborted record until its post-abort grace period expires.
-        Ok(CasAttempt::Settled(Some(abandoned))) => {
+        CasAttempt::Settled(Some(abandoned)) => {
             let _ = abandoned.release(sweep.store).await;
             Ok(retain_until(
                 sweep.mutation.now_ms.saturating_add(sweep.grace_window_ms),
             ))
         }
-        Ok(CasAttempt::Settled(None)) => Ok(retain_undated()),
-        Ok(CasAttempt::Contended(_)) => {
+        CasAttempt::Settled(None) => Ok(retain_undated()),
+        CasAttempt::Contended(_) => {
             tracing::debug!(
                 namespace_id = %state.namespace_id,
                 upload_id = %state.upload_id,
@@ -212,11 +218,5 @@ async fn abort_expired_session<S: ObjectStore + ?Sized>(
             );
             Ok(retain_undated())
         }
-        Ok(CasAttempt::Ambiguous(error, ())) => Err(CoreError::store(
-            loonfs_objectstore::keys::upload_session(&state.namespace_id, &state.upload_id),
-            &error,
-        )),
-        Err(CoreError::UploadNotFound { .. }) => Ok(retain_undated()),
-        Err(error) => Err(error),
     }
 }

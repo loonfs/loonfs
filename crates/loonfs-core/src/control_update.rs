@@ -15,59 +15,27 @@ use loonfs_api::{NamespaceId, UploadId};
 use loonfs_objectstore::keys::upload_session;
 use loonfs_objectstore::{ObjectMetadata, ObjectStore, ObjectStoreError};
 use std::future::Future;
-use thiserror::Error;
 
+/// An attempt whose write may have landed reads it back before it answers.
 #[derive(Debug)]
-pub(crate) enum CasAttempt<T, R = (), C = ()> {
+pub(crate) enum CasAttempt<T, R> {
     Settled(T),
     Contended(R),
-    Ambiguous(ObjectStoreError, C),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum WriteEvidence<T, R = ()> {
-    Landed(T),
-    Lost(R),
-    Unknown,
-}
-
-pub(crate) async fn settle_control_write<T, R, C, E, F, Fut>(
-    attempt: CasAttempt<T, R, C>,
-    mut confirm: F,
-) -> std::result::Result<std::result::Result<T, R>, E>
-where
-    E: From<ControlUpdateError>,
-    F: FnMut(&ObjectStoreError, C) -> Fut,
-    Fut: Future<Output = std::result::Result<WriteEvidence<T, R>, E>>,
-{
-    match attempt {
-        CasAttempt::Settled(outcome) => Ok(Ok(outcome)),
-        CasAttempt::Contended(reason) => Ok(Err(reason)),
-        CasAttempt::Ambiguous(error, context) => match confirm(&error, context).await? {
-            WriteEvidence::Landed(outcome) => Ok(Ok(outcome)),
-            WriteEvidence::Lost(reason) => Ok(Err(reason)),
-            WriteEvidence::Unknown => Err(E::from(ControlUpdateError::outcome_unknown(&error))),
-        },
-    }
 }
 
 /// Runs up to [`CONTENTION_RETRY_LIMIT`] attempts.
-pub(crate) async fn retry_while_contended<T, R, C, E, F, Fut, Confirm, ConfirmFut>(
+pub(crate) async fn retry_while_contended<T, R, E, F, Fut>(
     mut attempt: F,
-    mut confirm: Confirm,
 ) -> std::result::Result<std::result::Result<T, R>, E>
 where
-    E: From<ControlUpdateError>,
     F: FnMut() -> Fut,
-    Fut: Future<Output = std::result::Result<CasAttempt<T, R, C>, E>>,
-    Confirm: FnMut(&ObjectStoreError, C) -> ConfirmFut,
-    ConfirmFut: Future<Output = std::result::Result<WriteEvidence<T, R>, E>>,
+    Fut: Future<Output = std::result::Result<CasAttempt<T, R>, E>>,
 {
     let mut last_reason = None;
     for _attempt in 0..CONTENTION_RETRY_LIMIT {
-        match settle_control_write(attempt().await?, &mut confirm).await? {
-            Ok(outcome) => return Ok(Ok(outcome)),
-            Err(reason) => last_reason = Some(reason),
+        match attempt().await? {
+            CasAttempt::Settled(outcome) => return Ok(Ok(outcome)),
+            CasAttempt::Contended(reason) => last_reason = Some(reason),
         }
     }
     Ok(Err(last_reason.expect(
@@ -87,28 +55,20 @@ pub(crate) async fn create_control_object_under_generated_id<S: ObjectStore + ?S
     object_key: &str,
     encoded: Bytes,
 ) -> crate::error::Result<ObjectMetadata> {
-    retry_while_contended(
-        || async {
-            match store.put_if_absent(object_key, encoded.clone()).await {
-                Ok(metadata) => Ok(CasAttempt::Settled(metadata)),
-                Err(
-                    error @ (ObjectStoreError::PreconditionFailed { .. }
-                    | ObjectStoreError::Transport { .. }),
-                ) => Ok(CasAttempt::Ambiguous(error, ())),
+    retry_while_contended(|| async {
+        match store.put_if_absent(object_key, encoded.clone()).await {
+            Ok(metadata) => Ok(CasAttempt::Settled(metadata)),
+            Err(
+                error @ (ObjectStoreError::PreconditionFailed { .. }
+                | ObjectStoreError::Transport { .. }),
+            ) => match store.get_with_metadata(object_key).await {
+                Ok(Some(stored)) => Ok(CasAttempt::Settled(stored.metadata)),
+                Ok(None) => Ok(CasAttempt::Contended(CoreError::store(object_key, &error))),
                 Err(error) => Err(CoreError::store(object_key, &error)),
-            }
-        },
-        |error, ()| {
-            let failed = CoreError::store(object_key, error);
-            async move {
-                match store.get_with_metadata(object_key).await {
-                    Ok(Some(stored)) => Ok(WriteEvidence::Landed(stored.metadata)),
-                    Ok(None) => Ok(WriteEvidence::Lost(failed)),
-                    Err(error) => Err(CoreError::store(object_key, &error)),
-                }
-            }
-        },
-    )
+            },
+            Err(error) => Err(CoreError::store(object_key, &error)),
+        }
+    })
     .await?
 }
 
@@ -119,24 +79,6 @@ pub(crate) enum UploadSessionUpdate<T> {
         next: Box<UploadSessionPayload>,
         outcome: T,
     },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Error)]
-pub(crate) enum ControlUpdateError {
-    #[error("the outcome of the write to `{object_key}` is unknown: {message}")]
-    OutcomeUnknown { object_key: String, message: String },
-}
-
-impl ControlUpdateError {
-    fn outcome_unknown(error: &ObjectStoreError) -> Self {
-        Self::OutcomeUnknown {
-            object_key: error
-                .object_key()
-                .expect("an ambiguous control write should name its object")
-                .to_owned(),
-            message: error.public_message().into_owned(),
-        }
-    }
 }
 
 pub(crate) async fn update_upload_session<S, T, F, Fut>(
@@ -168,18 +110,15 @@ where
     Fut: Future<Output = crate::error::Result<UploadSessionUpdate<T>>>,
 {
     let update = &update;
-    retry_while_contended(
-        || {
-            let initial = initial.take();
-            async move {
-                match initial {
-                    Some(loaded) => try_update_loaded_upload_session(store, loaded, update).await,
-                    None => try_update_upload_session(store, namespace_id, upload_id, update).await,
-                }
+    retry_while_contended(|| {
+        let initial = initial.take();
+        async move {
+            match initial {
+                Some(loaded) => try_update_loaded_upload_session(store, loaded, update).await,
+                None => try_update_upload_session(store, namespace_id, upload_id, update).await,
             }
-        },
-        |_, ()| async { Ok::<_, CoreError>(WriteEvidence::Unknown) },
-    )
+        }
+    })
     .await?
 }
 
@@ -386,18 +325,11 @@ mod tests {
     #[tokio::test]
     async fn retry_exhaustion_returns_the_last_contention_reason() {
         let attempt = std::cell::Cell::new(0);
-        let exhausted = retry_while_contended(
-            || {
-                let reason = attempt.get();
-                attempt.set(reason + 1);
-                async move {
-                    Ok::<CasAttempt<(), usize, ()>, ControlUpdateError>(CasAttempt::Contended(
-                        reason,
-                    ))
-                }
-            },
-            |_, ()| async { Ok(WriteEvidence::Unknown) },
-        )
+        let exhausted = retry_while_contended(|| {
+            let reason = attempt.get();
+            attempt.set(reason + 1);
+            async move { Ok::<CasAttempt<(), usize>, ()>(CasAttempt::Contended(reason)) }
+        })
         .await
         .expect("contention attempts should not fail");
 

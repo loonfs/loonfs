@@ -1,6 +1,5 @@
 //! Publication through the next immutable manifest number.
 
-use crate::control_update::{settle_control_write, CasAttempt, WriteEvidence};
 use crate::error::{CoreError, Result};
 use crate::namespace::control::{
     load_current_manifest_if_present, load_current_manifest_with_hint, load_manifest_by_number,
@@ -198,52 +197,44 @@ async fn publish_manifest_from<S: ObjectStore + ?Sized>(
                 .settled_after_conflict(namespace_id)?
         }
         Err(error @ ObjectStoreError::Transport { .. }) => {
-            settle_control_write::<_, CoreError, (), CoreError, _, _>(
-                CasAttempt::Ambiguous(error, ()),
-                |_, ()| async {
-                    // Only the exact manifest at this number confirms the put;
-                    // a later manifest may already cover it.
-                    let landed = load_manifest_by_number(
-                        store,
-                        namespace_id,
-                        candidate.manifest().manifest_no,
-                    )
+            // Only the exact manifest at this number confirms the put;
+            // a later manifest may already cover it.
+            let landed =
+                load_manifest_by_number(store, namespace_id, candidate.manifest().manifest_no)
                     .await
                     .map_err(CoreError::ControlObjectLoad)?;
-                    let outcome = match landed {
-                        Some(landed) => classify_current(
-                            &landed.state,
-                            &candidate,
-                            expected_predecessor,
-                            names_own_object,
-                        ),
-                        None => {
-                            classify_current_manifest(
-                                store,
-                                namespace_id,
-                                &candidate,
-                                expected_predecessor,
-                                names_own_object,
-                            )
-                            .await?
-                        }
-                    };
-                    match outcome {
-                        ManifestClassification::Installable => Ok(WriteEvidence::Unknown),
-                        ManifestClassification::Settled(outcome) => {
-                            if matches!(
-                                outcome,
-                                ManifestPublicationOutcome::Published(_)
-                                    | ManifestPublicationOutcome::CoveredByCurrent(_)
-                            ) {
-                                ensure_publication_in_budget(&object_key, deadline)?;
-                            }
-                            Ok(WriteEvidence::Landed(outcome))
-                        }
-                    }
-                },
-            )
-            .await??
+            let outcome = match landed {
+                Some(landed) => classify_current(
+                    &landed.state,
+                    &candidate,
+                    expected_predecessor,
+                    names_own_object,
+                ),
+                None => {
+                    classify_current_manifest(
+                        store,
+                        namespace_id,
+                        &candidate,
+                        expected_predecessor,
+                        names_own_object,
+                    )
+                    .await?
+                }
+            };
+            let ManifestClassification::Settled(outcome) = outcome else {
+                return Err(CoreError::OutcomeUnknown {
+                    object_key,
+                    message: error.public_message().into_owned(),
+                });
+            };
+            if matches!(
+                outcome,
+                ManifestPublicationOutcome::Published(_)
+                    | ManifestPublicationOutcome::CoveredByCurrent(_)
+            ) {
+                ensure_publication_in_budget(&object_key, deadline)?;
+            }
+            outcome
         }
         Err(error) => return Err(CoreError::store(&object_key, &error)),
     };

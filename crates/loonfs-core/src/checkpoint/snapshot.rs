@@ -8,7 +8,7 @@ use super::record::{
 };
 use super::MetadataSegmentCache;
 use crate::context::MutationContext;
-use crate::control_update::{retry_while_contended, CasAttempt, WriteEvidence};
+use crate::control_update::{retry_while_contended, CasAttempt};
 use crate::error::{CoreError, Result};
 use crate::namespace::state::NamespaceReadState;
 use crate::time::{Deadline, MonotonicTimer};
@@ -48,45 +48,36 @@ pub(crate) async fn extend_snapshot_expiry<S: ObjectStore + ?Sized>(
 ) -> Result<Checkpoint> {
     let deadline = Deadline::start(timer);
     let object_key = checkpoint_record(namespace_id, checkpoint_id);
-    retry_while_contended(
-        || async {
-            let loaded = load_owned_checkpoint_record(
-                store,
-                namespace_id,
-                checkpoint_id,
-                CheckpointOwnerKind::Snapshot,
-            )
-            .await?;
-            let loaded = classify_live_snapshot(loaded, context.now_at(&deadline))?;
-            let mut next = loaded.state.clone();
-            let lifetime_ceiling = next.created_at_ms.saturating_add(max_lifetime_ms);
-            let expires_at_ms = snapshot_expiry_mut(&mut next.owner)
-                .expect("a classified snapshot should carry a snapshot owner");
-            let new_expires_at_ms = requested_expires_at_ms
-                .min(lifetime_ceiling)
-                .max(*expires_at_ms);
-            if *expires_at_ms == new_expires_at_ms {
-                return Ok(CasAttempt::Settled(super::checkpoint_summary(next)));
-            }
-            *expires_at_ms = new_expires_at_ms;
-            let encoded = encode_checkpoint_record(&next)?;
-            match store
-                .compare_and_swap(&object_key, &loaded.etag, encoded)
-                .await
-            {
-                Ok(_) => Ok(CasAttempt::Settled(super::checkpoint_summary(next))),
-                Err(ObjectStoreError::PreconditionFailed { .. }) => Ok(CasAttempt::Contended(
-                    CoreError::contention_exhausted(&object_key),
-                )),
-                Err(error @ ObjectStoreError::Transport { .. }) => {
-                    Ok(CasAttempt::Ambiguous(error, new_expires_at_ms))
-                }
-                Err(error) => Err(CoreError::store(&object_key, &error)),
-            }
-        },
-        |_, new_expires_at_ms| {
-            let object_key = object_key.clone();
-            async move {
+    retry_while_contended(|| async {
+        let loaded = load_owned_checkpoint_record(
+            store,
+            namespace_id,
+            checkpoint_id,
+            CheckpointOwnerKind::Snapshot,
+        )
+        .await?;
+        let loaded = classify_live_snapshot(loaded, context.now_at(&deadline))?;
+        let mut next = loaded.state.clone();
+        let lifetime_ceiling = next.created_at_ms.saturating_add(max_lifetime_ms);
+        let expires_at_ms = snapshot_expiry_mut(&mut next.owner)
+            .expect("a classified snapshot should carry a snapshot owner");
+        let new_expires_at_ms = requested_expires_at_ms
+            .min(lifetime_ceiling)
+            .max(*expires_at_ms);
+        if *expires_at_ms == new_expires_at_ms {
+            return Ok(CasAttempt::Settled(super::checkpoint_summary(next)));
+        }
+        *expires_at_ms = new_expires_at_ms;
+        let encoded = encode_checkpoint_record(&next)?;
+        match store
+            .compare_and_swap(&object_key, &loaded.etag, encoded)
+            .await
+        {
+            Ok(_) => Ok(CasAttempt::Settled(super::checkpoint_summary(next))),
+            Err(ObjectStoreError::PreconditionFailed { .. }) => Ok(CasAttempt::Contended(
+                CoreError::contention_exhausted(&object_key),
+            )),
+            Err(ObjectStoreError::Transport { .. }) => {
                 // This read proves an earlier CAS landed; it does not start a
                 // new extension. Expiry after that CAS must not erase success.
                 let current = load_owned_checkpoint_record(
@@ -103,17 +94,18 @@ pub(crate) async fn extend_snapshot_expiry<S: ObjectStore + ?Sized>(
                     .expires_at_ms()
                     .expect("a classified snapshot should carry an expiry");
                 if expires_at_ms >= new_expires_at_ms {
-                    Ok(WriteEvidence::Landed(super::checkpoint_summary(
+                    Ok(CasAttempt::Settled(super::checkpoint_summary(
                         current.state,
                     )))
                 } else {
-                    Ok(WriteEvidence::Lost(CoreError::contention_exhausted(
+                    Ok(CasAttempt::Contended(CoreError::contention_exhausted(
                         &object_key,
                     )))
                 }
             }
-        },
-    )
+            Err(error) => Err(CoreError::store(&object_key, &error)),
+        }
+    })
     .await?
 }
 

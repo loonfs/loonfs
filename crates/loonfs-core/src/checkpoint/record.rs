@@ -12,7 +12,7 @@ use loonfs_api::wire::control::{encode_control_state, ControlObjectKind, PinOwne
 use loonfs_api::{NamespaceId, PinId};
 use loonfs_objectstore::keys::checkpoint_record;
 use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
-use loonfs_objectstore::{ObjectStore, ObjectStoreError};
+use loonfs_objectstore::ObjectStore;
 
 pub(crate) fn encode_checkpoint_record(record: &PinPayload) -> crate::error::Result<Bytes> {
     let object_key = checkpoint_record(&record.namespace_id, &record.pin_id);
@@ -154,10 +154,10 @@ pub(crate) async fn delete_checkpoint_record<S: ObjectStore + ?Sized>(
     checkpoint_id: &PinId,
 ) -> Result<()> {
     let object_key = checkpoint_record(namespace_id, checkpoint_id);
-    match store.delete(&object_key).await {
-        Ok(()) | Err(ObjectStoreError::NotFound { .. }) => Ok(()),
-        Err(error) => Err(CoreError::store(&object_key, &error)),
-    }
+    store
+        .delete(&object_key)
+        .await
+        .map_err(|error| CoreError::store(&object_key, &error))
 }
 
 /// Deletes a pin whose creation failed with `error`. A failed delete is
@@ -193,7 +193,6 @@ pub(crate) async fn verify_checkpoint_basis<S: ObjectStore + ?Sized>(
     let pinned = record.manifest();
     Ok(
         if manifest.state.envelope.payload().status.is_deleted()
-            || manifest.state.retention_floor_seq() > record.head_seq
             || manifest.state.manifest().manifest_no != pinned.manifest_no
             || manifest.state.manifest().payload_checksum != pinned.payload_checksum
         {

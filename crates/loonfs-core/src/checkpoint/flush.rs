@@ -8,7 +8,7 @@ use super::runs::{flatten_manifest_segments, MetadataLsmPolicy};
 use super::scan::VerifiedMetadataSegments;
 use crate::commit::WalPublishError;
 use crate::commit_engine::WalFoldInput;
-use crate::control_update::{retry_while_contended, CasAttempt, WriteEvidence};
+use crate::control_update::{retry_while_contended, CasAttempt};
 use crate::error::CoreError;
 use crate::error::MetadataProjectionLoadError;
 use crate::error::Result;
@@ -84,19 +84,16 @@ async fn flush_wal_basis_with_deadline<S: ObjectStore + ?Sized>(
     deadline: &Deadline,
     policy: MetadataLsmPolicy,
 ) -> Result<FlushedBasis> {
-    retry_while_contended(
-        || async move {
-            Result::Ok(
-                match try_flush_wal(store, namespace_id, deadline, policy).await? {
-                    TryFlushWal::Settled(basis) => CasAttempt::Settled(*basis),
-                    TryFlushWal::RaceLost => {
-                        CasAttempt::Contended(CoreError::WalPublish(WalPublishError::StaleHead))
-                    }
-                },
-            )
-        },
-        |_, ()| async { Ok(WriteEvidence::Unknown) },
-    )
+    retry_while_contended(|| async move {
+        Result::Ok(
+            match try_flush_wal(store, namespace_id, deadline, policy).await? {
+                TryFlushWal::Settled(basis) => CasAttempt::Settled(*basis),
+                TryFlushWal::RaceLost => {
+                    CasAttempt::Contended(CoreError::WalPublish(WalPublishError::StaleHead))
+                }
+            },
+        )
+    })
     .await?
 }
 
@@ -312,13 +309,8 @@ pub(super) async fn load_manifest_projection<'a, S: ObjectStore + ?Sized>(
         block_memo: SessionBlockMemo::new(max_block_memo_bytes),
         ..loaded_basis.segments
     };
-    let replayed = replay_discovered_tail(
-        &manifest_head,
-        &head,
-        &loaded_basis.base_state,
-        &anchor.tail,
-    )
-    .map_err(CoreError::MetadataProjection)?;
+    let replayed = replay_discovered_tail(&manifest_head, &loaded_basis.base_state, &anchor.tail)
+        .map_err(CoreError::MetadataProjection)?;
     Ok(ManifestProjection {
         head,
         basis,

@@ -31,38 +31,32 @@ pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
     let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
     let deadline = &deadline;
     let owner = &owner;
-    let created = retry_while_contended(
-        || async move {
-            let basis =
-                match try_flush_wal(store, namespace_id, deadline, MetadataLsmPolicy::default())
-                    .await?
-                {
-                    TryFlushWal::Settled(basis) => basis,
-                    TryFlushWal::RaceLost => {
-                        return Ok(CasAttempt::Contended(CoreError::WalPublish(
-                            WalPublishError::StaleHead,
-                        )))
-                    }
-                };
-
-            match create_checkpoint_at_basis(
-                store,
-                namespace_id,
-                owner.clone(),
-                basis.manifest.clone(),
-                context,
-            )
-            .await
-            {
-                Ok(checkpoint) => Ok(CasAttempt::Settled(checkpoint)),
-                Err(error @ CoreError::CheckpointUnavailable(_)) => {
-                    Ok(CasAttempt::Contended(error))
-                }
-                Err(error) => Err(error),
+    let created = retry_while_contended(|| async move {
+        let basis = match try_flush_wal(store, namespace_id, deadline, MetadataLsmPolicy::default())
+            .await?
+        {
+            TryFlushWal::Settled(basis) => basis,
+            TryFlushWal::RaceLost => {
+                return Ok(CasAttempt::Contended(CoreError::WalPublish(
+                    WalPublishError::StaleHead,
+                )))
             }
-        },
-        |_, ()| async { Ok(crate::control_update::WriteEvidence::Unknown) },
-    )
+        };
+
+        match create_checkpoint_at_basis(
+            store,
+            namespace_id,
+            owner.clone(),
+            basis.manifest.clone(),
+            context,
+        )
+        .await
+        {
+            Ok(checkpoint) => Ok(CasAttempt::Settled(checkpoint)),
+            Err(error @ CoreError::CheckpointUnavailable(_)) => Ok(CasAttempt::Contended(error)),
+            Err(error) => Err(error),
+        }
+    })
     .await?;
     created
 }

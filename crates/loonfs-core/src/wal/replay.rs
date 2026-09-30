@@ -4,7 +4,6 @@ pub(crate) use super::frame::WalSegmentError;
 use super::ProjectedWalTail;
 use super::{ReplayedWalTail, ValidatedWalSegment, ValidatedWalTail};
 use crate::commit::next_inode_after;
-use crate::error::MetadataProjectionLoadError;
 use crate::namespace::state::NamespaceReadState;
 use bytes::Bytes;
 use loonfs_api::wire::wal::{WalCommitDelta, WalDelta, WalSegmentEnvelope};
@@ -28,27 +27,6 @@ pub(crate) fn project_validated_wal_tail(
         replayed.resulting_head = replayed.resulting_head.after_segment(payload);
     }
     Ok(replayed)
-}
-
-/// Verifies that replaying the WAL tail produces the current head.
-///
-/// An empty tail retains the basis tip, so the tip is compared only when the
-/// replay produced one.
-pub(crate) fn ensure_replayed_head_matches(
-    current_head: &NamespaceReadState,
-    reconstructed: &NamespaceReadState,
-) -> Result<(), MetadataProjectionLoadError> {
-    if current_head.namespace_id != reconstructed.namespace_id
-        || current_head.seq != reconstructed.seq
-        || current_head.next_inode_id != reconstructed.next_inode_id
-        || current_head.wal_no != reconstructed.wal_no
-    {
-        return Err(MetadataProjectionLoadError::ReplayedHeadMismatch {
-            expected: Box::new(current_head.clone()),
-            actual: Box::new(reconstructed.clone()),
-        });
-    }
-    Ok(())
 }
 
 pub(crate) fn replay_wal_records(

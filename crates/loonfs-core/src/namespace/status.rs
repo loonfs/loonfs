@@ -39,7 +39,6 @@ pub async fn load_namespace_wal_tail_usage<S: ObjectStore + ?Sized>(
         crate::checkpoint::load_basis_metadata_segments(store, None, &loaded.basis()).await?;
     let tail = crate::wal::replay_discovered_tail(
         &basis.replay_head(&loaded.read_state),
-        &loaded.read_state,
         &basis.base_state,
         &loaded.tail,
     )
