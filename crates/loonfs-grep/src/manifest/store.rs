@@ -9,9 +9,11 @@ use super::state::{GrepHint, GrepManifestState};
 use crate::keyspace::{hint_key, manifest_key};
 use bytes::Bytes;
 use loonfs::Deadline;
-use loonfs::{CoreError, StoreFailureClass, METADATA_PUBLICATION_BUDGET_MS};
+use loonfs::{CoreError, Observation, StoreFailureClass, METADATA_PUBLICATION_BUDGET_MS};
 use loonfs_api::{ManifestNo, NamespaceId};
+use loonfs_objectstore::timing::StdMonotonicTimer;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
+use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoadedGrepHint {
@@ -99,9 +101,12 @@ pub async fn load_grep_manifest<S: ObjectStore + ?Sized>(
     Ok(Some(envelope))
 }
 
+/// Discovers the current manifest. An absent successor confirms it only
+/// within the revalidation bound of `observed`, a time read before the call.
 pub async fn load_current_grep_manifest<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
+    mut observed: Observation,
 ) -> Result<Option<LoadedGrepManifest>> {
     let Some(mut hint) = load_grep_hint(store, namespace_id).await? else {
         return Ok(None);
@@ -123,13 +128,15 @@ pub async fn load_current_grep_manifest<S: ObjectStore + ?Sized>(
             }
         }
         // GC may remove the old discovery path after another publisher raises the hint.
+        let checked = Observation::now(Arc::new(StdMonotonicTimer::default()));
         let refreshed = load_grep_hint(store, namespace_id).await?.ok_or_else(|| {
             corrupt(
                 &hint_key(namespace_id),
                 "grep hint disappeared during discovery",
             )
         })?;
-        if refreshed.state.manifest_no > manifest_no {
+        if refreshed.state.manifest_no > manifest_no || !observed.is_within_revalidation_bound() {
+            observed = checked;
             hint = refreshed;
             manifest_no = hint.state.manifest_no;
             current = load_grep_manifest(store, namespace_id, manifest_no).await?;

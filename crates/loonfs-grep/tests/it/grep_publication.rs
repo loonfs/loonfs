@@ -77,10 +77,11 @@ async fn a_collected_publication_does_not_abandon_a_successors_backfill_checkpoi
             )
             .await
             .expect("publish a partial backfill");
-        let current = load_current_grep_manifest(&base, &namespace_id)
-            .await
-            .expect("load successor")
-            .expect("enabled");
+        let current =
+            load_current_grep_manifest(&base, &namespace_id, crate::common::observation())
+                .await
+                .expect("load successor")
+                .expect("enabled");
         assert_eq!(current.manifest_no(), ManifestNo(2));
         let checkpoint_id = match current.manifest_state().status() {
             GrepIndexStatus::Backfilling { checkpoint_id, .. } => Some(checkpoint_id.clone()),
@@ -144,10 +145,12 @@ async fn an_enable_whose_put_reads_back_absent_fails_and_keeps_its_checkpoint() 
     let outcome = host.worker.enable(&namespace_id).await;
 
     assert!(matches!(outcome, Err(error) if error.code() == ErrorCode::OutcomeUnknown));
-    assert!(load_current_grep_manifest(&base, &namespace_id)
-        .await
-        .expect("load")
-        .is_none());
+    assert!(
+        load_current_grep_manifest(&base, &namespace_id, crate::common::observation())
+            .await
+            .expect("load")
+            .is_none()
+    );
     let checkpoints = host
         .maintenance
         .list_checkpoints_page(

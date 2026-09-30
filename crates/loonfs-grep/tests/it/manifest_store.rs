@@ -80,7 +80,7 @@ async fn publications_race_one_number_and_the_loser_replans_at_the_next() {
     assert_eq!(manifest_writes.len(), 2);
     assert!(manifest_writes.iter().all(|operation| matches!(operation, RecordedOperation::Put { key, mode: PutMode::CreateIfAbsent, .. } if key == &manifest_key(&namespace_id, &ManifestNo(2)))));
     assert!(writes.iter().filter(|operation| matches!(operation, RecordedOperation::CompareAndSwap { .. } | RecordedOperation::Put { mode: PutMode::CompareAndSwap { .. }, .. })).all(|operation| matches!(operation, RecordedOperation::CompareAndSwap { key, .. } if key == &hint_key(&namespace_id))));
-    let current = load_current_grep_manifest(&store, &namespace_id)
+    let current = load_current_grep_manifest(&store, &namespace_id, crate::common::observation())
         .await
         .expect("discover")
         .expect("enabled");
@@ -113,15 +113,19 @@ async fn discovery_follows_a_lagging_hint_and_rejects_missing_or_misnamed_manife
     let directory = tempfile::tempdir().expect("directory");
     let store = LocalFsStore::new(directory.path()).expect("store");
     let namespace_id = namespace_id("docs");
-    assert!(load_current_grep_manifest(&store, &namespace_id)
-        .await
-        .expect("absent hint")
-        .is_none());
+    assert!(
+        load_current_grep_manifest(&store, &namespace_id, crate::common::observation())
+            .await
+            .expect("absent hint")
+            .is_none()
+    );
     write_hint(&store, &namespace_id, ManifestNo(1)).await;
-    assert!(load_current_grep_manifest(&store, &namespace_id)
-        .await
-        .expect("unfinished enable")
-        .is_none());
+    assert!(
+        load_current_grep_manifest(&store, &namespace_id, crate::common::observation())
+            .await
+            .expect("unfinished enable")
+            .is_none()
+    );
     for number in 1..=3 {
         let state = state(namespace_id.clone(), ManifestNo(number), RunNo(number));
         store
@@ -133,7 +137,7 @@ async fn discovery_follows_a_lagging_hint_and_rejects_missing_or_misnamed_manife
             .expect("manifest");
     }
     assert_eq!(
-        load_current_grep_manifest(&store, &namespace_id)
+        load_current_grep_manifest(&store, &namespace_id, crate::common::observation())
             .await
             .expect("lagging hint")
             .expect("enabled")
@@ -144,13 +148,15 @@ async fn discovery_follows_a_lagging_hint_and_rejects_missing_or_misnamed_manife
         .delete(&hint_key(&namespace_id))
         .await
         .expect("delete hint");
-    assert!(load_current_grep_manifest(&store, &namespace_id)
-        .await
-        .expect("missing hint")
-        .is_none());
+    assert!(
+        load_current_grep_manifest(&store, &namespace_id, crate::common::observation())
+            .await
+            .expect("missing hint")
+            .is_none()
+    );
     write_hint(&store, &namespace_id, ManifestNo(4)).await;
     assert!(matches!(
-        load_current_grep_manifest(&store, &namespace_id).await,
+        load_current_grep_manifest(&store, &namespace_id, crate::common::observation()).await,
         Err(GrepManifestError::Corrupt { .. })
     ));
     let wrong = state(namespace_id.clone(), ManifestNo(5), RunNo(0));
@@ -165,6 +171,53 @@ async fn discovery_follows_a_lagging_hint_and_rejects_missing_or_misnamed_manife
         load_grep_manifest(&store, &namespace_id, ManifestNo(4)).await,
         Err(GrepManifestError::Corrupt { .. })
     ));
+}
+
+#[tokio::test]
+async fn a_hint_reread_outside_the_revalidation_bound_walks_again_from_the_hint() {
+    use loonfs_test_support::stores::BlockingStore;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let directory = tempfile::tempdir().expect("directory");
+    let namespace_id = namespace_id("bound");
+    let hint = hint_key(&namespace_id);
+    let hint_reads = AtomicUsize::new(0);
+    let store = BlockingStore::matching(
+        LocalFsStore::new(directory.path()).expect("store"),
+        move |operation| operation.key() == hint && hint_reads.fetch_add(1, Ordering::SeqCst) == 1,
+    );
+    let put_manifest = |number| {
+        let key = manifest_key(&namespace_id, &ManifestNo(number));
+        let state = state(namespace_id.clone(), ManifestNo(number), RunNo(number));
+        let bytes = Bytes::from(encode_grep_manifest(state).expect("manifest").into_bytes());
+        let store = store.inner();
+        async move { store.put_if_absent(&key, bytes).await.expect("manifest") }
+    };
+    write_hint(store.inner(), &namespace_id, ManifestNo(1)).await;
+    put_manifest(1).await;
+    let clock = Arc::new(ManualClock::new(0));
+    store.block_next();
+    let (discovered, ()) = tokio::join!(
+        load_current_grep_manifest(
+            &store,
+            &namespace_id,
+            loonfs::Observation::now(clock.clone())
+        ),
+        async {
+            // The successor probe has found nothing; the hint reread is held.
+            store.wait_until_blocked().await;
+            put_manifest(2).await;
+            clock.advance_ms(loonfs::READ_REVALIDATION_BOUND_MS);
+            store.release();
+        }
+    );
+    assert_eq!(
+        discovered
+            .expect("discover")
+            .expect("enabled")
+            .manifest_no(),
+        ManifestNo(2)
+    );
 }
 
 #[tokio::test]
@@ -193,7 +246,7 @@ async fn a_failed_hint_raise_leaves_a_discoverable_publication_and_invalid_candi
     publish_grep_manifest(&store, Some(&first), &next, &deadline)
         .await
         .expect("publication survives hint failure");
-    let loaded = load_current_grep_manifest(&store, &namespace_id)
+    let loaded = load_current_grep_manifest(&store, &namespace_id, crate::common::observation())
         .await
         .expect("discover")
         .expect("enabled");
@@ -284,7 +337,7 @@ async fn missing_hint_etags_fail_without_repeated_store_attempts() {
         .expect("manifest")
         .is_none());
     assert!(matches!(
-        load_current_grep_manifest(&store, &namespace_id).await,
+        load_current_grep_manifest(&store, &namespace_id, crate::common::observation()).await,
         Err(GrepManifestError::Store { .. })
     ));
     let published = publish_grep_manifest(&raw, None, &first, &deadline)
@@ -344,10 +397,11 @@ async fn ambiguous_manifest_puts_reconcile_the_exact_landed_state() {
             assert_eq!(result.expect("landed manifest").manifest_state(), &next);
         } else {
             assert!(matches!(result, Err(error) if error.code() == ErrorCode::OutcomeUnknown));
-            let current = load_current_grep_manifest(&store, &namespace_id)
-                .await
-                .expect("reload")
-                .expect("current");
+            let current =
+                load_current_grep_manifest(&store, &namespace_id, crate::common::observation())
+                    .await
+                    .expect("reload")
+                    .expect("current");
             publish_grep_manifest(&store, Some(&current), &next, &deadline)
                 .await
                 .expect("caller replans");
@@ -415,7 +469,7 @@ async fn regressing_successors_fail_on_publication_and_discovery() {
             .await
             .expect("corrupt chain");
         assert!(matches!(
-            load_current_grep_manifest(&store, &namespace_id).await,
+            load_current_grep_manifest(&store, &namespace_id, crate::common::observation()).await,
             Err(GrepManifestError::Corrupt { .. })
         ));
     }
@@ -529,7 +583,7 @@ async fn a_late_ambiguous_put_cannot_confirm_a_recreated_manifest() {
                 .1
         ))
     );
-    let current = load_current_grep_manifest(&store, &namespace_id)
+    let current = load_current_grep_manifest(&store, &namespace_id, crate::common::observation())
         .await
         .expect("current manifest")
         .expect("enabled");

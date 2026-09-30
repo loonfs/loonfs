@@ -9,11 +9,13 @@ use crate::manifest::{load_current_grep_manifest, GrepIndexStatus};
 use crate::{GramIndexBuildPolicy, GrepBuildOutcome, GrepError, GrepReorganizeOutcome, GrepWorker};
 use loonfs::{
     MaintenanceCancellation, MaintenanceConclusion, MaintenanceJob, MaintenanceJobId,
-    MaintenanceProbe, MaintenanceRunReport, NamespaceId, NamespacePublication, Result,
+    MaintenanceProbe, MaintenanceRunReport, NamespaceId, NamespacePublication, Observation, Result,
     RuntimeError,
 };
 use loonfs_api::{ErrorCode, RunMaintenanceResponse};
+use loonfs_objectstore::timing::StdMonotonicTimer;
 use loonfs_objectstore::ObjectStore;
+use std::sync::Arc;
 
 /// Identity of the grep index job wherever it is registered.
 pub const GREP_INDEX_JOB: MaintenanceJobId = MaintenanceJobId::new("grep_index");
@@ -80,9 +82,13 @@ impl<S: ObjectStore + Clone + Send + Sync + 'static> MaintenanceJob for GrepMain
 
     /// Reports whether the index needs a build step from its manifest and namespace head.
     async fn probe(&self, namespace_id: &NamespaceId) -> Result<MaintenanceProbe> {
-        let Some(manifest) = load_current_grep_manifest(self.worker.store(), namespace_id)
-            .await
-            .map_err(|error| probe_failure(namespace_id, GrepError::from(error)))?
+        let Some(manifest) = load_current_grep_manifest(
+            self.worker.store(),
+            namespace_id,
+            Observation::now(Arc::new(StdMonotonicTimer::default())),
+        )
+        .await
+        .map_err(|error| probe_failure(namespace_id, GrepError::from(error)))?
         else {
             return Ok(MaintenanceProbe::Idle);
         };

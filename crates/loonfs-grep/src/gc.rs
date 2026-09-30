@@ -10,12 +10,14 @@ use crate::manifest::{
 use crate::{GrepError, GrepWorker, Result};
 use futures::StreamExt as _;
 use loonfs::{
-    delete_if_aged, grace_age, GraceAge, GC_DEFAULT_GRACE_WINDOW_MS, GC_MIN_GRACE_WINDOW_MS,
-    METADATA_PUBLICATION_BUDGET_MS, UNREFERENCED_SEGMENT_MIN_AGE_MS,
+    delete_if_aged, grace_age, GraceAge, Observation, GC_DEFAULT_GRACE_WINDOW_MS,
+    GC_MIN_GRACE_WINDOW_MS, METADATA_PUBLICATION_BUDGET_MS, UNREFERENCED_SEGMENT_MIN_AGE_MS,
 };
 use loonfs_api::{ErrorCode, ManifestNo, NamespaceId};
+use loonfs_objectstore::timing::StdMonotonicTimer;
 use loonfs_objectstore::ObjectStore;
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 pub const GREP_GC_GRACE_WINDOW_MS: u64 = GC_DEFAULT_GRACE_WINDOW_MS;
 const _: () = assert!(GREP_GC_GRACE_WINDOW_MS >= GC_MIN_GRACE_WINDOW_MS);
@@ -68,7 +70,12 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                 report.deleted_segments > 0 || report.deleted_other_objects > 0;
             return Ok(report);
         }
-        let current = load_current_grep_manifest(self.store(), namespace_id).await?;
+        let current = load_current_grep_manifest(
+            self.store(),
+            namespace_id,
+            Observation::now(Arc::new(StdMonotonicTimer::default())),
+        )
+        .await?;
         let observed_hint = current
             .as_ref()
             .map_or(ManifestNo(1), |current| current.hint.state.manifest_no);

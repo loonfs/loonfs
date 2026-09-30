@@ -227,7 +227,7 @@ async fn gram_segment_levels(
     store: &SharedObjectStore,
     namespace_id: &NamespaceId,
 ) -> BTreeSet<u32> {
-    load_current_grep_manifest(&**store, namespace_id)
+    load_current_grep_manifest(&**store, namespace_id, crate::common::observation())
         .await
         .expect("load grep manifest")
         .expect("grep manifest exists")

@@ -251,6 +251,12 @@ pub(crate) async fn grep_with(
     service.query(request, limit, &reads, store).await
 }
 
+pub(crate) fn observation() -> loonfs::Observation {
+    loonfs::Observation::now(Arc::new(
+        loonfs_objectstore::timing::StdMonotonicTimer::default(),
+    ))
+}
+
 pub(crate) fn default_page_limit() -> EffectiveLimit {
     PaginationPolicy::default()
         .resolve_limit(None)

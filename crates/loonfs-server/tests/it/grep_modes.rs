@@ -305,7 +305,7 @@ async fn serving_and_maintaining_enables_queries_nudges_and_disables_per_namespa
     let disabled_response = disable_grep(&router, &namespace_id).await;
     assert_eq!(disabled_response.lifecycle, GrepIndexLifecycle::Disabled);
     assert!(!disabled_response.reorganize_pending);
-    let disabled = load_current_grep_manifest(&*store, &namespace_id)
+    let disabled = load_current_grep_manifest(&*store, &namespace_id, observation())
         .await
         .expect("load disabled manifest")
         .expect("disabled manifest");
@@ -316,7 +316,7 @@ async fn serving_and_maintaining_enables_queries_nudges_and_disables_per_namespa
     settle(&server).await;
     assert!(
         matches!(
-            load_current_grep_manifest(&*store, &namespace_id)
+            load_current_grep_manifest(&*store, &namespace_id, observation())
                 .await
                 .expect("reload disabled manifest")
                 .expect("disabled manifest")
@@ -433,7 +433,7 @@ async fn first_query_after_restart_resumes_stale_and_mid_backfill_namespaces() {
         )
         .await
         .expect("leave mid-backfill manifest");
-    let manifest = load_current_grep_manifest(&*store, &backfill)
+    let manifest = load_current_grep_manifest(&*store, &backfill, observation())
         .await
         .expect("load manifest")
         .expect("backfill manifest");
@@ -635,7 +635,7 @@ async fn maintain_only_keeps_the_index_built_without_serving_searches() {
     assert_eq!(enable_grep(&router, &namespace_id).await, StatusCode::OK);
     settle(&server).await;
     assert_eq!(watermark(&store, &namespace_id).await, ChangeSeq(1));
-    let manifest = load_current_grep_manifest(&*store, &namespace_id)
+    let manifest = load_current_grep_manifest(&*store, &namespace_id, observation())
         .await
         .expect("load manifest")
         .expect("maintained manifest");
@@ -807,7 +807,7 @@ async fn watermark(store: &SharedObjectStore, namespace_id: &NamespaceId) -> Cha
 
 /// This namespace's durable grep lifecycle, read where an operator reads it.
 async fn lifecycle_of(store: &SharedObjectStore, namespace_id: &NamespaceId) -> GrepIndexStatus {
-    load_current_grep_manifest(&**store, namespace_id)
+    load_current_grep_manifest(&**store, namespace_id, observation())
         .await
         .expect("load grep manifest")
         .expect("an enabled namespace has a grep manifest")
@@ -1031,4 +1031,10 @@ fn grep_limits() -> [&'static str; 4] {
         LIMIT_QUERY_GREP_SCAN_BUDGET_FILES,
         LIMIT_QUERY_GREP_TAIL_BUDGET_FILES,
     ]
+}
+
+fn observation() -> loonfs::Observation {
+    loonfs::Observation::now(Arc::new(
+        loonfs_objectstore::timing::StdMonotonicTimer::default(),
+    ))
 }
