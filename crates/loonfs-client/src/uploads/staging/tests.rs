@@ -1028,6 +1028,48 @@ async fn journal_failures_stop_uploads_without_aborting_the_resumable_session() 
 }
 
 #[tokio::test]
+async fn a_one_shot_upload_aborts_its_session_once_when_completion_fails() {
+    let payload = payload(TEST_PAYLOAD_BYTES);
+    let mut multipart = multipart_script(TEST_PAYLOAD_PARTS, content_ref(&payload));
+    multipart.truncate(multipart.len() - 2);
+    let direct_put = vec![
+        capabilities_for(Advertised {
+            direct_put: true,
+            ..Advertised::default()
+        }),
+        create_direct_put_upload(ChecksumAlgorithm::Crc32c),
+        Outcome::Success(Vec::new()),
+    ];
+    let proxied = vec![capabilities(false), begin_proxied(), begin_proxied()];
+    for mut script in [multipart, direct_put, proxied] {
+        script.push(Outcome::TransportFailure);
+        script.push(json(&UploadSession {
+            namespace_id: namespace_id(),
+            upload_id: upload_id(),
+            mode: UploadMode::ServiceProxied,
+            status: UploadSessionStatus::Aborted { aborted_at_ms: 1 },
+        }));
+        let transport = scripted_transport::script(script);
+        let error = client_without_retry(&transport)
+            .put_file_bytes(
+                &spec(),
+                &payload,
+                &PutFileOptions::new(loonfs_test_support::test_actor()),
+            )
+            .await
+            .expect_err("the completion failed");
+        assert!(
+            matches!(&error, ClientError::Http(message) if message.contains("/complete")),
+            "expected the completion's error, got {error:?}"
+        );
+        let sent = transport.sent();
+        let aborts = sent.iter().filter(|sent| sent.url.ends_with("/abort"));
+        assert_eq!(aborts.count(), 1);
+        assert!(sent[sent.len() - 1].url.ends_with("/abort"));
+    }
+}
+
+#[tokio::test]
 async fn a_lost_commit_ack_replays_the_saved_request_without_reopening_the_upload() {
     let bytes = payload(1_000);
     let uploaded = content_ref(&bytes);

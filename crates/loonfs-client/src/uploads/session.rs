@@ -214,9 +214,9 @@ impl Client {
 
     /// Ends an open upload session and deletes the object it was writing.
     ///
-    /// Repeating it succeeds and reports the abort that stands. This is what
-    /// a one-pass upload does when its source fails partway: the session it
-    /// opened must not be left holding a half-written object.
+    /// Repeating it succeeds and reports the abort that stands. A one-shot
+    /// upload calls it when its transfer or completion fails, so the session
+    /// does not hold an object nothing will finish.
     pub async fn abort_upload(
         &self,
         namespace_id: &NamespaceId,
