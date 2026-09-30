@@ -11,9 +11,7 @@ use bytes::Bytes;
 use loonfs::Deadline;
 use loonfs::{CoreError, Observation, StoreFailureClass, METADATA_PUBLICATION_BUDGET_MS};
 use loonfs_api::{ManifestNo, NamespaceId};
-use loonfs_objectstore::timing::StdMonotonicTimer;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
-use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoadedGrepHint {
@@ -128,7 +126,7 @@ pub async fn load_current_grep_manifest<S: ObjectStore + ?Sized>(
             }
         }
         // GC may remove the old discovery path after another publisher raises the hint.
-        let checked = Observation::now(Arc::new(StdMonotonicTimer::default()));
+        let checked = observed.renew();
         let refreshed = load_grep_hint(store, namespace_id).await?.ok_or_else(|| {
             corrupt(
                 &hint_key(namespace_id),

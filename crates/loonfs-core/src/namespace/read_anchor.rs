@@ -62,9 +62,7 @@ pub(crate) async fn load_read_anchor_from_manifest<S: ObjectStore + ?Sized>(
                     )
                     .await?;
                     if successor || !observed.is_within_revalidation_bound() {
-                        observed = crate::time::Observation::now(Arc::new(
-                            crate::time::StdMonotonicTimer::default(),
-                        ));
+                        observed = observed.renew();
                         (manifest, hint) =
                             load_current_manifest_with_hint(store, namespace_id).await?;
                         continue;
@@ -78,9 +76,7 @@ pub(crate) async fn load_read_anchor_from_manifest<S: ObjectStore + ?Sized>(
                 });
             }
             Err(error @ ControlObjectLoadError::Codec { .. }) => {
-                observed = crate::time::Observation::now(Arc::new(
-                    crate::time::StdMonotonicTimer::default(),
-                ));
+                observed = observed.renew();
                 let (current, current_hint) =
                     load_current_manifest_with_hint(store, namespace_id).await?;
                 if current.state.manifest().manifest_no == manifest.state.manifest().manifest_no {

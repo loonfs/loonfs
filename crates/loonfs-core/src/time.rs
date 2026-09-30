@@ -82,6 +82,11 @@ impl Observation {
         Self { timer, at_ms }
     }
 
+    /// Reads the same timer again.
+    pub fn renew(&self) -> Self {
+        Self::now(Arc::clone(&self.timer))
+    }
+
     /// Returns the milliseconds elapsed since this observation.
     pub fn age_ms(&self) -> u64 {
         self.timer.monotonic_now_ms().saturating_sub(self.at_ms)
