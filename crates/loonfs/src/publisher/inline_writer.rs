@@ -66,7 +66,7 @@ async fn check_terminal_reload_failure(include_replay: bool) {
         InjectedError::Transport("recovery reads unavailable".to_owned()),
     ));
     store.fail_all();
-    let writer = crate::FsWriter::builder_with_store(store.clone())
+    let writer = crate::LoonFs::builder_with_store(store.clone())
         .writer_id("inline-writer")
         .inline_content(InlineContentOptions {
             inline_content_threshold_bytes: Some(4),
@@ -78,7 +78,7 @@ async fn check_terminal_reload_failure(include_replay: bool) {
         .build()
         .await
         .expect("writer");
-    let namespace_reader = writer.reader().namespace(&namespace);
+    let namespace_reader = writer.namespace(&namespace);
     writer
         .create_namespace(
             &namespace,
@@ -94,6 +94,7 @@ async fn check_terminal_reload_failure(include_replay: bool) {
         .await
         .expect("writer epoch");
     let permits = writer
+        .mode
         .bits
         .wal_fold_permits
         .acquire_many(crate::DEFAULT_MAX_CONCURRENT_FOLDS as u32)
@@ -110,7 +111,7 @@ async fn check_terminal_reload_failure(include_replay: bool) {
             .acquire_many(8)
             .await
             .expect("hold publications");
-        let publisher = namespace_writer.mode.session.publisher.clone();
+        let publisher = namespace_writer.session().publisher.clone();
         let (replayed, first, ()) = tokio::join!(
             namespace_writer.create_directory("/warmup", warmup_options),
             first,
@@ -208,6 +209,7 @@ async fn a_new_session_keeps_one_segment_budget_inline_until_it_observes_the_tai
     namespace_writer.close().await.expect("close session");
     let namespace_writer = writer.open_namespace(&namespace).expect("reopen namespace");
     let folds = writer
+        .mode
         .bits
         .wal_fold_permits
         .acquire_many(crate::DEFAULT_MAX_CONCURRENT_FOLDS as u32)
@@ -227,7 +229,7 @@ async fn a_new_session_keeps_one_segment_budget_inline_until_it_observes_the_tai
         namespace_writer.put_file_bytes("/b", b"bbbb", put_options("b")),
         namespace_writer.put_file_bytes("/c", b"cccc", put_options("c")),
         async {
-            let publisher = namespace_writer.mode.session.publisher.clone();
+            let publisher = namespace_writer.session().publisher.clone();
             timeout(
                 Duration::from_secs(10),
                 wait_for_queued_candidates(&publisher, 3),
@@ -266,7 +268,7 @@ async fn writer_with_policy(
 ) -> (
     tempfile::TempDir,
     Arc<RecordingStore<LocalFsStore>>,
-    crate::FsWriter,
+    crate::LoonFs<crate::Writable>,
     NamespaceId,
     crate::Namespace<crate::Writable>,
 ) {
@@ -279,7 +281,7 @@ async fn writer_with_policy_and_byte_limit(
 ) -> (
     tempfile::TempDir,
     Arc<RecordingStore<LocalFsStore>>,
-    crate::FsWriter,
+    crate::LoonFs<crate::Writable>,
     NamespaceId,
     crate::Namespace<crate::Writable>,
 ) {
@@ -288,7 +290,7 @@ async fn writer_with_policy_and_byte_limit(
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::any(),
     ));
-    let writer = crate::FsWriter::builder_with_store(store.clone())
+    let writer = crate::LoonFs::builder_with_store(store.clone())
         .writer_id("inline-writer")
         .inline_content(policy)
         .publication_limits(crate::PublicationLimits {
@@ -371,7 +373,7 @@ async fn written_records(
 async fn small_writes_use_one_wal_put_and_retry_by_bytes() {
     let (_directory, store, writer, namespace, namespace_writer) =
         writer_with_policy(policy()).await;
-    let namespace_reader = writer.reader().namespace(&namespace);
+    let namespace_reader = writer.namespace(&namespace);
     let options = put_options("small");
     let first = namespace_writer
         .put_file_bytes("/file", b"same", options.clone())
@@ -422,9 +424,9 @@ async fn disabled_and_above_threshold_writes_keep_uploaded_object_identity() {
         },
         policy(),
     ] {
-        let (_directory, store, writer, _namespace, namespace_writer) =
-            writer_with_policy(options).await;
+        let (_directory, store, writer, _namespace, namespace) = writer_with_policy(options).await;
         let bytes: &[u8] = if writer
+            .mode
             .bits
             .inline_content
             .inline_content_threshold_bytes
@@ -434,14 +436,14 @@ async fn disabled_and_above_threshold_writes_keep_uploaded_object_identity() {
         } else {
             b"large"
         };
-        namespace_writer
+        namespace
             .put_file_bytes("/file", bytes, put_options("staged"))
             .await
             .expect("put");
         assert!(family_requests(&store, DurableObjectFamily::ContentBlob) > 0);
         assert!(written_records(&store).await[0].inline_content.is_empty());
         assert_eq!(
-            namespace_writer
+            namespace
                 .put_file_bytes("/file", bytes, put_options("staged"))
                 .await
                 .expect_err("fresh object conflicts")
@@ -456,7 +458,7 @@ async fn disabled_and_above_threshold_writes_keep_uploaded_object_identity() {
 async fn inline_preparation_makes_no_request_and_retained_values_replay() {
     let (_directory, store, writer, namespace, namespace_writer) =
         writer_with_policy(policy()).await;
-    let namespace_reader = writer.reader().namespace(&namespace);
+    let namespace_reader = writer.namespace(&namespace);
     for bytes in [b"".as_slice(), b"same"] {
         store.reset();
         let prepared = namespace_writer
@@ -502,7 +504,7 @@ async fn stream_preparation_preserves_chunks_across_the_threshold() {
     use futures::StreamExt;
     let (_directory, store, writer, namespace, namespace_writer) =
         writer_with_policy(policy()).await;
-    let namespace_reader = writer.reader().namespace(&namespace);
+    let namespace_reader = writer.namespace(&namespace);
     for (index, chunks) in [
         vec![],
         vec![b"".as_slice(), b"sa", b"me"],
@@ -575,8 +577,9 @@ async fn tail_fallback_keeps_inline_identity_across_retries_and_a_fold() {
             ..policy()
         })
         .await;
-    let namespace_reader = writer.reader().namespace(&namespace);
+    let namespace_reader = writer.namespace(&namespace);
     let fold_permits = writer
+        .mode
         .bits
         .wal_fold_permits
         .acquire_many(crate::DEFAULT_MAX_CONCURRENT_FOLDS as u32)
@@ -651,7 +654,7 @@ async fn retained_receipts_answer_retries_before_fallback_when_content_writes_fa
             InjectedError::PermissionDenied("content writes refused".to_owned()),
         ));
         let store = Arc::new(RecordingStore::new(failing.clone(), KeyPredicate::any()));
-        let writer = crate::FsWriter::builder_with_store(store.clone())
+        let writer = crate::LoonFs::builder_with_store(store.clone())
             .writer_id("inline-writer")
             .inline_content(InlineContentOptions {
                 inline_content_threshold_bytes: Some(8),
@@ -751,7 +754,7 @@ async fn segment_fallback_keeps_bulk_commit_order_and_one_atomic_commit() {
             ADMISSION_BYTES,
         )
         .await;
-    let namespace_reader = writer.reader().namespace(&namespace);
+    let namespace_reader = writer.namespace(&namespace);
     let payloads = (0..VALUES)
         .map(|index| Bytes::from(vec![u8::try_from(index).expect("byte index"); VALUE_BYTES]))
         .collect::<Vec<_>>();
@@ -845,8 +848,7 @@ async fn queued_writes_share_tail_reservations_and_split_at_the_segment_budget()
             options.inline_content_fold_at_bytes = 5;
             options.inline_content_tail_limit_bytes = 5;
         }
-        let (_directory, store, writer, _namespace, namespace_writer) =
-            writer_with_policy(options).await;
+        let (_directory, store, writer, _namespace, namespace) = writer_with_policy(options).await;
         let registry = writer.publisher();
         let slots = registry
             .shared
@@ -855,10 +857,10 @@ async fn queued_writes_share_tail_reservations_and_split_at_the_segment_budget()
             .acquire_many(8)
             .await
             .expect("hold publications");
-        let publisher = namespace_writer.mode.session.publisher.clone();
+        let publisher = namespace.session().publisher.clone();
         let (first, second, ()) = tokio::join!(
-            namespace_writer.put_file_bytes("/one", b"one", put_options("one")),
-            namespace_writer.put_file_bytes("/two", b"two", put_options("two")),
+            namespace.put_file_bytes("/one", b"one", put_options("one")),
+            namespace.put_file_bytes("/two", b"two", put_options("two")),
             async {
                 timeout(Duration::from_secs(10), async {
                     while queued_candidates(&publisher.lock_state()) < 2 {
@@ -886,18 +888,19 @@ async fn queued_writes_share_tail_reservations_and_split_at_the_segment_budget()
         assert_eq!(inline_bytes, if limited_tail { 3 } else { 6 });
         if limited_tail {
             store.reset();
-            namespace_writer
+            namespace
                 .put_file_bytes("/warmup", b"x", put_options("fails"))
                 .await
                 .expect_err("directory cannot be replaced by a file");
             assert_eq!(store.count(OperationClass::Put), 0);
             let folds = writer
+                .mode
                 .bits
                 .wal_fold_permits
                 .acquire_many(crate::DEFAULT_MAX_CONCURRENT_FOLDS as u32)
                 .await
                 .expect("hold folds");
-            namespace_writer
+            namespace
                 .put_file_bytes("/after-failure", b"ok", put_options("after-failure"))
                 .await
                 .expect("reservation released on failure");
@@ -922,6 +925,7 @@ async fn repeated_projection_invalidation_does_not_repeat_the_tail_limit_oversho
         })
         .await;
     let folds = writer
+        .mode
         .bits
         .wal_fold_permits
         .acquire_many(crate::DEFAULT_MAX_CONCURRENT_FOLDS as u32)
@@ -952,7 +956,7 @@ async fn fold_completion_reports_only_inline_bytes_published_since_it_began() {
         LocalFsStore::new(directory.path()).expect("store"),
         metadata_manifest_prefix(&namespace),
     ));
-    let writer = crate::FsWriter::builder_with_store(store.clone())
+    let writer = crate::LoonFs::builder_with_store(store.clone())
         .writer_id("inline-writer")
         .inline_content(InlineContentOptions {
             inline_content_threshold_bytes: Some(4),
@@ -999,6 +1003,7 @@ async fn fold_completion_reports_only_inline_bytes_published_since_it_began() {
     );
 
     let fold_permits = writer
+        .mode
         .bits
         .wal_fold_permits
         .acquire_many(crate::DEFAULT_MAX_CONCURRENT_FOLDS as u32)
@@ -1023,7 +1028,11 @@ async fn fold_completion_reports_only_inline_bytes_published_since_it_began() {
     writer.shutdown().await.expect("shutdown");
 }
 
-async fn commit_two_values(writer: &crate::FsWriter, namespace: &NamespaceId, label: &str) {
+async fn commit_two_values(
+    writer: &crate::LoonFs<crate::Writable>,
+    namespace: &NamespaceId,
+    label: &str,
+) {
     let namespace_writer = writer.open_namespace(namespace).expect("open namespace");
     let prepared = vec![
         namespace_writer
@@ -1061,8 +1070,9 @@ async fn inline_bytes_make_automatic_and_explicit_folds_due_before_segment_count
                 ..policy()
             })
             .await;
-        let namespace_reader = writer.reader().namespace(&namespace);
+        let namespace_reader = writer.namespace(&namespace);
         let permits = writer
+            .mode
             .bits
             .wal_fold_permits
             .acquire_many(crate::DEFAULT_MAX_CONCURRENT_FOLDS as u32)
@@ -1077,9 +1087,7 @@ async fn inline_bytes_make_automatic_and_explicit_folds_due_before_segment_count
             .expect("usage");
         assert_eq!(usage.wal_tail_inline_bytes, 4);
         assert!(usage.wal_tail_segments < FOLD_AT_WAL_SEGMENTS);
-        let maintenance = writer
-            .maintenance_handle("maintenance")
-            .expect("maintenance");
+        let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id("maintenance"));
         let options = MetadataMaintenanceOptions {
             inline_content_fold_at_bytes: NonZeroUsize::new(4).expect("threshold"),
             ..Default::default()
@@ -1097,11 +1105,12 @@ async fn inline_bytes_make_automatic_and_explicit_folds_due_before_segment_count
             7,
             "one windowed WAL discovery without a byte-count replay"
         );
-        let independent = crate::FsMaintenance::builder_with_store(store.clone())
-            .actor_id("independent")
+        let independent = crate::LoonFs::builder_with_store(store.clone())
+            .writer_id("independent")
             .build()
             .await
-            .expect("independent maintenance");
+            .expect("independent maintenance")
+            .maintenance(loonfs_test_support::ids::writer_id("independent"));
         store.reset();
         let step = independent
             .maintain_metadata(&namespace, options.clone())
@@ -1216,7 +1225,7 @@ async fn invalid_inline_policy_is_rejected_before_store_access() {
             ..policy()
         },
     ] {
-        let error = crate::FsWriter::builder_with_store(store.clone())
+        let error = crate::LoonFs::builder_with_store(store.clone())
             .writer_id("writer")
             .inline_content(options)
             .build()
@@ -1226,7 +1235,7 @@ async fn invalid_inline_policy_is_rejected_before_store_access() {
         assert!(matches!(error, RuntimeError::Config(_)));
         assert!(store.snapshot().is_empty());
     }
-    crate::FsWriter::builder_with_store(store)
+    crate::LoonFs::builder_with_store(store)
         .writer_id("writer")
         .inline_content(InlineContentOptions {
             inline_content_threshold_bytes: Some(0),
@@ -1257,7 +1266,7 @@ async fn check_delayed_fold_callback(cache: RuntimeCacheConfig) {
         KeyPredicate::exact(loonfs_objectstore::keys::hint(&namespace)),
         OperationClass::CompareAndSwap,
     ));
-    let writer = crate::FsWriter::builder_with_store(store.clone())
+    let writer = crate::LoonFs::builder_with_store(store.clone())
         .writer_id("inline-writer")
         .runtime_cache(cache)
         .inline_content(InlineContentOptions {
@@ -1271,7 +1280,7 @@ async fn check_delayed_fold_callback(cache: RuntimeCacheConfig) {
         .build()
         .await
         .expect("writer");
-    let namespace_reader = writer.reader().namespace(&namespace);
+    let namespace_reader = writer.namespace(&namespace);
     writer
         .create_namespace(
             &namespace,
@@ -1281,6 +1290,7 @@ async fn check_delayed_fold_callback(cache: RuntimeCacheConfig) {
         .expect("namespace");
     let namespace_writer = writer.open_namespace(&namespace).expect("open namespace");
     let permits = writer
+        .mode
         .bits
         .wal_fold_permits
         .acquire_many(crate::DEFAULT_MAX_CONCURRENT_FOLDS as u32)
@@ -1290,9 +1300,7 @@ async fn check_delayed_fold_callback(cache: RuntimeCacheConfig) {
         .put_file_bytes("/first", b"four", put_options("first"))
         .await
         .expect("first inline commit");
-    let maintenance = writer
-        .maintenance_handle("maintenance")
-        .expect("maintenance");
+    let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id("maintenance"));
     store.block_next();
     let fold = maintenance.fold_wal(&namespace);
     let publish_after_fold = async {

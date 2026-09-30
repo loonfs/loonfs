@@ -1,8 +1,8 @@
 //! Cached reads and current retention-floor reads use different manifest requests.
 
 use loonfs::{
-    CreateNamespaceOptions, FsMaintenance, FsReader, FsWriter, MetadataMaintenanceOptions,
-    NamespaceId, PutFileOptions, SharedObjectStore,
+    CreateNamespaceOptions, LoonFs, MetadataMaintenanceOptions, NamespaceId, PutFileOptions,
+    SharedObjectStore,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::stores::{KeyPredicate, RecordingStore};
@@ -17,17 +17,18 @@ fn manifest_gets(gets: &[String]) -> Vec<String> {
 }
 
 async fn build_namespace(store: &SharedObjectStore, namespace_id: &NamespaceId) {
-    let writer = FsWriter::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone())
         .writer_id("seed-writer")
         .min_publish_interval_ms(0)
         .build()
         .await
         .expect("build writer");
-    let maintenance = FsMaintenance::builder_with_store(store.clone())
-        .actor_id("seed-maintenance")
+    let maintenance = LoonFs::builder_with_store(store.clone())
+        .writer_id("seed-maintenance")
         .build()
         .await
-        .expect("build maintenance");
+        .expect("build maintenance")
+        .maintenance(loonfs_test_support::ids::writer_id("seed-maintenance"));
     writer
         .create_namespace(
             namespace_id,
@@ -35,9 +36,9 @@ async fn build_namespace(store: &SharedObjectStore, namespace_id: &NamespaceId) 
         )
         .await
         .expect("create namespace");
-    let namespace_writer = writer.open_namespace(namespace_id).expect("open namespace");
+    let namespace = writer.open_namespace(namespace_id).expect("open namespace");
     for index in 0..4 {
-        namespace_writer
+        namespace
             .put_file_bytes(
                 &format!("/docs/file-{index}.txt"),
                 b"body",
@@ -69,7 +70,7 @@ async fn warm_reads_and_writes_reuse_their_manifest() {
     let namespace_id = NamespaceId::parse("pins").expect("valid namespace id");
     build_namespace(&store, &namespace_id).await;
 
-    let reader = FsReader::builder_with_store(store.clone())
+    let reader = LoonFs::reader_with_store(store.clone())
         .build()
         .await
         .expect("build reader");
@@ -92,7 +93,7 @@ async fn warm_reads_and_writes_reuse_their_manifest() {
         "a warm reader reuses its manifest"
     );
 
-    let writer = FsWriter::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone())
         .writer_id("warm-writer")
         .min_publish_interval_ms(0)
         .build()

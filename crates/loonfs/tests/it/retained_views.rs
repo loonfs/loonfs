@@ -3,7 +3,7 @@
 use crate::common::*;
 use loonfs::{
     current_time_ms, CreateDirectoryOptions, CreateNamespaceOptions, DeleteOptions,
-    DestinationBehavior, ForkNamespaceOptions, FsReader, GcConfig, InlineContentOptions,
+    DestinationBehavior, ForkNamespaceOptions, GcConfig, InlineContentOptions, LoonFs,
     MetadataCompactionPolicy, MetadataMaintenanceOptions, MoveOptions, PutFileOptions,
     ReorganizeStepOutcome, UndeleteOptions, UpdateAccessOptions, UpdateAttributesOptions,
     WalFlushStepOutcome, GC_DEFAULT_GRACE_WINDOW_MS, UNREFERENCED_SEGMENT_MIN_AGE_MS,
@@ -46,7 +46,7 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
         principals: PrincipalSet::new(BTreeSet::from([principal.clone()])).expect("principals"),
     };
     let writer = runtime.writer.as_subject(subject.clone());
-    let source_namespace = writer.reader().namespace(&source);
+    let source_namespace = writer.namespace(&source);
     writer
         .create_namespace(
             &source,
@@ -322,7 +322,7 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
             _ => {}
         }
 
-        let reader = FsReader::builder_with_store(object_store.clone())
+        let reader = LoonFs::reader_with_store(object_store.clone())
             .build()
             .await
             .expect("fresh reader")

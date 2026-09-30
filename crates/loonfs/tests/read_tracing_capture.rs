@@ -11,7 +11,7 @@
 //! Alone in its process, the read callsites are first hit with the capture
 //! subscriber installed, and the assertions are deterministic.
 
-use loonfs::{CreateNamespaceOptions, FsWriter, PutFileOptions, StoreConfig};
+use loonfs::{CreateNamespaceOptions, LoonFs, PutFileOptions, StoreConfig, Writable};
 use loonfs_test_support::block_on::block_on;
 use loonfs_test_support::ids::namespace_id;
 use std::path::Path;
@@ -26,8 +26,8 @@ fn store_config(root: &Path) -> StoreConfig {
     }
 }
 
-async fn writer(root: &Path) -> FsWriter {
-    FsWriter::builder(store_config(root))
+async fn writer(root: &Path) -> LoonFs<Writable> {
+    LoonFs::builder(store_config(root))
         .writer_id("read-tracing-capture-writer")
         .build()
         .await
@@ -84,7 +84,7 @@ fn reads_name_their_anchor_and_the_lookup_that_came_back_empty() {
             )
             .await
             .expect("put file");
-        let reader = writer.reader();
+        let reader = writer.read_only();
         let namespace = reader.namespace(&namespace_id);
         namespace
             .get_path_entry("/docs/report.txt", Default::default())

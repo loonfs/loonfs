@@ -12,17 +12,17 @@ use axum::response::Response;
 use axum::Router;
 use loonfs::metrics::{JsonlObjectStoreMetricsRecorder, ObjectStoreMetricsRecorder};
 use loonfs::{
-    maintenance_hint_relay, FsMaintenance, FsReader, FsWriter, GarbageCollectionJob,
-    MaintenanceHintObserver, MaintenanceRegistry, MaintenanceRunner, MetadataCompactionJob,
-    MetadataMaintenanceJob, MetadataMaintenanceOptions, SharedObjectStore,
-    StoredMetadataBlockCache, StoredMetadataBlockCacheCloseError, TraceMode, TraceStoreKind,
+    maintenance_hint_relay, GarbageCollectionJob, LoonFs, Maintenance, MaintenanceHintObserver,
+    MaintenanceRegistry, MaintenanceRunner, MetadataCompactionJob, MetadataMaintenanceJob,
+    MetadataMaintenanceOptions, SharedObjectStore, StoredMetadataBlockCache,
+    StoredMetadataBlockCacheCloseError, TraceMode, TraceStoreKind, Writable, WriterId,
 };
 use loonfs_grep::{
     new_grep_block_cache, GrepGcJob, GrepMaintenanceJob, GrepService, GrepWorker,
     DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
 };
 use loonfs_http::{
-    AuthPolicy, BindingOptions, BindingState, GrepMaintenance, HttpMetrics, NamespaceWriters,
+    AuthPolicy, BindingOptions, BindingState, GrepMaintenance, HttpMetrics, Namespaces,
 };
 use loonfs_objectstore::presign::DirectTransferIssuers;
 use loonfs_objectstore::{run_store_contract_probe, StoreProbeReport};
@@ -129,7 +129,7 @@ impl http_body::Body for DrainedBody {
 #[derive(Clone)]
 pub struct AppState {
     pub binding: BindingState,
-    pub writer: FsWriter,
+    pub runtime: LoonFs<Writable>,
     pub jobs: MaintenanceRegistry,
     pub runner: Option<MaintenanceRunner>,
     pub local_cache: Option<Arc<FoyerStoredMetadataBlockCache>>,
@@ -147,7 +147,7 @@ pub struct AppOptions {
 /// Builds the router and returns its state.
 ///
 /// After an embedded listener drains, the host must shut down
-/// [`AppState::writer`] and [`AppState::runner`], then close
+/// [`AppState::runtime`] and [`AppState::runner`], then close
 /// [`AppState::local_cache`] so in-memory entries are flushed. [`serve`]
 /// performs these steps automatically. The runner and cache are optional.
 pub async fn app(
@@ -183,16 +183,16 @@ pub async fn app(
     } else {
         (None, None)
     };
-    // Opened before the handles, because the handles are what it is
+    // Opened before the runtime, because the runtime is what it is
     // installed on: a directory that cannot be owned fails startup here
     // rather than after a runtime is already running on it.
     let local_cache = open_local_cache(&config, &metrics).await?;
-    // Grep reads and checkpoints through the same handles the HTTP API groups
-    // use, so it is composed after them. Nothing has to be wired back into
-    // the writer for its publications to reach the index: the job says on
-    // the trait that publications concern it, and registering it is what
+    // Grep reads and checkpoints through the same runtime the HTTP API
+    // groups use, so it is composed after it. Nothing has to be wired back
+    // into the runtime for its publications to reach the index: the job says
+    // on the trait that publications concern it, and registering it is what
     // subscribes it.
-    let (writer, reader, maintenance) = build_handles(
+    let (runtime, maintenance) = build_handles(
         &config,
         store,
         &metrics,
@@ -201,13 +201,19 @@ pub async fn app(
         maintenance_hint_observer,
     )
     .await?;
-    let probe_store = writer.object_store();
+    let probe_store = runtime.object_store();
     // A deployment that maintains the index needs a worker whether or not it
-    // answers queries with one. It runs on the writer's own instrumented
+    // answers queries with one. It runs on the runtime's own instrumented
     // client, so the grep-owned traffic is measured like every other
     // request instead of escaping on a second, raw client.
-    let grep_worker = (config.grep.mode.serves_grep() || config.grep.mode.maintains_index())
-        .then(|| GrepWorker::new(writer.object_store(), reader.clone(), maintenance.clone()));
+    let grep_worker =
+        (config.grep.mode.serves_grep() || config.grep.mode.maintains_index()).then(|| {
+            GrepWorker::new(
+                runtime.object_store(),
+                runtime.read_only(),
+                maintenance.clone(),
+            )
+        });
     let grep_service = config.grep.mode.serves_grep().then(|| {
         let grep_block_cache = Arc::new(new_grep_block_cache(
             DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
@@ -298,9 +304,8 @@ pub async fn app(
             config.max_concurrent_downloads.min(Semaphore::MAX_PERMITS),
         )),
         options,
-        writer: writer.clone(),
-        namespaces: Arc::new(NamespaceWriters::new(writer.clone())),
-        reader,
+        runtime: runtime.clone(),
+        namespaces: Arc::new(Namespaces::new(runtime.clone())),
         maintenance,
         probe_store,
         direct_transfers,
@@ -311,7 +316,7 @@ pub async fn app(
     };
     let state = AppState {
         binding,
-        writer,
+        runtime,
         jobs,
         runner,
         local_cache,
@@ -345,11 +350,12 @@ async fn open_local_cache(
     }
 }
 
-/// Builds the process handles over one store and one metrics recorder.
+/// Builds the process runtime and its maintenance over one store and one
+/// metrics recorder.
 ///
 /// An optional JSONL recorder receives the same object-store samples. The
-/// local block cache is installed once on the writer's shared runtime core,
-/// so the reader and maintenance use the same decoded cache hierarchy.
+/// local block cache is installed once on the runtime, so its reads and its
+/// maintenance use the same decoded cache hierarchy.
 pub(super) async fn build_handles(
     config: &ServerConfig,
     store: SharedObjectStore,
@@ -357,7 +363,7 @@ pub(super) async fn build_handles(
     metrics_jsonl_path: Option<OsString>,
     local_cache: Option<Arc<FoyerStoredMetadataBlockCache>>,
     maintenance_hint_observer: Option<MaintenanceHintObserver>,
-) -> Result<(FsWriter, FsReader, FsMaintenance), ServerConfigError> {
+) -> Result<(LoonFs<Writable>, Maintenance), ServerConfigError> {
     let trace_store_kind = TraceStoreKind::from(config.store.kind());
     let samples = object_store_metrics_recorder(metrics_jsonl_path)?;
     let runtime_error = |error: loonfs::RuntimeError| ServerConfigError::InvalidField {
@@ -365,7 +371,7 @@ pub(super) async fn build_handles(
         reason: error.to_string(),
     };
 
-    let mut writer_builder = FsWriter::builder_with_store(store.clone())
+    let mut builder = LoonFs::builder_with_store(store.clone())
         .writer_id(config.writer_id.clone())
         .min_publish_interval_ms(config.min_publish_interval_ms)
         .publication_limits(config.publication.resolve())
@@ -378,29 +384,31 @@ pub(super) async fn build_handles(
             std::num::NonZeroUsize::new(config.max_merge_input_bytes)
                 .expect("validated merge input budget should be nonzero"),
         )
-        // The reader below shares this core, so the read cap covers every
-        // proxied content read the server serves.
+        // Every read the server serves goes through this runtime, so the
+        // read cap covers every proxied content read.
         .max_read_content_bytes(config.max_download_bytes)
         .runtime_cache(config.runtime_cache_config())
         .trace_mode(TraceMode::Remote)
         .trace_store_kind(trace_store_kind)
         .metrics_recorder(metrics.recorder());
     if let Some(observer) = maintenance_hint_observer {
-        writer_builder = writer_builder.maintenance_hint_observer(move |hint| observer(hint));
+        builder = builder.maintenance_hint_observer(move |hint| observer(hint));
     }
     if let Some(samples) = &samples {
-        writer_builder = writer_builder.object_store_metrics_recorder(Arc::clone(samples));
+        builder = builder.object_store_metrics_recorder(Arc::clone(samples));
     }
     if let Some(local_cache) = local_cache {
-        writer_builder = writer_builder.stored_metadata_block_cache(local_cache);
+        builder = builder.stored_metadata_block_cache(local_cache);
     }
-    let writer = writer_builder.build().await.map_err(runtime_error)?;
-    let reader = writer.reader();
-    let maintenance = writer
-        .maintenance_handle(format!("{}-maintenance", config.writer_id))
-        .map_err(runtime_error)?;
+    let runtime = builder.build().await.map_err(runtime_error)?;
+    let maintenance_writer_id = WriterId::parse(format!("{}-maintenance", config.writer_id))
+        .map_err(|error| ServerConfigError::InvalidField {
+            field: "writer_id",
+            reason: error.to_string(),
+        })?;
+    let maintenance = runtime.maintenance(maintenance_writer_id);
 
-    Ok((writer, reader, maintenance))
+    Ok((runtime, maintenance))
 }
 
 fn object_store_metrics_recorder(
@@ -436,7 +444,7 @@ pub enum ServeError {
     Tls(#[source] TlsConfigError),
     #[error("server failed while serving requests: {0}")]
     Serve(#[source] std::io::Error),
-    #[error("writer or maintenance shutdown did not settle: {0}")]
+    #[error("runtime or maintenance shutdown did not settle: {0}")]
     Shutdown(#[source] loonfs::RuntimeError),
     #[error("the local block cache did not close during shutdown: {0}")]
     LocalCacheClose(#[source] StoredMetadataBlockCacheCloseError),
@@ -523,7 +531,7 @@ pub async fn serve_with_shutdown(
 /// The one serving body, over whichever listener the deployment configured.
 /// Plaintext and TLS differ in what `accept` returns and in nothing else.
 /// Both close admission, drain requests, close the listener, and settle the
-/// writer in the same order.
+/// runtime in the same order.
 pub(super) async fn serve_on<L>(
     listener: L,
     config: ServerConfig,
@@ -537,7 +545,7 @@ where
     serve_and_settle(
         listener,
         router,
-        state.writer,
+        state.runtime,
         state.runner,
         state.local_cache,
         shutdown_deadline_ms,
@@ -556,7 +564,7 @@ where
 pub(super) async fn serve_and_settle<L>(
     listener: L,
     router: Router,
-    writer: FsWriter,
+    runtime: LoonFs<Writable>,
     runner: Option<MaintenanceRunner>,
     local_cache: Option<Arc<FoyerStoredMetadataBlockCache>>,
     shutdown_deadline_ms: u64,
@@ -583,7 +591,7 @@ where
         result = server.as_mut() => result,
         () = shutdown.as_mut() => {
             // This is synchronous so readiness changes before the drain waits.
-            writer.close_admission_for_shutdown();
+            runtime.close_admission_for_shutdown();
             if let Some(runner) = &runner {
                 runner.close_admission();
             }
@@ -604,17 +612,17 @@ where
     // Dropping the server cancels requests left behind by an expired drain.
     drop(server);
     served.map_err(ServeError::Serve)?;
-    let writer_settled = writer.shutdown().await;
+    let runtime_settled = runtime.shutdown().await;
     let runner_settled = match runner {
         Some(runner) => runner.shutdown().await,
         None => Ok(()),
     };
-    let settled = writer_settled
+    let settled = runtime_settled
         .and(runner_settled)
         .map_err(ServeError::Shutdown);
-    // Close the cache after writer shutdown, even when writer shutdown fails.
-    // Closing flushes retained memory entries to disk. If both steps fail, report
-    // the writer failure.
+    // Close the cache after runtime shutdown, even when runtime shutdown
+    // fails. Closing flushes retained memory entries to disk. If both steps
+    // fail, report the runtime failure.
     let closed = match local_cache {
         Some(local_cache) => local_cache
             .close()

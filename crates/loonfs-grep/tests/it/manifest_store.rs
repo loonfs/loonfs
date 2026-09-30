@@ -478,7 +478,7 @@ async fn regressing_successors_fail_on_publication_and_discovery() {
 #[tokio::test]
 async fn a_late_ambiguous_put_cannot_confirm_a_recreated_manifest() {
     use crate::common::GrepHost;
-    use loonfs::{CoreError, CreateNamespaceOptions, FsWriter, RuntimeError, SharedObjectStore};
+    use loonfs::{CoreError, CreateNamespaceOptions, LoonFs, RuntimeError, SharedObjectStore};
     use loonfs_test_support::stores::{BlockingStore, MetadataMapStore};
 
     let directory = tempfile::tempdir().expect("directory");
@@ -487,7 +487,7 @@ async fn a_late_ambiguous_put_cannot_confirm_a_recreated_manifest() {
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::prefix(manifests_prefix(&namespace_id)),
     ));
-    let writer = FsWriter::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone())
         .writer_id("late-manifest")
         .build()
         .await

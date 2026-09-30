@@ -96,5 +96,5 @@ async fn binding_routes_exclude_host_routes_and_preserve_maintenance_admission()
             }
         );
     }
-    state.writer.shutdown().await.expect("shutdown writer");
+    state.runtime.shutdown().await.expect("shutdown writer");
 }

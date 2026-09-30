@@ -34,7 +34,7 @@ async fn grep_allow_stale_serves_indexed_results_and_warns_for_jsonl() {
     assert_success(&harness.run(&["put", payload.to_str().expect("utf-8 path"), "/visible.txt"]));
     assert_success(&harness.run(&["maintenance", "index", "enable"]));
     // CLI mutations drain grep maintenance, so leave these writes to a writer without a grep runner.
-    let writer = loonfs::FsWriter::builder(loonfs_objectstore::StoreConfig::LocalFs {
+    let writer = loonfs::LoonFs::builder(loonfs_objectstore::StoreConfig::LocalFs {
         root: harness.store_root("default").display().to_string(),
         key_prefix: None,
     })
@@ -43,10 +43,10 @@ async fn grep_allow_stale_serves_indexed_results_and_warns_for_jsonl() {
     .await
     .expect("build writer");
     let namespace_id = loonfs_api::NamespaceId::parse("demo").expect("namespace id");
-    let namespace_writer = writer
+    let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
-    let prepared = namespace_writer
+    let prepared = namespace
         .prepare_file_bytes(b"needle\n")
         .await
         .expect("prepare content");
@@ -61,7 +61,7 @@ async fn grep_allow_stale_serves_indexed_results_and_warns_for_jsonl() {
             expected_revision_no: None,
         })
         .collect();
-    namespace_writer
+    namespace
         .commit_prepared(
             loonfs::publish::CommitRequest {
                 commit_id: loonfs_api::CommitId::generate(),

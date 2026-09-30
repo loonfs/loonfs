@@ -2,12 +2,18 @@
 
 use loonfs_api::{
     ActorId, AttributeKey, AttributeValue, ContentId, ContentRef, EffectiveLimit, NamespaceId,
+    WriterId,
 };
 use std::num::{NonZeroU32, NonZeroUsize};
 
 /// Parses a namespace id that is expected to be valid test data.
 pub fn namespace_id(value: &str) -> NamespaceId {
     NamespaceId::parse(value).expect("valid namespace id")
+}
+
+/// Parses a writer id that is expected to be valid test data.
+pub fn writer_id(value: &str) -> WriterId {
+    WriterId::parse(value).expect("valid writer id")
 }
 
 /// Returns the actor shared by mutation tests.

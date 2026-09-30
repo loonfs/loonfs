@@ -2914,50 +2914,6 @@
         "example": "report.txt",
         "type": "string"
       },
-      "Namespace": {
-        "description": "Current state for one namespace.",
-        "properties": {
-          "access": {
-            "$ref": "#/components/schemas/NamespaceAccessMode",
-            "description": "The namespace's access mode."
-          },
-          "created_at_ms": {
-            "description": "Time the namespace was created, in Unix milliseconds.",
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "created_by": {
-            "$ref": "#/components/schemas/ActorId",
-            "description": "Actor that created the namespace, as supplied by the application."
-          },
-          "fork_basis": {
-            "$ref": "#/components/schemas/NamespaceForkBasis",
-            "description": "Present only for a fork: the source it was forked from."
-          },
-          "head_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
-            "description": "Current visible namespace sequence."
-          },
-          "namespace_id": {
-            "$ref": "#/components/schemas/NamespaceId",
-            "description": "Namespace ID."
-          },
-          "retention_floor_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
-            "description": "Oldest position a change feed can resume after. The feed returns\nchanges above it."
-          }
-        },
-        "required": [
-          "access",
-          "namespace_id",
-          "created_at_ms",
-          "created_by",
-          "head_seq",
-          "retention_floor_seq"
-        ],
-        "type": "object"
-      },
       "NamespaceAccess": {
         "description": "A namespace's access mode, fixed at creation.",
         "discriminator": {
@@ -3156,6 +3112,50 @@
         "example": "demo",
         "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$",
         "type": "string"
+      },
+      "NamespaceMetadata": {
+        "description": "Current state for one namespace.",
+        "properties": {
+          "access": {
+            "$ref": "#/components/schemas/NamespaceAccessMode",
+            "description": "The namespace's access mode."
+          },
+          "created_at_ms": {
+            "description": "Time the namespace was created, in Unix milliseconds.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "created_by": {
+            "$ref": "#/components/schemas/ActorId",
+            "description": "Actor that created the namespace, as supplied by the application."
+          },
+          "fork_basis": {
+            "$ref": "#/components/schemas/NamespaceForkBasis",
+            "description": "Present only for a fork: the source it was forked from."
+          },
+          "head_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Current visible namespace sequence."
+          },
+          "namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "Namespace ID."
+          },
+          "retention_floor_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Oldest position a change feed can resume after. The feed returns\nchanges above it."
+          }
+        },
+        "required": [
+          "access",
+          "namespace_id",
+          "created_at_ms",
+          "created_by",
+          "head_seq",
+          "retention_floor_seq"
+        ],
+        "type": "object"
       },
       "ObjectTransferAccess": {
         "description": "Client-facing direct transfer capability.",
@@ -5570,7 +5570,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Namespace"
+                  "$ref": "#/components/schemas/NamespaceMetadata"
                 }
               }
             },
@@ -5767,7 +5767,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Namespace"
+                  "$ref": "#/components/schemas/NamespaceMetadata"
                 }
               }
             },
@@ -6813,7 +6813,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Namespace"
+                  "$ref": "#/components/schemas/NamespaceMetadata"
                 }
               }
             },

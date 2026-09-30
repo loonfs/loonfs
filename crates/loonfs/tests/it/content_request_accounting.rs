@@ -9,8 +9,8 @@ use loonfs::publish::{
 use loonfs::uploads::ResolvedUploadCompletion;
 use loonfs::{
     CommitId, CoreError, CreateDirectoryOptions, CreateNamespaceOptions, DestinationBehavior,
-    ErrorCode, FsWriter, NamespaceId, PutFileOptions, RevisionNo, RuntimeError, SharedObjectStore,
-    CONTENT_READ_CHUNK_BYTES,
+    ErrorCode, LoonFs, NamespaceId, PutFileOptions, RevisionNo, RuntimeError, SharedObjectStore,
+    Writable, CONTENT_READ_CHUNK_BYTES,
 };
 use loonfs_api::ContentId;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -106,7 +106,7 @@ struct TestHarness {
     recording: RequestLog,
     store: SharedObjectStore,
     namespace_id: NamespaceId,
-    writer: FsWriter,
+    writer: LoonFs<Writable>,
 }
 
 impl TestHarness {
@@ -138,8 +138,8 @@ async fn build_initialized_writer(
     store: SharedObjectStore,
     namespace_id: &NamespaceId,
     writer_id: &str,
-) -> FsWriter {
-    let writer = FsWriter::builder_with_store(store)
+) -> LoonFs<Writable> {
+    let writer = LoonFs::builder_with_store(store)
         .writer_id(writer_id)
         .inline_content(loonfs::InlineContentOptions {
             inline_content_threshold_bytes: None,
@@ -156,8 +156,8 @@ async fn build_initialized_writer(
         )
         .await
         .expect("create namespace");
-    let namespace_writer = writer.open_namespace(namespace_id).expect("open namespace");
-    namespace_writer
+    let namespace = writer.open_namespace(namespace_id).expect("open namespace");
+    namespace
         .create_directory(
             "/catalog-warmup",
             CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
@@ -228,7 +228,7 @@ fn assert_content_not_prepared(error: impl Into<RuntimeError>, content_ref: &loo
 #[tokio::test]
 async fn put_file_content_ref_validates_content_before_publication() {
     let harness = TestHarness::new("content-ref-validation").await;
-    let namespace_writer = harness
+    let namespace = harness
         .writer
         .open_namespace(&harness.namespace_id)
         .expect("open namespace");
@@ -238,7 +238,7 @@ async fn put_file_content_ref_validates_content_before_publication() {
 
     // The convenience method should validate the referenced content exactly
     // once before publishing it.
-    namespace_writer
+    namespace
         .put_file_content_ref(
             "/file.txt",
             content_ref,
@@ -253,14 +253,14 @@ async fn put_file_content_ref_validates_content_before_publication() {
 #[tokio::test]
 async fn prepare_file_bytes_performs_one_content_put_and_no_reads() {
     let harness = TestHarness::new("prepare-file-bytes").await;
-    let namespace_writer = harness
+    let namespace = harness
         .writer
         .open_namespace(&harness.namespace_id)
         .expect("open namespace");
     let bytes = b"parallel preparation primitive";
     harness.recording.reset();
 
-    let prepared = namespace_writer
+    let prepared = namespace
         .prepare_file_bytes(bytes)
         .await
         .expect("prepare file bytes");
@@ -274,17 +274,17 @@ async fn prepare_file_bytes_performs_one_content_put_and_no_reads() {
 #[tokio::test]
 async fn put_file_prepared_performs_no_content_io() {
     let harness = TestHarness::new("put-file-prepared").await;
-    let namespace_writer = harness
+    let namespace = harness
         .writer
         .open_namespace(&harness.namespace_id)
         .expect("open namespace");
-    let prepared = namespace_writer
+    let prepared = namespace
         .prepare_file_bytes(b"already prepared")
         .await
         .expect("prepare file bytes");
     harness.recording.reset();
 
-    namespace_writer
+    namespace
         .put_file_prepared(
             "/file.txt",
             prepared,
@@ -456,7 +456,7 @@ async fn fork_and_source_reject_each_others_prepared_content() {
 #[tokio::test]
 async fn prepare_content_ref_rejects_bytes_that_do_not_match_the_ref() {
     let harness = TestHarness::new("content-import-mismatch").await;
-    let namespace_writer = harness
+    let namespace = harness
         .writer
         .open_namespace(&harness.namespace_id)
         .expect("open namespace");
@@ -464,7 +464,7 @@ async fn prepare_content_ref_rejects_bytes_that_do_not_match_the_ref() {
     let mut lying_ref = content_ref.clone();
     lying_ref.checksum = loonfs_api::Checksum::crc64nvme(b"other bytes");
 
-    let error = namespace_writer
+    let error = namespace
         .prepare_content_ref(lying_ref)
         .await
         .expect_err("import must reject a ref whose checksum does not match the bytes");
@@ -477,7 +477,7 @@ async fn prepare_content_ref_rejects_bytes_that_do_not_match_the_ref() {
 #[tokio::test]
 async fn prepare_content_ref_accepts_a_matching_crc64nvme_ref() {
     let harness = TestHarness::new("content-import-crc64nvme").await;
-    let namespace_writer = harness
+    let namespace = harness
         .writer
         .open_namespace(&harness.namespace_id)
         .expect("open namespace");
@@ -485,7 +485,7 @@ async fn prepare_content_ref_accepts_a_matching_crc64nvme_ref() {
     let mut content_ref = harness.stage_content(bytes).await;
     content_ref.checksum = loonfs_api::Checksum::crc64nvme(bytes);
 
-    let prepared = namespace_writer
+    let prepared = namespace
         .prepare_content_ref(content_ref)
         .await
         .expect("import must validate with the source ref's checksum algorithm");
@@ -501,7 +501,7 @@ async fn prepare_content_ref_accepts_a_matching_crc64nvme_ref() {
 #[tokio::test]
 async fn prepare_content_ref_reads_large_sources_in_bounded_ranges() {
     let harness = TestHarness::new("content-import-ranges").await;
-    let namespace_writer = harness
+    let namespace = harness
         .writer
         .open_namespace(&harness.namespace_id)
         .expect("open namespace");
@@ -509,7 +509,7 @@ async fn prepare_content_ref_reads_large_sources_in_bounded_ranges() {
     let content_ref = harness.stage_content(&bytes).await;
     harness.recording.reset();
 
-    let prepared = namespace_writer
+    let prepared = namespace
         .prepare_content_ref(content_ref)
         .await
         .expect("import a source larger than one read chunk");
@@ -525,7 +525,7 @@ async fn prepare_content_ref_reads_large_sources_in_bounded_ranges() {
 #[tokio::test]
 async fn prepare_content_ref_reads_once_and_prepared_publication_reads_nothing() {
     let harness = TestHarness::new("prepare-content-ref").await;
-    let namespace_writer = harness
+    let namespace = harness
         .writer
         .open_namespace(&harness.namespace_id)
         .expect("open namespace");
@@ -533,7 +533,7 @@ async fn prepare_content_ref_reads_once_and_prepared_publication_reads_nothing()
     let content_ref = harness.stage_content(bytes).await;
     harness.recording.reset();
 
-    let prepared = namespace_writer
+    let prepared = namespace
         .prepare_content_ref(content_ref.clone())
         .await
         .expect("prepare content ref");
@@ -548,7 +548,7 @@ async fn prepare_content_ref_reads_once_and_prepared_publication_reads_nothing()
     assert_content_counts(harness.recording.snapshot(), 1, 1, 1, bytes.len());
     harness.recording.reset();
 
-    namespace_writer
+    namespace
         .put_file_prepared(
             "/file.txt",
             prepared,
@@ -563,18 +563,15 @@ async fn prepare_content_ref_reads_once_and_prepared_publication_reads_nothing()
 #[tokio::test]
 async fn proxied_upload_completion_proof_publishes_without_additional_content_io() {
     let harness = TestHarness::new("proxied-completion-proof").await;
-    let namespace_writer = harness
+    let namespace = harness
         .writer
         .open_namespace(&harness.namespace_id)
         .expect("open namespace");
     let bytes = b"service proxied upload";
-    let begin = namespace_writer
-        .create_upload()
-        .await
-        .expect("begin upload");
+    let begin = namespace.create_upload().await.expect("begin upload");
     harness.recording.reset();
 
-    namespace_writer
+    namespace
         .put_upload_content(&begin.upload_id, bytes)
         .await
         .expect("upload content");
@@ -589,7 +586,7 @@ async fn proxied_upload_completion_proof_publishes_without_additional_content_io
     );
     harness.recording.reset();
 
-    let completed = namespace_writer
+    let completed = namespace
         .complete_upload(&begin.upload_id, ResolvedUploadCompletion::KnownContent)
         .await
         .expect("complete upload with proof");
@@ -604,7 +601,7 @@ async fn proxied_upload_completion_proof_publishes_without_additional_content_io
     assert_content_counts(harness.recording.snapshot(), 0, 0, 0, 0);
     harness.recording.reset();
 
-    namespace_writer
+    namespace
         .put_file_prepared(
             "/uploaded.txt",
             prepared,
@@ -619,12 +616,12 @@ async fn proxied_upload_completion_proof_publishes_without_additional_content_io
 #[tokio::test]
 async fn direct_put_completion_avoids_blob_get_and_prepared_publish_uses_no_content_io() {
     let harness = TestHarness::new("direct-completion-proof").await;
-    let namespace_writer = harness
+    let namespace = harness
         .writer
         .open_namespace(&harness.namespace_id)
         .expect("open namespace");
     let bytes = b"direct provider upload";
-    let begin = namespace_writer
+    let begin = namespace
         .create_direct_put_upload_target(loonfs_api::ChecksumAlgorithm::Sha256)
         .await
         .expect("begin direct put");
@@ -638,7 +635,7 @@ async fn direct_put_completion_avoids_blob_get_and_prepared_publish_uses_no_cont
     assert_content_counts(harness.recording.snapshot(), 0, 0, 1, 0);
     harness.recording.reset();
 
-    let completed = namespace_writer
+    let completed = namespace
         .complete_upload_for_mode(&begin.session.upload_id, |_| {
             Ok(loonfs::uploads::ResolvedUploadCompletion::DirectPut {
                 content: loonfs::UploadContentClaim {
@@ -668,7 +665,7 @@ async fn direct_put_completion_avoids_blob_get_and_prepared_publish_uses_no_cont
     assert_eq!(completion_counts.content_get_bytes, 0);
     harness.recording.reset();
 
-    namespace_writer
+    namespace
         .put_file_prepared(
             "/direct.txt",
             prepared,
@@ -694,12 +691,12 @@ async fn an_unprepared_external_ref_fails_typed_without_content_io() {
     ] {
         for behavior in [DestinationBehavior::NoReplace, DestinationBehavior::Replace] {
             let harness = TestHarness::new("unprepared-ref").await;
-            let namespace_writer = harness
+            let namespace = harness
                 .writer
                 .open_namespace(&harness.namespace_id)
                 .expect("open namespace");
             if behavior == DestinationBehavior::Replace {
-                namespace_writer
+                namespace
                     .put_file_bytes(
                         "/file.txt",
                         b"first revision",
@@ -725,11 +722,11 @@ async fn an_unprepared_external_ref_fails_typed_without_content_io() {
                 },
             );
             let error: RuntimeError = match entry_point {
-                UnpreparedEntryPoint::Publisher => namespace_writer
+                UnpreparedEntryPoint::Publisher => namespace
                     .commit_candidate(CommitCandidate::new(request))
                     .await
                     .expect_err("an unprepared ref must not publish"),
-                UnpreparedEntryPoint::WriterCreateCommit => namespace_writer
+                UnpreparedEntryPoint::WriterCreateCommit => namespace
                     .create_commit(request)
                     .await
                     .expect_err("an unprepared ref must not publish"),
@@ -744,7 +741,7 @@ async fn an_unprepared_external_ref_fails_typed_without_content_io() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn prepared_commit_after_concurrent_preparations_uses_no_publication_content_io() {
     let harness = TestHarness::new("prepared-explicit-many").await;
-    let namespace_writer = harness
+    let namespace = harness
         .writer
         .open_namespace(&harness.namespace_id)
         .expect("open namespace");
@@ -755,8 +752,8 @@ async fn prepared_commit_after_concurrent_preparations_uses_no_publication_conte
     ]
     .into_iter()
     .map(|bytes| {
-        let namespace_writer = namespace_writer.clone();
-        tokio::spawn(async move { namespace_writer.prepare_file_bytes(bytes).await })
+        let namespace = namespace.clone();
+        tokio::spawn(async move { namespace.prepare_file_bytes(bytes).await })
     });
     let mut prepared = Vec::new();
     for preparation in preparations {
@@ -782,7 +779,7 @@ async fn prepared_commit_after_concurrent_preparations_uses_no_publication_conte
         expected_inode_id: None,
         expected_revision_no: None,
     };
-    namespace_writer
+    namespace
         .commit_prepared(
             CommitRequest {
                 preconditions: Vec::new(),
@@ -808,12 +805,12 @@ async fn prepared_commit_after_concurrent_preparations_uses_no_publication_conte
 #[tokio::test]
 async fn restore_revision_uses_retained_metadata_without_content_io() {
     let harness = TestHarness::new("restore-retained").await;
-    let namespace_writer = harness
+    let namespace = harness
         .writer
         .open_namespace(&harness.namespace_id)
         .expect("open namespace");
     let first = b"first revision";
-    namespace_writer
+    namespace
         .put_file_bytes(
             "/file.txt",
             first,
@@ -821,7 +818,7 @@ async fn restore_revision_uses_retained_metadata_without_content_io() {
         )
         .await
         .expect("put first revision");
-    namespace_writer
+    namespace
         .put_file_bytes(
             "/file.txt",
             b"second revision",
@@ -843,7 +840,7 @@ async fn restore_revision_uses_retained_metadata_without_content_io() {
 
     // Restore resolves content from retained namespace metadata, so
     // re-downloading the retained blob would prove nothing.
-    namespace_writer
+    namespace
         .create_commit(CommitRequest::single(
             CommitId::parse("restore-first-revision").expect("valid commit id"),
             loonfs_test_support::test_actor(),
@@ -862,13 +859,13 @@ async fn restore_revision_uses_retained_metadata_without_content_io() {
 #[tokio::test]
 async fn put_file_bytes_publishes_without_reading_content() {
     let harness = TestHarness::new("put-bytes-admission").await;
-    let namespace_writer = harness
+    let namespace = harness
         .writer
         .open_namespace(&harness.namespace_id)
         .expect("open namespace");
     harness.recording.reset();
 
-    namespace_writer
+    namespace
         .put_file_bytes(
             "/file.txt",
             b"admitted content",
@@ -888,17 +885,17 @@ async fn commit_id_replay_performs_no_content_operations() {
     let content_ref = harness.stage_content(b"replayed content").await;
     let intent = put_request("replayed-put", "/file.txt", content_ref.clone());
     let prepared = prepare_content(&harness.store, &harness.namespace_id, &content_ref).await;
-    let namespace_writer = harness
+    let namespace = harness
         .writer
         .open_namespace(&harness.namespace_id)
         .expect("open namespace");
-    let original = namespace_writer
+    let original = namespace
         .commit_candidate(CommitCandidate::prepared(intent.clone(), vec![prepared]))
         .await
         .expect("publish original put");
     harness.recording.reset();
 
-    let replay = namespace_writer
+    let replay = namespace
         .commit_candidate(CommitCandidate::new(intent))
         .await
         .expect("replay put");
@@ -913,17 +910,17 @@ async fn rejected_preparation_replays_durable_receipt_without_content_operations
     let content_ref = harness.stage_content(b"replayed rejected content").await;
     let intent = put_request("rejected-replayed-put", "/file.txt", content_ref.clone());
     let prepared = prepare_content(&harness.store, &harness.namespace_id, &content_ref).await;
-    let namespace_writer = harness
+    let namespace = harness
         .writer
         .open_namespace(&harness.namespace_id)
         .expect("open namespace");
-    let original = namespace_writer
+    let original = namespace
         .commit_candidate(CommitCandidate::prepared(intent.clone(), vec![prepared]))
         .await
         .expect("publish original put");
     harness.recording.reset();
 
-    let replay = namespace_writer
+    let replay = namespace
         .commit_candidate(CommitCandidate::rejected(
             intent,
             ContentPreparationError::ContentToken(vec![(
@@ -941,7 +938,7 @@ async fn rejected_preparation_replays_durable_receipt_without_content_operations
 #[tokio::test]
 async fn new_rejected_preparation_fails_before_path_planning_without_content_operations() {
     let harness = TestHarness::new("new-rejected-preparation").await;
-    let namespace_writer = harness
+    let namespace = harness
         .writer
         .open_namespace(&harness.namespace_id)
         .expect("open namespace");
@@ -956,7 +953,7 @@ async fn new_rejected_preparation_fails_before_path_planning_without_content_ope
         },
     );
 
-    let error = namespace_writer
+    let error = namespace
         .commit_candidate(CommitCandidate::rejected(
             intent,
             ContentPreparationError::ContentToken(vec![(
@@ -989,7 +986,7 @@ async fn in_flight_duplicate_performs_no_additional_content_operations() {
     ));
     let store: SharedObjectStore = blocking.clone();
     let writer = build_initialized_writer(store.clone(), &namespace_id, "duplicate-writer").await;
-    let namespace_writer = writer
+    let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
     let content_ref =
@@ -1005,11 +1002,11 @@ async fn in_flight_duplicate_performs_no_additional_content_operations() {
 
     blocking.block_next();
     let primary = {
-        let namespace_writer = namespace_writer.clone();
+        let namespace = namespace.clone();
         let intent = intent.clone();
         let prepared = prepared.clone();
         tokio::spawn(async move {
-            namespace_writer
+            namespace
                 .commit_candidate(CommitCandidate::prepared(intent, vec![prepared]))
                 .await
         })
@@ -1018,9 +1015,8 @@ async fn in_flight_duplicate_performs_no_additional_content_operations() {
     let primary_counts = recording.snapshot();
     assert_content_counts(primary_counts, 0, 0, 0, 0);
 
-    let mut duplicate = Box::pin(
-        namespace_writer.commit_candidate(CommitCandidate::prepared(intent, vec![prepared])),
-    );
+    let mut duplicate =
+        Box::pin(namespace.commit_candidate(CommitCandidate::prepared(intent, vec![prepared])));
     assert!(
         futures::poll!(duplicate.as_mut()).is_pending(),
         "the duplicate must join the in-flight primary"
@@ -1056,7 +1052,7 @@ async fn stale_head_retry_preserves_content_admission() {
     ));
     let store: SharedObjectStore = conflicting.clone();
     let writer = build_initialized_writer(store.clone(), &namespace_id, "retry-writer").await;
-    let namespace_writer = writer
+    let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
     let content_ref =
@@ -1071,7 +1067,7 @@ async fn stale_head_retry_preserves_content_admission() {
     recording.reset();
     conflicting.fail_next(1);
 
-    namespace_writer
+    namespace
         .commit_candidate(CommitCandidate::prepared(intent, vec![prepared]))
         .await
         .expect("publish after stale-head retry");
@@ -1091,7 +1087,7 @@ async fn mixed_batch_publishes_admitted_put_and_rejects_unprepared_put_without_c
     ));
     let store: SharedObjectStore = blocking.clone();
     let writer = build_initialized_writer(store.clone(), &namespace_id, "mixed-writer").await;
-    let namespace_writer = writer
+    let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
     let content_ref =
@@ -1106,9 +1102,9 @@ async fn mixed_batch_publishes_admitted_put_and_rejects_unprepared_put_without_c
 
     blocking.block_next();
     let blocker = {
-        let namespace_writer = namespace_writer.clone();
+        let namespace = namespace.clone();
         tokio::spawn(async move {
-            namespace_writer
+            namespace
                 .commit_candidate(CommitCandidate::new(CommitRequest::single(
                     CommitId::parse("mixed-blocker").expect("valid commit id"),
                     loonfs_test_support::test_actor(),
@@ -1123,7 +1119,7 @@ async fn mixed_batch_publishes_admitted_put_and_rejects_unprepared_put_without_c
     };
     blocking.wait_until_blocked().await;
 
-    let mut admitted = Box::pin(namespace_writer.commit_candidate(CommitCandidate::prepared(
+    let mut admitted = Box::pin(namespace.commit_candidate(CommitCandidate::prepared(
         put_request("mixed-admitted", "/admitted.txt", content_ref.clone()),
         vec![prepared],
     )));
@@ -1131,9 +1127,11 @@ async fn mixed_batch_publishes_admitted_put_and_rejects_unprepared_put_without_c
         futures::poll!(admitted.as_mut()).is_pending(),
         "admitted put must queue behind the blocked publication"
     );
-    let mut unprepared = Box::pin(namespace_writer.commit_candidate(CommitCandidate::new(
-        put_request("mixed-unprepared", "/unprepared.txt", content_ref.clone()),
-    )));
+    let mut unprepared = Box::pin(namespace.commit_candidate(CommitCandidate::new(put_request(
+        "mixed-unprepared",
+        "/unprepared.txt",
+        content_ref.clone(),
+    ))));
     assert!(
         futures::poll!(unprepared.as_mut()).is_pending(),
         "unprepared put must join the pending batch"

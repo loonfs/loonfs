@@ -6,9 +6,8 @@
 use crate::common::{control, default_page_limit, grep_with, page_limit, GrepHost};
 use bytes::Bytes;
 use loonfs::{
-    CoreError, CreateNamespaceOptions, DeleteNamespaceOptions, ErrorCode, FsMaintenance, FsReader,
-    FsWriter, MetadataMaintenanceOptions, NamespaceId, PutFileOptions, RuntimeError,
-    SharedObjectStore,
+    CoreError, CreateNamespaceOptions, DeleteNamespaceOptions, ErrorCode, LoonFs, Maintenance,
+    MetadataMaintenanceOptions, NamespaceId, PutFileOptions, RuntimeError, SharedObjectStore,
 };
 use loonfs_api::wire::control::PinOwner;
 use loonfs_api::{
@@ -95,7 +94,7 @@ async fn new_query_page(
     grep_request: &GrepRequest,
     limit: EffectiveLimit,
 ) -> loonfs_grep::Result<GrepResponse> {
-    let reader = FsReader::builder_with_store(store.clone())
+    let reader = LoonFs::reader_with_store(store.clone())
         .build()
         .await
         .expect("new query reader");
@@ -111,7 +110,7 @@ async fn new_query_page(
 }
 
 async fn fold_wal_and_advance_retention(
-    maintenance: &FsMaintenance,
+    maintenance: &Maintenance,
     namespace_id: &NamespaceId,
 ) -> ChangeSeq {
     maintenance
@@ -141,7 +140,7 @@ async fn an_index_built_past_a_stale_pin_stays_enabled_and_refreshes_queries() {
     let directory = tempdir().expect("directory");
     let base: SharedObjectStore = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
     let namespace_id = NamespaceId::parse("index-ahead").expect("namespace id");
-    let writer = FsWriter::builder_with_store(base.clone())
+    let writer = LoonFs::builder_with_store(base.clone())
         .writer_id("index-ahead-writer")
         .min_publish_interval_ms(0)
         .build()
@@ -154,7 +153,7 @@ async fn an_index_built_past_a_stale_pin_stays_enabled_and_refreshes_queries() {
         )
         .await
         .expect("namespace");
-    let namespace_writer = writer
+    let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
     let host = GrepHost::new(&base, "index-ahead").await;
@@ -189,7 +188,7 @@ async fn an_index_built_past_a_stale_pin_stays_enabled_and_refreshes_queries() {
         let build = async {
             blocking.wait_until_blocked().await;
             let path = if query { "/second" } else { "/first" };
-            let committed = namespace_writer
+            let committed = namespace
                 .put_file_bytes(
                     path,
                     b"needle\n",
@@ -212,7 +211,7 @@ async fn grep_query_keeps_its_pinned_head_when_a_matching_file_commits_mid_query
     let base = Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let base_store: SharedObjectStore = base.clone();
     let namespace_id = NamespaceId::parse("query-pin").expect("namespace id");
-    let writer = FsWriter::builder_with_store(base_store.clone())
+    let writer = LoonFs::builder_with_store(base_store.clone())
         .writer_id("query-pin-writer")
         .min_publish_interval_ms(0)
         .build()
@@ -225,7 +224,7 @@ async fn grep_query_keeps_its_pinned_head_when_a_matching_file_commits_mid_query
         )
         .await
         .expect("create namespace");
-    let namespace_writer = writer
+    let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
     GrepHost::new(&base_store, "query-pin-index")
@@ -245,7 +244,7 @@ async fn grep_query_keeps_its_pinned_head_when_a_matching_file_commits_mid_query
     let query = new_query(&query_store, &namespace_id, &grep_request);
     let publish = async {
         blocking.wait_until_blocked().await;
-        let committed = namespace_writer
+        let committed = namespace
             .put_file_bytes(
                 "/later.txt",
                 b"mid-query needle\n",
@@ -276,7 +275,7 @@ async fn grep_worker_lifecycle_uses_and_releases_checkpointed_backfill() {
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("worker-lifecycle").expect("namespace id");
-    let writer = FsWriter::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone())
         .writer_id("lifecycle-writer")
         .min_publish_interval_ms(0)
         .build()
@@ -289,11 +288,11 @@ async fn grep_worker_lifecycle_uses_and_releases_checkpointed_backfill() {
         )
         .await
         .expect("create namespace");
-    let namespace_writer = writer
+    let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
     for index in 0..3u32 {
-        namespace_writer
+        namespace
             .put_file_bytes(
                 &format!("/before-{index}.txt"),
                 format!("checkpoint needle {index}\n").as_bytes(),
@@ -417,7 +416,7 @@ async fn exhausted_run_numbers_fail_as_server_errors_without_writing_the_manifes
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("run-number-limit").expect("namespace id");
-    let writer = FsWriter::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone())
         .writer_id("run-number-limit-writer")
         .min_publish_interval_ms(0)
         .build()
@@ -430,10 +429,10 @@ async fn exhausted_run_numbers_fail_as_server_errors_without_writing_the_manifes
         )
         .await
         .expect("create namespace");
-    let namespace_writer = writer
+    let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
-    namespace_writer
+    namespace
         .put_file_bytes(
             "/initial.txt",
             b"initial run number boundary needle\n",
@@ -469,7 +468,7 @@ async fn exhausted_run_numbers_fail_as_server_errors_without_writing_the_manifes
         .await
         .expect("install manifest at the public maximum");
 
-    namespace_writer
+    namespace
         .put_file_bytes(
             "/incremental.txt",
             b"incremental run number boundary needle\n",
@@ -556,7 +555,7 @@ async fn enable_creates_no_checkpoint_when_the_manifest_load_fails() {
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("enable-manifest-failure").expect("namespace id");
-    let writer = FsWriter::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone())
         .writer_id("enable-manifest-failure-writer")
         .min_publish_interval_ms(0)
         .build()
@@ -623,7 +622,7 @@ async fn enable_confirms_its_checkpoint_after_an_ambiguous_manifest_write() {
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("ambiguous-enable").expect("namespace id");
-    let writer = FsWriter::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone())
         .writer_id("ambiguous-enable-writer")
         .min_publish_interval_ms(0)
         .build()
@@ -682,7 +681,7 @@ async fn restart_confirms_its_checkpoint_after_an_ambiguous_manifest_write() {
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("ambiguous-restart").expect("namespace id");
-    let writer = FsWriter::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone())
         .writer_id("ambiguous-restart-writer")
         .min_publish_interval_ms(0)
         .build()
@@ -752,17 +751,18 @@ async fn retention_gap_and_vanished_checkpoint_restart_fresh_backfill() {
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("worker-gap").expect("namespace id");
-    let writer = FsWriter::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone())
         .writer_id("gap-writer")
         .min_publish_interval_ms(0)
         .build()
         .await
         .expect("writer");
-    let maintenance = FsMaintenance::builder_with_store(store.clone())
-        .actor_id("gap-maintenance")
+    let maintenance = LoonFs::builder_with_store(store.clone())
+        .writer_id("gap-maintenance")
         .build()
         .await
-        .expect("maintenance");
+        .expect("maintenance")
+        .maintenance(loonfs_test_support::ids::writer_id("gap-maintenance"));
     writer
         .create_namespace(
             &namespace_id,
@@ -770,14 +770,14 @@ async fn retention_gap_and_vanished_checkpoint_restart_fresh_backfill() {
         )
         .await
         .expect("create namespace");
-    let namespace_writer = writer
+    let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
     let worker = worker(&store).await;
     worker.enable(&namespace_id).await.expect("enable");
     drive_worker_to_current(&worker, &namespace_id, GramIndexBuildPolicy::default()).await;
 
-    namespace_writer
+    namespace
         .put_file_bytes(
             "/gap.txt",
             b"retention gap needle\n",
@@ -835,17 +835,20 @@ async fn retention_passing_a_backfill_checkpoint_never_serves_a_partial_query() 
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("worker-handoff-gap").expect("namespace id");
-    let writer = FsWriter::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone())
         .writer_id("handoff-gap-writer")
         .min_publish_interval_ms(0)
         .build()
         .await
         .expect("writer");
-    let maintenance = FsMaintenance::builder_with_store(store.clone())
-        .actor_id("handoff-gap-maintenance")
+    let maintenance = LoonFs::builder_with_store(store.clone())
+        .writer_id("handoff-gap-maintenance")
         .build()
         .await
-        .expect("maintenance");
+        .expect("maintenance")
+        .maintenance(loonfs_test_support::ids::writer_id(
+            "handoff-gap-maintenance",
+        ));
     writer
         .create_namespace(
             &namespace_id,
@@ -853,11 +856,11 @@ async fn retention_passing_a_backfill_checkpoint_never_serves_a_partial_query() 
         )
         .await
         .expect("create namespace");
-    let namespace_writer = writer
+    let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
     for index in 0..2u32 {
-        namespace_writer
+        namespace
             .put_file_bytes(
                 &format!("/before-{index}.txt"),
                 format!("handoff needle before {index}\n").as_bytes(),
@@ -905,7 +908,7 @@ async fn retention_passing_a_backfill_checkpoint_never_serves_a_partial_query() 
         }
     ));
 
-    namespace_writer
+    namespace
         .put_file_bytes(
             "/during.txt",
             b"handoff needle during\n",
@@ -968,7 +971,7 @@ async fn an_expired_backfill_pin_keeps_enumerating_until_deleted() {
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("worker-expiry").expect("namespace id");
-    let writer = FsWriter::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone())
         .writer_id("expiry-writer")
         .min_publish_interval_ms(0)
         .build()
@@ -981,10 +984,10 @@ async fn an_expired_backfill_pin_keeps_enumerating_until_deleted() {
         )
         .await
         .expect("create namespace");
-    let namespace_writer = writer
+    let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
-    namespace_writer
+    namespace
         .put_file_bytes(
             "/expiring.txt",
             b"expiring needle\n",
@@ -1117,7 +1120,7 @@ async fn commits_during_backfill_are_indexed_once_by_the_feed_phase() {
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("backfill-overlap").expect("namespace id");
-    let writer = FsWriter::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone())
         .writer_id("overlap-writer")
         .min_publish_interval_ms(0)
         .build()
@@ -1130,11 +1133,11 @@ async fn commits_during_backfill_are_indexed_once_by_the_feed_phase() {
         )
         .await
         .expect("create namespace");
-    let namespace_writer = writer
+    let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
     for index in 0..4u32 {
-        namespace_writer
+        namespace
             .put_file_bytes(
                 &format!("/before-{index}.txt"),
                 format!("overlap needle before {index}\n").as_bytes(),
@@ -1170,7 +1173,7 @@ async fn commits_during_backfill_are_indexed_once_by_the_feed_phase() {
 
     // Commits strictly after the pinned sequence: one new file, and a
     // replacement of a file the checkpoint already pinned.
-    namespace_writer
+    namespace
         .put_file_bytes(
             "/during.txt",
             b"overlap needle during\n",
@@ -1178,7 +1181,7 @@ async fn commits_during_backfill_are_indexed_once_by_the_feed_phase() {
         )
         .await
         .expect("write during backfill");
-    namespace_writer
+    namespace
         .put_file_bytes(
             "/before-0.txt",
             b"overlap needle replaced\n",
@@ -1228,7 +1231,7 @@ async fn a_move_reindexes_nothing_and_answers_the_new_path() {
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("move-no-reindex").expect("namespace id");
-    let writer = FsWriter::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone())
         .writer_id("move-writer")
         .min_publish_interval_ms(0)
         .build()
@@ -1241,10 +1244,10 @@ async fn a_move_reindexes_nothing_and_answers_the_new_path() {
         )
         .await
         .expect("create namespace");
-    let namespace_writer = writer
+    let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
-    namespace_writer
+    namespace
         .put_file_bytes(
             "/docs/note.txt",
             b"moved needle\n",
@@ -1258,7 +1261,7 @@ async fn a_move_reindexes_nothing_and_answers_the_new_path() {
     let segments_before = grep_segment_ids(&store, &namespace_id).await;
     let built_before = grep_built_through_seq(&store, &namespace_id).await;
 
-    let moved = namespace_writer
+    let moved = namespace
         .move_path(
             "/docs/note.txt",
             "/docs/renamed.txt",
@@ -1291,13 +1294,13 @@ async fn a_recursive_delete_hides_matches_and_an_undelete_restores_them() {
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("delete-undelete").expect("namespace id");
-    let writer = FsWriter::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone())
         .writer_id("delete-writer")
         .min_publish_interval_ms(0)
         .build()
         .await
         .expect("writer");
-    let reader = writer.reader();
+    let reader = writer.read_only();
     let namespace = reader.namespace(&namespace_id);
     writer
         .create_namespace(
@@ -1392,13 +1395,13 @@ async fn undeleting_a_subtree_deleted_before_backfill_needs_no_rebuild() {
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("undelete-after-backfill").expect("namespace id");
-    let writer = FsWriter::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone())
         .writer_id("undelete-backfill-writer")
         .min_publish_interval_ms(0)
         .build()
         .await
         .expect("writer");
-    let reader = writer.reader();
+    let reader = writer.read_only();
     let namespace = reader.namespace(&namespace_id);
     writer
         .create_namespace(
@@ -1495,13 +1498,13 @@ async fn a_failing_worker_step_never_blocks_a_concurrent_commit() {
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("worker-isolation").expect("namespace id");
-    let writer = FsWriter::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone())
         .writer_id("isolation-writer")
         .min_publish_interval_ms(0)
         .build()
         .await
         .expect("writer");
-    let reader = writer.reader();
+    let reader = writer.read_only();
     let namespace = reader.namespace(&namespace_id);
     writer
         .create_namespace(
@@ -1550,7 +1553,7 @@ async fn grep_manifest_lifecycle_pins_not_materialized_error_surface() {
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("error-surface").expect("namespace id");
-    let writer = FsWriter::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone())
         .writer_id("error-writer")
         .build()
         .await
@@ -1623,7 +1626,7 @@ async fn a_backfill_checkpoint_mismatch_is_corruption_without_writes() {
         KeyPredicate::any(),
     ));
     let store: SharedObjectStore = recording.clone();
-    let writer = FsWriter::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone())
         .writer_id("checkpoint-mismatch-writer")
         .build()
         .await
@@ -1682,7 +1685,7 @@ async fn backfilling_manifest_without_checkpoint_id_is_index_corrupt() {
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("missing-backfill-checkpoint").expect("namespace id");
-    let writer = FsWriter::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone())
         .writer_id("missing-checkpoint-writer")
         .build()
         .await
@@ -1776,7 +1779,7 @@ async fn planless_scan_covers_wal_revisions_at_or_below_index_watermark() {
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("scan-gap").expect("namespace id");
-    let writer = FsWriter::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone())
         .writer_id("scan-gap-writer")
         .min_publish_interval_ms(0)
         .build()
@@ -1789,7 +1792,7 @@ async fn planless_scan_covers_wal_revisions_at_or_below_index_watermark() {
         )
         .await
         .expect("create namespace");
-    let namespace_writer = writer
+    let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
 
@@ -1797,7 +1800,7 @@ async fn planless_scan_covers_wal_revisions_at_or_below_index_watermark() {
     worker.enable(&namespace_id).await.expect("enable");
     drive_worker_to_current(&worker, &namespace_id, GramIndexBuildPolicy::default()).await;
 
-    namespace_writer
+    namespace
         .put_file_bytes(
             "/only-in-wal.txt",
             b"x\n",
@@ -1896,7 +1899,7 @@ async fn grep_worker_pins_reorganized_tail_and_pagination_results() {
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("worker-results").expect("namespace id");
-    let writer = FsWriter::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone())
         .writer_id("worker-results-writer")
         .min_publish_interval_ms(0)
         .build()
@@ -1909,7 +1912,7 @@ async fn grep_worker_pins_reorganized_tail_and_pagination_results() {
         )
         .await
         .expect("create namespace");
-    let namespace_writer = writer
+    let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
     let worker = worker(&store).await;
@@ -1922,7 +1925,7 @@ async fn grep_worker_pins_reorganized_tail_and_pagination_results() {
     drive_worker_to_current(&worker, &namespace_id, policy).await;
 
     for round in 0..6u32 {
-        namespace_writer
+        namespace
             .put_file_bytes(
                 &format!("/docs/file-{round}.txt"),
                 format!("shared needle {round}\nshared needle again {round}\n").as_bytes(),
@@ -1941,7 +1944,7 @@ async fn grep_worker_pins_reorganized_tail_and_pagination_results() {
     }
     drive_worker_to_current(&worker, &namespace_id, policy).await;
 
-    namespace_writer
+    namespace
         .put_file_bytes(
             "/tail.txt",
             b"tail-only needle\n",
@@ -2037,7 +2040,7 @@ async fn fork_of_grep_enabled_namespace_starts_unmaterialized_without_manifest_s
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let source = NamespaceId::parse("grep-fork-source").expect("source namespace");
     let target = NamespaceId::parse("grep-fork-target").expect("target namespace");
-    let writer = FsWriter::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone())
         .writer_id("fork-writer")
         .min_publish_interval_ms(0)
         .build()
@@ -2050,8 +2053,8 @@ async fn fork_of_grep_enabled_namespace_starts_unmaterialized_without_manifest_s
         )
         .await
         .expect("create source");
-    let namespace_writer = writer.open_namespace(&source).expect("open namespace");
-    namespace_writer
+    let namespace = writer.open_namespace(&source).expect("open namespace");
+    namespace
         .put_file_bytes(
             "/source.txt",
             b"fork needle\n",
@@ -2132,7 +2135,7 @@ async fn checkpoint_backfill_matches_incremental_worker_results() {
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let backfill_namespace = NamespaceId::parse("equiv-backfill").expect("namespace id");
     let incremental_namespace = NamespaceId::parse("equiv-incremental").expect("namespace id");
-    let writer = FsWriter::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone())
         .writer_id("equiv-writer")
         .min_publish_interval_ms(0)
         .build()
@@ -2161,8 +2164,8 @@ async fn checkpoint_backfill_matches_incremental_worker_results() {
 
     for index in 0..5u32 {
         for namespace_id in [&backfill_namespace, &incremental_namespace] {
-            let namespace_writer = writer.open_namespace(namespace_id).expect("open namespace");
-            namespace_writer
+            let namespace = writer.open_namespace(namespace_id).expect("open namespace");
+            namespace
                 .put_file_bytes(
                     &format!("/file-{index}.txt"),
                     format!("equivalence needle {index}\n").as_bytes(),
@@ -2211,7 +2214,7 @@ async fn a_backfilling_manifest_never_reports_a_built_through_sequence() {
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("enable-honesty").expect("namespace id");
-    let writer = FsWriter::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone())
         .writer_id("enable-honesty-writer")
         .min_publish_interval_ms(0)
         .build()
@@ -2224,10 +2227,10 @@ async fn a_backfilling_manifest_never_reports_a_built_through_sequence() {
         )
         .await
         .expect("create namespace");
-    let namespace_writer = writer
+    let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
-    namespace_writer
+    namespace
         .put_file_bytes(
             "/note.txt",
             b"honest needle\n",
@@ -2311,7 +2314,7 @@ async fn enable_disable_and_cached_queries_use_numbered_publication() {
         KeyPredicate::prefix(grep_prefix(&namespace_id)),
     ));
     let store: SharedObjectStore = recording.clone();
-    let writer = FsWriter::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone())
         .writer_id("numbered-grep-tests")
         .build()
         .await
@@ -2418,7 +2421,7 @@ async fn gc_preserves_discovery_and_applies_manifest_and_segment_age_rules() {
     );
     let recording = Arc::new(RecordingStore::new(young_successor, KeyPredicate::any()));
     let store: SharedObjectStore = recording.clone();
-    let writer = FsWriter::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone())
         .writer_id("numbered-grep-tests")
         .build()
         .await
@@ -2430,7 +2433,7 @@ async fn gc_preserves_discovery_and_applies_manifest_and_segment_age_rules() {
         )
         .await
         .expect("namespace");
-    let namespace_writer = writer
+    let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
     let obsolete = crate::golden_formats::segment_ref(1, 1, 0);
@@ -2547,7 +2550,7 @@ async fn gc_preserves_discovery_and_applies_manifest_and_segment_age_rules() {
         Err(GrepError::CorruptIndex { .. })
     ));
     assert_eq!(recording.counts().deletes, 0);
-    namespace_writer
+    namespace
         .delete_namespace(DeleteNamespaceOptions::default())
         .await
         .expect("tombstone");
@@ -2612,7 +2615,7 @@ async fn gc_keeps_a_superseded_manifest_and_its_segments_while_its_successor_is_
             metadata
         },
     ));
-    let writer = FsWriter::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone())
         .writer_id("superseded-grep-gc")
         .build()
         .await
@@ -2718,7 +2721,7 @@ async fn grep_filters_candidates_the_subject_cannot_read() {
     };
     let temp_dir = tempdir().expect("tempdir");
     let store: SharedObjectStore = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
-    let writer = FsWriter::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone())
         .writer_id("grep-access")
         .min_publish_interval_ms(0)
         .build()
@@ -2738,7 +2741,7 @@ async fn grep_filters_candidates_the_subject_cannot_read() {
         )
         .await
         .expect("namespace");
-    let namespace_writer = writer
+    let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
     let host = GrepHost::new(&store, "grep-access").await;
@@ -2766,7 +2769,7 @@ async fn grep_filters_candidates_the_subject_cannot_read() {
             expected_access_revision_no: None,
         },
     ] {
-        namespace_writer
+        namespace
             .create_commit(
                 CommitRequest::single(
                     CommitId::generate(),
@@ -2780,11 +2783,11 @@ async fn grep_filters_candidates_the_subject_cannot_read() {
             .expect("seed");
     }
     for path in ["/team/file", "/team/secret/file"] {
-        let content = namespace_writer
+        let content = namespace
             .prepare_file_bytes(b"needle\n")
             .await
             .expect("content");
-        namespace_writer
+        namespace
             .commit_prepared(
                 CommitRequest::single(
                     CommitId::generate(),
@@ -2811,7 +2814,8 @@ async fn grep_filters_candidates_the_subject_cannot_read() {
         ("finance", vec!["/team/secret/file"]),
         ("prn_root", vec!["/team/file", "/team/secret/file"]),
     ] {
-        let reads = NamespaceReads::new(&host.reader, &namespace_id).as_subject(subject(principal));
+        let reads = NamespaceReads::new(host.reader.namespace(&namespace_id))
+            .as_subject(subject(principal));
         let response = host
             .service
             .query(&request("needle"), default_page_limit(), &reads, &store)
@@ -2829,7 +2833,8 @@ async fn grep_filters_candidates_the_subject_cannot_read() {
     let mut scan = request("ee");
     scan.allow_scan = true;
     scan.path_prefix = Some(AbsolutePath::parse("/team").expect("path"));
-    let reads = NamespaceReads::new(&host.reader, &namespace_id).as_subject(subject("viewer"));
+    let reads =
+        NamespaceReads::new(host.reader.namespace(&namespace_id)).as_subject(subject("viewer"));
     let scanned = host
         .service
         .query(&scan, default_page_limit(), &reads, &store)

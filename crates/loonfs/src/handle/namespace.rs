@@ -1,10 +1,9 @@
 //! The handle for one namespace, in a read-only or a writable mode.
 
-use crate::fs::{ReadCore, WriterBits};
-use crate::publisher::{
-    CloseNamespaceReport, NamespaceSession, NamespaceSessionState, PublisherRegistry,
-};
-use crate::{FsWriter, NamespaceId, Result};
+use super::{LoonFs, ReadOnly, Writable};
+use crate::fs::ReadCore;
+use crate::publisher::{CloseNamespaceReport, NamespaceSession, NamespaceSessionState};
+use crate::{NamespaceId, Result};
 use loonfs_api::Subject;
 use std::fmt;
 use std::sync::Arc;
@@ -14,46 +13,33 @@ use std::sync::Arc;
 /// Methods on this handle take no namespace id. The mode `M` is the only
 /// difference between the two kinds of handle.
 ///
-/// A `Namespace<ReadOnly>` comes from
-/// [`FsReader::namespace`](crate::FsReader::namespace) or from
+/// A `Namespace<ReadOnly>` comes from [`LoonFs::namespace`] or from
 /// [`Self::read_only`]. It owns no writer session and no writer epoch, so
 /// creating one does no IO and clones are cheap. Each read checks the cached
 /// namespace head against the store, so read-only handles on many nodes need
 /// no coordination with the node that writes.
 ///
-/// A `Namespace<Writable>` comes from [`FsWriter::open_namespace`] and is the
+/// A `Namespace<Writable>` comes from [`LoonFs::open_namespace`] and is the
 /// namespace's writer session: one publication queue, one WAL-tail fold, and
-/// the writer epoch that the session's first publish acquires. The
-/// [`FsWriter`] is the runtime: it owns the store client, the caches, the
-/// admission budgets, and shutdown, and every handle it opens shares them.
+/// the writer epoch that the session's first publish acquires. It shares the
+/// runtime's store client, caches, admission budgets, and shutdown.
 ///
 /// The host that holds a writable handle owns the session. Clones share it,
 /// and the session lives while any clone is held. [`Namespace::close`] ends
 /// it and waits for the work it admitted. Dropping the last clone also ends
 /// it: work already admitted still publishes, and opening the namespace
 /// again before that work finishes returns the same session. Once a session
-/// has ended, the next [`FsWriter::open_namespace`] starts a new one, and
-/// its first publish acquires a new writer epoch. The runtime never opens a
+/// has ended, the next [`LoonFs::open_namespace`] starts a new one, and its
+/// first publish acquires a new writer epoch. The runtime never opens a
 /// session by itself and never closes one to make room for another.
 #[derive(Clone)]
 pub struct Namespace<M> {
     pub(crate) core: ReadCore,
     pub(crate) namespace_id: NamespaceId,
     pub(crate) mode: M,
-}
-
-/// The mode of a [`Namespace`] handle that only reads. It holds no writer
-/// session.
-#[derive(Debug, Clone, Copy)]
-pub struct ReadOnly;
-
-/// The mode of a [`Namespace`] handle that holds the namespace's writer
-/// session, so it can also write.
-#[derive(Clone)]
-pub struct Writable {
-    pub(crate) bits: Arc<WriterBits>,
-    pub(crate) publisher: PublisherRegistry,
-    pub(crate) session: Arc<NamespaceSession>,
+    /// Held exactly when the mode is [`Writable`]. The mode type is shared
+    /// with [`LoonFs`], which has no session, so the session lives here.
+    session: Option<Arc<NamespaceSession>>,
 }
 
 impl<M: fmt::Debug> fmt::Debug for Namespace<M> {
@@ -63,12 +49,6 @@ impl<M: fmt::Debug> fmt::Debug for Namespace<M> {
             .field("namespace_id", &self.namespace_id)
             .field("mode", &self.mode)
             .finish_non_exhaustive()
-    }
-}
-
-impl fmt::Debug for Writable {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.debug_struct("Writable").finish_non_exhaustive()
     }
 }
 
@@ -99,40 +79,50 @@ impl<M> Namespace<M> {
     /// Returns a handle on the same namespace, for the same subject, that
     /// holds no writer session. Holding it does not keep a session open.
     pub fn read_only(&self) -> Namespace<ReadOnly> {
-        Namespace {
-            core: self.core.clone(),
-            namespace_id: self.namespace_id.clone(),
-            mode: ReadOnly,
-        }
+        Namespace::new(self.core.clone(), self.namespace_id.clone())
     }
 
     // Reads live in `fs/reads.rs`, `fs/snapshots.rs`, and
     // `fs/speculative_read.rs`.
 }
 
-impl Namespace<Writable> {
-    pub(crate) fn new(writer: &FsWriter, session: Arc<NamespaceSession>) -> Self {
+impl Namespace<ReadOnly> {
+    pub(crate) fn new(core: ReadCore, namespace_id: NamespaceId) -> Self {
         Self {
-            core: writer.core.clone(),
-            namespace_id: session.namespace_id().clone(),
-            mode: Writable {
-                bits: Arc::clone(&writer.bits),
-                publisher: writer.publisher.clone(),
-                session,
-            },
+            core,
+            namespace_id,
+            mode: ReadOnly,
+            session: None,
         }
+    }
+}
+
+impl Namespace<Writable> {
+    pub(crate) fn open(runtime: &LoonFs<Writable>, session: Arc<NamespaceSession>) -> Self {
+        Self {
+            core: runtime.core.clone(),
+            namespace_id: session.namespace_id().clone(),
+            mode: runtime.mode.clone(),
+            session: Some(session),
+        }
+    }
+
+    pub(crate) fn session(&self) -> &NamespaceSession {
+        self.session
+            .as_deref()
+            .expect("a writable namespace handle should hold its writer session")
     }
 
     /// Returns the state of this handle's writer session.
     pub fn session_state(&self) -> NamespaceSessionState {
-        self.mode.session.state()
+        self.session().state()
     }
 
     /// Refuses new work, drains admitted work, and ends the session.
     ///
     /// From the moment this is called, commits and deletes through every
     /// clone of this handle fail with `writer_session_closed`, and so does
-    /// [`FsWriter::open_namespace`] for this namespace until the drain
+    /// [`LoonFs::open_namespace`] for this namespace until the drain
     /// finishes. After this returns, the next open starts a new session,
     /// which acquires a new writer epoch. Closing a session that no longer
     /// admits work only waits for its drain, and the report says it was not
@@ -151,7 +141,7 @@ impl Namespace<Writable> {
     )]
     pub async fn close(self) -> Result<CloseNamespaceReport> {
         self.core.record_trace_context(&tracing::Span::current());
-        Ok(self.mode.session.close().await?)
+        Ok(self.session().close().await?)
     }
 
     /// Waits for the WAL-tail fold this session is running, if any.
@@ -169,7 +159,7 @@ impl Namespace<Writable> {
     )]
     pub async fn wait_for_fold(&self) -> Result<()> {
         self.core.record_trace_context(&tracing::Span::current());
-        self.mode.session.wait_for_fold().await
+        self.session().wait_for_fold().await
     }
 
     // Namespace deletion lives in `fs/namespaces.rs`; mutation, commit, and

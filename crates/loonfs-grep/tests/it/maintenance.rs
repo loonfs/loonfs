@@ -5,9 +5,8 @@
 use crate::common::is_content_object;
 use bytes::Bytes;
 use loonfs::{
-    DeleteNamespaceOptions, FsMaintenance, FsReader, FsWriter, MaintenanceCancellation,
-    MaintenanceConclusion, MaintenanceJob, MaintenanceProbe, MaintenanceRegistry,
-    MaintenanceRunner, SharedObjectStore,
+    DeleteNamespaceOptions, LoonFs, MaintenanceCancellation, MaintenanceConclusion, MaintenanceJob,
+    MaintenanceProbe, MaintenanceRegistry, MaintenanceRunner, SharedObjectStore, Writable,
 };
 use loonfs_api::{ChangeSeq, IndexSegmentId, NamespaceId};
 use loonfs_grep::keyspace::{hint_key, segment_key};
@@ -311,23 +310,27 @@ fn host_runner(max_concurrent_maintenance: usize) -> (MaintenanceRegistry, Maint
 /// the same client, so a fault-injecting store covers both.
 async fn worker<S: ObjectStore + 'static>(store: Arc<S>, actor: &str) -> GrepWorker<Arc<S>> {
     let shared: SharedObjectStore = store.clone();
-    let reader = FsReader::builder_with_store(shared.clone())
+    let reader = LoonFs::reader_with_store(shared.clone())
         .build()
         .await
         .expect("build reader");
-    let maintenance = FsMaintenance::builder_with_store(shared)
-        .actor_id(actor)
+    let maintenance = LoonFs::builder_with_store(shared)
+        .writer_id(actor)
         .build()
         .await
-        .expect("build maintenance");
+        .expect("build maintenance")
+        .maintenance(loonfs_test_support::ids::writer_id(actor));
     GrepWorker::new(store, reader, maintenance)
 }
 
-async fn seed<S: ObjectStore + 'static>(store: Arc<S>, namespace_id: &NamespaceId) -> FsWriter {
+async fn seed<S: ObjectStore + 'static>(
+    store: Arc<S>,
+    namespace_id: &NamespaceId,
+) -> LoonFs<Writable> {
     crate::test_seeding::writer(store, namespace_id, format!("seed-{namespace_id}")).await
 }
 
-async fn put_file(writer: &FsWriter, namespace_id: &NamespaceId, commit_id: &str) {
+async fn put_file(writer: &LoonFs<Writable>, namespace_id: &NamespaceId, commit_id: &str) {
     crate::test_seeding::put_file(
         writer,
         namespace_id,

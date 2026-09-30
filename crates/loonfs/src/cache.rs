@@ -585,7 +585,7 @@ impl ReadCore {
     /// Drops the namespace's read caches. The publish-side view of the same
     /// state — a namespace publisher's WAL tail projection — is stale for
     /// exactly the same reasons, so a caller that owns a publication service
-    /// drops that too; see `FsWriter::invalidate_namespace`.
+    /// drops that too; see `LoonFs::invalidate_namespace`.
     pub(crate) fn invalidate_namespace_read_cache(&self, namespace_id: &NamespaceId) {
         let _span = phase_span!(self, "update_cache", namespace_id).entered();
         self.inner

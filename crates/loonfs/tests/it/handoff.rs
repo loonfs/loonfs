@@ -4,9 +4,8 @@
 
 use crate::common::{collect_path_entries, directory_options, expect_code, writer};
 use loonfs::{
-    CreateNamespaceOptions, ErrorCode, FsMaintenance, FsReader, ManifestNo,
-    MetadataMaintenanceOptions, Namespace, NamespaceId, NamespaceSessionState, PutFileOptions,
-    SharedObjectStore, Writable,
+    CreateNamespaceOptions, ErrorCode, LoonFs, ManifestNo, MetadataMaintenanceOptions, Namespace,
+    NamespaceId, NamespaceSessionState, PutFileOptions, ReadOnly, SharedObjectStore, Writable,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::stores::{
@@ -20,15 +19,15 @@ fn file_options() -> PutFileOptions {
     PutFileOptions::new(loonfs_test_support::test_actor())
 }
 
-async fn fresh_reader(store: SharedObjectStore) -> FsReader {
-    FsReader::builder_with_store(store)
+async fn fresh_reader(store: SharedObjectStore) -> LoonFs<ReadOnly> {
+    LoonFs::reader_with_store(store)
         .build()
         .await
         .expect("build fresh reader")
 }
 
 async fn assert_root_paths(
-    reader: &FsReader,
+    reader: &LoonFs<ReadOnly>,
     namespace_id: &NamespaceId,
     expected: &BTreeSet<String>,
 ) {
@@ -42,8 +41,8 @@ async fn assert_root_paths(
     assert_eq!(&actual, expected);
 }
 
-async fn put_file(namespace_writer: &Namespace<Writable>, path: &str) {
-    namespace_writer
+async fn put_file(namespace: &Namespace<Writable>, path: &str) {
+    namespace
         .put_file_bytes(path, b"body", file_options())
         .await
         .expect("publish file");
@@ -120,7 +119,7 @@ async fn a_takeover_during_a_paused_publish_fences_the_old_node() {
     failing.clear();
 
     let expected = BTreeSet::from(["/from-a-first".to_owned(), "/from-b".to_owned()]);
-    assert_root_paths(&writer_b.reader(), &namespace_id, &expected).await;
+    assert_root_paths(&writer_b.read_only(), &namespace_id, &expected).await;
     let cold = fresh_reader(store).await;
     assert_root_paths(&cold, &namespace_id, &expected).await;
 }
@@ -197,7 +196,7 @@ async fn a_cold_node_reconstructs_current_state_during_active_writes() {
         )
         .await
         .expect("create namespace");
-    let namespace_writer = writer
+    let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
     let fold_threshold = usize::try_from(
@@ -210,23 +209,26 @@ async fn a_cold_node_reconstructs_current_state_during_active_writes() {
 
     for index in 0..(fold_threshold - 1) {
         let path = format!("/file-{index:03}.txt");
-        put_file(&namespace_writer, &path).await;
+        put_file(&namespace, &path).await;
         expected.insert(path);
     }
     assert_root_paths(&fresh_reader(store.clone()).await, &namespace_id, &expected).await;
 
     let fold_path = format!("/file-{:03}.txt", fold_threshold - 1);
-    put_file(&namespace_writer, &fold_path).await;
+    put_file(&namespace, &fold_path).await;
     expected.insert(fold_path);
-    namespace_writer
+    namespace
         .wait_for_fold()
         .await
         .expect("first fold completes");
-    let maintenance = FsMaintenance::builder_with_store(store.clone())
-        .actor_id("cold-handoff-inspection")
+    let maintenance = LoonFs::builder_with_store(store.clone())
+        .writer_id("cold-handoff-inspection")
         .build()
         .await
-        .expect("build maintenance handle");
+        .expect("build maintenance handle")
+        .maintenance(loonfs_test_support::ids::writer_id(
+            "cold-handoff-inspection",
+        ));
     let diagnostics = maintenance
         .get_namespace_diagnostics(&namespace_id)
         .await
@@ -236,7 +238,7 @@ async fn a_cold_node_reconstructs_current_state_during_active_writes() {
 
     for index in fold_threshold..(fold_threshold + 3) {
         let path = format!("/file-{index:03}.txt");
-        put_file(&namespace_writer, &path).await;
+        put_file(&namespace, &path).await;
         expected.insert(path);
     }
     assert_root_paths(&fresh_reader(store).await, &namespace_id, &expected).await;

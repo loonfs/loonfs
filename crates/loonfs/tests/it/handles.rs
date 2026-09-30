@@ -9,10 +9,10 @@
 use crate::common::collect_path_entries;
 use loonfs::{
     maintenance_hint_relay, CommitId, CreateCheckpointOptions, CreateDirectoryOptions,
-    CreateNamespaceOptions, ErrorCode, FsMaintenance, FsReader, FsWriter, GarbageCollectionJob,
+    CreateNamespaceOptions, ErrorCode, GarbageCollectionJob, LoonFs, Maintenance,
     MaintenanceRegistry, MaintenanceRunner, ManifestNo, MetadataCompactionJob,
     MetadataMaintenanceJob, MetadataMaintenanceOptions, NamespaceId, PutFileOptions,
-    RuntimeCacheConfig, RuntimeError, SharedObjectStore, StoreConfig,
+    RuntimeCacheConfig, RuntimeError, SharedObjectStore, StoreConfig, Writable,
 };
 use loonfs_core::test_support::append_wal_segments;
 use loonfs_core::MutationContext;
@@ -51,8 +51,8 @@ fn writes_past_wal_tail_threshold() -> u32 {
         .expect("WAL tail threshold plus one should fit in u32")
 }
 
-async fn writer(root: &Path) -> FsWriter {
-    FsWriter::builder(store_config(root))
+async fn writer(root: &Path) -> LoonFs<Writable> {
+    LoonFs::builder(store_config(root))
         .writer_id("handle-test-writer")
         .build()
         .await
@@ -62,19 +62,19 @@ async fn writer(root: &Path) -> FsWriter {
 async fn writer_with_runner(
     root: &Path,
     runtime_cache: RuntimeCacheConfig,
-) -> (FsWriter, FsMaintenance, MaintenanceRunner) {
+) -> (LoonFs<Writable>, Maintenance, MaintenanceRunner) {
     let (observer, receiver) =
         maintenance_hint_relay(NonZeroUsize::new(64).expect("relay capacity is nonzero"));
-    let writer = FsWriter::builder(store_config(root))
+    let writer = LoonFs::builder(store_config(root))
         .writer_id("handle-test-writer")
         .runtime_cache(runtime_cache)
         .maintenance_hint_observer(move |hint| observer(hint))
         .build()
         .await
         .expect("build writer");
-    let maintenance = writer
-        .maintenance_handle("handle-test-maintenance")
-        .expect("build maintenance handle");
+    let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id(
+        "handle-test-maintenance",
+    ));
     let registry = MaintenanceRegistry::new();
     registry
         .register(Arc::new(MetadataMaintenanceJob::new(maintenance.clone())))
@@ -129,10 +129,10 @@ fn writer_reader_and_maintenance_share_a_namespace_through_store_config() {
             )
             .await
             .expect("create namespace");
-        let namespace_writer = writer
+        let namespace = writer
             .open_namespace(&namespace_id)
             .expect("open namespace");
-        namespace_writer
+        namespace
             .put_file_bytes(
                 "/docs/hello.txt",
                 b"hello",
@@ -142,7 +142,7 @@ fn writer_reader_and_maintenance_share_a_namespace_through_store_config() {
             .expect("put file");
 
         // A reader derived from the writer shares its caches.
-        let derived = writer.reader();
+        let derived = writer.read_only();
         let derived_namespace = derived.namespace(&namespace_id);
         let read = derived_namespace
             .get_file_bytes("/docs/hello.txt")
@@ -152,7 +152,7 @@ fn writer_reader_and_maintenance_share_a_namespace_through_store_config() {
 
         // A standalone reader opens its own store client from config and
         // still observes the write.
-        let standalone = FsReader::builder(store_config(temp_dir.path()))
+        let standalone = LoonFs::reader(store_config(temp_dir.path()))
             .build()
             .await
             .expect("build standalone reader");
@@ -169,20 +169,20 @@ fn writer_reader_and_maintenance_share_a_namespace_through_store_config() {
         assert_eq!(entries.len(), 1);
 
         // Maintenance inspects the same namespace through its own handle.
-        let maintenance = FsMaintenance::builder(store_config(temp_dir.path()))
-            .actor_id("handle-test-maintenance")
+        let maintenance = LoonFs::builder(store_config(temp_dir.path()))
+            .writer_id("handle-test-maintenance")
             .build()
             .await
-            .expect("build maintenance");
+            .expect("build maintenance")
+            .maintenance(loonfs_test_support::ids::writer_id(
+                "handle-test-maintenance",
+            ));
         let status = maintenance
             .get_namespace_diagnostics(&namespace_id)
             .await
             .expect("namespace status");
         assert_eq!(status.namespace_id, namespace_id);
         assert_eq!(status.wal_tail_segments, 2);
-        // Maintenance work is observable through the maintenance handle's own
-        // cache counters, like writer and reader work through theirs.
-        let _ = maintenance.runtime_cache_stats();
 
         writer.shutdown().await.expect("shut down writer");
     });
@@ -213,7 +213,7 @@ fn standalone_reader_builds_without_writer_identity() {
             .await
             .expect("put file");
 
-        let reader = FsReader::builder(store_config(temp_dir.path()))
+        let reader = LoonFs::reader(store_config(temp_dir.path()))
             .build()
             .await
             .expect("build standalone reader");
@@ -246,7 +246,7 @@ fn standalone_reader_builds_without_writer_identity() {
 }
 
 #[test]
-fn a_writer_maintenance_handle_invalidates_shared_read_caches() {
+fn maintenance_invalidates_the_runtimes_shared_read_caches() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
     block_on(async {
@@ -262,7 +262,7 @@ fn a_writer_maintenance_handle_invalidates_shared_read_caches() {
         let namespace_writer = writer
             .open_namespace(&namespace_id)
             .expect("open namespace");
-        let reader = writer.reader();
+        let reader = writer.read_only();
         let namespace = reader.namespace(&namespace_id);
         for round in 0..writes_past_wal_tail_threshold() {
             namespace_writer
@@ -368,7 +368,7 @@ fn put_file_bytes_and_prepare_then_put_commit_equivalent_state() {
         assert_eq!(composed.commit_id, commit_id);
         assert_eq!(simple.committed_seq, composed.committed_seq);
 
-        let reader = writer.reader();
+        let reader = writer.read_only();
         let simple_namespace_reader = reader.namespace(&simple_namespace);
         let prepared_namespace_reader = reader.namespace(&prepared_namespace);
         let simple_stat = simple_namespace_reader
@@ -417,11 +417,11 @@ fn manual_only_writer_folds_without_scheduling_maintenance() {
             )
             .await
             .expect("create namespace");
-        let namespace_writer = writer
+        let namespace = writer
             .open_namespace(&namespace_id)
             .expect("open namespace");
         for round in 0..=(wal_tail_segment_threshold() * 2) {
-            namespace_writer
+            namespace
                 .put_file_bytes(
                     &format!("/docs/file-{round}.txt"),
                     b"body",
@@ -430,16 +430,19 @@ fn manual_only_writer_folds_without_scheduling_maintenance() {
                 .await
                 .expect("put file");
         }
-        namespace_writer
+        namespace
             .wait_for_fold()
             .await
             .expect("settle the writer's fold");
 
-        let maintenance = FsMaintenance::builder(store_config(temp_dir.path()))
-            .actor_id("handle-test-maintenance")
+        let maintenance = LoonFs::builder(store_config(temp_dir.path()))
+            .writer_id("handle-test-maintenance")
             .build()
             .await
-            .expect("build maintenance");
+            .expect("build maintenance")
+            .maintenance(loonfs_test_support::ids::writer_id(
+                "handle-test-maintenance",
+            ));
         let status = maintenance
             .get_namespace_diagnostics(&namespace_id)
             .await
@@ -474,11 +477,11 @@ fn a_writer_with_a_runner_maintains_what_it_touches() {
                 )
                 .await
                 .expect("create namespace");
-            let namespace_writer = writer
+            let namespace = writer
                 .open_namespace(&namespace_id)
                 .expect("open namespace");
 
-            namespace_writer
+            namespace
                 .put_file_bytes(
                     "/docs/under-threshold.txt",
                     b"body",
@@ -499,7 +502,7 @@ fn a_writer_with_a_runner_maintains_what_it_touches() {
             assert_eq!(status.wal_tail_segments, 2, "{status:?}");
 
             for round in 0..writes_past_wal_tail_threshold() {
-                namespace_writer
+                namespace
                     .put_file_bytes(
                         &format!("/docs/file-{round}.txt"),
                         b"body",
@@ -508,7 +511,7 @@ fn a_writer_with_a_runner_maintains_what_it_touches() {
                     .await
                     .expect("put file");
             }
-            namespace_writer
+            namespace
                 .wait_for_fold()
                 .await
                 .expect("writer fold settles");
@@ -545,15 +548,15 @@ fn a_runner_retries_a_failed_writer_fold_without_another_write() {
         let (observer, receiver) =
             maintenance_hint_relay(NonZeroUsize::new(64).expect("relay capacity is nonzero"));
         let store: SharedObjectStore = failing.clone();
-        let writer = FsWriter::builder_with_store(store)
+        let writer = LoonFs::builder_with_store(store)
             .writer_id("fold-retry-writer")
             .maintenance_hint_observer(move |hint| observer(hint))
             .build()
             .await
             .expect("build writer");
-        let maintenance = writer
-            .maintenance_handle("fold-retry-maintenance")
-            .expect("build maintenance handle");
+        let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id(
+            "fold-retry-maintenance",
+        ));
         let registry = MaintenanceRegistry::new();
         registry
             .register(Arc::new(MetadataMaintenanceJob::new(maintenance.clone())))
@@ -576,7 +579,7 @@ fn a_runner_retries_a_failed_writer_fold_without_another_write() {
             )
             .await
             .expect("create namespace");
-        let namespace_writer = writer
+        let namespace = writer
             .open_namespace(&namespace_id)
             .expect("open namespace");
         append_wal_segments(
@@ -592,7 +595,7 @@ fn a_runner_retries_a_failed_writer_fold_without_another_write() {
         .expect("seed WAL tail below fold threshold");
 
         failing.fail_next(1);
-        namespace_writer
+        namespace
             .put_file_bytes(
                 "/docs/cross-threshold.txt",
                 b"body",
@@ -600,7 +603,7 @@ fn a_runner_retries_a_failed_writer_fold_without_another_write() {
             )
             .await
             .expect("publish across the fold threshold");
-        namespace_writer
+        namespace
             .wait_for_fold()
             .await
             .expect("writer fold settles");
@@ -639,7 +642,7 @@ fn a_runtime_publish_folds_a_preexisting_write_stopped_tail_and_lands() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
     block_on(async {
-        let stalled = FsWriter::builder(store_config(temp_dir.path()))
+        let stalled = LoonFs::builder(store_config(temp_dir.path()))
             .writer_id("handle-test-stalled-writer")
             .build()
             .await
@@ -672,16 +675,16 @@ fn a_runtime_publish_folds_a_preexisting_write_stopped_tail_and_lands() {
             tail_store,
             crate::common::folded_manifest_put,
         ));
-        let writer = FsWriter::builder_with_store(blocking.clone())
+        let writer = LoonFs::builder_with_store(blocking.clone())
             .writer_id("handle-test-writer")
             .build()
             .await
             .expect("build writer");
-        let namespace_writer = writer
+        let namespace = writer
             .open_namespace(&namespace_id)
             .expect("open namespace");
         blocking.block_next();
-        let refused = namespace_writer
+        let refused = namespace
             .put_file_bytes(
                 "/write-stop/recovered.txt",
                 b"body",
@@ -691,17 +694,17 @@ fn a_runtime_publish_folds_a_preexisting_write_stopped_tail_and_lands() {
             .expect_err("the write-stopped tail refuses the first publish");
         assert_eq!(refused.code(), ErrorCode::MaintenanceRequired);
         blocking.wait_until_blocked().await;
-        let replay = namespace_writer
+        let replay = namespace
             .create_directory("/before-write-stop", replay_options)
             .await
             .expect("replay succeeds while the tail remains at the bound");
         assert_eq!(replay, original);
         blocking.release();
-        namespace_writer
+        namespace
             .wait_for_fold()
             .await
             .expect("settle the fold started by the refusal");
-        namespace_writer
+        namespace
             .put_file_bytes(
                 "/write-stop/recovered.txt",
                 b"body",
@@ -709,11 +712,14 @@ fn a_runtime_publish_folds_a_preexisting_write_stopped_tail_and_lands() {
             )
             .await
             .expect("the retry lands after the fold");
-        let maintenance = FsMaintenance::builder(store_config(temp_dir.path()))
-            .actor_id("handle-test-maintenance")
+        let maintenance = LoonFs::builder(store_config(temp_dir.path()))
+            .writer_id("handle-test-maintenance")
             .build()
             .await
-            .expect("build maintenance");
+            .expect("build maintenance")
+            .maintenance(loonfs_test_support::ids::writer_id(
+                "handle-test-maintenance",
+            ));
         let status = maintenance
             .get_namespace_diagnostics(&namespace_id)
             .await
@@ -738,7 +744,7 @@ fn a_failed_fold_preserves_the_write_stop_until_the_store_recovers() {
             InjectedError::PermissionDenied("manifest writes disabled".to_owned()),
         ));
         let store: SharedObjectStore = failing.clone();
-        let writer = FsWriter::builder_with_store(store)
+        let writer = LoonFs::builder_with_store(store)
             .writer_id("fold-failure-writer")
             .inline_content(loonfs::InlineContentOptions {
                 inline_content_threshold_bytes: None,
@@ -754,7 +760,7 @@ fn a_failed_fold_preserves_the_write_stop_until_the_store_recovers() {
             )
             .await
             .expect("create namespace");
-        let namespace_writer = writer
+        let namespace = writer
             .open_namespace(&namespace_id)
             .expect("open namespace");
         let seed_segments = wal_tail_segment_threshold() - 1;
@@ -772,7 +778,7 @@ fn a_failed_fold_preserves_the_write_stop_until_the_store_recovers() {
 
         failing.fail_all();
         for round in 0..(loonfs_core::limits::MAX_UNFOLDED_WAL_SEGMENTS - seed_segments - 2) {
-            namespace_writer
+            namespace
                 .put_file_bytes(
                     &format!("/failed-fold/file-{round}.txt"),
                     b"body",
@@ -781,7 +787,7 @@ fn a_failed_fold_preserves_the_write_stop_until_the_store_recovers() {
                 .await
                 .expect("publishes below the write-stop bound continue after a failed fold");
         }
-        let error = namespace_writer
+        let error = namespace
             .put_file_bytes(
                 "/failed-fold/refused.txt",
                 b"body",
@@ -792,11 +798,11 @@ fn a_failed_fold_preserves_the_write_stop_until_the_store_recovers() {
         assert_eq!(error.code(), ErrorCode::MaintenanceRequired);
 
         failing.clear();
-        namespace_writer
+        namespace
             .wait_for_fold()
             .await
             .expect("settle the fold after the manifest store recovers");
-        namespace_writer
+        namespace
             .put_file_bytes(
                 "/failed-fold/recovered.txt",
                 b"body",
@@ -804,11 +810,14 @@ fn a_failed_fold_preserves_the_write_stop_until_the_store_recovers() {
             )
             .await
             .expect("the recovered manifest store lets the retry land");
-        let maintenance = FsMaintenance::builder_with_store(failing as SharedObjectStore)
-            .actor_id("handle-test-maintenance")
+        let maintenance = LoonFs::builder_with_store(failing as SharedObjectStore)
+            .writer_id("handle-test-maintenance")
             .build()
             .await
-            .expect("build maintenance");
+            .expect("build maintenance")
+            .maintenance(loonfs_test_support::ids::writer_id(
+                "handle-test-maintenance",
+            ));
         let status = maintenance
             .get_namespace_diagnostics(&namespace_id)
             .await
@@ -829,7 +838,7 @@ fn a_threshold_crossing_publish_returns_before_its_fold_completes() {
             LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
             crate::common::folded_manifest_put,
         ));
-        let writer = FsWriter::builder_with_store(blocking.clone())
+        let writer = LoonFs::builder_with_store(blocking.clone())
             .writer_id("parked-fold-writer")
             .build()
             .await
@@ -841,7 +850,7 @@ fn a_threshold_crossing_publish_returns_before_its_fold_completes() {
             )
             .await
             .expect("create namespace");
-        let namespace_writer = writer
+        let namespace = writer
             .open_namespace(&namespace_id)
             .expect("open namespace");
         append_wal_segments(
@@ -858,9 +867,9 @@ fn a_threshold_crossing_publish_returns_before_its_fold_completes() {
 
         blocking.block_next();
         let put = tokio::spawn({
-            let namespace_writer = namespace_writer.clone();
+            let namespace = namespace.clone();
             async move {
-                namespace_writer
+                namespace
                     .put_file_bytes(
                         "/crossing.txt",
                         b"body",
@@ -882,13 +891,13 @@ fn a_threshold_crossing_publish_returns_before_its_fold_completes() {
             .expect("the crossing publish lands");
 
         blocking.release();
-        namespace_writer
+        namespace
             .wait_for_fold()
             .await
             .expect("settle the released fold");
-        let maintenance = writer
-            .maintenance_handle("parked-fold-inspection")
-            .expect("build maintenance handle");
+        let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id(
+            "parked-fold-inspection",
+        ));
         let status = maintenance
             .get_namespace_diagnostics(&namespace_id)
             .await
@@ -908,7 +917,7 @@ fn a_shut_down_writer_refuses_mutations_and_keeps_reading() {
     let namespace_id = namespace_id("demo");
     block_on(async {
         let writer = writer(temp_dir.path()).await;
-        let namespace = writer.reader().namespace(&namespace_id);
+        let namespace = writer.namespace(&namespace_id);
         writer
             .create_namespace(
                 &namespace_id,
@@ -927,11 +936,14 @@ fn a_shut_down_writer_refuses_mutations_and_keeps_reading() {
             )
             .await
             .expect("put file before the shutdown");
-        let tail_at_shutdown = FsMaintenance::builder(store_config(temp_dir.path()))
-            .actor_id("handle-test-maintenance")
+        let tail_at_shutdown = LoonFs::builder(store_config(temp_dir.path()))
+            .writer_id("handle-test-maintenance")
             .build()
             .await
             .expect("build maintenance")
+            .maintenance(loonfs_test_support::ids::writer_id(
+                "handle-test-maintenance",
+            ))
             .get_namespace_diagnostics(&namespace_id)
             .await
             .expect("status before the shutdown")
@@ -956,11 +968,14 @@ fn a_shut_down_writer_refuses_mutations_and_keeps_reading() {
             .expect("reads survive the writer's shutdown");
         assert_eq!(read.bytes, b"hello");
 
-        let maintenance = FsMaintenance::builder(store_config(temp_dir.path()))
-            .actor_id("handle-test-maintenance")
+        let maintenance = LoonFs::builder(store_config(temp_dir.path()))
+            .writer_id("handle-test-maintenance")
             .build()
             .await
-            .expect("build maintenance");
+            .expect("build maintenance")
+            .maintenance(loonfs_test_support::ids::writer_id(
+                "handle-test-maintenance",
+            ));
         let status = maintenance
             .get_namespace_diagnostics(&namespace_id)
             .await
@@ -980,13 +995,13 @@ fn a_shut_down_writer_refuses_mutations_and_keeps_reading() {
 #[test]
 fn builders_require_identity_and_a_runtime() {
     let temp_dir = tempdir().expect("tempdir");
-    match block_on(FsWriter::builder(store_config(temp_dir.path())).build()) {
+    match block_on(LoonFs::builder(store_config(temp_dir.path())).build()) {
         Err(RuntimeError::Config(_)) => {}
         Err(other) => panic!("expected config error for missing writer_id, got {other:?}"),
         Ok(_) => panic!("writer_id must be required"),
     }
     match block_on(
-        FsWriter::builder(store_config(temp_dir.path()))
+        LoonFs::builder(store_config(temp_dir.path()))
             .writer_id("   ")
             .build(),
     ) {
@@ -994,15 +1009,10 @@ fn builders_require_identity_and_a_runtime() {
         Err(other) => panic!("expected config error for a blank writer_id, got {other:?}"),
         Ok(_) => panic!("a whitespace-only writer_id must be rejected"),
     }
-    match block_on(FsMaintenance::builder(store_config(temp_dir.path())).build()) {
-        Err(RuntimeError::Config(_)) => {}
-        Err(other) => panic!("expected config error for missing actor_id, got {other:?}"),
-        Ok(_) => panic!("actor_id must be required"),
-    }
 
     // Polling build() outside a Tokio runtime is a config error, not a panic.
     let outside_runtime = futures::executor::block_on(
-        FsWriter::builder(store_config(temp_dir.path()))
+        LoonFs::builder(store_config(temp_dir.path()))
             .writer_id("handle-test-writer")
             .build(),
     );
@@ -1029,10 +1039,10 @@ fn maintenance_checkpoint_and_retention_are_explicit_one_shot_calls() {
             )
             .await
             .expect("create namespace");
-        let namespace_writer = writer
+        let namespace = writer
             .open_namespace(&namespace_id)
             .expect("open namespace");
-        namespace_writer
+        namespace
             .put_file_bytes(
                 "/docs/hello.txt",
                 b"hello",
@@ -1041,11 +1051,14 @@ fn maintenance_checkpoint_and_retention_are_explicit_one_shot_calls() {
             .await
             .expect("put file");
 
-        let maintenance = FsMaintenance::builder(store_config(temp_dir.path()))
-            .actor_id("handle-test-maintenance")
+        let maintenance = LoonFs::builder(store_config(temp_dir.path()))
+            .writer_id("handle-test-maintenance")
             .build()
             .await
-            .expect("build maintenance");
+            .expect("build maintenance")
+            .maintenance(loonfs_test_support::ids::writer_id(
+                "handle-test-maintenance",
+            ));
         let checkpoint = maintenance
             .create_checkpoint(
                 &namespace_id,
@@ -1085,7 +1098,7 @@ async fn namespace_deletion_drops_cached_reads_and_schedules_gc_even_when_its_an
         );
         let hints = Arc::new(Mutex::new(Vec::new()));
         let observed = hints.clone();
-        let writer = FsWriter::builder_with_store(store.clone())
+        let writer = LoonFs::builder_with_store(store.clone())
             .writer_id("delete-hint")
             .runtime_cache(RuntimeCacheConfig {
                 manifest_revalidation_interval_ms: u64::MAX,
@@ -1114,12 +1127,11 @@ async fn namespace_deletion_drops_cached_reads_and_schedules_gc_even_when_its_an
             .await
             .expect("put");
         writer
-            .maintenance_handle("delete-hint")
-            .expect("maintenance")
+            .maintenance(loonfs_test_support::ids::writer_id("delete-hint"))
             .fold_wal(&namespace_id)
             .await
             .expect("fold the tail so the tombstone is the only manifest put");
-        let reader = writer.reader();
+        let reader = writer.read_only();
         let namespace = reader.namespace(&namespace_id);
         namespace
             .get_path_entry("/file", Default::default())

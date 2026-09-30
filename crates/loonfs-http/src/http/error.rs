@@ -1,7 +1,7 @@
 //! The HTTP error envelope served by every v0 endpoint, and the mapping
 //! from error kinds to HTTP statuses.
 
-use crate::NamespaceWriters;
+use crate::Namespaces;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -136,10 +136,10 @@ impl ApiResponseError {
         |error| Self::runtime_for_namespace(namespace_id, error)
     }
 
-    /// Maps a failure from the host's writer handle for `namespace_id`, and
+    /// Maps a failure from the host's writable handle for `namespace_id`, and
     /// stops holding that handle when the namespace is missing or deleted.
     pub(super) fn runtime_for_namespace_writer(
-        namespaces: &NamespaceWriters,
+        namespaces: &Namespaces,
         namespace_id: &NamespaceId,
         error: RuntimeError,
     ) -> Self {
@@ -148,7 +148,7 @@ impl ApiResponseError {
     }
 
     pub(super) fn for_namespace_writer<'a>(
-        namespaces: &'a NamespaceWriters,
+        namespaces: &'a Namespaces,
         namespace_id: &'a NamespaceId,
     ) -> impl FnOnce(RuntimeError) -> Self + 'a {
         |error| Self::runtime_for_namespace_writer(namespaces, namespace_id, error)

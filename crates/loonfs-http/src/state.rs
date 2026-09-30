@@ -2,9 +2,8 @@
 
 use crate::HttpMetrics;
 use loonfs::{
-    CloseNamespaceReport, FsMaintenance, FsReader, FsWriter, InlineContentOptions,
-    MaintenanceHandle, MaintenanceJob, MaintenanceProbe, Namespace, SharedObjectStore,
-    SnapshotPolicy, Writable,
+    CloseNamespaceReport, InlineContentOptions, LoonFs, Maintenance, MaintenanceHandle,
+    MaintenanceJob, MaintenanceProbe, Namespace, SharedObjectStore, SnapshotPolicy, Writable,
 };
 use loonfs_api::{ErrorCode, NamespaceId, SecretString};
 use loonfs_grep::{GrepMaintenanceJob, GrepService, GrepWorker, GREP_INDEX_JOB};
@@ -42,14 +41,13 @@ pub struct BindingOptions {
     pub auth_policy: AuthPolicy,
 }
 
-/// Hosts supply handles over one store, with grep services and permit limits matching `options`.
+/// Hosts supply one runtime over one store, with grep services and permit limits matching `options`.
 #[derive(Clone)]
 pub struct BindingState {
     pub options: Arc<BindingOptions>,
-    pub writer: FsWriter,
-    pub namespaces: Arc<NamespaceWriters>,
-    pub reader: FsReader,
-    pub maintenance: FsMaintenance,
+    pub runtime: LoonFs<Writable>,
+    pub namespaces: Arc<Namespaces>,
+    pub maintenance: Maintenance,
     pub probe_store: SharedObjectStore,
     pub direct_transfers: Option<DirectTransferIssuers>,
     pub grep_worker: Option<GrepWorker<SharedObjectStore>>,
@@ -74,22 +72,22 @@ impl BindingState {
     }
 }
 
-/// The writer handle this host holds for each namespace.
+/// The writable handle this host holds for each namespace.
 ///
 /// The host decides which writer sessions stay open and for how long: a
 /// session lives while its handle is held. This reference host keeps every
 /// namespace it has written open, with no cap and no eviction. It stops
 /// holding a handle only when the namespace is deleted or turns out not to
 /// exist.
-pub struct NamespaceWriters {
-    writer: FsWriter,
+pub struct Namespaces {
+    runtime: LoonFs<Writable>,
     handles: Mutex<HashMap<NamespaceId, Namespace<Writable>>>,
 }
 
-impl NamespaceWriters {
-    pub fn new(writer: FsWriter) -> Self {
+impl Namespaces {
+    pub fn new(runtime: LoonFs<Writable>) -> Self {
         Self {
-            writer,
+            runtime,
             handles: Mutex::default(),
         }
     }
@@ -100,7 +98,7 @@ impl NamespaceWriters {
         if let Some(handle) = handles.get(namespace_id) {
             return Ok(handle.clone());
         }
-        let handle = self.writer.open_namespace(namespace_id)?;
+        let handle = self.runtime.open_namespace(namespace_id)?;
         handles.insert(namespace_id.clone(), handle.clone());
         Ok(handle)
     }

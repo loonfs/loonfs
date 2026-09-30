@@ -3,7 +3,7 @@
 use loonfs::publish::{CommitRequest, FilesystemOperation};
 use loonfs::{
     CreateNamespaceOptions, CreateSnapshotOptions, DeleteNamespaceOptions, ForkNamespaceOptions,
-    FsWriter, ListChangesOptions, SnapshotPolicy, StatPathOptions,
+    ListChangesOptions, LoonFs, SnapshotPolicy, StatPathOptions, Writable,
 };
 use loonfs_api::v0::FilesystemChange;
 use loonfs_api::{
@@ -47,10 +47,10 @@ fn access_mode() -> NamespaceAccessMode {
     }
 }
 
-async fn create_namespace() -> (tempfile::TempDir, FsWriter, NamespaceId) {
+async fn create_namespace() -> (tempfile::TempDir, LoonFs<Writable>, NamespaceId) {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let writer =
-        FsWriter::builder_with_store(Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")))
+        LoonFs::builder_with_store(Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")))
             .writer_id("access-namespace")
             .min_publish_interval_ms(0)
             .build()
@@ -76,20 +76,16 @@ async fn create_namespace() -> (tempfile::TempDir, FsWriter, NamespaceId) {
 #[tokio::test]
 async fn namespace_operations_need_an_administrator_or_no_subject() {
     let (_temp_dir, writer, namespace) = create_namespace().await;
-    let namespace_reader = writer.reader().namespace(&namespace);
+    let namespace_reader = writer.namespace(&namespace);
     let root = writer.as_subject(subject("root", "prn_root"));
     let member = writer.as_subject(subject("member", "team"));
     assert_eq!(
-        namespace_reader
-            .get_namespace()
-            .await
-            .expect("namespace")
-            .access,
+        namespace_reader.metadata().await.expect("namespace").access,
         access_mode()
     );
     let fork = namespace_id("fork");
-    let fork_namespace = writer.reader().namespace(&fork);
-    let member_fork_namespace = member.reader().namespace(&fork);
+    let fork_namespace = writer.namespace(&fork);
+    let member_fork_namespace = member.namespace(&fork);
     let fork_options = ForkNamespaceOptions {
         actor_id: loonfs_test_support::test_actor(),
         snapshot_id: None,
@@ -109,7 +105,7 @@ async fn namespace_operations_need_an_administrator_or_no_subject() {
     let root_namespace_writer = root.open_namespace(&namespace).expect("open namespace");
     let member_namespace_writer = member.open_namespace(&namespace).expect("open namespace");
     assert_eq!(
-        fork_namespace.get_namespace().await.expect("fork").access,
+        fork_namespace.metadata().await.expect("fork").access,
         access_mode()
     );
     member_fork_namespace
@@ -163,7 +159,7 @@ async fn namespace_operations_need_an_administrator_or_no_subject() {
 }
 
 async fn commit_as(
-    writer: &FsWriter,
+    writer: &LoonFs<Writable>,
     namespace: &NamespaceId,
     subject: Subject,
     operation: FilesystemOperation,
@@ -190,7 +186,7 @@ async fn subject_scope_is_enforced_only_for_acl_namespaces() {
     let expected_message =
         "subject principal scope `org_other` does not match namespace principal scope `org_demo`";
     let wrong_scope_namespace = writer
-        .reader()
+        .read_only()
         .as_subject(wrong_scope.clone())
         .namespace(&namespace);
     let error = wrong_scope_namespace
@@ -227,7 +223,7 @@ async fn subject_scope_is_enforced_only_for_acl_namespaces() {
         .await
         .expect("unrestricted namespace");
     let unrestricted_namespace = writer
-        .reader()
+        .read_only()
         .as_subject(wrong_scope.clone())
         .namespace(&unrestricted);
     unrestricted_namespace
@@ -254,7 +250,7 @@ fn create_directory(path: &str) -> FilesystemOperation {
 #[tokio::test]
 async fn recovery_restores_an_administrator_and_keeps_the_other_root_grants() {
     let (_temp_dir, writer, namespace) = create_namespace().await;
-    let namespace_reader = writer.reader().namespace(&namespace);
+    let namespace_reader = writer.namespace(&namespace);
     let namespace_writer = writer.open_namespace(&namespace).expect("open namespace");
     commit_as(
         &writer,
@@ -347,7 +343,7 @@ async fn a_revoked_administrator_cannot_delete_a_snapshot_through_the_former_wri
         .put_file_bytes("/file", b"private payload", options)
         .await
         .expect("publish after snapshot creation");
-    let peer = FsWriter::builder_with_store(writer.object_store())
+    let peer = LoonFs::builder_with_store(writer.object_store())
         .writer_id("peer")
         .min_publish_interval_ms(0)
         .build()
@@ -379,7 +375,7 @@ async fn a_revoked_administrator_cannot_delete_a_snapshot_through_the_former_wri
             .code(),
         ErrorCode::Forbidden
     );
-    let reader = loonfs::FsReader::builder_with_store(writer.object_store())
+    let reader = loonfs::LoonFs::reader_with_store(writer.object_store())
         .build()
         .await
         .expect("fresh reader");
@@ -435,14 +431,14 @@ async fn a_scoped_writer_uses_its_subject_for_commits_and_upload_ownership() {
 
 async fn snapshot_after_administrator_change() -> (
     tempfile::TempDir,
-    loonfs::FsReader,
+    loonfs::LoonFs<loonfs::ReadOnly>,
     NamespaceId,
     loonfs_api::PinId,
     loonfs_api::ContentRef,
 ) {
     let (directory, writer, namespace) = create_namespace().await;
     let root = writer.as_subject(subject("root", "prn_root"));
-    let namespace_reader = root.reader().namespace(&namespace);
+    let namespace_reader = root.namespace(&namespace);
     let namespace_writer = root.open_namespace(&namespace).expect("open namespace");
     namespace_writer
         .put_file_bytes(
@@ -489,7 +485,7 @@ async fn snapshot_after_administrator_change() -> (
     .expect("replace administrator");
     // A new runtime rules out stale-cache permission checks. The old ACL is
     // available only through the deliberately historical snapshot context.
-    let reader = loonfs::FsReader::builder_with_store(writer.object_store())
+    let reader = loonfs::LoonFs::reader_with_store(writer.object_store())
         .build()
         .await
         .expect("fresh reader");

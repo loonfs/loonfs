@@ -3,10 +3,7 @@
 
 //! Checks operation spans for the writer, reader, and maintenance handles.
 
-use loonfs::{
-    CreateDirectoryOptions, CreateNamespaceOptions, FsMaintenance, FsWriter, PutFileOptions,
-    StoreConfig,
-};
+use loonfs::{CreateDirectoryOptions, CreateNamespaceOptions, LoonFs, PutFileOptions, StoreConfig};
 use loonfs_test_support::block_on::block_on;
 use loonfs_test_support::ids::namespace_id;
 use std::path::Path;
@@ -64,7 +61,7 @@ fn every_handle_emits_an_operation_span_with_its_namespace() {
     let _guard = tracing::subscriber::set_default(subscriber);
 
     block_on(async {
-        let writer = FsWriter::builder(store_config(temp_dir.path()))
+        let writer = LoonFs::builder(store_config(temp_dir.path()))
             .writer_id("operation-span-writer")
             .build()
             .await
@@ -77,22 +74,22 @@ fn every_handle_emits_an_operation_span_with_its_namespace() {
             .await
             .expect("create namespace");
 
-        let reader = writer.reader();
+        let reader = writer.read_only();
         let namespace = reader.namespace(&namespace_id);
         namespace
             .get_path_entry("/", Default::default())
             .await
             .expect("stat namespace root");
-        namespace
-            .get_namespace()
-            .await
-            .expect("read namespace state");
+        namespace.metadata().await.expect("read namespace state");
 
-        FsMaintenance::builder_with_store(writer.object_store())
-            .actor_id("operation-span-maintenance")
+        LoonFs::builder_with_store(writer.object_store())
+            .writer_id("operation-span-maintenance")
             .build()
             .await
             .expect("build maintenance")
+            .maintenance(loonfs_test_support::ids::writer_id(
+                "operation-span-maintenance",
+            ))
             .get_namespace_diagnostics(&namespace_id)
             .await
             .expect("read namespace diagnostics");
@@ -131,7 +128,7 @@ fn delegated_writer_calls_close_one_operation_span() {
     let _guard = tracing::subscriber::set_default(subscriber);
 
     let (create_log, put_log) = block_on(async {
-        let writer = FsWriter::builder(store_config(temp_dir.path()))
+        let writer = LoonFs::builder(store_config(temp_dir.path()))
             .writer_id("operation-span-count-writer")
             .build()
             .await
@@ -143,11 +140,11 @@ fn delegated_writer_calls_close_one_operation_span() {
             )
             .await
             .expect("create namespace");
-        let namespace_writer = writer
+        let namespace = writer
             .open_namespace(&namespace_id)
             .expect("open namespace");
         let _setup_log = take_captured_log(&captured);
-        namespace_writer
+        namespace
             .create_directory(
                 "/docs",
                 CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
@@ -155,7 +152,7 @@ fn delegated_writer_calls_close_one_operation_span() {
             .await
             .expect("create directory");
         let create_log = take_captured_log(&captured);
-        namespace_writer
+        namespace
             .put_file_bytes(
                 "/docs/file.txt",
                 b"body",

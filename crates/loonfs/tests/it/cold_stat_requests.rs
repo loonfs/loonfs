@@ -10,8 +10,8 @@
 //! wave count.
 
 use loonfs::{
-    CreateNamespaceOptions, FsMaintenance, FsReader, FsWriter, MetadataMaintenanceOptions,
-    Namespace, NamespaceId, PutFileOptions, Writable,
+    CreateNamespaceOptions, LoonFs, MetadataMaintenanceOptions, Namespace, NamespaceId,
+    PutFileOptions, Writable,
 };
 use loonfs_api::wire::manifest::{decode_namespace_manifest_json, MetadataRowFamily};
 use loonfs_api::AbsolutePath;
@@ -26,12 +26,12 @@ use tempfile::tempdir;
 /// service. Every candidate is admitted before the publisher's worker can
 /// take any of them, so they coalesce into one publication.
 async fn publish_candidates(
-    namespace_writer: &Namespace<Writable>,
+    namespace: &Namespace<Writable>,
     candidates: Vec<loonfs::publish::CommitCandidate>,
 ) {
     let submissions = candidates
         .into_iter()
-        .map(|candidate| namespace_writer.commit_candidate(candidate));
+        .map(|candidate| namespace.commit_candidate(candidate));
     for outcome in futures::future::join_all(submissions).await {
         outcome.expect("publish batch member");
     }
@@ -47,17 +47,18 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
     let store: loonfs::SharedObjectStore = log.clone();
     let namespace_id = NamespaceId::parse("coldstat").expect("valid namespace id");
 
-    let writer = FsWriter::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone())
         .writer_id("coldstat-writer")
         .min_publish_interval_ms(0)
         .build()
         .await
         .expect("build writer");
-    let maintenance = FsMaintenance::builder_with_store(store.clone())
-        .actor_id("coldstat-maintenance")
+    let maintenance = LoonFs::builder_with_store(store.clone())
+        .writer_id("coldstat-maintenance")
         .build()
         .await
-        .expect("build maintenance");
+        .expect("build maintenance")
+        .maintenance(loonfs_test_support::ids::writer_id("coldstat-maintenance"));
     writer
         .create_namespace(
             &namespace_id,
@@ -206,7 +207,7 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
         .collect();
 
     // The measured operation: first stat on a fresh handle, nothing warm.
-    let reader = FsReader::builder_with_store(store.clone())
+    let reader = LoonFs::reader_with_store(store.clone())
         .build()
         .await
         .expect("build reader");

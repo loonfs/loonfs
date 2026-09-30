@@ -11,7 +11,7 @@ use axum::http::{Method, Request};
 use axum::Router;
 use bytes::Bytes;
 use common::http_split_support::test_config;
-use loonfs::{CreateNamespaceOptions, FsWriter, SharedObjectStore, TraceMode, TraceStoreKind};
+use loonfs::{CreateNamespaceOptions, LoonFs, SharedObjectStore, TraceMode, TraceStoreKind};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_server::{app, AppOptions, MaintenanceMode};
 use loonfs_test_support::ids::namespace_id;
@@ -217,7 +217,7 @@ async fn missing_path_has_one_debug_completion_and_no_errors() {
     );
     config.maintenance = MaintenanceMode::ServeOnly;
     let (router, state) = app(config, AppOptions::default()).await.expect("build app");
-    let writer = state.writer;
+    let writer = state.runtime;
     writer
         .create_namespace(
             &namespace_id("demo"),
@@ -264,7 +264,7 @@ async fn expected_typed_errors_use_debug_or_warn_and_keep_completion_fields() {
     config.maintenance = MaintenanceMode::ServeOnly;
     config.max_concurrent_uploads = 1;
     let (router, state) = app(config, AppOptions::default()).await.expect("build app");
-    let writer = state.writer;
+    let writer = state.runtime;
     let namespace = namespace_id("demo");
     writer
         .create_namespace(
@@ -386,7 +386,7 @@ async fn store_fault_has_one_error_from_the_boundary() {
         InjectedError::Transport("injected WAL-head read failure".to_owned()),
     ));
     let store: SharedObjectStore = failing.clone();
-    let bootstrap = FsWriter::builder_with_store(store.clone())
+    let bootstrap = LoonFs::builder_with_store(store.clone())
         .writer_id("logging-store-fault-bootstrap")
         .trace_mode(TraceMode::Remote)
         .trace_store_kind(TraceStoreKind::LocalFs)

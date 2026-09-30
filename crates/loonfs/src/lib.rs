@@ -1,37 +1,42 @@
 //! Embedded LoonFS runtime.
 //!
-//! Compose mutation, maintenance, and optional scheduling explicitly.
+//! The crate has two nouns. A [`LoonFs`] is the runtime: it owns the store
+//! client, the caches, and the read budgets. A [`Namespace`] handle acts on
+//! one namespace, and its methods take no namespace id. Both have one of two
+//! modes, [`ReadOnly`] or [`Writable`]. A writable runtime also creates and
+//! forks namespaces, opens the writable handle that is a namespace's writer
+//! session, and shuts down. Explicit maintenance is a capability of a
+//! writable runtime: [`LoonFs::maintenance`] returns a [`Maintenance`].
 //!
 //! ```no_run
-//! # async fn open(store_config: loonfs::StoreConfig) -> loonfs::Result<()> {
-//! use std::num::NonZeroUsize;
-//! use std::sync::Arc;
-//! use loonfs::{
-//!     maintenance_hint_relay, FsWriter, GarbageCollectionJob, MaintenanceRegistry,
-//!     MaintenanceRunner, MetadataCompactionJob, MetadataMaintenanceJob,
-//! };
+//! # async fn run(store_config: loonfs::StoreConfig) -> loonfs::Result<()> {
+//! use loonfs::{ActorId, CreateNamespaceOptions, LoonFs, NamespaceId, PutFileOptions};
 //!
-//! let (observer, receiver) = maintenance_hint_relay(
-//!     NonZeroUsize::new(1024).expect("nonzero capacity"),
-//! );
-//! let writer = FsWriter::builder(store_config)
+//! let actor_id = ActorId::parse("usr_8f3c").expect("valid actor id");
+//! let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+//!
+//! let runtime = LoonFs::builder(store_config)
 //!     .writer_id("server-a")
-//!     .maintenance_hint_observer(move |hint| observer(hint))
 //!     .build()
 //!     .await?;
-//! let maintenance = writer.maintenance_handle("server-a-maintenance")?;
-//! let jobs = MaintenanceRegistry::new();
-//! jobs.register(Arc::new(MetadataMaintenanceJob::new(maintenance.clone())))?;
-//! jobs.register(Arc::new(MetadataCompactionJob::new(maintenance.clone())))?;
-//! jobs.register(Arc::new(GarbageCollectionJob::new(maintenance)))?;
-//! let runner = MaintenanceRunner::builder(jobs).build()?;
-//! runner.attach_hints(receiver);
-//! # runner.shutdown().await?;
-//! # writer.shutdown().await?;
+//! runtime
+//!     .create_namespace(&namespace_id, CreateNamespaceOptions::new(actor_id.clone()))
+//!     .await?;
+//!
+//! let namespace = runtime.open_namespace(&namespace_id)?;
+//! namespace
+//!     .put_file_bytes("/hello.txt", b"hello", PutFileOptions::new(actor_id))
+//!     .await?;
+//! let file = namespace.get_file_bytes("/hello.txt").await?;
+//! assert_eq!(file.bytes, b"hello");
+//!
+//! runtime.shutdown().await?;
 //! # Ok(()) }
 //! ```
 //!
-//! Readers and maintenance handles start no background work; a runner is the only scheduler and is optional.
+//! A runtime starts no maintenance by itself. A host that wants scheduled
+//! maintenance registers jobs built over [`LoonFs::maintenance`] with a
+//! [`MaintenanceRunner`], which is the only scheduler and is optional.
 
 #![warn(missing_docs)]
 
@@ -66,13 +71,13 @@ pub use loonfs_api::{
     ListFileRevisionsResponse, ListInodeChildrenResponse, ListPathEntriesResponse,
     ListSnapshotsResponse, ManifestNo, MetadataCompactionOutcome, MetadataCompactionRequest,
     MetadataCompactionResponse, MetadataMaintenanceResponse, NameKey, NamespaceDiagnostics,
-    NamespaceId, Page, PageRequest, PaginationPolicy, PathEntry, PathEntryKind, PinId,
-    ReorganizeStepOutcome, RetainedCandidates, RetainedReason, RevisionNo, RunMaintenanceRequest,
-    RunMaintenanceResponse, SnapshotSummary, TrashEntry, UploadId, WalFlushStepOutcome,
-    API_GROUP_FILESYSTEM_V0, API_GROUP_MAINTENANCE_V0, FEATURE_DOWNLOADS_DIRECT_GET,
-    FEATURE_NAMESPACES_CREATE, FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK,
-    FEATURE_SNAPSHOTS, FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT,
-    PROTOCOL_VERSION,
+    NamespaceId, NamespaceMetadata, Page, PageRequest, PaginationPolicy, PathEntry, PathEntryKind,
+    PinId, ReorganizeStepOutcome, RetainedCandidates, RetainedReason, RevisionNo,
+    RunMaintenanceRequest, RunMaintenanceResponse, SnapshotSummary, TrashEntry, UploadId,
+    WalFlushStepOutcome, WriterId, API_GROUP_FILESYSTEM_V0, API_GROUP_MAINTENANCE_V0,
+    FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_NAMESPACES_CREATE, FEATURE_NAMESPACES_DELETE,
+    FEATURE_NAMESPACES_FORK, FEATURE_SNAPSHOTS, FEATURE_UPLOADS_DIRECT_MULTIPART,
+    FEATURE_UPLOADS_DIRECT_PUT, PROTOCOL_VERSION,
 };
 pub use loonfs_core::cache::{
     DecodedBlock, DecodedBlockCache, DecodedBlockCacheConfig, DecodedBlockCacheObserver,
@@ -158,9 +163,9 @@ pub mod downloads {
 
 /// Typed loaders for inspecting durable namespace control objects.
 ///
-/// These functions bypass runtime handles and are intended for layout tests
-/// and operational inspection. Normal application reads and writes should
-/// use [`FsReader`] and [`FsWriter`].
+/// These functions bypass the runtime and are intended for layout tests and
+/// operational inspection. Normal application reads and writes go through a
+/// [`LoonFs`] runtime and its [`Namespace`] handles.
 pub mod control {
     pub use loonfs_core::control::{
         load_checkpoint_statistics, load_namespace_catalog_entry, load_namespace_current_manifest,
@@ -184,10 +189,7 @@ pub use fs::{
     ChangesPager, CheckpointsPager, FileRevisionsPager, FsReadSnapshot, InodeChildrenPager,
     PathEntriesPager, SnapshotPolicy, SnapshotsPager, TrashPager,
 };
-pub use handle::{
-    FsMaintenance, FsMaintenanceBuilder, FsReader, FsReaderBuilder, FsWriter, FsWriterBuilder,
-    Namespace, ReadOnly, Writable,
-};
+pub use handle::{LoonFs, LoonFsBuilder, Maintenance, Namespace, ReadOnly, Writable};
 pub use maintenance::{
     maintenance_hint_relay, GarbageCollectionJob, MaintenanceAssignment, MaintenanceCancellation,
     MaintenanceConclusion, MaintenanceHandle, MaintenanceHint, MaintenanceHintObserver,

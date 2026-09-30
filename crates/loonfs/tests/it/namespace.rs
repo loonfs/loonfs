@@ -5,15 +5,15 @@
 
 use crate::common::{data_wal_put_for, directory_options, expect_code, writer, writer_epoch};
 use loonfs::{
-    CreateNamespaceOptions, ErrorCode, FsWriter, NamespaceId, NamespaceSessionState,
-    SharedObjectStore,
+    CreateNamespaceOptions, ErrorCode, LoonFs, NamespaceId, NamespaceSessionState,
+    SharedObjectStore, Writable,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::stores::{BlockingStore, KeyPredicate, RecordingStore};
 use std::sync::{Arc, Barrier};
 use tempfile::tempdir;
 
-async fn create_namespace(writer: &FsWriter, namespace_id: &NamespaceId) {
+async fn create_namespace(writer: &LoonFs<Writable>, namespace_id: &NamespaceId) {
     writer
         .create_namespace(
             namespace_id,
@@ -37,14 +37,14 @@ async fn opening_does_no_store_io_and_the_first_publish_acquires_the_epoch() {
     let created = writer_epoch(&store, &namespace_id).await;
 
     recording.reset();
-    let namespace_writer = writer
+    let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
     let operations = recording.take();
     assert!(operations.is_empty(), "opening touched {operations:?}");
     assert_eq!(writer_epoch(&store, &namespace_id).await, created);
 
-    namespace_writer
+    namespace
         .create_directory("/first", directory_options())
         .await
         .expect("first publish");
@@ -62,7 +62,7 @@ async fn concurrent_opens_share_one_session_and_one_epoch() {
     let created = writer_epoch(&store, &namespace_id).await;
     let barrier = Arc::new(Barrier::new(8));
 
-    let namespace_writers = std::thread::scope(|scope| {
+    let namespaces = std::thread::scope(|scope| {
         let openers = (0..8)
             .map(|_| {
                 let writer = writer.clone();
@@ -82,8 +82,8 @@ async fn concurrent_opens_share_one_session_and_one_epoch() {
             .collect::<Vec<_>>()
     });
 
-    for (index, namespace_writer) in namespace_writers.iter().enumerate() {
-        namespace_writer
+    for (index, namespace) in namespaces.iter().enumerate() {
+        namespace
             .create_directory(&format!("/from-{index}"), directory_options())
             .await
             .expect("every handle publishes through the shared session");
@@ -101,16 +101,16 @@ async fn close_drains_admitted_commits_and_refuses_later_work_from_every_clone()
     ));
     let writer = writer(blocking.clone(), "close-drain").await;
     create_namespace(&writer, &namespace_id).await;
-    let namespace_writer = writer
+    let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
-    let clone = namespace_writer.clone();
+    let clone = namespace.clone();
 
     blocking.block_next();
     let first = tokio::spawn({
-        let namespace_writer = namespace_writer.clone();
+        let namespace = namespace.clone();
         async move {
-            namespace_writer
+            namespace
                 .create_directory("/first", directory_options())
                 .await
         }
@@ -119,7 +119,7 @@ async fn close_drains_admitted_commits_and_refuses_later_work_from_every_clone()
     let mut second = Box::pin(clone.create_directory("/second", directory_options()));
     assert!(futures::poll!(second.as_mut()).is_pending());
 
-    let mut close = Box::pin(namespace_writer.close());
+    let mut close = Box::pin(namespace.close());
     assert!(futures::poll!(close.as_mut()).is_pending());
     expect_code(
         clone.create_directory("/third", directory_options()).await,
@@ -147,15 +147,15 @@ async fn reopening_after_close_starts_a_new_epoch() {
     let namespace_id = NamespaceId::parse("reopen").expect("namespace id");
     create_namespace(&writer, &namespace_id).await;
 
-    let namespace_writer = writer
+    let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
-    namespace_writer
+    namespace
         .create_directory("/before", directory_options())
         .await
         .expect("first session publishes");
     let first_epoch = writer_epoch(&store, &namespace_id).await;
-    namespace_writer.close().await.expect("close first session");
+    namespace.close().await.expect("close first session");
 
     let reopened = writer
         .open_namespace(&namespace_id)
@@ -221,16 +221,16 @@ async fn dropping_the_last_clone_ends_the_session_and_a_kept_clone_keeps_it_open
     let namespace_id = NamespaceId::parse("drop-ends").expect("namespace id");
     create_namespace(&writer, &namespace_id).await;
 
-    let namespace_writer = writer
+    let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
-    let kept = namespace_writer.clone();
-    namespace_writer
+    let kept = namespace.clone();
+    namespace
         .create_directory("/first", directory_options())
         .await
         .expect("first session publishes");
     let first_epoch = writer_epoch(&store, &namespace_id).await;
-    drop(namespace_writer);
+    drop(namespace);
 
     let shared = writer
         .open_namespace(&namespace_id)
@@ -280,7 +280,7 @@ async fn a_read_only_handle_does_no_io_and_does_not_keep_the_session_open() {
     create_namespace(&writer, &namespace_id).await;
 
     recording.reset();
-    let namespace = writer.reader().namespace(&namespace_id);
+    let namespace = writer.namespace(&namespace_id);
     let operations = recording.take();
     assert!(
         operations.is_empty(),
@@ -337,21 +337,21 @@ async fn shutdown_publishes_the_commits_open_handles_queued_before_it_returns() 
     ));
     let writer = writer(blocking.clone(), "shutdown-drain").await;
     create_namespace(&writer, &namespace_id).await;
-    let namespace_writer = writer
+    let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
 
     blocking.block_next();
     let first = tokio::spawn({
-        let namespace_writer = namespace_writer.clone();
+        let namespace = namespace.clone();
         async move {
-            namespace_writer
+            namespace
                 .create_directory("/first", directory_options())
                 .await
         }
     });
     blocking.wait_until_blocked().await;
-    let mut queued = Box::pin(namespace_writer.create_directory("/queued", directory_options()));
+    let mut queued = Box::pin(namespace.create_directory("/queued", directory_options()));
     assert!(futures::poll!(queued.as_mut()).is_pending());
 
     let mut shutdown = Box::pin(writer.shutdown());
@@ -383,7 +383,7 @@ async fn the_runtime_holds_as_many_sessions_as_the_host_opens() {
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("create store"));
     let writer = writer(store.clone(), "no-cap").await;
-    let namespace_writers = (0..NAMESPACES)
+    let namespaces = (0..NAMESPACES)
         .map(|index| {
             let namespace_id =
                 NamespaceId::parse(format!("no-cap-{index:04}")).expect("namespace id");
@@ -393,9 +393,9 @@ async fn the_runtime_holds_as_many_sessions_as_the_host_opens() {
         })
         .collect::<Vec<_>>();
 
-    let first = namespace_writers[0].namespace_id().clone();
+    let first = namespaces[0].namespace_id().clone();
     create_namespace(&writer, &first).await;
-    namespace_writers[0]
+    namespaces[0]
         .create_directory("/written", directory_options())
         .await
         .expect("the first session publishes");
@@ -411,7 +411,7 @@ async fn the_runtime_holds_as_many_sessions_as_the_host_opens() {
         epoch,
         "the first session is still the one open"
     );
-    assert!(namespace_writers
+    assert!(namespaces
         .iter()
-        .all(|namespace_writer| namespace_writer.session_state() == NamespaceSessionState::Open));
+        .all(|namespace| namespace.session_state() == NamespaceSessionState::Open));
 }

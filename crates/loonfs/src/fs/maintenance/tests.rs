@@ -4,14 +4,15 @@
 //! These tests need a family group whose base run no bounded step can compact,
 //! with delta runs still arriving above it. The shipped row budget only
 //! reaches that state at a scale no test can write, so the budget is narrowed
-//! through [`FsMaintenance::starve_compaction_row_budget`]. Everything else —
+//! through [`Maintenance::starve_compaction_row_budget`]. Everything else —
 //! planning, admission, the executor, the finalizer — is the shipped path.
 
 use crate::metrics::{DefaultMetricsRecorder, MetricValue, MetricsSnapshot};
 use crate::{
-    CreateCheckpointOptions, CreateNamespaceOptions, FsMaintenance, FsWriter,
+    CreateCheckpointOptions, CreateNamespaceOptions, LoonFs, Maintenance,
     MetadataCompactionOutcome, MetadataCompactionPolicy, MoveOptions, NamespaceId, PutFileOptions,
     ReorganizeStepOutcome, RunMaintenanceRequest, RunMaintenanceResponse, SharedObjectStore,
+    Writable,
 };
 use loonfs_api::wire::manifest::{
     decode_namespace_manifest_json, MetadataRowFamily, NamespaceManifestPayload, RunTier,
@@ -40,28 +41,30 @@ const BINDINGS: MetadataFamilyGroup = MetadataFamilyGroup::Bindings;
 async fn manual_deployment(
     root: &std::path::Path,
 ) -> (
-    FsWriter,
-    FsMaintenance,
-    FsMaintenance,
+    LoonFs<Writable>,
+    Maintenance,
+    Maintenance,
     Arc<DefaultMetricsRecorder>,
 ) {
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(root).expect("create local-fs store"));
     let recorder = Arc::new(DefaultMetricsRecorder::new());
-    let writer = FsWriter::builder_with_store(Arc::clone(&store))
+    let writer = LoonFs::builder_with_store(Arc::clone(&store))
         .writer_id("manual-writer")
         .build()
         .await
         .expect("build the writer");
-    let standalone = FsMaintenance::builder_with_store(Arc::clone(&store))
-        .actor_id("standalone-maintenance")
+    let standalone = LoonFs::builder_with_store(Arc::clone(&store))
+        .writer_id("standalone-maintenance")
         .metrics_recorder(recorder.clone())
         .build()
         .await
-        .expect("build the standalone maintenance");
-    let scheduled = writer
-        .maintenance_handle("scheduled-maintenance")
-        .expect("build the shared maintenance handle");
+        .expect("build the standalone maintenance")
+        .maintenance(loonfs_test_support::ids::writer_id(
+            "standalone-maintenance",
+        ));
+    let scheduled =
+        writer.maintenance(loonfs_test_support::ids::writer_id("scheduled-maintenance"));
     (writer, standalone, scheduled, recorder)
 }
 
@@ -159,13 +162,13 @@ async fn a_maintenance_gc_step_records_the_pass_counters_once() {
 
 /// Writes one file and folds the tail, so each call leaves one more delta run.
 async fn write_and_fold(
-    writer: &FsWriter,
-    maintenance: &FsMaintenance,
+    writer: &LoonFs<Writable>,
+    maintenance: &Maintenance,
     namespace_id: &NamespaceId,
     path: &str,
 ) {
-    let namespace_writer = writer.open_namespace(namespace_id).expect("open namespace");
-    namespace_writer
+    let namespace = writer.open_namespace(namespace_id).expect("open namespace");
+    namespace
         .put_file_bytes(
             path,
             path.as_bytes(),
@@ -190,8 +193,8 @@ async fn write_and_fold(
 /// are what makes a delta-only merge available at the moment the tests ask for
 /// a compaction.
 async fn namespace_with_a_frozen_base(
-    writer: &FsWriter,
-    maintenance: &FsMaintenance,
+    writer: &LoonFs<Writable>,
+    maintenance: &Maintenance,
     namespace_id: &NamespaceId,
 ) {
     writer
@@ -201,7 +204,7 @@ async fn namespace_with_a_frozen_base(
         )
         .await
         .expect("create the namespace");
-    let namespace_writer = writer.open_namespace(namespace_id).expect("open namespace");
+    let namespace = writer.open_namespace(namespace_id).expect("open namespace");
     for index in 0..24 {
         write_and_fold(
             writer,
@@ -214,7 +217,7 @@ async fn namespace_with_a_frozen_base(
     // Churn: every rename retires one binding and creates another, and a
     // bottom-anchored rebuild below the floor drops the retired pair.
     for index in 0..12 {
-        namespace_writer
+        namespace
             .move_path(
                 &format!("/docs/file-{index}.txt"),
                 &format!("/docs/moved-{index}.txt"),
@@ -265,8 +268,8 @@ async fn namespace_with_a_frozen_base(
 /// its steps can no longer merge the group they land in, so each write leaves
 /// one more delta run behind rather than being merged into the base.
 async fn sustained_writes(
-    writer: &FsWriter,
-    maintenance: &FsMaintenance,
+    writer: &LoonFs<Writable>,
+    maintenance: &Maintenance,
     namespace_id: &NamespaceId,
 ) {
     for index in 0..10 {
@@ -400,14 +403,15 @@ async fn compaction_planning_survives_restart_and_explicit_work_has_bounded_fan_
     writer.shutdown().await.expect("shut down the first writer");
     let fresh_store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("create local-fs store"));
-    let fresh_writer = FsWriter::builder_with_store(Arc::clone(&fresh_store))
+    let fresh_writer = LoonFs::builder_with_store(Arc::clone(&fresh_store))
         .writer_id("fresh-writer")
         .build()
         .await
         .expect("build a fresh writer");
     let fresh_scheduled = fresh_writer
-        .maintenance_handle("fresh-scheduled-maintenance")
-        .expect("build a fresh shared maintenance handle")
+        .maintenance(loonfs_test_support::ids::writer_id(
+            "fresh-scheduled-maintenance",
+        ))
         .starve_compaction_row_budget(budget);
     let response = fresh_scheduled
         .run_maintenance(&automatic, metadata_request())
@@ -544,14 +548,12 @@ async fn explicit_compaction_merges_twenty_deltas_and_reads_the_large_base_once(
     let store = Arc::new(RecordingStore::metadata_segments(
         LocalFsStore::new(directory.path()).expect("store"),
     ));
-    let writer = FsWriter::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone())
         .writer_id("writer")
         .build()
         .await
         .expect("writer");
-    let maintenance = writer
-        .maintenance_handle("maintenance")
-        .expect("maintenance");
+    let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id("maintenance"));
     let namespace = namespace_id("compact-deltas-first");
     writer
         .create_namespace(
@@ -741,7 +743,7 @@ async fn maintenance_clones_share_one_claim_and_never_reclaim_after_fencing() {
         )),
     ));
     let shared: SharedObjectStore = store.clone();
-    let writer = FsWriter::builder_with_store(shared.clone())
+    let writer = LoonFs::builder_with_store(shared.clone())
         .writer_id("writer")
         .build()
         .await
@@ -753,11 +755,12 @@ async fn maintenance_clones_share_one_claim_and_never_reclaim_after_fencing() {
         )
         .await
         .expect("namespace");
-    let maintenance = FsMaintenance::builder_with_store(shared.clone())
-        .actor_id("maintenance")
+    let maintenance = LoonFs::builder_with_store(shared.clone())
+        .writer_id("maintenance")
         .build()
         .await
-        .expect("maintenance");
+        .expect("maintenance")
+        .maintenance(loonfs_test_support::ids::writer_id("maintenance"));
     maintenance
         .create_checkpoint(
             &namespace,
@@ -793,11 +796,12 @@ async fn maintenance_clones_share_one_claim_and_never_reclaim_after_fencing() {
         current_manifest_payload(store.as_ref(), &namespace).await,
         expected
     );
-    let other = FsMaintenance::builder_with_store(shared)
-        .actor_id("other")
+    let other = LoonFs::builder_with_store(shared)
+        .writer_id("other")
         .build()
         .await
-        .expect("other process");
+        .expect("other process")
+        .maintenance(loonfs_test_support::ids::writer_id("other"));
     assert_eq!(
         other.compactor_epoch(&namespace).await.expect("new claim"),
         loonfs_api::CompactorEpoch(epoch.0 + 1)

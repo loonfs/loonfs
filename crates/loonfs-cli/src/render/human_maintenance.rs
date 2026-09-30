@@ -6,7 +6,7 @@ use loonfs_api::v0::{
 };
 use loonfs_api::{
     ChangeSeq, Checkpoint, DeleteCheckpointResponse, DeleteNamespaceResponse,
-    ListCheckpointsResponse, MetadataCompactionOutcome, Namespace, NamespaceId,
+    ListCheckpointsResponse, MetadataCompactionOutcome, NamespaceId, NamespaceMetadata,
     ReorganizeStepOutcome, RunMaintenanceResponse,
 };
 
@@ -21,7 +21,7 @@ pub(super) fn human_current(profile: &str, namespace: Option<&str>) -> String {
     )
 }
 
-pub(super) fn human_namespace_status(namespace: &Namespace) -> String {
+pub(super) fn human_namespace_status(namespace: &NamespaceMetadata) -> String {
     let access = match &namespace.access {
         loonfs_api::v0::NamespaceAccessMode::Unrestricted {} => "unrestricted".to_owned(),
         loonfs_api::v0::NamespaceAccessMode::Acl { principal_scope } => {

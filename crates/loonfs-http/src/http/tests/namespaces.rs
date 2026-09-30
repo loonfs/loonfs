@@ -1,4 +1,4 @@
-//! The writer handles the host holds across requests.
+//! The writable namespace handles the host holds across requests.
 
 use super::*;
 use axum::http::Method;
@@ -47,7 +47,7 @@ async fn host(writer_id: &str) -> (tempfile::TempDir, axum::Router, BindingState
 
 async fn create_namespace(state: &BindingState, namespace_id: &NamespaceId) {
     state
-        .writer
+        .runtime
         .create_namespace(
             namespace_id,
             CreateNamespaceOptions::new(loonfs_test_support::test_actor()),

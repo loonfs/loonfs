@@ -3,7 +3,7 @@
 use bytes::Bytes;
 use loonfs::publish::{CommitCandidate, CommitRequest, FilesystemOperation, InlineContent};
 use loonfs::{
-    CreateNamespaceOptions, FsWriter, InlineContentOptions, Namespace, SharedObjectStore, Writable,
+    CreateNamespaceOptions, InlineContentOptions, LoonFs, Namespace, SharedObjectStore, Writable,
 };
 use loonfs_api::{
     AbsolutePath, AccessGrants, AccessRight, AccessRights, CommitId, ContentId,
@@ -89,8 +89,8 @@ fn inline(id: &str, who: &str, bytes: &'static [u8]) -> CommitCandidate {
     )
 }
 
-async fn open(store: SharedObjectStore, segment_budget: usize) -> FsWriter {
-    FsWriter::builder_with_store(store)
+async fn open(store: SharedObjectStore, segment_budget: usize) -> LoonFs<Writable> {
+    LoonFs::builder_with_store(store)
         .writer_id("inline-retry")
         .min_publish_interval_ms(0)
         .monotonic_timer(Arc::new(ManualClock::new(0)))
@@ -103,7 +103,7 @@ async fn open(store: SharedObjectStore, segment_budget: usize) -> FsWriter {
         .expect("writer")
 }
 
-async fn seed(writer: &FsWriter) -> Namespace<Writable> {
+async fn seed(writer: &LoonFs<Writable>) -> Namespace<Writable> {
     writer
         .create_namespace(
             &namespace(),
@@ -162,8 +162,7 @@ async fn retained_receipt_skips_fallback(state: ReceiptState) {
         .expect("revoke access");
     if matches!(state, ReceiptState::Folded | ReceiptState::ManifestOnly) {
         writer
-            .maintenance_handle("inline-retry")
-            .expect("maintenance")
+            .maintenance(loonfs_test_support::ids::writer_id("inline-retry"))
             .fold_wal(&namespace())
             .await
             .expect("fold receipts");

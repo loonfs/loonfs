@@ -9,7 +9,7 @@ use crate::common::*;
 use loonfs::metrics::{DefaultMetricsRecorder, MetricValue, MetricsSnapshot};
 use loonfs::{
     maintenance_hint_relay, CreateCheckpointOptions, CreateNamespaceOptions, CreateSnapshotOptions,
-    FsReader, GarbageCollectionJob, MaintenanceConclusion, MaintenanceJobId, MaintenanceRegistry,
+    GarbageCollectionJob, LoonFs, MaintenanceConclusion, MaintenanceJobId, MaintenanceRegistry,
     MaintenanceRunner, MetadataCompactionJob, MetadataMaintenanceJob, MetadataMaintenanceOptions,
     PutFileOptions, RuntimeCacheConfig, SnapshotPolicy,
 };
@@ -95,12 +95,12 @@ fn a_writer_with_a_recorder_reports_stores_publications_and_steps() {
             )
             .await
             .expect("create namespace");
-        let namespace_writer = fs
+        let namespace = fs
             .writer
             .open_namespace(&namespace_id)
             .expect("open namespace");
         for file in 0..writes {
-            namespace_writer
+            namespace
                 .put_file_bytes(
                     &format!("/docs/file-{file}.txt"),
                     b"body",
@@ -109,7 +109,7 @@ fn a_writer_with_a_recorder_reports_stores_publications_and_steps() {
                 .await
                 .expect("put file");
         }
-        namespace_writer
+        namespace
             .wait_for_fold()
             .await
             .expect("publisher fold settles");
@@ -322,7 +322,7 @@ fn reads_report_head_cache_lookups_and_retained_segment_bytes() {
                 .await
                 .expect("create namespace");
         }
-        let reader = FsReader::builder_with_store(store(temp_dir.path()))
+        let reader = LoonFs::reader_with_store(store(temp_dir.path()))
             .runtime_cache(RuntimeCacheConfig {
                 max_cached_namespaces: 1,
                 ..RuntimeCacheConfig::default()

@@ -97,7 +97,7 @@ pub fn openapi_document() -> utoipa::openapi::OpenApi {
         loonfs_api::WriterEpoch,
         CreateNamespaceRequest,
         ForkNamespaceRequest,
-        loonfs_api::Namespace,
+        loonfs_api::NamespaceMetadata,
         loonfs_api::NamespaceDiagnostics,
         loonfs_api::DeleteNamespaceResponse,
         loonfs_api::DestinationBehavior,

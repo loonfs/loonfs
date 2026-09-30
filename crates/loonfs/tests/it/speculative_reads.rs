@@ -3,8 +3,8 @@
 //! replaced file is never served from the reference the cached view named.
 
 use loonfs::{
-    CreateNamespaceOptions, DestinationBehavior, FsMaintenance, FsReader, FsWriter,
-    MetadataSegmentCacheConfig, NamespaceId, PutFileOptions, RuntimeCacheConfig,
+    CreateNamespaceOptions, DestinationBehavior, LoonFs, MetadataSegmentCacheConfig, NamespaceId,
+    PutFileOptions, ReadOnly, RuntimeCacheConfig, Writable,
 };
 use loonfs_core::time::Deadline;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -18,8 +18,8 @@ const PATH: &str = "/docs/small.txt";
 async fn writer_with_file(
     store: &loonfs::SharedObjectStore,
     namespace_id: &NamespaceId,
-) -> FsWriter {
-    let writer = FsWriter::builder_with_store(store.clone())
+) -> LoonFs<Writable> {
+    let writer = LoonFs::builder_with_store(store.clone())
         .writer_id("speculative-writer")
         .min_publish_interval_ms(0)
         .build()
@@ -32,8 +32,8 @@ async fn writer_with_file(
         )
         .await
         .expect("create namespace");
-    let namespace_writer = writer.open_namespace(namespace_id).expect("open namespace");
-    namespace_writer
+    let namespace = writer.open_namespace(namespace_id).expect("open namespace");
+    namespace
         .put_file_bytes(
             PATH,
             b"first",
@@ -49,8 +49,8 @@ async fn writer_with_file(
 async fn uncached_segment_reader(
     store: &loonfs::SharedObjectStore,
     max_cached_namespaces: usize,
-) -> FsReader {
-    FsReader::builder_with_store(store.clone())
+) -> LoonFs<ReadOnly> {
+    LoonFs::reader_with_store(store.clone())
         .runtime_cache(RuntimeCacheConfig {
             max_cached_namespaces,
             metadata_segment_cache: MetadataSegmentCacheConfig {
@@ -73,11 +73,14 @@ async fn an_unchanged_view_resolves_the_path_once() {
     let store: loonfs::SharedObjectStore = log.clone();
     let namespace_id = NamespaceId::parse("speculative").expect("valid namespace id");
     let _writer = writer_with_file(&store, &namespace_id).await;
-    FsMaintenance::builder_with_store(store.clone())
-        .actor_id("speculative-maintenance")
+    LoonFs::builder_with_store(store.clone())
+        .writer_id("speculative-maintenance")
         .build()
         .await
         .expect("build maintenance")
+        .maintenance(loonfs_test_support::ids::writer_id(
+            "speculative-maintenance",
+        ))
         .fold_wal(&namespace_id)
         .await
         .expect("move the file's rows into metadata segments");
@@ -125,7 +128,7 @@ async fn a_replaced_file_is_not_served_from_the_cached_reference() {
     let namespace_writer = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
-    let reader = FsReader::builder_with_store(store.clone())
+    let reader = LoonFs::reader_with_store(store.clone())
         .build()
         .await
         .expect("build reader");

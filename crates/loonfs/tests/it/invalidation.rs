@@ -6,9 +6,9 @@
 
 use loonfs::metrics::{DefaultMetricsRecorder, MetricValue};
 use loonfs::{
-    CreateNamespaceOptions, CreateSnapshotOptions, DeleteNamespaceOptions, FsMaintenance, FsReader,
-    FsWriter, NamespaceId, PutFileOptions, RuntimeCacheConfig, RuntimeError, SharedObjectStore,
-    SnapshotPolicy, WriterFence, READ_REVALIDATION_BOUND_MS,
+    CreateNamespaceOptions, CreateSnapshotOptions, DeleteNamespaceOptions, LoonFs, NamespaceId,
+    PutFileOptions, ReadOnly, RuntimeCacheConfig, RuntimeError, SharedObjectStore, SnapshotPolicy,
+    Writable, WriterFence, READ_REVALIDATION_BOUND_MS,
 };
 use loonfs_api::wire::control::NamespaceStatus;
 use loonfs_core::control::NamespaceReadState;
@@ -21,7 +21,7 @@ use loonfs_test_support::stores::{
 use std::sync::Arc;
 use tempfile::tempdir;
 
-async fn writer(store: &SharedObjectStore, writer_id: &str) -> FsWriter {
+async fn writer(store: &SharedObjectStore, writer_id: &str) -> LoonFs<Writable> {
     writer_with_cache(store, writer_id, RuntimeCacheConfig::default()).await
 }
 
@@ -29,8 +29,8 @@ async fn writer_with_cache(
     store: &SharedObjectStore,
     writer_id: &str,
     runtime_cache: RuntimeCacheConfig,
-) -> FsWriter {
-    FsWriter::builder_with_store(store.clone())
+) -> LoonFs<Writable> {
+    LoonFs::builder_with_store(store.clone())
         .writer_id(writer_id)
         .min_publish_interval_ms(0)
         .runtime_cache(runtime_cache)
@@ -44,8 +44,8 @@ async fn writer_with_cache_and_metrics(
     writer_id: &str,
     runtime_cache: RuntimeCacheConfig,
     recorder: Arc<DefaultMetricsRecorder>,
-) -> FsWriter {
-    FsWriter::builder_with_store(store.clone())
+) -> LoonFs<Writable> {
+    LoonFs::builder_with_store(store.clone())
         .writer_id(writer_id)
         .min_publish_interval_ms(0)
         .runtime_cache(runtime_cache)
@@ -83,7 +83,7 @@ async fn first_projections_decoded_bytes(ns_fence: &NamespaceId, ns_other: &Name
         recorder.clone(),
     )
     .await;
-    let mut namespace_writers = Vec::new();
+    let mut namespaces = Vec::new();
     for (namespace_id, path) in [(ns_fence, "/a1.txt"), (ns_other, "/spill.txt")] {
         writer
             .create_namespace(
@@ -92,8 +92,8 @@ async fn first_projections_decoded_bytes(ns_fence: &NamespaceId, ns_other: &Name
             )
             .await
             .expect("create namespace");
-        let namespace_writer = writer.open_namespace(namespace_id).expect("open namespace");
-        namespace_writer
+        let namespace = writer.open_namespace(namespace_id).expect("open namespace");
+        namespace
             .put_file_bytes(
                 path,
                 b"a",
@@ -101,7 +101,7 @@ async fn first_projections_decoded_bytes(ns_fence: &NamespaceId, ns_other: &Name
             )
             .await
             .expect("first put");
-        namespace_writers.push(namespace_writer);
+        namespaces.push(namespace);
     }
     let bytes = retention_gauge(&recorder, "loonfs.publisher.retained_projection_bytes");
     usize::try_from(bytes).expect("retained bytes are positive")
@@ -202,7 +202,7 @@ async fn fenced_writer_stays_fenced_instead_of_reacquiring() {
         ),
         "unexpected error: {still_fenced:?}"
     );
-    let reader = writer_a.reader();
+    let reader = writer_a.read_only();
     let namespace = reader.namespace(&namespace_id);
     let entry = namespace
         .get_path_entry("/b1.txt", Default::default())
@@ -542,7 +542,7 @@ async fn a_cached_view_older_than_the_revalidation_bound_rediscovers() {
     let namespace_id = NamespaceId::parse("revalidation-bound").expect("namespace");
     let timer = Arc::new(ManualClock::new(0));
     let interval_ms = 1_000;
-    let reader = FsReader::builder_with_store(store.clone())
+    let reader = LoonFs::reader_with_store(store.clone())
         .monotonic_timer(timer.clone())
         .runtime_cache(RuntimeCacheConfig {
             manifest_revalidation_interval_ms: interval_ms,
@@ -605,7 +605,7 @@ async fn a_cached_view_older_than_the_revalidation_bound_rediscovers() {
 }
 
 async fn read_across_a_held_successor_probe(
-    reader: &FsReader,
+    reader: &LoonFs<ReadOnly>,
     store: &RecordingStore<BlockingStore<LocalFsStore>>,
     timer: &ManualClock,
     namespace_id: &NamespaceId,
@@ -639,7 +639,7 @@ async fn warm_answers_are_measured_against_the_previous_check() {
     let store: SharedObjectStore = recording.clone();
     let timer = Arc::new(ManualClock::new(0));
     let interval_ms = 1_000;
-    let reader = FsReader::builder_with_store(store.clone())
+    let reader = LoonFs::reader_with_store(store.clone())
         .monotonic_timer(timer.clone())
         .runtime_cache(RuntimeCacheConfig {
             manifest_revalidation_interval_ms: interval_ms,
@@ -730,8 +730,8 @@ async fn writer_with_timer(
     writer_id: &str,
     timer: &Arc<ManualClock>,
     runtime_cache: RuntimeCacheConfig,
-) -> FsWriter {
-    FsWriter::builder_with_store(store.clone())
+) -> LoonFs<Writable> {
+    LoonFs::builder_with_store(store.clone())
         .writer_id(writer_id)
         .min_publish_interval_ms(0)
         .monotonic_timer(timer.clone())
@@ -771,7 +771,7 @@ async fn a_seeded_view_carries_the_writers_basis_confirmation() {
     let namespace_writer = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
-    let reader = writer.reader();
+    let reader = writer.read_only();
     let other_namespace = reader.namespace(&other_id);
     let namespace = reader.namespace(&namespace_id);
     for id in [&namespace_id, &other_id] {
@@ -889,13 +889,14 @@ async fn a_seed_on_another_basis_does_not_keep_the_cached_check() {
         },
     )
     .await;
-    let reader = writer.reader();
+    let reader = writer.read_only();
     let namespace = reader.namespace(&namespace_id);
-    let maintenance = FsMaintenance::builder_with_store(store.clone())
-        .actor_id("reseeded-maintenance")
+    let maintenance = LoonFs::builder_with_store(store.clone())
+        .writer_id("reseeded-maintenance")
         .build()
         .await
-        .expect("build maintenance");
+        .expect("build maintenance")
+        .maintenance(loonfs_test_support::ids::writer_id("reseeded-maintenance"));
     writer
         .create_namespace(
             &namespace_id,
@@ -993,7 +994,7 @@ async fn read_after_write_only_probes_the_next_wal_number_without_replay() {
     let namespace_writer = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
-    let reader = writer.reader();
+    let reader = writer.read_only();
     let namespace = reader.namespace(&namespace_id);
     for index in 0..3 {
         namespace_writer

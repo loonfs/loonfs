@@ -7,7 +7,7 @@
 //!
 //! Admitted work continues if its caller is cancelled. Shutdown closes
 //! admission and drains the queues through
-//! [`FsWriter::shutdown`](crate::FsWriter::shutdown).
+//! [`LoonFs::shutdown`](crate::LoonFs::shutdown).
 //!
 //! The registry keeps one table of live sessions, for three reasons: an open
 //! returns the session a handle already holds, the retained projection
@@ -74,7 +74,7 @@ pub struct NamespaceAdvanceHint {
 /// namespace.
 ///
 /// Register one with
-/// [`FsWriterBuilder::namespace_advance_observer`](crate::FsWriterBuilder::namespace_advance_observer),
+/// [`LoonFsBuilder::namespace_advance_observer`](crate::LoonFsBuilder::namespace_advance_observer),
 /// which documents what the callback may do.
 pub type NamespaceAdvanceObserver = Arc<dyn Fn(NamespaceAdvanceHint) + Send + Sync + 'static>;
 
@@ -111,7 +111,7 @@ pub enum NamespaceSessionState {
 /// sessions exist or how long they live.
 ///
 /// Shutdown closes admission and then drains admitted work. Prefer
-/// [`FsWriter::shutdown`](crate::FsWriter::shutdown), which closes admission
+/// [`LoonFs::shutdown`](crate::LoonFs::shutdown), which closes admission
 /// before draining publication work.
 #[derive(Clone)]
 pub struct PublisherRegistry {

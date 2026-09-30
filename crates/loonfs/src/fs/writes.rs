@@ -12,7 +12,7 @@ use crate::{
     RestoreRevisionOptions, RevisionNo, UndeleteOptions, UpdateAccessOptions,
     UpdateAttributesOptions,
 };
-use crate::{FsWriter, Namespace, Writable};
+use crate::{LoonFs, Namespace, Writable};
 use futures::StreamExt;
 use loonfs_core::NamespaceWriterEngine;
 use std::sync::Arc;
@@ -27,20 +27,21 @@ fn single_operation(commit: &CommitOptions, operation: FilesystemOperation) -> C
     .preconditions(commit.preconditions.clone())
 }
 
-impl FsWriter {
-    /// A mutating engine under this writer's identity.
+impl LoonFs<Writable> {
+    /// A mutating engine under this runtime's writer identity.
     pub(crate) fn engine(
         &self,
         namespace_id: &NamespaceId,
     ) -> NamespaceWriterEngine<crate::SharedObjectStore> {
-        self.core.writer_engine(&self.bits.identity, namespace_id)
+        self.core
+            .writer_engine(&self.mode.bits.identity, namespace_id)
     }
 
     /// Drops everything this runtime caches for a namespace: the read
     /// caches, and the rebuildable half of its publisher's publish state.
     pub(crate) fn invalidate_namespace(&self, namespace_id: &NamespaceId) {
         self.core.invalidate_namespace_read_cache(namespace_id);
-        self.publisher.invalidate_projection(namespace_id);
+        self.mode.publisher.invalidate_projection(namespace_id);
     }
 
     pub(crate) fn finish_namespace_mutation<T>(
@@ -523,7 +524,7 @@ impl Namespace<Writable> {
     ///
     /// Deletion is tombstone-first: the commit hides the path without erasing
     /// history. Physical reclamation is explicit garbage collection: nothing
-    /// sweeps unless an operator asks, through `FsMaintenance::gc_namespace` or a
+    /// sweeps unless an operator asks, through `Maintenance::gc_namespace` or a
     /// maintenance pass that opted in.
     #[tracing::instrument(
         level = "debug",
@@ -851,7 +852,7 @@ impl Namespace<Writable> {
             Some(subject) => candidate.with_subject(subject.clone()),
             None => candidate,
         };
-        self.mode.session.submit_candidate(candidate).await
+        self.session().submit_candidate(candidate).await
     }
 
     async fn commit_one(

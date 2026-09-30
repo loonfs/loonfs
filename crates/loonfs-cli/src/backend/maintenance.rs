@@ -4,8 +4,8 @@ use super::{MaintenanceDrainProgress, MaintenanceKeyProgress, StepBudget};
 use crate::error::CliError;
 use crate::resolve::ResolvedTarget;
 use loonfs::{
-    FsMaintenance, FsWriter, MaintenanceAssignment, MaintenanceHandle, MaintenanceJob,
-    MaintenanceJobId, MaintenanceRegistry, MaintenanceRunner, SharedObjectStore,
+    LoonFs, Maintenance, MaintenanceAssignment, MaintenanceHandle, MaintenanceJob,
+    MaintenanceJobId, MaintenanceRegistry, MaintenanceRunner, SharedObjectStore, Writable,
 };
 use loonfs_api::NamespaceId;
 use loonfs_grep::GrepWorker;
@@ -13,8 +13,8 @@ use loonfs_objectstore::timing::{MonotonicTimer, StdMonotonicTimer};
 use std::sync::Arc;
 
 pub(crate) struct MaintenanceHost {
-    pub(crate) writer: FsWriter,
-    pub(crate) maintenance: FsMaintenance,
+    pub(crate) runtime: LoonFs<Writable>,
+    pub(crate) maintenance: Maintenance,
     pub(crate) jobs: MaintenanceRegistry,
     pub(crate) runner: MaintenanceRunner,
     pub(crate) grep_worker: GrepWorker<SharedObjectStore>,
@@ -90,9 +90,9 @@ impl MaintenanceHost {
                 }
             }
         }
-        let writer = self.writer.shutdown().await;
+        let runtime = self.runtime.shutdown().await;
         let runner = self.runner.shutdown().await;
-        writer.and(runner).map_err(CliError::from)
+        runtime.and(runner).map_err(CliError::from)
     }
 
     pub(super) async fn drain_maintenance(
@@ -103,7 +103,7 @@ impl MaintenanceHost {
     ) -> Result<MaintenanceDrainProgress, CliError> {
         let hosted = self.hosted_jobs(jobs)?;
         self.runner.shutdown().await.map_err(CliError::from)?;
-        self.writer.shutdown().await.map_err(CliError::from)?;
+        self.runtime.shutdown().await.map_err(CliError::from)?;
         let timer = StdMonotonicTimer::default();
         let started_ms = timer.monotonic_now_ms();
         let mut steps = 0;

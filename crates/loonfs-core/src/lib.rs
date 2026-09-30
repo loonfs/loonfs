@@ -7,8 +7,8 @@
 //!
 //! Commits are published as candidate batches through
 //! [`publish::NamespaceCommitEngine`]; day-to-day reads and writes should go
-//! through the `loonfs` crate's `FsReader`/`FsWriter` handles, which wrap
-//! this crate with caching and batching.
+//! through the `loonfs` crate's `LoonFs` runtime and `Namespace` handles,
+//! which wrap this crate with caching and batching.
 //!
 //! ```no_run
 //! use loonfs_api::{AbsolutePath, ActorId, CommitId, NamespaceId};
@@ -204,6 +204,6 @@ pub use protocol::{
     ResolvedUploadCompletion, UploadSessionView,
 };
 pub use write_waves::write_segments_in_waves;
-// The streaming read `loonfs`'s reader handle returns, and the chunk size it
+// The streaming read `loonfs`'s namespace handle returns, and the chunk size it
 // reads in.
 pub use storage::content::{FileContentStream, CONTENT_READ_CHUNK_BYTES};

@@ -1,7 +1,7 @@
 //! Subject reads observe access changes through the runtime cache.
 
 use loonfs::publish::{CommitRequest, FilesystemOperation};
-use loonfs::{CreateNamespaceOptions, DestinationBehavior, FsReader, FsWriter, StatPathOptions};
+use loonfs::{CreateNamespaceOptions, DestinationBehavior, LoonFs, StatPathOptions};
 use loonfs_api::{
     AbsolutePath, AccessGrants, AccessRight, AccessRights, CommitId, ErrorCode, NamespaceAccess,
     PrincipalId, PrincipalScope, PrincipalSet, Subject, SubjectId,
@@ -40,7 +40,7 @@ async fn a_warmed_reader_sees_a_revocation_on_its_next_read() {
 async fn check_buffered_read_access(content_size: usize) {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
-    let writer = FsWriter::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone())
         .writer_id("access-reads")
         .min_publish_interval_ms(0)
         .build()
@@ -64,7 +64,7 @@ async fn check_buffered_read_access(content_size: usize) {
         .open_namespace(&namespace_id)
         .expect("open namespace");
     // Keep the reader's cache independent so a write cannot invalidate it.
-    let reader = FsReader::builder_with_store(store)
+    let reader = LoonFs::reader_with_store(store)
         .build()
         .await
         .expect("reader")
@@ -208,7 +208,7 @@ async fn a_former_writer_sees_revocation_after_a_warm_read_before_handoff() {
 async fn check_former_writer_read(warm_before_handoff: bool) {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
-    let old_writer = FsWriter::builder_with_store(store.clone())
+    let old_writer = LoonFs::builder_with_store(store.clone())
         .writer_id("old-writer")
         .min_publish_interval_ms(0)
         .build()
@@ -256,7 +256,7 @@ async fn check_former_writer_read(warm_before_handoff: bool) {
         )
         .await
         .expect("grant read access");
-    let reader = old_writer.reader().as_subject(subject("viewer"));
+    let reader = old_writer.read_only().as_subject(subject("viewer"));
     let namespace = reader.namespace(&namespace_id);
     if warm_before_handoff {
         assert_eq!(
@@ -268,7 +268,7 @@ async fn check_former_writer_read(warm_before_handoff: bool) {
             b"private payload"
         );
     }
-    let peer = FsWriter::builder_with_store(store)
+    let peer = LoonFs::builder_with_store(store)
         .writer_id("peer")
         .min_publish_interval_ms(0)
         .build()

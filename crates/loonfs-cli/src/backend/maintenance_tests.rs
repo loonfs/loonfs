@@ -64,7 +64,7 @@ fn every_job() -> [MaintenanceJobId; 5] {
 
 async fn seed_wal_backlog(store: &SharedObjectStore, namespace_id: &NamespaceId) {
     const PUBLISHES_PAST_THE_CHECKPOINT_THRESHOLD: u64 = 34;
-    let writer = FsWriter::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone())
         .writer_id(format!("{namespace_id}-backlog"))
         .min_publish_interval_ms(0)
         .build()

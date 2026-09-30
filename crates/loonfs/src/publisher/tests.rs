@@ -242,15 +242,15 @@ fn test_runtime(store: SharedStore) -> TestRuntime {
     }
 }
 
-async fn test_writer(store: SharedStore) -> crate::FsWriter {
+async fn test_writer(store: SharedStore) -> crate::LoonFs<crate::Writable> {
     test_writer_with_interval(store, crate::config::DEFAULT_MIN_PUBLISH_INTERVAL_MS).await
 }
 
 async fn test_writer_with_interval(
     store: SharedStore,
     min_publish_interval_ms: u64,
-) -> crate::FsWriter {
-    crate::FsWriter::builder_with_store(store)
+) -> crate::LoonFs<crate::Writable> {
+    crate::LoonFs::builder_with_store(store)
         .writer_id("writer-a")
         .min_publish_interval_ms(min_publish_interval_ms)
         .trace_mode(TraceMode::Remote)
@@ -264,8 +264,8 @@ async fn test_writer_with_cache(
     store: SharedStore,
     runtime_cache: RuntimeCacheConfig,
     recorder: Arc<DefaultMetricsRecorder>,
-) -> crate::FsWriter {
-    crate::FsWriter::builder_with_store(store)
+) -> crate::LoonFs<crate::Writable> {
+    crate::LoonFs::builder_with_store(store)
         .writer_id("writer-a")
         .min_publish_interval_ms(0)
         .runtime_cache(runtime_cache)
@@ -327,7 +327,7 @@ fn retained_namespaces(registry: &PublisherRegistry) -> Vec<NamespaceId> {
 /// each, in order, so the registry's retention order is the namespace order.
 /// The sessions stay in the table while the caller holds the handles.
 async fn publish_once_into_each(
-    writer: &crate::FsWriter,
+    writer: &crate::LoonFs<crate::Writable>,
     namespaces: &[NamespaceId],
 ) -> Vec<crate::Namespace<crate::Writable>> {
     let mut namespace_writers = Vec::new();
@@ -339,14 +339,14 @@ async fn publish_once_into_each(
             )
             .await
             .expect("bootstrap");
-        let namespace_writer = writer.open_namespace(namespace_id).expect("open namespace");
-        namespace_writer
+        let namespace = writer.open_namespace(namespace_id).expect("open namespace");
+        namespace
             .commit_candidate(CommitCandidate::new(create_directory_request(
                 "seed", "docs",
             )))
             .await
             .expect("commit");
-        namespace_writers.push(namespace_writer);
+        namespace_writers.push(namespace);
     }
     namespace_writers
 }
@@ -417,9 +417,9 @@ async fn wait_for_queued_candidates(publisher: &NamespacePublisher, expected: us
     }
 }
 
-async fn wait_for_fold_waiters(writer: &crate::FsWriter, expected: usize) {
+async fn wait_for_fold_waiters(writer: &crate::LoonFs<crate::Writable>, expected: usize) {
     timeout(Duration::from_secs(10), async {
-        while writer.bits.wal_folds_waiting.load(Ordering::SeqCst) != expected {
+        while writer.mode.bits.wal_folds_waiting.load(Ordering::SeqCst) != expected {
             tokio::task::yield_now().await;
         }
     })
@@ -817,10 +817,10 @@ async fn rejected_duplicate_joins_ready_in_flight_primary() {
         )
         .await
         .expect("bootstrap");
-    let namespace_writer = writer
+    let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
-    let publisher = namespace_writer.mode.session.publisher.clone();
+    let publisher = namespace.session().publisher.clone();
     let request = create_directory_request("ready-primary", "ready-primary");
 
     let primary = try_admit_candidate(
@@ -863,10 +863,10 @@ async fn ready_duplicate_joins_rejected_in_flight_primary() {
         )
         .await
         .expect("bootstrap");
-    let namespace_writer = writer
+    let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
-    let publisher = namespace_writer.mode.session.publisher.clone();
+    let publisher = namespace.session().publisher.clone();
     let request = create_directory_request("rejected-primary", "rejected-primary");
 
     let primary = try_admit_candidate(
@@ -1300,7 +1300,7 @@ async fn a_sequential_follow_up_publishes_at_once() {
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let mut writer = test_writer_with_interval(store, 400).await;
-    writer.publisher.timer = Arc::new(ManualMonotonicTimer::default());
+    writer.mode.publisher.timer = Arc::new(ManualMonotonicTimer::default());
     writer
         .create_namespace(
             &namespace_id,
@@ -1308,13 +1308,13 @@ async fn a_sequential_follow_up_publishes_at_once() {
         )
         .await
         .expect("bootstrap");
-    let namespace_writer = writer
+    let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
     for (commit_id, directory) in [("first", "first"), ("second", "second"), ("first", "first")] {
         tokio::time::timeout(
             Duration::from_millis(399),
-            namespace_writer.commit_candidate(CommitCandidate::new(create_directory_request(
+            namespace.commit_candidate(CommitCandidate::new(create_directory_request(
                 commit_id, directory,
             ))),
         )
@@ -1788,7 +1788,7 @@ async fn publisher_batches_concurrent_distinct_commits_into_one_wal_segment() {
     let store = Arc::new(blocking_publication_store(temp_dir.path(), &namespace_id));
     let shared = store.clone() as SharedStore;
     let writer = test_writer(shared.clone()).await;
-    let namespace = writer.reader().namespace(&namespace_id);
+    let namespace = writer.namespace(&namespace_id);
     writer
         .create_namespace(
             &namespace_id,
@@ -1837,7 +1837,7 @@ async fn publisher_batches_concurrent_distinct_commits_into_one_wal_segment() {
                 .await
         })
     };
-    let publisher = namespace_writer.mode.session.publisher.clone();
+    let publisher = namespace_writer.session().publisher.clone();
     wait_for_queued_candidates(&publisher, 2).await;
 
     store.release();
@@ -1915,14 +1915,11 @@ async fn publisher_batches_plain_and_prepared_mutations_together() {
         )
         .await
         .expect("bootstrap");
-    let namespace_writer = writer
+    let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
-    let upload = namespace_writer
-        .create_upload()
-        .await
-        .expect("begin upload");
-    let staged = namespace_writer
+    let upload = namespace.create_upload().await.expect("begin upload");
+    let staged = namespace
         .put_upload_content(&upload.upload_id, b"hello")
         .await
         .expect("stage content");
@@ -1941,9 +1938,9 @@ async fn publisher_batches_plain_and_prepared_mutations_together() {
     // deterministically admitted to the pending batch behind it.
     store.block_next();
     let warmup = {
-        let namespace_writer = namespace_writer.clone();
+        let namespace = namespace.clone();
         tokio::spawn(async move {
-            namespace_writer
+            namespace
                 .commit_candidate(CommitCandidate::new(create_directory_request(
                     "warmup", "warmup",
                 )))
@@ -1967,22 +1964,22 @@ async fn publisher_batches_plain_and_prepared_mutations_together() {
         },
     );
     let plain_response = {
-        let namespace_writer = namespace_writer.clone();
+        let namespace = namespace.clone();
         tokio::spawn(async move {
-            namespace_writer
+            namespace
                 .commit_candidate(CommitCandidate::new(plain))
                 .await
         })
     };
     let prepared_response = {
-        let namespace_writer = namespace_writer.clone();
+        let namespace = namespace.clone();
         tokio::spawn(async move {
-            namespace_writer
+            namespace
                 .commit_candidate(CommitCandidate::prepared(prepared, vec![prepared_content]))
                 .await
         })
     };
-    let publisher = namespace_writer.mode.session.publisher.clone();
+    let publisher = namespace.session().publisher.clone();
     wait_for_queued_candidates(&publisher, 2).await;
 
     store.release();
@@ -2045,16 +2042,16 @@ async fn registry_close_admission_refuses_new_work_while_admitted_work_drains() 
         .await
         .expect("bootstrap");
     let registry = writer.publisher();
-    let namespace_writer = writer
+    let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
 
     // An admitted publication blocks at its WAL put...
     store.block_next();
     let active = {
-        let namespace_writer = namespace_writer.clone();
+        let namespace = namespace.clone();
         tokio::spawn(async move {
-            namespace_writer
+            namespace
                 .commit_candidate(CommitCandidate::new(create_directory_request(
                     "active", "active",
                 )))
@@ -2065,7 +2062,7 @@ async fn registry_close_admission_refuses_new_work_while_admitted_work_drains() 
 
     // Admission then closes, and new work is refused.
     registry.close_admission();
-    let refused = namespace_writer
+    let refused = namespace
         .commit_candidate(CommitCandidate::new(create_directory_request(
             "refused", "refused",
         )))
@@ -2074,7 +2071,7 @@ async fn registry_close_admission_refuses_new_work_while_admitted_work_drains() 
     assert_eq!(refused.code(), ErrorCode::ShuttingDown);
 
     // A publisher clone that predates the sweep also refuses directly.
-    let publisher = namespace_writer.mode.session.publisher.clone();
+    let publisher = namespace.session().publisher.clone();
     let direct = try_admit_commit(
         &publisher,
         &namespace_id,
@@ -2113,15 +2110,15 @@ async fn worker_survives_panic_and_processes_later_queue_items() {
         .await
         .expect("bootstrap");
     let registry = writer.publisher();
-    let namespace_writer = writer
+    let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
 
     store.arm_blocking_panic();
     let doomed = {
-        let namespace_writer = namespace_writer.clone();
+        let namespace = namespace.clone();
         tokio::spawn(async move {
-            namespace_writer
+            namespace
                 .commit_candidate(CommitCandidate::new(create_directory_request(
                     "doomed", "doomed",
                 )))
@@ -2133,16 +2130,16 @@ async fn worker_survives_panic_and_processes_later_queue_items() {
     // Queued behind the doomed batch: only a worker that survives the panic
     // publishes this one, and the drain must wait for it.
     let queued = {
-        let namespace_writer = namespace_writer.clone();
+        let namespace = namespace.clone();
         tokio::spawn(async move {
-            namespace_writer
+            namespace
                 .commit_candidate(CommitCandidate::new(create_directory_request(
                     "queued", "queued",
                 )))
                 .await
         })
     };
-    let publisher = namespace_writer.mode.session.publisher.clone();
+    let publisher = namespace.session().publisher.clone();
     wait_for_queued_candidates(&publisher, 1).await;
 
     store.release_into_panic();
@@ -2180,7 +2177,7 @@ async fn a_fold_reloads_the_tail_when_no_projection_is_retained() {
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
     let namespace_id = NamespaceId::parse("no-projection").expect("valid namespace id");
     let hints = Arc::new(Mutex::new(Vec::new()));
-    let writer = crate::FsWriter::builder_with_store(store.clone())
+    let writer = crate::LoonFs::builder_with_store(store.clone())
         .writer_id("writer-a")
         .runtime_cache(RuntimeCacheConfig::disabled())
         .maintenance_hint_observer({
@@ -2197,7 +2194,7 @@ async fn a_fold_reloads_the_tail_when_no_projection_is_retained() {
         )
         .await
         .expect("bootstrap");
-    let namespace_writer = writer
+    let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
     append_wal_segments(
@@ -2212,21 +2209,20 @@ async fn a_fold_reloads_the_tail_when_no_projection_is_retained() {
     .await
     .expect("seed the WAL tail below the fold threshold");
 
-    namespace_writer
+    namespace
         .commit_candidate(CommitCandidate::new(create_directory_request(
             "cross-threshold",
             "docs",
         )))
         .await
         .expect("publish across the fold threshold");
-    namespace_writer
+    namespace
         .wait_for_fold()
         .await
         .expect("fold the uncached tail");
 
     let status = writer
-        .maintenance_handle("fold-inspection")
-        .expect("maintenance handle")
+        .maintenance(loonfs_test_support::ids::writer_id("fold-inspection"))
         .get_namespace_diagnostics(&namespace_id)
         .await
         .expect("inspect the folded namespace");
@@ -2262,7 +2258,7 @@ async fn a_runtime_fold_materializes_inline_content_and_reanchors_to_an_empty_ta
         KeyPredicate::content_blob(),
     ));
     let namespace_id = NamespaceId::parse("inline-fold").expect("namespace");
-    let writer = crate::FsWriter::builder_with_store(store.clone())
+    let writer = crate::LoonFs::builder_with_store(store.clone())
         .writer_id("writer")
         .build()
         .await
@@ -2324,7 +2320,7 @@ async fn a_runtime_fold_materializes_inline_content_and_reanchors_to_an_empty_ta
     );
     assert_eq!(folded.activity.file_revisions.get(), 1);
     assert_eq!(store.count(OperationClass::Put), 1);
-    let reader = crate::FsReader::builder_with_store(store.clone())
+    let reader = crate::LoonFs::reader_with_store(store.clone())
         .build()
         .await
         .expect("fresh reader");
@@ -2339,8 +2335,7 @@ async fn a_runtime_fold_materializes_inline_content_and_reanchors_to_an_empty_ta
     );
     assert!(store.count(OperationClass::Read) > 0);
     let input = namespace_writer
-        .mode
-        .session
+        .session()
         .publisher
         .engine
         .lock()
@@ -2382,7 +2377,7 @@ async fn a_failed_fold_notifies_maintenance_and_reloads_the_tail() {
     ));
     let namespace_id = NamespaceId::parse("failed-fold-hint").expect("valid namespace id");
     let hints = Arc::new(Mutex::new(Vec::new()));
-    let writer = crate::FsWriter::builder_with_store(failing.clone())
+    let writer = crate::LoonFs::builder_with_store(failing.clone())
         .writer_id("writer-a")
         .maintenance_hint_observer({
             let hints = Arc::clone(&hints);
@@ -2398,7 +2393,7 @@ async fn a_failed_fold_notifies_maintenance_and_reloads_the_tail() {
         )
         .await
         .expect("bootstrap");
-    let namespace_writer = writer
+    let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
     append_wal_segments(
@@ -2414,14 +2409,14 @@ async fn a_failed_fold_notifies_maintenance_and_reloads_the_tail() {
     .expect("seed the WAL tail below the fold threshold");
 
     failing.fail_next(1);
-    namespace_writer
+    namespace
         .commit_candidate(CommitCandidate::new(create_directory_request(
             "cross-threshold",
             "docs",
         )))
         .await
         .expect("publish across the fold threshold");
-    namespace_writer
+    namespace
         .wait_for_fold()
         .await
         .expect("settle the failed fold");
@@ -2445,7 +2440,7 @@ async fn a_failed_fold_notifies_maintenance_and_reloads_the_tail() {
     )
     .await
     .expect("another process folds the tail");
-    namespace_writer
+    namespace
         .commit_candidate(CommitCandidate::new(create_directory_request(
             "after-fold",
             "after-fold",
@@ -2480,7 +2475,7 @@ async fn wal_folds_share_the_writer_concurrency_bound() {
         fold_b,
         metadata_manifest_prefix(&namespaces[0]),
     ));
-    let writer = crate::FsWriter::builder_with_store(blocking.clone())
+    let writer = crate::LoonFs::builder_with_store(blocking.clone())
         .writer_id("writer-a")
         .max_concurrent_folds(NonZeroUsize::new(1).expect("nonzero fold limit"))
         .build()
@@ -2514,8 +2509,8 @@ async fn wal_folds_share_the_writer_concurrency_bound() {
     blocking.inner().block_next();
     blocking.inner().inner().block_next();
 
-    for (index, namespace_writer) in namespace_writers.iter().enumerate() {
-        namespace_writer
+    for (index, namespace) in namespace_writers.iter().enumerate() {
+        namespace
             .commit_candidate(CommitCandidate::new(create_directory_request(
                 format!("cross-threshold-{index}"),
                 "docs",
@@ -2528,7 +2523,7 @@ async fn wal_folds_share_the_writer_concurrency_bound() {
             wait_for_fold_waiters(&writer, index).await;
         }
     }
-    assert_eq!(writer.bits.wal_fold_permits.available_permits(), 0);
+    assert_eq!(writer.mode.bits.wal_fold_permits.available_permits(), 0);
     let closing = tokio::spawn(namespace_writers[2].clone().close());
     while namespace_writers[2].session_state() != NamespaceSessionState::Closed {
         tokio::task::yield_now().await;
@@ -2539,8 +2534,8 @@ async fn wal_folds_share_the_writer_concurrency_bound() {
     blocking.inner().release();
     blocking.inner().inner().wait_until_blocked().await;
     blocking.inner().inner().release();
-    for namespace_writer in &namespace_writers[..2] {
-        namespace_writer
+    for namespace in &namespace_writers[..2] {
+        namespace
             .wait_for_fold()
             .await
             .expect("released fold settles");
@@ -2550,8 +2545,8 @@ async fn wal_folds_share_the_writer_concurrency_bound() {
         .expect("namespace close should settle")
         .expect("join namespace close")
         .expect("close namespace with a waiting fold");
-    assert_eq!(writer.bits.wal_folds_waiting.load(Ordering::SeqCst), 0);
-    assert_eq!(writer.bits.wal_fold_permits.available_permits(), 1);
+    assert_eq!(writer.mode.bits.wal_folds_waiting.load(Ordering::SeqCst), 0);
+    assert_eq!(writer.mode.bits.wal_fold_permits.available_permits(), 1);
     writer.shutdown().await.expect("shut down writer");
 }
 
@@ -2568,7 +2563,7 @@ async fn a_late_fold_does_not_republish_an_already_folded_tail() {
         blocked,
         KeyPredicate::prefix(metadata_manifest_prefix(&namespace_b)),
     ));
-    let writer = crate::FsWriter::builder_with_store(recording.clone())
+    let writer = crate::LoonFs::builder_with_store(recording.clone())
         .writer_id("writer-a")
         .max_concurrent_folds(NonZeroUsize::new(1).expect("nonzero fold limit"))
         .build()
@@ -2598,17 +2593,17 @@ async fn a_late_fold_does_not_republish_an_already_folded_tail() {
     let namespace_writer_b = writer.open_namespace(&namespace_b).expect("open namespace");
     recording.inner().block_next();
 
-    for (namespace_writer, commit_id) in [
+    for (namespace, commit_id) in [
         (&namespace_writer_a, "cross-a"),
         (&namespace_writer_b, "cross-b"),
     ] {
-        namespace_writer
+        namespace
             .commit_candidate(CommitCandidate::new(create_directory_request(
                 commit_id, "docs",
             )))
             .await
             .expect("publish across the fold threshold");
-        if namespace_writer.namespace_id() == &namespace_a {
+        if namespace.namespace_id() == &namespace_a {
             recording.inner().wait_until_blocked().await;
         } else {
             wait_for_fold_waiters(&writer, 1).await;
@@ -2617,8 +2612,7 @@ async fn a_late_fold_does_not_republish_an_already_folded_tail() {
 
     recording.reset();
     writer
-        .maintenance_handle("late-fold-maintenance")
-        .expect("maintenance handle")
+        .maintenance(loonfs_test_support::ids::writer_id("late-fold-maintenance"))
         .fold_wal(&namespace_b)
         .await
         .expect("fold the waiting namespace tail");
@@ -2666,7 +2660,7 @@ async fn successful_delete_waits_for_fold_before_evicting_the_namespace_publishe
         .await
         .expect("bootstrap");
     let registry = writer.publisher();
-    let namespace_writer = writer
+    let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
     append_wal_segments(
@@ -2682,7 +2676,7 @@ async fn successful_delete_waits_for_fold_before_evicting_the_namespace_publishe
     .expect("seed the WAL tail below the fold threshold");
 
     blocking.block_next();
-    namespace_writer
+    namespace
         .commit_candidate(CommitCandidate::new(create_directory_request(
             "before", "before",
         )))
@@ -2690,14 +2684,13 @@ async fn successful_delete_waits_for_fold_before_evicting_the_namespace_publishe
         .expect("threshold-crossing commit before delete");
     blocking.wait_until_blocked().await;
     assert_eq!(registry.shared.lock_state().sessions.len(), 1);
-    let publisher = namespace_writer.mode.session.publisher.clone();
+    let publisher = namespace.session().publisher.clone();
 
     let mut delete = {
-        let namespace_writer = namespace_writer.clone();
+        let namespace = namespace.clone();
         tokio::spawn(async move {
-            namespace_writer
-                .mode
-                .session
+            namespace
+                .session()
                 .submit_delete(DeleteNamespaceOptions::default())
                 .await
         })
@@ -2725,7 +2718,7 @@ async fn successful_delete_waits_for_fold_before_evicting_the_namespace_publishe
         registry.shared.lock_state().sessions.is_empty(),
         "a deleted session must not stay in the table while its handle is held"
     );
-    let fast = namespace_writer
+    let fast = namespace
         .commit_candidate(CommitCandidate::new(create_directory_request(
             "fast", "fast",
         )))
@@ -2738,10 +2731,7 @@ async fn successful_delete_waits_for_fold_before_evicting_the_namespace_publishe
     let reopened = writer
         .open_namespace(&namespace_id)
         .expect("reopen namespace");
-    assert!(!Arc::ptr_eq(
-        &reopened.mode.session,
-        &namespace_writer.mode.session
-    ));
+    assert!(!std::ptr::eq(reopened.session(), namespace.session()));
     let late = reopened
         .commit_candidate(CommitCandidate::new(create_directory_request(
             "late", "late",
@@ -2784,7 +2774,7 @@ async fn a_delete_admitted_before_close_admission_lands_terminal() {
         .await
         .expect("bootstrap");
     let registry = writer.publisher();
-    let namespace_writer = writer
+    let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
 
@@ -2792,9 +2782,9 @@ async fn a_delete_admitted_before_close_admission_lands_terminal() {
     // queues behind it instead of being taken first.
     store.block_next();
     let active = {
-        let namespace_writer = namespace_writer.clone();
+        let namespace = namespace.clone();
         tokio::spawn(async move {
-            namespace_writer
+            namespace
                 .commit_candidate(CommitCandidate::new(create_directory_request(
                     "active", "active",
                 )))
@@ -2802,7 +2792,7 @@ async fn a_delete_admitted_before_close_admission_lands_terminal() {
         })
     };
     store.wait_until_blocked().await;
-    let publisher = namespace_writer.mode.session.publisher.clone();
+    let publisher = namespace.session().publisher.clone();
     let delete = spawn_delete(&publisher, DeleteNamespaceOptions::default());
     wait_for_queued_delete(&publisher).await;
 
@@ -2850,7 +2840,7 @@ async fn delete_queued_mid_publish_waits_behind_admitted_work() {
         .await
         .expect("bootstrap");
     let registry = writer.publisher();
-    let namespace_writer = writer
+    let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
 
@@ -2861,9 +2851,9 @@ async fn delete_queued_mid_publish_waits_behind_admitted_work() {
     // the delete first.
     store.block_next();
     let before = {
-        let namespace_writer = namespace_writer.clone();
+        let namespace = namespace.clone();
         tokio::spawn(async move {
-            namespace_writer
+            namespace
                 .commit_candidate(CommitCandidate::new(create_directory_request(
                     "before", "before",
                 )))
@@ -2871,14 +2861,14 @@ async fn delete_queued_mid_publish_waits_behind_admitted_work() {
         })
     };
     store.wait_until_blocked().await;
-    let publisher = namespace_writer.mode.session.publisher.clone();
+    let publisher = namespace.session().publisher.clone();
 
     // The worker is parked in the blocked CAS, so this admission
     // deterministically queues the next batch instead of being taken.
     let second = {
-        let namespace_writer = namespace_writer.clone();
+        let namespace = namespace.clone();
         tokio::spawn(async move {
-            namespace_writer
+            namespace
                 .commit_candidate(CommitCandidate::new(create_directory_request(
                     "second", "second",
                 )))
@@ -2888,11 +2878,10 @@ async fn delete_queued_mid_publish_waits_behind_admitted_work() {
     wait_for_queued_candidates(&publisher, 1).await;
 
     let delete = {
-        let namespace_writer = namespace_writer.clone();
+        let namespace = namespace.clone();
         tokio::spawn(async move {
-            namespace_writer
-                .mode
-                .session
+            namespace
+                .session()
                 .submit_delete(DeleteNamespaceOptions::default())
                 .await
         })
@@ -2984,8 +2973,8 @@ async fn retained_tail_projections_are_not_bounded_by_the_namespace_count() {
     );
 
     recording.reset();
-    for namespace_writer in &namespace_writers {
-        namespace_writer
+    for namespace in &namespace_writers {
+        namespace
             .commit_candidate(CommitCandidate::new(create_directory_request(
                 "second", "more",
             )))
@@ -3018,10 +3007,10 @@ async fn maintenance_invalidation_leaves_publisher_projection() {
         )
         .await
         .expect("create namespace");
-    let namespace_writer = writer
+    let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
-    namespace_writer
+    namespace
         .commit_candidate(CommitCandidate::new(create_directory_request(
             "seed", "docs",
         )))
@@ -3029,9 +3018,7 @@ async fn maintenance_invalidation_leaves_publisher_projection() {
         .expect("publish commit");
     assert_eq!(retained_projections(&writer.publisher()).projections, 1);
 
-    let maintenance = writer
-        .maintenance_handle("maintenance")
-        .expect("build maintenance");
+    let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id("maintenance"));
     maintenance.invalidate_namespace(&namespace_id);
 
     assert_eq!(retained_projections(&writer.publisher()).projections, 1);
@@ -3088,12 +3075,12 @@ async fn retained_tail_projections_stay_within_the_shared_byte_budget() {
         "each session's first publish has no projection to start from"
     );
 
-    for (namespace_writer, replays) in [
+    for (namespace, replays) in [
         (&namespace_writers[NAMESPACES - 1], 0),
         (&namespace_writers[0], 1),
     ] {
         let before = counter(&recorder, "loonfs.publisher.tail_replays");
-        namespace_writer
+        namespace
             .commit_candidate(CommitCandidate::new(create_directory_request(
                 "again", "again",
             )))
@@ -3121,7 +3108,7 @@ async fn a_publish_past_the_publish_budget_counts_a_tail_replay() {
     let mut writer =
         test_writer_with_cache(store, RuntimeCacheConfig::default(), recorder.clone()).await;
     let timer = Arc::new(ManualMonotonicTimer::default());
-    writer.publisher.timer = timer.clone();
+    writer.mode.publisher.timer = timer.clone();
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     writer
         .create_namespace(
@@ -3131,7 +3118,7 @@ async fn a_publish_past_the_publish_budget_counts_a_tail_replay() {
         .await
         .expect("bootstrap");
     let registry = writer.publisher();
-    let namespace_writer = writer
+    let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
 
@@ -3140,7 +3127,7 @@ async fn a_publish_past_the_publish_budget_counts_a_tail_replay() {
         ("second", loonfs_core::limits::WAL_PUBLISH_BUDGET_MS + 1_000),
     ] {
         timer.set(now_ms);
-        namespace_writer
+        namespace
             .commit_candidate(CommitCandidate::new(create_directory_request(
                 commit_id, commit_id,
             )))
@@ -3217,8 +3204,7 @@ async fn a_landed_delete_forgets_the_namespace_projection() {
     assert_eq!(retained_projections(&registry).projections, 2);
 
     namespace_writers[0]
-        .mode
-        .session
+        .session()
         .submit_delete(DeleteNamespaceOptions::default())
         .await
         .expect("delete namespace");
@@ -3265,7 +3251,7 @@ async fn a_skipped_eviction_leaves_the_namespace_accounted() {
 
     // Standing in for a publication in flight: the engine is held, so the
     // sweep the next publish runs cannot take it.
-    let held_engine = busy_writers[0].mode.session.publisher.engine.lock().await;
+    let held_engine = busy_writers[0].session().publisher.engine.lock().await;
 
     let _other_writers = publish_once_into_each(&writer, &namespaces[1..2]).await;
 
@@ -3303,7 +3289,7 @@ async fn registry_shares_admission_and_publication_slots_after_caller_cancellati
     let a = NamespaceId::parse("a").expect("namespace");
     let b = NamespaceId::parse("b").expect("namespace");
     let store = Arc::new(blocking_publication_store(temp_dir.path(), &a));
-    let writer = crate::FsWriter::builder_with_store(store.clone())
+    let writer = crate::LoonFs::builder_with_store(store.clone())
         .writer_id("bounded-writer")
         .publication_limits(crate::PublicationLimits {
             max_requests: NonZeroUsize::new(2).expect("two requests"),
@@ -3348,7 +3334,7 @@ async fn registry_shares_admission_and_publication_slots_after_caller_cancellati
                 .await
         })
     };
-    let publisher = writer_b.mode.session.publisher.clone();
+    let publisher = writer_b.session().publisher.clone();
     wait_for_queued_candidates(&publisher, 1).await;
     assert_eq!(
         registry.shared.admission.publications.available_permits(),
@@ -3366,8 +3352,7 @@ async fn registry_shares_admission_and_publication_slots_after_caller_cancellati
         "disconnected work remains charged"
     );
     let error = writer_a
-        .mode
-        .session
+        .session()
         .submit_delete(DeleteNamespaceOptions::default())
         .await
         .expect_err("budget remains full");

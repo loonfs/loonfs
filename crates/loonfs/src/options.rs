@@ -24,10 +24,10 @@ pub struct MetadataMaintenanceOptions {
     /// Fold the visible WAL tail once it reaches this many segments.
     pub max_wal_tail_segments: NonZeroU64,
     /// Fold once unfolded inline bytes reach this size; defaults to 2 MiB.
-    /// Applies only when the writer's publisher knows the count.
+    /// Applies only when the runtime's publisher knows the count.
     pub inline_content_fold_at_bytes: NonZeroUsize,
     /// Fold a WAL tail of any size once its newest commit is this old on
-    /// the maintenance handle's wall clock; defaults to 15 minutes. Zero
+    /// the runtime's wall clock; defaults to 15 minutes. Zero
     /// turns this off.
     pub idle_fold_after_ms: u64,
     /// Whether run sizes must justify the rewrite before maintenance merges them.

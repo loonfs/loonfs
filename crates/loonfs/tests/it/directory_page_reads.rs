@@ -1,8 +1,8 @@
 //! Store reads and entry metadata for a directory page across folded batches.
 
 use loonfs::{
-    CreateDirectoryOptions, CreateNamespaceOptions, DestinationBehavior, FsMaintenance, FsReader,
-    FsWriter, PageRequest, PutFileOptions, SharedObjectStore, StatPathOptions,
+    CreateDirectoryOptions, CreateNamespaceOptions, DestinationBehavior, LoonFs, PageRequest,
+    PutFileOptions, SharedObjectStore, StatPathOptions,
 };
 use loonfs_api::wire::manifest::MetadataRowFamily;
 use loonfs_core::test_support::STORE_READ_WAVE;
@@ -40,17 +40,20 @@ async fn directory_pages_use_bindings_and_load_revision_heads_concurrently() {
         Arc::new(LocalFsStore::new(temporary.path()).expect("local store"));
     let namespace_id = namespace_id("directory-page-reads");
     let actor = loonfs_test_support::test_actor();
-    let writer = FsWriter::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone())
         .writer_id("directory-page-writer")
         .min_publish_interval_ms(0)
         .build()
         .await
         .expect("writer");
-    let maintenance = FsMaintenance::builder_with_store(store.clone())
-        .actor_id("directory-page-maintenance")
+    let maintenance = LoonFs::builder_with_store(store.clone())
+        .writer_id("directory-page-maintenance")
         .build()
         .await
-        .expect("maintenance");
+        .expect("maintenance")
+        .maintenance(loonfs_test_support::ids::writer_id(
+            "directory-page-maintenance",
+        ));
     writer
         .create_namespace(&namespace_id, CreateNamespaceOptions::new(actor.clone()))
         .await
@@ -114,7 +117,7 @@ async fn directory_pages_use_bindings_and_load_revision_heads_concurrently() {
         KeyPredicate::new(move |key| revision_keys.contains(key)),
     ));
     let recording = Arc::new(RecordingStore::metadata_segments(revisions.clone()));
-    let reader = FsReader::builder_with_store(recording.clone())
+    let reader = LoonFs::reader_with_store(recording.clone())
         .build()
         .await
         .expect("fresh reader");

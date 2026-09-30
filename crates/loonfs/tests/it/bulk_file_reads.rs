@@ -9,9 +9,9 @@ use crate::common::*;
 use loonfs::{
     CheckpointFile, CheckpointFilesPageCursor, ContentRef, CreateCheckpointOptions,
     CreateNamespaceOptions, CurrentFileState, DeleteDirectoryBehavior, DeleteOptions,
-    DestinationBehavior, ErrorCode, FsReader, InodeId, ListCheckpointFilesOptions, MoveOptions,
-    NamespaceId, PageRequest, PutFileOptions, RevisionNo, RuntimeError, SharedObjectStore,
-    StoreConfig, UndeleteOptions,
+    DestinationBehavior, ErrorCode, InodeId, ListCheckpointFilesOptions, LoonFs, MoveOptions,
+    NamespaceId, PageRequest, PutFileOptions, ReadOnly, RevisionNo, RuntimeError,
+    SharedObjectStore, StoreConfig, UndeleteOptions,
 };
 use loonfs_test_support::ids::{namespace_id, page_limit};
 use loonfs_test_support::stores::{KeyPredicate, OperationClass, RecordingStore};
@@ -40,7 +40,7 @@ struct ListedFile {
 /// Every visible file in the namespace right now, by inode, found by walking
 /// directories through the ordinary listing surface.
 async fn listed_files(
-    reader: &FsReader,
+    reader: &LoonFs<ReadOnly>,
     namespace_id: &NamespaceId,
 ) -> BTreeMap<InodeId, ListedFile> {
     let mut found = BTreeMap::new();
@@ -80,7 +80,7 @@ async fn listed_files(
 /// Every file a checkpoint pins, read one page at a time so the paging path
 /// carries every assertion.
 async fn checkpoint_files(
-    reader: &FsReader,
+    reader: &LoonFs<ReadOnly>,
     namespace_id: &NamespaceId,
     checkpoint_id: &loonfs::PinId,
     limit: usize,
@@ -141,7 +141,7 @@ async fn build_mixed_namespace(fs: &TestRuntime, namespace_id: &NamespaceId) {
     )
     .await
     .expect("create namespace");
-    let namespace_writer = fs
+    let namespace = fs
         .writer
         .open_namespace(namespace_id)
         .expect("open namespace");
@@ -161,7 +161,7 @@ async fn build_mixed_namespace(fs: &TestRuntime, namespace_id: &NamespaceId) {
         .await
         .expect("put file");
     }
-    namespace_writer
+    namespace
         .create_directory(
             "/empty",
             loonfs::CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
@@ -184,7 +184,7 @@ async fn build_mixed_namespace(fs: &TestRuntime, namespace_id: &NamespaceId) {
 
     // A deleted subtree: neither the directory nor the file below it is
     // visible any more.
-    namespace_writer
+    namespace
         .delete_path(
             "/scratch",
             DeleteOptions {
@@ -201,7 +201,7 @@ async fn build_mixed_namespace(fs: &TestRuntime, namespace_id: &NamespaceId) {
         .await
         .expect("stat before delete")
         .inode_id;
-    let deletion_seq = namespace_writer
+    let deletion_seq = namespace
         .delete_path(
             "/notes/recovered.txt",
             DeleteOptions::new(loonfs_test_support::test_actor()),
@@ -209,7 +209,7 @@ async fn build_mixed_namespace(fs: &TestRuntime, namespace_id: &NamespaceId) {
         .await
         .expect("delete file")
         .committed_seq;
-    namespace_writer
+    namespace
         .undelete(
             recovered_inode_id,
             deletion_seq,
@@ -1004,7 +1004,7 @@ async fn a_standalone_reader_serves_every_operation() {
 
     // No writer identity anywhere on this path: the reader opens its own
     // store client from configuration.
-    let reader = FsReader::builder(store_config(temp_dir.path()))
+    let reader = LoonFs::reader(store_config(temp_dir.path()))
         .build()
         .await
         .expect("build a standalone reader");
