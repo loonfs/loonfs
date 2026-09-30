@@ -142,19 +142,20 @@ fn delegated_writer_calls_close_one_operation_span() {
             )
             .await
             .expect("create namespace");
+        let namespace_writer = writer
+            .open_namespace(&namespace_id)
+            .expect("open namespace");
         let _setup_log = take_captured_log(&captured);
-        writer
+        namespace_writer
             .create_directory(
-                &namespace_id,
                 "/docs",
                 CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
             )
             .await
             .expect("create directory");
         let create_log = take_captured_log(&captured);
-        writer
+        namespace_writer
             .put_file_bytes(
-                &namespace_id,
                 "/docs/file.txt",
                 b"body",
                 PutFileOptions::new(loonfs_test_support::test_actor()),

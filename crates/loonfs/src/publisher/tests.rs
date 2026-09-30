@@ -1917,12 +1917,15 @@ async fn publisher_batches_plain_and_prepared_mutations_together() {
         )
         .await
         .expect("bootstrap");
-    let upload = writer
-        .create_upload(&namespace_id)
+    let namespace_writer = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
+    let upload = namespace_writer
+        .create_upload()
         .await
         .expect("begin upload");
-    let staged = writer
-        .put_upload_content(&namespace_id, &upload.upload_id, b"hello")
+    let staged = namespace_writer
+        .put_upload_content(&upload.upload_id, b"hello")
         .await
         .expect("stage content");
     let catalog = loonfs_core::control::load_namespace_catalog_entry(&shared, &namespace_id)
@@ -2219,6 +2222,9 @@ async fn a_fold_reloads_the_tail_when_no_projection_is_retained() {
         )
         .await
         .expect("bootstrap");
+    let namespace_writer = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
     append_wal_segments(
         store.as_ref(),
         &namespace_id,
@@ -2239,8 +2245,8 @@ async fn a_fold_reloads_the_tail_when_no_projection_is_retained() {
         )
         .await
         .expect("publish across the fold threshold");
-    writer
-        .wait_for_fold(&namespace_id)
+    namespace_writer
+        .wait_for_fold()
         .await
         .expect("fold the uncached tail");
 
@@ -2294,6 +2300,9 @@ async fn a_runtime_fold_materializes_inline_content_and_reanchors_to_an_empty_ta
         )
         .await
         .expect("namespace");
+    let namespace_writer = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
     append_wal_segments(
         store.as_ref(),
         &namespace_id,
@@ -2332,7 +2341,7 @@ async fn a_runtime_fold_materializes_inline_content_and_reanchors_to_an_empty_ta
         .submit_candidate(namespace_id.clone(), candidate.clone())
         .await
         .expect("publish");
-    writer.wait_for_fold(&namespace_id).await.expect("fold");
+    namespace_writer.wait_for_fold().await.expect("fold");
     let folded = loonfs_core::control::load_namespace_statistics(store.as_ref(), &namespace_id)
         .await
         .expect("inline statistics");
@@ -2419,6 +2428,9 @@ async fn a_failed_fold_notifies_maintenance_and_reloads_the_tail() {
         )
         .await
         .expect("bootstrap");
+    let namespace_writer = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
     append_wal_segments(
         failing.as_ref(),
         &namespace_id,
@@ -2440,8 +2452,8 @@ async fn a_failed_fold_notifies_maintenance_and_reloads_the_tail() {
         )
         .await
         .expect("publish across the fold threshold");
-    writer
-        .wait_for_fold(&namespace_id)
+    namespace_writer
+        .wait_for_fold()
         .await
         .expect("settle the failed fold");
 
@@ -2564,8 +2576,9 @@ async fn wal_folds_share_the_writer_concurrency_bound() {
     blocking.inner().inner().wait_until_blocked().await;
     blocking.inner().inner().release();
     for namespace_id in &namespaces[..2] {
-        writer
-            .wait_for_fold(namespace_id)
+        let namespace_writer = writer.open_namespace(namespace_id).expect("open namespace");
+        namespace_writer
+            .wait_for_fold()
             .await
             .expect("released fold settles");
     }
@@ -2618,6 +2631,8 @@ async fn a_late_fold_does_not_republish_an_already_folded_tail() {
         .await
         .expect("seed the WAL tail below the fold threshold");
     }
+    let namespace_writer_a = writer.open_namespace(&namespace_a).expect("open namespace");
+    let namespace_writer_b = writer.open_namespace(&namespace_b).expect("open namespace");
     recording.inner().block_next();
 
     for (namespace_id, commit_id) in [(&namespace_a, "cross-a"), (&namespace_b, "cross-b")] {
@@ -2654,12 +2669,12 @@ async fn a_late_fold_does_not_republish_an_already_folded_tail() {
         .expect("refresh the retained projection below the fold threshold");
 
     recording.inner().release();
-    writer
-        .wait_for_fold(&namespace_a)
+    namespace_writer_a
+        .wait_for_fold()
         .await
         .expect("first fold settles");
-    writer
-        .wait_for_fold(&namespace_b)
+    namespace_writer_b
+        .wait_for_fold()
         .await
         .expect("late fold settles");
     assert_eq!(

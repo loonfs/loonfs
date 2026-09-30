@@ -118,16 +118,23 @@ async fn cold_discovery_seeds_projection_after_control_cache_eviction() {
         .await
         .expect("create namespace");
     }
-    fs.writer
+    let namespace_writer = fs
+        .writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
+    namespace_writer
         .create_directory(
-            &namespace_id,
             "/docs",
             CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("publish directory");
-    fs.writer
-        .prepare_file_bytes(&other_namespace_id, b"pending")
+    let other_namespace_writer = fs
+        .writer
+        .open_namespace(&other_namespace_id)
+        .expect("open namespace");
+    other_namespace_writer
+        .prepare_file_bytes(b"pending")
         .await
         .expect("evict published control entry");
     let before_read = fs.runtime_cache_stats();
@@ -250,12 +257,14 @@ async fn runtime_publish_reuses_wal_tail_projection_while_a_fold_runs() {
         )
         .await
         .expect("namespace");
+    let namespace_writer = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
     recording.inner().block_next();
     for number in 0..FOLD_AT_WAL_SEGMENTS + 3 {
         recording.reset();
-        writer
+        namespace_writer
             .create_directory(
-                &namespace_id,
                 &format!("/directory-{number}"),
                 CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
             )
@@ -283,7 +292,7 @@ async fn runtime_publish_reuses_wal_tail_projection_while_a_fold_runs() {
         assert_eq!(tail_segments.load(Ordering::SeqCst), number + 2);
     }
     recording.inner().release();
-    writer.wait_for_fold(&namespace_id).await.expect("fold");
+    namespace_writer.wait_for_fold().await.expect("fold");
     writer.publisher().drain().await.expect("finish hints");
     let manifest =
         loonfs_core::control::load_namespace_current_manifest(recording.as_ref(), &namespace_id)
@@ -294,9 +303,8 @@ async fn runtime_publish_reuses_wal_tail_projection_while_a_fold_runs() {
         &manifest.state.manifest().manifest_no,
     );
     recording.reset();
-    writer
+    namespace_writer
         .create_directory(
-            &namespace_id,
             "/after-fold",
             CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
         )

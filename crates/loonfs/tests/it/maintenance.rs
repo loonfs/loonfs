@@ -76,6 +76,7 @@ fn namespace_diagnostics_counts_user_and_live_snapshot_records_only() {
         CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
     )
     .expect("create namespace");
+    let namespace_writer = fs.writer.open_namespace(&source).expect("open namespace");
     block_on(fs.maintenance.create_checkpoint(
         &source,
         CreateCheckpointOptions {
@@ -92,8 +93,7 @@ fn namespace_diagnostics_counts_user_and_live_snapshot_records_only() {
         },
     ))
     .expect("create expired checkpoint");
-    block_on(fs.writer.create_snapshot(
-        &source,
+    block_on(namespace_writer.create_snapshot(
         CreateSnapshotOptions {
             name: "expired".to_owned(),
             expires_at_ms: 1,
@@ -101,8 +101,7 @@ fn namespace_diagnostics_counts_user_and_live_snapshot_records_only() {
         SnapshotPolicy::default().max_live_per_namespace,
     ))
     .expect("create expired snapshot record");
-    block_on(fs.writer.create_snapshot(
-        &source,
+    block_on(namespace_writer.create_snapshot(
         CreateSnapshotOptions {
             name: "live".to_owned(),
             expires_at_ms: u64::MAX,
@@ -180,11 +179,12 @@ fn namespace_diagnostics_and_step_reject_a_namespace_whose_hint_is_gone() {
         CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
     )
     .expect("create namespace for deletion");
-    block_on(
-        fs.writer
-            .delete_namespace(&deleted_namespace, DeleteNamespaceOptions::default()),
-    )
-    .expect("delete namespace");
+    let namespace_writer = fs
+        .writer
+        .open_namespace(&deleted_namespace)
+        .expect("open namespace");
+    block_on(namespace_writer.delete_namespace(DeleteNamespaceOptions::default()))
+        .expect("delete namespace");
     let response = fs
         .maintenance_run_namespace_blocking(
             &deleted_namespace,

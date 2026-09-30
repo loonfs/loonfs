@@ -359,8 +359,6 @@ pub(super) async fn delete_namespace(
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(query): AppQuery<DeleteNamespaceQuery>,
 ) -> Result<Json<loonfs_api::DeleteNamespaceResponse>, ApiResponseError> {
-    let scoped_writer = subject.map(|subject| state.writer.as_subject(subject));
-    let writer = scoped_writer.as_ref().unwrap_or(&state.writer);
     let options = DeleteNamespaceOptions {
         expected_head_seq: query
             .expected_head_seq
@@ -368,10 +366,17 @@ pub(super) async fn delete_namespace(
             .map(parse_expected_head_seq)
             .transpose()?,
     };
-    let response = writer
-        .delete_namespace(&namespace_id, options)
+    let namespace_writer = state
+        .namespaces
+        .open(&namespace_id)
+        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
+    let scoped_writer = subject.map(|subject| namespace_writer.as_subject(subject));
+    let namespace_writer = scoped_writer.as_ref().unwrap_or(&namespace_writer);
+    let response = namespace_writer
+        .delete_namespace(options)
         .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
+    state.namespaces.forget(&namespace_id);
     Ok(Json(response))
 }
 
@@ -465,13 +470,16 @@ pub(super) async fn create_snapshot(
     AppQuery(_): AppQuery<NoQuery>,
     AppJson(request): AppJson<CreateSnapshotRequest>,
 ) -> Result<Json<SnapshotSummary>, ApiResponseError> {
-    let scoped_writer = subject.map(|subject| state.writer.as_subject(subject));
-    let writer = scoped_writer.as_ref().unwrap_or(&state.writer);
-    let now_ms = writer.now_ms().map_err(ApiResponseError::runtime)?;
+    let now_ms = state.writer.now_ms().map_err(ApiResponseError::runtime)?;
     let expires_at_ms = snapshot_expiry_from_ttl(&state, now_ms, request.ttl_ms)?;
-    let checkpoint = writer
+    let namespace_writer = state
+        .namespaces
+        .open(&namespace_id)
+        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
+    let scoped_writer = subject.map(|subject| namespace_writer.as_subject(subject));
+    let namespace_writer = scoped_writer.as_ref().unwrap_or(&namespace_writer);
+    let checkpoint = namespace_writer
         .create_snapshot(
-            &namespace_id,
             CreateSnapshotOptions {
                 name: request.name,
                 expires_at_ms,
@@ -576,14 +584,17 @@ pub(super) async fn extend_snapshot(
     AppQuery(_): AppQuery<NoQuery>,
     AppJson(request): AppJson<ExtendSnapshotRequest>,
 ) -> Result<Json<SnapshotSummary>, ApiResponseError> {
-    let scoped_writer = subject.map(|subject| state.writer.as_subject(subject));
-    let writer = scoped_writer.as_ref().unwrap_or(&state.writer);
     let snapshot_id = super::query_params::parse_snapshot_id(&snapshot_id)?;
-    let now_ms = writer.now_ms().map_err(ApiResponseError::runtime)?;
+    let now_ms = state.writer.now_ms().map_err(ApiResponseError::runtime)?;
     let requested_expires_at_ms = snapshot_expiry_from_ttl(&state, now_ms, request.ttl_ms)?;
-    let response = writer
+    let namespace_writer = state
+        .namespaces
+        .open(&namespace_id)
+        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
+    let scoped_writer = subject.map(|subject| namespace_writer.as_subject(subject));
+    let namespace_writer = scoped_writer.as_ref().unwrap_or(&namespace_writer);
+    let response = namespace_writer
         .extend_snapshot(
-            &namespace_id,
             &snapshot_id,
             requested_expires_at_ms,
             state.options.snapshot_policy.max_lifetime_ms,
@@ -626,11 +637,15 @@ pub(super) async fn delete_snapshot(
     AppPath(SnapshotPathParams { snapshot_id }): AppPath<SnapshotPathParams>,
     AppQuery(_): AppQuery<NoQuery>,
 ) -> Result<Json<DeleteSnapshotResponse>, ApiResponseError> {
-    let scoped_writer = subject.map(|subject| state.writer.as_subject(subject));
-    let writer = scoped_writer.as_ref().unwrap_or(&state.writer);
     let snapshot_id = super::query_params::parse_snapshot_id(&snapshot_id)?;
-    let response = writer
-        .delete_snapshot(&namespace_id, &snapshot_id)
+    let namespace_writer = state
+        .namespaces
+        .open(&namespace_id)
+        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
+    let scoped_writer = subject.map(|subject| namespace_writer.as_subject(subject));
+    let namespace_writer = scoped_writer.as_ref().unwrap_or(&namespace_writer);
+    let response = namespace_writer
+        .delete_snapshot(&snapshot_id)
         .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
     Ok(Json(response))
@@ -861,9 +876,12 @@ pub(super) async fn run_maintenance(
     }
     if let RunMaintenanceRequest::RecoverAdministrator(request) = request {
         let actor_id = actor_id.ok_or_else(missing_actor)?;
-        let recovered = state
-            .writer
-            .recover_administrator(&namespace_id, &request.principal_id, actor_id)
+        let namespace_writer = state
+            .namespaces
+            .open(&namespace_id)
+            .map_err(ApiResponseError::for_namespace(&namespace_id))?;
+        let recovered = namespace_writer
+            .recover_administrator(&request.principal_id, actor_id)
             .await
             .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
         return Ok(Json(RunMaintenanceResponse::RecoverAdministrator(

@@ -77,6 +77,10 @@ async fn hosted_subject_cannot_import_a_foreign_bare_content_reference() {
         )
         .await
         .expect("source namespace");
+    let namespace_writer = state
+        .writer
+        .open_namespace(&source)
+        .expect("open namespace");
     state
         .writer
         .create_namespace(
@@ -86,10 +90,9 @@ async fn hosted_subject_cannot_import_a_foreign_bare_content_reference() {
         .await
         .expect("destination namespace");
     let options = PutFileOptions::new(loonfs_test_support::test_actor());
-    state
-        .writer
+    namespace_writer
         .as_subject(subject("administrator"))
-        .put_file_bytes(&source, "/private", b"private bytes", options)
+        .put_file_bytes("/private", b"private bytes", options)
         .await
         .expect("publish source");
     let content_ref = state

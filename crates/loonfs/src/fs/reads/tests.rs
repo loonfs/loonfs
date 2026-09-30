@@ -117,12 +117,9 @@ async fn create_compacted_directory(
         Some(subject) => writer.as_subject(subject.clone()),
         None => writer,
     };
-    writer
-        .create_directory(
-            namespace_id,
-            "/directory",
-            CreateDirectoryOptions::new(actor.clone()),
-        )
+    let namespace_writer = writer.open_namespace(namespace_id).expect("open namespace");
+    namespace_writer
+        .create_directory("/directory", CreateDirectoryOptions::new(actor.clone()))
         .await
         .expect("directory");
     let per_batch = FILES / BATCHES;
@@ -158,22 +155,19 @@ async fn create_compacted_directory(
                 std::iter::once(put).chain(access)
             })
             .collect();
-        writer
-            .commit_candidate(
-                namespace_id,
-                CommitCandidate::with_inline_content(
-                    CommitRequest {
-                        commit_id: CommitId::generate(),
-                        actor_id: actor.clone(),
-                        subject: None,
-                        message: None,
-                        operations,
-                        preconditions: Vec::new(),
-                    },
-                    Vec::new(),
-                    vec![content],
-                ),
-            )
+        namespace_writer
+            .commit_candidate(CommitCandidate::with_inline_content(
+                CommitRequest {
+                    commit_id: CommitId::generate(),
+                    actor_id: actor.clone(),
+                    subject: None,
+                    message: None,
+                    operations,
+                    preconditions: Vec::new(),
+                },
+                Vec::new(),
+                vec![content],
+            ))
             .await
             .expect("file batch");
         maintenance

@@ -41,6 +41,9 @@ async fn registered_observer_sees_one_hint_per_publication() {
         )
         .await
         .expect("create namespace");
+    let namespace_writer = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
     assert!(
         observed
             .lock()
@@ -49,9 +52,8 @@ async fn registered_observer_sees_one_hint_per_publication() {
         "namespace bootstrap is not a committed mutation publication"
     );
 
-    let response = writer
+    let response = namespace_writer
         .put_file_bytes(
-            &namespace_id,
             "/note.txt",
             b"observer needle\n",
             PutFileOptions::new(loonfs_test_support::test_actor()),
@@ -140,10 +142,12 @@ async fn an_observer_panic_leaves_the_commit_the_publisher_and_maintenance_intac
         )
         .await
         .expect("create namespace");
+    let namespace_writer = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
 
-    let first = writer
+    let first = namespace_writer
         .put_file_bytes(
-            &namespace_id,
             "/note.txt",
             b"first\n",
             PutFileOptions::new(loonfs_test_support::test_actor()),
@@ -161,9 +165,8 @@ async fn an_observer_panic_leaves_the_commit_the_publisher_and_maintenance_intac
         b"first\n"
     );
 
-    let second = writer
+    let second = namespace_writer
         .put_file_bytes(
-            &namespace_id,
             "/second.txt",
             b"second\n",
             PutFileOptions::new(loonfs_test_support::test_actor()),

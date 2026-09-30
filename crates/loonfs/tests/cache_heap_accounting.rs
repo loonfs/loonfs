@@ -308,17 +308,17 @@ async fn seed(store: &SharedObjectStore, shape: &Shape) {
             .create_namespace(&namespace_id, options)
             .await
             .expect("create namespace");
-        writer
-            .commit_candidate(
+        let namespace_writer = writer
+            .open_namespace(&namespace_id)
+            .expect("open namespace");
+        namespace_writer
+            .commit_candidate(shape.candidate(
                 &namespace_id,
-                shape.candidate(
-                    &namespace_id,
-                    "seed",
-                    0..shape.folded_entries,
-                    0..DIRECTORIES,
-                    None,
-                ),
-            )
+                "seed",
+                0..shape.folded_entries,
+                0..DIRECTORIES,
+                None,
+            ))
             .await
             .expect("seed commit");
         maintenance
@@ -328,17 +328,14 @@ async fn seed(store: &SharedObjectStore, shape: &Shape) {
         let mut next = shape.folded_entries;
         for commit in 0..shape.tail_commits {
             let end = next + shape.tail_entries_per_commit;
-            writer
-                .commit_candidate(
+            namespace_writer
+                .commit_candidate(shape.candidate(
                     &namespace_id,
-                    shape.candidate(
-                        &namespace_id,
-                        &format!("tail-{commit}"),
-                        next..end,
-                        commit..commit + 1,
-                        Some(2048),
-                    ),
-                )
+                    &format!("tail-{commit}"),
+                    next..end,
+                    commit..commit + 1,
+                    Some(2048),
+                ))
                 .await
                 .expect("tail commit");
             next = end;

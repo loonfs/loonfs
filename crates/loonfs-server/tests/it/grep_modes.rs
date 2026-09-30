@@ -195,6 +195,9 @@ async fn grep_get_query_parameters_use_the_list_route_grammar() {
 async fn serving_and_maintaining_enables_queries_nudges_and_disables_per_namespace() {
     let temp_dir = tempdir().expect("store tempdir");
     let (store, writer, namespace_id) = seed_namespace(temp_dir.path(), "both").await;
+    let namespace_writer = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
     let (router, server) = app(
         test_config(temp_dir.path(), GrepMode::ServeAndMaintain),
         AppOptions::default(),
@@ -263,9 +266,8 @@ async fn serving_and_maintaining_enables_queries_nudges_and_disables_per_namespa
     // The file lands through a writer of its own, so nothing in this server
     // observed the publish: the index stays where it was until a request
     // touches the namespace again.
-    writer
+    namespace_writer
         .put_file_bytes(
-            &namespace_id,
             "/note.txt",
             b"automatic needle\n",
             PutFileOptions::new(loonfs_test_support::test_actor()),
@@ -385,9 +387,10 @@ async fn first_query_after_restart_resumes_stale_and_mid_backfill_namespaces() {
             .await
             .expect("create namespace");
     }
-    writer
+    let stale_writer = writer.open_namespace(&stale).expect("open namespace");
+    let backfill_writer = writer.open_namespace(&backfill).expect("open namespace");
+    stale_writer
         .put_file_bytes(
-            &stale,
             "/indexed.txt",
             b"indexed before restart\n",
             PutFileOptions::new(loonfs_test_support::test_actor()),
@@ -395,9 +398,8 @@ async fn first_query_after_restart_resumes_stale_and_mid_backfill_namespaces() {
         .await
         .expect("write indexed file");
     for index in 0..3 {
-        writer
+        backfill_writer
             .put_file_bytes(
-                &backfill,
                 &format!("/backfill-{index}.txt"),
                 format!("mid-backfill needle {index}\n").as_bytes(),
                 PutFileOptions::new(loonfs_test_support::test_actor()),
@@ -409,9 +411,8 @@ async fn first_query_after_restart_resumes_stale_and_mid_backfill_namespaces() {
     let worker = grep_worker(&store, "restart-worker").await;
     worker.enable(&stale).await.expect("enable stale namespace");
     drive_worker_to_current(&worker, &stale, GramIndexBuildPolicy::default()).await;
-    writer
+    stale_writer
         .put_file_bytes(
-            &stale,
             "/tail.txt",
             b"stale steady needle\n",
             PutFileOptions::new(loonfs_test_support::test_actor()),
@@ -489,6 +490,9 @@ async fn first_query_after_restart_resumes_stale_and_mid_backfill_namespaces() {
 async fn serve_only_answers_searches_over_an_index_it_refuses_to_maintain() {
     let temp_dir = tempdir().expect("store tempdir");
     let (store, writer, namespace_id) = seed_namespace(temp_dir.path(), "serve-only").await;
+    let namespace_writer = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
     let (router, server) = app(
         test_config(temp_dir.path(), GrepMode::ServeOnly),
         AppOptions::default(),
@@ -548,9 +552,8 @@ async fn serve_only_answers_searches_over_an_index_it_refuses_to_maintain() {
 
     let worker = grep_worker(&store, "external-grep-worker").await;
     worker.enable(&namespace_id).await.expect("enable grep");
-    writer
+    namespace_writer
         .put_file_bytes(
-            &namespace_id,
             "/note.txt",
             b"external needle\n",
             PutFileOptions::new(loonfs_test_support::test_actor()),
@@ -579,6 +582,9 @@ async fn serve_only_answers_searches_over_an_index_it_refuses_to_maintain() {
 async fn maintain_only_keeps_the_index_built_without_serving_searches() {
     let temp_dir = tempdir().expect("store tempdir");
     let (store, writer, namespace_id) = seed_namespace(temp_dir.path(), "maintain-only").await;
+    let namespace_writer = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
     let (router, server) = app(
         test_config(temp_dir.path(), GrepMode::MaintainOnly),
         AppOptions::default(),
@@ -623,9 +629,8 @@ async fn maintain_only_keeps_the_index_built_without_serving_searches() {
 
     // The index itself is this deployment's job: enabling it here admits the
     // backfill, and the runner carries it to the namespace's head.
-    writer
+    namespace_writer
         .put_file_bytes(
-            &namespace_id,
             "/note.txt",
             b"unserved needle\n",
             PutFileOptions::new(loonfs_test_support::test_actor()),
@@ -658,6 +663,9 @@ async fn maintain_only_keeps_the_index_built_without_serving_searches() {
 async fn serve_only_maintenance_registers_the_index_job_without_scheduling_it() {
     let temp_dir = tempdir().expect("store tempdir");
     let (store, writer, namespace_id) = seed_namespace(temp_dir.path(), "manual-maintenance").await;
+    let namespace_writer = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
     let (router, server) = app(
         ServerConfig {
             maintenance: MaintenanceMode::ServeOnly,
@@ -673,9 +681,8 @@ async fn serve_only_maintenance_registers_the_index_job_without_scheduling_it() 
     );
     assert!(server.runner.is_none(), "serve-only mode builds no runner");
 
-    writer
+    namespace_writer
         .put_file_bytes(
-            &namespace_id,
             "/note.txt",
             b"unscheduled needle\n",
             PutFileOptions::new(loonfs_test_support::test_actor()),

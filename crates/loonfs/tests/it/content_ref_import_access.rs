@@ -93,10 +93,11 @@ async fn create_namespace(writer: &FsWriter, namespace_id: &NamespaceId, access:
 }
 
 async fn publish_inline(writer: &FsWriter, namespace_id: &NamespaceId) -> ContentRef {
+    let namespace_writer = writer.open_namespace(namespace_id).expect("open namespace");
     let options = PutFileOptions::new(loonfs_test_support::test_actor());
-    writer
+    namespace_writer
         .as_subject(subject("administrator"))
-        .put_file_bytes(namespace_id, "/source", b"private inline bytes", options)
+        .put_file_bytes("/source", b"private inline bytes", options)
         .await
         .expect("publish source");
     writer
@@ -188,6 +189,7 @@ async fn subject_without_source_rights_cannot_prepare_or_publish_an_inline_tail_
     create_namespace(&writer, &destination, NamespaceAccess::unrestricted()).await;
     let content_ref = publish_inline(&writer, &source).await;
     let scoped = writer.as_subject(subject("stranger"));
+    let namespace_writer = scoped.open_namespace(&destination).expect("open namespace");
 
     assert_eq!(
         scoped
@@ -200,16 +202,15 @@ async fn subject_without_source_rights_cannot_prepare_or_publish_an_inline_tail_
     );
 
     recording.reset();
-    let error = scoped
-        .prepare_content_ref(&destination, content_ref.clone())
+    let error = namespace_writer
+        .prepare_content_ref(content_ref.clone())
         .await
         .expect_err("prepare requires source administrator");
     assert_forbidden_without_writes(recording.as_ref(), error);
 
     recording.reset();
-    let error = scoped
+    let error = namespace_writer
         .put_file_content_ref(
-            &destination,
             "/imported",
             content_ref,
             PutFileOptions::new(loonfs_test_support::test_actor()),
@@ -233,13 +234,15 @@ async fn same_namespace_inline_tail_import_requires_its_administrator() {
     let (_directory, recording, writer) = open_writer().await;
     let namespace_id = namespace_id("same-namespace");
     create_namespace(&writer, &namespace_id, acl("administrator")).await;
+    let namespace_writer = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
     let content_ref = publish_inline(&writer, &namespace_id).await;
 
     recording.reset();
-    let error = writer
+    let error = namespace_writer
         .as_subject(subject("stranger"))
         .put_file_content_ref(
-            &namespace_id,
             "/imported",
             content_ref.clone(),
             PutFileOptions::new(loonfs_test_support::test_actor()),
@@ -248,9 +251,9 @@ async fn same_namespace_inline_tail_import_requires_its_administrator() {
         .expect_err("same-namespace import requires administrator");
     assert_forbidden_without_writes(recording.as_ref(), error);
 
-    let prepared = writer
+    let prepared = namespace_writer
         .as_subject(subject("administrator"))
-        .prepare_content_ref(&namespace_id, content_ref.clone())
+        .prepare_content_ref(content_ref.clone())
         .await
         .expect("administrator imports same-namespace reference");
     assert_eq!(prepared.content_ref().owner_namespace_id, namespace_id);
@@ -279,8 +282,11 @@ async fn bare_reference_import_accepts_service_administrator_and_unrestricted_au
         (writer.as_subject(subject("administrator")), acl_ref.clone()),
         (writer.as_subject(subject("stranger")), unrestricted_ref),
     ] {
-        let prepared = authority
-            .prepare_content_ref(&destination, content_ref.clone())
+        let namespace_writer = authority
+            .open_namespace(&destination)
+            .expect("open namespace");
+        let prepared = namespace_writer
+            .prepare_content_ref(content_ref.clone())
             .await
             .expect("authorized import");
         assert_eq!(prepared.content_ref().owner_namespace_id, destination);
@@ -294,10 +300,12 @@ async fn reclaimed_deleted_owner_import_reports_the_owner_without_writes() {
     let source = namespace_id("reclaimed-source");
     let destination = namespace_id("destination");
     create_namespace(&writer, &source, acl("administrator")).await;
+    let source_writer = writer.open_namespace(&source).expect("open namespace");
     create_namespace(&writer, &destination, NamespaceAccess::unrestricted()).await;
+    let destination_writer = writer.open_namespace(&destination).expect("open namespace");
     let content_ref = publish_inline(&writer, &source).await;
-    writer
-        .delete_namespace(&source, DeleteNamespaceOptions::default())
+    source_writer
+        .delete_namespace(DeleteNamespaceOptions::default())
         .await
         .expect("delete owner");
     let report = loonfs_core::gc_namespace(
@@ -318,9 +326,9 @@ async fn reclaimed_deleted_owner_import_reports_the_owner_without_writes() {
     assert_eq!(report.deleted.retired_content_objects, 1);
 
     recording.reset();
-    let error = writer
+    let error = destination_writer
         .as_subject(subject("administrator"))
-        .prepare_content_ref(&destination, content_ref)
+        .prepare_content_ref(content_ref)
         .await
         .expect_err("reclaimed owner");
     assert_eq!(error.code(), ErrorCode::NamespaceDeleted);
@@ -347,19 +355,20 @@ async fn deleted_owner_import_uses_updated_access_state_in_the_surviving_head() 
         )
         .await
         .expect("fork");
+    let source_writer = writer.open_namespace(&source).expect("open namespace");
     // The replacement lands after the fork, so only the source's final runs
     // carry it; the fork keeps the administrator it inherited.
     let access = UpdateAccessOptions::new(
         loonfs_test_support::test_actor(),
         administrator_grants("replacement"),
     );
-    writer
+    source_writer
         .as_subject(subject("administrator"))
-        .update_access(&source, "/", access)
+        .update_access("/", access)
         .await
         .expect("replace administrator");
-    writer
-        .delete_namespace(&source, DeleteNamespaceOptions::default())
+    source_writer
+        .delete_namespace(DeleteNamespaceOptions::default())
         .await
         .expect("delete source");
     assert_eq!(
@@ -384,18 +393,21 @@ async fn deleted_owner_import_uses_updated_access_state_in_the_surviving_head() 
         .build()
         .await
         .expect("cold writer");
+    let destination_writer = importer
+        .open_namespace(&destination)
+        .expect("open namespace");
 
     recording.reset();
-    let error = importer
+    let error = destination_writer
         .as_subject(subject("administrator"))
-        .prepare_content_ref(&destination, content_ref.clone())
+        .prepare_content_ref(content_ref.clone())
         .await
         .expect_err("former administrator is refused");
     assert_forbidden_without_writes(recording.as_ref(), error);
 
-    let prepared = importer
+    let prepared = destination_writer
         .as_subject(subject("replacement"))
-        .prepare_content_ref(&destination, content_ref.clone())
+        .prepare_content_ref(content_ref.clone())
         .await
         .expect("surviving access state authorizes administrator");
     assert_eq!(prepared.content_ref().owner_namespace_id, destination);

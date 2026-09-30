@@ -191,6 +191,7 @@ async fn imports_read_the_owners_tail_before_folding_and_object_after_folding() 
         )
         .await
         .expect("destination namespace");
+    let namespace_writer = writer.open_namespace(&destination).expect("open namespace");
     let content_ref = publish_inline(&store, &source, Some(subject)).await;
 
     let source_key = content_blob(&source, &content_ref.content_id);
@@ -208,9 +209,8 @@ async fn imports_read_the_owners_tail_before_folding_and_object_after_folding() 
         }
         recording.reset();
         let path = if folded { "/folded" } else { "/tail" };
-        writer
+        namespace_writer
             .put_file_content_ref(
-                &destination,
                 path,
                 content_ref.clone(),
                 PutFileOptions::new(loonfs_test_support::test_actor()),
@@ -280,11 +280,13 @@ async fn same_namespace_imports_read_inline_bytes_without_a_content_request() {
         )
         .await
         .expect("namespace");
+    let namespace_writer = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
     let content_ref = publish_inline(&store, &namespace_id, None).await;
     recording.reset();
-    writer
+    namespace_writer
         .put_file_content_ref(
-            &namespace_id,
             "/file",
             content_ref.clone(),
             PutFileOptions {
@@ -323,6 +325,7 @@ async fn imports_of_fork_content_read_the_deleted_owners_key() {
             .await
             .expect("writer");
         let source = NamespaceId::parse("source").expect("source");
+        let source_writer = writer.open_namespace(&source).expect("open namespace");
         let fork = NamespaceId::parse("fork").expect("fork");
         let destination = NamespaceId::parse("destination").expect("destination");
         for namespace_id in [&source, &destination] {
@@ -337,9 +340,8 @@ async fn imports_of_fork_content_read_the_deleted_owners_key() {
         if inline {
             publish_inline(&store, &source, None).await;
         } else {
-            writer
+            source_writer
                 .put_file_bytes(
-                    &source,
                     "/file",
                     b"inline content",
                     PutFileOptions::new(loonfs_test_support::test_actor()),
@@ -355,8 +357,9 @@ async fn imports_of_fork_content_read_the_deleted_owners_key() {
             )
             .await
             .expect("fork");
-        writer
-            .delete_namespace(&source, DeleteNamespaceOptions::default())
+        let destination_writer = writer.open_namespace(&destination).expect("open namespace");
+        source_writer
+            .delete_namespace(DeleteNamespaceOptions::default())
             .await
             .expect("delete source");
         let entry = writer
@@ -369,9 +372,8 @@ async fn imports_of_fork_content_read_the_deleted_owners_key() {
 
         let source_key = content_blob(&source, &content_ref.content_id);
         recording.reset();
-        writer
+        destination_writer
             .put_file_content_ref(
-                &destination,
                 "/imported",
                 content_ref.clone(),
                 PutFileOptions::new(loonfs_test_support::test_actor()),

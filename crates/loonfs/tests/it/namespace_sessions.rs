@@ -68,22 +68,23 @@ async fn close_refuses_late_work_and_drains_admitted_commits() {
     let store: SharedObjectStore = blocking.clone();
     let writer = writer(store, "close-drain").await;
     create_namespace(&writer, &namespace_id).await;
+    let namespace_writer = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
 
     blocking.block_next();
     let first = tokio::spawn({
-        let writer = writer.clone();
-        let namespace_id = namespace_id.clone();
+        let namespace_writer = namespace_writer.clone();
         async move {
-            writer
-                .create_directory(&namespace_id, "/first", directory_options())
+            namespace_writer
+                .create_directory("/first", directory_options())
                 .await
         }
     });
     blocking.wait_until_blocked().await;
     let open_before_close = writer.writer_session_stats().open;
 
-    let mut second =
-        Box::pin(writer.create_directory(&namespace_id, "/second", directory_options()));
+    let mut second = Box::pin(namespace_writer.create_directory("/second", directory_options()));
     assert!(futures::poll!(second.as_mut()).is_pending());
     let mut close = Box::pin(writer.close_namespace(&namespace_id));
     assert!(futures::poll!(close.as_mut()).is_pending());
@@ -99,8 +100,8 @@ async fn close_refuses_late_work_and_drains_admitted_commits() {
     });
 
     expect_code(
-        writer
-            .create_directory(&namespace_id, "/third", directory_options())
+        namespace_writer
+            .create_directory("/third", directory_options())
             .await,
         ErrorCode::WriterSessionClosed,
     );
@@ -122,8 +123,8 @@ async fn close_refuses_late_work_and_drains_admitted_commits() {
         writer.namespace_session_state(&namespace_id),
         NamespaceSessionState::Closed
     );
-    writer
-        .create_directory(&namespace_id, "/after", directory_options())
+    namespace_writer
+        .create_directory("/after", directory_options())
         .await
         .expect("a later mutation opens a new session");
     assert_eq!(writer.writer_session_stats().open, open_before_close);
@@ -151,13 +152,13 @@ async fn closing_session_holds_capacity_and_shutdown_waits_for_it() {
         .build()
         .await
         .expect("build bounded writer");
+    let first_writer = writer.open_namespace(&first).expect("open namespace");
     blocking.block_next();
     let mutation = tokio::spawn({
-        let writer = writer.clone();
-        let first = first.clone();
+        let first_writer = first_writer.clone();
         async move {
-            writer
-                .create_directory(&first, "/first", directory_options())
+            first_writer
+                .create_directory("/first", directory_options())
                 .await
         }
     });
@@ -202,8 +203,11 @@ async fn reopening_starts_a_new_epoch_and_explicit_policy_requires_open() {
     let namespace_id = NamespaceId::parse("reopen").expect("namespace id");
     let automatic = writer(store.clone(), "automatic").await;
     create_namespace(&automatic, &namespace_id).await;
-    automatic
-        .create_directory(&namespace_id, "/before", directory_options())
+    let namespace_writer = automatic
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
+    namespace_writer
+        .create_directory("/before", directory_options())
         .await
         .expect("first session publishes");
     let before_close = writer_epoch(&store, &namespace_id).await;
@@ -212,8 +216,8 @@ async fn reopening_starts_a_new_epoch_and_explicit_policy_requires_open() {
         .close_namespace(&namespace_id)
         .await
         .expect("close first session");
-    automatic
-        .create_directory(&namespace_id, "/after", directory_options())
+    namespace_writer
+        .create_directory("/after", directory_options())
         .await
         .expect("automatic policy reopens");
     assert_eq!(writer_epoch(&store, &namespace_id).await, before_close + 1);
@@ -225,17 +229,24 @@ async fn reopening_starts_a_new_epoch_and_explicit_policy_requires_open() {
         .build()
         .await
         .expect("build explicit writer");
+    let namespace_writer = explicit
+        .open_namespace(&namespace_id)
+        .expect("open assigned namespace");
+    explicit
+        .close_namespace(&namespace_id)
+        .await
+        .expect("close assigned namespace");
     expect_code(
-        explicit
-            .create_directory(&namespace_id, "/refused", directory_options())
+        namespace_writer
+            .create_directory("/refused", directory_options())
             .await,
         ErrorCode::WriterSessionClosed,
     );
     explicit
         .open_namespace(&namespace_id)
-        .expect("open assigned namespace");
-    explicit
-        .create_directory(&namespace_id, "/explicit", directory_options())
+        .expect("reopen assigned namespace");
+    namespace_writer
+        .create_directory("/explicit", directory_options())
         .await
         .expect("explicitly opened session publishes");
 }
@@ -249,19 +260,25 @@ async fn fencing_is_sticky_until_the_session_is_closed() {
     let writer_a = writer(store.clone(), "writer-a").await;
     let writer_b = writer(store, "writer-b").await;
     create_namespace(&writer_a, &namespace_id).await;
-    writer_a
-        .create_directory(&namespace_id, "/a-one", directory_options())
+    let namespace_writer_a = writer_a
+        .open_namespace(&namespace_id)
+        .expect("open writer A");
+    let namespace_writer_b = writer_b
+        .open_namespace(&namespace_id)
+        .expect("open writer B");
+    namespace_writer_a
+        .create_directory("/a-one", directory_options())
         .await
         .expect("writer A acquires its session");
-    writer_b
-        .create_directory(&namespace_id, "/b-one", directory_options())
+    namespace_writer_b
+        .create_directory("/b-one", directory_options())
         .await
         .expect("writer B takes over");
 
     for path in ["/a-two", "/a-three"] {
         expect_code(
-            writer_a
-                .create_directory(&namespace_id, path, directory_options())
+            namespace_writer_a
+                .create_directory(path, directory_options())
                 .await,
             ErrorCode::WriterFenced,
         );
@@ -280,13 +297,13 @@ async fn fencing_is_sticky_until_the_session_is_closed() {
         .await
         .expect("close fenced session");
     assert!(report.fenced);
-    writer_a
-        .create_directory(&namespace_id, "/a-four", directory_options())
+    namespace_writer_a
+        .create_directory("/a-four", directory_options())
         .await
         .expect("writer A opens a new session");
     expect_code(
-        writer_b
-            .create_directory(&namespace_id, "/b-two", directory_options())
+        namespace_writer_b
+            .create_directory("/b-two", directory_options())
             .await,
         ErrorCode::WriterFenced,
     );
@@ -311,30 +328,30 @@ async fn explicit_open_capacity_refuses_without_eviction_and_close_releases_it()
     for namespace_id in [&first, &second, &third] {
         create_namespace(&writer, namespace_id).await;
     }
-    writer.open_namespace(&first).expect("open first session");
-    writer.open_namespace(&second).expect("open second session");
+    let first_writer = writer.open_namespace(&first).expect("open first session");
+    let second_writer = writer.open_namespace(&second).expect("open second session");
 
     expect_code(
         writer.open_namespace(&third),
         ErrorCode::WriterCapacityExceeded,
     );
-    writer
-        .create_directory(&first, "/first", directory_options())
+    first_writer
+        .create_directory("/first", directory_options())
         .await
         .expect("first session remains open");
-    writer
-        .create_directory(&second, "/second", directory_options())
+    second_writer
+        .create_directory("/second", directory_options())
         .await
         .expect("second session remains open");
     writer
         .close_namespace(&first)
         .await
         .expect("close first session");
-    writer
+    let third_writer = writer
         .open_namespace(&third)
         .expect("third session opens after close");
-    writer
-        .create_directory(&third, "/third", directory_options())
+    third_writer
+        .create_directory("/third", directory_options())
         .await
         .expect("third session publishes");
     writer
@@ -349,12 +366,12 @@ async fn explicit_open_capacity_refuses_without_eviction_and_close_releases_it()
     for index in 0..20 {
         let namespace_id =
             NamespaceId::parse(format!("cycled-{index}")).expect("valid cycled namespace id");
-        writer
+        let namespace_writer = writer
             .open_namespace(&namespace_id)
             .expect("open cycled session");
         create_namespace(&writer, &namespace_id).await;
-        writer
-            .create_directory(&namespace_id, "/written", directory_options())
+        namespace_writer
+            .create_directory("/written", directory_options())
             .await
             .expect("write through cycled session");
         writer
@@ -388,12 +405,11 @@ async fn a_full_table_closes_the_least_recently_used_idle_session() {
     }
 
     for (index, namespace_id) in namespaces.iter().chain([&namespaces[0]]).enumerate() {
-        writer
-            .create_directory(
-                namespace_id,
-                &format!("/written-{index}"),
-                directory_options(),
-            )
+        let namespace_writer = writer
+            .open_namespace(namespace_id)
+            .expect("a full table makes room for the session");
+        namespace_writer
+            .create_directory(&format!("/written-{index}"), directory_options())
             .await
             .expect("a full table makes room for the write");
         assert!(writer.writer_session_stats().open <= 2);
@@ -438,34 +454,32 @@ async fn a_full_table_of_busy_sessions_refuses_until_one_settles() {
     for namespace_id in [&first, &second, &third] {
         create_namespace(&writer, namespace_id).await;
     }
+    let first_writer = writer.open_namespace(&first).expect("open namespace");
+    let second_writer = writer.open_namespace(&second).expect("open namespace");
 
     gates.block_next();
     gates.inner().block_next();
     let first_write = tokio::spawn({
-        let writer = writer.clone();
-        let first = first.clone();
+        let first_writer = first_writer.clone();
         async move {
-            writer
-                .create_directory(&first, "/first", directory_options())
+            first_writer
+                .create_directory("/first", directory_options())
                 .await
         }
     });
     gates.wait_until_blocked().await;
     let second_write = tokio::spawn({
-        let writer = writer.clone();
-        let second = second.clone();
+        let second_writer = second_writer.clone();
         async move {
-            writer
-                .create_directory(&second, "/second", directory_options())
+            second_writer
+                .create_directory("/second", directory_options())
                 .await
         }
     });
     gates.inner().wait_until_blocked().await;
 
     expect_code(
-        writer
-            .create_directory(&third, "/refused", directory_options())
-            .await,
+        writer.open_namespace(&third),
         ErrorCode::WriterCapacityExceeded,
     );
 
@@ -474,8 +488,11 @@ async fn a_full_table_of_busy_sessions_refuses_until_one_settles() {
         .await
         .expect("join first write")
         .expect("first write lands");
-    writer
-        .create_directory(&third, "/third", directory_options())
+    let third_writer = writer
+        .open_namespace(&third)
+        .expect("the settled session makes room");
+    third_writer
+        .create_directory("/third", directory_options())
         .await
         .expect("the settled session makes room");
     assert_eq!(
@@ -511,27 +528,35 @@ async fn a_full_table_never_closes_a_fenced_session() {
     for namespace_id in [&fenced, &idle, &third] {
         create_namespace(&writer_a, namespace_id).await;
     }
-    writer_a
-        .create_directory(&fenced, "/a-one", directory_options())
+    let fenced_writer_a = writer_a.open_namespace(&fenced).expect("open namespace");
+    let fenced_writer_b = writer_b.open_namespace(&fenced).expect("open namespace");
+    fenced_writer_a
+        .create_directory("/a-one", directory_options())
         .await
         .expect("writer A acquires its session");
-    writer_b
-        .create_directory(&fenced, "/b-one", directory_options())
+    fenced_writer_b
+        .create_directory("/b-one", directory_options())
         .await
         .expect("writer B takes over");
     expect_code(
-        writer_a
-            .create_directory(&fenced, "/a-two", directory_options())
+        fenced_writer_a
+            .create_directory("/a-two", directory_options())
             .await,
         ErrorCode::WriterFenced,
     );
-    writer_a
-        .create_directory(&idle, "/idle", directory_options())
+    let idle_writer_a = writer_a
+        .open_namespace(&idle)
+        .expect("the second session fills the table");
+    idle_writer_a
+        .create_directory("/idle", directory_options())
         .await
         .expect("the second session fills the table");
 
-    writer_a
-        .create_directory(&third, "/third", directory_options())
+    let third_writer_a = writer_a
+        .open_namespace(&third)
+        .expect("the idle session makes room");
+    third_writer_a
+        .create_directory("/third", directory_options())
         .await
         .expect("the idle session makes room");
 
@@ -548,8 +573,8 @@ async fn a_full_table_never_closes_a_fenced_session() {
         }
     );
     expect_code(
-        writer_a
-            .create_directory(&fenced, "/a-three", directory_options())
+        fenced_writer_a
+            .create_directory("/a-three", directory_options())
             .await,
         ErrorCode::WriterFenced,
     );

@@ -173,17 +173,17 @@ async fn a_batch_commits_once_and_matches_the_same_batch_embedded() {
         )
         .await
         .expect("create embedded namespace");
-    let first_prepared = writer
-        .prepare_file_bytes(&embedded_ns, FIRST_BYTES)
+    let namespace_writer = writer.open_namespace(&embedded_ns).expect("open namespace");
+    let first_prepared = namespace_writer
+        .prepare_file_bytes(FIRST_BYTES)
         .await
         .expect("prepare first");
-    let second_prepared = writer
-        .prepare_file_bytes(&embedded_ns, SECOND_BYTES)
+    let second_prepared = namespace_writer
+        .prepare_file_bytes(SECOND_BYTES)
         .await
         .expect("prepare second");
-    let embedded_committed = writer
+    let embedded_committed = namespace_writer
         .commit_prepared(
-            &embedded_ns,
             CoreCommitRequest {
                 subject: None,
                 preconditions: Vec::new(),
@@ -1025,18 +1025,16 @@ async fn a_commit_id_used_embedded_replays_over_http() {
             )
             .await
             .expect("create namespace");
-        let receipt = writer
-            .create_commit(
-                &namespace,
-                CoreCommitRequest {
-                    subject: None,
-                    preconditions: Vec::new(),
-                    commit_id: commit_id("crosses-transports"),
-                    actor_id: loonfs_test_support::test_actor(),
-                    message: Some("shaped once".to_owned()),
-                    operations: operations(),
-                },
-            )
+        let namespace_writer = writer.open_namespace(&namespace).expect("open namespace");
+        let receipt = namespace_writer
+            .create_commit(CoreCommitRequest {
+                subject: None,
+                preconditions: Vec::new(),
+                commit_id: commit_id("crosses-transports"),
+                actor_id: loonfs_test_support::test_actor(),
+                message: Some("shaped once".to_owned()),
+                operations: operations(),
+            })
             .await
             .expect("embedded batch commits");
         writer

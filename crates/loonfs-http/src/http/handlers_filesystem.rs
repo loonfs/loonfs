@@ -549,6 +549,9 @@ pub(super) async fn create_commit(
     // Failed and uncertain outcomes echo the idempotency key the caller can
     // resubmit under (API spec, "Commit responses and safe retry").
     let commit_id_for_errors = commit_id.clone();
+    let namespace_writer = state.namespaces.open(&namespace_id).map_err(|error| {
+        ApiResponseError::runtime_for_namespace(&namespace_id, error).with_commit_id(&commit_id)
+    })?;
     // Every put in the request shares one preparation pass: a proof belongs
     // to the content, not to the operation that names it.
     let put_content_refs = operations
@@ -567,7 +570,7 @@ pub(super) async fn create_commit(
         Some((
             payload_class(usize::try_from(put_bytes).unwrap_or(usize::MAX)),
             content_preparation_for_puts(
-                &state.writer,
+                &namespace_writer,
                 ContentTokenVerifier::new(state.options.content_token_secret.expose()),
                 &namespace_id,
                 &put_content_refs,
@@ -608,15 +611,12 @@ pub(super) async fn create_commit(
                         ))
                 }
             };
-            state
-                .writer
-                .commit_candidate(&namespace_id, candidate)
-                .await
+            namespace_writer.commit_candidate(candidate).await
         }
         .instrument(span)
         .await
     } else {
-        state.writer.create_commit(&namespace_id, request).await
+        namespace_writer.create_commit(request).await
     };
     let response = response_result.map_err(|error| {
         ApiResponseError::runtime_for_namespace(&namespace_id, error)

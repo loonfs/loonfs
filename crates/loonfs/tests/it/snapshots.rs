@@ -52,6 +52,10 @@ fn a_created_snapshot_is_listed_with_its_snapshot_owner() {
         CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
     )
     .expect("create namespace");
+    let namespace_writer = fs
+        .writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
     fs.put_file_bytes_blocking(
         &namespace_id,
         "/docs/hello.txt",
@@ -61,8 +65,7 @@ fn a_created_snapshot_is_listed_with_its_snapshot_owner() {
     .expect("put file");
 
     let expires_at_ms = 4_102_444_800_000;
-    let snapshot = block_on(fs.writer.create_snapshot(
-        &namespace_id,
+    let snapshot = block_on(namespace_writer.create_snapshot(
         CreateSnapshotOptions {
             name: "report-run".to_owned(),
             expires_at_ms,
@@ -109,12 +112,14 @@ async fn snapshot_create_recovers_an_ambiguously_landed_record_write() {
     )
     .await
     .expect("create namespace");
+    let namespace_writer = fs
+        .writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
     store.fail_next(1);
 
-    let snapshot = fs
-        .writer
+    let snapshot = namespace_writer
         .create_snapshot(
-            &namespace_id,
             CreateSnapshotOptions {
                 name: "report-run".to_owned(),
                 expires_at_ms: u64::MAX,
@@ -157,10 +162,12 @@ async fn snapshot_extension_recovers_an_ambiguously_landed_record_write() {
     )
     .await
     .expect("create namespace");
-    let snapshot = fs
+    let namespace_writer = fs
         .writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
+    let snapshot = namespace_writer
         .create_snapshot(
-            &namespace_id,
             CreateSnapshotOptions {
                 name: "report-run".to_owned(),
                 expires_at_ms: u64::MAX - 1,
@@ -171,9 +178,8 @@ async fn snapshot_extension_recovers_an_ambiguously_landed_record_write() {
         .expect("create snapshot");
     store.fail_next(1);
 
-    let extended = fs
-        .writer
-        .extend_snapshot(&namespace_id, &snapshot.checkpoint_id, u64::MAX, u64::MAX)
+    let extended = namespace_writer
+        .extend_snapshot(&snapshot.checkpoint_id, u64::MAX, u64::MAX)
         .await
         .expect("reconcile the durable snapshot extension");
 
@@ -202,10 +208,12 @@ async fn snapshot_delete_reports_an_uncertain_delete_without_recreating_the_pin(
     )
     .await
     .expect("create namespace");
-    let snapshot = fs
+    let namespace_writer = fs
         .writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
+    let snapshot = namespace_writer
         .create_snapshot(
-            &namespace_id,
             CreateSnapshotOptions {
                 name: "report-run".to_owned(),
                 expires_at_ms: u64::MAX,
@@ -217,14 +225,14 @@ async fn snapshot_delete_reports_an_uncertain_delete_without_recreating_the_pin(
     store.fail_next(1);
 
     assert_core_error_kind(
-        fs.writer
-            .delete_snapshot(&namespace_id, &snapshot.checkpoint_id)
+        namespace_writer
+            .delete_snapshot(&snapshot.checkpoint_id)
             .await,
         ErrorCode::ServerError,
     );
     assert_core_error_kind(
-        fs.writer
-            .delete_snapshot(&namespace_id, &snapshot.checkpoint_id)
+        namespace_writer
+            .delete_snapshot(&snapshot.checkpoint_id)
             .await,
         ErrorCode::SnapshotNotFound,
     );
@@ -252,12 +260,16 @@ async fn a_namespace_at_its_snapshot_limit_refuses_a_create_without_writing() {
     )
     .await
     .expect("create namespace");
+    let namespace_writer = fs
+        .writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
     let options = |name: &str| CreateSnapshotOptions {
         name: name.to_owned(),
         expires_at_ms: u64::MAX,
     };
-    fs.writer
-        .create_snapshot(&namespace_id, options("kept"), 1)
+    namespace_writer
+        .create_snapshot(options("kept"), 1)
         .await
         .expect("create the snapshot that fills the limit");
     fs.put_file_bytes(
@@ -277,8 +289,8 @@ async fn a_namespace_at_its_snapshot_limit_refuses_a_create_without_writing() {
     store.reset();
 
     assert_core_error_kind(
-        fs.writer
-            .create_snapshot(&namespace_id, options("refused"), 1)
+        namespace_writer
+            .create_snapshot(options("refused"), 1)
             .await,
         ErrorCode::SnapshotQuotaExceeded,
     );
@@ -355,15 +367,17 @@ async fn concurrent_snapshot_creates_cannot_both_claim_the_last_quota_slot() {
     )
     .await
     .expect("create namespace");
+    let namespace_writer = fs
+        .writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
 
     checkpoint_write_gate.arm();
     checkpoint_delete_gate.arm();
-    let first_writer = fs.writer.clone();
-    let first_namespace = namespace_id.clone();
+    let first_writer = namespace_writer.clone();
     let first = tokio::spawn(async move {
         first_writer
             .create_snapshot(
-                &first_namespace,
                 CreateSnapshotOptions {
                     name: "first".to_owned(),
                     expires_at_ms: u64::MAX,
@@ -372,12 +386,10 @@ async fn concurrent_snapshot_creates_cannot_both_claim_the_last_quota_slot() {
             )
             .await
     });
-    let second_writer = fs.writer.clone();
-    let second_namespace = namespace_id.clone();
+    let second_writer = namespace_writer.clone();
     let second = tokio::spawn(async move {
         second_writer
             .create_snapshot(
-                &second_namespace,
                 CreateSnapshotOptions {
                     name: "second".to_owned(),
                     expires_at_ms: u64::MAX,
@@ -464,7 +476,8 @@ fn tombstoned_namespace_keeps_checkpoint_inventory_and_user_delete_available() {
             .build(),
     )
     .expect("build deleting writer");
-    block_on(deleter.delete_namespace(&source, DeleteNamespaceOptions::default()))
+    let namespace_writer = deleter.open_namespace(&source).expect("open namespace");
+    block_on(namespace_writer.delete_namespace(DeleteNamespaceOptions::default()))
         .expect("delete source namespace");
 
     let maintenance = block_on(
@@ -526,9 +539,9 @@ async fn shared_read_options_select_the_snapshot_for_paths_and_inodes() {
         )
         .await
         .expect("namespace");
-    writer
+    let namespace_writer = writer.open_namespace(&namespace).expect("open namespace");
+    namespace_writer
         .put_file_bytes(
-            &namespace,
             "/file",
             b"before",
             PutFileOptions::new(loonfs_test_support::test_actor()),
@@ -544,9 +557,8 @@ async fn shared_read_options_select_the_snapshot_for_paths_and_inodes() {
         .get_path_entry(&namespace, "/file", Default::default())
         .await
         .expect("file");
-    let snapshot = writer
+    let snapshot = namespace_writer
         .create_snapshot(
-            &namespace,
             CreateSnapshotOptions {
                 name: "options".to_owned(),
                 expires_at_ms: u64::MAX,
@@ -555,9 +567,8 @@ async fn shared_read_options_select_the_snapshot_for_paths_and_inodes() {
         )
         .await
         .expect("snapshot");
-    writer
+    namespace_writer
         .delete_path(
-            &namespace,
             "/file",
             loonfs::DeleteOptions::new(loonfs_test_support::test_actor()),
         )

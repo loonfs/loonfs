@@ -141,6 +141,10 @@ async fn build_mixed_namespace(fs: &TestRuntime, namespace_id: &NamespaceId) {
     )
     .await
     .expect("create namespace");
+    let namespace_writer = fs
+        .writer
+        .open_namespace(namespace_id)
+        .expect("open namespace");
     for (path, bytes) in [
         ("/docs/alpha.txt", &b"alpha"[..]),
         ("/docs/deep/bravo.txt", &b"bravo"[..]),
@@ -157,9 +161,8 @@ async fn build_mixed_namespace(fs: &TestRuntime, namespace_id: &NamespaceId) {
         .await
         .expect("put file");
     }
-    fs.writer
+    namespace_writer
         .create_directory(
-            namespace_id,
             "/empty",
             loonfs::CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
         )
@@ -181,9 +184,8 @@ async fn build_mixed_namespace(fs: &TestRuntime, namespace_id: &NamespaceId) {
 
     // A deleted subtree: neither the directory nor the file below it is
     // visible any more.
-    fs.writer
+    namespace_writer
         .delete_path(
-            namespace_id,
             "/scratch",
             DeleteOptions {
                 behavior: DeleteDirectoryBehavior::Recursive,
@@ -199,19 +201,16 @@ async fn build_mixed_namespace(fs: &TestRuntime, namespace_id: &NamespaceId) {
         .await
         .expect("stat before delete")
         .inode_id;
-    let deletion_seq = fs
-        .writer
+    let deletion_seq = namespace_writer
         .delete_path(
-            namespace_id,
             "/notes/recovered.txt",
             DeleteOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("delete file")
         .committed_seq;
-    fs.writer
+    namespace_writer
         .undelete(
-            namespace_id,
             recovered_inode_id,
             deletion_seq,
             Some("/notes/restored.txt"),
@@ -227,6 +226,10 @@ async fn checkpoint_enumeration_answers_the_state_it_pinned() {
     let fs = open_runtime_async(store(temp_dir.path()), "checkpoint-files-test").await;
     let namespace_id = namespace_id("demo");
     build_mixed_namespace(&fs, &namespace_id).await;
+    let namespace_writer = fs
+        .writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
 
     // Ground truth, collected through the ordinary read surface BEFORE the
     // later writes land.
@@ -257,17 +260,15 @@ async fn checkpoint_enumeration_answers_the_state_it_pinned() {
     )
     .await
     .expect("replace a file after the checkpoint");
-    fs.writer
+    namespace_writer
         .delete_path(
-            &namespace_id,
             "/docs/deep/bravo.txt",
             DeleteOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("delete a file after the checkpoint");
-    fs.writer
+    namespace_writer
         .move_path(
-            &namespace_id,
             "/docs/deep/charlie.txt",
             "/docs/charlie.txt",
             MoveOptions::new(loonfs_test_support::test_actor()),
@@ -641,6 +642,10 @@ async fn resolve_current_files_answers_the_whole_matrix_in_input_order() {
     )
     .await
     .expect("create namespace");
+    let namespace_writer = fs
+        .writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
     for (path, bytes) in [
         ("/m/unchanged.txt", &b"unchanged"[..]),
         ("/m/replaced.txt", &b"first"[..]),
@@ -689,35 +694,31 @@ async fn resolve_current_files_answers_the_whole_matrix_in_input_order() {
     )
     .await
     .expect("replace file");
-    fs.writer
+    namespace_writer
         .move_path(
-            &namespace_id,
             "/m/moved.txt",
             "/m/moved-away.txt",
             MoveOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("move file");
-    fs.writer
+    namespace_writer
         .move_path(
-            &namespace_id,
             "/m/carried",
             "/m/carried-elsewhere",
             MoveOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("move directory");
-    fs.writer
+    namespace_writer
         .delete_path(
-            &namespace_id,
             "/m/deleted.txt",
             DeleteOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("delete file");
-    fs.writer
+    namespace_writer
         .delete_path(
-            &namespace_id,
             "/m/subtree",
             DeleteOptions {
                 behavior: DeleteDirectoryBehavior::Recursive,
@@ -726,19 +727,16 @@ async fn resolve_current_files_answers_the_whole_matrix_in_input_order() {
         )
         .await
         .expect("delete subtree");
-    let recovered_deletion_seq = fs
-        .writer
+    let recovered_deletion_seq = namespace_writer
         .delete_path(
-            &namespace_id,
             "/m/recovered.txt",
             DeleteOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("delete file")
         .committed_seq;
-    fs.writer
+    namespace_writer
         .undelete(
-            &namespace_id,
             recovered,
             recovered_deletion_seq,
             Some("/m/recovered-again.txt"),
@@ -995,13 +993,16 @@ async fn a_standalone_reader_serves_every_operation() {
     let fs = open_runtime_async(store(temp_dir.path()), "standalone-reader-test").await;
     let namespace_id = namespace_id("demo");
     build_mixed_namespace(&fs, &namespace_id).await;
+    let namespace_writer = fs
+        .writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
     let checkpoint = fs
         .create_checkpoint(&namespace_id)
         .await
         .expect("create checkpoint");
-    fs.writer
+    namespace_writer
         .move_path(
-            &namespace_id,
             "/docs/alpha.txt",
             "/docs/alpha-moved.txt",
             MoveOptions::new(loonfs_test_support::test_actor()),

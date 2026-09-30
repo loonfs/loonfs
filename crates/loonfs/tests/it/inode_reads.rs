@@ -30,18 +30,16 @@ async fn stat_inode_tracks_a_rename_and_retained_revisions_keep_the_same_identit
         )
         .await
         .expect("create namespace");
-    fs.writer
-        .put_file_bytes(
-            &namespace_id,
-            "/before.txt",
-            b"one",
-            PutFileOptions::new(actor.clone()),
-        )
+    let namespace_writer = fs
+        .writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
+    namespace_writer
+        .put_file_bytes("/before.txt", b"one", PutFileOptions::new(actor.clone()))
         .await
         .expect("put first revision");
-    fs.writer
+    namespace_writer
         .put_file_bytes(
-            &namespace_id,
             "/before.txt",
             b"two",
             PutFileOptions {
@@ -72,13 +70,8 @@ async fn stat_inode_tracks_a_rename_and_retained_revisions_keep_the_same_identit
         b"one"
     );
 
-    fs.writer
-        .move_path(
-            &namespace_id,
-            "/before.txt",
-            "/after.txt",
-            MoveOptions::new(actor.clone()),
-        )
+    namespace_writer
+        .move_path("/before.txt", "/after.txt", MoveOptions::new(actor.clone()))
         .await
         .expect("rename file");
     let after = fs
@@ -110,8 +103,8 @@ async fn stat_inode_tracks_a_rename_and_retained_revisions_keep_the_same_identit
         b"one"
     );
 
-    fs.writer
-        .delete_path(&namespace_id, "/after.txt", DeleteOptions::new(actor))
+    namespace_writer
+        .delete_path("/after.txt", DeleteOptions::new(actor))
         .await
         .expect("delete file");
     let hidden = fs
@@ -151,6 +144,10 @@ async fn stat_inode_preserves_the_nameless_root_and_revision_error_conventions()
         )
         .await
         .expect("create namespace");
+    let namespace_writer = fs
+        .writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
 
     let root = fs
         .reader
@@ -168,8 +165,8 @@ async fn stat_inode_preserves_the_nameless_root_and_revision_error_conventions()
             .expect("stat root path")
     );
 
-    fs.writer
-        .create_directory(&namespace_id, "/docs", CreateDirectoryOptions::new(actor))
+    namespace_writer
+        .create_directory("/docs", CreateDirectoryOptions::new(actor))
         .await
         .expect("create directory");
     let directory = fs
@@ -220,9 +217,12 @@ async fn stat_inode_and_stat_path_have_the_same_point_lookup_request_count() {
         )
         .await
         .expect("create namespace");
-    fs.writer
+    let namespace_writer = fs
+        .writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
+    namespace_writer
         .put_file_bytes(
-            &namespace_id,
             "/file.txt",
             b"body",
             PutFileOptions::new(loonfs_test_support::test_actor()),

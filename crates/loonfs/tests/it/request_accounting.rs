@@ -272,9 +272,11 @@ async fn warm_phase_request_accounting() {
         .build()
         .await
         .expect("build second writer");
-    writer
+    let namespace_writer = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
+    namespace_writer
         .put_file_bytes(
-            &namespace_id,
             "/hot/file-05001.txt",
             b"replaced",
             PutFileOptions {
@@ -295,9 +297,8 @@ async fn warm_phase_request_accounting() {
 
     // A second write on the same handle separates per-handle warmup cost
     // from per-write cost.
-    writer
+    namespace_writer
         .put_file_bytes(
-            &namespace_id,
             "/hot/file-05002.txt",
             b"replaced again",
             PutFileOptions {

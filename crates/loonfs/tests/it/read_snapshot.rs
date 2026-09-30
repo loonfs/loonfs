@@ -45,6 +45,7 @@ async fn read_during_compaction_and_collection(
         )
         .await
         .expect("namespace");
+    let namespace_writer = runtime.writer.open_namespace(&namespace)?;
     for name in ["a", "b"] {
         runtime
             .put_file_bytes(
@@ -78,10 +79,8 @@ async fn read_during_compaction_and_collection(
     assert!(!old_segments.lock().expect("old segments").is_empty());
     let snapshot = if durable {
         Some(
-            runtime
-                .writer
+            namespace_writer
                 .create_snapshot(
-                    &namespace,
                     CreateSnapshotOptions {
                         name: "durable".to_owned(),
                         expires_at_ms: loonfs::current_time_ms().expect("time") + 60_000,
@@ -253,6 +252,10 @@ async fn durable_pinned_reads_keep_missing_segments_corrupt_after_manifest_advan
         )
         .await
         .expect("namespace");
+    let namespace_writer = runtime
+        .writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
     runtime
         .put_file_bytes(
             &namespace_id,
@@ -262,10 +265,8 @@ async fn durable_pinned_reads_keep_missing_segments_corrupt_after_manifest_advan
         )
         .await
         .expect("file");
-    let snapshot = runtime
-        .writer
+    let snapshot = namespace_writer
         .create_snapshot(
-            &namespace_id,
             CreateSnapshotOptions {
                 name: "durable".to_owned(),
                 expires_at_ms: loonfs::current_time_ms().expect("time") + 60_000,
@@ -348,6 +349,10 @@ async fn pinned_reads_report_their_deleted_pin_when_a_segment_is_missing() {
         )
         .await
         .expect("namespace");
+    let namespace_writer = runtime
+        .writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
     runtime
         .put_file_bytes(
             &namespace_id,
@@ -357,10 +362,8 @@ async fn pinned_reads_report_their_deleted_pin_when_a_segment_is_missing() {
         )
         .await
         .expect("file");
-    let snapshot = runtime
-        .writer
+    let snapshot = namespace_writer
         .create_snapshot(
-            &namespace_id,
             CreateSnapshotOptions {
                 name: "deleted".to_owned(),
                 expires_at_ms: loonfs::current_time_ms().expect("time") + 60_000,
@@ -385,9 +388,8 @@ async fn pinned_reads_report_their_deleted_pin_when_a_segment_is_missing() {
         .pin_namespace_at_checkpoint(&namespace_id, &checkpoint.checkpoint_id)
         .await
         .expect("checkpoint view");
-    runtime
-        .writer
-        .delete_snapshot(&namespace_id, &snapshot.checkpoint_id)
+    namespace_writer
+        .delete_snapshot(&snapshot.checkpoint_id)
         .await
         .expect("delete snapshot");
     runtime
@@ -439,6 +441,10 @@ async fn snapshot_directory_cursor_resumes_only_at_its_snapshot() {
         )
         .await
         .expect("create namespace");
+    let namespace_writer = runtime
+        .writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
     for name in ["a", "c", "e", "g"] {
         runtime
             .put_file_bytes(
@@ -452,10 +458,8 @@ async fn snapshot_directory_cursor_resumes_only_at_its_snapshot() {
     }
 
     let now_ms = loonfs::current_time_ms().expect("current time");
-    let first_snapshot = runtime
-        .writer
+    let first_snapshot = namespace_writer
         .create_snapshot(
-            &namespace_id,
             CreateSnapshotOptions {
                 name: "first".to_owned(),
                 expires_at_ms: now_ms + 60_000,
@@ -498,10 +502,8 @@ async fn snapshot_directory_cursor_resumes_only_at_its_snapshot() {
         )
         .await
         .expect("change current directory");
-    let second_snapshot = runtime
-        .writer
+    let second_snapshot = namespace_writer
         .create_snapshot(
-            &namespace_id,
             CreateSnapshotOptions {
                 name: "second".to_owned(),
                 expires_at_ms: now_ms + 60_000,
@@ -953,6 +955,10 @@ async fn snapshot_pins_serve_captured_state_and_enforce_release() {
         )
         .await
         .expect("create namespace");
+    let namespace_writer = runtime
+        .writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
     runtime
         .put_file_bytes(
             &namespace_id,
@@ -968,10 +974,8 @@ async fn snapshot_pins_serve_captured_state_and_enforce_release() {
         .await
         .expect("resolve captured file");
     let now_ms = loonfs::current_time_ms().expect("current time");
-    let snapshot = runtime
-        .writer
+    let snapshot = namespace_writer
         .create_snapshot(
-            &namespace_id,
             CreateSnapshotOptions {
                 name: "reader".to_owned(),
                 expires_at_ms: now_ms + 60_000,
@@ -1039,9 +1043,8 @@ async fn snapshot_pins_serve_captured_state_and_enforce_release() {
         captured.content_ref().expect("content reference")
     );
 
-    runtime
-        .writer
-        .delete_snapshot(&namespace_id, &snapshot.checkpoint_id)
+    namespace_writer
+        .delete_snapshot(&snapshot.checkpoint_id)
         .await
         .expect("release snapshot");
     assert_core_error_kind(
@@ -1080,9 +1083,11 @@ async fn a_reader_judges_snapshot_expiry_on_its_own_wall_clock() {
         )
         .await
         .expect("create namespace");
-    let snapshot = writer
+    let namespace_writer = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
+    let snapshot = namespace_writer
         .create_snapshot(
-            &namespace_id,
             CreateSnapshotOptions {
                 name: "clock".to_owned(),
                 expires_at_ms: EXPIRES_AT_MS,
@@ -1123,6 +1128,10 @@ async fn a_pinned_reader_rejects_options_naming_another_snapshot() {
         )
         .await
         .expect("create namespace");
+    let namespace_writer = runtime
+        .writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
     runtime
         .put_file_bytes(
             &namespace_id,
@@ -1136,10 +1145,8 @@ async fn a_pinned_reader_rejects_options_naming_another_snapshot() {
     let mut snapshots = Vec::new();
     for name in ["first", "second"] {
         snapshots.push(
-            runtime
-                .writer
+            namespace_writer
                 .create_snapshot(
-                    &namespace_id,
                     CreateSnapshotOptions {
                         name: name.to_owned(),
                         expires_at_ms: now_ms + 60_000,

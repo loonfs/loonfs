@@ -1017,8 +1017,9 @@ async fn retired_fork_collection_schedules_the_source_namespace() {
         )
         .await
         .expect("fork");
-    writer
-        .delete_namespace(&target, Default::default())
+    let namespace_writer = writer.open_namespace(&target).expect("open namespace");
+    namespace_writer
+        .delete_namespace(Default::default())
         .await
         .expect("delete target");
     let maintenance = crate::FsMaintenance::builder_with_store(store.clone())
@@ -1042,9 +1043,9 @@ async fn retired_fork_collection_schedules_the_source_namespace() {
 }
 
 async fn write_file(writer: &crate::FsWriter, namespace_id: &NamespaceId, path: &str) {
-    writer
+    let namespace_writer = writer.open_namespace(namespace_id).expect("open namespace");
+    namespace_writer
         .put_file_bytes(
-            namespace_id,
             path,
             b"body",
             crate::PutFileOptions::new(loonfs_test_support::test_actor()),

@@ -115,6 +115,7 @@ async fn seed(writer: &FsWriter) {
         )
         .await
         .expect("namespace");
+    let namespace_writer = writer.open_namespace(&namespace()).expect("open namespace");
     let mut seed = request(
         "seed",
         "root",
@@ -127,10 +128,7 @@ async fn seed(writer: &FsWriter) {
         "alice",
         &[AccessRight::Read, AccessRight::Write, AccessRight::Create],
     )));
-    writer
-        .create_commit(&namespace(), seed)
-        .await
-        .expect("seed");
+    namespace_writer.create_commit(seed).await.expect("seed");
 }
 
 enum ReceiptState {
@@ -151,15 +149,13 @@ async fn retained_receipt_skips_fallback(state: ReceiptState) {
     let recording = Arc::new(RecordingStore::new(failing.clone(), KeyPredicate::any()));
     let mut writer = open(recording.clone(), 1).await;
     seed(&writer).await;
-    let original = writer
-        .commit_candidate(&namespace(), inline("retained", "alice", b"recorded"))
+    let mut namespace_writer = writer.open_namespace(&namespace()).expect("open namespace");
+    let original = namespace_writer
+        .commit_candidate(inline("retained", "alice", b"recorded"))
         .await
         .expect("original commit");
-    writer
-        .create_commit(
-            &namespace(),
-            request("revoke", "root", access(AccessGrants::default())),
-        )
+    namespace_writer
+        .create_commit(request("revoke", "root", access(AccessGrants::default())))
         .await
         .expect("revoke access");
     if matches!(state, ReceiptState::Folded | ReceiptState::ManifestOnly) {
@@ -173,41 +169,39 @@ async fn retained_receipt_skips_fallback(state: ReceiptState) {
     if matches!(state, ReceiptState::Restarted | ReceiptState::ManifestOnly) {
         writer.shutdown().await.expect("shutdown original writer");
         writer = open(recording.clone(), 1).await;
+        namespace_writer = writer.open_namespace(&namespace()).expect("open namespace");
     }
     if matches!(state, ReceiptState::ManifestOnly) {
-        writer
-            .create_commit(
-                &namespace(),
-                request(
-                    "warm-after-fold",
-                    "root",
-                    FilesystemOperation::CreateDirectory {
-                        path: AbsolutePath::parse("/after-fold").expect("path"),
-                        parents: false,
-                    },
-                ),
-            )
+        namespace_writer
+            .create_commit(request(
+                "warm-after-fold",
+                "root",
+                FilesystemOperation::CreateDirectory {
+                    path: AbsolutePath::parse("/after-fold").expect("path"),
+                    parents: false,
+                },
+            ))
             .await
             .expect("load a publisher projection after the receipt was folded");
     }
     failing.fail_all();
     recording.reset();
-    let replay = writer
-        .commit_candidate(&namespace(), inline("retained", "alice", b"recorded"))
+    let replay = namespace_writer
+        .commit_candidate(inline("retained", "alice", b"recorded"))
         .await
         .expect("receipt replays after access revocation");
     assert_eq!(replay.committed_seq, original.committed_seq);
     assert_eq!(
-        writer
-            .commit_candidate(&namespace(), inline("retained", "alice", b"modified"))
+        namespace_writer
+            .commit_candidate(inline("retained", "alice", b"modified"))
             .await
             .expect_err("changed bytes conflict")
             .code(),
         ErrorCode::CommitIdReuseConflict
     );
     assert_eq!(
-        writer
-            .commit_candidate(&namespace(), inline("retained", "bob", b"recorded"))
+        namespace_writer
+            .commit_candidate(inline("retained", "bob", b"recorded"))
             .await
             .expect_err("another subject conflicts")
             .code(),
@@ -250,9 +244,10 @@ async fn inline_publication_without_fallback_keeps_its_store_requests() {
     ));
     let writer = open(recording.clone(), 1024).await;
     seed(&writer).await;
+    let namespace_writer = writer.open_namespace(&namespace()).expect("open namespace");
     recording.reset();
-    writer
-        .commit_candidate(&namespace(), inline("inline", "alice", b"recorded"))
+    namespace_writer
+        .commit_candidate(inline("inline", "alice", b"recorded"))
         .await
         .expect("inline publication");
     let operations = recording.take();
@@ -273,31 +268,38 @@ async fn cold_receipt_lookup_does_not_acquire_authority_or_block_other_submissio
     let recording = Arc::new(RecordingStore::new(blocking.clone(), KeyPredicate::any()));
     let original_writer = open(recording.clone(), 1).await;
     seed(&original_writer).await;
-    let original = original_writer
-        .commit_candidate(&namespace(), inline("retained", "alice", b"recorded"))
+    let original_namespace_writer = original_writer
+        .open_namespace(&namespace())
+        .expect("open namespace");
+    let original = original_namespace_writer
+        .commit_candidate(inline("retained", "alice", b"recorded"))
         .await
         .expect("original commit");
     let cold_writer = open(recording.clone(), 1).await;
     recording.reset();
     blocking.block_next();
     let namespace_id = namespace();
-    let retry =
-        cold_writer.commit_candidate(&namespace_id, inline("retained", "alice", b"recorded"));
+    let cold_namespace_writer = cold_writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
+    let retry = cold_namespace_writer.commit_candidate(inline("retained", "alice", b"recorded"));
     let submissions = async {
         blocking.wait_until_blocked().await;
         assert_eq!(recording.count(OperationClass::Put), 0);
-        original_writer
-            .create_commit(
-                &namespace_id,
-                request("old-writer", "root", access(AccessGrants::default())),
-            )
+        original_namespace_writer
+            .create_commit(request(
+                "old-writer",
+                "root",
+                access(AccessGrants::default()),
+            ))
             .await
             .expect("lookup has not fenced the original writer");
-        cold_writer
-            .create_commit(
-                &namespace_id,
-                request("new-writer", "root", access(AccessGrants::default())),
-            )
+        cold_namespace_writer
+            .create_commit(request(
+                "new-writer",
+                "root",
+                access(AccessGrants::default()),
+            ))
             .await
             .expect("another submission can use the publisher engine");
         blocking.release();
@@ -330,17 +332,19 @@ async fn failed_receipt_lookup_writes_no_durable_state() {
     let recording = Arc::new(RecordingStore::new(failing.clone(), KeyPredicate::any()));
     let writer = open(recording.clone(), 1).await;
     seed(&writer).await;
-    writer
-        .commit_candidate(&namespace(), inline("retained", "alice", b"recorded"))
+    let namespace_writer = writer.open_namespace(&namespace()).expect("open namespace");
+    namespace_writer
+        .commit_candidate(inline("retained", "alice", b"recorded"))
         .await
         .expect("original commit");
     writer.shutdown().await.expect("shutdown original writer");
     let writer = open(recording.clone(), 1).await;
+    let namespace_writer = writer.open_namespace(&namespace()).expect("open namespace");
     failing.fail_all();
     recording.reset();
     assert_eq!(
-        writer
-            .commit_candidate(&namespace(), inline("retained", "alice", b"recorded"))
+        namespace_writer
+            .commit_candidate(inline("retained", "alice", b"recorded"))
             .await
             .expect_err("lookup fails")
             .code(),

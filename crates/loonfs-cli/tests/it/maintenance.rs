@@ -43,8 +43,11 @@ async fn grep_allow_stale_serves_indexed_results_and_warns_for_jsonl() {
     .await
     .expect("build writer");
     let namespace_id = loonfs_api::NamespaceId::parse("demo").expect("namespace id");
-    let prepared = writer
-        .prepare_file_bytes(&namespace_id, b"needle\n")
+    let namespace_writer = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
+    let prepared = namespace_writer
+        .prepare_file_bytes(b"needle\n")
         .await
         .expect("prepare content");
     let operations = (0..=loonfs_grep::MAX_GREP_TAIL_FILES)
@@ -58,9 +61,8 @@ async fn grep_allow_stale_serves_indexed_results_and_warns_for_jsonl() {
             expected_revision_no: None,
         })
         .collect();
-    writer
+    namespace_writer
         .commit_prepared(
-            &namespace_id,
             loonfs::publish::CommitRequest {
                 commit_id: loonfs_api::CommitId::generate(),
                 actor_id: loonfs_test_support::test_actor(),

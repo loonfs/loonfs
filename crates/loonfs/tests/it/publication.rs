@@ -61,16 +61,19 @@ async fn park_two_puts(temp_dir: &Path) -> ParkedPuts {
         )
         .await
         .expect("create namespace");
+    let namespace_writer = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
 
     // Stage the second put's content while the store is unblocked: once
     // callers start being cancelled, the only work still in flight is
     // publication, the thing under test.
-    let upload = writer
-        .create_upload(&namespace_id)
+    let upload = namespace_writer
+        .create_upload()
         .await
         .expect("begin upload");
-    let staged = writer
-        .put_upload_content(&namespace_id, &upload.upload_id, b"b")
+    let staged = namespace_writer
+        .put_upload_content(&upload.upload_id, b"b")
         .await
         .expect("stage second put content");
     let catalog = loonfs_core::control::load_namespace_catalog_entry(&store, &namespace_id)
@@ -87,12 +90,10 @@ async fn park_two_puts(temp_dir: &Path) -> ParkedPuts {
 
     store_impl.arm();
     let first = {
-        let writer = Arc::clone(&writer);
-        let namespace_id = namespace_id.clone();
+        let namespace_writer = namespace_writer.clone();
         tokio::spawn(async move {
-            writer
+            namespace_writer
                 .put_file_bytes(
-                    &namespace_id,
                     "/a.txt",
                     b"a",
                     PutFileOptions::new(loonfs_test_support::test_actor()),

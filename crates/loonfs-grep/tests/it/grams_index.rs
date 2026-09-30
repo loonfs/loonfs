@@ -105,18 +105,19 @@ async fn grep_worker_builds_the_gram_index_once_enabled() {
         )
         .await
         .expect("create namespace");
-    writer
+    let namespace_writer = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
+    namespace_writer
         .put_file_bytes(
-            &namespace_id,
             "/alpha.txt",
             b"a needle in alpha\n",
             PutFileOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("write alpha");
-    writer
+    namespace_writer
         .put_file_bytes(
-            &namespace_id,
             "/bravo.txt",
             b"nothing here\n",
             PutFileOptions::new(loonfs_test_support::test_actor()),
@@ -153,9 +154,8 @@ async fn grep_worker_builds_the_gram_index_once_enabled() {
 
     // New commits are visible immediately through the exhaustive tail, and
     // a later step absorbs them into the index.
-    writer
+    namespace_writer
         .put_file_bytes(
-            &namespace_id,
             "/charlie.txt",
             b"another needle\n",
             PutFileOptions::new(loonfs_test_support::test_actor()),
@@ -212,6 +212,9 @@ async fn a_publish_below_the_wal_threshold_does_not_schedule_grep_work() {
         )
         .await
         .expect("create namespace");
+    let namespace_writer = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
     // Worker-level enable publishes the backfilling manifest without driving
     // it (a host drives it to quiescence), so the test can observe that
     // nothing else drives it either.
@@ -220,9 +223,8 @@ async fn a_publish_below_the_wal_threshold_does_not_schedule_grep_work() {
         outcome => panic!("expected fresh enable, got {outcome:?}"),
     }
 
-    writer
+    namespace_writer
         .put_file_bytes(
-            &namespace_id,
             "/delta.txt",
             b"a needle in delta\n",
             PutFileOptions::new(loonfs_test_support::test_actor()),
@@ -294,6 +296,9 @@ async fn a_worker_policy_bounds_each_build_step() {
         )
         .await
         .expect("create namespace");
+    let namespace_writer = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
     host.enable_grep_index(&namespace_id).await.expect("enable");
     // Materialize the empty backfill so the steps below run pure WAL
     // catch-up, where the file budget maps one-to-one onto the puts.
@@ -301,9 +306,8 @@ async fn a_worker_policy_bounds_each_build_step() {
 
     let mut put_seqs = Vec::new();
     for index in 0..5u32 {
-        let result = writer
+        let result = namespace_writer
             .put_file_bytes(
-                &namespace_id,
                 &format!("/notes/needle-{index}.txt"),
                 format!("a needle numbered {index}\n").as_bytes(),
                 PutFileOptions::new(loonfs_test_support::test_actor()),
@@ -380,6 +384,9 @@ async fn a_thousand_file_commit_is_byte_bounded_query_complete_and_crash_resumab
         )
         .await
         .expect("create namespace");
+    let namespace_writer = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
     host.enable_grep_index(&namespace_id).await.expect("enable");
     first_worker
         .build_step(&namespace_id, GramIndexBuildPolicy::default())
@@ -400,8 +407,8 @@ async fn a_thousand_file_commit_is_byte_bounded_query_complete_and_crash_resumab
     for index in 0..FILES {
         let bytes = format!("bounded needle file {index:04}\n");
         assert_eq!(bytes.len(), content_bytes);
-        let content = writer
-            .prepare_file_bytes(&namespace_id, bytes.as_bytes())
+        let content = namespace_writer
+            .prepare_file_bytes(bytes.as_bytes())
             .await
             .expect("prepare atomic-commit content");
         operations.push(FilesystemOperation::PutFile {
@@ -415,9 +422,8 @@ async fn a_thousand_file_commit_is_byte_bounded_query_complete_and_crash_resumab
         });
         prepared.push(content);
     }
-    let commit = writer
+    let commit = namespace_writer
         .commit_prepared(
-            &namespace_id,
             CommitRequest {
                 preconditions: Vec::new(),
                 commit_id: CommitId::parse("thousand-file-atomic").expect("commit id"),
@@ -627,14 +633,16 @@ async fn grep_answers_identically_across_tiered_reorganizations() {
         )
         .await
         .expect("create namespace");
+    let namespace_writer = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
     host.enable_grep_index(&namespace_id).await.expect("enable");
 
     let mut expected_paths = Vec::new();
     for round in 0..10u32 {
         let path = format!("/notes/needle-{round:02}.txt");
-        writer
+        namespace_writer
             .put_file_bytes(
-                &namespace_id,
                 &path,
                 format!("a needle numbered {round}\n").as_bytes(),
                 PutFileOptions::new(loonfs_test_support::test_actor()),
@@ -712,18 +720,19 @@ async fn repeated_grep_serves_posting_blocks_from_the_grep_cache() {
         )
         .await
         .expect("create namespace");
-    writer
+    let namespace_writer = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
+    namespace_writer
         .put_file_bytes(
-            &namespace_id,
             "/alpha.txt",
             b"a needle in alpha\n",
             PutFileOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("write alpha");
-    writer
+    namespace_writer
         .put_file_bytes(
-            &namespace_id,
             "/bravo.txt",
             b"nothing here\n",
             PutFileOptions::new(loonfs_test_support::test_actor()),
@@ -790,11 +799,13 @@ async fn a_failed_candidate_read_surfaces_in_traversal_order() {
         )
         .await
         .expect("create namespace");
+    let namespace_writer = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
     // Two matches in alpha, so a one-match page fills before the walk
     // reaches bravo.
-    writer
+    namespace_writer
         .put_file_bytes(
-            &namespace_id,
             "/alpha.txt",
             b"needle one\nneedle two\n",
             PutFileOptions::new(loonfs_test_support::test_actor()),
@@ -802,9 +813,8 @@ async fn a_failed_candidate_read_surfaces_in_traversal_order() {
         .await
         .expect("write alpha");
     let blobs_before_bravo = content_blob_keys(&store).await;
-    writer
+    namespace_writer
         .put_file_bytes(
-            &namespace_id,
             "/bravo.txt",
             b"needle three\n",
             PutFileOptions::new(loonfs_test_support::test_actor()),
@@ -903,9 +913,11 @@ async fn an_oversized_tail_candidate_is_skipped_without_a_content_read() {
         )
         .await
         .expect("create namespace");
-    writer
+    let namespace_writer = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
+    namespace_writer
         .put_file_bytes(
-            &namespace_id,
             "/alpha.txt",
             b"a needle in alpha\n",
             PutFileOptions::new(loonfs_test_support::test_actor()),
@@ -922,9 +934,8 @@ async fn an_oversized_tail_candidate_is_skipped_without_a_content_read() {
     let oversized_bytes = b"needle\n".repeat(INDEX_GRAMS_MAX_FILE_BYTES as usize / 7 + 1);
     assert!(oversized_bytes.len() as u64 > INDEX_GRAMS_MAX_FILE_BYTES);
     let blobs_before_bravo = content_blob_keys(&store).await;
-    writer
+    namespace_writer
         .put_file_bytes(
-            &namespace_id,
             "/bravo.big",
             &oversized_bytes,
             PutFileOptions::new(loonfs_test_support::test_actor()),
@@ -939,9 +950,8 @@ async fn an_oversized_tail_candidate_is_skipped_without_a_content_read() {
     let [oversized_content_key] = new_blobs.as_slice() else {
         panic!("the oversized write must add exactly one content blob, got {new_blobs:?}");
     };
-    writer
+    namespace_writer
         .put_file_bytes(
-            &namespace_id,
             "/charlie.txt",
             b"a needle in charlie\n",
             PutFileOptions::new(loonfs_test_support::test_actor()),
@@ -1028,12 +1038,14 @@ async fn reorganization_does_not_warm_the_query_cache() {
         )
         .await
         .expect("create namespace");
+    let namespace_writer = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
     host.enable_grep_index(&namespace_id).await.expect("enable");
 
     for round in 1..=8u32 {
-        writer
+        namespace_writer
             .put_file_bytes(
-                &namespace_id,
                 &format!("/notes/needle-{round:02}.txt"),
                 format!("a needle numbered {round}\n").as_bytes(),
                 PutFileOptions::new(loonfs_test_support::test_actor()),
@@ -1116,6 +1128,9 @@ async fn a_cold_reorganization_fans_out_its_segment_opens_within_the_io_cap() {
         )
         .await
         .expect("create namespace");
+    let namespace_writer = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
     host.enable_grep_index(&namespace_id).await.expect("enable");
 
     // Each round writes one file and runs one build and reorganization step.
@@ -1127,9 +1142,8 @@ async fn a_cold_reorganization_fans_out_its_segment_opens_within_the_io_cap() {
             rounds <= 24,
             "the delta threshold must trigger reorganization within a bounded number of rounds"
         );
-        writer
+        namespace_writer
             .put_file_bytes(
-                &namespace_id,
                 &format!("/notes/needle-{rounds:02}.txt"),
                 format!("a needle numbered {rounds}\n").as_bytes(),
                 PutFileOptions::new(loonfs_test_support::test_actor()),

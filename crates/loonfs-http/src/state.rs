@@ -2,14 +2,16 @@
 
 use crate::HttpMetrics;
 use loonfs::{
-    FsMaintenance, FsReader, FsWriter, InlineContentOptions, MaintenanceHandle, MaintenanceJob,
-    MaintenanceProbe, SharedObjectStore, SnapshotPolicy,
+    CloseNamespaceReport, FsMaintenance, FsReader, FsWriter, InlineContentOptions,
+    MaintenanceHandle, MaintenanceJob, MaintenanceProbe, NamespaceWriter, SharedObjectStore,
+    SnapshotPolicy,
 };
 use loonfs_api::{NamespaceId, SecretString};
 use loonfs_grep::{GrepMaintenanceJob, GrepService, GrepWorker, GREP_INDEX_JOB};
 use loonfs_objectstore::presign::DirectTransferIssuers;
 use loonfs_objectstore::ConfiguredObjectStoreKind;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use tokio::sync::Semaphore;
 
 #[derive(Clone, Debug)]
@@ -45,6 +47,7 @@ pub struct BindingOptions {
 pub struct BindingState {
     pub options: Arc<BindingOptions>,
     pub writer: FsWriter,
+    pub namespaces: Arc<NamespaceWriters>,
     pub reader: FsReader,
     pub maintenance: FsMaintenance,
     pub probe_store: SharedObjectStore,
@@ -68,6 +71,57 @@ impl BindingState {
         self.grep_service
             .as_deref()
             .expect("grep routes should carry a grep service")
+    }
+}
+
+/// The writer handle this host holds for each namespace.
+///
+/// The host decides which writer sessions stay open and for how long. This
+/// reference host keeps every namespace it has written open, with no cap and
+/// no eviction.
+pub struct NamespaceWriters {
+    writer: FsWriter,
+    handles: Mutex<HashMap<NamespaceId, NamespaceWriter>>,
+}
+
+impl NamespaceWriters {
+    pub fn new(writer: FsWriter) -> Self {
+        Self {
+            writer,
+            handles: Mutex::default(),
+        }
+    }
+
+    /// Returns the handle held for `namespace_id`, opening one first if none is held.
+    pub fn open(&self, namespace_id: &NamespaceId) -> loonfs::Result<NamespaceWriter> {
+        let mut handles = self.lock();
+        if let Some(handle) = handles.get(namespace_id) {
+            return Ok(handle.clone());
+        }
+        let handle = self.writer.open_namespace(namespace_id)?;
+        handles.insert(namespace_id.clone(), handle.clone());
+        Ok(handle)
+    }
+
+    /// Closes the session of the handle held for `namespace_id` and stops
+    /// holding it. Returns `None` when no handle is held.
+    pub async fn close(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> loonfs::Result<Option<CloseNamespaceReport>> {
+        let Some(handle) = self.lock().remove(namespace_id) else {
+            return Ok(None);
+        };
+        handle.close().await.map(Some)
+    }
+
+    /// Stops holding the handle of a deleted namespace.
+    pub(crate) fn forget(&self, namespace_id: &NamespaceId) {
+        self.lock().remove(namespace_id);
+    }
+
+    fn lock(&self) -> MutexGuard<'_, HashMap<NamespaceId, NamespaceWriter>> {
+        self.handles.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 

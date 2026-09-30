@@ -55,12 +55,11 @@ async fn directory_pages_use_bindings_and_load_revision_heads_concurrently() {
         .create_namespace(&namespace_id, CreateNamespaceOptions::new(actor.clone()))
         .await
         .expect("namespace");
-    writer
-        .create_directory(
-            &namespace_id,
-            "/files",
-            CreateDirectoryOptions::new(actor.clone()),
-        )
+    let namespace_writer = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
+    namespace_writer
+        .create_directory("/files", CreateDirectoryOptions::new(actor.clone()))
         .await
         .expect("directory");
     maintenance
@@ -70,9 +69,8 @@ async fn directory_pages_use_bindings_and_load_revision_heads_concurrently() {
     let parent_inode_keys = family_keys(&store, &namespace_id, MetadataRowFamily::Inodes).await;
     for batch in 0..6 {
         for index in batch * 50..(batch + 1) * 50 {
-            writer
+            namespace_writer
                 .put_file_bytes(
-                    &namespace_id,
                     &format!("/files/{index:03}.txt"),
                     &vec![b'a'; index + 1],
                     PutFileOptions::new(actor.clone()),
@@ -86,9 +84,8 @@ async fn directory_pages_use_bindings_and_load_revision_heads_concurrently() {
             .expect("fold batch");
     }
     for index in (0..300).step_by(3) {
-        writer
+        namespace_writer
             .put_file_bytes(
-                &namespace_id,
                 &format!("/files/{index:03}.txt"),
                 &vec![b'b'; index + 2],
                 PutFileOptions {

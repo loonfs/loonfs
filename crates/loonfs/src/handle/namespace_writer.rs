@@ -47,12 +47,12 @@ impl NamespaceWriter {
     /// session is closed, the writer's
     /// [`NamespaceSessionPolicy`](crate::NamespaceSessionPolicy) decides at
     /// the first publish whether to open it or to refuse the work.
-    pub(crate) fn new(writer: &FsWriter, namespace_id: &NamespaceId) -> Self {
+    pub(crate) fn new(writer: &FsWriter, namespace_id: NamespaceId) -> Self {
         Self {
             core: writer.core.clone(),
             bits: Arc::clone(&writer.bits),
             publisher: writer.publisher.clone(),
-            namespace_id: namespace_id.clone(),
+            namespace_id,
         }
     }
 

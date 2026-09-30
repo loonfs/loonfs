@@ -29,9 +29,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             },
         )
         .await?;
-    writer
+    let namespace_writer = writer.open_namespace(&namespace_id)?;
+    namespace_writer
         .put_file_bytes(
-            &namespace_id,
             "/hello.txt",
             b"hello from embedded LoonFS\n",
             PutFileOptions {

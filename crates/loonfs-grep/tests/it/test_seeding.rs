@@ -34,8 +34,9 @@ pub(crate) async fn put_file(
     path: &str,
     commit_id: &str,
 ) {
-    writer
-        .put_file_bytes(namespace_id, path, bytes, {
+    let namespace_writer = writer.open_namespace(namespace_id).expect("open namespace");
+    namespace_writer
+        .put_file_bytes(path, bytes, {
             let mut options = PutFileOptions::new(loonfs_test_support::test_actor());
             options.commit.commit_id = Some(CommitId::parse(commit_id).expect("commit id"));
             options
