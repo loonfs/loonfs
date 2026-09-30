@@ -20,6 +20,7 @@ use super::runs::{
 use super::scan::VerifiedMetadataSegments;
 use super::streaming_compaction::{merge_group_in_step, MetadataCompactionSpec};
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
+use crate::namespace::control::load_current_manifest;
 use crate::namespace::read_anchor::load_read_anchor;
 use crate::time::{Deadline, StdMonotonicTimer};
 use loonfs_api::wire::envelope::EncodedEnvelope;
@@ -123,15 +124,14 @@ pub(super) async fn reorganize_metadata_step_with_deadline<S: ObjectStore + ?Siz
     compaction_policy: MetadataCompactionPolicy,
     deadline: &Deadline,
 ) -> Result<MetadataReorganizeOutcome> {
-    // A streaming compaction keeps the floor read with this manifest.
-    let anchor = load_read_anchor(store, namespace_id)
+    let current_manifest = load_current_manifest(store, namespace_id)
         .await
-        .map_err(CoreError::ControlObjectLoad)?;
-    let floor_seq = anchor.retention_floor_seq();
-    let current_manifest = anchor.manifest.state;
+        .map_err(CoreError::ControlObjectLoad)?
+        .state;
     if current_manifest.compactor_epoch() != compactor_epoch {
         return Ok(MetadataReorganizeOutcome::Fenced);
     }
+    let floor_seq = current_manifest.retention_floor_seq();
     let segments = load_manifest_segments(store, None, &current_manifest.manifest()).await?;
     let previous = segments.manifest();
 

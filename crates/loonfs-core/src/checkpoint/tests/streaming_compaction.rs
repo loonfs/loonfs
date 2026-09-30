@@ -2835,6 +2835,7 @@ async fn a_backlogged_job_limits_input_and_preserves_unselected_runs() {
 #[tokio::test]
 async fn a_new_compactor_epoch_an_expired_job_and_a_deletion_each_prevent_publication() {
     use crate::limits::METADATA_COMPACTION_BUDGET_MS;
+    use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
     use loonfs_test_support::stores::RecordingStore;
 
     let directory = tempdir().expect("tempdir");
@@ -2880,6 +2881,16 @@ async fn a_new_compactor_epoch_an_expired_job_and_a_deletion_each_prevent_public
     .expect("fenced");
     assert_eq!(outcome, MetadataCompactionJobOutcome::Fenced);
     assert_eq!(store.counts().puts, 0);
+    let reads_only_manifests = |store: &RecordingStore<LocalFsStore>| {
+        store.counts().puts == 0
+            && store.take().iter().all(|operation| {
+                matches!(
+                    parse_object_key(operation.key()).map(|key| key.family()),
+                    Some(DurableObjectFamily::Hint | DurableObjectFamily::MetadataManifest)
+                )
+            })
+    };
+    store.reset();
     let bounded = super::super::reorganize_metadata_step(
         &store,
         &namespace,
@@ -2890,7 +2901,19 @@ async fn a_new_compactor_epoch_an_expired_job_and_a_deletion_each_prevent_public
     .await
     .expect("bounded fence");
     assert_eq!(bounded, MetadataReorganizeOutcome::Fenced);
-    assert_eq!(store.counts().puts, 0);
+    assert!(reads_only_manifests(&store));
+    let job = run_metadata_compaction_job(
+        &store,
+        &namespace,
+        epoch,
+        &spec,
+        small_segment_policy(),
+        &cancellation,
+    )
+    .await
+    .expect("job fence");
+    assert_eq!(job, MetadataCompactionJobOutcome::Fenced);
+    assert!(reads_only_manifests(&store));
 
     publication.compactor_epoch = next_epoch;
     timer

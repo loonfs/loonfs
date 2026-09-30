@@ -1609,7 +1609,7 @@ mod tests {
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_objectstore::PutMode;
     use loonfs_test_support::stores::{
-        FailStore, InjectedError, KeyPredicate, OperationClass, RecordingStore,
+        BlockingStore, FailStore, InjectedError, KeyPredicate, OperationClass, RecordingStore,
     };
     use tempfile::tempdir;
 
@@ -1733,6 +1733,57 @@ mod tests {
             loaded.mode,
             UploadSessionMode::ServiceProxied {
                 staging: ProxiedStaging::Claimed
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_buffered_upload_aborted_during_its_write_is_refused_and_records_nothing() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = BlockingStore::new(
+            LocalFsStore::new(temp_dir.path()).expect("store"),
+            KeyPredicate::content_blob(),
+            OperationClass::Put,
+        );
+        let namespace_id = NamespaceId::parse("aborted-buffered-write").expect("namespace id");
+        let setup = context(1_000);
+        create(&store, &namespace_id, &setup)
+            .await
+            .expect("bootstrap");
+        let session = begin_service_proxied_upload(&store, &namespace_id, None, &setup)
+            .await
+            .expect("begin upload");
+        store.block_next();
+        let (result, ()) = tokio::join!(
+            upload_content(
+                &store,
+                &namespace_id,
+                &session.upload_id,
+                None,
+                BYTES,
+                1_000
+            ),
+            async {
+                store.wait_until_blocked().await;
+                abort(store.inner(), &namespace_id, &session.upload_id, &setup)
+                    .await
+                    .expect("abort during the write");
+                store.release();
+            }
+        );
+
+        assert!(matches!(result, Err(CoreError::UploadNotFound { .. })));
+        let loaded = load_upload_session_state(&store, &namespace_id, &session.upload_id)
+            .await
+            .expect("load session");
+        assert!(matches!(
+            loaded.status,
+            UploadSessionRecordStatus::Aborted { .. }
+        ));
+        assert!(!matches!(
+            loaded.mode,
+            UploadSessionMode::ServiceProxied {
+                staging: ProxiedStaging::Staged(_)
             }
         ));
     }
