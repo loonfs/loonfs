@@ -88,13 +88,14 @@ pub(crate) const MAX_PROVIDER_MULTIPART_PARTS: usize = 10_000;
 /// parts are bounded by [`PROVIDER_MULTIPART_PART_BYTES`].
 pub const PROVIDER_TRANSFER_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// Request-phase allowance for a single-request publication, including retries.
+/// Request-phase allowance for a single-request publication.
 ///
-/// Conditional WAL and manifest puts can carry payload-sized bodies. The
-/// provider client checks its retry deadline before backoff, so the final
-/// request may finish one backoff and one payload attempt after that deadline.
-/// This does not bound response-body consumption or prove that a timed-out
-/// request cannot take effect remotely.
+/// The provider client checks its retry deadline before backoff, so a
+/// resent request may finish one backoff and one payload attempt after that
+/// deadline. A conditional WAL or manifest put is one attempt, even with a
+/// payload-sized body, so the bound still holds for it. This does not bound
+/// response-body consumption or prove that a timed-out request cannot take
+/// effect remotely.
 pub const PROVIDER_PUBLICATION_REQUEST_BOUND: Duration = PROVIDER_OPERATION_DEADLINE
     .saturating_add(PROVIDER_MAX_RETRY_BACKOFF)
     .saturating_add(PROVIDER_TRANSFER_ATTEMPT_TIMEOUT);
@@ -191,6 +192,7 @@ pub(crate) trait MultipartController: Send + Sync {
 #[derive(Clone)]
 pub struct ProviderObjectStore {
     inner: Arc<dyn provider_store::ObjectStore>,
+    one_attempt: Arc<dyn provider_store::ObjectStore>,
     multipart: Arc<dyn MultipartStore>,
     checksum_reader: Option<Arc<dyn StoredChecksumReader>>,
     multipart_controller: Option<Arc<dyn MultipartController>>,
@@ -214,12 +216,15 @@ impl fmt::Debug for ProviderObjectStore {
 }
 
 impl ProviderObjectStore {
-    /// Wraps a provider client and its native multipart surface.
+    /// Wraps a provider client, the same client built to never resend a
+    /// request, and the native multipart surface.
     ///
-    /// Construction fails when `config.key_prefix` is not a normalized,
-    /// non-escaping logical prefix.
+    /// Conditional flat puts go to `one_attempt`; everything else uses
+    /// `inner`. Construction fails when `config.key_prefix` is not a
+    /// normalized, non-escaping logical prefix.
     pub(crate) fn new(
         inner: Arc<dyn provider_store::ObjectStore>,
+        one_attempt: Arc<dyn provider_store::ObjectStore>,
         multipart: Arc<dyn MultipartStore>,
         config: ProviderObjectStoreConfig,
         kind: ConfiguredObjectStoreKind,
@@ -227,6 +232,7 @@ impl ProviderObjectStore {
     ) -> Result<Self> {
         Ok(Self {
             inner,
+            one_attempt,
             multipart,
             checksum_reader: None,
             multipart_controller: None,
@@ -956,17 +962,18 @@ impl ObjectStore for ProviderObjectStore {
                 .put_large_multipart(Arc::clone(&self.multipart), key, &path, bytes)
                 .await;
         }
-        // Raw flat writes are deliberately one attempt. In particular, a
-        // mutable overwrite cannot be replayed after an ambiguous transport
-        // outcome without changing write ordering. Immutable callers use
-        // `put_immutable_verified`, whose name supplies the retry invariant.
+        // A conditional write is one request, so its precondition failure is
+        // never its own landing.
+        let client = match mode {
+            PutMode::Overwrite => &self.inner,
+            PutMode::CreateIfAbsent | PutMode::CompareAndSwap { .. } => &self.one_attempt,
+        };
         let compare_and_swap = matches!(mode, PutMode::CompareAndSwap { .. });
         let options = PutOptions {
             mode: self.map_put_mode(mode),
             ..Default::default()
         };
-        match self
-            .inner
+        match client
             .put_opts(&path, PutPayload::from(bytes), options)
             .await
         {
@@ -1288,6 +1295,7 @@ mod tests {
     fn memory_store() -> ProviderObjectStore {
         let inner = Arc::new(InMemory::default());
         ProviderObjectStore::new(
+            Arc::clone(&inner) as Arc<dyn provider_store::ObjectStore>,
             Arc::clone(&inner) as Arc<dyn provider_store::ObjectStore>,
             inner,
             ProviderObjectStoreConfig {
@@ -1905,6 +1913,7 @@ mod tests {
     fn retrying_store(flaky: Arc<FlakyStore>) -> ProviderObjectStore {
         ProviderObjectStore::new(
             Arc::clone(&flaky) as Arc<dyn provider_store::ObjectStore>,
+            Arc::clone(&flaky) as Arc<dyn provider_store::ObjectStore>,
             flaky,
             ProviderObjectStoreConfig {
                 key_prefix: Some("tenant-a".to_owned()),
@@ -2124,6 +2133,46 @@ mod tests {
             store.get(key, None).await.expect("get"),
             Some(Bytes::from_static(b"one"))
         );
+    }
+
+    #[tokio::test]
+    async fn a_conditional_put_goes_once_to_the_client_that_never_resends() {
+        let resending = Arc::new(FlakyStore::default());
+        let one_attempt = Arc::new(FlakyStore {
+            inner: resending.inner.clone(),
+            ..FlakyStore::default()
+        });
+        let store = ProviderObjectStore::new(
+            Arc::clone(&resending) as Arc<dyn provider_store::ObjectStore>,
+            Arc::clone(&one_attempt) as Arc<dyn provider_store::ObjectStore>,
+            Arc::clone(&resending) as Arc<dyn MultipartStore>,
+            ProviderObjectStoreConfig { key_prefix: None },
+            ConfiguredObjectStoreKind::LocalFs,
+            StoreIoRuntime::new().expect("store io runtime"),
+        )
+        .expect("provider store");
+        script_puts(&one_attempt, [WriteScript::LandThenFail]);
+        let key = "namespaces/demo/uploads/upl_11.json";
+
+        let error = store
+            .put_if_absent(key, Bytes::from_static(b"claim"))
+            .await
+            .expect_err("the landed write's lost answer reaches the caller");
+        assert!(matches!(error, ObjectStoreError::Transport { .. }));
+        assert_eq!(one_attempt.puts.load(Ordering::SeqCst), 1);
+
+        store
+            .put_overwrite(key, Bytes::from_static(b"session"))
+            .await
+            .expect("overwrite");
+        assert_eq!(
+            store.get(key, None).await.expect("get"),
+            Some(Bytes::from_static(b"session"))
+        );
+        assert_eq!(resending.puts.load(Ordering::SeqCst), 1);
+        assert_eq!(resending.gets.load(Ordering::SeqCst), 1);
+        assert_eq!(one_attempt.puts.load(Ordering::SeqCst), 1);
+        assert_eq!(one_attempt.gets.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

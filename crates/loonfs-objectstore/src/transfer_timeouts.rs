@@ -316,10 +316,9 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     #[allow(clippy::disallowed_methods)]
-    async fn conditional_payload_retry_can_outlast_the_control_attempt_allowance() {
+    async fn a_conditional_payload_put_is_one_request() {
         use crate::provider_object_store::{
-            provider_retry_config, PROVIDER_MAX_RETRY_BACKOFF, PROVIDER_OPERATION_DEADLINE,
-            PROVIDER_PUBLICATION_REQUEST_BOUND,
+            provider_retry_config, PROVIDER_MAX_RETRY_BACKOFF, PROVIDER_PUBLICATION_REQUEST_BOUND,
         };
         use object_store::ObjectStore;
 
@@ -335,7 +334,10 @@ mod tests {
             .with_endpoint("http://provider.invalid")
             .with_allow_http(true)
             .with_http_connector(RetriedPublicationConnector)
-            .with_retry(provider_retry_config())
+            .with_retry(object_store::RetryConfig {
+                max_retries: 0,
+                ..provider_retry_config()
+            })
             .build()
             .expect("scripted store");
         let started = tokio::time::Instant::now();
@@ -349,13 +351,12 @@ mod tests {
                 },
             )
             .await
-            .expect("second conditional attempt publishes");
+            .expect_err("the first answer, a 503, is the put's answer");
 
-        // The first retry is admitted after 115s, before the 120s retry budget.
-        // Upstream uses std::Instant, unlike this paused test clock, but both
-        // clocks admit this one retry; no second retry decision is exercised.
-        assert!(started.elapsed() >= Duration::from_secs(230));
-        assert!(started.elapsed() > PROVIDER_OPERATION_DEADLINE + PROVIDER_ATTEMPT_TIMEOUT);
+        // The scripted service answers once after 115s; the client does not
+        // send the conditional put again.
+        assert!(started.elapsed() >= Duration::from_secs(115));
+        assert!(started.elapsed() < Duration::from_secs(230));
         assert!(started.elapsed() <= PROVIDER_PUBLICATION_REQUEST_BOUND);
     }
 

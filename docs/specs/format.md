@@ -293,7 +293,7 @@ What the protocol guarantees:
 
 The object-store layer must provide create-if-absent for immutable publication, compare-and-swap for mutable control objects, full and ranged reads, deletion, and reliable prefix enumeration. Operations must remain within the configured storage scope.
 
-A compare-and-swap (CAS) replaces an object only if its compare token still matches the version read by the caller. If another writer has changed that version, the update fails its precondition. Conditional updates must distinguish this result from a transport error. A confirmed precondition failure means the inspected state was not replaced. A transport failure after sending a request may leave the outcome unknown.
+A compare-and-swap (CAS) replaces an object only if its compare token still matches the version read by the caller. If another writer has changed that version, the update fails its precondition. Conditional updates must distinguish this result from a transport error. A confirmed precondition failure means the inspected state was not replaced. The object-store layer sends a conditional write as one request and never resends it, so its precondition failure is never caused by its own landing. A transport failure after sending a request may leave the outcome unknown.
 
 A mutable-object read must return the bytes and the compare token for those same bytes in one observation. Reading metadata and content separately is insufficient: a concurrent update could otherwise pair one version's payload with another version's token. Compare tokens, including ETags, are opaque. They are not assumed to be content digests.
 
@@ -1566,7 +1566,7 @@ Publication and collection use the timing relationships below. Configurable sizi
 | `DIRECT_TRANSFER_URL_TTL_MS` | 900,000 | Lifetime of a direct transfer capability. |
 | `NAMESPACE_RETIREMENT_GRACE_MS` | 2,490,000 | Minimum grace from the deletion call clock. |
 
-A provider retry can be admitted before its operation deadline, wait up to 15 seconds of backoff, then take up to 120 seconds for a payload-sized request. Conditional WAL and manifest writes can exceed the payload threshold even though they use a single request. The publication allowance therefore reserves 120 + 15 + 120 seconds, not the 30-second small-request timeout. This is a request-phase allowance, not a bound on response-body consumption. It retains the relative-clock and scheduling assumptions and does not prove that a timed-out remote mutation had no effect.
+A provider retry can be admitted before its operation deadline, wait up to 15 seconds of backoff, then take up to 120 seconds for a payload-sized request. The object-store layer never resends a conditional write (section 3.1). Conditional WAL and manifest writes can still exceed the payload threshold in their one request. The publication allowance therefore reserves 120 + 15 + 120 seconds, not the 30-second small-request timeout. This is a request-phase allowance, not a bound on response-body consumption. It retains the relative-clock and scheduling assumptions and does not prove that a timed-out remote mutation had no effect.
 
 ```text
 GC_MIN_GRACE_WINDOW_MS

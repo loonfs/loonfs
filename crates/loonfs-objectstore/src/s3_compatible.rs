@@ -218,11 +218,20 @@ fn new(config: S3CompatibleConfig) -> Result<(ProviderObjectStore, DirectTransfe
 
     let provider = Arc::new(
         builder
+            .clone()
             .build()
             .map_err(|err| ObjectStoreError::Configuration(err.to_string()))?,
     );
+    let one_attempt = builder
+        .with_retry(object_store::RetryConfig {
+            max_retries: 0,
+            ..crate::provider_object_store::provider_retry_config()
+        })
+        .build()
+        .map_err(|err| ObjectStoreError::Configuration(err.to_string()))?;
     let store = ProviderObjectStore::new(
         Arc::clone(&provider) as Arc<dyn object_store::ObjectStore>,
+        Arc::new(one_attempt),
         provider,
         ProviderObjectStoreConfig {
             key_prefix: config.key_prefix,
