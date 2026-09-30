@@ -304,7 +304,7 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | `upload_already_completed` | 409 | The upload session is already completed, so it cannot select other content and cannot be aborted. |
 | `upload_content_conflict` | 409 | Different bytes were staged under this upload id, or another staging request holds the session's staging claim: one still in flight, one that was cancelled, or one whose write may still land. Open a new session. |
 | `query_unindexable` | 400 | The pattern has no run of at least 3 literal bytes, so the trigram index cannot narrow candidates; rewrite the pattern, or set `allow_scan` (capped by `query.grep.scan_budget_files`). |
-| `rebootstrap_required` | 409 | The resume position is unanswerable — a change cursor below the retention floor, or a listing cursor minted ahead of the serving head; restart from a fresh listing or checkpoint. |
+| `rebootstrap_required` | 409 | A change feed `after_seq` is below the retention floor, so the feed no longer holds the changes after it. Rebuild state from a fresh listing or checkpoint. |
 | `not_supported` | 501 | The deployment does not implement the requested op or feature. |
 | `commit_outcome_unknown` | 503 | The publish outcome was not observed; the commit may or may not be visible. Retry with the same commit id or reconcile. |
 | `commit_queue_full` | 503 | The namespace write queue is full; back off and retry. |
@@ -1121,6 +1121,11 @@ snapshot, as the HTTP request does. A reader that is already pinned at a
 snapshot accepts options that name that snapshot and rejects any other
 snapshot id as `invalid_request`.
 
+An embedded reader can also pin a checkpoint. A directory cursor from a
+reader pinned at a checkpoint or a snapshot names that pin. Only a reader
+pinned at the same checkpoint or snapshot resumes it; a live listing or a
+reader pinned elsewhere rejects it as `invalid_request`.
+
 Snapshot reads require a live snapshot. Missing snapshots return
 `snapshot_not_found`, including after deletion. Expired snapshots return
 `snapshot_gone` while their pins still exist. Neither case falls back to the current namespace state.
@@ -1607,7 +1612,7 @@ The `Namespace` object has exactly these fields:
 | `created_by` | Actor that created or forked the namespace, as supplied by the application. |
 | `fork_basis` | Present only for a fork. Contains `source_namespace_id` and the captured `source_head_seq`. |
 | `head_seq` | Current visible namespace sequence. |
-| `retention_floor_seq` | Oldest sequence still promised for incremental replay. |
+| `retention_floor_seq` | Oldest position a change feed can resume after. The feed returns changes above it. |
 
 The create request carries `access` with the same shape plus `root_grants` for the `acl` kind, defaulting to unrestricted, and an ACL namespace needs at least one administrator in `root_grants`.
 
@@ -1641,7 +1646,7 @@ namespace state plus storage details used by maintenance:
 | `created_by` | Actor that created or forked the namespace, as supplied by the application. |
 | `fork_basis` | Present only for a fork. Contains `source_namespace_id` and the captured `source_head_seq`. |
 | `head_seq` | Current visible namespace sequence. |
-| `retention_floor_seq` | Oldest sequence still promised for incremental replay. |
+| `retention_floor_seq` | Oldest position a change feed can resume after. The feed returns changes above it. |
 | `current_manifest_no` | Current manifest number, present from namespace creation. |
 | `wal_tail_segments` | WAL tip minus the current manifest's folded number, including fences. |
 | `live_snapshots` | Number of snapshots that had not expired when diagnostics began. |
@@ -1788,17 +1793,19 @@ listing on this route. A directory deleted mid-listing answers
 `include_attributes` works exactly as it does on the entry route and obeys the same required-siblings-together projection rule, but it defaults to `false`. This keeps the default response bounded because a page may contain up to `pagination.max_limit` entries and each attribute map may be 64 KiB. Clients that request attributes should choose a suitable page size.
 
 A cursor is normally an opaque ordering resume, not a snapshot pin. Directory
-listing, revision listing, grep, and change-feed cursors tolerate forward head
-drift: commits landing mid-listing never retire them, and the resumed page
-evaluates at the then-current head, continuing strictly after the last returned
-position. Each page is internally consistent at its own head, but a multi-page
-listing spans whatever heads its pages ran at: an entry created behind the
-resume position is missed, an entry deleted behind it was already returned,
-and a rename can surface as a duplicate or a miss. A client that needs one
-consistent cut re-issues the listing when `head_seq` changes between pages.
-Only a cursor minted ahead of the serving head answers `rebootstrap_required`
-— drift tolerance runs forward, never backward. (A malformed cursor, or one
-replayed against a different target, stays `invalid_request`.)
+listing, trash listing, revision listing, grep, and change-feed cursors
+tolerate forward head drift: commits landing mid-listing never retire them,
+and the resumed page evaluates at the then-current head, continuing strictly
+after the last returned position. Each page is internally consistent at its
+own head, but a multi-page listing spans whatever heads its pages ran at: an
+entry created behind the resume position is missed, an entry deleted behind
+it was already returned, and a rename can surface as a duplicate or a miss. A
+client that needs one consistent cut re-issues the listing when `head_seq`
+changes between pages.
+Every read confirms its head when it starts, so a cursor minted ahead of the
+serving head was not issued for this view and answers `invalid_request`.
+Drift tolerance runs forward, never backward. A malformed cursor, or one
+replayed against a different target, also answers `invalid_request`.
 
 A directory cursor minted with `snapshot_id` is the exception: it binds to
 that snapshot's immutable view. The client must repeat the same `snapshot_id`
@@ -2878,6 +2885,10 @@ If `limit` truncates the page before the namespace head, the response includes
 resumes with `after_seq={next_after_seq}`.
 
 `after_seq` may equal the current namespace head, which returns an empty page.
+An `after_seq` above the head the request reads answers `invalid_request`.
+The lowest `after_seq` the feed accepts is `retention_floor_seq`. A lower
+`after_seq` answers `rebootstrap_required`: the client rebuilds its state from
+a fresh listing or checkpoint and follows the feed from that state's head.
 
 ### 6.12 `POST /forks`
 
@@ -3000,8 +3011,8 @@ the cursor has passed are not revisited even if later commits changed
 them. A search is a bounded sampling read over content, not an
 enumeration contract; a client that needs one consistent cut across pages
 re-issues the search when `head_seq` changes between pages. A cursor from
-a head newer than the serving view's is still rejected
-(`rebootstrap_required`) — drift tolerance runs forward, never backward.
+a head newer than the serving view's answers `invalid_request`: drift
+tolerance runs forward, never backward.
 
 A pattern with no required
 literal bytes is rejected with `query_unindexable` unless `allow_scan`

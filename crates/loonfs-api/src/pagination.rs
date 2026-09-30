@@ -338,14 +338,16 @@ pub struct Page<T, C> {
 
 /// A cursor that resumes one directory listing after `last_name_key`.
 ///
-/// Snapshot cursors can resume only against the same snapshot.
+/// A cursor from a read pinned at a checkpoint or a snapshot resumes only
+/// against the same pin.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DirectoryPageCursor {
     /// Head sequence the issuing page was evaluated at.
     pub head_seq: ChangeSeq,
-    /// The snapshot that issued this cursor, or `None` for a live read.
+    /// The checkpoint or snapshot pin that issued this cursor, or `None` for
+    /// a live read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub snapshot_id: Option<crate::PinId>,
+    pub pin_id: Option<crate::PinId>,
     /// Directory inode resolved at `head_seq`.
     pub directory_inode_id: InodeId,
     /// Last canonical name key returned to the client.
@@ -605,9 +607,8 @@ mod tests {
     fn directory_cursor_round_trips() {
         let cursor = DirectoryPageCursor {
             head_seq: ChangeSeq(11),
-            snapshot_id: Some(
-                crate::PinId::parse("pin_00000000000000000001-0000000000000001")
-                    .expect("snapshot id"),
+            pin_id: Some(
+                crate::PinId::parse("pin_00000000000000000001-0000000000000001").expect("pin id"),
             ),
             directory_inode_id: InodeId(7),
             last_name_key: NameKey::parse("plan.md").expect("name key"),
@@ -620,10 +621,10 @@ mod tests {
     }
 
     #[test]
-    fn live_directory_cursor_omits_the_additive_snapshot_field() {
+    fn live_directory_cursor_omits_the_pin_field() {
         let cursor = DirectoryPageCursor {
             head_seq: ChangeSeq(11),
-            snapshot_id: None,
+            pin_id: None,
             directory_inode_id: InodeId(7),
             last_name_key: NameKey::parse("plan.md").expect("name key"),
         };
@@ -632,7 +633,7 @@ mod tests {
         let bytes = crate::hex::hex_decode_bytes(&encoded).expect("decode hex");
         let json: serde_json::Value = serde_json::from_slice(&bytes).expect("decode JSON");
 
-        assert!(json.get("snapshot_id").is_none());
+        assert!(json.get("pin_id").is_none());
         assert_eq!(
             decode_cursor::<DirectoryPageCursor>(&encoded).expect("decode cursor"),
             cursor
@@ -719,7 +720,7 @@ mod tests {
             kind: <DirectoryPageCursor as PageCursor>::KIND.to_owned(),
             token: DirectoryPageCursor {
                 head_seq: ChangeSeq(11),
-                snapshot_id: None,
+                pin_id: None,
                 directory_inode_id: InodeId(7),
                 last_name_key: NameKey::parse("plan.md").expect("name key"),
             },

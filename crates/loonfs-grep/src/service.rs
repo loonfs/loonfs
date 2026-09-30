@@ -17,7 +17,7 @@ use crate::query::{plan_pattern, GramPlanOutcome, GramQueryPlan};
 use crate::reads::{published_revision, resolve_batch_size, NamespaceReads, PinnedNamespaceReads};
 use crate::{GrepError, Result};
 use futures::future::{join_all, try_join_all};
-use loonfs::{CoreError, CurrentFileState, MetadataViewError, Observation};
+use loonfs::{CoreError, CurrentFileState, Observation};
 use loonfs_api::wire::hex::hex_decode_bytes;
 use loonfs_api::wire::sst_blocks::{
     decode_filter_block, index_blocks_for_key_range, key_range_may_intersect,
@@ -203,10 +203,10 @@ impl GrepService {
                     .into());
                 }
                 if cursor.head_seq > head_seq {
-                    return Err(CoreError::from(MetadataViewError::CursorAheadOfHead {
-                        cursor_seq: cursor.head_seq,
-                        head_seq,
-                    })
+                    return Err(CoreError::InvalidCursor(format!(
+                        "the cursor was minted at seq `{}`, ahead of the serving head `{head_seq}`",
+                        cursor.head_seq
+                    ))
                     .into());
                 }
                 Some((cursor.last_inode_id, cursor.last_byte_offset))

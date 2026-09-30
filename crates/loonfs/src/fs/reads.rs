@@ -24,7 +24,7 @@ mod tests;
 fn validate_pinned_directory_cursor(
     cursor: Option<&DirectoryPageCursor>,
     pinned_head_seq: ChangeSeq,
-    snapshot_id: Option<&PinId>,
+    pin_id: Option<&PinId>,
 ) -> Result<()> {
     let Some(cursor) = cursor else {
         return Ok(());
@@ -36,30 +36,52 @@ fn validate_pinned_directory_cursor(
         ))
         .into());
     }
-    match (&cursor.snapshot_id, snapshot_id) {
+    match (&cursor.pin_id, pin_id) {
         (Some(actual), Some(expected)) if actual == expected => Ok(()),
         (Some(actual), Some(expected)) => Err(CoreError::InvalidCursor(format!(
-            "directory cursor snapshot `{actual}` does not match requested snapshot `{expected}`"
+            "directory cursor pin `{actual}` does not match requested pin `{expected}`"
         ))
         .into()),
         (Some(actual), None) => Err(CoreError::InvalidCursor(format!(
-            "directory cursor is bound to snapshot `{actual}`"
+            "directory cursor is bound to pin `{actual}`"
         ))
         .into()),
         (None, Some(expected)) => Err(CoreError::InvalidCursor(format!(
-            "directory cursor is not bound to snapshot `{expected}`"
+            "directory cursor is not bound to pin `{expected}`"
         ))
         .into()),
         (None, None) => Ok(()),
     }
 }
 
-fn reject_snapshot_bound_directory_cursor(cursor: Option<&DirectoryPageCursor>) -> Result<()> {
-    let Some(snapshot_id) = cursor.and_then(|cursor| cursor.snapshot_id.as_ref()) else {
+/// Reads one page of the change feed at the head `context` serves. The
+/// feed's position is `after_seq`; it has no cursor parameter.
+async fn list_changes(
+    engine: &NamespaceReaderEngine<SharedObjectStore>,
+    context: &RuntimeReadContext,
+    after_seq: ChangeSeq,
+    options: ListChangesOptions,
+) -> Result<ListChangesResponse> {
+    engine.require_administrator(context).await?;
+    let limit = changes_page_limit(options.limit)?;
+    engine
+        .list_changes_after(after_seq, limit, context)
+        .await
+        .map_err(|error| match error {
+            CoreError::InvalidCursor(message) => RuntimeError::InvalidRequest {
+                message,
+                param: "after_seq",
+            },
+            error => error.into(),
+        })
+}
+
+fn reject_pinned_directory_cursor(cursor: Option<&DirectoryPageCursor>) -> Result<()> {
+    let Some(pin_id) = cursor.and_then(|cursor| cursor.pin_id.as_ref()) else {
         return Ok(());
     };
     Err(CoreError::InvalidCursor(format!(
-        "directory cursor is bound to snapshot `{snapshot_id}`; repeat snapshot_id on every page"
+        "directory cursor is bound to pin `{pin_id}`; resume it from the same snapshot or checkpoint"
     ))
     .into())
 }
@@ -92,6 +114,13 @@ impl FsReadSnapshot {
         match &self.pin {
             ReadPin::Snapshot(snapshot_id) => Some(snapshot_id),
             ReadPin::Head | ReadPin::Checkpoint(_) => None,
+        }
+    }
+
+    fn pin_id(&self) -> Option<&PinId> {
+        match &self.pin {
+            ReadPin::Checkpoint(pin_id) | ReadPin::Snapshot(pin_id) => Some(pin_id),
+            ReadPin::Head => None,
         }
     }
 
@@ -128,23 +157,12 @@ impl FsReadSnapshot {
         after_seq: ChangeSeq,
         options: ListChangesOptions,
     ) -> Result<ListChangesResponse> {
-        self.read(async {
-            if after_seq > self.head_seq() {
-                return Err(RuntimeError::InvalidRequest {
-                    message: format!(
-                        "after_seq `{after_seq}` is above snapshot sequence `{}`",
-                        self.head_seq()
-                    ),
-                    param: "after_seq",
-                });
-            }
-            self.engine.require_administrator(&self.context).await?;
-            let limit = changes_page_limit(options.limit)?;
-            Ok(self
-                .engine
-                .list_changes_after(after_seq, limit, &self.context)
-                .await?)
-        })
+        self.read(list_changes(
+            &self.engine,
+            &self.context,
+            after_seq,
+            options,
+        ))
         .await
     }
 
@@ -176,7 +194,7 @@ impl FsReadSnapshot {
             validate_pinned_directory_cursor(
                 request.cursor.as_ref(),
                 self.head_seq(),
-                self.snapshot_id(),
+                self.pin_id(),
             )?;
             let listed_path = AbsolutePath::parse(absolute_path)
                 .map_err(|error| CoreError::InvalidPath(error.to_string()))?;
@@ -184,10 +202,8 @@ impl FsReadSnapshot {
                 .engine
                 .list_path_page(listed_path.as_str(), request, options, &self.context)
                 .await?;
-            if let (Some(cursor), Some(snapshot_id)) =
-                (page.next_cursor.as_mut(), self.snapshot_id())
-            {
-                cursor.snapshot_id = Some(snapshot_id.clone());
+            if let Some(cursor) = page.next_cursor.as_mut() {
+                cursor.pin_id = self.pin_id().cloned();
             }
             Ok(ListPathEntriesResponse {
                 namespace_id: self.namespace_id().clone(),
@@ -228,16 +244,14 @@ impl FsReadSnapshot {
             validate_pinned_directory_cursor(
                 request.cursor.as_ref(),
                 self.head_seq(),
-                self.snapshot_id(),
+                self.pin_id(),
             )?;
             let mut page = self
                 .engine
                 .list_inode_children_page(inode_id, request, options, &self.context)
                 .await?;
-            if let (Some(cursor), Some(snapshot_id)) =
-                (page.next_cursor.as_mut(), self.snapshot_id())
-            {
-                cursor.snapshot_id = Some(snapshot_id.clone());
+            if let Some(cursor) = page.next_cursor.as_mut() {
+                cursor.pin_id = self.pin_id().cloned();
             }
             Ok(ListInodeChildrenResponse {
                 namespace_id: self.namespace_id().clone(),
@@ -650,7 +664,7 @@ impl FsReader {
                 .list_path_entries_page(absolute_path, request, options)
                 .await;
         }
-        reject_snapshot_bound_directory_cursor(request.cursor.as_ref())?;
+        reject_pinned_directory_cursor(request.cursor.as_ref())?;
         self.core.record_trace_context(&tracing::Span::current());
         let (mut response, next_cursor) = self
             .list_path_entries_page_typed(namespace_id, absolute_path, request, options)
@@ -758,7 +772,7 @@ impl FsReader {
                 .list_inode_children_page(inode_id, request, options)
                 .await;
         }
-        reject_snapshot_bound_directory_cursor(request.cursor.as_ref())?;
+        reject_pinned_directory_cursor(request.cursor.as_ref())?;
         self.core.record_trace_context(&tracing::Span::current());
         self.core
             .read(namespace_id, |engine, read_context| {
@@ -1346,12 +1360,9 @@ impl FsReader {
     ) -> Result<ListChangesResponse> {
         self.core.record_trace_context(&tracing::Span::current());
         self.core
-            .read(namespace_id, |engine, context| async move {
-                engine.require_administrator(&context).await?;
-                let limit = changes_page_limit(options.limit)?;
-                Ok(engine
-                    .list_changes_after(after_seq, limit, &context)
-                    .await?)
+            .read(namespace_id, |engine, context| {
+                let options = options.clone();
+                async move { list_changes(&engine, &context, after_seq, options).await }
             })
             .await
     }

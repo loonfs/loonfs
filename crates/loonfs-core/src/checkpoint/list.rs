@@ -142,7 +142,7 @@ mod cursor_tests {
     fn cursor_is_operation_bound() {
         let directory = DirectoryPageCursor {
             head_seq: loonfs_api::ChangeSeq(1),
-            snapshot_id: None,
+            pin_id: None,
             directory_inode_id: loonfs_api::InodeId(1),
             last_name_key: NameKey::parse("entry").expect("name key"),
         };

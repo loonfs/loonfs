@@ -145,7 +145,8 @@ pub struct ErrorDetails {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub after_seq: Option<ChangeSeq>,
-    /// Oldest sequence still promised for incremental replay.
+    /// Oldest position a change feed can resume after. The feed returns
+    /// changes above it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub retention_floor_seq: Option<ChangeSeq>,
@@ -211,7 +212,8 @@ pub struct Namespace {
     pub fork_basis: Option<NamespaceForkBasis>,
     /// Current visible namespace sequence.
     pub head_seq: ChangeSeq,
-    /// Oldest sequence still promised for incremental replay.
+    /// Oldest position a change feed can resume after. The feed returns
+    /// changes above it.
     pub retention_floor_seq: ChangeSeq,
 }
 
@@ -268,7 +270,8 @@ pub struct NamespaceDiagnostics {
     pub fork_basis: Option<NamespaceForkBasis>,
     /// Current visible namespace sequence.
     pub head_seq: ChangeSeq,
-    /// Oldest sequence still promised for incremental replay.
+    /// Oldest position a change feed can resume after. The feed returns
+    /// changes above it.
     pub retention_floor_seq: ChangeSeq,
     /// The namespace's current manifest number.
     #[serde(default, skip_serializing_if = "Option::is_none")]
