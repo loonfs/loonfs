@@ -263,13 +263,12 @@ fn ensure_publication_in_budget(object_key: &str, deadline: &Deadline) -> Result
     let elapsed_ms = deadline.elapsed_ms();
     // A put that lands after the budget may have landed on a reclaimed number.
     if elapsed_ms > crate::limits::METADATA_PUBLICATION_BUDGET_MS {
-        return Err(CoreError::Store {
+        return Err(CoreError::OutcomeUnknown {
             object_key: object_key.to_owned(),
             message: format!(
-                "manifest publication outcome is unknown after {elapsed_ms}ms (budget {}ms)",
+                "the publication took {elapsed_ms}ms, over its {}ms budget",
                 crate::limits::METADATA_PUBLICATION_BUDGET_MS,
             ),
-            class: crate::error::StoreFailureClass::RetryableTransport,
         });
     }
     Ok(())

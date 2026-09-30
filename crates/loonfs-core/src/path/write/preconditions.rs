@@ -231,12 +231,6 @@ async fn evaluate_binding<S: ObjectStore + ?Sized>(
                 actual_binding_version,
                 precondition_index,
             },
-            CoreError::RootMutationForbidden => CoreError::BindingVersionMismatch {
-                inode_id: binding.inode_id,
-                expected_binding_version: expected.clone(),
-                actual_binding_version: None,
-                precondition_index,
-            },
             CoreError::InvalidCommitField { field, message, .. } => CoreError::InvalidCommitField {
                 field,
                 message,

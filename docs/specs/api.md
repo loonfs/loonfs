@@ -252,7 +252,7 @@ The codes that populate it:
 | `stale_revision` | `inode_id`, `expected_revision_no`, `actual_revision_no` (absent when the inode has no current revision or is not visible); `precondition_index` for a failed request precondition |
 | `stale_attributes` | `inode_id`, `expected_attributes_revision_no` (absent when the caller stated no expectation), `actual_attributes_revision_no` (absent when the inode is not visible); `precondition_index` for a failed request precondition |
 | `stale_access` | `inode_id`, `expected_access_revision_no` (absent when the caller stated no expectation), `actual_access_revision_no` (absent when the inode is not visible); `precondition_index` for a failed request precondition |
-| `binding_version_mismatch` | `inode_id`, `expected_binding_version` (the request's token as supplied), `actual_binding_version` (the current binding's token, absent for the root); `precondition_index` for a failed request precondition. Clients must not parse or order the tokens |
+| `binding_version_mismatch` | `inode_id`, `expected_binding_version` (the request's token as supplied), `actual_binding_version` (the current binding's token); `precondition_index` for a failed request precondition. Clients must not parse or order the tokens |
 | `commit_id_reuse_conflict` | `commit_id`, plus `committed_seq` and `committed_fingerprint` when the conflict was decided against a durable commit receipt: the sequence that `commit_id` already landed at, and the semantic identity of what landed there (section 5.1). The sequence comes from the receipt and the fingerprint comes from the retained commit row at that sequence, so both are present or neither is; both are absent when nothing has committed under the id yet and two live requests are claiming it at once |
 | `rebootstrap_required` | `after_seq`, `retention_floor_seq` |
 | `stale_head` | `expected_head_seq`, `actual_head_seq` for a caller-supplied head precondition; `precondition_index` identifies a failed request precondition. |
@@ -307,6 +307,7 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | `rebootstrap_required` | 409 | A change feed `after_seq` is below the retention floor, so the feed no longer holds the changes after it. Rebuild state from a fresh listing or checkpoint. |
 | `not_supported` | 501 | The deployment does not implement the requested op or feature. |
 | `commit_outcome_unknown` | 503 | The publish outcome was not observed; the commit may or may not be visible. Retry with the same commit id or reconcile. |
+| `outcome_unknown` | 503 | The outcome of a write other than a commit was not observed; the operation may or may not have taken effect. Read the resource before retrying. |
 | `commit_queue_full` | 503 | The namespace write queue is full; back off and retry. |
 | `writer_session_closed` | 503 | This node holds no open writer session for the namespace. The request was not admitted; retry on the node the namespace is assigned to. |
 | `writer_capacity_exceeded` | 503 | This node holds its maximum number of writer sessions and every one is busy, so none can be closed to make room (section 5.3). The request was not admitted; retry on another node, or wait for a session to settle in a single-node deployment. |
@@ -329,9 +330,9 @@ be retried. Of the registered error codes, only `commit_queue_full`,
 the request to another node, not by waiting, and carry no `Retry-After` header.
 `checkpoint_unavailable`, `maintenance_required`, and `index_lagging` require
 maintenance. `storage_permission_denied` requires the operator to fix the
-storage credentials or bucket policy. `commit_outcome_unknown` and
-`deadline_exceeded` require the caller to determine whether a mutation
-completed before retrying it.
+storage credentials or bucket policy. `commit_outcome_unknown`,
+`outcome_unknown`, and `deadline_exceeded` require the caller to determine
+whether a mutation completed before retrying it.
 Responses carrying one of the three immediately retryable codes include
 `Retry-After: 1`. Generated SDKs retry a response that carries `Retry-After` and do
 not retry on status alone.
@@ -569,7 +570,7 @@ The path must resolve to that inode. A different inode or an unbound path return
 Without a binding version, returning to the same inode satisfies the precondition again.
 Optional `expected_binding_version` also detects moves away and back.
 A binding version mismatch returns `binding_version_mismatch`.
-Binding the root to `ino_1` passes without a binding version. The root has no binding version, so supplying one returns `binding_version_mismatch`.
+Binding the root to `ino_1` passes without a binding version. The root has no binding version, so supplying one returns `invalid_request`.
 
 `path_absence` requires only an absolute `path` and rejects inode or binding version fields.
 It passes when no visible entry resolves at the full path, including when an ancestor is missing or an intermediate component is not a directory.

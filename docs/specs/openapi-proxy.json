@@ -897,7 +897,7 @@
           },
           "actual_binding_version": {
             "$ref": "#/components/schemas/BindingVersion",
-            "description": "Current binding token; absent for the root, which has no binding."
+            "description": "Current binding token."
           },
           "actual_deletion_seq": {
             "$ref": "#/components/schemas/ChangeSeq",

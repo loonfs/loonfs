@@ -2,10 +2,10 @@
 
 use crate::common::{control, default_page_limit, GrepHost};
 use loonfs::{CreateNamespaceOptions, FsWriter, PutFileOptions, SharedObjectStore};
-use loonfs_api::{ManifestNo, PageRequest};
+use loonfs_api::{ErrorCode, ManifestNo, PageRequest};
 use loonfs_grep::keyspace::manifest_key;
 use loonfs_grep::manifest::{load_current_grep_manifest, GrepIndexStatus};
-use loonfs_grep::{GramIndexBuildPolicy, GrepError, GREP_GC_GRACE_WINDOW_MS};
+use loonfs_grep::{GramIndexBuildPolicy, GREP_GC_GRACE_WINDOW_MS};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{
@@ -111,7 +111,7 @@ async fn a_collected_publication_does_not_abandon_a_successors_backfill_checkpoi
             .is_some(),
         "uncertain publication cleanup must preserve the successor's checkpoint"
     );
-    assert!(matches!(outcome, Err(GrepError::StoreUnavailable { .. })));
+    assert!(matches!(outcome, Err(error) if error.code() == ErrorCode::OutcomeUnknown));
 }
 
 #[tokio::test]
@@ -143,7 +143,7 @@ async fn an_enable_whose_put_reads_back_absent_fails_and_keeps_its_checkpoint() 
 
     let outcome = host.worker.enable(&namespace_id).await;
 
-    assert!(matches!(outcome, Err(GrepError::StoreUnavailable { .. })));
+    assert!(matches!(outcome, Err(error) if error.code() == ErrorCode::OutcomeUnknown));
     assert!(load_current_grep_manifest(&base, &namespace_id)
         .await
         .expect("load")

@@ -34,8 +34,8 @@ pub enum ErrorKind {
     DeadlineExceeded,
     /// An unavailable condition that may require retry or maintenance.
     Unavailable,
-    /// The operation may have committed and requires retry with the same commit ID or
-    /// reconciliation.
+    /// The operation may or may not have taken effect. Retry a commit with the same commit
+    /// ID; read any other resource before retrying.
     OutcomeUnknown,
     /// Durable state is malformed and requires operator repair.
     DataCorruption,
@@ -141,6 +141,7 @@ error_codes! {
     WouldCycle => "would_cycle",
     CommitIdReuseConflict => "commit_id_reuse_conflict",
     CommitOutcomeUnknown => "commit_outcome_unknown",
+    OutcomeUnknown => "outcome_unknown",
     CommitQueueFull => "commit_queue_full",
     WriterSessionClosed => "writer_session_closed",
     WriterCapacityExceeded => "writer_capacity_exceeded",
@@ -200,7 +201,7 @@ impl ErrorCode {
             | ErrorCode::ContentNotMaterialized
             | ErrorCode::IndexLagging
             | ErrorCode::MaintenanceRequired => ErrorKind::Unavailable,
-            ErrorCode::CommitOutcomeUnknown => ErrorKind::OutcomeUnknown,
+            ErrorCode::CommitOutcomeUnknown | ErrorCode::OutcomeUnknown => ErrorKind::OutcomeUnknown,
             ErrorCode::IndexCorrupt | ErrorCode::NamespaceCorrupt => ErrorKind::DataCorruption,
             ErrorCode::ServerError => ErrorKind::Internal,
             // The spec deliberately surfaces precondition failures
@@ -276,6 +277,7 @@ impl ErrorCode {
             | ErrorCode::WouldCycle
             | ErrorCode::CommitIdReuseConflict
             | ErrorCode::CommitOutcomeUnknown
+            | ErrorCode::OutcomeUnknown
             | ErrorCode::WriterSessionClosed
             | ErrorCode::WriterCapacityExceeded
             | ErrorCode::DeadlineExceeded

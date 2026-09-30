@@ -197,9 +197,8 @@ async fn a_late_ambiguous_put_cannot_confirm_a_recreated_manifest() {
             blocked.release();
         }
     );
-    assert!(matches!(outcome, Err(CoreError::Store {
+    assert!(matches!(outcome, Err(CoreError::OutcomeUnknown {
         object_key: actual_key,
-        class: crate::error::StoreFailureClass::RetryableTransport,
         ..
     }) if actual_key == object_key));
     assert_eq!(blocked.inner().remaining(), 0);
