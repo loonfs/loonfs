@@ -1,7 +1,7 @@
 //! Clocks used for durable timestamps and local publication time limits.
 
 use crate::error::{CoreError, Result};
-use crate::limits::METADATA_PUBLICATION_BUDGET_MS;
+use crate::limits::{METADATA_PUBLICATION_BUDGET_MS, READ_REVALIDATION_BOUND_MS};
 use loonfs_api::NamespaceId;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -85,6 +85,14 @@ impl Observation {
     /// Returns the milliseconds elapsed since this observation.
     pub fn age_ms(&self) -> u64 {
         self.timer.monotonic_now_ms().saturating_sub(self.at_ms)
+    }
+
+    /// Returns whether an answer arriving now is still inside the revalidation bound of this check.
+    ///
+    /// An absent manifest successor confirms a view only if the answer arrives less than
+    /// [`READ_REVALIDATION_BOUND_MS`] after the view's previous check (format section 4.2).
+    pub fn is_within_revalidation_bound(&self) -> bool {
+        self.age_ms() < READ_REVALIDATION_BOUND_MS
     }
 
     pub(crate) fn age_at(&self, observation: &Self) -> u64 {

@@ -10,15 +10,17 @@ pub trait MonotonicTimer: std::fmt::Debug + Send + Sync {
 }
 
 /// Measures monotonic elapsed time, including host sleep.
+///
+/// Every instance measures from one process-wide origin, so readings from any two standard timers
+/// are comparable.
 #[derive(Debug, Default)]
-pub struct StdMonotonicTimer {
-    origin: OnceLock<Duration>,
-}
+pub struct StdMonotonicTimer(());
 
 impl MonotonicTimer for StdMonotonicTimer {
     fn monotonic_now_ms(&self) -> u64 {
+        static ORIGIN: OnceLock<Duration> = OnceLock::new();
         let now = monotonic_now();
-        let origin = self.origin.get_or_init(|| now);
+        let origin = ORIGIN.get_or_init(|| now);
         u64::try_from(now.saturating_sub(*origin).as_millis()).unwrap_or(u64::MAX)
     }
 }
@@ -111,4 +113,21 @@ pub fn transport_retry_backoff(policy: &TransportRetryPolicy, retry: u32) -> Dur
         .initial_backoff
         .saturating_mul(1u32 << doublings)
         .min(policy.max_backoff)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn standard_timers_created_at_different_times_read_on_one_scale() {
+        let first = StdMonotonicTimer::default();
+        let started_ms = first.monotonic_now_ms();
+        let mut earlier_ms = started_ms;
+        while earlier_ms == started_ms {
+            earlier_ms = first.monotonic_now_ms();
+        }
+        let second = StdMonotonicTimer::default();
+        assert!(second.monotonic_now_ms() >= earlier_ms);
+    }
 }
