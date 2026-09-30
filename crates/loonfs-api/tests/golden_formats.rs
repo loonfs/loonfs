@@ -31,8 +31,8 @@ use loonfs_api::wire::manifest::{
     METADATA_SEGMENT_ENCODING,
 };
 use loonfs_api::wire::wal::{
-    decode_wal_segment_envelope_zstd, encode_wal_segment_envelope_zstd, WalCommitDelta,
-    WalCommitPayload, WalDelta, WalInlineContent, WalSegmentPayload,
+    decode_wal_object_envelope_zstd, encode_wal_object_envelope_zstd, WalCommitDelta,
+    WalCommitPayload, WalDelta, WalInlineContent, WalObjectPayload,
 };
 use loonfs_api::{
     sha256_digest, AccessGrants, AccessRevisionNo, AccessRight, ActorId, AttributeKey,
@@ -233,7 +233,7 @@ fn sample_grants() -> AccessGrants {
     .expect("grants")
 }
 
-fn sample_wal_payload() -> WalSegmentPayload {
+fn sample_wal_payload() -> WalObjectPayload {
     let deltas = vec![
         WalCommitDelta {
             semantic_operation_index: 0,
@@ -316,7 +316,7 @@ fn sample_wal_payload() -> WalSegmentPayload {
             },
         },
     ];
-    WalSegmentPayload {
+    WalObjectPayload {
         namespace_id: namespace_id(),
         wal_no: WalNo(2),
         writer_epoch: WriterEpoch(3),
@@ -338,7 +338,7 @@ fn sample_wal_payload() -> WalSegmentPayload {
     }
 }
 
-fn sample_wal_inline_content_payload() -> WalSegmentPayload {
+fn sample_wal_inline_content_payload() -> WalObjectPayload {
     let mut payload = sample_wal_payload();
     let mut without_inline_content = payload.records[0].clone();
     without_inline_content.committed_seq = ChangeSeq(3);
@@ -502,8 +502,8 @@ fn sample_fork_manifest() -> NamespaceManifestPayload {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn wal_segment_document_matches_golden_bytes() {
-    let encoded = encode_wal_segment_envelope_zstd(sample_wal_payload())
+fn wal_object_document_matches_golden_bytes() {
+    let encoded = encode_wal_object_envelope_zstd(sample_wal_payload())
         .expect("encode wal")
         .into_bytes();
     // Compare the decompressed document: zstd frames may differ across zstd
@@ -512,26 +512,26 @@ fn wal_segment_document_matches_golden_bytes() {
 }
 
 #[test]
-fn wal_segment_golden_decodes_to_sample() {
-    let decoded = decode_wal_segment_envelope_zstd(&rezstd(&read_golden("wal_segment.v1.cbor")))
-        .expect("decode golden wal segment");
+fn wal_object_golden_decodes_to_sample() {
+    let decoded = decode_wal_object_envelope_zstd(&rezstd(&read_golden("wal_segment.v1.cbor")))
+        .expect("decode golden WAL object");
     assert_eq!(decoded.into_payload(), sample_wal_payload());
 }
 
 #[test]
-fn wal_segment_inline_content_document_matches_golden_bytes() {
-    let encoded = encode_wal_segment_envelope_zstd(sample_wal_inline_content_payload())
+fn wal_object_inline_content_document_matches_golden_bytes() {
+    let encoded = encode_wal_object_envelope_zstd(sample_wal_inline_content_payload())
         .expect("encode wal with inline content")
         .into_bytes();
     assert_matches_golden("wal_segment_inline_content.v1.cbor", &unzstd(&encoded));
 }
 
 #[test]
-fn wal_segment_inline_content_golden_decodes_to_sample() {
-    let decoded = decode_wal_segment_envelope_zstd(&rezstd(&read_golden(
+fn wal_object_inline_content_golden_decodes_to_sample() {
+    let decoded = decode_wal_object_envelope_zstd(&rezstd(&read_golden(
         "wal_segment_inline_content.v1.cbor",
     )))
-    .expect("decode golden wal segment with inline content");
+    .expect("decode golden WAL object with inline content");
     assert_eq!(decoded.into_payload(), sample_wal_inline_content_payload());
 }
 
@@ -1263,11 +1263,11 @@ fn metadata_row_family_wire_tags_are_pinned() {
 
 /// Edits a WAL payload and updates its checksum.
 fn wal_document_with_payload_edit(
-    payload: &WalSegmentPayload,
+    payload: &WalObjectPayload,
     edit: impl FnOnce(&mut ciborium::Value),
 ) -> Vec<u8> {
     let document = unzstd(
-        &encode_wal_segment_envelope_zstd(payload.clone())
+        &encode_wal_object_envelope_zstd(payload.clone())
             .expect("wal")
             .into_bytes(),
     );
@@ -1323,8 +1323,8 @@ fn commit_delta(payload: &mut ciborium::Value, position: usize) -> &mut ciborium
     cbor_entry(delta, "delta")
 }
 
-/// Builds a sample segment with the supplied deltas.
-fn wal_payload_with_deltas(deltas: Vec<WalCommitDelta>) -> WalSegmentPayload {
+/// Builds a sample WAL object payload with the supplied deltas.
+fn wal_payload_with_deltas(deltas: Vec<WalCommitDelta>) -> WalObjectPayload {
     let mut payload = sample_wal_payload();
     payload.records[0].deltas = deltas;
     payload
@@ -1382,7 +1382,7 @@ fn wal_delta_decode_rejects_invalid_name_key() {
 #[test]
 fn wal_decode_rejects_wrong_format_version_cleanly() {
     let document = unzstd(
-        &encode_wal_segment_envelope_zstd(sample_wal_payload())
+        &encode_wal_object_envelope_zstd(sample_wal_payload())
             .expect("wal")
             .into_bytes(),
     );
@@ -1390,7 +1390,7 @@ fn wal_decode_rejects_wrong_format_version_cleanly() {
         *value = ciborium::Value::from(7);
     });
 
-    let err = decode_wal_segment_envelope_zstd(&rezstd(&wrong_version))
+    let err = decode_wal_object_envelope_zstd(&rezstd(&wrong_version))
         .expect_err("wrong version must be rejected");
     assert!(
         matches!(
@@ -1408,7 +1408,7 @@ fn wal_decode_rejects_wrong_format_version_cleanly() {
 #[test]
 fn wal_decode_rejects_unknown_kind_cleanly() {
     let document = unzstd(
-        &encode_wal_segment_envelope_zstd(sample_wal_payload())
+        &encode_wal_object_envelope_zstd(sample_wal_payload())
             .expect("wal")
             .into_bytes(),
     );
@@ -1416,7 +1416,7 @@ fn wal_decode_rejects_unknown_kind_cleanly() {
         *value = ciborium::Value::from("namespace_wal_index");
     });
 
-    let err = decode_wal_segment_envelope_zstd(&rezstd(&rekinded))
+    let err = decode_wal_object_envelope_zstd(&rezstd(&rekinded))
         .expect_err("unknown kind must be rejected");
     assert!(
         matches!(err, EnvelopeCodecError::KindMismatch { .. }),
@@ -1427,7 +1427,7 @@ fn wal_decode_rejects_unknown_kind_cleanly() {
 #[test]
 fn wal_decode_rejects_tampered_payload_bytes_as_checksum_mismatch() {
     let document = unzstd(
-        &encode_wal_segment_envelope_zstd(sample_wal_payload())
+        &encode_wal_object_envelope_zstd(sample_wal_payload())
             .expect("wal")
             .into_bytes(),
     );
@@ -1440,7 +1440,7 @@ fn wal_decode_rejects_tampered_payload_bytes_as_checksum_mismatch() {
         *last ^= 0xff;
     });
 
-    let err = decode_wal_segment_envelope_zstd(&rezstd(&tampered))
+    let err = decode_wal_object_envelope_zstd(&rezstd(&tampered))
         .expect_err("tampered payload must be rejected");
     assert!(
         matches!(err, EnvelopeCodecError::ChecksumMismatch { .. }),
@@ -1454,7 +1454,7 @@ fn wal_decode_rejects_unknown_payload_fields() {
     let envelope = sample_wal_payload();
     let document = wal_document_with_payload_edit(&envelope, with_future_field);
 
-    let error = decode_wal_segment_envelope_zstd(&document)
+    let error = decode_wal_object_envelope_zstd(&document)
         .expect_err("unknown durable fields must be rejected");
     assert!(matches!(error, EnvelopeCodecError::PayloadDecode(message)
         if message.contains("unknown field") && message.contains("field_from_the_future")));
@@ -1493,7 +1493,7 @@ fn wal_decode_rejects_unknown_fields_inside_tombstone_deltas() {
         with_future_field(cbor_entry(commit_delta(payload, 1), "target"));
     });
 
-    let error = decode_wal_segment_envelope_zstd(&document)
+    let error = decode_wal_object_envelope_zstd(&document)
         .expect_err("unknown durable fields must be rejected");
     assert!(matches!(error, EnvelopeCodecError::PayloadDecode(message)
         if message.contains("unknown field") && message.contains("field_from_the_future")));
@@ -1506,7 +1506,7 @@ fn wal_decode_rejects_a_version_one_commit_without_committed_by() {
             .retain(|(key, _)| key.as_text() != Some("committed_by"));
     });
 
-    let error = decode_wal_segment_envelope_zstd(&document)
+    let error = decode_wal_object_envelope_zstd(&document)
         .expect_err("version-one WAL commits require an actor");
     assert!(
         matches!(&error, EnvelopeCodecError::PayloadDecode(message) if message.contains("committed_by")),
@@ -1645,7 +1645,7 @@ fn immutable_envelopes_reject_unknown_fields() {
         Err(EnvelopeCodecError::EnvelopeDecode(message)) if message.contains("field_from_the_future")));
 
     let encoded = unzstd(
-        &encode_wal_segment_envelope_zstd(sample_wal_payload())
+        &encode_wal_object_envelope_zstd(sample_wal_payload())
             .expect("wal")
             .into_bytes(),
     );
@@ -1654,7 +1654,7 @@ fn immutable_envelopes_reject_unknown_fields() {
     with_future_field(&mut document);
     let mut future = Vec::new();
     ciborium::ser::into_writer(&document, &mut future).expect("encode document");
-    assert!(matches!(decode_wal_segment_envelope_zstd(&rezstd(&future)),
+    assert!(matches!(decode_wal_object_envelope_zstd(&rezstd(&future)),
         Err(EnvelopeCodecError::EnvelopeDecode(message)) if message.contains("field_from_the_future")));
 }
 

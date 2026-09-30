@@ -205,7 +205,7 @@ pub enum KeyClass {
     Content,
     /// Groups small control records not assigned a more specific class.
     Metadata,
-    /// Groups immutable WAL segment payloads.
+    /// Groups immutable WAL object payloads.
     WalSegment,
     /// Groups namespace manifests.
     NamespaceManifest,
@@ -756,7 +756,7 @@ fn classify_key(key: &str) -> KeyClass {
 
     match parsed.family() {
         DurableObjectFamily::ContentBlob => KeyClass::Content,
-        DurableObjectFamily::WalSegment => KeyClass::WalSegment,
+        DurableObjectFamily::WalObject => KeyClass::WalSegment,
         DurableObjectFamily::MetadataManifest | DurableObjectFamily::Hint => {
             KeyClass::NamespaceManifest
         }

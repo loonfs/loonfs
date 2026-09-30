@@ -1053,7 +1053,7 @@ Durable inode IDs are integers. Public API inode strings such as `ino_42` do not
 
 ### 12.2 Envelopes and checksums
 
-Structured control records, manifests, and WAL segments use an envelope with `kind`, `format_version`, `payload_checksum`, and `payload`. Content objects are raw file bytes. Block segments use the sectioned encoding in Appendix A instead of an envelope.
+Structured control records, manifests, and WAL objects use an envelope with `kind`, `format_version`, `payload_checksum`, and `payload`. Content objects are raw file bytes. Block segments use the sectioned encoding in Appendix A instead of an envelope.
 
 JSON envelopes retain the payload as an inline raw JSON fragment. A WAL envelope contains the encoded CBOR payload as a CBOR byte string. The enclosing document is compressed with zstd. The checksum covers the payload bytes that were stored, not a decoded object serialized again by the reader.
 
@@ -1105,7 +1105,7 @@ The three control-object kinds are `hint`, `pin`, and `upload_session`.
 
 | Object | Envelope kind | Encoding | Version |
 | --- | --- | --- | --- |
-| WAL segment | `wal_segment` | zstd-compressed CBOR envelope with CBOR payload bytes | 1 |
+| WAL object | `wal_segment` | zstd-compressed CBOR envelope with CBOR payload bytes | 1 |
 | Namespace manifest | `manifest` | Uncompressed JSON | 1 |
 | Namespace hint | `hint` | Uncompressed JSON | 1 |
 | Metadata segment | No envelope | Block sections described in A.7 | 1, named by the segment descriptor's `encoding` |
@@ -1230,11 +1230,11 @@ The owner and segment ID determine the object key. The descriptor stores no sepa
 
 ### A.5 WAL records
 
-`MAX_WAL_SEGMENT_BYTES` is 512 MiB (536,870,912 bytes) for the complete decompressed WAL document, including its envelope. Writers keep every segment within this limit through request and batch admission; readers refuse larger documents. A writer composes each batch so the sum of its requests' bounds plus the document overhead stays within the limit. This is a format constraint because every successful publication must remain readable with bounded decompression.
+`MAX_WAL_OBJECT_BYTES` is 512 MiB (536,870,912 bytes) for the complete decompressed WAL document, including its envelope. Writers keep every WAL object within this limit through request and batch admission; readers refuse larger documents. A writer composes each batch so the sum of its requests' bounds plus the document overhead stays within the limit. This is a format constraint because every successful publication must remain readable with bounded decompression.
 
-A WAL segment's payload contains `namespace_id`, `wal_no`, `writer_epoch`, `head_seq`, `next_inode_id`, and `records`.
+A WAL object's payload contains `namespace_id`, `wal_no`, `writer_epoch`, `head_seq`, `next_inode_id`, and `records`.
 
-For a data segment, `prior_head_seq` is derived with checked subtraction from the first record sequence. `records` covers the sequences after it through `head_seq` contiguously. A first sequence of zero is invalid. The WAL number must match the key, and the allocation high-water mark must agree with replay. A fence has an empty record list and an unchanged head and allocator. Its derived `prior_head_seq` equals `head_seq`. Fences participate in WAL numbering and epoch validation but produce no logical changes.
+For a data WAL object, `prior_head_seq` is derived with checked subtraction from the first record sequence. `records` covers the sequences after it through `head_seq` contiguously. A first sequence of zero is invalid. The WAL number must match the key, and the allocation high-water mark must agree with replay. A fence has an empty record list and an unchanged head and allocator. Its derived `prior_head_seq` equals `head_seq`. Fences participate in WAL numbering and epoch validation but produce no logical changes.
 
 Each commit contains `committed_seq`, `commit_id`, `committed_by`, `semantic_commit_fingerprint`, `committed_at_ms`, optional `message`, `deltas`, and optional `inline_content`. A delta wrapper contains `semantic_operation_index` and `delta`. The latter is a kind-tagged object with these fields:
 
@@ -1253,15 +1253,15 @@ A delta's own commit sequence is implicit in its containing commit. An unbind ta
 
 `inline_content` is a list of `{content_id, bytes}`, where `bytes` is a CBOR byte string; the field is omitted when empty and defaults to an empty list when absent. This field is part of the version 1 format, and the reference it accompanies is an ordinary `blob_v1` reference.
 
-Encoding and decoding enforce these rules using only the WAL segment:
+Encoding and decoding enforce these rules using only the WAL object:
 
-1. Every entry's `content_id` is named by at least one `append_file_revision` delta in the same commit whose `content_ref.owner_namespace_id` equals the segment's `namespace_id`.
+1. Every entry's `content_id` is named by at least one `append_file_revision` delta in the same commit whose `content_ref.owner_namespace_id` equals the WAL object's `namespace_id`.
 2. The entry's length equals the `size_bytes` of every such reference. A zero-length entry is valid.
 3. A content ID appears at most once in a commit's `inline_content`.
 4. Each entry contains at most `MAX_WAL_INLINE_CONTENT_BYTES`: 256 KiB (262,144 bytes).
-5. The sum of all entry lengths in one WAL segment is at most `MAX_WAL_SEGMENT_INLINE_CONTENT_BYTES`: 4 MiB (4,194,304 bytes).
+5. The sum of all entry lengths in one WAL object is at most `MAX_WAL_OBJECT_INLINE_CONTENT_BYTES`: 4 MiB (4,194,304 bytes).
 
-These are reader limits; writer thresholds are policy at or below them. `MAX_WAL_SEGMENT_BYTES` still limits the complete decompressed document. A delta may name content with no inline entry. Replay does not hash inline bytes against the reference's checksum; the envelope's `payload_checksum` covers the stored payload bytes.
+These are reader limits; writer thresholds are policy at or below them. `MAX_WAL_OBJECT_BYTES` still limits the complete decompressed document. A delta may name content with no inline entry. Replay does not hash inline bytes against the reference's checksum; the envelope's `payload_checksum` covers the stored payload bytes.
 
 WAL replay applies these normalized records in sequence and delta order. It does not re-run the original request's preconditions or reinterpret the request under a newer planner.
 
@@ -1432,7 +1432,7 @@ These patterns define the core object families. Segment owners can differ from t
 
 | Family | Standard object key pattern |
 | --- | --- |
-| **WAL segments** | `namespaces/{namespace_id}/wal/{wal_no:020}.wal.zst` |
+| **WAL objects** | `namespaces/{namespace_id}/wal/{wal_no:020}.wal.zst` |
 | **Namespace manifests** | `namespaces/{namespace_id}/manifests/{manifest_no:020}.json` |
 | **Pin records** | `namespaces/{namespace_id}/pins/{pin_id}.json` |
 | **Metadata segments** | `namespaces/{owner_namespace_id}/segments/{segment_id}.sst.zst` |
@@ -1633,9 +1633,9 @@ These are reference producer and runtime defaults. A target size can be exceeded
 | Maximum bounded compaction input runs | 8 |
 | Maximum bounded compaction input rows | 131,072 |
 | Maximum bounded compaction decoded input | 64 MiB |
-| Automatic WAL-fold threshold | 32 segments |
+| Automatic WAL-fold threshold | 32 WAL objects |
 | Idle WAL-fold period | 15 minutes |
-| Unfolded-tail write rejection threshold | 128 segments |
+| Unfolded-tail write rejection threshold | 128 WAL objects |
 | `RuntimeCacheConfig::manifest_revalidation_interval_ms` | 1,000 ms |
 | Maximum commit-message size | 4,096 bytes |
 

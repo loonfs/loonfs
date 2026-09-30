@@ -94,7 +94,7 @@ fn reject_pinned_directory_cursor(cursor: Option<&DirectoryPageCursor>) -> Resul
 #[must_use]
 pub struct FsReadSnapshot {
     engine: NamespaceReaderEngine<SharedObjectStore>,
-    core: super::ReadCore,
+    core: super::RuntimeCore,
     context: RuntimeReadContext,
     pin: ReadPin,
 }

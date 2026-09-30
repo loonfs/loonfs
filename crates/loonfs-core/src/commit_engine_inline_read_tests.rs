@@ -12,7 +12,7 @@ use crate::namespace::read_anchor::load_read_anchor;
 use crate::storage::content::{ContentLocation, DurableContentValidationError};
 use crate::{NamespaceEngine, RuntimeReadContext};
 use loonfs_api::{DestinationPrecondition, RevisionNo, WalNo};
-use loonfs_objectstore::keys::{content_blob, wal_segment};
+use loonfs_objectstore::keys::{content_blob, wal_object};
 use loonfs_objectstore::PutMode;
 use std::num::NonZeroU64;
 
@@ -253,7 +253,7 @@ async fn published_projection_reads_without_replay_and_counts_inline_bytes() {
     );
     assert!(store.snapshot().iter().all(|operation| !operation
         .key()
-        .starts_with(&wal_segment_prefix(&publisher.namespace_id))));
+        .starts_with(&wal_prefix(&publisher.namespace_id))));
     assert_no_content_requests(&store);
 }
 
@@ -539,13 +539,13 @@ async fn inline_checksum_failures_match_object_validation() {
     let input = publisher.wal_fold_input().expect("head");
     let bytes = store
         .get(
-            &wal_segment(&publisher.namespace_id, &input.head.wal_no),
+            &wal_object(&publisher.namespace_id, &input.head.wal_no),
             None,
         )
         .await
         .expect("get WAL")
         .expect("WAL");
-    let mut payload = decode_wal_segment_envelope_zstd(&bytes)
+    let mut payload = decode_wal_object_envelope_zstd(&bytes)
         .expect("decode")
         .into_payload();
     payload.wal_no = WalNo(input.head.wal_no.0 + 1);
@@ -571,8 +571,8 @@ async fn inline_checksum_failures_match_object_validation() {
     }
     record.inline_content[0].content_id = corrupt_ref.content_id.clone();
     record.inline_content[0].bytes = b"wrong".to_vec();
-    let key = wal_segment(&publisher.namespace_id, &payload.wal_no);
-    let bytes = loonfs_api::wire::wal::encode_wal_segment_envelope_zstd(payload)
+    let key = wal_object(&publisher.namespace_id, &payload.wal_no);
+    let bytes = loonfs_api::wire::wal::encode_wal_object_envelope_zstd(payload)
         .expect("codec does not hash")
         .into_bytes();
     store
@@ -638,7 +638,7 @@ async fn folded_inline_values_remain_readable_after_all_folded_wal_is_deleted() 
     for delete_wal in [false, true] {
         if delete_wal {
             for object in store
-                .list_prefix(&wal_segment_prefix(&publisher.namespace_id))
+                .list_prefix(&wal_prefix(&publisher.namespace_id))
                 .await
                 .expect("WAL")
             {

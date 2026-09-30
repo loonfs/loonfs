@@ -1,4 +1,5 @@
-//! Shared read state and additional state used by writers.
+//! The runtime core that read-only and writable runtimes share, and the extra
+//! state a writer holds.
 
 use crate::cache::{RuntimeCacheStatsInner, RuntimeControlCache};
 use crate::config::ReadConfig;
@@ -28,14 +29,15 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex, MutexGuard};
 use tokio::sync::Semaphore;
 
-/// Shared object-store client, read configuration, caches, and metrics.
+/// The object-store client, configuration, caches, and metrics that
+/// read-only and writable runtimes share.
 #[derive(Clone)]
-pub(crate) struct ReadCore {
-    pub(crate) inner: Arc<ReadCoreInner>,
+pub(crate) struct RuntimeCore {
+    pub(crate) inner: Arc<RuntimeCoreInner>,
     pub(crate) subject: Option<Subject>,
 }
 
-pub(crate) struct ReadCoreInner {
+pub(crate) struct RuntimeCoreInner {
     pub(crate) store: SharedObjectStore,
     pub(crate) config: ReadConfig,
     pub(crate) timer: Arc<dyn loonfs_api::MonotonicTimer>,
@@ -136,7 +138,7 @@ impl WriterIdentity {
 /// Poisoning is propagated as a panic: a poisoned cache means another thread
 /// panicked mid-update, and serving from it could violate the consistency the
 /// caches promise.
-impl ReadCoreInner {
+impl RuntimeCoreInner {
     pub(crate) fn control_cache(&self) -> MutexGuard<'_, RuntimeControlCache> {
         self.control_cache
             .lock()
@@ -144,7 +146,7 @@ impl ReadCoreInner {
     }
 }
 
-impl ReadCore {
+impl RuntimeCore {
     pub(crate) fn as_subject(&self, subject: Subject) -> Self {
         Self {
             inner: Arc::clone(&self.inner),
@@ -152,7 +154,7 @@ impl ReadCore {
         }
     }
 
-    /// Opens a read core. When `shared_metadata_segment_cache` is set, the
+    /// Opens a runtime core. When `shared_metadata_segment_cache` is set, the
     /// core reuses that decoded-block cache instead of creating one from
     /// `config.runtime_cache.metadata_segment_cache`. Sharing is safe because
     /// entries are keyed by immutable payload checksums and manifest keys.
@@ -188,7 +190,7 @@ impl ReadCore {
         ));
         Self {
             subject: None,
-            inner: Arc::new(ReadCoreInner {
+            inner: Arc::new(RuntimeCoreInner {
                 store,
                 config,
                 timer,

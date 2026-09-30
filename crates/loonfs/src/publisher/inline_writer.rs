@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::{InlineContentOptions, MetadataMaintenanceOptions, PutFileOptions};
-use loonfs_api::wire::wal::decode_wal_segment_envelope_zstd;
+use loonfs_api::wire::wal::decode_wal_object_envelope_zstd;
 use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
 use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::stores::RecordedOperation;
@@ -33,7 +33,7 @@ async fn check_terminal_reload_failure(include_replay: bool) {
     let unreadable = Arc::new(AtomicBool::new(false));
     let put_armed = Arc::clone(&armed);
     let put_unreadable = Arc::clone(&unreadable);
-    let wal_prefix = wal_segment_prefix(&namespace);
+    let wal_prefix = wal_prefix(&namespace);
     let lost_ack = FailStore::matching(
         LocalFsStore::new(directory.path()).expect("store"),
         move |operation| {
@@ -348,7 +348,7 @@ async fn written_records(
         .filter_map(|operation| match operation {
             RecordedOperation::Put { key, .. }
                 if parse_object_key(&key)
-                    .is_some_and(|parsed| parsed.family() == DurableObjectFamily::WalSegment) =>
+                    .is_some_and(|parsed| parsed.family() == DurableObjectFamily::WalObject) =>
             {
                 Some(key)
             }
@@ -359,7 +359,7 @@ async fn written_records(
     for key in keys {
         let bytes = store.get(&key, None).await.expect("get WAL").expect("WAL");
         records.extend(
-            decode_wal_segment_envelope_zstd(&bytes)
+            decode_wal_object_envelope_zstd(&bytes)
                 .expect("decode WAL")
                 .payload()
                 .records
@@ -1062,7 +1062,7 @@ async fn commit_two_values(
 }
 
 #[tokio::test]
-async fn inline_bytes_make_automatic_and_explicit_folds_due_before_segment_count() {
+async fn inline_bytes_make_automatic_and_explicit_folds_due_before_wal_object_count() {
     for mode in ["automatic", "explicit", "scheduled"] {
         let (_directory, store, writer, namespace, namespace_writer) =
             writer_with_policy(InlineContentOptions {
@@ -1086,7 +1086,7 @@ async fn inline_bytes_make_automatic_and_explicit_folds_due_before_segment_count
             .await
             .expect("usage");
         assert_eq!(usage.wal_tail_inline_bytes, 4);
-        assert!(usage.wal_tail_segments < FOLD_AT_WAL_SEGMENTS);
+        assert!(usage.wal_tail_segments < FOLD_AT_WAL_OBJECTS);
         let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id("maintenance"));
         let options = MetadataMaintenanceOptions {
             inline_content_fold_at_bytes: NonZeroUsize::new(4).expect("threshold"),
@@ -1101,7 +1101,7 @@ async fn inline_bytes_make_automatic_and_explicit_folds_due_before_segment_count
             crate::MaintenanceProbe::Idle
         );
         assert_eq!(
-            family_requests(&store, DurableObjectFamily::WalSegment),
+            family_requests(&store, DurableObjectFamily::WalObject),
             7,
             "one windowed WAL discovery without a byte-count replay"
         );
@@ -1118,7 +1118,7 @@ async fn inline_bytes_make_automatic_and_explicit_folds_due_before_segment_count
             .expect("maintenance without a writer");
         assert_eq!(step.wal_flush, crate::WalFlushStepOutcome::NotNeeded);
         assert_eq!(
-            family_requests(&store, DurableObjectFamily::WalSegment),
+            family_requests(&store, DurableObjectFamily::WalObject),
             14,
             "two windowed WAL discoveries without a byte-count replay"
         );
@@ -1192,7 +1192,7 @@ async fn inline_bytes_make_automatic_and_explicit_folds_due_before_segment_count
 #[tokio::test]
 async fn invalid_inline_policy_is_rejected_before_store_access() {
     use loonfs_api::wire::wal::{
-        MAX_WAL_INLINE_CONTENT_BYTES, MAX_WAL_SEGMENT_INLINE_CONTENT_BYTES,
+        MAX_WAL_INLINE_CONTENT_BYTES, MAX_WAL_OBJECT_INLINE_CONTENT_BYTES,
     };
     let directory = tempdir().expect("directory");
     let store = Arc::new(RecordingStore::new(
@@ -1205,7 +1205,7 @@ async fn invalid_inline_policy_is_rejected_before_store_access() {
             ..policy()
         },
         InlineContentOptions {
-            inline_content_segment_budget_bytes: MAX_WAL_SEGMENT_INLINE_CONTENT_BYTES + 1,
+            inline_content_segment_budget_bytes: MAX_WAL_OBJECT_INLINE_CONTENT_BYTES + 1,
             ..policy()
         },
         InlineContentOptions {

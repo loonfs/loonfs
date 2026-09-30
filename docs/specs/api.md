@@ -436,7 +436,7 @@ changes are available through the change feed in sequence order.
 Uploaded content is durable before the commit, but the file is not yet visible.
 Inline content becomes durable and visible in the same write
 ([format section 1.5](format.md#15-file-contents-and-ownership)). In both cases,
-the commit takes effect when the next numbered WAL segment is written with
+the commit takes effect when the next numbered WAL object is written with
 put-if-absent. Accepting a request into a batch does not mean it has committed.
 
 With an embedded `loonfs::Namespace<Writable>`, you can prepare content separately
@@ -486,7 +486,7 @@ one operation is the same shape as a request with many, so a convenience
 call and a one-element list are the same commit and fingerprint alike.
 A `message` is at most 4096 bytes; a longer one is rejected with
 `invalid_request` before planning, on every transport.
-A commit whose estimated encoded log would exceed one WAL segment is rejected with `content_too_large` before publication; the message names the [WAL document limit](format.md#a5-wal-records).
+A commit whose estimated encoded log would exceed one WAL object is rejected with `content_too_large` before publication; the message names the [WAL document limit](format.md#a5-wal-records).
 The semantic fingerprint includes preconditions in request order. Changing a
 precondition or its position changes identity. The fingerprint input always
 includes the precondition list, including an empty list.
@@ -540,7 +540,7 @@ If the WAL put's outcome was never observed — a transport failure after
 the put was sent — the server reports `commit_outcome_unknown`: the commit
 may already be visible. Section 5.2 defines how the caller resolves it.
 
-The server may publish multiple committed logical commits in one WAL segment
+The server may publish multiple committed logical commits in one WAL object
 put, but it must preserve per-commit idempotency, ordering,
 and change-feed identity.
 
@@ -1244,7 +1244,7 @@ namespace also does not reclaim its published content, because LoonFS retains
 every file revision.
 
 The metadata retention floor is separate. It limits WAL replay history and
-makes older WAL segments eligible for GC. Advance it explicitly with
+makes older WAL objects eligible for GC. Advance it explicitly with
 `POST .../runs` and body `{"kind":"retention"}`, or
 `loonfs maintenance retention advance`. It does not remove file revisions.
 Completed upload sessions in active namespaces use the derived content
@@ -1642,7 +1642,7 @@ The create request carries `access` with the same shape plus `root_grants` for t
 Namespace status derives the live sequence from the manifest and numbered
 WAL tip. A cold read follows a lagging hint by probing forward. A missing
 hint reads as an absent namespace. A cached runtime probes the next WAL
-number with GET, applies any new segments, and continues until 404. Commits
+number with GET, applies any new WAL objects, and continues until 404. Commits
 are visible on the next read even when the hint has not been raised. The
 acknowledging runtime seeds its read caches from the publication. Its next
 read probes the next WAL number like any warm read. If the manifest and WAL
@@ -3117,7 +3117,7 @@ A conforming server must:
 9. keep control-plane sessions and any implementation-specific coordinators
    out of namespace history and the change feed;
 10. preserve per-commit idempotency, ordering, and change-feed identity even
-    when physically batching logical commits in a WAL segment;
+    when physically batching logical commits in a WAL object;
 11. advertise its API groups and features truthfully through the capability
     document, never advertising an API group whose required ops are not
     implemented; and

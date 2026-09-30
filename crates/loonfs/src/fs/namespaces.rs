@@ -1,6 +1,6 @@
 //! Namespace lifecycle: create, fork, and delete.
 
-use super::core::{should_invalidate_after_result, ReadCore, WriterBits};
+use super::core::{should_invalidate_after_result, RuntimeCore, WriterBits};
 use crate::maintenance::namespace_reclaim_at_ms;
 use crate::{
     CreateNamespaceOptions, DeleteNamespaceOptions, DeleteNamespaceResponse, ForkNamespaceOptions,
@@ -135,7 +135,7 @@ impl Namespace<Writable> {
 /// its tombstone swap too. Only the service calls this; everything else
 /// must go through [`Namespace::delete_namespace`] so the barrier holds.
 pub(crate) async fn delete_namespace_with_engine(
-    core: &ReadCore,
+    core: &RuntimeCore,
     writer: &WriterBits,
     namespace_id: &NamespaceId,
     engine: &mut loonfs_core::publish::NamespaceCommitEngine,

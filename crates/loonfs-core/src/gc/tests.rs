@@ -28,7 +28,7 @@ use loonfs_api::wire::control::{
 use loonfs_api::{ContentRef, ManifestNo, NamespaceId, PinId, UploadId};
 use loonfs_objectstore::keys::{
     hint, metadata_manifest_object, metadata_manifest_prefix, metadata_segment,
-    metadata_segment_prefix, pin_prefix, wal_segment_prefix,
+    metadata_segment_prefix, pin_prefix, wal_prefix,
 };
 use loonfs_objectstore::ObjectStore;
 use std::collections::BTreeSet;
@@ -192,7 +192,7 @@ async fn gc_rejects_grace_windows_below_the_derived_minimum() {
 }
 
 #[tokio::test]
-async fn gc_reaps_below_floor_segments_after_the_grace_window() {
+async fn gc_reaps_below_floor_wal_objects_after_the_grace_window() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
@@ -367,7 +367,7 @@ async fn deleted_namespace_keeps_its_tombstone_and_segments() {
         assert!(store.head(key).await.expect("reclaimed content").is_none());
     }
 
-    for prefix in [wal_segment_prefix(&namespace_id), pin_prefix(&namespace_id)] {
+    for prefix in [wal_prefix(&namespace_id), pin_prefix(&namespace_id)] {
         assert!(
             store.list_prefix(&prefix).await.expect("list").is_empty(),
             "prefix `{prefix}` must be empty after reclamation"
@@ -1249,7 +1249,7 @@ async fn a_publication_during_a_pass_never_costs_the_job_its_segments() {
     // job does happens in that gap, on a store the gate does not hold.
     let gated = BlockingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
-        KeyPredicate::prefix(wal_segment_prefix(&namespace_id)),
+        KeyPredicate::prefix(wal_prefix(&namespace_id)),
         OperationClass::List,
     );
     gated.block_next();
@@ -1336,7 +1336,7 @@ async fn gc_never_deletes_the_live_replay_tail() {
     advance_retention_floor(&store, &namespace_id)
         .await
         .expect("advance floor");
-    // A commit past the floor: its segment is the live replay gap.
+    // A commit past the floor: its WAL object is the live replay gap.
     write_test_file(&store, &namespace_id, "/docs/two.txt", "gc-two", &setup).await;
 
     let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);

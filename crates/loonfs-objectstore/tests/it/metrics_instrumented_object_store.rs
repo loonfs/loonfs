@@ -5,9 +5,7 @@ use bytes::Bytes;
 use futures::stream::{self, BoxStream};
 use futures::TryStreamExt;
 use loonfs_api::ManifestNo;
-use loonfs_objectstore::keys::{
-    hint, metadata_manifest_object, metadata_segment, pin, wal_segment,
-};
+use loonfs_objectstore::keys::{hint, metadata_manifest_object, metadata_segment, pin, wal_object};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::metrics::{
     InstrumentedObjectStore, JsonlObjectStoreMetricsRecorder, KeyClass, ObjectStoreMetricsRecorder,
@@ -288,7 +286,7 @@ async fn classifies_durable_key_families() {
 
     store
         .put_overwrite(
-            &wal_segment(
+            &wal_object(
                 &loonfs_api::NamespaceId::parse("ns-1").expect("valid namespace id"),
                 &loonfs_api::WalNo(1),
             ),

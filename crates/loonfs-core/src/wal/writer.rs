@@ -1,20 +1,20 @@
-//! Assembles and validates data and fence segments before publication.
+//! Assembles and validates data and fence WAL objects before publication.
 
-use super::{PreparedWalSegment, WalSegmentError};
+use super::{PreparedWalObject, WalObjectError};
 use crate::commit::{wal_payload_from_prepared_commit, PreparedCommit};
 use crate::namespace::state::NamespaceReadState;
-use loonfs_api::wire::wal::{encode_wal_segment_envelope_zstd, WalSegmentPayload};
+use loonfs_api::wire::wal::{encode_wal_object_envelope_zstd, WalObjectPayload};
 use loonfs_api::{NamespaceId, WriterEpoch};
 
-pub(crate) fn prepare_segment(
+pub(crate) fn prepare_wal_object(
     namespace_id: NamespaceId,
     writer_epoch: WriterEpoch,
     head: &NamespaceReadState,
     records: &[PreparedCommit],
-) -> Result<PreparedWalSegment, WalSegmentError> {
+) -> Result<PreparedWalObject, WalObjectError> {
     for record in records {
         if record.commit.namespace_id != namespace_id {
-            return Err(WalSegmentError::NamespaceMismatch {
+            return Err(WalObjectError::NamespaceMismatch {
                 expected: namespace_id,
                 actual: record.commit.namespace_id.clone(),
             });
@@ -24,12 +24,12 @@ pub(crate) fn prepare_segment(
         .iter()
         .map(wal_payload_from_prepared_commit)
         .collect();
-    let payload = WalSegmentPayload {
+    let payload = WalObjectPayload {
         namespace_id,
         wal_no: head
             .wal_no
             .successor()
-            .map_err(|_| WalSegmentError::NumberOverflow)?,
+            .map_err(|_| WalObjectError::NumberOverflow)?,
         writer_epoch,
         head_seq: payload_records
             .last()
@@ -39,8 +39,8 @@ pub(crate) fn prepare_segment(
         }),
         records: payload_records,
     };
-    let segment = encode_wal_segment_envelope_zstd(payload)
-        .map_err(|error| WalSegmentError::Codec(error.to_string()))?;
-    super::replay::validate_wal_segment_for_replay(head.seq, segment.envelope())?;
-    Ok(segment)
+    let object = encode_wal_object_envelope_zstd(payload)
+        .map_err(|error| WalObjectError::Codec(error.to_string()))?;
+    super::replay::validate_wal_object_for_replay(head.seq, object.envelope())?;
+    Ok(object)
 }

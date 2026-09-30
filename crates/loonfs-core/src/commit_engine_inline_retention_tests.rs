@@ -220,7 +220,7 @@ async fn inline_receipt_retention_keeps_the_boundary_and_reuses_only_pruned_ids(
     .await
     .expect("collect old WAL and unpinned segments");
     assert!(store
-        .list_prefix(&wal_segment_prefix(&namespace_id))
+        .list_prefix(&wal_prefix(&namespace_id))
         .await
         .expect("WAL listing")
         .is_empty());

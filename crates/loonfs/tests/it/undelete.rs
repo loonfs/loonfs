@@ -407,7 +407,7 @@ fn undelete_survives_checkpoints_and_reopen_in_both_orders() {
             loonfs::UndeleteOptions::new(loonfs_test_support::test_actor()),
         ))
         .expect("undelete before checkpoint");
-        // The default threshold (32 segments) would answer NotNeeded for
+        // The default threshold (32 WAL objects) would answer NotNeeded for
         // this short history; force the fold so reopen reads Set and
         // Revoke rows out of durable segments, not WAL replay.
         let step = fs

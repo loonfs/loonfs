@@ -172,7 +172,7 @@ async fn default_inline_commits_write_only_wal_and_replay_by_bytes() {
     let (status, first) = harness.commit(request.clone()).await;
     assert_eq!(status, StatusCode::OK, "{first}");
     assert_eq!(harness.store.count(OperationClass::Put), 1);
-    assert_eq!(harness.family_requests(DurableObjectFamily::WalSegment), 1);
+    assert_eq!(harness.family_requests(DurableObjectFamily::WalObject), 1);
     assert_eq!(
         harness.family_requests(DurableObjectFamily::UploadSession),
         0
@@ -335,7 +335,7 @@ async fn inode_inline_operations_and_segment_fallback_keep_retry_identity() {
         .filter_map(|operation| match operation {
             RecordedOperation::Put { key, .. }
                 if parse_object_key(&key)
-                    .is_some_and(|key| key.family() == DurableObjectFamily::WalSegment) =>
+                    .is_some_and(|key| key.family() == DurableObjectFamily::WalObject) =>
             {
                 Some(key)
             }
@@ -349,7 +349,7 @@ async fn inode_inline_operations_and_segment_fallback_keep_retry_identity() {
         .await
         .expect("get")
         .expect("WAL");
-    let decoded = loonfs_api::wire::wal::decode_wal_segment_envelope_zstd(&wal).expect("decode");
+    let decoded = loonfs_api::wire::wal::decode_wal_object_envelope_zstd(&wal).expect("decode");
     assert_eq!(decoded.payload().records[0].inline_content.len(), 1);
     harness.read("/first", b"same").await;
     harness.read("/second", b"same").await;

@@ -58,13 +58,13 @@ pub(crate) fn assert_wal_probe(
 pub(crate) fn data_wal_put_for(
     namespace_id: &NamespaceId,
 ) -> impl Fn(&loonfs_test_support::stores::OperationContext<'_>) -> bool + Send + Sync + 'static {
-    let prefix = loonfs_objectstore::keys::wal_segment_prefix(namespace_id);
+    let prefix = loonfs_objectstore::keys::wal_prefix(namespace_id);
     move |operation| match operation.kind() {
         loonfs_test_support::stores::OperationKind::Put {
             bytes,
             mode: loonfs_objectstore::PutMode::CreateIfAbsent,
         } if operation.key().starts_with(&prefix) => {
-            loonfs_api::wire::wal::decode_wal_segment_envelope_zstd(bytes)
+            loonfs_api::wire::wal::decode_wal_object_envelope_zstd(bytes)
                 .is_ok_and(|envelope| !envelope.payload().records.is_empty())
         }
         _ => false,
@@ -761,7 +761,7 @@ impl RuntimeStoreProbe {
         ));
         let fail_wal_publish = Arc::new(FailStore::new(
             hint_gets.clone() as SharedObjectStore,
-            KeyPredicate::prefix(loonfs_objectstore::keys::wal_segment_prefix(namespace_id)),
+            KeyPredicate::prefix(loonfs_objectstore::keys::wal_prefix(namespace_id)),
             OperationClass::PutCreateIfAbsent,
             InjectedError::PreconditionFailed,
         ));

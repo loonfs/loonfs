@@ -1,30 +1,30 @@
 //! Replays a validated WAL tail onto metadata state, record by record.
 
-pub(crate) use super::frame::WalSegmentError;
+pub(crate) use super::frame::WalObjectError;
 use super::ProjectedWalTail;
-use super::{ReplayedWalTail, ValidatedWalSegment, ValidatedWalTail};
+use super::{ReplayedWalTail, ValidatedWalObject, ValidatedWalTail};
 use crate::commit::next_inode_after;
 use crate::namespace::state::NamespaceReadState;
 use bytes::Bytes;
-use loonfs_api::wire::wal::{WalCommitDelta, WalDelta, WalSegmentEnvelope};
+use loonfs_api::wire::wal::{WalCommitDelta, WalDelta, WalObjectEnvelope};
 use loonfs_api::{ChangeSeq, InodeId};
 
 pub(crate) fn project_validated_wal_tail(
     base_head: &NamespaceReadState,
     base_tail: &ProjectedWalTail,
     wal_tail: &ValidatedWalTail,
-) -> Result<ReplayedWalTail, WalSegmentError> {
+) -> Result<ReplayedWalTail, WalObjectError> {
     let mut replayed = ReplayedWalTail {
         resulting_head: base_head.clone(),
         projected_tail: base_tail.clone(),
     };
-    for segment in wal_tail.segments() {
-        replayed = replay_wal_records(&replayed.resulting_head, &replayed.projected_tail, segment)?;
-        let payload = segment.envelope().payload();
+    for object in wal_tail.objects() {
+        replayed = replay_wal_records(&replayed.resulting_head, &replayed.projected_tail, object)?;
+        let payload = object.envelope().payload();
         if replayed.resulting_head.next_inode_id != payload.next_inode_id {
-            return Err(WalSegmentError::SegmentSummaryMismatch);
+            return Err(WalObjectError::SegmentSummaryMismatch);
         }
-        replayed.resulting_head = replayed.resulting_head.after_segment(payload);
+        replayed.resulting_head = replayed.resulting_head.after_wal_object(payload);
     }
     Ok(replayed)
 }
@@ -32,11 +32,11 @@ pub(crate) fn project_validated_wal_tail(
 pub(crate) fn replay_wal_records(
     base_head: &NamespaceReadState,
     base_tail: &ProjectedWalTail,
-    segment: &ValidatedWalSegment,
-) -> Result<ReplayedWalTail, WalSegmentError> {
+    object: &ValidatedWalObject,
+) -> Result<ReplayedWalTail, WalObjectError> {
     let mut current_head = base_head.clone();
     let mut current_tail = base_tail.clone();
-    let payload = segment.envelope().payload();
+    let payload = object.envelope().payload();
 
     for record in &payload.records {
         for value in &record.inline_content {
@@ -68,19 +68,19 @@ pub(crate) fn replay_wal_records(
     })
 }
 
-pub(crate) fn validate_wal_segment_for_replay(
+pub(crate) fn validate_wal_object_for_replay(
     expected_prior_head_seq: ChangeSeq,
-    envelope: &WalSegmentEnvelope,
-) -> Result<(), WalSegmentError> {
+    envelope: &WalObjectEnvelope,
+) -> Result<(), WalObjectError> {
     if envelope.payload().records.is_empty() {
         if envelope.payload().head_seq != expected_prior_head_seq {
-            return Err(WalSegmentError::SegmentSummaryMismatch);
+            return Err(WalObjectError::SegmentSummaryMismatch);
         }
         return Ok(());
     }
     let expected_first_seq = expected_prior_head_seq
         .successor()
-        .map_err(|_| WalSegmentError::SeqOverflow)?;
+        .map_err(|_| WalObjectError::SeqOverflow)?;
 
     if envelope
         .payload()
@@ -95,16 +95,16 @@ pub(crate) fn validate_wal_segment_for_replay(
             .map(|record| record.committed_seq)
             != Some(envelope.payload().head_seq)
     {
-        return Err(WalSegmentError::SegmentSummaryMismatch);
+        return Err(WalObjectError::SegmentSummaryMismatch);
     }
     for (offset, record) in envelope.payload().records.iter().enumerate() {
         let expected = expected_first_seq
             .0
             .checked_add(offset as u64)
             .map(ChangeSeq)
-            .ok_or(WalSegmentError::SeqOverflow)?;
+            .ok_or(WalObjectError::SeqOverflow)?;
         if record.committed_seq != expected {
-            return Err(WalSegmentError::NonContiguousSeq {
+            return Err(WalObjectError::NonContiguousSeq {
                 expected,
                 actual: record.committed_seq,
             });

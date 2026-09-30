@@ -2,7 +2,7 @@
 
 use loonfs::{CreateDirectoryOptions, CreateNamespaceOptions, LoonFs, NamespaceId};
 use loonfs_objectstore::keys::{
-    hint, metadata_manifest_object, metadata_manifest_prefix, wal_segment_prefix,
+    hint, metadata_manifest_object, metadata_manifest_prefix, wal_prefix,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::stores::{
@@ -88,9 +88,7 @@ async fn acquisition_shares_discovery_and_an_own_fold_needs_none() {
     let before_put = requests
         .iter()
         .take_while(|request| {
-            !(request
-                .key()
-                .starts_with(&wal_segment_prefix(&namespace_id))
+            !(request.key().starts_with(&wal_prefix(&namespace_id))
                 && matches!(request, RecordedOperation::Put { .. }))
         })
         .collect::<Vec<_>>();
@@ -106,9 +104,9 @@ async fn acquisition_shares_discovery_and_an_own_fold_needs_none() {
     assert!(before_put.iter().filter(|request| matches!(request, RecordedOperation::Get { key, .. } if key.contains("/manifests/"))).count() <= 1, "{requests:?}");
     assert!(!before_put.iter().any(|request| matches!(request, RecordedOperation::Head { key } if key.contains("/manifests/"))), "{requests:?}");
     assert!(
-        !before_put.iter().any(|request| request
-            .key()
-            .starts_with(&wal_segment_prefix(&namespace_id))),
+        !before_put
+            .iter()
+            .any(|request| request.key().starts_with(&wal_prefix(&namespace_id))),
         "{requests:?}"
     );
     writer.shutdown().await.expect("shutdown");
@@ -163,9 +161,7 @@ async fn a_directory_created_during_a_fold_is_seen_after_the_projection_is_dropp
         .take()
         .into_iter()
         .find_map(|request| match request {
-            RecordedOperation::Put { key, .. }
-                if key.starts_with(&wal_segment_prefix(&namespace_id)) =>
-            {
+            RecordedOperation::Put { key, .. } if key.starts_with(&wal_prefix(&namespace_id)) => {
                 Some(key)
             }
             _ => None,
@@ -196,7 +192,7 @@ async fn a_directory_created_during_a_fold_is_seen_after_the_projection_is_dropp
         .iter()
         .position(|request| {
             matches!(request, RecordedOperation::Put { key, .. }
-                if key.starts_with(&wal_segment_prefix(&namespace_id)))
+                if key.starts_with(&wal_prefix(&namespace_id)))
         })
         .expect("child WAL put");
     let before_put = &requests[..put];

@@ -1,7 +1,7 @@
 //! The runtime, in a read-only or a writable mode.
 
 use super::{LoonFsBuilder, Maintenance, Namespace};
-use crate::fs::{ReadCore, WriterBits, WriterIdentity};
+use crate::fs::{RuntimeCore, WriterBits, WriterIdentity};
 use crate::publisher::PublisherRegistry;
 use crate::{
     CapabilityDocument, NamespaceId, Result, RuntimeCacheStats, SharedObjectStore, StoreConfig,
@@ -28,7 +28,7 @@ use std::sync::Arc;
 /// shutdown state.
 #[derive(Clone)]
 pub struct LoonFs<M> {
-    pub(crate) core: ReadCore,
+    pub(crate) core: RuntimeCore,
     pub(crate) mode: M,
 }
 
@@ -310,7 +310,7 @@ mod tests {
     ) -> (LoonFs<Writable>, Arc<BlockingStore<LocalFsStore>>) {
         let blocking = Arc::new(BlockingStore::new(
             LocalFsStore::new(temp_dir).expect("create local-fs store"),
-            KeyPredicate::prefix(loonfs_objectstore::keys::wal_segment_prefix(namespace_id)),
+            KeyPredicate::prefix(loonfs_objectstore::keys::wal_prefix(namespace_id)),
             OperationClass::PutCreateIfAbsent,
         ));
         let runtime = LoonFs::builder_with_store(blocking.clone())

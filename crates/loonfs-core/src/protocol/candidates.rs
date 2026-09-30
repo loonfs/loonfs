@@ -8,7 +8,7 @@ use crate::authorize::Authorizer;
 use crate::commit::{CandidateAllocation, CommitFingerprint, ValidatedCommitPlan};
 use crate::commit_engine::{CommitCandidate, ContentPreparation, ContentPreparationError};
 use crate::error::{CoreError, MetadataViewError, Result};
-use crate::limits::MAX_UNFOLDED_WAL_SEGMENTS;
+use crate::limits::MAX_UNFOLDED_WAL_OBJECTS;
 use crate::metadata::CommitReceiptRecord;
 use crate::path::write::{CommitRequest, FilesystemOperation, PublishPlanningSession};
 use crate::storage::content_admission::PreparedContent;
@@ -125,7 +125,7 @@ pub(super) async fn prepare_candidate_request<S: ObjectStore + ?Sized>(
         return CandidateAdmission::independent(Err(MetadataViewError::MaintenanceRequired {
             namespace_id: namespace_id.clone(),
             reason: format!(
-                "WAL tail has {wal_tail_segments} segments; publishes resume once maintenance brings it back under {MAX_UNFOLDED_WAL_SEGMENTS}"
+                "WAL tail has {wal_tail_segments} objects; publishes resume once maintenance brings it back under {MAX_UNFOLDED_WAL_OBJECTS}"
             ),
         }
         .into()));

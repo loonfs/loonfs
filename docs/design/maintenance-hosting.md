@@ -6,7 +6,7 @@ Namespace assignment belongs to the hosting layer. The maintenance runner schedu
 
 Hosts assign namespace/job pairs explicitly. The runner can deduplicate pending work, limit concurrency, back off failed jobs, and check assignments periodically. It does not discover every namespace by listing storage.
 
-Metadata probes inspect the unfolded WAL segment count, the time of the tail's newest commit, and the manifest descriptors. An assigned namespace can be checked again after a restart. Losing an in-memory scheduling hint can delay work, but cannot change committed filesystem state.
+Metadata probes inspect the unfolded WAL object count, the time of the tail's newest commit, and the manifest descriptors. An assigned namespace can be checked again after a restart. Losing an in-memory scheduling hint can delay work, but cannot change committed filesystem state.
 
 | Work | Durable basis after restart |
 | --- | --- |

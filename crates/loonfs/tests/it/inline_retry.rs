@@ -253,7 +253,7 @@ async fn inline_publication_without_fallback_keeps_its_store_requests() {
     let operations = recording.take();
     assert_eq!(operations.len(), 1, "{operations:?}");
     assert!(matches!(&operations[0], RecordedOperation::Put { key, .. }
-        if key.starts_with(&loonfs_objectstore::keys::wal_segment_prefix(&namespace()))));
+        if key.starts_with(&loonfs_objectstore::keys::wal_prefix(&namespace()))));
     writer.shutdown().await.expect("shutdown");
 }
 

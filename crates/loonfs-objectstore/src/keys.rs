@@ -10,13 +10,13 @@ pub fn namespace_prefix(namespace_id: &NamespaceId) -> String {
     format!("namespaces/{namespace_id}/")
 }
 
-/// Builds the immutable object key for a numbered WAL segment.
-pub fn wal_segment(namespace_id: &NamespaceId, wal_no: &WalNo) -> String {
+/// Builds the immutable object key for a numbered WAL object.
+pub fn wal_object(namespace_id: &NamespaceId, wal_no: &WalNo) -> String {
     format!("namespaces/{namespace_id}/wal/{:020}.wal.zst", wal_no.0)
 }
 
 /// Builds the listing prefix for numbered WAL objects.
-pub fn wal_segment_prefix(namespace_id: &NamespaceId) -> String {
+pub fn wal_prefix(namespace_id: &NamespaceId) -> String {
     format!("namespaces/{namespace_id}/wal/")
 }
 
@@ -93,7 +93,7 @@ mod tests {
 
     use super::{
         content_blob, hint, metadata_manifest_object, metadata_segment,
-        metadata_segment_object_key, pin, upload_session, wal_segment, wal_segment_prefix,
+        metadata_segment_object_key, pin, upload_session, wal_object, wal_prefix,
     };
     use loonfs_api::wire::manifest::{
         MetadataRowFamily, MetadataSegmentRef, METADATA_SEGMENT_ENCODING,
@@ -176,7 +176,7 @@ mod tests {
         };
 
         let built = [
-            ("WAL segments", wal_segment(&namespace_id(), &WalNo(42))),
+            ("WAL objects", wal_object(&namespace_id(), &WalNo(42))),
             (
                 "Namespace manifests",
                 metadata_manifest_object(&namespace_id(), &ManifestNo(400)),
@@ -214,9 +214,8 @@ mod tests {
 
     #[test]
     fn listing_prefixes_match_their_keys() {
-        assert_eq!(wal_segment_prefix(&namespace_id()), "namespaces/ns-1/wal/");
-        assert!(wal_segment(&namespace_id(), &WalNo(42))
-            .starts_with(&wal_segment_prefix(&namespace_id())));
+        assert_eq!(wal_prefix(&namespace_id()), "namespaces/ns-1/wal/");
+        assert!(wal_object(&namespace_id(), &WalNo(42)).starts_with(&wal_prefix(&namespace_id())));
     }
 
     fn segment_descriptor() -> MetadataSegmentRef {

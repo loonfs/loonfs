@@ -18,11 +18,11 @@ use crate::{
 };
 use async_trait::async_trait;
 use bytes::Bytes;
-use loonfs_api::wire::wal::decode_wal_segment_envelope_zstd;
+use loonfs_api::wire::wal::decode_wal_object_envelope_zstd;
 use loonfs_api::{AbsolutePath, ActorId, ChangeSeq, DestinationBehavior};
-use loonfs_core::test_support::append_wal_segments;
+use loonfs_core::test_support::append_wal_objects;
 use loonfs_core::MutationContext;
-use loonfs_objectstore::keys::{metadata_manifest_prefix, wal_segment_prefix};
+use loonfs_objectstore::keys::{metadata_manifest_prefix, wal_prefix};
 use loonfs_objectstore::layout::DurableObjectFamily;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
@@ -38,7 +38,7 @@ use tempfile::tempdir;
 use tokio::time::timeout;
 
 fn is_publication(bytes: &[u8]) -> bool {
-    decode_wal_segment_envelope_zstd(bytes).is_ok_and(|wal| !wal.payload().records.is_empty())
+    decode_wal_object_envelope_zstd(bytes).is_ok_and(|wal| !wal.payload().records.is_empty())
         || loonfs_api::wire::manifest::decode_namespace_manifest_json(bytes)
             .is_ok_and(|manifest| manifest.payload().status.is_deleted())
 }
@@ -193,14 +193,14 @@ fn lost_wal_put_ack_store(
     root: impl AsRef<Path>,
     namespace_id: &NamespaceId,
 ) -> FailStore<LocalFsStore> {
-    let prefix = wal_segment_prefix(namespace_id);
+    let prefix = wal_prefix(namespace_id);
     FailStore::matching(LocalFsStore::new(root.as_ref()).expect("store"), move |operation| {
         operation.key().starts_with(&prefix) && matches!(operation.kind(), OperationKind::Put { bytes, mode: PutMode::CreateIfAbsent } if is_publication(bytes))
     }, InjectedError::Transport("lost WAL put acknowledgement".to_owned())).apply_then_fail()
 }
 
-fn test_read_core(store: SharedStore) -> ReadCore {
-    ReadCore::open(
+fn test_runtime_core(store: SharedStore) -> RuntimeCore {
+    RuntimeCore::open(
         store,
         ReadConfig {
             max_read_content_bytes: None,
@@ -228,16 +228,16 @@ fn test_writer_bits() -> Arc<WriterBits> {
     })
 }
 
-/// A read core plus the writer bits a standalone publisher publishes
+/// A runtime core plus the writer bits a standalone publisher publishes
 /// under. The caller keeps both alive; the publisher holds the bits weakly.
 struct TestRuntime {
-    core: ReadCore,
+    core: RuntimeCore,
     bits: Arc<WriterBits>,
 }
 
 fn test_runtime(store: SharedStore) -> TestRuntime {
     TestRuntime {
-        core: test_read_core(store),
+        core: test_runtime_core(store),
         bits: test_writer_bits(),
     }
 }
@@ -597,7 +597,7 @@ async fn publisher_splits_batches_at_the_wal_bound_in_admission_order() {
         let namespace_id = NamespaceId::parse("bounded").expect("namespace");
         let store = Arc::new(RecordingStore::new(
             LocalFsStore::new(temp_dir.path()).expect("store"),
-            KeyPredicate::prefix(wal_segment_prefix(&namespace_id)),
+            KeyPredicate::prefix(wal_prefix(&namespace_id)),
         ));
         let runtime = test_runtime(store.clone());
         create_namespace(&runtime, &namespace_id).await;
@@ -614,7 +614,7 @@ async fn publisher_splits_batches_at_the_wal_bound_in_admission_order() {
         .await;
         store.reset();
 
-        let available_bytes = MAX_WAL_SEGMENT_BYTES - WAL_SEGMENT_OVERHEAD_BYTES;
+        let available_bytes = MAX_WAL_OBJECT_BYTES - WAL_OBJECT_OVERHEAD_BYTES;
         let first_bound = available_bytes / 2;
         let mut responses = Vec::new();
         for (name, bound) in [
@@ -660,7 +660,7 @@ async fn publisher_splits_batches_at_the_wal_bound_in_admission_order() {
 #[tokio::test]
 async fn publisher_splits_batches_at_the_inline_limit_without_failing_commits() {
     use loonfs_api::wire::wal::{
-        MAX_WAL_INLINE_CONTENT_BYTES, MAX_WAL_SEGMENT_INLINE_CONTENT_BYTES,
+        MAX_WAL_INLINE_CONTENT_BYTES, MAX_WAL_OBJECT_INLINE_CONTENT_BYTES,
     };
     use loonfs_core::publish::InlineContent;
 
@@ -669,14 +669,14 @@ async fn publisher_splits_batches_at_the_inline_limit_without_failing_commits() 
         let namespace_id = NamespaceId::parse("inline-batches").expect("namespace");
         let store = Arc::new(RecordingStore::new(
             LocalFsStore::new(directory.path()).expect("store"),
-            KeyPredicate::prefix(wal_segment_prefix(&namespace_id)),
+            KeyPredicate::prefix(wal_prefix(&namespace_id)),
         ));
         let runtime = test_runtime(store.clone());
         create_namespace(&runtime, &namespace_id).await;
         let mut publisher = standalone_publisher(&namespace_id, &runtime);
         publisher.min_publish_interval = Duration::ZERO;
         publisher.inline_content.inline_content_segment_budget_bytes =
-            MAX_WAL_SEGMENT_INLINE_CONTENT_BYTES;
+            MAX_WAL_OBJECT_INLINE_CONTENT_BYTES;
         recv_commit(
             admit_commit(
                 &publisher,
@@ -687,7 +687,7 @@ async fn publisher_splits_batches_at_the_inline_limit_without_failing_commits() 
         )
         .await;
         store.reset();
-        let half = MAX_WAL_SEGMENT_INLINE_CONTENT_BYTES / MAX_WAL_INLINE_CONTENT_BYTES / 2;
+        let half = MAX_WAL_OBJECT_INLINE_CONTENT_BYTES / MAX_WAL_INLINE_CONTENT_BYTES / 2;
         let mut responses = Vec::new();
         for (name, count) in [("first", half), ("second", half + extra_values)] {
             let values: Vec<_> = (0..count)
@@ -929,7 +929,7 @@ async fn publisher_admits_pending_batch_while_active_publish_blocks() {
     assert_eq!(pending_response.committed_seq, ChangeSeq(2));
 
     let wal_keys = shared
-        .list_prefix(&wal_segment_prefix(
+        .list_prefix(&wal_prefix(
             &loonfs_api::NamespaceId::parse("demo").expect("valid namespace id"),
         ))
         .await
@@ -1782,7 +1782,7 @@ async fn mutations_admitted_after_a_queued_delete_wait_behind_it() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn publisher_batches_concurrent_distinct_commits_into_one_wal_segment() {
+async fn publisher_batches_concurrent_distinct_commits_into_one_wal_object() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let store = Arc::new(blocking_publication_store(temp_dir.path(), &namespace_id));
@@ -1862,9 +1862,9 @@ async fn publisher_batches_concurrent_distinct_commits_into_one_wal_segment() {
     assert_eq!(committed_seqs, [ChangeSeq(2), ChangeSeq(3)]);
 
     // The warmup published alone; the two concurrent submissions share
-    // one segment.
+    // one WAL object.
     let wal_keys = shared
-        .list_prefix(&wal_segment_prefix(
+        .list_prefix(&wal_prefix(
             &loonfs_api::NamespaceId::parse("demo").expect("valid namespace id"),
         ))
         .await
@@ -1876,11 +1876,11 @@ async fn publisher_batches_concurrent_distinct_commits_into_one_wal_segment() {
         let bytes = shared
             .get(key, None)
             .await
-            .expect("read WAL segment")
-            .expect("WAL segment exists");
-        let segment = decode_wal_segment_envelope_zstd(&bytes).expect("decode WAL segment");
-        if segment.payload().records.len() == 2 {
-            for record in segment.into_payload().records {
+            .expect("read WAL object")
+            .expect("WAL object exists");
+        let wal_object = decode_wal_object_envelope_zstd(&bytes).expect("decode WAL object");
+        if wal_object.payload().records.len() == 2 {
+            for record in wal_object.into_payload().records {
                 batched_actors.insert(record.commit_id.to_string(), record.committed_by);
             }
         }
@@ -2007,7 +2007,7 @@ async fn publisher_batches_plain_and_prepared_mutations_together() {
     assert_eq!(committed_seqs, [ChangeSeq(2), ChangeSeq(3)]);
 
     let wal_keys = shared
-        .list_prefix(&wal_segment_prefix(
+        .list_prefix(&wal_prefix(
             &loonfs_api::NamespaceId::parse("demo").expect("valid namespace id"),
         ))
         .await
@@ -2019,11 +2019,11 @@ async fn publisher_batches_plain_and_prepared_mutations_together() {
             .await
             .expect("read wal")
             .expect("wal exists");
-        let segment = decode_wal_segment_envelope_zstd(&wal_bytes).expect("decode wal segment");
-        record_counts.push(segment.payload().records.len());
+        let wal_object = decode_wal_object_envelope_zstd(&wal_bytes).expect("decode WAL object");
+        record_counts.push(wal_object.payload().records.len());
     }
     record_counts.sort_unstable();
-    // The warmup published alone; the concurrent pair shares a segment.
+    // The warmup published alone; the concurrent pair shares a WAL object.
     assert_eq!(record_counts, vec![0, 1, 2]);
 }
 
@@ -2197,10 +2197,10 @@ async fn a_fold_reloads_the_tail_when_no_projection_is_retained() {
     let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
-    append_wal_segments(
+    append_wal_objects(
         store.as_ref(),
         &namespace_id,
-        FOLD_AT_WAL_SEGMENTS - 1,
+        FOLD_AT_WAL_OBJECTS - 1,
         &MutationContext {
             writer_id: loonfs_api::WriterId::parse("fold-seed").expect("valid writer id"),
             now_ms: 1_000,
@@ -2227,17 +2227,14 @@ async fn a_fold_reloads_the_tail_when_no_projection_is_retained() {
         .await
         .expect("inspect the folded namespace");
     assert!(status.current_manifest_no.is_some(), "{status:?}");
-    assert!(
-        status.wal_tail_segments < FOLD_AT_WAL_SEGMENTS,
-        "{status:?}"
-    );
+    assert!(status.wal_tail_segments < FOLD_AT_WAL_OBJECTS, "{status:?}");
     {
         let hints = hints.lock().expect("hint log");
         assert!(hints.iter().any(|hint| matches!(
             hint,
             MaintenanceHint::Published(publication)
                 if publication.namespace_id == namespace_id
-                    && publication.wal_tail_segments >= FOLD_AT_WAL_SEGMENTS
+                    && publication.wal_tail_segments >= FOLD_AT_WAL_OBJECTS
         )));
         assert!(hints.iter().any(|hint| matches!(
             hint,
@@ -2273,10 +2270,10 @@ async fn a_runtime_fold_materializes_inline_content_and_reanchors_to_an_empty_ta
     let namespace_writer = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
-    append_wal_segments(
+    append_wal_objects(
         store.as_ref(),
         &namespace_id,
-        FOLD_AT_WAL_SEGMENTS - 1,
+        FOLD_AT_WAL_OBJECTS - 1,
         &MutationContext {
             writer_id: loonfs_api::WriterId::parse("seed").expect("writer"),
             now_ms: 1_000,
@@ -2396,10 +2393,10 @@ async fn a_failed_fold_notifies_maintenance_and_reloads_the_tail() {
     let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
-    append_wal_segments(
+    append_wal_objects(
         failing.as_ref(),
         &namespace_id,
-        FOLD_AT_WAL_SEGMENTS - 1,
+        FOLD_AT_WAL_OBJECTS - 1,
         &MutationContext {
             writer_id: loonfs_api::WriterId::parse("fold-seed").expect("valid writer id"),
             now_ms: 1_000,
@@ -2453,7 +2450,7 @@ async fn a_failed_fold_notifies_maintenance_and_reloads_the_tail() {
             MaintenanceHint::Published(publication) => Some(publication),
             _ => None,
         });
-        assert!(publication.expect("publication").wal_tail_segments < FOLD_AT_WAL_SEGMENTS);
+        assert!(publication.expect("publication").wal_tail_segments < FOLD_AT_WAL_OBJECTS);
     }
     writer.shutdown().await.expect("shut down writer");
 }
@@ -2489,10 +2486,10 @@ async fn wal_folds_share_the_writer_concurrency_bound() {
             )
             .await
             .expect("bootstrap");
-        append_wal_segments(
+        append_wal_objects(
             blocking.as_ref(),
             namespace_id,
-            FOLD_AT_WAL_SEGMENTS - 1,
+            FOLD_AT_WAL_OBJECTS - 1,
             &MutationContext {
                 writer_id: loonfs_api::WriterId::parse("fold-seed").expect("valid writer id"),
                 now_ms: 1_000,
@@ -2577,10 +2574,10 @@ async fn a_late_fold_does_not_republish_an_already_folded_tail() {
             )
             .await
             .expect("bootstrap");
-        append_wal_segments(
+        append_wal_objects(
             recording.as_ref(),
             namespace_id,
-            FOLD_AT_WAL_SEGMENTS - 1,
+            FOLD_AT_WAL_OBJECTS - 1,
             &MutationContext {
                 writer_id: loonfs_api::WriterId::parse("fold-seed").expect("valid writer id"),
                 now_ms: 1_000,
@@ -2663,10 +2660,10 @@ async fn successful_delete_waits_for_fold_before_evicting_the_namespace_publishe
     let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
-    append_wal_segments(
+    append_wal_objects(
         blocking.inner(),
         &namespace_id,
-        FOLD_AT_WAL_SEGMENTS - 1,
+        FOLD_AT_WAL_OBJECTS - 1,
         &MutationContext {
             writer_id: loonfs_api::WriterId::parse("fold-seed").expect("valid writer id"),
             now_ms: 1_000,
@@ -2945,7 +2942,7 @@ async fn retained_tail_projections_are_not_bounded_by_the_namespace_count() {
     let temp_dir = tempdir().expect("tempdir");
     let recording = Arc::new(RecordingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
-        KeyPredicate::family(DurableObjectFamily::WalSegment),
+        KeyPredicate::family(DurableObjectFamily::WalObject),
     ));
     let recorder = Arc::new(DefaultMetricsRecorder::new());
     let writer = test_writer_with_cache(
@@ -2984,7 +2981,7 @@ async fn retained_tail_projections_are_not_bounded_by_the_namespace_count() {
     assert_eq!(
         recording.count(OperationClass::Read),
         0,
-        "a commit with a retained projection reads no WAL segment"
+        "a commit with a retained projection reads no WAL object"
     );
 
     registry.close_admission();

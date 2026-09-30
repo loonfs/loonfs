@@ -1020,7 +1020,7 @@ async fn a_change_feed_page_costs_the_page_not_the_namespaces_history() {
                 loonfs_objectstore::layout::parse_object_key(operation.key()),
                 Some(key)
                     if key.family()
-                        == loonfs_objectstore::layout::DurableObjectFamily::WalSegment
+                        == loonfs_objectstore::layout::DurableObjectFamily::WalObject
             )),
             "{:?}",
             store.snapshot()

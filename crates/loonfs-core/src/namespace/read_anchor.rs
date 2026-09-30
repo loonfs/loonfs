@@ -50,10 +50,7 @@ pub(crate) async fn load_read_anchor_from_manifest<S: ObjectStore + ?Sized>(
 ) -> Result<NamespaceReadAnchor, ControlObjectLoadError> {
     loop {
         match discover_tail(store, namespace_id, &manifest).await {
-            Ok(DiscoveredTail {
-                head: state,
-                segments,
-            }) => {
+            Ok(DiscoveredTail { head: state, tail }) => {
                 if !state.status.is_deleted() {
                     let successor = manifest_has_successor(
                         store,
@@ -72,7 +69,7 @@ pub(crate) async fn load_read_anchor_from_manifest<S: ObjectStore + ?Sized>(
                     read_state: state,
                     manifest,
                     hint,
-                    tail: segments,
+                    tail,
                 });
             }
             Err(error @ ControlObjectLoadError::Codec { .. }) => {

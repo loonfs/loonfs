@@ -8,8 +8,8 @@ use crate::metadata::{InMemoryMetadataView, MetadataState};
 use crate::namespace::state::NamespaceReadState;
 use crate::path::write::PublishPlanningSession;
 use crate::storage::inline_content::InlineContent;
-use crate::wal::prepare_segment;
-use loonfs_api::wire::wal::{WalDelta, MAX_WAL_SEGMENT_BYTES, WAL_SEGMENT_OVERHEAD_BYTES};
+use crate::wal::prepare_wal_object;
+use loonfs_api::wire::wal::{WalDelta, MAX_WAL_OBJECT_BYTES, WAL_OBJECT_OVERHEAD_BYTES};
 use loonfs_api::{
     ActorId, AttributeKey, Attributes, AttributesRevisionNo, ChangeSeq, Checksum, CommitId,
     ContentId, ContentRef, ContentRefKind, DestinationBehavior, DestinationPrecondition,
@@ -171,8 +171,8 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
             baseline
         };
         candidate.validate_request_limits().expect("request limits");
-        let estimate = candidate.wal_record_bytes_upper_bound() + WAL_SEGMENT_OVERHEAD_BYTES;
-        assert!(estimate <= MAX_WAL_SEGMENT_BYTES, "{kind}");
+        let estimate = candidate.wal_record_bytes_upper_bound() + WAL_OBJECT_OVERHEAD_BYTES;
+        assert!(estimate <= MAX_WAL_OBJECT_BYTES, "{kind}");
         let mut session = PublishPlanningSession::new(&head);
         let mut allocation = session.begin_candidate();
         let plan = session
@@ -193,8 +193,9 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
             committed_at_ms: u64::MAX,
             inline_content: candidate.inline_content().to_vec(),
         };
-        let encoded = prepare_segment(namespace_id.clone(), head.writer_epoch, &head, &[prepared])
-            .expect("encode");
+        let encoded =
+            prepare_wal_object(namespace_id.clone(), head.writer_epoch, &head, &[prepared])
+                .expect("encode");
         assert!(
             encoded.document_len() <= estimate,
             "{kind}: {} > {estimate}",

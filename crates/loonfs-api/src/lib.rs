@@ -66,7 +66,7 @@ pub mod wire {
     }
 
     pub mod wal {
-        //! WAL segment envelopes, records, and codecs.
+        //! WAL object envelopes, records, and codecs.
 
         pub use crate::wal::*;
     }

@@ -8,7 +8,7 @@ use crate::common::namespace_engine;
 use bytes::Bytes;
 use loonfs_api::{
     v0::FilesystemChange,
-    wire::wal::{decode_wal_segment_envelope_zstd, WalDelta},
+    wire::wal::{decode_wal_object_envelope_zstd, WalDelta},
     AbsolutePath, ActorId, ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior,
     InodeId, NamespaceId,
 };
@@ -67,7 +67,7 @@ fn is_data_wal_put(operation: &OperationContext<'_>, wal_prefix: &str) -> bool {
         OperationKind::Put {
             bytes,
             mode: PutMode::CreateIfAbsent,
-        } if operation.key().starts_with(wal_prefix) => decode_wal_segment_envelope_zstd(bytes)
+        } if operation.key().starts_with(wal_prefix) => decode_wal_object_envelope_zstd(bytes)
             .is_ok_and(|envelope| !envelope.payload().records.is_empty()),
         _ => false,
     }
@@ -77,7 +77,7 @@ fn ack_lost_wal_put_store(
     root: impl AsRef<Path>,
     namespace_id: &NamespaceId,
 ) -> FailStore<LocalFsStore> {
-    let wal_prefix = loonfs_objectstore::keys::wal_segment_prefix(namespace_id);
+    let wal_prefix = loonfs_objectstore::keys::wal_prefix(namespace_id);
     let store = FailStore::matching(
         LocalFsStore::new(root.as_ref()).expect("store"),
         move |operation: &OperationContext<'_>| is_data_wal_put(operation, &wal_prefix),
@@ -100,7 +100,7 @@ async fn data_wal_keys<S: ObjectStore + ?Sized>(store: &S) -> Vec<String> {
             .await
             .expect("read WAL")
             .expect("WAL exists");
-        if !decode_wal_segment_envelope_zstd(&bytes)
+        if !decode_wal_object_envelope_zstd(&bytes)
             .expect("decode WAL")
             .payload()
             .records
@@ -207,7 +207,7 @@ async fn batch_delete_then_recreate_of_a_durable_file_layers_over_cached_state()
 }
 
 #[tokio::test]
-async fn batch_commit_writes_one_segment_and_expands_change_feed() {
+async fn batch_commit_writes_one_wal_object_and_expands_change_feed() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -250,20 +250,20 @@ async fn batch_commit_writes_one_segment_and_expands_change_feed() {
         .await
         .expect("read wal")
         .expect("wal exists");
-    let segment = decode_wal_segment_envelope_zstd(&wal_bytes).expect("decode segment");
-    assert_eq!(segment.payload().records[0].committed_seq, ChangeSeq(1));
-    assert_eq!(segment.payload().head_seq, ChangeSeq(2));
-    assert_eq!(segment.payload().records.len(), 2);
-    assert_eq!(segment.payload().records[0].deltas.len(), 2);
+    let wal_object = decode_wal_object_envelope_zstd(&wal_bytes).expect("decode WAL object");
+    assert_eq!(wal_object.payload().records[0].committed_seq, ChangeSeq(1));
+    assert_eq!(wal_object.payload().head_seq, ChangeSeq(2));
+    assert_eq!(wal_object.payload().records.len(), 2);
+    assert_eq!(wal_object.payload().records[0].deltas.len(), 2);
     assert_eq!(
-        segment.payload().records[0].deltas[0].semantic_operation_index,
+        wal_object.payload().records[0].deltas[0].semantic_operation_index,
         0
     );
     assert_eq!(
-        segment.payload().records[0].deltas[1].semantic_operation_index,
+        wal_object.payload().records[0].deltas[1].semantic_operation_index,
         0
     );
-    match &segment.payload().records[0].deltas[1].delta {
+    match &wal_object.payload().records[0].deltas[1].delta {
         WalDelta::BindDirentry {
             name_key,
             display_name,
@@ -317,7 +317,7 @@ async fn change_feed_does_not_read_folded_wal_before_current_manifest() {
     let wal_keys = data_wal_keys(&store).await;
     assert_eq!(wal_keys.len(), 1);
     store
-        .put_overwrite(&wal_keys[0], Bytes::from_static(b"not a wal segment"))
+        .put_overwrite(&wal_keys[0], Bytes::from_static(b"not a WAL object"))
         .await
         .expect("corrupt wal");
 
@@ -401,7 +401,7 @@ async fn a_failed_retry_keeps_the_result_a_batch_already_settled() {
     // After the data put loses its answer, the retry cannot load its view.
     let answer_lost = std::sync::atomic::AtomicBool::new(false);
     let hint = loonfs_objectstore::keys::hint(&namespace_id);
-    let wal_prefix = loonfs_objectstore::keys::wal_segment_prefix(&namespace_id);
+    let wal_prefix = loonfs_objectstore::keys::wal_prefix(&namespace_id);
     let store = FailStore::matching(
         ack_lost_wal_put_store(temp_dir.path(), &namespace_id),
         move |operation: &OperationContext<'_>| {
@@ -669,8 +669,8 @@ async fn batch_commit_aliases_duplicate_commit_id_with_same_fingerprint() {
         .await
         .expect("read wal")
         .expect("wal exists");
-    let segment = decode_wal_segment_envelope_zstd(&wal_bytes).expect("decode segment");
-    assert_eq!(segment.payload().records.len(), 1);
+    let wal_object = decode_wal_object_envelope_zstd(&wal_bytes).expect("decode WAL object");
+    assert_eq!(wal_object.payload().records.len(), 1);
 
     let changes = list_changes_after(&store, &namespace_id, ChangeSeq(0))
         .await
@@ -1055,8 +1055,8 @@ async fn batch_commit_rejects_duplicate_commit_id_with_different_fingerprint() {
         .await
         .expect("read wal")
         .expect("wal exists");
-    let segment = decode_wal_segment_envelope_zstd(&wal_bytes).expect("decode segment");
-    assert_eq!(segment.payload().records.len(), 1);
+    let wal_object = decode_wal_object_envelope_zstd(&wal_bytes).expect("decode WAL object");
+    assert_eq!(wal_object.payload().records.len(), 1);
 
     let changes = list_changes_after(&store, &namespace_id, ChangeSeq(0))
         .await

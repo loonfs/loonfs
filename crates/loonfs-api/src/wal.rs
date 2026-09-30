@@ -1,5 +1,5 @@
-//! The WAL segment format: envelopes, commit payloads, and the delta
-//! records replay applies (format spec, "WAL segments").
+//! The WAL object format: envelopes, commit payloads, and the delta
+//! records replay applies (format spec, "WAL records").
 
 use crate::digest::sha256_digest;
 use crate::envelope::{self, EnvelopeCodecError, EnvelopeProbe};
@@ -21,20 +21,20 @@ use std::io::Read;
 pub const WAL_FORMAT_VERSION: u32 = 1;
 
 /// Largest decompressed WAL document allowed by [Appendix A.5](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a5-wal-records).
-pub const MAX_WAL_SEGMENT_BYTES: usize = 512 * 1024 * 1024;
+pub const MAX_WAL_OBJECT_BYTES: usize = 512 * 1024 * 1024;
 
 /// Reader limit per inline value in
 /// [Appendix A.5](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a5-wal-records);
 /// writer thresholds are policy at or below this limit.
 pub const MAX_WAL_INLINE_CONTENT_BYTES: usize = 256 * 1024;
 
-/// Reader limit for total inline bytes in one WAL segment in
+/// Reader limit for total inline bytes in one WAL object in
 /// [Appendix A.5](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a5-wal-records);
 /// writer thresholds are policy at or below this limit.
-pub const MAX_WAL_SEGMENT_INLINE_CONTENT_BYTES: usize = 4 * 1024 * 1024;
+pub const MAX_WAL_OBJECT_INLINE_CONTENT_BYTES: usize = 4 * 1024 * 1024;
 
 /// Upper bound for the document and payload fields outside commit records.
-pub const WAL_SEGMENT_OVERHEAD_BYTES: usize = cbor_map_bytes(&[
+pub const WAL_OBJECT_OVERHEAD_BYTES: usize = cbor_map_bytes(&[
     ("kind", cbor_string_bytes("wal_segment".len())),
     ("format_version", 5),
     ("payload_checksum", cbor_string_bytes(64)),
@@ -65,11 +65,11 @@ const fn cbor_map_bytes(fields: &[(&str, usize)]) -> usize {
 
 /// Identifies the durable payload family carried by a WAL envelope.
 ///
-/// See [WAL segment rules](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a5-wal-records).
+/// See [WAL object rules](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a5-wal-records).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WalEnvelopeKind {
-    /// Marks an immutable segment in one namespace's numbered WAL.
+    /// Marks an immutable numbered object in one namespace's WAL.
     WalSegment,
 }
 
@@ -259,13 +259,13 @@ pub struct WalInlineContent {
     pub bytes: Vec<u8>,
 }
 
-/// Carries one accepted logical commit inside a WAL segment.
+/// Carries one accepted logical commit inside a WAL object.
 ///
-/// See [WAL segment rules](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a5-wal-records).
+/// See [WAL object rules](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a5-wal-records).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WalCommitPayload {
-    /// Namespace-wide commit position; segment records must cover their range contiguously.
+    /// Namespace-wide commit position; the records in one WAL object must cover their range contiguously.
     pub committed_seq: ChangeSeq,
     /// Caller idempotency key whose reuse must retain the same semantic fingerprint.
     pub commit_id: CommitId,
@@ -290,35 +290,35 @@ pub struct WalCommitPayload {
 
 /// Carries the namespace identity, numbered range, and commits stored in one WAL object.
 ///
-/// See [WAL segment rules](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a5-wal-records).
+/// See [WAL object rules](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a5-wal-records).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct WalSegmentPayload {
-    /// Namespace this segment belongs to; recovery rejects cross-namespace content.
+pub struct WalObjectPayload {
+    /// Namespace this WAL object belongs to; recovery rejects cross-namespace content.
     pub namespace_id: NamespaceId,
     /// Contiguous object number checked against the key.
     pub wal_no: WalNo,
-    /// Fencing epoch of the writer that proposed this segment.
+    /// Fencing epoch of the writer that proposed this WAL object.
     pub writer_epoch: WriterEpoch,
-    /// Visible sequence after this segment.
+    /// Visible sequence after this WAL object.
     pub head_seq: ChangeSeq,
-    /// Allocation high-water mark after this segment.
+    /// Allocation high-water mark after this WAL object.
     pub next_inode_id: InodeId,
     /// Logical commits in contiguous ascending sequence order.
     pub records: Vec<WalCommitPayload>,
 }
 
-/// A WAL segment decoded through its checked durable codec.
-pub type WalSegmentEnvelope = crate::envelope::VerifiedEnvelope<WalSegmentPayload>;
+/// A WAL object decoded through its checked durable codec.
+pub type WalObjectEnvelope = crate::envelope::VerifiedEnvelope<WalObjectPayload>;
 
-/// Durable layout of a WAL segment object (before zstd compression): the
+/// Durable layout of a WAL object (before zstd compression): the
 /// envelope fields plus the payload as an opaque CBOR byte string.
 /// `payload_checksum` covers exactly those bytes, so integrity verification
 /// never depends on re-encoding the payload with this build's schema. Unknown
 /// payload fields are rejected after checksum verification.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct WalSegmentDocument {
+struct WalObjectDocument {
     kind: String,
     format_version: u32,
     payload_checksum: String,
@@ -327,7 +327,7 @@ struct WalSegmentDocument {
 }
 
 pub(crate) fn encode_wal_payload_cbor(
-    payload: &WalSegmentPayload,
+    payload: &WalObjectPayload,
 ) -> Result<Vec<u8>, EnvelopeCodecError> {
     validate_wal_inline_content(payload)?;
     let mut encoded = Vec::new();
@@ -337,12 +337,12 @@ pub(crate) fn encode_wal_payload_cbor(
 }
 
 /// Encodes a WAL payload once, then checksums and compresses its durable document.
-pub fn encode_wal_segment_envelope_zstd(
-    payload: WalSegmentPayload,
-) -> Result<crate::envelope::EncodedEnvelope<WalSegmentPayload>, EnvelopeCodecError> {
+pub fn encode_wal_object_envelope_zstd(
+    payload: WalObjectPayload,
+) -> Result<crate::envelope::EncodedEnvelope<WalObjectPayload>, EnvelopeCodecError> {
     let payload_bytes = encode_wal_payload_cbor(&payload)?;
     let payload_checksum = sha256_digest(&payload_bytes);
-    let document = WalSegmentDocument {
+    let document = WalObjectDocument {
         kind: WalEnvelopeKind::WalSegment.as_str().to_owned(),
         format_version: WAL_FORMAT_VERSION,
         payload_checksum: payload_checksum.clone(),
@@ -363,21 +363,21 @@ pub fn encode_wal_segment_envelope_zstd(
     })
 }
 
-/// Decodes and verifies a durable zstd-compressed WAL segment envelope.
+/// Decodes and verifies a durable zstd-compressed WAL object envelope.
 ///
 /// Decoding fails for invalid compression or CBOR, the wrong kind or version,
 /// a checksum mismatch, or an invalid payload. See
-/// [WAL segment rules](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a5-wal-records).
-pub fn decode_wal_segment_envelope_zstd(
+/// [WAL object rules](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a5-wal-records).
+pub fn decode_wal_object_envelope_zstd(
     bytes: &[u8],
-) -> Result<WalSegmentEnvelope, EnvelopeCodecError> {
-    decode_wal_segment_envelope_zstd_with_limit(bytes, MAX_WAL_SEGMENT_BYTES)
+) -> Result<WalObjectEnvelope, EnvelopeCodecError> {
+    decode_wal_object_envelope_zstd_with_limit(bytes, MAX_WAL_OBJECT_BYTES)
 }
 
-fn decode_wal_segment_envelope_zstd_with_limit(
+fn decode_wal_object_envelope_zstd_with_limit(
     bytes: &[u8],
     limit: usize,
-) -> Result<WalSegmentEnvelope, EnvelopeCodecError> {
+) -> Result<WalObjectEnvelope, EnvelopeCodecError> {
     let decoder = zstd::stream::read::Decoder::new(bytes)
         .map_err(|err| EnvelopeCodecError::Decompress(err.to_string()))?;
     let mut decompressed = Vec::new();
@@ -386,7 +386,7 @@ fn decode_wal_segment_envelope_zstd_with_limit(
         .read_to_end(&mut decompressed)
         .map_err(|err| EnvelopeCodecError::Decompress(err.to_string()))?;
     if decompressed.len() > limit {
-        return Err(EnvelopeCodecError::WalSegmentTooLarge { max_bytes: limit });
+        return Err(EnvelopeCodecError::WalObjectTooLarge { max_bytes: limit });
     }
     let probe: EnvelopeProbe = from_reader(decompressed.as_slice())
         .map_err(|err| EnvelopeCodecError::EnvelopeDecode(err.to_string()))?;
@@ -394,20 +394,20 @@ fn decode_wal_segment_envelope_zstd_with_limit(
     envelope::verify_kind(expected_kind.as_str(), &probe.kind)?;
     envelope::verify_version(&probe.kind, probe.format_version, WAL_FORMAT_VERSION)?;
 
-    let document: WalSegmentDocument = from_reader(decompressed.as_slice())
+    let document: WalObjectDocument = from_reader(decompressed.as_slice())
         .map_err(|err| EnvelopeCodecError::EnvelopeDecode(err.to_string()))?;
     envelope::verify_payload_checksum(&document.payload_checksum, &document.payload)?;
-    let payload: WalSegmentPayload = from_reader(document.payload.as_slice())
+    let payload: WalObjectPayload = from_reader(document.payload.as_slice())
         .map_err(|err| EnvelopeCodecError::PayloadDecode(err.to_string()))?;
     validate_wal_inline_content(&payload)?;
 
-    Ok(WalSegmentEnvelope {
+    Ok(WalObjectEnvelope {
         payload_checksum: document.payload_checksum,
         payload,
     })
 }
 
-fn validate_wal_inline_content(payload: &WalSegmentPayload) -> Result<(), EnvelopeCodecError> {
+fn validate_wal_inline_content(payload: &WalObjectPayload) -> Result<(), EnvelopeCodecError> {
     let mut total_bytes = 0;
     for record in &payload.records {
         if record.inline_content.is_empty() {
@@ -438,15 +438,15 @@ fn validate_wal_inline_content(payload: &WalSegmentPayload) -> Result<(), Envelo
                 return Err(invalid("value exceeds `MAX_WAL_INLINE_CONTENT_BYTES`"));
             }
             let sizes = reference_sizes.get(&entry.content_id).ok_or_else(|| {
-                invalid("no `append_file_revision` reference in the same commit owned by the segment's `namespace_id`")
+                invalid("no `append_file_revision` reference in the same commit owned by the WAL object's `namespace_id`")
             })?;
             if !sizes.iter().all(|&size| size == entry.bytes.len() as u64) {
                 return Err(invalid("length does not match reference `size_bytes`"));
             }
             total_bytes += entry.bytes.len();
-            if total_bytes > MAX_WAL_SEGMENT_INLINE_CONTENT_BYTES {
+            if total_bytes > MAX_WAL_OBJECT_INLINE_CONTENT_BYTES {
                 return Err(invalid(
-                    "segment inline total exceeds `MAX_WAL_SEGMENT_INLINE_CONTENT_BYTES`",
+                    "WAL object inline total exceeds `MAX_WAL_OBJECT_INLINE_CONTENT_BYTES`",
                 ));
             }
         }
@@ -462,7 +462,7 @@ mod tests {
 
     #[test]
     fn committed_activity_counts_full_revisions_and_semantic_groups() {
-        let mut deltas: Vec<_> = inline_segment(&[5, 5, 0])
+        let mut deltas: Vec<_> = inline_wal_object(&[5, 5, 0])
             .records
             .into_iter()
             .flat_map(|record| record.deltas)
@@ -486,7 +486,7 @@ mod tests {
         assert_eq!(committed_activity(&deltas), None);
     }
 
-    fn inline_segment(lengths: &[usize]) -> WalSegmentPayload {
+    fn inline_wal_object(lengths: &[usize]) -> WalObjectPayload {
         let namespace_id = NamespaceId::parse("bounded").expect("namespace");
         let records: Vec<WalCommitPayload> = lengths
             .iter()
@@ -521,7 +521,7 @@ mod tests {
             })
             .collect();
 
-        WalSegmentPayload {
+        WalObjectPayload {
             namespace_id,
             wal_no: WalNo(1),
             writer_epoch: WriterEpoch(1),
@@ -531,10 +531,10 @@ mod tests {
         }
     }
 
-    fn unchecked_segment_bytes(payload: &WalSegmentPayload) -> Vec<u8> {
+    fn unchecked_wal_object_bytes(payload: &WalObjectPayload) -> Vec<u8> {
         let mut payload_bytes = Vec::new();
         into_writer(payload, &mut payload_bytes).expect("encode payload directly");
-        let document = WalSegmentDocument {
+        let document = WalObjectDocument {
             kind: WalEnvelopeKind::WalSegment.as_str().to_owned(),
             format_version: WAL_FORMAT_VERSION,
             payload_checksum: sha256_digest(&payload_bytes),
@@ -546,7 +546,7 @@ mod tests {
     }
 
     fn assert_inline_content_rejected(
-        payload: WalSegmentPayload,
+        payload: WalObjectPayload,
         record_index: usize,
         expected_reason: &str,
     ) {
@@ -554,9 +554,9 @@ mod tests {
         let expected_content_id = payload.records[record_index].inline_content[0]
             .content_id
             .clone();
-        let decoded_error = decode_wal_segment_envelope_zstd(&unchecked_segment_bytes(&payload))
+        let decoded_error = decode_wal_object_envelope_zstd(&unchecked_wal_object_bytes(&payload))
             .expect_err("invalid inline content should not decode");
-        let encoded_error = encode_wal_segment_envelope_zstd(payload)
+        let encoded_error = encode_wal_object_envelope_zstd(payload)
             .expect_err("invalid inline content should not encode");
         for error in [decoded_error, encoded_error] {
             assert_eq!(
@@ -580,36 +580,37 @@ mod tests {
         }
     }
 
-    fn assert_inline_content_accepted(payload: WalSegmentPayload) {
-        let encoded = encode_wal_segment_envelope_zstd(payload.clone()).expect("encode segment");
-        let decoded = decode_wal_segment_envelope_zstd(encoded.as_bytes()).expect("decode segment");
+    fn assert_inline_content_accepted(payload: WalObjectPayload) {
+        let encoded = encode_wal_object_envelope_zstd(payload.clone()).expect("encode WAL object");
+        let decoded =
+            decode_wal_object_envelope_zstd(encoded.as_bytes()).expect("decode WAL object");
         assert_eq!(decoded.into_payload(), payload);
     }
 
     #[test]
     fn inline_content_requires_a_local_revision_reference_in_the_same_commit() {
-        let expected_reason = "no `append_file_revision` reference in the same commit owned by the segment's `namespace_id`";
-        let mut missing = inline_segment(&[3, 3]);
+        let expected_reason = "no `append_file_revision` reference in the same commit owned by the WAL object's `namespace_id`";
+        let mut missing = inline_wal_object(&[3, 3]);
         missing.records[0].deltas.clear();
         assert_inline_content_rejected(missing, 0, expected_reason);
 
-        let mut wrong_id = inline_segment(&[3]);
+        let mut wrong_id = inline_wal_object(&[3]);
         wrong_id.records[0].inline_content[0].content_id =
             ContentId::parse("con_fedcba9876543210fedcba9876543210").expect("content id");
         assert_inline_content_rejected(wrong_id, 0, expected_reason);
 
-        let mut foreign = inline_segment(&[3]);
+        let mut foreign = inline_wal_object(&[3]);
         foreign.namespace_id = NamespaceId::parse("other").expect("namespace");
         assert_inline_content_rejected(foreign, 0, expected_reason);
     }
 
     #[test]
     fn inline_content_length_must_match_the_reference() {
-        let mut payload = inline_segment(&[3]);
+        let mut payload = inline_wal_object(&[3]);
         payload.records[0].inline_content[0].bytes.push(42);
         assert_inline_content_rejected(payload, 0, "length does not match reference `size_bytes`");
 
-        let mut payload = inline_segment(&[3]);
+        let mut payload = inline_wal_object(&[3]);
         let mut other_reference = payload.records[0].deltas[0].clone();
         other_reference.semantic_operation_index = 1;
         match &mut other_reference.delta {
@@ -631,7 +632,7 @@ mod tests {
 
     #[test]
     fn inline_content_ids_must_be_unique_within_each_commit() {
-        let mut payload = inline_segment(&[0]);
+        let mut payload = inline_wal_object(&[0]);
         let entry = payload.records[0].inline_content[0].clone();
         payload.records[0].inline_content.push(entry);
         assert_inline_content_rejected(payload, 0, "duplicate `content_id` in commit");
@@ -640,40 +641,40 @@ mod tests {
     #[test]
     fn inline_content_accepts_the_value_limit_and_rejects_one_byte_more() {
         assert_eq!(MAX_WAL_INLINE_CONTENT_BYTES, 262_144);
-        assert_inline_content_accepted(inline_segment(&[MAX_WAL_INLINE_CONTENT_BYTES]));
+        assert_inline_content_accepted(inline_wal_object(&[MAX_WAL_INLINE_CONTENT_BYTES]));
         assert_inline_content_rejected(
-            inline_segment(&[MAX_WAL_INLINE_CONTENT_BYTES + 1]),
+            inline_wal_object(&[MAX_WAL_INLINE_CONTENT_BYTES + 1]),
             0,
             "value exceeds `MAX_WAL_INLINE_CONTENT_BYTES`",
         );
     }
 
     #[test]
-    fn inline_content_accepts_the_segment_limit_and_rejects_one_byte_more() {
-        assert_eq!(MAX_WAL_SEGMENT_INLINE_CONTENT_BYTES, 4_194_304);
+    fn inline_content_accepts_the_wal_object_limit_and_rejects_one_byte_more() {
+        assert_eq!(MAX_WAL_OBJECT_INLINE_CONTENT_BYTES, 4_194_304);
         let mut lengths = vec![
             MAX_WAL_INLINE_CONTENT_BYTES;
-            MAX_WAL_SEGMENT_INLINE_CONTENT_BYTES / MAX_WAL_INLINE_CONTENT_BYTES
+            MAX_WAL_OBJECT_INLINE_CONTENT_BYTES / MAX_WAL_INLINE_CONTENT_BYTES
         ];
-        assert_inline_content_accepted(inline_segment(&lengths));
+        assert_inline_content_accepted(inline_wal_object(&lengths));
         lengths.push(1);
         assert_inline_content_rejected(
-            inline_segment(&lengths),
+            inline_wal_object(&lengths),
             lengths.len() - 1,
-            "segment inline total exceeds `MAX_WAL_SEGMENT_INLINE_CONTENT_BYTES`",
+            "WAL object inline total exceeds `MAX_WAL_OBJECT_INLINE_CONTENT_BYTES`",
         );
     }
 
     #[test]
     fn inline_content_is_not_hashed_against_the_reference_checksum() {
-        let mut payload = inline_segment(&[3]);
+        let mut payload = inline_wal_object(&[3]);
         payload.records[0].inline_content[0].bytes[0] = 43;
         assert_inline_content_accepted(payload);
     }
 
     #[test]
     fn decoder_accepts_the_limit_and_rejects_the_next_byte_before_decoding() {
-        let encoded = encode_wal_segment_envelope_zstd(WalSegmentPayload {
+        let encoded = encode_wal_object_envelope_zstd(WalObjectPayload {
             namespace_id: NamespaceId::parse("bounded").expect("namespace"),
             wal_no: WalNo(1),
             writer_epoch: WriterEpoch(1),
@@ -684,23 +685,23 @@ mod tests {
         .expect("encode");
         let document = zstd::stream::decode_all(encoded.as_bytes()).expect("decompress");
         assert_eq!(document.len(), encoded.document_len());
-        assert!(document.len() <= WAL_SEGMENT_OVERHEAD_BYTES);
+        assert!(document.len() <= WAL_OBJECT_OVERHEAD_BYTES);
         assert_eq!(
-            &decode_wal_segment_envelope_zstd_with_limit(encoded.as_bytes(), document.len())
+            &decode_wal_object_envelope_zstd_with_limit(encoded.as_bytes(), document.len())
                 .expect("at limit"),
             encoded.envelope(),
         );
         assert!(matches!(
-            decode_wal_segment_envelope_zstd_with_limit(encoded.as_bytes(), document.len() - 1),
-            Err(EnvelopeCodecError::WalSegmentTooLarge { max_bytes }) if max_bytes == document.len() - 1
+            decode_wal_object_envelope_zstd_with_limit(encoded.as_bytes(), document.len() - 1),
+            Err(EnvelopeCodecError::WalObjectTooLarge { max_bytes }) if max_bytes == document.len() - 1
         ));
         let invalid = zstd::stream::encode_all(&[0xff; 64][..], 0).expect("compress");
         assert!(matches!(
-            decode_wal_segment_envelope_zstd_with_limit(&invalid, 8),
-            Err(EnvelopeCodecError::WalSegmentTooLarge { max_bytes: 8 })
+            decode_wal_object_envelope_zstd_with_limit(&invalid, 8),
+            Err(EnvelopeCodecError::WalObjectTooLarge { max_bytes: 8 })
         ));
         assert!(matches!(
-            decode_wal_segment_envelope_zstd_with_limit(&invalid, 64),
+            decode_wal_object_envelope_zstd_with_limit(&invalid, 64),
             Err(EnvelopeCodecError::EnvelopeDecode(_))
         ));
     }

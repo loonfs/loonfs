@@ -156,7 +156,7 @@ async fn warm_phase_request_accounting() {
     let catalog = loonfs_core::control::load_namespace_catalog_entry(&store, &namespace_id)
         .await
         .expect("load namespace catalog");
-    // The bench publishes 100-mutation batches (one WAL segment each) and
+    // The bench publishes 100-mutation batches (one WAL object each) and
     // steps a few times across the build; mirror that shape.
     let mut index = 0usize;
     while index < FILES {

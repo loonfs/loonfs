@@ -2,7 +2,7 @@
 
 use super::{CoreError, NamespaceId, PreparedCandidate};
 use crate::PublicationLimits;
-use loonfs_api::wire::wal::{MAX_WAL_SEGMENT_BYTES, WAL_SEGMENT_OVERHEAD_BYTES};
+use loonfs_api::wire::wal::{MAX_WAL_OBJECT_BYTES, WAL_OBJECT_OVERHEAD_BYTES};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -59,11 +59,11 @@ impl PublicationAdmission {
     pub(super) fn validate_candidate(candidate: &PreparedCandidate) -> Result<(), CoreError> {
         let document_bytes = candidate
             .wal_record_bytes_upper_bound
-            .saturating_add(WAL_SEGMENT_OVERHEAD_BYTES);
-        if document_bytes > MAX_WAL_SEGMENT_BYTES {
+            .saturating_add(WAL_OBJECT_OVERHEAD_BYTES);
+        if document_bytes > MAX_WAL_OBJECT_BYTES {
             return Err(CoreError::CommitTooLarge {
                 estimated_bytes: document_bytes,
-                max_bytes: MAX_WAL_SEGMENT_BYTES,
+                max_bytes: MAX_WAL_OBJECT_BYTES,
             });
         }
         Ok(())
@@ -220,14 +220,14 @@ mod tests {
         ))
         .expect("prepare");
         candidate.wal_record_bytes_upper_bound =
-            MAX_WAL_SEGMENT_BYTES - WAL_SEGMENT_OVERHEAD_BYTES + 1;
+            MAX_WAL_OBJECT_BYTES - WAL_OBJECT_OVERHEAD_BYTES + 1;
         let error = budget
             .acquire_candidate(&namespace_id, &candidate)
             .err()
             .expect("oversized commit");
         assert_eq!(error.code(), loonfs_api::ErrorCode::ContentTooLarge);
-        assert!(error.to_string().contains("too large for one WAL segment"));
-        assert!(error.to_string().contains("MAX_WAL_SEGMENT_BYTES"));
+        assert!(error.to_string().contains("too large for one WAL object"));
+        assert!(error.to_string().contains("MAX_WAL_OBJECT_BYTES"));
         drop(permit);
         assert_eq!(budget.used_requests(), 0);
     }

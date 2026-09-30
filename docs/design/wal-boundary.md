@@ -22,20 +22,20 @@ These distinctions matter during recovery and collection. A fence is still a WAL
 
 ## Module responsibilities
 
-Numbered WAL keys, segment construction, reads, and publication are handled in `wal/`. Discovery and collection decisions specific to the log are defined there as well.
+Numbered WAL keys, WAL object construction, reads, and publication are handled in `wal/`. Discovery and collection decisions specific to the log are defined there as well.
 
 | File | Responsibility |
 | --- | --- |
-| `frame.rs` | Segment and tail types, including validation errors |
-| `writer.rs` | Construction of data and fence segments, calculation of the next WAL number and resulting head |
+| `frame.rs` | WAL object and tail types, including validation errors |
+| `writer.rs` | Construction of data and fence WAL objects, calculation of the next WAL number and resulting head |
 | `publish.rs` | Conditional writes and classification of successful, conflicting, and uncertain outcomes |
 | `discover.rs` | Windowed discovery that retains the WAL tail and incremental updates to cached views |
-| `reader.rs` | Reading consecutive segments, loading bounded tails, and replaying discovered tails |
+| `reader.rs` | Reading consecutive WAL objects, loading bounded tails, and replaying discovered tails |
 | `replay.rs` | Reconstruction of metadata state from committed records |
 | `projected_tail.rs` | Metadata rows and inline content projected from the unfolded WAL tail |
 | `reclaim.rs` | Identification of WAL objects still required for recovery |
 
-Commit publication uses the current namespace head and accepted commits to prepare the next segment. Reads use a base head and current head to load and replay the intervening WAL. The change feed and commit replay read the `commits` metadata family and the projected tail; they do not load retained segments.
+Commit publication uses the current namespace head and accepted commits to prepare the next WAL object. Reads use a base head and current head to load and replay the intervening WAL. The change feed and commit replay read the `commits` metadata family and the projected tail; they do not load retained WAL objects.
 
 The numbered-key builder is restricted by `clippy.toml`, with explicit exceptions for WAL storage code and tests that inspect physical objects. The envelope codecs remain available for format validation and tests.
 
@@ -45,7 +45,7 @@ Several parts of the storage protocol involve both the log and other namespace s
 
 - Manifest and hint management. A hint contains a manifest number, raised by manifest publications. Its updates live in the control module. WAL discovery starts at the manifest's folded position and reads forward in windows.
 - Garbage collection. Object enumeration, age checks, and deletion live in `gc/`. For a live namespace, an object is required if its number is above the folded position. An object at or below it goes through the remaining collection checks.
-- Position tracking. WAL numbers appear in the namespace head and durable manifest. Their differences count unfolded segments and enforce maintenance and write limits.
+- Position tracking. WAL numbers appear in the namespace head and durable manifest. Their differences count unfolded WAL objects and enforce maintenance and write limits.
 
 The module boundary therefore separates WAL operations while preserving the numbered-log model used elsewhere in LoonFS.
 

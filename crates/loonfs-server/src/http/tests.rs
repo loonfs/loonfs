@@ -985,13 +985,13 @@ fn options_with_store(store: SharedObjectStore) -> AppOptions {
 fn data_wal_put_for(
     namespace_id: &NamespaceId,
 ) -> impl Fn(&OperationContext<'_>) -> bool + Send + Sync + 'static {
-    let prefix = loonfs_objectstore::keys::wal_segment_prefix(namespace_id);
+    let prefix = loonfs_objectstore::keys::wal_prefix(namespace_id);
     move |operation| match operation.kind() {
         OperationKind::Put {
             bytes,
             mode: PutMode::CreateIfAbsent,
         } if operation.key().starts_with(&prefix) => {
-            loonfs_api::wire::wal::decode_wal_segment_envelope_zstd(bytes)
+            loonfs_api::wire::wal::decode_wal_object_envelope_zstd(bytes)
                 .is_ok_and(|envelope| !envelope.payload().records.is_empty())
         }
         _ => false,

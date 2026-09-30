@@ -224,7 +224,7 @@ async fn forks_start_activity_at_zero_and_inherit_the_selected_checkpoint_footpr
         .expect("write");
     let unavailable_wal = FailStore::new(
         LocalFsStore::new(dir.path()).expect("statistics store"),
-        KeyPredicate::prefix(loonfs_objectstore::keys::wal_segment_prefix(&parent)),
+        KeyPredicate::prefix(loonfs_objectstore::keys::wal_prefix(&parent)),
         OperationClass::Read,
         InjectedError::PermissionDenied("WAL unavailable".to_owned()),
     );

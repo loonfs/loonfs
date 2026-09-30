@@ -28,7 +28,7 @@ impl<S: ObjectStore + ?Sized> Sweep<'_, '_, S> {
             return Ok(());
         }
         match family {
-            CandidateFamily::WalSegments => {
+            CandidateFamily::WalObjects => {
                 self.process_aged_family(family, key, |counts| &mut counts.wal_segments)
                     .await
             }
@@ -58,7 +58,7 @@ impl<S: ObjectStore + ?Sized> Sweep<'_, '_, S> {
             return Ok(());
         }
         if self.live.objects.contains(key)
-            || (family == CandidateFamily::WalSegments && self.live.protects_wal(key))
+            || (family == CandidateFamily::WalObjects && self.live.protects_wal(key))
         {
             self.report.retain(RetainedReason::Referenced);
             return Ok(());
