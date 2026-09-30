@@ -57,12 +57,12 @@ pub fn metadata_segment_object_key(descriptor: &MetadataSegmentRef) -> String {
 }
 
 /// Builds a pin key with its manifest number in the id.
-pub fn checkpoint_record(namespace_id: &NamespaceId, checkpoint_id: &PinId) -> String {
-    format!("namespaces/{namespace_id}/pins/{checkpoint_id}.json")
+pub fn pin(namespace_id: &NamespaceId, pin_id: &PinId) -> String {
+    format!("namespaces/{namespace_id}/pins/{pin_id}.json")
 }
 
 /// Builds the listing prefix containing pins for one namespace.
-pub fn checkpoint_prefix(namespace_id: &NamespaceId) -> String {
+pub fn pin_prefix(namespace_id: &NamespaceId) -> String {
     format!("namespaces/{namespace_id}/pins/")
 }
 
@@ -92,8 +92,8 @@ mod tests {
     #![allow(clippy::disallowed_methods)]
 
     use super::{
-        checkpoint_record, content_blob, hint, metadata_manifest_object, metadata_segment,
-        metadata_segment_object_key, upload_session, wal_segment, wal_segment_prefix,
+        content_blob, hint, metadata_manifest_object, metadata_segment,
+        metadata_segment_object_key, pin, upload_session, wal_segment, wal_segment_prefix,
     };
     use loonfs_api::wire::manifest::{
         MetadataRowFamily, MetadataSegmentRef, METADATA_SEGMENT_ENCODING,
@@ -181,7 +181,7 @@ mod tests {
                 "Namespace manifests",
                 metadata_manifest_object(&namespace_id(), &ManifestNo(400)),
             ),
-            ("Pin records", checkpoint_record(&namespace_id(), &pin_id())),
+            ("Pin records", pin(&namespace_id(), &pin_id())),
             (
                 "Metadata segments",
                 metadata_segment(&namespace_id(), &metadata_segment_id()),

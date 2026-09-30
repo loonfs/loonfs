@@ -3,7 +3,7 @@
 mod collect;
 mod config;
 mod families;
-mod fork_checkpoints;
+mod fork_pins;
 mod live_set;
 mod reap;
 mod reclaim;

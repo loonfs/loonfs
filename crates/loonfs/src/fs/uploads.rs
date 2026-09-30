@@ -336,7 +336,7 @@ impl FsWriter {
             .await?)
     }
 
-    /// Returns an upload session and a new receipt when the upload is complete.
+    /// Returns an upload session and new evidence when the upload is complete.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.get_upload_status",

@@ -130,7 +130,7 @@ async fn content_prepared_and_never_published_is_reclaimed_with_its_session() {
     assert_eq!(inside.deleted.content_objects, 0);
     assert!(
         exists(&store, &orphan_key).await,
-        "inside the grace a receipt could still admit a commit for these bytes"
+        "inside the grace evidence could still admit a commit for these bytes"
     );
 
     let past = collect(

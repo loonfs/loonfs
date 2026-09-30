@@ -8,7 +8,7 @@
 
 use crate::{EffectiveLimit, GcConfig, MetadataCompactionPolicy, Result, RuntimeError};
 use loonfs_api::{CreateCheckpointRequest, GcRequest, MetadataMaintenanceRequest};
-use loonfs_core::limits::{FOLD_AT_WAL_SEGMENTS, MAX_UNFLUSHED_WAL_SEGMENTS};
+use loonfs_core::limits::{FOLD_AT_WAL_SEGMENTS, MAX_UNFOLDED_WAL_SEGMENTS};
 use std::num::{NonZeroU64, NonZeroUsize};
 
 pub use loonfs_api::options::{
@@ -21,12 +21,12 @@ pub use loonfs_api::options::{
 /// Overrides for the metadata-upkeep action.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataMaintenanceOptions {
-    /// Flush the visible WAL tail once it reaches this many segments.
+    /// Fold the visible WAL tail once it reaches this many segments.
     pub max_wal_tail_segments: NonZeroU64,
-    /// Flush once unfolded inline bytes reach this size; defaults to 2 MiB.
+    /// Fold once unfolded inline bytes reach this size; defaults to 2 MiB.
     /// Applies only when the writer's publisher knows the count.
     pub inline_content_fold_at_bytes: NonZeroUsize,
-    /// Flush a WAL tail of any size once its newest commit is this old on
+    /// Fold a WAL tail of any size once its newest commit is this old on
     /// the maintenance handle's wall clock; defaults to 15 minutes. Zero
     /// turns this off.
     pub idle_fold_after_ms: u64,
@@ -60,7 +60,7 @@ impl MetadataMaintenanceOptions {
                 param: "/max_wal_tail_segments",
             });
         };
-        let reject_writes_at_segments = MAX_UNFLUSHED_WAL_SEGMENTS;
+        let reject_writes_at_segments = MAX_UNFOLDED_WAL_SEGMENTS;
         if max_wal_tail_segments.get() > reject_writes_at_segments {
             return Err(RuntimeError::InvalidRequest {
                 message: format!(
@@ -76,26 +76,26 @@ impl MetadataMaintenanceOptions {
         })
     }
 
-    /// Returns whether the WAL tail has reached the flush threshold.
-    pub fn flush_is_due(&self, wal_tail_segments: u64, wal_tail_inline_bytes: usize) -> bool {
+    /// Returns whether the WAL tail has reached the fold threshold.
+    pub fn fold_is_due(&self, wal_tail_segments: u64, wal_tail_inline_bytes: usize) -> bool {
         wal_tail_segments >= self.max_wal_tail_segments.get()
             || wal_tail_inline_bytes >= self.inline_content_fold_at_bytes.get()
     }
 
     /// Returns whether a WAL tail has gone idle: it holds a commit, and the
     /// newest one is at least `idle_fold_after_ms` old at `now_ms`.
-    pub(crate) fn idle_flush_is_due(
+    pub(crate) fn idle_fold_is_due(
         &self,
         wal_tail_newest_commit_at_ms: Option<u64>,
         now_ms: u64,
     ) -> bool {
-        self.idle_flush_due_in_ms(wal_tail_newest_commit_at_ms, now_ms) == Some(0)
+        self.idle_fold_due_in_ms(wal_tail_newest_commit_at_ms, now_ms) == Some(0)
     }
 
     /// Returns how long after `now_ms` a WAL tail goes idle, or zero once it
     /// has. A commit stamped after `now_ms` counts as zero milliseconds old.
     /// Returns `None` when the tail holds no commit or the rule is off.
-    pub(crate) fn idle_flush_due_in_ms(
+    pub(crate) fn idle_fold_due_in_ms(
         &self,
         wal_tail_newest_commit_at_ms: Option<u64>,
         now_ms: u64,
@@ -207,8 +207,8 @@ mod tests {
     }
 
     #[test]
-    fn a_useless_flush_threshold_is_rejected() {
-        for threshold in [0, MAX_UNFLUSHED_WAL_SEGMENTS + 1] {
+    fn a_useless_fold_threshold_is_rejected() {
+        for threshold in [0, MAX_UNFOLDED_WAL_SEGMENTS + 1] {
             let error = MetadataMaintenanceOptions::from_request(MetadataMaintenanceRequest {
                 max_wal_tail_segments: Some(threshold),
             })

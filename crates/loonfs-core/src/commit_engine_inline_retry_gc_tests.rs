@@ -43,7 +43,7 @@ async fn inline_retry_after_lost_ack_and_wal_collection_replays_the_original_com
     // Remove the physical evidence from WAL before the client retries. The
     // folded receipt and commit record must supply the original result.
     assert_eq!(
-        flush_wal(&store, &namespace_id)
+        fold_wal(&store, &namespace_id)
             .await
             .expect("fold landed commit")
             .outcome,

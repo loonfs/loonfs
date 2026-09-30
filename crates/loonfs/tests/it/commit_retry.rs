@@ -82,9 +82,9 @@ async fn compact_receipt_past_horizon(
     namespace_id: &NamespaceId,
     committed_seq: ChangeSeq,
 ) -> ChangeSeq {
-    // Nine rounds: the first flush builds the base run, and the next eight
-    // accumulate the delta runs that reach the fold trigger
-    // (`DEFAULT_MAX_CHECKPOINT_DELTA_RUNS`).
+    // Nine rounds: the first fold builds the base run, and the next eight
+    // accumulate the delta runs that reach the compaction trigger
+    // (`DEFAULT_MAX_DELTA_RUNS`).
     let mut last_seq = committed_seq;
     for round in 0..9 {
         let filler = runtime
@@ -114,7 +114,7 @@ async fn compact_receipt_past_horizon(
         committed_seq
     );
 
-    // The floor alone leaves the receipt answering. Drain reorganization so
+    // The floor alone leaves the receipt answering. Drain compaction so
     // the run families holding the receipt are rebuilt above the floor.
     let mut folded = false;
     for _ in 0..32 {
@@ -130,7 +130,7 @@ async fn compact_receipt_past_horizon(
     }
     assert!(
         folded,
-        "reorganization must actually rebuild runs for this to test anything"
+        "compaction must actually rebuild runs for this to test anything"
     );
 
     last_seq
@@ -716,7 +716,7 @@ async fn a_retry_past_the_receipt_horizon_commits_again() {
     // longer in-process window — a rerun in the same process still replays
     // or conflicts). The horizon is a durable-state fact, and the late
     // retry it governs is a cross-process event, so reopen on the same
-    // store to read what the reorganization actually kept.
+    // store to read what the compaction actually kept.
     drop(runtime);
     let runtime = open_runtime_async(store(temp_dir.path()), "writer-b").await;
 

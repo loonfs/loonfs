@@ -118,7 +118,7 @@ File content is durable no later than the commit that references it. The bytes t
 | Path | How the bytes become durable |
 | --- | --- |
 | Uploaded | An upload session writes and verifies the content object before the commit (section 5). |
-| Inline | The WAL object that commits the revision carries the bytes (Appendix A.5), so they become durable in the same publication that makes the revision visible. Before a flush publishes a manifest whose `folded_wal_no` covers that WAL object, it writes the bytes to the content object (section 7.2). |
+| Inline | The WAL object that commits the revision carries the bytes (Appendix A.5), so they become durable in the same publication that makes the revision visible. Before a fold publishes a manifest whose `folded_wal_no` covers that WAL object, it writes the bytes to the content object (section 7.2). |
 
 WAL collection requires that coverage, so a WAL object is never deleted while its inline bytes exist only in the WAL. A reference is therefore the content's identity, not proof that the content object exists. Section 4.5 defines where a reader finds the bytes.
 
@@ -241,7 +241,7 @@ The counters have different meanings:
 | `seq` | A logical mutation request commits; one WAL object may contain several sequences. |
 | `revision_no` | A new content revision is committed for one file inode. |
 
-For example, manifest 5 may cover WAL 8 through sequence 40. WAL 9 can be a fence at sequence 40, and WAL 10 can contain commits 41–43. The read view is then at sequence 43. A flush can publish manifest 6 covering WAL 10 without allocating sequence 44.
+For example, manifest 5 may cover WAL 8 through sequence 40. WAL 9 can be a fence at sequence 40, and WAL 10 can contain commits 41–43. The read view is then at sequence 43. A fold can publish manifest 6 covering WAL 10 without allocating sequence 44.
 
 ### 2.5 Manifest references
 
@@ -260,7 +260,7 @@ Readers validate the referenced identity, sequence, and checksum. A missing or c
 
 ### 2.6 The log protocol in one page
 
-This section summarizes how commits, writer takeover, flushes, discovery, and collection fit together. Sections 4, 6, 7, and 11 give the complete rules.
+This section summarizes how commits, writer takeover, folds, discovery, and collection fit together. Sections 4, 6, 7, and 11 give the complete rules.
 
 Each namespace has two chains of numbered objects: manifests and WAL objects. Each chain starts at 1, and a publisher creates each object with put-if-absent at the previous number plus one. A manifest records the namespace's lifecycle, its writer and compactor epochs, `head_seq`, `folded_wal_no`, and the metadata segments that hold its rows through `head_seq`. A WAL object holds the commits that follow the previous WAL object, stamped with the writer epoch of the session that wrote it; a fence holds no commits. The hint is mutable. It names a manifest number, manifest publications raise it by compare-and-swap, and it never decreases. Content objects hold file bytes and are written once. Pins are retained manifests (section 8).
 
@@ -268,7 +268,7 @@ A commit creates WAL `tip + 1` with put-if-absent. An acquired writer session pl
 
 A writer takeover publishes the next manifest with `writer_epoch + 1`, then creates a zero-record fence at the next WAL number with that epoch. Between the manifest and the fence, the previous writer can still commit at `tip + 1`. Those commits are valid: their epoch is below the manifest's, and the fence lands above them. Once the fence lands, a stale session cannot commit. Its next put collides, and the discovery that follows finds the higher epoch and fences the session for good. Any earlier discovery that finds the higher epoch fences it the same way (section 6.1).
 
-A flush needs no writer epoch, and any process may run one. It folds the WAL above the current manifest's `folded_wal_no` into new metadata segments and publishes the next manifest with `folded_wal_no` set to the tip it read. That manifest carries the predecessor's writer and compactor epochs. Before it publishes, the flush writes the inline content it covers as content objects (section 7.2).
+A fold needs no writer epoch, and any process may run one. It folds the WAL above the current manifest's `folded_wal_no` into new metadata segments and publishes the next manifest with `folded_wal_no` set to the tip it read. That manifest carries the predecessor's writer and compactor epochs. Before it publishes, the fold writes the inline content it covers as content objects (section 7.2).
 
 Discovery loads the hint and the manifest it names, then probes successive manifest numbers until one is absent, rereading the hint in case it rose meanwhile. It reads WAL objects from `folded_wal_no + 1` upward, in concurrent windows, until the first absent number. It then checks that the manifest still has no successor. If a successor appeared, or the check came `READ_REVALIDATION_BOUND_MS` or more after the manifest probe, discovery reloads the manifest and starts again. A missing or invalid WAL object also reloads the manifest; if the manifest number is unchanged, the store is corrupt (sections 4.1 and 4.2).
 
@@ -283,7 +283,7 @@ What the protocol guarantees:
 3. Writer epochs never decrease along the chain and never exceed the current manifest's epoch; once a newer writer's fence has landed, no older writer commits (the claim and the fence, sections 6.1 and 4.2).
 4. A fresh discovery observes every commit acknowledged before it began (the successor check within the revalidation bound, section 4.2).
 5. A cached view never regresses, and a read served from it reflects a successor check no older than the revalidation bound (the successor probe and the revalidation bound, section 4.2).
-6. Inline bytes stay readable: in the WAL until a flush has written their content objects, then in those objects (content written before the manifest, sections 7.2 and 1.5).
+6. Inline bytes stay readable: in the WAL until a fold has written their content objects, then in those objects (content written before the manifest, sections 7.2 and 1.5).
 7. A retry with the same commit ID and request does not commit twice while its receipt is retained (the commit receipt, section 6.5).
 8. A view that revalidates within its bound never lists a collected segment: its manifest was current at its last successor check, so the manifest and its segments stay for at least one grace after that check (the superseded-manifest root and the revalidation bound, sections 11.2 and 4.2).
 
@@ -365,7 +365,7 @@ After selecting a manifest, read the WAL from `folded_wal_no + 1` upward until t
 
 Each WAL object other than a fence must contain contiguous commits following the preceding head. Its `prior_head_seq` is derived by subtracting one from the first record sequence; a first sequence of zero is invalid. A fence derives its preceding head from `head_seq`. Namespace identity, WAL number, sequence range, allocation state, and writer epoch must validate. Empty fence objects contain no metadata changes. Epochs cannot decrease along the log or exceed the current manifest's epoch. When discovery finds a missing or invalid WAL object, reload the current manifest. If its number changed, start discovery again from it; if it did not, the store is corrupt. A WAL object whose epoch exceeds the loaded manifest's is one case of this rule: another writer may have claimed that epoch after the manifest was loaded.
 
-A deleted manifest ends discovery without a WAL or manifest successor probe. For an active manifest, check for a successor after WAL discovery and reload if one appeared. This prevents a concurrent flush or retention advance from making a reclaimed WAL number look unused. Required missing or malformed objects fail the read. The successor check is trusted only while the manifest probe it confirms is younger than `READ_REVALIDATION_BOUND_MS`; a reader that has taken longer reloads the manifest instead, because a successor published after its probe may already have been collected.
+A deleted manifest ends discovery without a WAL or manifest successor probe. For an active manifest, check for a successor after WAL discovery and reload if one appeared. This prevents a concurrent fold or retention advance from making a reclaimed WAL number look unused. Required missing or malformed objects fail the read. The successor check is trusted only while the manifest probe it confirms is younger than `READ_REVALIDATION_BOUND_MS`; a reader that has taken longer reloads the manifest instead, because a successor published after its probe may already have been collected.
 
 A read is evaluated at one sequence. Replaying the WAL produces a projection of its metadata changes and any file bytes stored inline. This is the *projected WAL tail*. An implementation may query verified metadata segments and this projection directly, without loading every metadata row into memory, provided it applies the same visibility rules.
 
@@ -537,7 +537,7 @@ The publication procedure is:
    If a candidate's evidence has expired, return its own error for that candidate and `stale_head` for the other accepted candidates so they can be planned again. Write no WAL for that batch.
 5. On success, update the local read state and acknowledge the requests.
 
-The publication budget is measured from observing the tip used to plan the batch until initiating its numbered put. A cached tip has the same time limit. A successful put is itself an observation of the tip it created, so the budget for the next put runs from the start of the batch that made it. It confirms nothing about the manifest the batch was planned against, which another process may have replaced by a flush. A writer that keeps its view across puts confirms that manifest at least once per `WAL_PUBLISH_BUDGET_MS` with a HEAD of the next manifest number. It reloads the view when the successor exists, or when the answer arrives `READ_REVALIDATION_BOUND_MS` or more after the observation it would confirm. An expired attempt reloads and re-plans before writing. Appendix C records the bound.
+The publication budget is measured from observing the tip used to plan the batch until initiating its numbered put. A cached tip has the same time limit. A successful put is itself an observation of the tip it created, so the budget for the next put runs from the start of the batch that made it. It confirms nothing about the manifest the batch was planned against, which another process may have replaced by a fold. A writer that keeps its view across puts confirms that manifest at least once per `WAL_PUBLISH_BUDGET_MS` with a HEAD of the next manifest number. It reloads the view when the successor exists, or when the answer arrives `READ_REVALIDATION_BOUND_MS` or more after the observation it would confirm. An expired attempt reloads and re-plans before writing. Appendix C records the bound.
 
 For example, three requests accepted after sequence 40 can be written together as sequences 41, 42, and 43 in WAL object 10. Creating that object commits all three. They remain separate logical commits, while a request containing several operations remains one commit.
 
@@ -578,7 +578,7 @@ While the receipt is retained, an equal fingerprint under the same `commit_id` i
 
 Inline content is identified by its bytes. While the commit receipt is retained, retrying the same request with the same inline bytes returns the original commit, even if a new content ID was assigned. Changed bytes or a different subject return `commit_id_reuse_conflict`.
 
-Receipt lookup uses the publisher's current projection. The publisher refreshes that projection when a WAL publication budget passes without a put landing, or when its basis manifest gains a successor (section 6.3). A flush it published itself moves the projection's basis to the new manifest and keeps the commits published since, without a refresh. Check for the commit receipt before uploading inline bytes as content objects. If the receipt is still available, return the original result for an identical request or a reuse conflict for a changed request. Neither requires another upload, even after a restart or on another server.
+Receipt lookup uses the publisher's current projection. The publisher refreshes that projection when a WAL publication budget passes without a put landing, or when its basis manifest gains a successor (section 6.3). A fold it published itself moves the projection's basis to the new manifest and keeps the commits published since, without a refresh. Check for the commit receipt before uploading inline bytes as content objects. If the receipt is still available, return the original result for an identical request or a reuse conflict for a changed request. Neither requires another upload, even after a restart or on another server.
 
 The guarantee is bounded by retention. Receipts below the retention floor can be removed during compaction. Once a receipt is gone, the old ID cannot be distinguished from an unused ID and a later request can execute as a new mutation. A receipt that has not yet been compacted may still be available, but callers must not depend on that extra lifetime.
 
@@ -608,21 +608,21 @@ A consumer that requires permanent event history must retain its own copy before
 
 ## 7. Materializing metadata
 
-Replaying a longer WAL requires more object reads and more work. A flush materializes committed metadata into immutable sorted segments and publishes a manifest describing those segments. Subsequent reads start from that manifest and replay only the later visible WAL.
+Replaying a longer WAL requires more object reads and more work. A fold materializes committed metadata into immutable sorted segments and publishes a manifest describing those segments. Subsequent reads start from that manifest and replay only the later visible WAL.
 
-This changes the physical representation, not the namespace's visible history. A flush does not allocate a logical commit sequence or create a pin record.
+This changes the physical representation, not the namespace's visible history. A fold does not allocate a logical commit sequence or create a pin record.
 
 ### 7.1 Manifests, runs, and segments
 
 A namespace manifest describes one complete metadata file set through `head_seq`. It includes the inode allocator, folded WAL number, retention floor, and all metadata runs required to reconstruct that state. Its `manifest_no` determines its immutable key; only one publication can succeed at that number.
 
-A run is the collection of segments produced together. `run_no` is allocated from the manifest's `next_run_no`, which advances when that run is published. A WAL flush allocates one run number across the families it writes. A compaction allocates a run number for its selected family group.
+A run is the collection of segments produced together. `run_no` is allocated from the manifest's `next_run_no`, which advances when that run is published. A WAL fold allocates one run number across the families it writes. A compaction allocates a run number for its selected family group.
 
 Each run records `run_seq`, `tier`, and its segment descriptors. `base_seq` is derived as the smallest `run_seq` among runs with segments, or `head_seq` when none have segments. A non-empty manifest must have a non-empty run at `head_seq`; no run sequence may exceed it. An empty manifest describes genesis. Within one run, each family's segments follow list order and have strictly separated ascending key ranges. Every segment contains at least one row. Different runs can overlap because a later run can contain additional rows for the same inode, name slot, or revision history.
 
 The manifest must not contain duplicate run numbers or a run number at or above `next_run_no`. A family's segment ranges must not overlap or descend. Metadata producers must not write the same logical row key twice within one run.
 
-Metadata rows describe immutable facts at specific positions. Reads merge those facts and apply the visibility rules, rather than choosing arbitrary values for a conflicting row key. The parent-and-name binding family and child-binding index contain the same binding versions in different orders. Manifest validation checks their per-run row counts; reorganization checks full row-level equality across its selected complete input runs.
+Metadata rows describe immutable facts at specific positions. Reads merge those facts and apply the visibility rules, rather than choosing arbitrary values for a conflicting row key. The parent-and-name binding family and child-binding index contain the same binding versions in different orders. Manifest validation checks their per-run row counts; compaction checks full row-level equality across its selected complete input runs.
 
 The `commits` and `commit_receipts` families hold one row each per retained commit; manifest validation checks their per-run row counts the same way.
 
@@ -630,13 +630,13 @@ The `commits` and `commit_receipts` families hold one row each per retained comm
 
 The first manifest has number 1, the requested namespace identity, creation time, and `created_by`, active status, and no writer block. Both epochs, the local folded WAL number, and activity counters start at zero. A plain create has no fork basis or runs, next inode ID 2, and head sequence, base sequence, retention floor, and next run number zero. A fork has the immutable source basis and inherited state described in section 9.2; its head and retention floor equal the pinned source sequence.
 
-A flush starts from a verified manifest and a discovered WAL tip. A flush call discovers both; a writer's own fold takes them from its retained view. It materializes the required numbers after `folded_wal_no`, writes new segments, and publishes the next manifest with `folded_wal_no` set to the captured tip. A fence is folded even when the logical sequence does not change. Ordinary flushes write a run at the head when materializing new state.
+A fold starts from a verified manifest and a discovered WAL tip. A fold call discovers both; a writer's own fold takes them from its retained view. It materializes the required numbers after `folded_wal_no`, writes new segments, and publishes the next manifest with `folded_wal_no` set to the captured tip. A fence is folded even when the logical sequence does not change. Ordinary folds write a run at the head when materializing new state.
 
-A flush needs no writer epoch and may run in any process. It carries the predecessor's writer and compactor epochs forward. It loads the current manifest before its put, and again when its put loses, and decides coverage. The flush is covered if the current manifest's `folded_wal_no` is at least the flush's captured tip, and the current manifest's head sequence and manifest number are at least the flush's. A covered flush is finished. Otherwise it rebuilds against the new predecessor and carries that predecessor's epochs. One `METADATA_PUBLICATION_BUDGET_MS` deadline covers the whole call, including rebuilds.
+A fold needs no writer epoch and may run in any process. It carries the predecessor's writer and compactor epochs forward. It loads the current manifest before its put, and again when its put loses, and decides coverage. The fold is covered if the current manifest's `folded_wal_no` is at least the fold's captured tip, and the current manifest's head sequence and manifest number are at least the fold's. A covered fold is finished. Otherwise it rebuilds against the new predecessor and carries that predecessor's epochs. One `METADATA_PUBLICATION_BUDGET_MS` deadline covers the whole call, including rebuilds.
 
-Before writing segments or publishing the manifest, a flush writes every inline value it covers as a content object, verified against its reference. A manifest whose `folded_wal_no` is `n` implies a content object exists for every inline value in WAL objects up to `n`. WAL collection's rule is unchanged because it already requires each WAL object to be at or below `folded_wal_no`.
+Before writing segments or publishing the manifest, a fold writes every inline value it covers as a content object, verified against its reference. A manifest whose `folded_wal_no` is `n` implies a content object exists for every inline value in WAL objects up to `n`. WAL collection's rule is unchanged because it already requires each WAL object to be at or below `folded_wal_no`.
 
-Publication uses put-if-absent at `predecessor.manifest_no + 1`. A lost put loads the winning manifest. A flush already covered by the winner needs no further publication; coverage includes WAL position as well as sequence. Otherwise it rebuilds against the new predecessor. Reorganization and compaction additionally require their selected inputs to remain valid.
+Publication uses put-if-absent at `predecessor.manifest_no + 1`. A lost put loads the winning manifest. A fold already covered by the winner needs no further publication; coverage includes WAL position as well as sequence. Otherwise it rebuilds against the new predecessor. Compaction additionally requires its selected inputs to remain valid.
 
 Successors preserve namespace identity and cannot lower head sequence, writer or compactor epoch, folded WAL number, the retention floor, allocators, or cumulative activity counters. A successor at the same head must preserve activity counters exactly. A tombstone has no successor.
 
@@ -650,11 +650,11 @@ Forks follow the same path from manifest 1. Publishing a target-owned manifest d
 
 After the corresponding WAL is reclaimed, metadata segments are required recovery material. They are not disposable caches. A missing or corrupt required manifest or segment is an error; readers do not select a different file set and silently return another state.
 
-Implementations can flush automatically as the WAL grows. The reference defaults request a flush at 32 unflushed WAL objects and reject new commits with `maintenance_required` at 128. The commit that triggers a flush can finish before the flush completes. Reads and retained-receipt lookup remain available at the threshold.
+Implementations can fold automatically as the WAL grows. The reference defaults request a fold at 32 unfolded WAL objects and reject new commits with `maintenance_required` at 128. The commit that triggers a fold can finish before the fold completes. Reads and retained-receipt lookup remain available at the threshold.
 
-The reference maintenance also requests a flush of a shorter tail once it has gone idle: the tail holds a commit, and the newest commit's `committed_at_ms` is at least 15 minutes older than the maintenance clock. A tail of fences alone is never idle. The timestamp only decides when to flush; a flush is valid at any time.
+The reference maintenance also requests a fold of a shorter tail once it has gone idle: the tail holds a commit, and the newest commit's `committed_at_ms` is at least 15 minutes older than the maintenance clock. A tail of fences alone is never idle. The timestamp only decides when to fold; a fold is valid at any time.
 
-Flushing does not advance retention. An operator separately decides when older replay history may be discarded. Appendix C lists the reference implementation's sizing defaults.
+Folding does not advance retention. An operator separately decides when older replay history may be discarded. Appendix C lists the reference implementation's sizing defaults.
 
 ### 7.4 Statistics
 
@@ -668,9 +668,9 @@ Each manifest stores three cumulative activity counters in a required `activity`
 
 For example, writing a 10-byte file and then replacing it with a 6-byte revision adds 16 bytes, two revisions, and two mutations. Creating a directory adds one mutation. Recursively deleting that directory adds one mutation, regardless of how many descendants it hides. Convenience requests can contain several internal operations, so mutation totals can exceed request counts.
 
-A flush adds only the activity after its predecessor's covered position. It publishes the counters, runs, head sequence, and folded WAL number together. A competing publication requires the flush to reload the predecessor and count only the remaining tail. A recognized commit retry adds nothing again. If an expired receipt allows a new durable commit, that commit counts as new activity.
+A fold adds only the activity after its predecessor's covered position. It publishes the counters, runs, head sequence, and folded WAL number together. A competing publication requires the fold to reload the predecessor and count only the remaining tail. A recognized commit retry adds nothing again. If an expired receipt allows a new durable commit, that commit counts as new activity.
 
-Uploads alone, fence records, pins, inline-content extraction, and compaction add no activity. Retention and deletion do not subtract past activity. Every publisher carries forward the counters from the predecessor it actually updates, including when compaction races a newer flush.
+Uploads alone, fence records, pins, inline-content extraction, and compaction add no activity. Retention and deletion do not subtract past activity. Every publisher carries forward the counters from the predecessor it actually updates, including when compaction races a newer fold.
 
 Two footprint values are calculated from the manifest's segment descriptors:
 
@@ -695,7 +695,7 @@ Grep reports its own referenced segment bytes under Appendix D. Its manifest and
 
 ## 8. Pins
 
-A pin is a durable record that holds one manifest. It preserves that manifest and its segments after newer manifests are published. Ordinary flushing creates no pin; applications, operators, and forks create pins when they need a stable retained basis.
+A pin is a durable record that holds one manifest. It preserves that manifest and its segments after newer manifests are published. Ordinary folding creates no pin; applications, operators, and forks create pins when they need a stable retained basis.
 
 ### 8.1 Records and owners
 
@@ -715,7 +715,7 @@ Expiry, read eligibility, collection eligibility, and removal are separate. An e
 
 For a pin created from the current head:
 
-1. Flush the observed WAL tail and select a verified current manifest.
+1. Fold the observed WAL tail and select a verified current manifest.
 2. Write a fresh pin with put-if-absent.
 3. Load the current manifest again.
 4. Require the same manifest number and payload checksum, an active namespace, and a retention floor no later than the pinned head sequence.
@@ -828,7 +828,7 @@ Retention determines which historical views remain available under the format gu
 
 The floor bounds incremental replay, superseded binding history, old attribute states, and commit receipts. It does not expire file revisions or content-publication evidence. WAL objects are not retained by the floor; collection removes them once folded.
 
-Floor advancement is explicit. The initial sequence floor is 0 for a new root namespace and the fork point for a fork. Automatic flushes do not advance it. The change feed returns only commits above the floor, so the commit row at the floor is kept and never replayed; a fork's floor is its fork point so that the source's commit at that sequence stays out of the fork's feed.
+Floor advancement is explicit. The initial sequence floor is 0 for a new root namespace and the fork point for a fork. Automatic folds do not advance it. The change feed returns only commits above the floor, so the commit row at the floor is kept and never replayed; a fork's floor is its fork point so that the source's commit at that sequence stays out of the fork's feed.
 
 A floor advance loads the current manifest and verifies that its referenced segments exist. It publishes a successor with the same runs, head summary, allocators, and authority, setting `retention_floor_seq` to the predecessor's `head_seq`. The floor cannot decrease.
 
@@ -838,17 +838,17 @@ The existence check detects missing recovery material before abandoning the corr
 
 Metadata is compacted by family group. The `direntry_binds` and `direntry_child_binds` families form one group because they must remain consistent. The `commits` and `commit_receipts` families form another group, and each of the other seven groups contains one family. Appendix A.6 lists the groups.
 
-A bounded rebuild merges an oldest-first contiguous window. It can skip the group's oldest run when that run is too large for one bounded step and merge the delta runs above it instead. It cannot skip an intervening delta run.
+A bounded compaction merges an oldest-first contiguous window. It can skip the group's oldest run when that run is too large for one bounded step and merge the delta runs above it instead. It cannot skip an intervening delta run.
 
-An output run is `base` if and only if the window includes the group's oldest run. Only that kind of rebuild can drop rows under the retention rules. A rebuild above the oldest run produces a `delta` run and drops nothing, because an excluded older run may hold rows that a row in the window supersedes: an older binding version below an unbound one, or a listed deletion whose removal row is in the window.
+An output run is `base` if and only if the window includes the group's oldest run. Only that kind of compaction can drop rows under the retention rules. A compaction above the oldest run produces a `delta` run and drops nothing, because an excluded older run may hold rows that a row in the window supersedes: an older binding version below an unbound one, or a listed deletion whose removal row is in the window.
 
-A group has at most one base run. A bottom-anchored rebuild replaces the existing base when one exists and is stamped with the manifest's `head_seq`. Base runs are ordered before delta runs regardless of their sequence stamp. A rebuild that skips the oldest run is stamped with its newest input's sequence and remains at that position in the group.
+A group has at most one base run. A bottom-anchored compaction replaces the existing base when one exists and is stamped with the manifest's `head_seq`. Base runs are ordered before delta runs regardless of their sequence stamp. A compaction that skips the oldest run is stamped with its newest input's sequence and remains at that position in the group.
 
-A delta-only rebuild must merge at least two runs. Once a group has only one delta run above an oversized base, another bounded delta-only rebuild cannot reduce the run count. A larger streaming compaction can handle the complete group.
+A delta-only compaction must merge at least two runs. Once a group has only one delta run above an oversized base, another bounded delta-only compaction cannot reduce the run count. A larger streaming compaction can handle the complete group.
 
-### 10.3 Row retention during a base rebuild
+### 10.3 Row retention during a base compaction
 
-The following rules apply only when the selected inputs include the group's oldest run. A delta-only rebuild retains all input rows.
+The following rules apply only when the selected inputs include the group's oldest run. A delta-only compaction retains all input rows.
 
 | Family | Rows retained or removed |
 | --- | --- |
@@ -862,7 +862,7 @@ The following rules apply only when the selected inputs include the group's olde
 | `attributes` | For each inode, retain all revisions above the floor and the newest revision at or below it; remove earlier revisions. |
 | `access` | For each inode, retain all revisions above the floor and the newest revision at or below it; remove earlier revisions. |
 
-An unbound binding version is a tombstone. It must remain while it hides older versions of its slot or child. Only a bottom-anchored rebuild, which includes the group's oldest run, can drop it. That rebuild drops it together with every older version it hides. A rebuild that excludes the oldest run keeps every row, including unbound versions at or below the floor. Runs cover separate sequence ranges, so a bottom-anchored rebuild includes every older version that can affect its floor state.
+An unbound binding version is a tombstone. It must remain while it hides older versions of its slot or child. Only a bottom-anchored compaction, which includes the group's oldest run, can drop it. That compaction drops it together with every older version it hides. A compaction that excludes the oldest run keeps every row, including unbound versions at or below the floor. Runs cover separate sequence ranges, so a bottom-anchored compaction includes every older version that can affect its floor state.
 
 Each binding event appears in both indexes. At the floor, a bound value is current in both indexes or in neither, because replacing a slot's child requires an unbind and moving a child requires unbinding its old slot. Removing unbound floor values, together with the older values they hide, therefore leaves the same events in both indexes. Row counts and row digests verify that the two indexes agree. Every event above the floor remains.
 
@@ -1328,7 +1328,7 @@ Bloom filters use the following keys, which are not always full row keys:
 | `attributes` | `attribute-{inode_id:020}` |
 | `access` | `access-{inode_id:020}` |
 
-Every delta that appends a file revision also produces a content-publication row for its content ID. Repeated references to the same content within one commit share one row with the first publishing delta index. These rows survive every base rebuild, regardless of retention floor.
+Every delta that appends a file revision also produces a content-publication row for its content ID. Repeated references to the same content within one commit share one row with the first publishing delta index. These rows survive every base compaction, regardless of retention floor.
 
 The family groups are fixed:
 
@@ -1630,12 +1630,12 @@ These are reference producer and runtime defaults. A target size can be exceeded
 | Inline filter threshold | 1,024 stored bytes |
 | Target segment rows | 65,536 |
 | Target decoded segment size | 8 MiB |
-| Maximum bounded reorganization input runs | 8 |
-| Maximum bounded reorganization input rows | 131,072 |
-| Maximum bounded reorganization decoded input | 64 MiB |
-| Automatic WAL-flush threshold | 32 segments |
-| Idle WAL-flush period | 15 minutes |
-| Unflushed-tail write rejection threshold | 128 segments |
+| Maximum bounded compaction input runs | 8 |
+| Maximum bounded compaction input rows | 131,072 |
+| Maximum bounded compaction decoded input | 64 MiB |
+| Automatic WAL-fold threshold | 32 segments |
+| Idle WAL-fold period | 15 minutes |
+| Unfolded-tail write rejection threshold | 128 segments |
 | `RuntimeCacheConfig::manifest_revalidation_interval_ms` | 1,000 ms |
 | Maximum commit-message size | 4,096 bytes |
 

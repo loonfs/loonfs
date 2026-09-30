@@ -212,19 +212,19 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
     let mut fork_listing = BTreeMap::new();
     for stage in [
         "cold",
-        "flushed",
+        "folded",
         "forked",
         "floor_advanced",
         "rebuilt",
         "gc",
     ] {
         match stage {
-            "flushed" => {
+            "folded" => {
                 let step = runtime
                     .maintenance
                     .run_maintenance(&source, metadata_request(1))
                     .await
-                    .expect("flush WAL");
+                    .expect("fold WAL");
                 assert_eq!(
                     upkeep(&step).wal_flush,
                     WalFlushStepOutcome::Flushed {

@@ -7,9 +7,9 @@ use super::row_decode::{
     commit_receipt_from_manifest_row, direntry_binding_from_manifest_row, inode_from_manifest_row,
     revision_from_manifest_row, tombstone_from_manifest_row,
 };
-use crate::checkpoint::{ManifestLoadError, Readahead, VerifiedMetadataSegments};
 use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, Result};
+use crate::manifest::{ManifestLoadError, Readahead, VerifiedMetadataSegments};
 use crate::metadata::{
     AccessRevisionRecord, ActiveDeletionRecord, AttributesRevisionRecord, CommitReceiptRecord,
     DirentryBindingRecord, InodeRecord, RevisionRecord, SubtreeTombstoneRecord,

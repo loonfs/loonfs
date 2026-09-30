@@ -173,7 +173,7 @@ pub(crate) fn upkeep(response: &RunMaintenanceResponse) -> &MetadataMaintenanceR
     metadata
 }
 
-/// A metadata request with an explicit flush threshold.
+/// A metadata request with an explicit fold threshold.
 pub(crate) fn metadata_request(max_wal_tail_segments: u64) -> RunMaintenanceRequest {
     RunMaintenanceRequest::Metadata(MetadataMaintenanceRequest {
         max_wal_tail_segments: Some(max_wal_tail_segments),
@@ -402,7 +402,7 @@ pub(crate) trait RuntimeTestExt {
         namespace_id: &NamespaceId,
         request: RunMaintenanceRequest,
     ) -> loonfs::Result<RunMaintenanceResponse>;
-    fn flush_wal_blocking(
+    fn fold_wal_blocking(
         &self,
         namespace_id: &NamespaceId,
     ) -> loonfs::Result<MetadataMaintenanceResponse>;
@@ -524,11 +524,11 @@ impl RuntimeTestExt for TestRuntime {
         block_on(self.maintenance.run_maintenance(namespace_id, request))
     }
 
-    fn flush_wal_blocking(
+    fn fold_wal_blocking(
         &self,
         namespace_id: &NamespaceId,
     ) -> loonfs::Result<MetadataMaintenanceResponse> {
-        block_on(self.maintenance.flush_wal(namespace_id))
+        block_on(self.maintenance.fold_wal(namespace_id))
     }
 
     fn stat_path_blocking(

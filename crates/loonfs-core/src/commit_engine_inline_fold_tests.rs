@@ -1,4 +1,4 @@
-//! Inline materialization ordering, failure, and concurrent flush contracts.
+//! Inline materialization ordering, failure, and concurrent fold contracts.
 
 use super::*;
 use crate::namespace::control::load_current_manifest;
@@ -395,7 +395,7 @@ async fn failed_manifest_and_over_budget_retries_keep_materialized_content() {
         *input.basis.manifest()
     );
     store.reset();
-    let flushed = fold_wal_tail(
+    let folded = fold_wal_tail(
         &store,
         None,
         &engine.namespace_id,
@@ -404,7 +404,7 @@ async fn failed_manifest_and_over_budget_retries_keep_materialized_content() {
     )
     .await
     .expect("retry");
-    assert_eq!(flushed.response.outcome, FlushWalOutcome::Published);
+    assert_eq!(folded.response.outcome, FlushWalOutcome::Published);
     assert_content_before_metadata(&store, values.len());
     let mut retry_keys = content_puts(&store);
     retry_keys.sort();
@@ -440,14 +440,14 @@ async fn competing_engines_materialize_identical_objects_and_publish_one_manifes
     store.reset();
     let first_timer = Arc::new(StdMonotonicTimer::default());
     let deadline = crate::time::Deadline::start(first_timer);
-    let first_flush = fold_wal_tail(
+    let first_fold = fold_wal_tail(
         &blocked,
         None,
         &first.namespace_id,
         Some(first_input),
         &deadline,
     );
-    let second_flush = async {
+    let second_fold = async {
         blocked.wait_until_blocked().await;
         let result = fold_wal_tail(
             &store,
@@ -460,9 +460,9 @@ async fn competing_engines_materialize_identical_objects_and_publish_one_manifes
         blocked.release();
         result
     };
-    let (first_result, second_result) = tokio::join!(first_flush, second_flush);
-    let first_result = first_result.expect("first flush");
-    let second_result = second_result.expect("second flush");
+    let (first_result, second_result) = tokio::join!(first_fold, second_fold);
+    let first_result = first_result.expect("first fold");
+    let second_result = second_result.expect("second fold");
     assert_eq!(
         first_result.response.outcome,
         FlushWalOutcome::AlreadyCurrent
@@ -507,7 +507,7 @@ async fn an_existing_different_object_is_corruption_and_stops_manifest_publicati
         .await
         .expect("conflicting object");
     store.reset();
-    let error = flush_wal(&store, &engine.namespace_id)
+    let error = fold_wal(&store, &engine.namespace_id)
         .await
         .expect_err("different object");
     assert_eq!(error.code(), ErrorCode::NamespaceCorrupt);
@@ -559,7 +559,7 @@ async fn a_materialization_transport_failure_remains_retryable() {
     );
     failing.fail_all();
     store.reset();
-    let error = flush_wal(&failing, &engine.namespace_id)
+    let error = fold_wal(&failing, &engine.namespace_id)
         .await
         .expect_err("readback failure");
     assert!(

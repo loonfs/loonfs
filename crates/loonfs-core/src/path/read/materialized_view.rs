@@ -4,13 +4,13 @@
 use super::current_files::resolve_visible_inode;
 use super::listing::{invalid_cursor, validate_cursor_head, validate_directory_cursor};
 use crate::authorize::{Absence, ReadAccess};
-use crate::checkpoint::{
-    load_basis_metadata_segments, MetadataSegmentCache, VerifiedMetadataSegments,
-    WalTailProjectionCache, WalTailProjectionCacheKey,
-};
 #[cfg(test)]
 use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, Result};
+use crate::manifest::{
+    load_basis_metadata_segments, MetadataSegmentCache, VerifiedMetadataSegments,
+    WalTailProjectionCache, WalTailProjectionCacheKey,
+};
 use crate::metadata::{
     LeafRevisionPrefetch, MetadataView, MetadataViewSession, ResolvedVisiblePath, RevisionRecord,
     VisibleChildEntry, METADATA_VIEW_SESSION_COUNTER_FIELDS,

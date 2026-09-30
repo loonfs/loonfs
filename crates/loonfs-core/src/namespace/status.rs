@@ -12,9 +12,9 @@ use loonfs_objectstore::ObjectStore;
 /// Whether a namespace carries visible commits its basis manifest does not
 /// cover, and the head sequence they run to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct NamespaceFlushBasis {
+pub struct NamespaceFoldBasis {
     pub head_seq: ChangeSeq,
-    pub has_unflushed_wal_tail: bool,
+    pub has_unfolded_wal_tail: bool,
 }
 
 /// Decoded WAL tail usage for test assertions.
@@ -35,8 +35,7 @@ pub async fn load_namespace_wal_tail_usage<S: ObjectStore + ?Sized>(
         .await
         .map_err(CoreError::ControlObjectLoad)?;
     super::control::ensure_namespace_live(&loaded.read_state)?;
-    let basis =
-        crate::checkpoint::load_basis_metadata_segments(store, None, &loaded.basis()).await?;
+    let basis = crate::manifest::load_basis_metadata_segments(store, None, &loaded.basis()).await?;
     let tail = crate::wal::replay_discovered_tail(
         &basis.replay_head(&loaded.read_state),
         &basis.base_state,
@@ -132,14 +131,14 @@ pub async fn load_namespace_diagnostics<S: ObjectStore + ?Sized>(
     ))
 }
 
-pub async fn load_namespace_flush_basis<S: ObjectStore + ?Sized>(
+pub async fn load_namespace_fold_basis<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace_id: &NamespaceId,
-) -> Result<NamespaceFlushBasis> {
+) -> Result<NamespaceFoldBasis> {
     let loaded = load_read_anchor(store, expected_namespace_id).await?;
     super::control::ensure_namespace_live(&loaded.read_state)?;
-    Ok(NamespaceFlushBasis {
+    Ok(NamespaceFoldBasis {
         head_seq: loaded.read_state.seq,
-        has_unflushed_wal_tail: loaded.read_state.folded_wal_no < loaded.read_state.wal_no,
+        has_unfolded_wal_tail: loaded.read_state.folded_wal_no < loaded.read_state.wal_no,
     })
 }

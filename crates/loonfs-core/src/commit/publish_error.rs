@@ -8,7 +8,7 @@ use thiserror::Error;
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum WalPublishError {
     #[error("WAL number was taken by another publication")]
-    StaleHead,
+    NumberTaken,
     #[error("publish budget exceeded: elapsed {elapsed_ms}ms over budget {budget_ms}ms")]
     PublishBudgetExceeded { elapsed_ms: u64, budget_ms: u64 },
     #[error("WAL publication outcome unknown: {0}")]
@@ -18,7 +18,7 @@ pub enum WalPublishError {
 impl WalPublishError {
     pub fn code(&self) -> ErrorCode {
         match self {
-            Self::StaleHead | Self::PublishBudgetExceeded { .. } => ErrorCode::StaleHead,
+            Self::NumberTaken | Self::PublishBudgetExceeded { .. } => ErrorCode::StaleHead,
             Self::OutcomeUnknown(_) => ErrorCode::CommitOutcomeUnknown,
         }
     }
@@ -31,7 +31,7 @@ pub fn is_retryable_wal_publish(result: &Result<Commit, CoreError>) -> bool {
     matches!(
         result,
         Err(CoreError::WalPublish(
-            WalPublishError::StaleHead
+            WalPublishError::NumberTaken
                 | WalPublishError::PublishBudgetExceeded { .. }
                 | WalPublishError::OutcomeUnknown(_)
         ))

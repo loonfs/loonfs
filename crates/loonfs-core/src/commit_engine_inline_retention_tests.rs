@@ -2,12 +2,13 @@
 
 use super::*;
 use crate::authorize::{Authorizer, ReadAccess};
-use crate::checkpoint::{
-    advance_retention_floor, create_checkpoint, load_snapshot_read_basis, reorganize_metadata_step,
-    MetadataCompactionPolicy, MetadataLsmPolicy, MetadataReorganizeOutcome,
-};
 use crate::gc::{gc_namespace, GcConfig};
+use crate::manifest::{
+    advance_retention_floor, compaction_step, CompactionStepOutcome, MetadataCompactionPolicy,
+    MetadataLsmPolicy,
+};
 use crate::path::read::{load_metadata_view, ReadLoadContext};
+use crate::pin::{create_pin, load_snapshot_read_basis};
 use loonfs_api::wire::control::PinOwner;
 use loonfs_test_support::stores::MetadataMapStore;
 
@@ -40,7 +41,7 @@ async fn compact_and_check_pair(
 ) {
     let mut finished = false;
     for _ in 0..32 {
-        let outcome = reorganize_metadata_step(
+        let outcome = compaction_step(
             store,
             namespace_id,
             loonfs_api::CompactorEpoch(0),
@@ -59,13 +60,13 @@ async fn compact_and_check_pair(
             .expect("receipt");
         let record = metadata.commit_at_seq(seq).await.expect("commit record");
         assert_eq!(receipt.is_some(), record.is_some());
-        if matches!(outcome, MetadataReorganizeOutcome::NotNeeded { .. }) {
+        if matches!(outcome, CompactionStepOutcome::NotNeeded { .. }) {
             finished = true;
             break;
         }
         assert!(matches!(
             outcome,
-            MetadataReorganizeOutcome::UnitPublished { .. }
+            CompactionStepOutcome::UnitPublished { .. }
         ));
     }
     assert!(finished, "small fixture did not finish compaction");
@@ -82,13 +83,13 @@ async fn inline_receipt_retention_keeps_the_boundary_and_reuses_only_pruned_ids(
     publish(&mut engine, &store, &context, filler)
         .await
         .expect("first run");
-    flush_wal(&store, &namespace_id).await.expect("first fold");
+    fold_wal(&store, &namespace_id).await.expect("first fold");
     let request = replace(&namespace_id, b"before");
     let old_reference = request.inline_content()[0].content_ref().clone();
     let original = publish(&mut engine, &store, &context, request)
         .await
         .expect("original inline commit");
-    let snapshot = create_checkpoint(
+    let snapshot = create_pin(
         &store,
         &namespace_id,
         PinOwner::Snapshot {
@@ -150,7 +151,7 @@ async fn inline_receipt_retention_keeps_the_boundary_and_reuses_only_pruned_ids(
     let later = publish(&mut engine, &store, &context, later)
         .await
         .expect("advance history");
-    flush_wal(&store, &namespace_id)
+    fold_wal(&store, &namespace_id)
         .await
         .expect("fold later history");
     assert_eq!(
@@ -203,7 +204,7 @@ async fn inline_receipt_retention_keeps_the_boundary_and_reuses_only_pruned_ids(
     .expect("a pruned ID can identify a new mutation");
     assert_eq!(reused.committed_seq, ChangeSeq(later.committed_seq.0 + 1));
     assert_ne!(reused.events, original.events);
-    flush_wal(&store, &namespace_id)
+    fold_wal(&store, &namespace_id)
         .await
         .expect("fold reused ID");
     let aged = MetadataMapStore::aged(store.clone(), KeyPredicate::any());

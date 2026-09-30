@@ -1,4 +1,4 @@
-//! Access updates, structural rules, and revision continuity after a flush.
+//! Access updates, structural rules, and revision continuity after a fold.
 
 use crate::common::commit_split_support::{bootstrap_namespace, submit_commit};
 use crate::common::{namespace_engine, read_context};
@@ -245,25 +245,25 @@ async fn an_unrestricted_namespace_refuses_access_updates() {
 }
 
 #[tokio::test]
-async fn access_rows_survive_a_flush_and_the_counter_keeps_going() {
+async fn access_rows_survive_a_fold_and_the_counter_keeps_going() {
     let (_temp_dir, store, namespace_id, context) = setup().await;
     submit_operation(
         &store,
         &namespace_id,
-        CommitId::parse("before-flush").expect("commit id"),
+        CommitId::parse("before-fold").expect("commit id"),
         update_access("/", false, grants("prn_root", &[AccessRight::Admin])),
         &context,
     )
     .await
     .expect("root access");
     namespace_engine(&store, &namespace_id, &context)
-        .flush_wal()
+        .fold_wal()
         .await
-        .expect("flush");
+        .expect("fold");
     let after = submit_operation(
         &store,
         &namespace_id,
-        CommitId::parse("after-flush").expect("commit id"),
+        CommitId::parse("after-fold").expect("commit id"),
         FilesystemOperation::UpdateAccess {
             path: AbsolutePath::root(),
             boundary: false,
@@ -274,7 +274,7 @@ async fn access_rows_survive_a_flush_and_the_counter_keeps_going() {
         &context,
     )
     .await
-    .expect("update after flush");
+    .expect("update after fold");
     assert_eq!(
         after.events,
         vec![event(ROOT_INODE_ID, 2, false, AccessGrants::default())]
@@ -1344,12 +1344,12 @@ async fn a_revocation_is_visible_to_the_next_read() {
         )],
     )
     .await;
-    for flush in [false, true] {
-        if flush {
+    for fold in [false, true] {
+        if fold {
             namespace_engine(&store, &namespace_id, &mutation)
-                .flush_wal()
+                .fold_wal()
                 .await
-                .expect("flush");
+                .expect("fold");
         }
         assert_eq!(
             viewer

@@ -1,8 +1,8 @@
 //! Writer acquisition through a manifest epoch and a numbered fence segment.
 
-use crate::checkpoint::publish::{update_manifest, ManifestChange};
 use crate::context::MutationContext;
 use crate::error::{CoreError, Result, WriterFence};
+use crate::manifest::publish::{update_manifest, ManifestChange};
 use crate::namespace::read_anchor::{
     load_read_anchor, load_read_anchor_from_manifest, NamespaceReadAnchor,
 };
@@ -66,7 +66,7 @@ pub(crate) async fn acquire_writer<S: ObjectStore + ?Sized>(
                 return Ok((acquired, anchor));
             }
             Err(CoreError::WalPublish(
-                crate::commit::WalPublishError::StaleHead
+                crate::commit::WalPublishError::NumberTaken
                 | crate::commit::WalPublishError::PublishBudgetExceeded { .. },
             )) => {}
             Err(error) => return Err(error),

@@ -20,7 +20,7 @@ pub struct CurrentManifest {
 
 impl CurrentManifest {
     pub fn manifest(&self) -> ManifestRef {
-        crate::checkpoint::publish::manifest_ref_for(
+        crate::manifest::publish::manifest_ref_for(
             &self.envelope.payload().namespace_id,
             &self.envelope,
         )
@@ -233,14 +233,14 @@ pub(crate) async fn load_manifest_by_number<S: ObjectStore + ?Sized>(
     manifest_no: loonfs_api::ManifestNo,
 ) -> Result<Option<LoadedManifest>, ControlObjectLoadError> {
     let object_key = loonfs_objectstore::keys::metadata_manifest_object(namespace_id, &manifest_no);
-    let envelope = crate::checkpoint::load_namespace_manifest_envelope_if_present(
+    let envelope = crate::manifest::load_namespace_manifest_envelope_if_present(
         store,
         namespace_id,
         &manifest_no,
     )
     .await
     .map_err(|error| match error {
-        crate::checkpoint::ManifestLoadError::ReadManifest {
+        crate::manifest::ManifestLoadError::ReadManifest {
             object_key,
             message,
             class,

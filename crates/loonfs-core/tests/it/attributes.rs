@@ -1,5 +1,5 @@
 //! Inode attributes end to end: what the planner accepts, what the commit
-//! preconditions reject, and what survives a flush, a fork, and every operation that
+//! preconditions reject, and what survives a fold, a fork, and every operation that
 //! moves an inode around.
 
 #![allow(clippy::panic)]
@@ -897,11 +897,11 @@ async fn a_request_that_stops_at_a_bad_update_publishes_nothing() {
 }
 
 // ---------------------------------------------------------------------------
-// Durability: across a flush, and across a fork
+// Durability: across a fold, and across a fork
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn attributes_survive_a_flush_and_the_counter_keeps_going() {
+async fn attributes_survive_a_fold_and_the_counter_keeps_going() {
     let (_temp_dir, store, namespace_id, context) = setup().await;
     put_file_bytes(
         &store,
@@ -934,19 +934,19 @@ async fn attributes_survive_a_flush_and_the_counter_keeps_going() {
     .expect("second write");
 
     namespace_engine(&store, &namespace_id, &context)
-        .flush_wal()
+        .fold_wal()
         .await
-        .expect("flush the WAL tail into metadata segments");
+        .expect("fold the WAL tail into metadata segments");
 
     update(
         &store,
         &namespace_id,
-        "repeat-after-flush",
+        "repeat-after-fold",
         set_attributes("/docs/a.txt", &[("owner", "ada")]),
         &context,
     )
     .await
-    .expect("an unchanged map advances the flushed revision");
+    .expect("an unchanged map advances the folded revision");
 
     let entry = resolve_path(&store, &namespace_id, "/docs/a.txt")
         .await
@@ -965,12 +965,12 @@ async fn attributes_survive_a_flush_and_the_counter_keeps_going() {
     update(
         &store,
         &namespace_id,
-        "set-after-flush",
+        "set-after-fold",
         set_attributes("/docs/a.txt", &[("owner", "grace")]),
         &context,
     )
     .await
-    .expect("an update after the flush commits");
+    .expect("an update after the fold commits");
 
     let file_inode = inode_of(&store, &namespace_id, "/docs/a.txt").await;
     assert_eq!(
@@ -979,12 +979,12 @@ async fn attributes_survive_a_flush_and_the_counter_keeps_going() {
             AttributesRevisionNo(4),
             map(&[("owner", "grace"), ("stage", "draft")])
         )),
-        "the counter continues from the flushed revision and the map is whole"
+        "the counter continues from the folded revision and the map is whole"
     );
 }
 
 #[tokio::test]
-async fn a_fork_reads_the_sources_attributes_before_and_after_its_first_flush() {
+async fn a_fork_reads_the_sources_attributes_before_and_after_its_first_fold() {
     let (_temp_dir, store, source, context) = setup().await;
     put_file_bytes(
         &store,
@@ -1007,9 +1007,9 @@ async fn a_fork_reads_the_sources_attributes_before_and_after_its_first_flush() 
     .await
     .expect("write attributes in the source");
     namespace_engine(&store, &source, &context)
-        .flush_wal()
+        .fold_wal()
         .await
-        .expect("flush the source");
+        .expect("fold the source");
 
     let target = namespace_id("fork");
     namespace_engine(&store, &source, &context)
@@ -1017,7 +1017,7 @@ async fn a_fork_reads_the_sources_attributes_before_and_after_its_first_flush() 
         .await
         .expect("fork the namespace");
 
-    // Before the fork's first flush, its basis is the source's manifest.
+    // Before the fork's first fold, its basis is the source's manifest.
     update(
         &store,
         &target,
@@ -1043,19 +1043,19 @@ async fn a_fork_reads_the_sources_attributes_before_and_after_its_first_flush() 
     .await
     .expect("the fork writes over the inherited map");
     namespace_engine(&store, &target, &context)
-        .flush_wal()
+        .fold_wal()
         .await
-        .expect("flush the fork");
+        .expect("fold the fork");
 
     update(
         &store,
         &target,
-        "set-after-fork-flush",
+        "set-after-fork-fold",
         set_attributes("/docs/a.txt", &[("stage", "draft")]),
         &context,
     )
     .await
-    .expect("an update after the fork's flush commits");
+    .expect("an update after the fork's fold commits");
 
     assert_eq!(
         attributes_of(&store, &target, file_inode).await,
@@ -1063,7 +1063,7 @@ async fn a_fork_reads_the_sources_attributes_before_and_after_its_first_flush() 
             AttributesRevisionNo(4),
             map(&[("owner", "grace"), ("stage", "draft")])
         )),
-        "the fork's own flush carries the inherited revision forward"
+        "the fork's own fold carries the inherited revision forward"
     );
 
     // The source is untouched by what the fork wrote.
@@ -1466,11 +1466,11 @@ async fn clearing_every_attribute_publishes_the_empty_map() {
         Some((AttributesRevisionNo(3), Attributes::default()))
     );
 
-    // A cleared map is a real state that survives a flush.
+    // A cleared map is a real state that survives a fold.
     namespace_engine(&store, &namespace_id, &context)
-        .flush_wal()
+        .fold_wal()
         .await
-        .expect("flush");
+        .expect("fold");
     update(
         &store,
         &namespace_id,

@@ -57,7 +57,7 @@ fn a_writer_with_a_recorder_reports_stores_publications_and_steps() {
     let recorder = Arc::new(DefaultMetricsRecorder::new());
     let namespace_id = namespace_id("demo");
     // Enough writes to push the WAL tail past its threshold, so the writer
-    // folds it and nudges the metadata job to reorganize.
+    // folds it and nudges the metadata job to compact.
     let writes = MetadataMaintenanceOptions::default()
         .max_wal_tail_segments
         .get()

@@ -1,5 +1,5 @@
 //! [`FsMaintenance`]'s explicit maintenance: steps, GC, checkpoints, WAL
-//! flushes, and retention.
+//! folds, and retention.
 //!
 //! Derived indexes are not here and not in this crate: `loonfs-grep`
 //! builds and collects its own state through this handle's public
@@ -19,7 +19,7 @@ use crate::{
 use crate::{ChangeSeq, Result, RuntimeError};
 use loonfs_api::CompactorEpoch;
 use loonfs_api::PageRequest;
-use loonfs_core::cache::{load_namespace_flush_basis, NamespaceStorageDiagnostics};
+use loonfs_core::cache::{load_namespace_fold_basis, NamespaceStorageDiagnostics};
 use loonfs_core::CheckpointPageCursor;
 use tokio::time::Instant;
 use tracing::Instrument;
@@ -27,8 +27,8 @@ use tracing::Instrument;
 #[cfg(test)]
 mod tests;
 
-/// What one reorganization unit left for its caller.
-enum ReorganizationStep {
+/// What one compaction unit left for its caller.
+enum CompactionStep {
     Fenced,
     /// The unit is finished, and this is what it did.
     Concluded(ReorganizeStepOutcome),
@@ -82,8 +82,8 @@ impl FsMaintenance {
     ) -> loonfs_core::NamespaceWriterEngine<SharedObjectStore> {
         let engine = self.core.writer_engine(&self.actor, namespace_id);
         #[cfg(test)]
-        let engine = match self.reorganization_row_budget {
-            Some(rows) => engine.starve_reorganization_row_budget(rows),
+        let engine = match self.compaction_row_budget {
+            Some(rows) => engine.starve_compaction_row_budget(rows),
             None => engine,
         };
         #[cfg(test)]
@@ -260,10 +260,10 @@ impl FsMaintenance {
         }
     }
 
-    /// Flushes the WAL tail at the segment threshold, at the inline byte
+    /// Folds the WAL tail at the segment threshold, at the inline byte
     /// threshold when the writer knows the count, or once the tail's newest
     /// commit is `idle_fold_after_ms` old on this handle's wall clock. Then
-    /// runs one bounded reorganization step.
+    /// runs one bounded compaction step.
     pub async fn maintain_metadata(
         &self,
         namespace_id: &NamespaceId,
@@ -275,7 +275,7 @@ impl FsMaintenance {
     }
 
     /// Does what [`Self::maintain_metadata`] does, and also returns when a
-    /// tail this step did not flush goes idle on this handle's wall clock.
+    /// tail this step did not fold goes idle on this handle's wall clock.
     /// That time is after the step's clock reading and at most
     /// `idle_fold_after_ms` past it.
     pub(crate) async fn maintain_metadata_step(
@@ -292,17 +292,17 @@ impl FsMaintenance {
             _ => 0,
         };
         let now_ms = self.core.now_ms()?;
-        let idle_flush_due_in_ms =
-            options.idle_flush_due_in_ms(status.wal_tail_newest_commit_at_ms, now_ms);
-        let flush = options.flush_is_due(status.wal_tail_segments, inline_bytes)
-            || idle_flush_due_in_ms == Some(0);
-        let idle_flush_at_ms = idle_flush_due_in_ms
-            .filter(|_| !flush)
+        let idle_fold_due_in_ms =
+            options.idle_fold_due_in_ms(status.wal_tail_newest_commit_at_ms, now_ms);
+        let fold = options.fold_is_due(status.wal_tail_segments, inline_bytes)
+            || idle_fold_due_in_ms == Some(0);
+        let idle_fold_at_ms = idle_fold_due_in_ms
+            .filter(|_| !fold)
             .map(|due_in_ms| now_ms.saturating_add(due_in_ms));
         let response = self
-            .flush_then_reorganize(
+            .fold_then_compact(
                 namespace_id,
-                flush,
+                fold,
                 status.head_seq,
                 options.compaction_policy,
             )
@@ -313,7 +313,7 @@ impl FsMaintenance {
             reorganize = ?response.reorganize,
             "metadata maintenance pass concluded"
         );
-        Ok((response, idle_flush_at_ms))
+        Ok((response, idle_fold_at_ms))
     }
 
     /// Checks the WAL segment threshold, the age of the tail's newest commit,
@@ -335,7 +335,7 @@ impl FsMaintenance {
             namespace_id,
             |wal_tail_segments, wal_tail_newest_commit_at_ms| {
                 wal_tail_segments >= options.max_wal_tail_segments.get()
-                    || options.idle_flush_is_due(wal_tail_newest_commit_at_ms, now_ms)
+                    || options.idle_fold_is_due(wal_tail_newest_commit_at_ms, now_ms)
             },
             options.compaction_policy,
         )
@@ -350,27 +350,27 @@ impl FsMaintenance {
         .map_err(RuntimeError::Core)
     }
 
-    /// Optionally flushes the WAL tail, then runs one reorganization step.
+    /// Optionally folds the WAL tail, then runs one compaction step.
     /// `observed_head_seq` is reported when concurrent updates prevent every
-    /// flush attempt from publishing.
-    async fn flush_then_reorganize(
+    /// fold attempt from publishing.
+    async fn fold_then_compact(
         &self,
         namespace_id: &NamespaceId,
-        flush: bool,
+        fold: bool,
         observed_head_seq: ChangeSeq,
         compaction_policy: loonfs_core::MetadataCompactionPolicy,
     ) -> Result<MetadataMaintenanceResponse> {
-        let wal_flush = if flush {
-            match self.run_wal_flush(namespace_id).await {
-                Ok(flush) => match flush.outcome {
+        let wal_flush = if fold {
+            match self.run_wal_fold(namespace_id).await {
+                Ok(folded) => match folded.outcome {
                     FlushWalOutcome::Published => WalFlushStepOutcome::Flushed {
-                        manifest_head_seq: flush.manifest_head_seq,
+                        manifest_head_seq: folded.manifest_head_seq,
                     },
-                    // In both cases, this flush did not publish a manifest.
+                    // In both cases, this fold did not publish a manifest.
                     FlushWalOutcome::AlreadyCurrent | FlushWalOutcome::ManifestAdvanced => {
                         WalFlushStepOutcome::AlreadyPublished {
-                            attempted_seq: flush.target_head_seq,
-                            current_manifest_no: flush.manifest_no,
+                            attempted_seq: folded.target_head_seq,
+                            current_manifest_no: folded.manifest_no,
                         }
                     }
                 },
@@ -383,7 +383,7 @@ impl FsMaintenance {
             WalFlushStepOutcome::NotNeeded
         };
         let reorganize = self
-            .run_reorganization(namespace_id, compaction_policy)
+            .run_compaction_step(namespace_id, compaction_policy)
             .await?;
         Ok(MetadataMaintenanceResponse {
             namespace_id: namespace_id.clone(),
@@ -392,23 +392,20 @@ impl FsMaintenance {
         })
     }
 
-    /// Runs one bounded reorganization step for one metadata family.
+    /// Runs one bounded compaction step for one metadata family.
     ///
     /// A family group whose oldest run no longer fits one unit reports that
     /// the metadata compaction job is required.
-    async fn run_reorganization(
+    async fn run_compaction_step(
         &self,
         namespace_id: &NamespaceId,
         compaction_policy: loonfs_core::MetadataCompactionPolicy,
     ) -> Result<ReorganizeStepOutcome> {
         Ok(
-            match self
-                .reorganize_once(namespace_id, compaction_policy)
-                .await?
-            {
-                ReorganizationStep::Concluded(outcome) => outcome,
-                ReorganizationStep::Fenced => ReorganizeStepOutcome::Fenced {},
-                ReorganizationStep::CompactionPlanned(_) => {
+            match self.compact_once(namespace_id, compaction_policy).await? {
+                CompactionStep::Concluded(outcome) => outcome,
+                CompactionStep::Fenced => ReorganizeStepOutcome::Fenced {},
+                CompactionStep::CompactionPlanned(_) => {
                     ReorganizeStepOutcome::CompactionRequired {}
                 }
             },
@@ -442,11 +439,11 @@ impl FsMaintenance {
         }
     }
 
-    async fn reorganize_once(
+    async fn compact_once(
         &self,
         namespace_id: &NamespaceId,
         compaction_policy: loonfs_core::MetadataCompactionPolicy,
-    ) -> Result<ReorganizationStep> {
+    ) -> Result<CompactionStep> {
         let claimed = self
             .compactor_epochs
             .lock()
@@ -463,21 +460,21 @@ impl FsMaintenance {
             .await
             .map_err(RuntimeError::Core)?
         {
-            return Ok(ReorganizationStep::Concluded(
+            return Ok(CompactionStep::Concluded(
                 ReorganizeStepOutcome::NotNeeded {},
             ));
         }
         let compactor_epoch = self.compactor_epoch(namespace_id).await?;
         let outcome = self
             .engine(namespace_id)
-            .reorganize_metadata(compaction_policy, compactor_epoch)
+            .metadata_compaction_step(compaction_policy, compactor_epoch)
             .await
             .map_err(RuntimeError::Core)?;
-        Ok(ReorganizationStep::Concluded(match outcome {
-            loonfs_core::MetadataReorganizeOutcome::NotNeeded { .. } => {
+        Ok(CompactionStep::Concluded(match outcome {
+            loonfs_core::CompactionStepOutcome::NotNeeded { .. } => {
                 ReorganizeStepOutcome::NotNeeded {}
             }
-            loonfs_core::MetadataReorganizeOutcome::UnitPublished {
+            loonfs_core::CompactionStepOutcome::UnitPublished {
                 group,
                 merged_delta_rows,
                 input_runs,
@@ -494,21 +491,21 @@ impl FsMaintenance {
                     decoded_input_rows,
                     decoded_input_bytes,
                     bottom_anchored_merge_blocked,
-                    "metadata reorganization unit published"
+                    "metadata compaction unit published"
                 );
                 ReorganizeStepOutcome::UnitPublished {}
             }
-            loonfs_core::MetadataReorganizeOutcome::CompactionPlanned { spec, .. } => {
-                return Ok(ReorganizationStep::CompactionPlanned(spec))
+            loonfs_core::CompactionStepOutcome::CompactionPlanned { spec, .. } => {
+                return Ok(CompactionStep::CompactionPlanned(spec))
             }
-            loonfs_core::MetadataReorganizeOutcome::Fenced => {
+            loonfs_core::CompactionStepOutcome::Fenced => {
                 self.forget_fenced_compactor_epoch(namespace_id, compactor_epoch)
                     .await;
-                return Ok(ReorganizationStep::Fenced);
+                return Ok(CompactionStep::Fenced);
             }
-            loonfs_core::MetadataReorganizeOutcome::Superseded => {
+            loonfs_core::CompactionStepOutcome::Superseded => {
                 tracing::info!(
-                    "current manifest changed before reorganization published; a later step retries"
+                    "current manifest changed before compaction published; a later step retries"
                 );
                 ReorganizeStepOutcome::ManifestAdvanced {}
             }
@@ -549,26 +546,26 @@ impl FsMaintenance {
     ) -> Result<MetadataCompactionResponse> {
         self.core.record_trace_context(&tracing::Span::current());
         let spec = match self
-            .reorganize_once(
+            .compact_once(
                 namespace_id,
                 loonfs_core::MetadataCompactionPolicy::CompactImmediately,
             )
             .await?
         {
-            ReorganizationStep::Fenced => {
+            CompactionStep::Fenced => {
                 return Ok(MetadataCompactionResponse {
                     namespace_id: namespace_id.clone(),
                     compaction: MetadataCompactionOutcome::Fenced,
                 });
             }
-            ReorganizationStep::CompactionPlanned(spec) => spec,
-            ReorganizationStep::Concluded(ReorganizeStepOutcome::UnitPublished {}) => {
+            CompactionStep::CompactionPlanned(spec) => spec,
+            CompactionStep::Concluded(ReorganizeStepOutcome::UnitPublished {}) => {
                 return Ok(MetadataCompactionResponse {
                     namespace_id: namespace_id.clone(),
                     compaction: MetadataCompactionOutcome::BoundedMergePublished,
                 })
             }
-            ReorganizationStep::Concluded(_) => {
+            CompactionStep::Concluded(_) => {
                 return Ok(MetadataCompactionResponse {
                     namespace_id: namespace_id.clone(),
                     compaction: MetadataCompactionOutcome::NotNeeded,
@@ -805,35 +802,35 @@ impl FsMaintenance {
         self.finish_namespace_mutation(namespace_id, result)
     }
 
-    /// Flushes any visible WAL tail, then runs one reorganization step.
+    /// Folds any visible WAL tail, then runs one compaction step.
     ///
     /// This is equivalent to a metadata maintenance pass with a one-segment
-    /// flush threshold. It reports both the flush and reorganization outcomes.
+    /// fold threshold. It reports both the fold and compaction outcomes.
     /// An empty WAL tail reports [`WalFlushStepOutcome::NotNeeded`].
     ///
     /// This checks only whether a WAL tail exists. It does not require the
     /// head to contain enough hints to count every segment.
     #[tracing::instrument(
         level = "debug",
-        name = "loonfs.maintenance.wal_flush",
+        name = "loonfs.maintenance.wal_fold",
         err(level = "debug"),
         skip_all,
         fields(
-            operation = "maintenance.wal_flush",
+            operation = "maintenance.wal_fold",
             namespace_id = %namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn flush_wal(
+    pub async fn fold_wal(
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<MetadataMaintenanceResponse> {
         self.core.record_trace_context(&tracing::Span::current());
-        let basis = load_namespace_flush_basis(self.core.store(), namespace_id).await?;
-        self.flush_then_reorganize(
+        let basis = load_namespace_fold_basis(self.core.store(), namespace_id).await?;
+        self.fold_then_compact(
             namespace_id,
-            basis.has_unflushed_wal_tail,
+            basis.has_unfolded_wal_tail,
             basis.head_seq,
             loonfs_core::MetadataCompactionPolicy::CompactImmediately,
         )
@@ -866,12 +863,12 @@ impl FsMaintenance {
         self.run_retention(namespace_id).await
     }
 
-    /// Shared implementation for metadata maintenance and [`Self::flush_wal`].
-    async fn run_wal_flush(&self, namespace_id: &NamespaceId) -> Result<FlushWalResponse> {
+    /// Shared implementation for metadata maintenance and [`Self::fold_wal`].
+    async fn run_wal_fold(&self, namespace_id: &NamespaceId) -> Result<FlushWalResponse> {
         async {
             let result = self
                 .engine(namespace_id)
-                .flush_wal()
+                .fold_wal()
                 .await
                 .map_err(RuntimeError::from);
             if let (Ok(_), Some(publisher)) = (&result, &self.publisher) {
@@ -880,7 +877,7 @@ impl FsMaintenance {
             self.finish_namespace_mutation(namespace_id, result)
                 .inspect_err(|error| tracing::debug!(%error))
         }
-        .instrument(phase_span!(self.core, "wal_flush", namespace_id))
+        .instrument(phase_span!(self.core, "wal_fold", namespace_id))
         .await
     }
 

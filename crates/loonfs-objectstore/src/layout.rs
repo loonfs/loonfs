@@ -16,7 +16,7 @@ pub enum DurableObjectFamily {
     /// Classifies an immutable metadata segment.
     MetadataSegment,
     /// Classifies a pin to a numbered manifest.
-    CheckpointRecord,
+    Pin,
     /// Classifies a mutable upload-session lifecycle record.
     UploadSession,
     /// Classifies immutable whole-file content bytes.
@@ -85,15 +85,9 @@ pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
                 )
             })
         }
-        ["namespaces", namespace, "pins", checkpoint] => {
-            checkpoint.strip_suffix(".json").map(|identifier| {
-                parsed(
-                    DurableObjectFamily::CheckpointRecord,
-                    namespace,
-                    Some(identifier),
-                )
-            })
-        }
+        ["namespaces", namespace, "pins", pin] => pin
+            .strip_suffix(".json")
+            .map(|identifier| parsed(DurableObjectFamily::Pin, namespace, Some(identifier))),
         ["namespaces", namespace, "uploads", upload] => {
             upload.strip_suffix(".json").map(|identifier| {
                 parsed(
@@ -164,8 +158,8 @@ mod tests {
 
     use super::{parse_object_key, DurableObjectFamily};
     use crate::keys::{
-        checkpoint_record, content_blob, hint, metadata_manifest_object, metadata_segment,
-        metadata_segment_prefix, upload_session, wal_segment, wal_segment_prefix,
+        content_blob, hint, metadata_manifest_object, metadata_segment, metadata_segment_prefix,
+        pin, upload_session, wal_segment, wal_segment_prefix,
     };
     use loonfs_api::{
         ContentId, ManifestNo, MetadataSegmentId, NamespaceId, PinId, UploadId, WalNo,
@@ -200,8 +194,8 @@ mod tests {
                 Some(metadata_segment_id.as_str()),
             ),
             (
-                checkpoint_record(&namespace_id, &pin_id),
-                DurableObjectFamily::CheckpointRecord,
+                pin(&namespace_id, &pin_id),
+                DurableObjectFamily::Pin,
                 Some(pin_id.as_str()),
             ),
             (

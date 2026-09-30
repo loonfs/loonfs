@@ -220,7 +220,7 @@ fn maintenance_step_below_threshold_is_not_needed() {
 }
 
 #[test]
-fn maintenance_step_at_segment_threshold_flushes_the_wal() {
+fn maintenance_step_at_segment_threshold_folds_the_wal() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "step-publish-test");
     let namespace_id = namespace_id("demo");
@@ -250,17 +250,16 @@ fn maintenance_step_at_segment_threshold_flushes_the_wal() {
 
     let status = fs
         .namespace_diagnostics_blocking(&namespace_id)
-        .expect("status after wal flush");
+        .expect("status after wal fold");
     assert_eq!(status.current_manifest_no, Some(ManifestNo(3)));
     assert_eq!(status.wal_tail_segments, 0);
 
-    // Maintenance is record-less: flushing the WAL must leave nothing
+    // Maintenance is record-less: folding the WAL must leave nothing
     // under `checkpoints/`.
     let raw_store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let records = block_on(
-        raw_store.list_prefix(&loonfs_objectstore::keys::checkpoint_prefix(&namespace_id)),
-    )
-    .expect("list pins");
+    let records =
+        block_on(raw_store.list_prefix(&loonfs_objectstore::keys::pin_prefix(&namespace_id)))
+            .expect("list pins");
     assert!(
         records.is_empty(),
         "maintenance pass created pins: {records:?}"
@@ -322,7 +321,7 @@ fn metadata_run_does_not_advance_retention() {
     )
     .expect("put second file");
     fs.maintenance_run_namespace_blocking(&namespace_id, metadata_request(1))
-        .expect("flush second segment");
+        .expect("fold second segment");
     let response = fs
         .maintenance_run_namespace_blocking(
             &namespace_id,
@@ -347,8 +346,8 @@ fn the_typed_wrappers_are_single_action_steps() {
     )
     .expect("create namespace");
     assert_eq!(
-        fs.flush_wal_blocking(&namespace_id)
-            .expect("flush an empty tail")
+        fs.fold_wal_blocking(&namespace_id)
+            .expect("fold an empty tail")
             .wal_flush,
         WalFlushStepOutcome::NotNeeded,
         "the wrapper folds a tail; it does not publish a manifest for a namespace with none"
@@ -361,19 +360,17 @@ fn the_typed_wrappers_are_single_action_steps() {
         PutFileOptions::new(loonfs_test_support::test_actor()),
     )
     .expect("put first file");
-    let flushed = fs
-        .flush_wal_blocking(&namespace_id)
-        .expect("flush the tail");
+    let folded = fs.fold_wal_blocking(&namespace_id).expect("fold the tail");
     assert_eq!(
-        flushed.wal_flush,
+        folded.wal_flush,
         WalFlushStepOutcome::Flushed {
             manifest_head_seq: ChangeSeq(1)
         }
     );
     assert_eq!(
-        flushed.reorganize,
+        folded.reorganize,
         ReorganizeStepOutcome::NotNeeded {},
-        "the upkeep pass reports its reorganization half rather than hiding it"
+        "the upkeep pass reports its compaction half rather than hiding it"
     );
 
     fs.put_file_bytes_blocking(
@@ -478,7 +475,7 @@ fn maintenance_step_after_existing_manifest_writes_delta_manifest() {
 
     let status = fs
         .namespace_diagnostics_blocking(&namespace_id)
-        .expect("status after delta wal flush");
+        .expect("status after delta wal fold");
     assert_eq!(status.current_manifest_no, Some(ManifestNo(4)));
     assert_eq!(status.wal_tail_segments, 0);
 
@@ -493,8 +490,8 @@ fn maintenance_step_after_existing_manifest_writes_delta_manifest() {
         .expect("read namespace manifest")
         .expect("namespace manifest exists");
     let manifest = decode_namespace_manifest_json(&manifest_bytes).expect("decode manifest");
-    // A WAL flush only appends: the base marker stays where the first
-    // published manifest put it until reorganization folds the delta runs.
+    // A WAL fold only appends: the base marker stays where the first
+    // published manifest put it until compaction merges the delta runs.
     assert_eq!(manifest.payload().base_seq(), ChangeSeq(1));
     let delta_files = manifest
         .payload()
@@ -524,7 +521,7 @@ fn a_standalone_maintenance_drives_metadata_compaction_itself() {
         MetadataCompactionOutcome::NotNeeded
     );
 
-    // Enough flushes to put the manifest's delta run count over the fold
+    // Enough folds to put the manifest's delta run count over the compaction
     // trigger, which is what makes the planner select a group at all.
     for index in 0..9 {
         fs.put_file_bytes_blocking(
@@ -534,8 +531,7 @@ fn a_standalone_maintenance_drives_metadata_compaction_itself() {
             PutFileOptions::new(loonfs_test_support::test_actor()),
         )
         .expect("put a file");
-        fs.flush_wal_blocking(&namespace_id)
-            .expect("flush the tail");
+        fs.fold_wal_blocking(&namespace_id).expect("fold the tail");
     }
     let manifest_before = fs
         .namespace_diagnostics_blocking(&namespace_id)
@@ -604,9 +600,9 @@ async fn fenced_compaction_blocks_until_a_new_request_claims_and_publishes() {
                 .expect("put file");
             first
                 .maintenance
-                .flush_wal(&namespace_id)
+                .fold_wal(&namespace_id)
                 .await
-                .expect("flush WAL");
+                .expect("fold WAL");
         }
         for runtime in [&first, &second] {
             assert_eq!(
@@ -709,9 +705,9 @@ async fn a_delayed_fenced_compaction_does_not_forget_a_newer_claim() {
             .expect("put file");
         first
             .maintenance
-            .flush_wal(&namespace_id)
+            .fold_wal(&namespace_id)
             .await
-            .expect("flush");
+            .expect("fold");
     }
     for runtime in [&first, &second] {
         assert_eq!(
@@ -844,7 +840,7 @@ async fn maintenance_step_treats_manifest_number_collision_as_benign_race() {
         OperationClass::Put,
     ));
     let fs = open_runtime_async(blocked.clone(), "step-race-test").await;
-    let winner = open_runtime_async(raw_store, "competing-flush").await;
+    let winner = open_runtime_async(raw_store, "competing-fold").await;
 
     fs.create_namespace(
         &namespace_id,
@@ -869,9 +865,9 @@ async fn maintenance_step_treats_manifest_number_collision_as_benign_race() {
             blocked.wait_until_blocked().await;
             winner
                 .maintenance
-                .flush_wal(&namespace_id)
+                .fold_wal(&namespace_id)
                 .await
-                .expect("competing flush");
+                .expect("competing fold");
             blocked.release();
         }
     );
@@ -923,7 +919,7 @@ async fn a_cold_metadata_job_probes_with_its_configured_options() {
     drop(runtime);
     let runtime = open_runtime_async(store(temp_dir.path()), "writer-b").await;
     let defaults = MetadataMaintenanceJob::new(runtime.maintenance.clone());
-    let eager_flush = MetadataMaintenanceJob::new(runtime.maintenance.clone()).options(
+    let eager_fold = MetadataMaintenanceJob::new(runtime.maintenance.clone()).options(
         MetadataMaintenanceOptions {
             max_wal_tail_segments: NonZeroU64::MIN,
             ..MetadataMaintenanceOptions::default()
@@ -934,13 +930,13 @@ async fn a_cold_metadata_job_probes_with_its_configured_options() {
         MaintenanceProbe::Idle
     );
     assert_eq!(
-        eager_flush.probe(&namespace).await.expect("custom probe"),
+        eager_fold.probe(&namespace).await.expect("custom probe"),
         MaintenanceProbe::Due
     );
     runtime
         .create_checkpoint(&namespace)
         .await
-        .expect("flush the first run");
+        .expect("fold the first run");
     runtime
         .put_file_bytes(
             &namespace,
@@ -953,7 +949,7 @@ async fn a_cold_metadata_job_probes_with_its_configured_options() {
     runtime
         .create_checkpoint(&namespace)
         .await
-        .expect("flush a delta below the default trigger");
+        .expect("fold a delta below the default trigger");
     drop(runtime);
     let runtime = open_runtime_async(store(temp_dir.path()), "writer-c").await;
     let defaults = MetadataMaintenanceJob::new(runtime.maintenance.clone());

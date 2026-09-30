@@ -1096,9 +1096,9 @@ fn metadata_upkeep_offers_nothing_to_the_local_block_cache() {
     .expect("create namespace");
 
     // Each step folds the tail into one more delta run, and the default policy
-    // admits a reorganization unit once enough of them have piled up. Reads
+    // admits a compaction unit once enough of them have piled up. Reads
     // the writes make on the way are outside every measured window.
-    let mut reorganized = false;
+    let mut compacted = false;
     for index in 0..16 {
         fs.put_file_bytes_blocking(
             &namespace_id,
@@ -1122,14 +1122,14 @@ fn metadata_upkeep_offers_nothing_to_the_local_block_cache() {
         fs.stat_path_blocking(&namespace_id, &format!("/docs/file-{index:02}.txt"))
             .expect("read folded file outside the maintenance window");
         if upkeep(&step).reorganize == (ReorganizeStepOutcome::UnitPublished {}) {
-            reorganized = true;
+            compacted = true;
             break;
         }
     }
 
     assert!(
-        reorganized,
-        "the steps above should have folded one reorganization unit"
+        compacted,
+        "the steps above should have published one compaction unit"
     );
     assert!(
         stored_blocks.call_count() > 0,

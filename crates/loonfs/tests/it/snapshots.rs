@@ -9,7 +9,7 @@ use loonfs::{
     DeleteNamespaceOptions, ErrorCode, FsMaintenance, FsReader, FsWriter, ListSnapshotsResponse,
     NamespaceId, PageRequest, PaginationPolicy, PutFileOptions, SharedObjectStore, SnapshotPolicy,
 };
-use loonfs_objectstore::keys::checkpoint_prefix;
+use loonfs_objectstore::keys::pin_prefix;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{
@@ -95,7 +95,7 @@ async fn snapshot_create_recovers_an_ambiguously_landed_record_write() {
     let store = Arc::new(
         FailStore::new(
             LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
-            KeyPredicate::prefix(checkpoint_prefix(&namespace_id)),
+            KeyPredicate::prefix(pin_prefix(&namespace_id)),
             OperationClass::PutCreateIfAbsent,
             InjectedError::Transport("lost checkpoint write acknowledgement".to_owned()),
         )
@@ -139,11 +139,11 @@ async fn snapshot_create_recovers_an_ambiguously_landed_record_write() {
 async fn snapshot_extension_recovers_an_ambiguously_landed_record_write() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("snapshot-ambiguous-extension");
-    let checkpoint_key_prefix = checkpoint_prefix(&namespace_id);
+    let pin_key_prefix = pin_prefix(&namespace_id);
     let store = Arc::new(
         FailStore::new(
             LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
-            KeyPredicate::prefix(checkpoint_key_prefix),
+            KeyPredicate::prefix(pin_key_prefix),
             OperationClass::CompareAndSwap,
             InjectedError::Transport("lost snapshot extension acknowledgement".to_owned()),
         )
@@ -188,7 +188,7 @@ async fn snapshot_delete_reports_an_uncertain_delete_without_recreating_the_pin(
     let store = Arc::new(
         FailStore::new(
             LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
-            KeyPredicate::prefix(checkpoint_prefix(&namespace_id)),
+            KeyPredicate::prefix(pin_prefix(&namespace_id)),
             OperationClass::Delete,
             InjectedError::Transport("lost snapshot delete acknowledgement".to_owned()),
         )
@@ -242,7 +242,7 @@ async fn a_namespace_at_its_snapshot_limit_refuses_a_create_without_writing() {
     let namespace_id = namespace_id("snapshot-quota-full");
     let store = Arc::new(RecordingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
-        KeyPredicate::prefix(checkpoint_prefix(&namespace_id)),
+        KeyPredicate::prefix(pin_prefix(&namespace_id)),
     ));
     let object_store: SharedObjectStore = store.clone();
     let fs = open_runtime_async(object_store, "snapshot-quota-full").await;
@@ -267,7 +267,7 @@ async fn a_namespace_at_its_snapshot_limit_refuses_a_create_without_writing() {
         PutFileOptions::new(loonfs_test_support::test_actor()),
     )
     .await
-    .expect("leave a WAL tail for a create to flush");
+    .expect("leave a WAL tail for a create to fold");
     let manifest_no = fs
         .maintenance
         .get_namespace_diagnostics(&namespace_id)
@@ -299,13 +299,13 @@ async fn a_namespace_at_its_snapshot_limit_refuses_a_create_without_writing() {
 async fn concurrent_snapshot_creates_cannot_both_claim_the_last_quota_slot() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("snapshot-quota-race");
-    let checkpoint_key_prefix = checkpoint_prefix(&namespace_id);
+    let pin_key_prefix = pin_prefix(&namespace_id);
     let checkpoint_writes = Arc::new(AtomicUsize::new(0));
     let checkpoint_writes_seen = checkpoint_writes.clone();
     let checkpoint_write_gate = Arc::new(BlockingStore::matching(
         LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
         move |operation| {
-            let matches = operation.key().starts_with(&checkpoint_key_prefix)
+            let matches = operation.key().starts_with(&pin_key_prefix)
                 && matches!(
                     operation.kind(),
                     OperationKind::Put { .. } | OperationKind::PutStreamed { .. }
@@ -316,7 +316,7 @@ async fn concurrent_snapshot_creates_cannot_both_claim_the_last_quota_slot() {
             matches
         },
     ));
-    let checkpoint_list_prefix = checkpoint_prefix(&namespace_id);
+    let checkpoint_list_prefix = pin_prefix(&namespace_id);
     let checkpoint_lists = Arc::new(AtomicUsize::new(0));
     let checkpoint_lists_seen = checkpoint_lists.clone();
     let checkpoint_list_gate = Arc::new(BlockingStore::matching(
@@ -333,7 +333,7 @@ async fn concurrent_snapshot_creates_cannot_both_claim_the_last_quota_slot() {
     // Neither create may delete its tentative record until both have listed;
     // otherwise the later listing sees one live snapshot and that create
     // succeeds.
-    let checkpoint_delete_prefix = checkpoint_prefix(&namespace_id);
+    let checkpoint_delete_prefix = pin_prefix(&namespace_id);
     let checkpoint_deletes = Arc::new(AtomicUsize::new(0));
     let checkpoint_deletes_seen = checkpoint_deletes.clone();
     let checkpoint_delete_gate = Arc::new(BlockingStore::matching(

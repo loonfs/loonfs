@@ -1,7 +1,7 @@
 //! Overlapping retirement passes preserve other owners and retry partial effects.
 
 use super::*;
-use loonfs_objectstore::keys::checkpoint_record;
+use loonfs_objectstore::keys::pin;
 
 #[tokio::test]
 async fn overlapping_retirement_retries_lost_delete_ack_and_preserves_a_live_sibling() {
@@ -104,7 +104,7 @@ async fn overlapping_retirement_retries_lost_delete_ack_and_preserves_a_live_sib
             .expect("landed delete")
             .is_none());
         assert!(
-            checkpoint_exists(store.inner(), &source, &target_pin).await,
+            pin_exists(store.inner(), &source, &target_pin).await,
             "failed sweep does not release its source pin"
         );
         store.inner().clear();
@@ -123,8 +123,8 @@ async fn overlapping_retirement_retries_lost_delete_ack_and_preserves_a_live_sib
         gc_namespace(store.inner(), &target, &config, &deadline)
             .await
             .expect("second collector retries from the beginning");
-        assert!(!checkpoint_exists(store.inner(), &source, &target_pin).await);
-        assert!(checkpoint_exists(store.inner(), &source, &sibling_pin).await);
+        assert!(!pin_exists(store.inner(), &source, &target_pin).await);
+        assert!(pin_exists(store.inner(), &source, &sibling_pin).await);
         assert!(store
             .inner()
             .list_prefix(&target_content_prefix)
@@ -147,7 +147,7 @@ async fn overlapping_retirement_retries_lost_delete_ack_and_preserves_a_live_sib
         .expect("target content")
         .is_empty());
     assert!(store
-        .head(&checkpoint_record(&source, &sibling_pin))
+        .head(&pin(&source, &sibling_pin))
         .await
         .expect("sibling pin")
         .is_some());

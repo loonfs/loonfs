@@ -20,15 +20,15 @@ const TOKEN_VERSION: &str = "vct2";
 /// Evidence read from a durable upload session in its completed state.
 ///
 /// The type has no public constructor. Only the upload protocol can create
-/// it after loading a completed session, so callers cannot create receipts
+/// it after loading a completed session, so callers cannot create evidence
 /// from an in-memory expectation or an unverified provider response.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CompletedUploadReceipt {
+pub struct CompletedUploadEvidence {
     content_ref: ContentRef,
     completed_at_ms: u64,
 }
 
-impl CompletedUploadReceipt {
+impl CompletedUploadEvidence {
     pub(crate) fn for_completed_session(content_ref: ContentRef, completed_at_ms: u64) -> Self {
         Self {
             content_ref,
@@ -194,10 +194,10 @@ pub enum ContentTokenError {
 /// status request, not another upload.
 pub fn mint_content_token(
     secret: &str,
-    receipt: &CompletedUploadReceipt,
+    evidence: &CompletedUploadEvidence,
     now_ms: u64,
 ) -> Result<ContentToken, ContentTokenError> {
-    let issuance_deadline_ms = receipt
+    let issuance_deadline_ms = evidence
         .completed_at_ms
         .checked_add(COMPLETED_UPLOAD_RECEIPT_WINDOW_MS)
         .ok_or(ContentTokenError::TimeOverflow)?;
@@ -209,7 +209,7 @@ pub fn mint_content_token(
         .ok_or(ContentTokenError::TimeOverflow)?;
     let payload = ContentTokenPayload {
         version: TOKEN_VERSION.to_owned(),
-        content_ref: receipt.content_ref.clone(),
+        content_ref: evidence.content_ref.clone(),
         expires_at_ms,
     };
     let payload_json = serde_json::to_vec(&payload)
@@ -220,7 +220,7 @@ pub fn mint_content_token(
         payload_part.as_bytes(),
     ));
     Ok(ContentToken {
-        content_ref: receipt.content_ref.clone(),
+        content_ref: evidence.content_ref.clone(),
         token: format!("{payload_part}.{signature_part}"),
     })
 }
@@ -290,7 +290,7 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
 mod tests {
     use super::*;
 
-    use super::{mint_content_token, verify_content_token, CompletedUploadReceipt};
+    use super::{mint_content_token, verify_content_token, CompletedUploadEvidence};
     use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
     use crate::namespace::state::NamespaceReadState;
     use loonfs_api::v0::ContentToken;
@@ -304,15 +304,15 @@ mod tests {
         ))
     }
 
-    fn receipt(content_ref: &ContentRef) -> CompletedUploadReceipt {
-        CompletedUploadReceipt::for_completed_session(content_ref.clone(), 1_000)
+    fn evidence(content_ref: &ContentRef) -> CompletedUploadEvidence {
+        CompletedUploadEvidence::for_completed_session(content_ref.clone(), 1_000)
     }
 
     #[test]
     fn minted_content_token_passes_unchanged_into_embedded_verification() {
         let namespace = NamespaceId::parse("demo").expect("namespace");
         let content = ContentRef::blob_v1(namespace.clone(), ContentId::generate(), b"hello");
-        let token = mint_content_token("secret", &receipt(&content), 1_000).expect("mint");
+        let token = mint_content_token("secret", &evidence(&content), 1_000).expect("mint");
         let catalog = catalog_entry(namespace);
 
         let prepared =
@@ -327,7 +327,7 @@ mod tests {
         let namespace = NamespaceId::parse("source").expect("namespace");
         let other_namespace = NamespaceId::parse("target").expect("namespace");
         let content = ContentRef::blob_v1(namespace.clone(), ContentId::generate(), b"hello");
-        let token = mint_content_token("secret", &receipt(&content), 1_000).expect("mint");
+        let token = mint_content_token("secret", &evidence(&content), 1_000).expect("mint");
         let catalog = catalog_entry(namespace);
         let admission =
             verify_content_token("secret", &catalog, &token, 1_000).expect("verify token");
@@ -343,7 +343,7 @@ mod tests {
             ContentId::parse("con_0123456789abcdef0123456789abcdef").expect("content id"),
             b"hello",
         );
-        let token = mint_content_token("secret", &receipt(&content), 1_000).expect("mint");
+        let token = mint_content_token("secret", &evidence(&content), 1_000).expect("mint");
         let (payload_part, _) = token.token.split_once('.').expect("signed token");
         let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(payload_part)
@@ -373,7 +373,7 @@ mod tests {
         let content = ContentRef::blob_v1(namespace.clone(), ContentId::generate(), b"hello");
         let issued_at_ms = 1_000;
         let expires_at_ms = issued_at_ms + CONTENT_RECEIPT_TTL_MS;
-        let token = mint_content_token("secret", &receipt(&content), issued_at_ms).expect("mint");
+        let token = mint_content_token("secret", &evidence(&content), issued_at_ms).expect("mint");
         let catalog = catalog_entry(namespace);
 
         let prepared = verify_content_token("secret", &catalog, &token, expires_at_ms - 1)
@@ -393,7 +393,7 @@ mod tests {
         let content = ContentRef::blob_v1(namespace.clone(), ContentId::generate(), b"hello");
         let other_content = ContentRef::blob_v1(namespace.clone(), ContentId::generate(), b"other");
         let issued_at_ms = 1_000;
-        let token = mint_content_token("secret", &receipt(&content), issued_at_ms).expect("mint");
+        let token = mint_content_token("secret", &evidence(&content), issued_at_ms).expect("mint");
         let catalog = catalog_entry(namespace.clone());
         let other_catalog = catalog_entry(other_namespace);
 
@@ -401,7 +401,7 @@ mod tests {
         assert_eq!(
             verify_content_token("secret", &other_catalog, &token, 1_000),
             Err(ContentTokenError::NamespaceMismatch),
-            "receipts belong to one namespace"
+            "evidence belongs to one namespace"
         );
         assert!(verify_content_token(
             "secret",

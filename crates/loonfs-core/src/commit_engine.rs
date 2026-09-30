@@ -3,10 +3,10 @@
 //! one result per candidate.
 
 use crate::authorize::CommitAuthority;
-use crate::checkpoint::MetadataSegmentCache;
 use crate::commit::{settle_publish_attempt, CommitFingerprint, WalPublishError};
 use crate::context::MutationContext;
 use crate::error::{CoreError, Result, WriterFence};
+use crate::manifest::MetadataSegmentCache;
 use crate::namespace::basis::MetadataBasis;
 use crate::namespace::read_anchor::NamespaceReadAnchor;
 use crate::namespace::state::NamespaceReadState;
@@ -654,7 +654,7 @@ impl NamespaceCommitEngine {
         self.wal_fold_input()
     }
 
-    pub fn record_wal_fold(&mut self, folded: Option<&crate::checkpoint::FoldedWalTail>) {
+    pub fn record_wal_fold(&mut self, folded: Option<&crate::manifest::FoldedWalTail>) {
         let fold_observed = self.fold_observed.take();
         let reanchored = match (folded, &mut self.publish_tail_projection) {
             (Some(folded), Some(projection))
@@ -725,7 +725,7 @@ impl NamespaceCommitEngine {
             acquired_writer,
             context,
             &deadline,
-            crate::checkpoint::MetadataLsmPolicy::for_segment_cache(self.segment_cache.as_deref()),
+            crate::manifest::MetadataLsmPolicy::for_segment_cache(self.segment_cache.as_deref()),
         )
         .await;
         self.invalidate_projection();
@@ -778,7 +778,7 @@ impl NamespaceCommitEngine {
             self.invalidate_projection();
         }
         // A landed put confirms the tip, not the manifest the batch was planned
-        // against: another process may have flushed since. A basis unconfirmed
+        // against: another process may have folded since. A basis unconfirmed
         // for a budget is checked for a successor. A successor, a check that
         // returns after the revalidation bound, or a failed check reloads the
         // view instead.
@@ -1016,9 +1016,9 @@ mod deletion_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::checkpoint::fold_wal_tail;
     use crate::error::ErrorCode;
     use crate::limits::{READ_REVALIDATION_BOUND_MS, WAL_PUBLISH_BUDGET_MS};
+    use crate::manifest::fold_wal_tail;
     use crate::namespace::control::load_namespace_read_state;
     use crate::test_support::ops::create;
     use futures::StreamExt;
@@ -1605,7 +1605,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_flush_by_another_process_is_found_at_the_basis_check() {
+    async fn a_fold_by_another_process_is_found_at_the_basis_check() {
         let temp_dir = tempdir().expect("tempdir");
         let store = RecordingStore::new(
             LocalFsStore::new(temp_dir.path()).expect("store"),
@@ -1626,7 +1626,7 @@ mod tests {
             .basis
             .manifest_no();
 
-        // Another process flushes the tail into the next manifest.
+        // Another process folds the tail into the next manifest.
         fold_wal_tail(
             &store,
             None,
@@ -1635,7 +1635,7 @@ mod tests {
             &Deadline::start(Arc::new(StdMonotonicTimer::default())),
         )
         .await
-        .expect("flush");
+        .expect("fold");
 
         // Within a budget of the load the basis is trusted, as before.
         timer.advance_ms(WAL_PUBLISH_BUDGET_MS - 1);
@@ -1843,7 +1843,7 @@ mod tests {
         .results
         .remove(0)
         .expect("seed publish");
-        crate::checkpoint::create_checkpoint(
+        crate::pin::create_pin(
             &store,
             &namespace_id,
             loonfs_api::wire::control::PinOwner::User {
@@ -1853,7 +1853,7 @@ mod tests {
             &writer,
         )
         .await
-        .map(crate::checkpoint::checkpoint_summary)
+        .map(crate::pin::checkpoint_summary)
         .expect("checkpoint");
 
         // Without a cache, every publish view re-fetches the segment blocks

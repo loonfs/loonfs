@@ -234,7 +234,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
                     outcome: Err(error),
                     depends_on_batch: false,
                 };
-                return abort_batch(slots, &CoreError::WalPublish(WalPublishError::StaleHead));
+                return abort_batch(slots, &CoreError::WalPublish(WalPublishError::NumberTaken));
             }
         }
     }
@@ -435,7 +435,7 @@ mod tests {
         );
         assert!(matches!(
             result.results[1],
-            Err(CoreError::WalPublish(WalPublishError::StaleHead))
+            Err(CoreError::WalPublish(WalPublishError::NumberTaken))
         ));
         assert_eq!(store.count(OperationClass::Put), 0);
         assert_eq!(store.count(OperationClass::CompareAndSwap), 0);

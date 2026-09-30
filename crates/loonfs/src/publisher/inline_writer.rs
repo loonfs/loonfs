@@ -1297,7 +1297,7 @@ async fn check_delayed_fold_callback(cache: RuntimeCacheConfig) {
         .maintenance_handle("maintenance")
         .expect("maintenance");
     store.block_next();
-    let fold = maintenance.flush_wal(&namespace);
+    let fold = maintenance.fold_wal(&namespace);
     let publish_after_fold = async {
         timeout(Duration::from_secs(10), store.wait_until_blocked())
             .await

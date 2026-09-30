@@ -4,12 +4,6 @@
 
 use super::collect::gc_namespace;
 use super::config::GcConfig;
-use crate::checkpoint::advance_retention_floor;
-use crate::checkpoint::record::delete_checkpoint_record;
-use crate::checkpoint::tests::{
-    compact_a_family_group, create_checkpoint, mutation_context, write_test_file,
-};
-use crate::checkpoint::MetadataCompactionPolicy;
 use crate::commit_engine::{CommitCandidate, NamespaceCommitEngine};
 use crate::context::MutationContext;
 use crate::error::CoreError;
@@ -17,7 +11,13 @@ use crate::limits::{
     CONTENT_RECLAMATION_GRACE_MS, GC_MIN_GRACE_WINDOW_MS, UNREFERENCED_SEGMENT_MIN_AGE_MS,
     UPLOAD_SESSION_LEASE_MS,
 };
+use crate::manifest::advance_retention_floor;
+use crate::manifest::tests::{
+    compact_a_family_group, create_checkpoint, mutation_context, write_test_file,
+};
+use crate::manifest::MetadataCompactionPolicy;
 use crate::path::write::{CommitRequest, FilesystemOperation};
+use crate::pin::record::delete_pin;
 use crate::test_support::ops::create;
 use crate::time::{Deadline, StdMonotonicTimer};
 use loonfs_api::v0::GcResponse;
@@ -27,8 +27,8 @@ use loonfs_api::wire::control::{
 };
 use loonfs_api::{ContentRef, ManifestNo, NamespaceId, PinId, UploadId};
 use loonfs_objectstore::keys::{
-    checkpoint_prefix, hint, metadata_manifest_object, metadata_manifest_prefix, metadata_segment,
-    metadata_segment_prefix, wal_segment_prefix,
+    hint, metadata_manifest_object, metadata_manifest_prefix, metadata_segment,
+    metadata_segment_prefix, pin_prefix, wal_segment_prefix,
 };
 use loonfs_objectstore::ObjectStore;
 use std::collections::BTreeSet;
@@ -68,12 +68,12 @@ fn context(now_ms: u64) -> MutationContext {
     mutation_context("gc-test", now_ms)
 }
 
-async fn checkpoint_exists<S: ObjectStore + ?Sized>(
+async fn pin_exists<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     checkpoint_id: &PinId,
 ) -> bool {
-    crate::checkpoint::record::load_checkpoint_record(store, namespace_id, checkpoint_id)
+    crate::pin::record::load_pin(store, namespace_id, checkpoint_id)
         .await
         .expect("read pin")
         .is_some()
@@ -367,10 +367,7 @@ async fn deleted_namespace_keeps_its_tombstone_and_segments() {
         assert!(store.head(key).await.expect("reclaimed content").is_none());
     }
 
-    for prefix in [
-        wal_segment_prefix(&namespace_id),
-        checkpoint_prefix(&namespace_id),
-    ] {
+    for prefix in [wal_segment_prefix(&namespace_id), pin_prefix(&namespace_id)] {
         assert!(
             store.list_prefix(&prefix).await.expect("list").is_empty(),
             "prefix `{prefix}` must be empty after reclamation"
@@ -494,7 +491,7 @@ async fn fork_protected_bases_survive_source_deletion_until_the_target_dies() {
     gc_namespace(&store, &clone, &config(), &aged)
         .await
         .expect("clone releases source pin");
-    assert!(!checkpoint_exists(&store, &source, &fork_record.pin_id).await);
+    assert!(!pin_exists(&store, &source, &fork_record.pin_id).await);
 
     let again = context(now_after_newest_object(&store, &source, GRACE_MS + 1).await);
     let report = gc_namespace(&store, &source, &config(), &again)
@@ -1052,9 +1049,9 @@ async fn completed_uploads_use_publication_lookups_without_scanning_segments() {
         if materialize {
             // Materializing and then dropping the WAL below the floor
             // leaves the manifest as the only place the reference lives.
-            crate::checkpoint::flush_wal(&store, &namespace_id)
+            crate::manifest::fold_wal(&store, &namespace_id)
                 .await
-                .expect("flush wal");
+                .expect("fold wal");
             advance_retention_floor(&store, &namespace_id)
                 .await
                 .expect("advance floor");
@@ -1185,12 +1182,12 @@ async fn published_compaction_segments_are_referenced_and_kept() {
             &setup,
         )
         .await;
-        // Flushes rather than checkpoints: a checkpoint pins the manifest it
+        // Folds rather than checkpoints: a checkpoint pins the manifest it
         // published, and a pinned manifest protects its segments forever, which
         // would leave this pass nothing to reap and nothing to prove.
-        crate::checkpoint::flush_wal(&store, &namespace_id)
+        crate::manifest::fold_wal(&store, &namespace_id)
             .await
-            .expect("flush wal");
+            .expect("fold wal");
     }
     let staged = compact_a_family_group(&store, &namespace_id, &setup).await;
 
@@ -1235,16 +1232,16 @@ async fn a_publication_during_a_pass_never_costs_the_job_its_segments() {
             &setup,
         )
         .await;
-        crate::checkpoint::flush_wal(&seed, &namespace_id)
+        crate::manifest::fold_wal(&seed, &namespace_id)
             .await
-            .expect("flush wal");
+            .expect("fold wal");
     }
     // One clock for the job and the pass: the job stamps its lease at the same
     // instant the pass reads it by, which is what a running job's lease looks
     // like to a collector.
     let pass_clock = context(now_after_newest_object(&seed, &namespace_id, GRACE_MS + 1).await);
     let (policy, spec) =
-        crate::checkpoint::tests::plan_a_family_group_compaction(&seed, &namespace_id, &pass_clock)
+        crate::manifest::tests::plan_a_family_group_compaction(&seed, &namespace_id, &pass_clock)
             .await;
 
     // The pass parks at its first listing, which is after it has collected the
@@ -1261,7 +1258,7 @@ async fn a_publication_during_a_pass_never_costs_the_job_its_segments() {
         gc_namespace(&gated, &namespace_id, &pass_config, &pass_clock),
         async {
             gated.wait_until_blocked().await;
-            crate::checkpoint::tests::publish_planned_compaction(
+            crate::manifest::tests::publish_planned_compaction(
                 &seed,
                 &namespace_id,
                 &pass_clock,
@@ -1269,11 +1266,9 @@ async fn a_publication_during_a_pass_never_costs_the_job_its_segments() {
                 &spec,
             )
             .await;
-            let staged = crate::checkpoint::tests::segment_keys_of_the_current_manifest(
-                &seed,
-                &namespace_id,
-            )
-            .await;
+            let staged =
+                crate::manifest::tests::segment_keys_of_the_current_manifest(&seed, &namespace_id)
+                    .await;
             gated.release();
             staged
         }
@@ -1292,7 +1287,7 @@ async fn a_publication_during_a_pass_never_costs_the_job_its_segments() {
 }
 
 #[tokio::test]
-async fn a_pass_names_a_checkpoint_record_it_could_not_advance() {
+async fn a_pass_names_a_pin_it_could_not_advance() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
@@ -1369,7 +1364,7 @@ async fn assert_basis_reaped(
     _pass: &GcResponse,
     manifest_number: &ManifestNo,
 ) {
-    assert!(crate::checkpoint::load_namespace_manifest_envelope(
+    assert!(crate::manifest::load_namespace_manifest_envelope(
         store,
         namespace_id,
         manifest_number
@@ -1423,7 +1418,7 @@ async fn gc_retains_unrecognized_manifest_keys() {
 }
 
 #[tokio::test]
-async fn gc_reclaims_manifests_superseded_by_wal_flushes() {
+async fn gc_reclaims_manifests_superseded_by_wal_folds() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
@@ -1440,19 +1435,19 @@ async fn gc_reclaims_manifests_superseded_by_wal_flushes() {
             &setup,
         )
         .await;
-        crate::checkpoint::flush_wal(&store, &namespace_id)
+        crate::manifest::fold_wal(&store, &namespace_id)
             .await
-            .expect("flush wal");
+            .expect("fold wal");
     }
 
     // Record-less maintenance: nothing accumulates under `pins/`.
     assert!(
         store
-            .list_prefix(&checkpoint_prefix(&namespace_id))
+            .list_prefix(&pin_prefix(&namespace_id))
             .await
             .expect("list pins")
             .is_empty(),
-        "a wal flush must not create pins"
+        "a wal fold must not create pins"
     );
 
     let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
@@ -1460,9 +1455,9 @@ async fn gc_reclaims_manifests_superseded_by_wal_flushes() {
         .await
         .expect("gc pass");
 
-    // The first flush materialized the namespace's first manifest and the
+    // The first fold materialized the namespace's first manifest and the
     // next two superseded it; only the current manifest is reachable. Its
-    // segments are all still referenced (a flush only appends delta runs).
+    // segments are all still referenced (a fold only appends delta runs).
     assert_eq!(report.deleted.manifests, 6);
     let manifests_left = store
         .list_prefix(&metadata_manifest_prefix(&namespace_id))
@@ -1470,25 +1465,25 @@ async fn gc_reclaims_manifests_superseded_by_wal_flushes() {
         .expect("list manifests");
     assert_eq!(manifests_left.len(), 1, "only the current manifest stays");
 
-    // Reorganization folds the delta runs into fresh base segments; the
+    // Compaction merges the delta runs into fresh base segments; the
     // superseded run segments then age out on the next pass.
-    let fold_policy = crate::checkpoint::MetadataLsmPolicy {
+    let merge_policy = crate::manifest::MetadataLsmPolicy {
         max_delta_runs: NonZeroUsize::MIN,
         ..Default::default()
     };
     for _ in 0..16 {
-        let report = crate::checkpoint::reorganize_metadata_step(
+        let report = crate::manifest::compaction_step(
             &store,
             &namespace_id,
             loonfs_api::CompactorEpoch(0),
-            fold_policy,
+            merge_policy,
             MetadataCompactionPolicy::default(),
         )
         .await
-        .expect("reorganize step");
+        .expect("compact step");
         if matches!(
             report,
-            crate::checkpoint::MetadataReorganizeOutcome::NotNeeded { .. }
+            crate::manifest::CompactionStepOutcome::NotNeeded { .. }
         ) {
             break;
         }
@@ -1496,12 +1491,12 @@ async fn gc_reclaims_manifests_superseded_by_wal_flushes() {
     let aged = context(
         now_after_newest_object(&store, &namespace_id, UNREFERENCED_SEGMENT_MIN_AGE_MS + 1).await,
     );
-    let after_fold = gc_namespace(&store, &namespace_id, &config(), &aged)
+    let after_merge = gc_namespace(&store, &namespace_id, &config(), &aged)
         .await
-        .expect("gc pass after reorganization");
+        .expect("gc pass after compaction");
     assert!(
-        after_fold.deleted.metadata_segments > 0,
-        "folded-away run segments become collectable"
+        after_merge.deleted.metadata_segments > 0,
+        "merged-away run segments become collectable"
     );
 
     stat_root(&store, &namespace_id).await;
@@ -1529,7 +1524,7 @@ async fn gc_keeps_a_basis_pinned_by_another_owner_after_one_release() {
         .await
         .expect("bootstrap");
     write_test_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
-    let first = crate::checkpoint::create_checkpoint(
+    let first = crate::pin::create_pin(
         &store,
         &namespace_id,
         PinOwner::User {
@@ -1539,9 +1534,9 @@ async fn gc_keeps_a_basis_pinned_by_another_owner_after_one_release() {
         &setup,
     )
     .await
-    .map(crate::checkpoint::checkpoint_summary)
+    .map(crate::pin::checkpoint_summary)
     .expect("first owner");
-    let second = crate::checkpoint::create_checkpoint(
+    let second = crate::pin::create_pin(
         &store,
         &namespace_id,
         PinOwner::User {
@@ -1551,7 +1546,7 @@ async fn gc_keeps_a_basis_pinned_by_another_owner_after_one_release() {
         &setup,
     )
     .await
-    .map(crate::checkpoint::checkpoint_summary)
+    .map(crate::pin::checkpoint_summary)
     .expect("second owner");
     assert_ne!(first.checkpoint_id, second.checkpoint_id);
     assert_eq!(first.manifest_no, second.manifest_no);
@@ -1560,7 +1555,7 @@ async fn gc_keeps_a_basis_pinned_by_another_owner_after_one_release() {
         .await
         .expect("advance past the shared basis");
 
-    crate::checkpoint::delete_checkpoint(&store, &namespace_id, &second.checkpoint_id)
+    crate::pin::delete_checkpoint(&store, &namespace_id, &second.checkpoint_id)
         .await
         .expect("release one owner");
     let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
@@ -1581,17 +1576,13 @@ async fn gc_keeps_a_basis_pinned_by_another_owner_after_one_release() {
         loonfs_api::DeletedCheckpointsByOwner::default()
     );
 
-    let keeper = crate::checkpoint::record::load_checkpoint_record(
-        &store,
-        &namespace_id,
-        &first.checkpoint_id,
-    )
-    .await
-    .expect("read keeper record")
-    .expect("the surviving owner's record stays")
-    .state;
+    let keeper = crate::pin::record::load_pin(&store, &namespace_id, &first.checkpoint_id)
+        .await
+        .expect("read keeper record")
+        .expect("the surviving owner's record stays")
+        .state;
     assert!(
-        crate::checkpoint::load_namespace_manifest_envelope(
+        crate::manifest::load_namespace_manifest_envelope(
             &store,
             &namespace_id,
             &keeper.pin_id.manifest_no(),
@@ -1632,16 +1623,12 @@ async fn gc_retains_active_checkpoint_bases() {
         report.deleted_checkpoints_by_owner,
         loonfs_api::DeletedCheckpointsByOwner::default()
     );
-    let first_record = crate::checkpoint::record::load_checkpoint_record(
-        &store,
-        &namespace_id,
-        &first.checkpoint_id,
-    )
-    .await
-    .expect("read first checkpoint")
-    .expect("first checkpoint exists")
-    .state;
-    assert!(crate::checkpoint::load_namespace_manifest_envelope(
+    let first_record = crate::pin::record::load_pin(&store, &namespace_id, &first.checkpoint_id)
+        .await
+        .expect("read first checkpoint")
+        .expect("first checkpoint exists")
+        .state;
+    assert!(crate::manifest::load_namespace_manifest_envelope(
         &store,
         &namespace_id,
         &first_record.pin_id.manifest_no(),
@@ -1653,7 +1640,7 @@ async fn gc_retains_active_checkpoint_bases() {
 /// Reads the single fork-owned record a fork left under the source.
 async fn read_fork_record(store: &LocalFsStore, source: &NamespaceId) -> PinPayload {
     for key in store
-        .list_prefix(&checkpoint_prefix(source))
+        .list_prefix(&pin_prefix(source))
         .await
         .expect("list checkpoints")
     {
@@ -1695,7 +1682,7 @@ async fn retired_targets_release_their_source_pins_and_retry_failed_deletes() {
     let target_pin = create_checkpoint(&store, &clone, &setup)
         .await
         .expect("materialize target manifest");
-    delete_checkpoint_record(&store, &clone, &target_pin.checkpoint_id)
+    delete_pin(&store, &clone, &target_pin.checkpoint_id)
         .await
         .expect("release target pin");
     let fork_record = read_fork_record(&store, &source).await;
@@ -1729,10 +1716,10 @@ async fn retired_targets_release_their_source_pins_and_retry_failed_deletes() {
         .await
         .expect("wait for grace");
     assert_eq!(waiting.deleted_checkpoints_by_owner.fork, 0);
-    assert!(checkpoint_exists(&store, &source, &fork_record.pin_id).await);
+    assert!(pin_exists(&store, &source, &fork_record.pin_id).await);
     let aged = context(deadline);
 
-    let pin_key = loonfs_objectstore::keys::checkpoint_record(&source, &fork_record.pin_id);
+    let pin_key = loonfs_objectstore::keys::pin(&source, &fork_record.pin_id);
     let store = RecordingStore::new(
         FailStore::new(
             store,
@@ -1746,12 +1733,12 @@ async fn retired_targets_release_their_source_pins_and_retry_failed_deletes() {
     assert!(gc_namespace(&store, &clone, &config(), &aged)
         .await
         .is_err());
-    assert!(checkpoint_exists(&store, &source, &fork_record.pin_id).await);
+    assert!(pin_exists(&store, &source, &fork_record.pin_id).await);
     let released = gc_namespace(&store, &clone, &config(), &aged)
         .await
         .expect("retry source pin delete");
     assert_eq!(released.deleted_checkpoints_by_owner.fork, 1);
-    assert!(!checkpoint_exists(&store, &source, &fork_record.pin_id).await);
+    assert!(!pin_exists(&store, &source, &fork_record.pin_id).await);
     let repeated = gc_namespace(&store, &clone, &config(), &aged)
         .await
         .expect("repeat source pin delete");
@@ -1813,7 +1800,7 @@ async fn a_corrupt_fork_target_manifest_fails_the_pass_and_an_unreadable_hint_re
         .await
         .expect("an unreadable target is retained conservatively");
     assert_eq!(report.deleted_checkpoints_by_owner.fork, 0);
-    assert!(checkpoint_exists(store.inner(), &source, &fork_record.pin_id).await);
+    assert!(pin_exists(store.inner(), &source, &fork_record.pin_id).await);
 
     store.clear();
     store
@@ -1873,11 +1860,11 @@ async fn gc_never_releases_a_fork_record_while_its_target_lives() {
         assert_eq!(report.deleted_checkpoints_by_owner.fork, 0, "at {now_ms}");
         assert_eq!(report.deleted_checkpoints_by_owner.user, 0, "at {now_ms}");
         assert!(
-            checkpoint_exists(&store, &source, &fork_record.pin_id).await,
+            pin_exists(&store, &source, &fork_record.pin_id).await,
             "a live target keeps its pin at {now_ms}"
         );
     }
-    assert!(crate::checkpoint::load_namespace_manifest_envelope(
+    assert!(crate::manifest::load_namespace_manifest_envelope(
         &store,
         &source,
         &fork_record.pin_id.manifest_no(),
@@ -1905,7 +1892,7 @@ async fn a_fork_retry_keeps_young_pins_and_reclaims_the_abandoned_one_after_grac
     let setup = context(1_000);
     create(&store, &source, &setup).await.expect("bootstrap");
     write_test_file(&store, &source, "/docs/one.txt", "gc-one", &setup).await;
-    let abandoned = crate::checkpoint::create_checkpoint(
+    let abandoned = crate::pin::create_pin(
         &store,
         &source,
         PinOwner::Fork {
@@ -1914,7 +1901,7 @@ async fn a_fork_retry_keeps_young_pins_and_reclaims_the_abandoned_one_after_grac
         &setup,
     )
     .await
-    .map(crate::checkpoint::checkpoint_summary)
+    .map(crate::pin::checkpoint_summary)
     .expect("fork pin from the abandoned attempt");
 
     fork_namespace(
@@ -1929,13 +1916,13 @@ async fn a_fork_retry_keeps_young_pins_and_reclaims_the_abandoned_one_after_grac
     .await
     .expect("fork retry after abandonment");
     let retry = store
-        .list_prefix(&checkpoint_prefix(&source))
+        .list_prefix(&pin_prefix(&source))
         .await
         .expect("list checkpoints")
         .len();
     assert_eq!(retry, 2, "the retry pins for itself instead of reusing");
     assert!(
-        checkpoint_exists(&store, &source, &abandoned.checkpoint_id).await,
+        pin_exists(&store, &source, &abandoned.checkpoint_id).await,
         "the retry leaves the abandoned record alone"
     );
 
@@ -1944,7 +1931,7 @@ async fn a_fork_retry_keeps_young_pins_and_reclaims_the_abandoned_one_after_grac
         .await
         .expect("gc pass with a target that reads through another record");
     assert_eq!(report.deleted_checkpoints_by_owner.fork, 0);
-    assert!(checkpoint_exists(&store, &source, &abandoned.checkpoint_id).await);
+    assert!(pin_exists(&store, &source, &abandoned.checkpoint_id).await);
     let report = gc_namespace(
         &store,
         &source,
@@ -1954,10 +1941,10 @@ async fn a_fork_retry_keeps_young_pins_and_reclaims_the_abandoned_one_after_grac
     .await
     .expect("an aged pin the target does not name is the abandoned attempt's");
     assert_eq!(report.deleted_checkpoints_by_owner.fork, 1);
-    assert!(!checkpoint_exists(&store, &source, &abandoned.checkpoint_id).await);
+    assert!(!pin_exists(&store, &source, &abandoned.checkpoint_id).await);
     assert_eq!(
         store
-            .list_prefix(&checkpoint_prefix(&source))
+            .list_prefix(&pin_prefix(&source))
             .await
             .expect("list checkpoints")
             .len(),
@@ -1977,12 +1964,12 @@ async fn a_fork_retry_keeps_young_pins_and_reclaims_the_abandoned_one_after_grac
 }
 
 #[tokio::test]
-async fn a_corrupt_checkpoint_record_and_an_unreadable_one_both_fail_the_pass() {
+async fn a_corrupt_pin_and_an_unreadable_one_both_fail_the_pass() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let store = FailStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
-        KeyPredicate::prefix(checkpoint_prefix(&namespace_id)),
+        KeyPredicate::prefix(pin_prefix(&namespace_id)),
         OperationClass::Read,
         InjectedError::Transport("pin read timed out".to_owned()),
     );
@@ -1997,7 +1984,7 @@ async fn a_corrupt_checkpoint_record_and_an_unreadable_one_both_fail_the_pass() 
 
     let record_key = store
         .inner()
-        .list_prefix(&checkpoint_prefix(&namespace_id))
+        .list_prefix(&pin_prefix(&namespace_id))
         .await
         .expect("list checkpoints")
         .first()
@@ -2263,9 +2250,9 @@ async fn publish_owned_content<S: ObjectStore>(
         )
         .await;
         if (number + 1) % 32 == 0 {
-            crate::checkpoint::flush_wal(store, namespace_id)
+            crate::manifest::fold_wal(store, namespace_id)
                 .await
-                .expect("flush published content");
+                .expect("fold published content");
         }
     }
     keys
@@ -2341,9 +2328,9 @@ async fn gc_keeps_pinned_and_current_numbers_and_preserves_discovery_from_a_lagg
             &setup,
         )
         .await;
-        crate::checkpoint::flush_wal(&store, &namespace_id)
+        crate::manifest::fold_wal(&store, &namespace_id)
             .await
-            .expect("flush");
+            .expect("fold");
     }
     let current = crate::namespace::control::load_current_manifest(&store, &namespace_id)
         .await
@@ -2376,7 +2363,7 @@ async fn gc_keeps_pinned_and_current_numbers_and_preserves_discovery_from_a_lagg
         current.state
     );
     write_test_file(&store, &namespace_id, "/four", "four", &setup).await;
-    crate::checkpoint::flush_wal(&store, &namespace_id)
+    crate::manifest::fold_wal(&store, &namespace_id)
         .await
         .expect("refresh hint by publishing");
     let current = crate::namespace::control::load_current_manifest(&store, &namespace_id)
@@ -2420,9 +2407,9 @@ async fn concurrent_collectors_keep_pinned_and_current_roots_and_young_objects()
         .await
         .expect("pin");
     write_test_file(&inner, &namespace_id, "/two", "two", &setup).await;
-    crate::checkpoint::flush_wal(&inner, &namespace_id)
+    crate::manifest::fold_wal(&inner, &namespace_id)
         .await
-        .expect("flush");
+        .expect("fold");
     let protected: BTreeSet<_> = inner
         .list_prefix(&metadata_segment_prefix(&namespace_id))
         .await
@@ -2576,9 +2563,9 @@ async fn expiry_and_creation_grace_delete_pins_without_a_released_state() {
         },
     ] {
         pins.push(
-            crate::checkpoint::create_checkpoint(&store, &namespace_id, owner, &setup)
+            crate::pin::create_pin(&store, &namespace_id, owner, &setup)
                 .await
-                .map(crate::checkpoint::checkpoint_summary)
+                .map(crate::pin::checkpoint_summary)
                 .expect("pin"),
         );
     }
@@ -2598,7 +2585,7 @@ async fn expiry_and_creation_grace_delete_pins_without_a_released_state() {
         .await
         .expect("creation grace");
     assert_eq!(abandoned.deleted_checkpoints_by_owner.fork, 1);
-    assert!(!checkpoint_exists(&store, &namespace_id, &pins[3].checkpoint_id).await);
+    assert!(!pin_exists(&store, &namespace_id, &pins[3].checkpoint_id).await);
     assert!(namespace_keys(&store, &target).await.is_empty());
     let before_expiry = gc_namespace(
         &store,
@@ -2617,9 +2604,9 @@ async fn expiry_and_creation_grace_delete_pins_without_a_released_state() {
         .expect("expiry grace");
     assert_eq!(expired.deleted_checkpoints_by_owner.user, 1);
     assert_eq!(expired.deleted_checkpoints_by_owner.snapshot, 1);
-    assert!(checkpoint_exists(&store, &namespace_id, &pins[0].checkpoint_id).await);
-    assert!(!checkpoint_exists(&store, &namespace_id, &pins[1].checkpoint_id).await);
-    assert!(!checkpoint_exists(&store, &namespace_id, &pins[2].checkpoint_id).await);
+    assert!(pin_exists(&store, &namespace_id, &pins[0].checkpoint_id).await);
+    assert!(!pin_exists(&store, &namespace_id, &pins[1].checkpoint_id).await);
+    assert!(!pin_exists(&store, &namespace_id, &pins[2].checkpoint_id).await);
     create_checkpoint(&store, &namespace_id, &setup)
         .await
         .expect("second permanent pin");
@@ -2657,7 +2644,7 @@ async fn a_pin_naming_an_absent_manifest_is_corruption_before_sweeping() {
     create(&store, &namespace_id, &setup)
         .await
         .expect("bootstrap");
-    let initial = crate::checkpoint::create_checkpoint(
+    let initial = crate::pin::create_pin(
         &store,
         &namespace_id,
         PinOwner::User {
@@ -2667,12 +2654,12 @@ async fn a_pin_naming_an_absent_manifest_is_corruption_before_sweeping() {
         &setup,
     )
     .await
-    .map(crate::checkpoint::checkpoint_summary)
+    .map(crate::pin::checkpoint_summary)
     .expect("pin");
     write_test_file(&store, &namespace_id, "/file", "new", &setup).await;
-    crate::checkpoint::flush_wal(&store, &namespace_id)
+    crate::manifest::fold_wal(&store, &namespace_id)
         .await
-        .expect("flush");
+        .expect("fold");
     store
         .delete(&metadata_manifest_object(
             &namespace_id,
@@ -2685,12 +2672,10 @@ async fn a_pin_naming_an_absent_manifest_is_corruption_before_sweeping() {
         .await
         .expect_err("missing pin manifest");
     assert_eq!(error.code(), loonfs_api::ErrorCode::NamespaceCorrupt);
-    assert!(error
-        .to_string()
-        .contains(&loonfs_objectstore::keys::checkpoint_record(
-            &namespace_id,
-            &initial.checkpoint_id
-        )));
+    assert!(error.to_string().contains(&loonfs_objectstore::keys::pin(
+        &namespace_id,
+        &initial.checkpoint_id
+    )));
     assert_eq!(store.counts().puts, 0);
     assert_eq!(store.counts().deletes, 0);
 }
@@ -2759,7 +2744,7 @@ async fn fork_pin_grace_skips_targets_and_aged_pins_read_only_manifest_discovery
     assert_eq!(
         store
             .inner()
-            .list_prefix(&checkpoint_prefix(&source))
+            .list_prefix(&pin_prefix(&source))
             .await
             .expect("source pins")
             .len(),

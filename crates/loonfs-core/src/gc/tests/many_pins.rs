@@ -1,7 +1,7 @@
 //! Complete collection across pin and upload families.
 
 use super::*;
-use loonfs_objectstore::keys::{checkpoint_record, upload_session, upload_session_prefix};
+use loonfs_objectstore::keys::{pin, upload_session, upload_session_prefix};
 use loonfs_test_support::stores::RecordedOperation;
 
 #[tokio::test]
@@ -19,15 +19,11 @@ async fn one_pass_deletes_an_aged_upload_and_every_expired_snapshot_among_many_p
     let permanent = create_checkpoint(&store, &namespace_id, &setup)
         .await
         .expect("permanent pin");
-    let basis = crate::checkpoint::record::load_checkpoint_record(
-        &store,
-        &namespace_id,
-        &permanent.checkpoint_id,
-    )
-    .await
-    .expect("pin")
-    .expect("record")
-    .state;
+    let basis = crate::pin::record::load_pin(&store, &namespace_id, &permanent.checkpoint_id)
+        .await
+        .expect("pin")
+        .expect("record")
+        .state;
     for number in 0..1025 {
         let record = PinPayload {
             pin_id: PinId::parse(format!(
@@ -41,7 +37,7 @@ async fn one_pass_deletes_an_aged_upload_and_every_expired_snapshot_among_many_p
             },
             ..basis.clone()
         };
-        crate::checkpoint::record::write_checkpoint_record(&store, &record)
+        crate::pin::record::write_pin(&store, &record)
             .await
             .expect("snapshot pin");
     }
@@ -87,7 +83,7 @@ async fn one_pass_deletes_an_aged_upload_and_every_expired_snapshot_among_many_p
             .filter(|operation| matches!(
                 operation,
                 RecordedOperation::GetWithMetadata { key, .. }
-                    if key.starts_with(&checkpoint_prefix(&namespace_id))
+                    if key.starts_with(&pin_prefix(&namespace_id))
             ))
             .count(),
         1026
@@ -102,12 +98,12 @@ async fn one_pass_deletes_an_aged_upload_and_every_expired_snapshot_among_many_p
     assert_eq!(
         listings,
         vec![
-            checkpoint_prefix(&namespace_id),
+            pin_prefix(&namespace_id),
             metadata_manifest_prefix(&namespace_id), // Discover superseded roots before sweeping.
             metadata_manifest_prefix(&namespace_id),
             wal_segment_prefix(&namespace_id),
             metadata_segment_prefix(&namespace_id),
-            checkpoint_prefix(&namespace_id),
+            pin_prefix(&namespace_id),
             upload_session_prefix(&namespace_id),
         ]
     );
@@ -120,9 +116,9 @@ async fn one_pass_deletes_an_aged_upload_and_every_expired_snapshot_among_many_p
     assert_eq!(
         store
             .inner()
-            .list_prefix(&checkpoint_prefix(&namespace_id))
+            .list_prefix(&pin_prefix(&namespace_id))
             .await
             .expect("remaining pins"),
-        vec![checkpoint_record(&namespace_id, &permanent.checkpoint_id)],
+        vec![pin(&namespace_id, &permanent.checkpoint_id)],
     );
 }

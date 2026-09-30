@@ -166,7 +166,7 @@ async fn retained_receipt_skips_fallback(state: ReceiptState) {
         writer
             .maintenance_handle("inline-retry")
             .expect("maintenance")
-            .flush_wal(&namespace())
+            .fold_wal(&namespace())
             .await
             .expect("fold receipts");
     }

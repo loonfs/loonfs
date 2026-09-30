@@ -1,7 +1,7 @@
 //! Namespace deletion status published as successive manifests.
 
-use crate::checkpoint::publish::{update_manifest, ManifestChange};
 use crate::error::{CoreError, Result};
+use crate::manifest::publish::{update_manifest, ManifestChange};
 use crate::namespace::read_anchor::load_read_anchor;
 use crate::namespace::writer_epoch::ensure_writer_not_fenced;
 use crate::options::DeleteNamespaceOptions;
@@ -17,7 +17,7 @@ pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
     acquired_writer: AcquiredWriter,
     context: &crate::context::MutationContext,
     deadline: &Deadline,
-    flush_policy: crate::checkpoint::MetadataLsmPolicy,
+    fold_policy: crate::manifest::MetadataLsmPolicy,
 ) -> Result<DeleteNamespaceResponse> {
     update_manifest(store, namespace_id, deadline, |mut payload| {
         let acquired_writer = &acquired_writer;
@@ -37,13 +37,8 @@ pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
             }
             if payload.folded_wal_no < head.wal_no {
                 deadline.ensure_metadata_publication_budget(namespace_id)?;
-                crate::checkpoint::flush_wal_with_deadline(
-                    store,
-                    namespace_id,
-                    deadline,
-                    flush_policy,
-                )
-                .await?;
+                crate::manifest::fold_wal_with_deadline(store, namespace_id, deadline, fold_policy)
+                    .await?;
                 return Ok(ManifestChange::Again);
             }
             payload.status = NamespaceStatus::Deleted {

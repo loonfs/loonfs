@@ -1,6 +1,6 @@
 # Commit history
 
-The `commits` metadata family stores one row per retained logical commit, keyed by sequence. The change feed reads a range of these rows, and a retried commit reads the row at its receipt's sequence. The storage format defines the row, its key, its compaction group, and its retention ([Appendix A.6](../specs/format.md#a6-metadata-rows-and-row-keys), [section 10.3](../specs/format.md#103-row-retention-during-a-base-rebuild)). This note explains why the family exists and how reads use it.
+The `commits` metadata family stores one row per retained logical commit, keyed by sequence. The change feed reads a range of these rows, and a retried commit reads the row at its receipt's sequence. The storage format defines the row, its key, its compaction group, and its retention ([Appendix A.6](../specs/format.md#a6-metadata-rows-and-row-keys), [section 10.3](../specs/format.md#103-row-retention-during-a-base-compaction)). This note explains why the family exists and how reads use it.
 
 ## Why a commits family
 
@@ -8,11 +8,11 @@ Every other metadata family reshapes WAL deltas into one query order: bindings b
 
 A commit row is the WAL commit record without its inline content, in the same encoding. The feed maps a row to events with the same mapping it uses for a WAL record.
 
-The family shares a compaction group with `commit_receipts`, the way the two bind families share the bindings group. Both hold one row per commit, both are written by the same flush, and both are removed by the same rule at the same floor. A receipt therefore always has its commit row, and a replay always has its events.
+The family shares a compaction group with `commit_receipts`, the way the two bind families share the bindings group. Both hold one row per commit, both are written by the same fold, and both are removed by the same rule at the same floor. A receipt therefore always has its commit row, and a replay always has its events.
 
 ## Writing
 
-A commit is one conditional put of the next numbered WAL object, and no row is written before it. WAL replay adds one commit row per record to the projected tail, next to the rows that the record's deltas produce. A flush writes the tail's commit rows into its new run with the other families, and compaction merges them under the group's retention rule. The folded WAL objects then become collectable.
+A commit is one conditional put of the next numbered WAL object, and no row is written before it. WAL replay adds one commit row per record to the projected tail, next to the rows that the record's deltas produce. A fold writes the tail's commit rows into its new run with the other families, and compaction merges them under the group's retention rule. The folded WAL objects then become collectable.
 
 ## Reading
 
@@ -22,13 +22,13 @@ A retried commit finds its receipt by commit ID, reads the commit row at the rec
 
 A snapshot feed reads its pinned manifest's `commits` family and nothing later, so the page ends at the captured sequence without reading live history.
 
-A page costs the blocks it returns, and a replay costs two point reads, on top of the pinned view that every read shares. Neither reads retained history. The only WAL that a cold view replays is the unfolded tail, and the flush trigger bounds it.
+A page costs the blocks it returns, and a replay costs two point reads, on top of the pinned view that every read shares. Neither reads retained history. The only WAL that a cold view replays is the unfolded tail, and the fold trigger bounds it.
 
 ## Costs
 
-- A commit row repeats the deltas that the other families already hold in other orders. An attribute or access delta carries a whole map, so those rows are the largest. Rows below the floor are removed at the next base rebuild.
-- The projected tail holds commit rows in memory, within the existing tail budgets. The flush trigger bounds a tail.
-- A flush writes one more family. A base rebuild of the commits group merges two families instead of one.
+- A commit row repeats the deltas that the other families already hold in other orders. An attribute or access delta carries a whole map, so those rows are the largest. Rows below the floor are removed at the next base compaction.
+- The projected tail holds commit rows in memory, within the existing tail budgets. The fold trigger bounds a tail.
+- A fold writes one more family. A base compaction of the commits group merges two families instead of one.
 - The delta-to-event mapping must stay total over every retained row, for both metadata rows and WAL records.
 
 ## Alternatives considered

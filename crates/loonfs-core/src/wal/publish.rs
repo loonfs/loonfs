@@ -33,7 +33,7 @@ pub(crate) async fn publish_segment<S: ObjectStore + ?Sized>(
         .map_err(|error| -> crate::error::CoreError {
             match error {
                 // Another batch took this number; the caller re-plans at the tip.
-                ObjectStoreError::PreconditionFailed { .. } => WalPublishError::StaleHead.into(),
+                ObjectStoreError::PreconditionFailed { .. } => WalPublishError::NumberTaken.into(),
                 error => {
                     tracing::error!(namespace_id = %payload.namespace_id, %object_key, %error, "WAL publication failed");
                     match error {

@@ -231,7 +231,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         ) {
             Ok(next) => next,
             Err(error) => {
-                self.delete_checkpoint_if_present(namespace_id, &checkpoint.checkpoint_id)
+                self.delete_pin_if_present(namespace_id, &checkpoint.checkpoint_id)
                     .await;
                 return Err(error);
             }
@@ -243,7 +243,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                 state: published.manifest_state().status().clone(),
             }),
             Err(GrepError::PublicationConflict { .. }) => {
-                self.delete_checkpoint_if_present(namespace_id, &checkpoint.checkpoint_id)
+                self.delete_pin_if_present(namespace_id, &checkpoint.checkpoint_id)
                     .await;
                 Ok(GrepEnableOutcome::Superseded)
             }
@@ -288,7 +288,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         match publish_grep_manifest(&self.store, Some(&current), &next, &deadline).await {
             Ok(_) => {
                 if let Some(checkpoint_id) = checkpoint_id {
-                    self.delete_checkpoint_if_present(namespace_id, &checkpoint_id)
+                    self.delete_pin_if_present(namespace_id, &checkpoint_id)
                         .await;
                 }
                 Ok(GrepDisableOutcome::Disabled)
@@ -425,25 +425,21 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             .await?)
     }
 
-    /// Deletes a backfill checkpoint. A failed delete is only logged, and
-    /// collection removes the checkpoint after it expires.
-    async fn delete_checkpoint_if_present(
-        &self,
-        namespace_id: &NamespaceId,
-        checkpoint_id: &PinId,
-    ) {
+    /// Deletes a backfill pin. A failed delete is only logged, and
+    /// collection removes the pin after it expires.
+    async fn delete_pin_if_present(&self, namespace_id: &NamespaceId, pin_id: &PinId) {
         match self
             .maintenance
-            .delete_checkpoint(namespace_id, checkpoint_id)
+            .delete_checkpoint(namespace_id, pin_id)
             .await
         {
             Ok(_) => {}
             Err(error) if error.code() == ErrorCode::CheckpointNotFound => {}
             Err(error) => tracing::warn!(
                 %namespace_id,
-                %checkpoint_id,
+                %pin_id,
                 %error,
-                "failed to delete a grep backfill checkpoint"
+                "failed to delete a grep backfill pin"
             ),
         }
     }
@@ -469,7 +465,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         ) {
             Ok(next) => next,
             Err(error) => {
-                self.delete_checkpoint_if_present(namespace_id, &checkpoint.checkpoint_id)
+                self.delete_pin_if_present(namespace_id, &checkpoint.checkpoint_id)
                     .await;
                 return Err(error);
             }
@@ -477,7 +473,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         match publish_grep_manifest(&self.store, Some(current), &next, deadline).await {
             Ok(_) => {
                 if let Some(previous_checkpoint_id) = previous_checkpoint_id {
-                    self.delete_checkpoint_if_present(namespace_id, &previous_checkpoint_id)
+                    self.delete_pin_if_present(namespace_id, &previous_checkpoint_id)
                         .await;
                 }
                 Ok(GrepBuildOutcome::BackfillRestarted {
@@ -485,7 +481,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                 })
             }
             Err(GrepError::PublicationConflict { .. }) => {
-                self.delete_checkpoint_if_present(namespace_id, &checkpoint.checkpoint_id)
+                self.delete_pin_if_present(namespace_id, &checkpoint.checkpoint_id)
                     .await;
                 Ok(GrepBuildOutcome::Superseded)
             }
@@ -581,7 +577,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         match publish_grep_manifest(&self.store, Some(&current), &next, deadline).await {
             Ok(_) => {
                 if let Some(checkpoint_id) = completed_checkpoint_id {
-                    self.delete_checkpoint_if_present(namespace_id, &checkpoint_id)
+                    self.delete_pin_if_present(namespace_id, &checkpoint_id)
                         .await;
                 }
                 Ok(GrepBuildOutcome::Published {
@@ -731,12 +727,12 @@ async fn collect_backfill_unit(
         let page = reads
             .list_checkpoint_files_page(checkpoint_id, cursor, files_remaining)
             .await?;
-        if page.checkpoint_seq != captured_seq {
+        if page.captured_seq != captured_seq {
             return Err(GrepError::CorruptIndex {
                 message: format!(
                     "checkpoint `{checkpoint_id}` pins sequence `{}` but the grep manifest is \
                  backfilling sequence `{captured_seq}`",
-                    page.checkpoint_seq
+                    page.captured_seq
                 ),
             });
         }

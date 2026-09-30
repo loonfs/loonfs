@@ -356,7 +356,7 @@ fn directory_cursor_from_the_future_is_rejected() {
 }
 
 #[test]
-fn directory_cursor_resumes_across_a_wal_flush() {
+fn directory_cursor_resumes_across_a_wal_fold() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "directory-page-floor-test");
     let namespace_id = namespace_id("demo");
@@ -406,7 +406,7 @@ fn directory_cursor_resumes_across_a_wal_flush() {
             cursor: Some(cursor),
         },
     ))
-    .expect("second directory page resumes across a flush");
+    .expect("second directory page resumes across a fold");
     assert_eq!(display_names(&second.entries), vec!["c.txt", "z.txt"]);
     assert!(second.next_cursor.is_none());
 }

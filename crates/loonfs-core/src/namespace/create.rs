@@ -1,8 +1,8 @@
 //! Publishes the first manifest of a namespace.
 
 use super::control::load_current_manifest_if_present;
-use crate::checkpoint::publish::{encode_manifest, publish_manifest, ManifestPublicationOutcome};
 use crate::error::{CoreError, Result};
+use crate::manifest::publish::{encode_manifest, publish_manifest, ManifestPublicationOutcome};
 use crate::time::Deadline;
 use bytes::Bytes;
 use loonfs_api::wire::control::{encode_control_state, ControlObjectKind, HintPayload};

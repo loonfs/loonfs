@@ -104,7 +104,7 @@ async fn fill_wal_tail_to_write_stop<S: ObjectStore + ?Sized>(
     append_wal_segments(
         store,
         namespace_id,
-        loonfs_core::limits::MAX_UNFLUSHED_WAL_SEGMENTS
+        loonfs_core::limits::MAX_UNFOLDED_WAL_SEGMENTS
             - (current.wal_no.0 - current.folded_wal_no.0)
             - 1,
         &MutationContext {
@@ -746,7 +746,7 @@ fn a_failed_fold_preserves_the_write_stop_until_the_store_recovers() {
         .expect("seed WAL tail below fold threshold");
 
         failing.fail_all();
-        for round in 0..(loonfs_core::limits::MAX_UNFLUSHED_WAL_SEGMENTS - seed_segments - 2) {
+        for round in 0..(loonfs_core::limits::MAX_UNFOLDED_WAL_SEGMENTS - seed_segments - 2) {
             writer
                 .put_file_bytes(
                     &namespace_id,
@@ -1088,7 +1088,7 @@ async fn namespace_deletion_drops_cached_reads_and_schedules_gc_even_when_its_an
         writer
             .maintenance_handle("delete-hint")
             .expect("maintenance")
-            .flush_wal(&namespace_id)
+            .fold_wal(&namespace_id)
             .await
             .expect("fold the tail so the tombstone is the only manifest put");
         let reader = writer.reader();

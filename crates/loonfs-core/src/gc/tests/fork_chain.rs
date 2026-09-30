@@ -124,8 +124,8 @@ async fn live_grandchild_keeps_deleted_ancestors_pinned_until_retirement_runs_le
             .expect("collect ancestor while grandchild lives");
         assert_eq!(report.deleted.retired_content_objects, 0);
         assert_eq!(report.deleted_checkpoints_by_owner.fork, 0);
-        assert!(checkpoint_exists(&store, &namespaces[0], &middle_pin.pin_id).await);
-        assert!(checkpoint_exists(&store, &namespaces[1], &leaf_pin.pin_id).await);
+        assert!(pin_exists(&store, &namespaces[0], &middle_pin.pin_id).await);
+        assert!(pin_exists(&store, &namespaces[1], &leaf_pin.pin_id).await);
         assert_leaf_reads_every_owner(&store, &namespaces).await;
     }
 
@@ -154,7 +154,7 @@ async fn live_grandchild_keeps_deleted_ancestors_pinned_until_retirement_runs_le
         }
         if index > 0 {
             let pin = if index == 2 { &leaf_pin } else { &middle_pin };
-            assert!(!checkpoint_exists(&store, &namespaces[index - 1], &pin.pin_id).await);
+            assert!(!pin_exists(&store, &namespaces[index - 1], &pin.pin_id).await);
         }
     }
 }

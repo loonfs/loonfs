@@ -10,8 +10,8 @@ use crate::{
 use loonfs_api::CompactorEpoch;
 use std::sync::Arc;
 
-/// Maintenance handle: namespace diagnostics, operator checkpoints, WAL flush,
-/// metadata reorganization and compaction, garbage collection, and retention.
+/// Maintenance handle: namespace diagnostics, operator checkpoints, WAL fold,
+/// metadata compaction, garbage collection, and retention.
 /// Each call runs in the caller's task; the handle starts no background work.
 /// Operations that mutate durable control state record the builder's `actor_id`.
 #[derive(Clone)]
@@ -22,10 +22,10 @@ pub struct FsMaintenance {
     pub(crate) compactor_epochs:
         Arc<tokio::sync::Mutex<std::collections::BTreeMap<crate::NamespaceId, CompactorEpoch>>>,
     /// A narrowed per-step row budget for the tests that need a family group
-    /// whose base run no bounded step can fold. See
-    /// [`Self::starve_reorganization_row_budget`].
+    /// whose base run no bounded step can compact. See
+    /// [`Self::starve_compaction_row_budget`].
     #[cfg(test)]
-    pub(crate) reorganization_row_budget: Option<std::num::NonZeroUsize>,
+    pub(crate) compaction_row_budget: Option<std::num::NonZeroUsize>,
     /// A narrowed per-segment row budget for the tests that need many
     /// compacted segments. See [`Self::narrow_segment_row_budget`].
     #[cfg(test)]
@@ -59,26 +59,26 @@ impl FsMaintenance {
             actor: WriterIdentity::new(actor_id)?,
             compactor_epochs: Arc::default(),
             #[cfg(test)]
-            reorganization_row_budget: None,
+            compaction_row_budget: None,
             #[cfg(test)]
             segment_row_budget: None,
         })
     }
 
-    /// Narrows the rows one reorganization step this handle drives may
+    /// Narrows the rows one compaction step this handle drives may
     /// decode, so a namespace a test can build in seconds ends up with a base
-    /// run no bounded step can fold.
+    /// run no bounded step can compact.
     ///
     /// Test-only, and the one shipped number that has to move to reach that
     /// state: planning, running, and publishing the job are the shipped path
     /// either way.
     #[cfg(test)]
     #[must_use]
-    pub(crate) fn starve_reorganization_row_budget(
+    pub(crate) fn starve_compaction_row_budget(
         mut self,
         max_decoded_input_rows_per_step: std::num::NonZeroUsize,
     ) -> Self {
-        self.reorganization_row_budget = Some(max_decoded_input_rows_per_step);
+        self.compaction_row_budget = Some(max_decoded_input_rows_per_step);
         self
     }
 
@@ -209,7 +209,7 @@ impl FsMaintenanceBuilder {
             actor,
             compactor_epochs: Arc::default(),
             #[cfg(test)]
-            reorganization_row_budget: None,
+            compaction_row_budget: None,
             #[cfg(test)]
             segment_row_budget: None,
         })

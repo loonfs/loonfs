@@ -1,6 +1,6 @@
 //! Content and source-pin cleanup for an eligible tombstone.
 
-use super::fork_checkpoints::delete_source_checkpoint;
+use super::fork_pins::delete_source_pin;
 use super::live_set::{LiveSet, RetirementState};
 use crate::error::{CoreError, Result};
 use crate::store_waves::STORE_WRITE_WAVE;
@@ -24,7 +24,7 @@ pub(super) async fn reclaim_namespace<S: ObjectStore + ?Sized>(
         .expect("eligible namespace should have a tombstone");
     sweep_content(store, tombstone, report).await?;
     if let Some(basis) = &tombstone.fork_basis {
-        if delete_source_checkpoint(store, basis).await? {
+        if delete_source_pin(store, basis).await? {
             report.deleted_checkpoints_by_owner.fork += 1;
         }
     }

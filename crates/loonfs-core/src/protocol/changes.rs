@@ -275,11 +275,11 @@ fn binding_version(
 #[cfg(test)]
 mod tests {
     use super::event_from_op_deltas;
-    use crate::checkpoint::{
-        MetadataSegmentCache, WalTailProjectionCache, WalTailProjectionCacheConfig,
-    };
     use crate::context::MutationContext;
     use crate::error::CoreError;
+    use crate::manifest::{
+        MetadataSegmentCache, WalTailProjectionCache, WalTailProjectionCacheConfig,
+    };
     use crate::namespace::read_anchor::load_read_anchor;
     use crate::test_support::ops::create;
     use crate::{NamespaceEngine, RuntimeReadContext};

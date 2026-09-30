@@ -154,8 +154,8 @@ fn background_step_conclusions_emit_debug_events() {
     for field in ["dispatched=", "ready_queued=", "oldest_queued_ms="] {
         assert!(dispatch.contains(field), "missing `{field}` in: {dispatch}");
     }
-    // Record the WAL flush phase.
-    let span_evidence = "loonfs.phase{phase=\"wal_flush\"";
+    // Record the WAL fold phase.
+    let span_evidence = "loonfs.phase{phase=\"wal_fold\"";
     assert!(
         log.contains(span_evidence),
         "missing span evidence `{span_evidence}` in:\n{log}"

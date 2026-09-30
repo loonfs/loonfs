@@ -88,7 +88,7 @@ pub struct InlineContentOptions {
     /// not observed the tail admits at most the segment budget. The tail can
     /// exceed the limit by at most the segment budget: for a new session's
     /// first inline commit, and after a put whose outcome is unknown.
-    /// `MAX_UNFLUSHED_WAL_SEGMENTS` stops new commits regardless of this limit.
+    /// `MAX_UNFOLDED_WAL_SEGMENTS` stops new commits regardless of this limit.
     pub inline_content_tail_limit_bytes: usize,
 }
 
@@ -148,7 +148,7 @@ pub(crate) struct ReadConfig {
     pub max_read_content_bytes: Option<u64>,
     /// Cache configuration.
     pub runtime_cache: RuntimeCacheConfig,
-    /// Budgets for WAL flushes and metadata reorganizations.
+    /// Budgets for WAL folds and metadata compactions.
     pub metadata_lsm_policy: loonfs_core::MetadataLsmPolicy,
     /// Tracing mode label.
     pub trace_mode: TraceMode,
@@ -188,7 +188,7 @@ pub struct RuntimeCacheConfig {
     pub max_cached_wal_tail_projection_decoded_bytes: usize,
     /// Cache settings for decoded metadata segments. The byte budget
     /// defaults to 256 MiB. The block memo budget, 64 MiB by default, bounds
-    /// the data blocks one read, publication, fold, or WAL flush keeps for
+    /// the data blocks one read, publication, or fold keeps for
     /// itself on top of the shared cache.
     pub metadata_segment_cache: MetadataSegmentCacheConfig,
 }

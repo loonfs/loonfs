@@ -901,7 +901,7 @@ async fn a_seed_on_another_basis_does_not_keep_the_cached_check() {
 
     // The next put starts a budget later, so it discovers the namespace
     // again, and that discovery is held at the hint. Meanwhile the reader
-    // checks the old basis, and a flush publishes a new one.
+    // checks the old basis, and a fold publishes a new one.
     let check_after_attempt_ms = 10_000;
     timer.advance_ms(WAL_PUBLISH_BUDGET_MS);
     recording.inner().block_next();
@@ -920,7 +920,7 @@ async fn a_seed_on_another_basis_does_not_keep_the_cached_check() {
                 .await
                 .expect("check the old basis");
             maintenance
-                .flush_wal(&namespace_id)
+                .fold_wal(&namespace_id)
                 .await
                 .expect("publish a new basis");
             recording.inner().release();

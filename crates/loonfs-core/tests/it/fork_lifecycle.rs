@@ -20,7 +20,7 @@ use loonfs_core::content::store_bytes_as_content;
 use loonfs_core::control::load_namespace_read_state;
 use loonfs_core::publish::FilesystemOperation;
 use loonfs_core::{Error as CoreError, ErrorCode, MutationContext};
-use loonfs_objectstore::keys::{checkpoint_record, content_blob, hint, metadata_manifest_object};
+use loonfs_objectstore::keys::{content_blob, hint, metadata_manifest_object, pin};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{ObjectStore, PutMode};
 use loonfs_test_support::ids::namespace_id;
@@ -48,7 +48,7 @@ async fn load_pin<S: ObjectStore + ?Sized>(
     pin_id: &PinId,
 ) -> PinPayload {
     let bytes = store
-        .get(&checkpoint_record(namespace_id, pin_id), None)
+        .get(&pin(namespace_id, pin_id), None)
         .await
         .expect("read pin")
         .expect("pin exists");
@@ -107,7 +107,7 @@ async fn snapshot_fork_keeps_its_view_after_source_compaction_collection_and_sna
     )
     .await
     .expect("advance source");
-    engine.flush_wal().await.expect("flush current source");
+    engine.fold_wal().await.expect("fold current source");
     let floor = engine
         .advance_retention_floor()
         .await
@@ -116,15 +116,15 @@ async fn snapshot_fork_keeps_its_view_after_source_compaction_collection_and_sna
     let mut compacted = false;
     for _ in 0..16 {
         let report = engine
-            .reorganize_metadata(
+            .metadata_compaction_step(
                 loonfs_core::MetadataCompactionPolicy::CompactImmediately,
                 loonfs_api::CompactorEpoch(0),
             )
             .await
             .expect("compact source");
         match report {
-            loonfs_core::MetadataReorganizeOutcome::NotNeeded { .. } => break,
-            loonfs_core::MetadataReorganizeOutcome::UnitPublished { .. } => compacted = true,
+            loonfs_core::CompactionStepOutcome::NotNeeded { .. } => break,
+            loonfs_core::CompactionStepOutcome::UnitPublished { .. } => compacted = true,
             other => panic!("expected bounded compaction, got {other:?}"),
         }
     }
@@ -240,13 +240,13 @@ async fn snapshot_deletion_during_fork_deletes_the_attempt_without_installing_a_
     let store = BlockingStore::new(
         BlockingStore::new(
             store,
-            KeyPredicate::exact(loonfs_objectstore::keys::checkpoint_record(
+            KeyPredicate::exact(loonfs_objectstore::keys::pin(
                 &source,
                 &snapshot.checkpoint_id,
             )),
             OperationClass::Read,
         ),
-        KeyPredicate::prefix(loonfs_objectstore::keys::checkpoint_prefix(&source)),
+        KeyPredicate::prefix(loonfs_objectstore::keys::pin_prefix(&source)),
         OperationClass::PutCreateIfAbsent,
     );
     let engine = namespace_engine(&store, &source, &context);
@@ -260,7 +260,7 @@ async fn snapshot_deletion_during_fork_deletes_the_attempt_without_installing_a_
         store.inner().wait_until_blocked().await;
         assert_eq!(
             store
-                .list_prefix(&loonfs_objectstore::keys::checkpoint_prefix(&source))
+                .list_prefix(&loonfs_objectstore::keys::pin_prefix(&source))
                 .await
                 .expect("durable pins")
                 .len(),
@@ -323,7 +323,7 @@ async fn namespace_keys<S: ObjectStore + ?Sized>(
 }
 
 #[tokio::test]
-async fn a_created_namespace_reads_manifest_one_before_its_first_flush() {
+async fn a_created_namespace_reads_manifest_one_before_its_first_fold() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
@@ -376,31 +376,31 @@ async fn a_created_namespace_reads_manifest_one_before_its_first_flush() {
             || key == &content_key
             || key.starts_with(&format!("namespaces/{namespace_id}/manifests/"))
             || key.starts_with(&format!("namespaces/{}/wal/", namespace_id.as_str()))),
-        "only control, WAL, and the uploaded content exist before the first flush: {keys:?}"
+        "only control, WAL, and the uploaded content exist before the first fold: {keys:?}"
     );
 
     namespace_engine(&store, &namespace_id, &context)
-        .flush_wal()
+        .fold_wal()
         .await
-        .expect("flush");
+        .expect("fold");
     assert!(
         store
             .head(&metadata_manifest_object(&namespace_id, &ManifestNo(3)))
             .await
             .expect("probe root")
             .is_some(),
-        "the flush follows the writer acquisitions"
+        "the fold follows the writer acquisitions"
     );
     assert_eq!(
         read_file_bytes(&store, &namespace_id, "/docs/first.txt")
             .await
-            .expect("read after flush")
+            .expect("read after fold")
             .bytes,
         b"hello"
     );
     let status = loonfs_core::cache::load_namespace_diagnostics(&store, &namespace_id)
         .await
-        .expect("status after flush");
+        .expect("status after fold");
     assert_eq!(status.current_manifest_no, ManifestNo(3));
 }
 
@@ -688,12 +688,12 @@ async fn fork_namespace_reads_inherited_content_and_isolates_metadata() {
     assert_eq!(clone_changes.changes.len(), 1);
     assert_eq!(clone_changes.changes[0].committed_seq, ChangeSeq(2));
 
-    // The target's own first flush inherits the source's segments by
+    // The target's own first fold inherits the source's segments by
     // reference and adds only its own delta run.
     namespace_engine(&store, &clone_namespace_id, &context)
-        .flush_wal()
+        .fold_wal()
         .await
-        .expect("flush clone");
+        .expect("fold clone");
     let clone_root =
         loonfs_core::control::load_namespace_current_manifest(&store, &clone_namespace_id)
             .await
@@ -723,7 +723,7 @@ async fn fork_namespace_reads_inherited_content_and_isolates_metadata() {
     assert_eq!(
         read_file_bytes(&store, &clone_namespace_id, "/docs/shared.txt")
             .await
-            .expect("read clone after its own flush")
+            .expect("read clone after its own fold")
             .bytes,
         b"clone-after-fork"
     );
@@ -731,15 +731,15 @@ async fn fork_namespace_reads_inherited_content_and_isolates_metadata() {
     let mut revisions_compacted = false;
     for _ in 0..16 {
         let report = engine
-            .reorganize_metadata(
+            .metadata_compaction_step(
                 loonfs_core::MetadataCompactionPolicy::CompactImmediately,
                 loonfs_api::CompactorEpoch(0),
             )
             .await
             .expect("compact clone");
         match report {
-            loonfs_core::MetadataReorganizeOutcome::NotNeeded { .. } => break,
-            loonfs_core::MetadataReorganizeOutcome::UnitPublished { group, .. } => {
+            loonfs_core::CompactionStepOutcome::NotNeeded { .. } => break,
+            loonfs_core::CompactionStepOutcome::UnitPublished { group, .. } => {
                 revisions_compacted |= group == loonfs_api::MetadataFamilyGroup::Revisions;
             }
             other => panic!("expected bounded compaction, got {other:?}"),
@@ -817,19 +817,19 @@ async fn nested_fork_survives_ancestor_and_parent_delete_and_collection() {
     .await
     .expect("write descendant");
     let engine = namespace_engine(&store, &descendant, &context);
-    engine.flush_wal().await.expect("flush descendant");
+    engine.fold_wal().await.expect("fold descendant");
     let mut compacted = false;
     for _ in 0..16 {
         match engine
-            .reorganize_metadata(
+            .metadata_compaction_step(
                 loonfs_core::MetadataCompactionPolicy::CompactImmediately,
                 loonfs_api::CompactorEpoch(0),
             )
             .await
             .expect("compact descendant")
         {
-            loonfs_core::MetadataReorganizeOutcome::NotNeeded { .. } => break,
-            loonfs_core::MetadataReorganizeOutcome::UnitPublished { .. } => compacted = true,
+            loonfs_core::CompactionStepOutcome::NotNeeded { .. } => break,
+            loonfs_core::CompactionStepOutcome::UnitPublished { .. } => compacted = true,
             other => panic!("expected compaction, got {other:?}"),
         }
     }
@@ -1152,7 +1152,7 @@ async fn namespace_delete_blocks_reads_writes_and_forks() {
 }
 
 #[tokio::test]
-async fn gc_preserves_unflushed_data_then_the_current_manifest_tombstone() {
+async fn gc_preserves_unfolded_data_then_the_current_manifest_tombstone() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();

@@ -134,7 +134,7 @@ pub mod publish {
 pub mod content_tokens {
     pub use loonfs_api::v0::ContentToken;
     pub use loonfs_core::content::{
-        mint_content_token, CompletedUpload, CompletedUploadReceipt, ContentTokenError,
+        mint_content_token, CompletedUpload, CompletedUploadEvidence, ContentTokenError,
     };
 }
 

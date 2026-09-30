@@ -25,11 +25,11 @@ A path lookup reads the slot index once per component. A listing scans the paren
 
 ## Retention
 
-An unbound value is a tombstone for older values of its slot or child. It must remain while an excluded run may still hold those older values. A rebuild that excludes the group's oldest run keeps every row.
+An unbound value is a tombstone for older values of its slot or child. It must remain while an excluded run may still hold those older values. A compaction that excludes the group's oldest run keeps every row.
 
-A bottom-anchored rebuild includes the oldest run. It keeps every version above the floor and the newest version at or below the floor. If that floor value is unbound, the rebuild removes it together with every older version it hides. Because the input is sorted, the rebuild buffers at most one floor value per slot or child.
+A bottom-anchored compaction includes the oldest run. It keeps every version above the floor and the newest version at or below the floor. If that floor value is unbound, the compaction removes it together with every older version it hides. Because the input is sorted, the compaction buffers at most one floor value per slot or child.
 
-For example, suppose inode 7 moves from `/a` to `/b` at sequence 20 and the floor is at 20. A bottom-anchored rebuild produces:
+For example, suppose inode 7 moves from `/a` to `/b` at sequence 20 and the floor is at 20. A bottom-anchored compaction produces:
 
 | Index entry | Value at the floor | Retained rows |
 | --- | --- | --- |
@@ -45,18 +45,18 @@ Attribute and access revisions keep a cleared floor value, because the next upda
 
 Deleting a subtree unbinds its root and records a subtree tombstone. The descendants stay bound beneath that root, and the covering-tombstone rule hides them. Undelete binds the root again, at the name saved in the tombstone or at the caller's destination. Reusing a name writes a newer bound value.
 
-A rebuild in a fork applies the same retention rule to inherited and local runs. Inherited segments and content references keep their owner namespace. Pins still protect their captured manifests and runs.
+A compaction in a fork applies the same retention rule to inherited and local runs. Inherited segments and content references keep their owner namespace. Pins still protect their captured manifests and runs.
 
 WAL deltas, semantic fingerprints, and change-feed events do not depend on the binding row encoding. The API's `binding_version` token represents the position of the bound event. Creating, moving, or undeleting an entry changes the token. Content and attribute writes do not. Binding preconditions compare the same positions that reads return.
 
 ## Costs and alternatives
 
-An unbind writes two rows. A bottom-anchored rebuild can remove those rows and the history they hide. Reads need no join against removals. Bounded and streaming compaction both process one index at a time, and neither collects removals or makes point reads for them.
+An unbind writes two rows. A bottom-anchored compaction can remove those rows and the history they hide. Reads need no join against removals. Bounded and streaming compaction both process one index at a time, and neither collects removals or makes point reads for them.
 
 | Alternative | Cost |
 | --- | --- |
 | Collect removal identities before compacting the child index | Keeps joins in path reads, listings, and retention, and memory grows with the input. |
-| Keep unbound floor values during bottom-anchored rebuilds | Retains abandoned slots and leaves different event sets in the indexes after a move. |
+| Keep unbound floor values during bottom-anchored compactions | Retains abandoned slots and leaves different event sets in the indexes after a move. |
 | Repeat the retired position on an unbound value | Repeats a reference already checked during commit validation. |
 | Remove the child index | Parent lookup, deletion checks, and inode-addressed moves require slot scans. |
 

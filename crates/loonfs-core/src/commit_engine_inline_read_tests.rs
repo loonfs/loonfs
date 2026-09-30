@@ -410,7 +410,7 @@ async fn foreign_references_resolve_to_objects_and_object_downloads_do_not_write
 }
 
 #[tokio::test]
-async fn direct_downloads_materialize_once_and_do_not_write_after_a_flush() {
+async fn direct_downloads_materialize_once_and_do_not_write_after_a_fold() {
     for fold_first in [false, true] {
         let (_directory, store, mut publisher, mutation_context) = setup().await;
         let value = inline(&publisher.namespace_id, Bytes::from_static(b"download"));
@@ -423,9 +423,9 @@ async fn direct_downloads_materialize_once_and_do_not_write_after_a_flush() {
         .await
         .expect("publish");
         if fold_first {
-            flush_wal(&store, &publisher.namespace_id)
+            fold_wal(&store, &publisher.namespace_id)
                 .await
-                .expect("flush");
+                .expect("fold");
         }
         let context = fresh_context(&store, &publisher.namespace_id).await;
         let engine = NamespaceEngine::reader(&store, publisher.namespace_id.clone());
@@ -594,11 +594,11 @@ async fn inline_checksum_failures_match_object_validation() {
         .expect_err("corrupt download");
     assert_eq!(download_error.to_string(), error.to_string());
     assert_no_content_requests(&store);
-    let flush_error = flush_wal(&store, &publisher.namespace_id)
+    let fold_error = fold_wal(&store, &publisher.namespace_id)
         .await
         .expect_err("corrupt tail");
-    assert_eq!(flush_error.code(), loonfs_api::ErrorCode::NamespaceCorrupt);
-    assert_eq!(flush_error.to_string(), error.to_string());
+    assert_eq!(fold_error.code(), loonfs_api::ErrorCode::NamespaceCorrupt);
+    assert_eq!(fold_error.to_string(), error.to_string());
     assert_no_writes(&store);
     let key = content_blob(&publisher.namespace_id, &corrupt_ref.content_id);
     store
@@ -631,10 +631,10 @@ async fn folded_inline_values_remain_readable_after_all_folded_wal_is_deleted() 
     )
     .await
     .expect("publish");
-    let flushed = flush_wal(&store, &publisher.namespace_id)
+    let folded = fold_wal(&store, &publisher.namespace_id)
         .await
-        .expect("flush");
-    assert_eq!(flushed.outcome, FlushWalOutcome::Published);
+        .expect("fold");
+    assert_eq!(folded.outcome, FlushWalOutcome::Published);
     for delete_wal in [false, true] {
         if delete_wal {
             for object in store

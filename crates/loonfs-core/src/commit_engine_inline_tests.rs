@@ -1,10 +1,10 @@
-//! Inline publication, retry identity, admission, and flush contracts.
+//! Inline publication, retry identity, admission, and fold contracts.
 
 #[path = "commit_engine_inline_retention_tests.rs"]
 mod retention;
 
 use super::*;
-use crate::checkpoint::{flush_wal, fold_wal_tail};
+use crate::manifest::{fold_wal, fold_wal_tail};
 use crate::path::read::load_current_metadata_view;
 use crate::storage::content::store_bytes_as_content;
 use crate::test_support::ops::create;
@@ -328,9 +328,9 @@ async fn inline_tail_replay_matches_publication_and_materializes_before_metadata
         .await
         .expect("directory");
     assert_eq!(
-        flush_wal(&store, &engine.namespace_id)
+        fold_wal(&store, &engine.namespace_id)
             .await
-            .expect("non-inline flush")
+            .expect("non-inline fold")
             .outcome,
         FlushWalOutcome::Published
     );
@@ -370,7 +370,7 @@ async fn inline_tail_replay_matches_publication_and_materializes_before_metadata
         .enumerate()
     {
         store.reset();
-        let flushed = fold_wal_tail(
+        let folded = fold_wal_tail(
             &store,
             None,
             &engine.namespace_id,
@@ -378,9 +378,9 @@ async fn inline_tail_replay_matches_publication_and_materializes_before_metadata
             &crate::time::Deadline::start(Arc::new(StdMonotonicTimer::default())),
         )
         .await
-        .expect("flush inline content");
+        .expect("fold inline content");
         if index == 0 {
-            assert_eq!(flushed.response.outcome, FlushWalOutcome::Published);
+            assert_eq!(folded.response.outcome, FlushWalOutcome::Published);
             fold_tests::assert_content_before_metadata(&store, values.len());
             for value in &values {
                 let key = crate::storage::content::content_object_key_for_ref(value.content_ref())
@@ -395,14 +395,14 @@ async fn inline_tail_replay_matches_publication_and_materializes_before_metadata
                 );
             }
         } else if index == 1 {
-            assert_eq!(flushed.response.outcome, FlushWalOutcome::ManifestAdvanced);
+            assert_eq!(folded.response.outcome, FlushWalOutcome::ManifestAdvanced);
             fold_tests::assert_content_before_metadata(&store, values.len());
             assert!(!store.snapshot().iter().any(|operation| {
                 matches!(operation, RecordedOperation::Put { key, .. }
                     if loonfs_objectstore::layout::manifest_no_of(key).is_some())
             }));
         } else {
-            assert_eq!(flushed.response.outcome, FlushWalOutcome::AlreadyCurrent);
+            assert_eq!(folded.response.outcome, FlushWalOutcome::AlreadyCurrent);
             assert_no_writes(&store);
         }
         let manifest =
