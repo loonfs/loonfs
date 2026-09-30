@@ -25,6 +25,7 @@
 | **Content reference** | A `blob_v1` record containing the original owner namespace, content ID, complete size, and checksum. It identifies content; it does not prove that the content object exists yet. |
 | **Inline content** | File bytes carried in the WAL commit that references them. A flush writes them to a content object before the WAL object can be collected ([format section 1.5](format.md#15-file-contents-and-ownership)). |
 | **Upload session** | A durable record for one upload, with a fixed identity and mode and an open, completed, or aborted status. Completion alone does not commit a file. |
+| **Admission evidence** | The in-process proof or the signed content token that admits an externally supplied content reference to publication ([format section 5.5](format.md#55-admission-proofs)). It is bound to the namespace and the complete reference. It is valid while the clock reads before its expiry. |
 | **Metadata segment** | An immutable, sorted set of rows in one metadata family, stored in independently readable blocks. |
 | **Run** | The metadata segments produced together, identified by a manifest-allocated run number. |
 | **Namespace manifest** | A numbered immutable record of namespace identity, lifecycle, authority, materialized file set, and retention floors. |
@@ -33,7 +34,8 @@
 | **Checkpoint** | A durable pin retaining one numbered manifest for a user, snapshot, or fork dependency. |
 | **Snapshot** | A retained read view represented by a snapshot-owned pin; reads require an unexpired record. |
 | **Fork** | A new namespace initialized from a retained source view, sharing stored objects with independent subsequent metadata history. |
-| **Tombstone** | A committed deletion event that hides an inode or subtree while preserving the information needed for undelete. |
+| **Tombstone** | A committed deletion event that hides an inode or subtree while preserving the information needed for undelete. It is a row in a namespace's history. The manifest that a namespace deletion publishes is a different object, the namespace tombstone. |
+| **Namespace tombstone** | A deleted namespace's final manifest ([format section 9.4](format.md#94-deleting-a-namespace)). It stays the current manifest forever and is the last manifest of its chain. It is not a file or subtree tombstone. |
 | **Retention floor** | The lower bound for guaranteed incremental replay and retained metadata views. It limits superseded metadata and receipt retention but does not expire a live namespace's file revisions. |
 | **Namespace retirement** | Eligibility to reclaim a deleted namespace's content prefix and source pin under [format section 9.5](format.md#95-retirement). |
 | **Change feed** | Committed filesystem events ordered by namespace sequence and operation position. |
@@ -44,6 +46,7 @@
 | **Compare-and-swap (CAS)** | A conditional update that succeeds only if the object's compare token still matches the version previously read. |
 | **Control object** | A structured durable record for discovery, retained views, or upload state. Its kind determines its update rules. |
 | **Family group** | Related metadata row families that compaction processes together, such as the two bind indexes and unbinds. |
+| **Bounded compaction** | One compaction step that merges a contiguous window of runs in one family group within the step's row and byte budgets and publishes the result at once ([format section 10.2](format.md#102-compaction-windows)). A window over those budgets runs as streaming compaction instead: a background job that merges the window without holding every row in memory and publishes once at the end ([format section 10.4](format.md#104-streaming-compaction)). |
 | **Compactor epoch** | A namespace-wide counter in the manifest that fences compaction publications from older runtime claims. |
 | **GC pass** | One complete collection call with freshly loaded roots, an in-memory live set, and a fixed call clock. |
 | **Publication budget** | The longest monotonic time from the observation a publisher planned against to the start of its numbered put. A put that returns after its budget has an unknown outcome ([format Appendix C.1](format.md#c1-publication-and-collection-timing)). |

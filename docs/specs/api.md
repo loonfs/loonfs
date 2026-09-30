@@ -1658,7 +1658,7 @@ namespace state plus storage details used by maintenance:
 | `current_manifest_no` | Current manifest number, present from namespace creation. |
 | `wal_tail_segments` | WAL tip minus the current manifest's folded number, including fences. |
 | `live_snapshots` | Number of snapshots that had not expired when diagnostics began. |
-| `live_checkpoints` | Number of active user checkpoints, including expired records awaiting collection. |
+| `live_checkpoints` | Number of user checkpoints, including expired records awaiting collection. |
 
 ```json
 {
@@ -2943,7 +2943,7 @@ The `fork_basis` object identifies the captured source:
 | `source_namespace_id` | Namespace the fork captured. |
 | `source_head_seq` | Captured source sequence. |
 
-The optional `snapshot_id` request field selects a live user snapshot of the
+The optional `snapshot_id` request field selects an unexpired snapshot of the
 source namespace. Without it, the server captures the current head. The
 snapshot and the source namespace must remain live through verification after
 the fork-owned checkpoint is written. Missing snapshots, including one deleted

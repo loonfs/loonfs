@@ -220,7 +220,7 @@ Manifest and WAL numbers are independent, positive counters scoped to a namespac
 
 Each number names one immutable object. A publisher creates the next number with put-if-absent. Competing publishers cannot install different objects at the same number; a loser loads the winner before planning another attempt. The payload's namespace and number must agree with its key.
 
-A pin ID has the form `pin_{manifest_no:020}-{16 lowercase hex}`. The number identifies its manifest; a random suffix distinguishes separate user, snapshot, and fork pins over that manifest. The API calls a pin id a `checkpoint_id`; the durable record calls it `pin_id`.
+A pin ID has the form `pin_{manifest_no:020}-{16 lowercase hex}`. The number identifies its manifest; a random suffix distinguishes separate user, snapshot, and fork pins over that manifest. The API calls a pin id a `checkpoint_id`, and a snapshot pin's id is also its `snapshot_id`; the durable record calls it `pin_id`.
 
 Content IDs are `con_` followed by 32 random lowercase hexadecimal characters. Metadata segment IDs are also generated identities, rather than positions in publication history. A collision at a newly generated immutable key must not overwrite existing bytes.
 
@@ -560,7 +560,7 @@ Commits do not raise the hint. Manifest publications raise it (section 7.2), and
 
 ### 6.4 Failed and unknown outcomes
 
-A transport error after the put of the WAL object was sent is not necessarily a failed commit. The put may have succeeded even though its response was lost. An implementation that cannot establish the outcome must report it as unknown, not as a definite failure. An implementation may resolve an unknown outcome itself by retrying with the same commit ID and request: the retry discovers the tip again and looks up the commit receipt, so it returns the original result if the earlier put landed. It reports `commit_outcome_unknown` only when that also fails to establish the outcome. The reference publisher retries a bounded number of times before it reports.
+A transport error after the put of the WAL object was sent is not necessarily a failed commit. The put may have succeeded even though its response was lost. An implementation that cannot establish the outcome must report it as unknown, not as a definite failure. An implementation may resolve an unknown outcome itself by retrying with the same commit ID and request: the retry discovers the tip again and looks up the commit receipt, so it returns the original result if the earlier put landed. Only a success or a receipt replay establishes the outcome. A retry that ends in any other error does not show that the earlier put failed, so the implementation still reports `commit_outcome_unknown`. The reference publisher retries a bounded number of times before it reports.
 
 The caller should retry with the same commit ID and the same logical request. Re-uploading the bytes first creates a new content identity and is not the same request.
 
@@ -630,9 +630,9 @@ The `commits` and `commit_receipts` families hold one row each per retained comm
 
 The first manifest has number 1, the requested namespace identity, creation time, and `created_by`, active status, and no writer block. Both epochs, the local folded WAL number, and activity counters start at zero. A plain create has no fork basis or runs, next inode ID 2, and head sequence, base sequence, retention floor, and next run number zero. A fork has the immutable source basis and inherited state described in section 9.2; its head and retention floor equal the pinned source sequence.
 
-A flush starts from the verified manifest and discovered WAL tip. It materializes the required numbers after `folded_wal_no`, writes new segments, and publishes the next manifest with `folded_wal_no` set to the captured tip. A fence is folded even when the logical sequence does not change. Ordinary flushes write a run at the head when materializing new state.
+A flush starts from a verified manifest and a discovered WAL tip. A flush call discovers both; a writer's own fold takes them from its retained view. It materializes the required numbers after `folded_wal_no`, writes new segments, and publishes the next manifest with `folded_wal_no` set to the captured tip. A fence is folded even when the logical sequence does not change. Ordinary flushes write a run at the head when materializing new state.
 
-A flush needs no writer epoch and may run in any process. It carries the predecessor's writer and compactor epochs forward. When its put loses, it reloads the current manifest and decides coverage. The flush is covered if the current manifest's `folded_wal_no` is at least the flush's captured tip, and the current manifest's head sequence and manifest number are at least the flush's. A covered flush is finished. Otherwise it rebuilds against the new predecessor and carries that predecessor's epochs. One `METADATA_PUBLICATION_BUDGET_MS` deadline covers the whole call, including rebuilds.
+A flush needs no writer epoch and may run in any process. It carries the predecessor's writer and compactor epochs forward. It loads the current manifest before its put, and again when its put loses, and decides coverage. The flush is covered if the current manifest's `folded_wal_no` is at least the flush's captured tip, and the current manifest's head sequence and manifest number are at least the flush's. A covered flush is finished. Otherwise it rebuilds against the new predecessor and carries that predecessor's epochs. One `METADATA_PUBLICATION_BUDGET_MS` deadline covers the whole call, including rebuilds.
 
 Before writing segments or publishing the manifest, a flush writes every inline value it covers as a content object, verified against its reference. A manifest whose `folded_wal_no` is `n` implies a content object exists for every inline value in WAL objects up to `n`. WAL collection's rule is unchanged because it already requires each WAL object to be at or below `folded_wal_no`.
 
@@ -769,7 +769,7 @@ A fork starts independent history from the source's retained metadata:
 
 The target copies no file bytes or metadata segments. Its first data commit is one sequence above its initial head. It can itself be forked immediately because its manifest already lists its inherited runs.
 
-The fixed creation grace on the source pin protects installation. The metadata publication budget in section 7.2 starts at the beginning of the fork call, before target discovery and source pin creation. The remaining grace covers provider operations and the clock allowance.
+The source pin's creation grace protects installation: collection keeps a fork pin for at least the ordinary grace `T` of the pass (section 11.3) after its `created_at_ms`, which the fork call takes from its request clock (section 11.7). The metadata publication budget in section 7.2 starts at the beginning of the fork call, before target discovery and source pin creation. The remaining grace covers provider operations and the clock allowance.
 
 ### 9.3 Conflicting and unknown installations
 
@@ -779,7 +779,7 @@ A confirmed precondition failure is a conflict. After a put with an unknown tran
 
 On `namespace_exists` or `namespace_deleted`, a fork installer reloads the target and deletes its source pin unless the target’s fork basis names it. It returns the original error in every case. If the reload or the deletion fails, the pin stays for collection to decide under section 11.7. A matching pin ID with a different manifest reference is corruption under section 11.7.
 
-An unused fork pin is collected after its installation grace under section 11.7.
+An unused fork pin is collected after its creation grace under section 11.7.
 
 ### 9.4 Deleting a namespace
 
@@ -804,7 +804,7 @@ Eligible tombstones release their own content and source pins under section 11.8
 
 ### 9.6 Fork dependencies after deletion
 
-A source pin remains required while a target's current manifest refers to it. Rewriting a target's metadata does not transfer ownership of inherited file bytes.
+A source pin remains required until its target is retired. While the target's current manifest, active or deleted, names the pin, the source's collection keeps it (section 11.7). The target's retirement deletes it (section 11.8), although the target's tombstone stays current and still names it. Rewriting a target's metadata does not transfer ownership of inherited file bytes.
 
 For `A → B → C`, C's fork pin on B prevents B from being reclaimed. B's pin on A remains until B is reclaimed. Reclaiming C deletes C's pin on B. B can then be reclaimed once its deadline and pin checks pass, releasing its pin on A.
 
@@ -880,7 +880,7 @@ Compaction must preserve visible metadata at every retained sequence. It publish
 
 A streaming compaction processes selected runs without holding every row in memory. It writes completed segments under the namespace's normal `segments/` prefix using fresh IDs, then publishes references to that output in the next manifest. Readers continue using the preceding manifest until publication succeeds.
 
-A runtime claims the namespace's compactor epoch before its first compaction after open. Claiming publishes a manifest with `compactor_epoch + 1` and otherwise unchanged state. Concurrent family groups in that runtime share the claim. Bounded and streaming compaction publications must match the current epoch; a newer claim fences older compactors. Both also check the epoch of the manifest they load before they read a segment. Core keeps this epoch because streaming compaction rebuilds a whole family group and publishes once at the end, so a newer runtime can stop a stale compactor at its next check; grep publishes each bounded step, so a lost race costs one step.
+A runtime claims the namespace's compactor epoch before its first compaction after open. Claiming publishes a manifest with `compactor_epoch + 1` and otherwise unchanged state. Concurrent family groups in that runtime share the claim. Bounded and streaming compaction publications must match the current epoch; a newer claim fences older compactors. Both also check the epoch of the manifest they load before they read a segment. Core keeps this epoch because streaming compaction merges a window too large for one bounded step and publishes once at the end, so a newer runtime can stop a stale compactor at its next check; grep publishes each bounded step, so a lost race costs one step.
 
 Before each publication attempt, a job checks its elapsed monotonic time and reloads the current manifest. Its selected input segments must still be present and unchanged. A lost numbered put can be retried against a new manifest while those conditions hold. A changed epoch produces `fenced`; changed inputs produce `abandoned`.
 
@@ -1018,13 +1018,13 @@ For a fork pin naming target `T`:
 
 | Condition | Decision |
 | --- | --- |
-| Inside the creation grace; or the target’s current fork basis names this pin with the same manifest reference; or a target store read fails | Retain, including when the target is deleted. |
+| Inside its creation grace, less than `T` after its `created_at_ms`; or the target's current fork basis names this pin with the same manifest reference; or a target store read fails | Retain, including when the target is deleted. |
 | Target absent or its fork basis does not name this pin | Delete the abandoned installation’s pin. |
 | Target’s current fork basis names this pin with a different manifest reference | Fail with `namespace_corrupt`. |
 
 The source discovers the target’s current manifest through its hint. It reads no target WAL and performs no listing. Section 11.8 defines source-pin release.
 
-A candidate pin that fails verification is deleted by its creator. If that deletion fails, or the creator crashes first, its installation grace and owner rules still apply.
+A candidate pin that fails verification is deleted by its creator. If that deletion fails, or the creator crashes first, collection decides the pin under its owner's rules, including a fork pin's creation grace.
 
 ### 11.8 Sweeping a retired owner's content
 
@@ -1668,7 +1668,7 @@ Discovery loads the hinted manifest and probes successive numbers until not-foun
 
 An index watermark ahead of a reader's pinned head does not disable the index. The query pins the head again once before using that index.
 
-A step writes segments first, then publishes the next manifest with put-if-absent. A losing publisher reloads durable state and re-plans against current inputs. If a manifest put ends with an unknown outcome, the publisher reads the manifest at the number it attempted. If that manifest has an identical payload and the publication budget has not expired, the publication succeeded. If it has another payload, the publisher lost, and it reloads and plans its next step from current state. If the number is absent, the outcome stays unknown. The publisher reports a store error and keeps the backfill checkpoint that the step pinned, because the put may still land and name it. A put that succeeds after the budget has expired also has an unknown outcome, as in section 11.4. A successful publisher raises the hint with CAS, taking the greater number. A hint read or write that returns no compare token is a store error. A failed hint raise does not undo publication.
+A step writes segments first, then publishes the next manifest with put-if-absent. A losing publisher reloads durable state and re-plans against current inputs. If a manifest put ends with an unknown outcome, the publisher reads the manifest at the number it attempted. If that manifest has an identical payload and the publication budget has not expired, the publication succeeded. If it has another payload, the publisher lost, and it reloads and plans its next step from current state. If the number is absent, the outcome stays unknown. The publisher answers `outcome_unknown` and keeps the backfill checkpoint that the step pinned, because the put may still land and name it. A put that succeeds after the budget has expired also has an unknown outcome, as in section 11.4. A successful publisher raises the hint with CAS, taking the greater number. A hint read or write that returns no compare token is a store error. A failed hint raise does not undo publication.
 
 Every step that publishes a manifest must initiate that publication within `METADATA_PUBLICATION_BUDGET_MS`, measured from before it loads the grep manifest it builds on. It writes no manifest after that bound. Grep uses bounded steps rather than core streaming compaction's epoch claim; conditional numbered publication and input revalidation control competing steps.
 

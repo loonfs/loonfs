@@ -443,7 +443,7 @@ pub(super) async fn fork_namespace(
         path = "/v0/namespaces/{namespace_id}/snapshots",
         tag = "namespaces",
         summary = "Create snapshot",
-        description = "Creates a snapshot of the current namespace state. Every call creates a new snapshot.",
+        description = "Creates a snapshot of the current namespace state. Every accepted call creates a new snapshot.",
         params(("namespace_id" = String, Path, description = "Namespace id")),
         request_body = CreateSnapshotRequest,
         responses(
