@@ -68,11 +68,12 @@ pub const PROVIDER_PUBLICATION_REQUEST_BOUND_MS: u64 =
 /// Maximum elapsed time from observing a tip to initiating its next numbered put.
 pub const WAL_PUBLISH_BUDGET_MS: u64 = 60_000;
 
-/// Self-enforced budget for one metadata publication — WAL flush or
-/// reorganization — measured from before the first segment object is written
-/// until the manifest put-if-absent is initiated. A publication that exceeds
-/// it aborts without publishing; its immutable outputs remain unreachable
-/// garbage-collection candidates.
+/// Self-enforced budget for one metadata publication: a flush, a compaction
+/// step, a claim, a deletion, a fork installation, a retention advance, or a
+/// grep step. It runs from the start of the publication, before the publisher
+/// loads the manifest it builds on, until the manifest put-if-absent is
+/// initiated. A publication that exceeds it aborts without publishing; its
+/// immutable outputs remain unreachable garbage-collection candidates.
 pub const METADATA_PUBLICATION_BUDGET_MS: u64 = 15 * 60 * 1000;
 
 /// Combined allowance for age overstatement from host-to-provider or

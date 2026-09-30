@@ -343,7 +343,7 @@ async fn change_feed_does_not_read_folded_wal_before_current_manifest() {
 }
 
 #[tokio::test]
-async fn ack_lost_wal_put_reports_unknown_outcome_and_replays_idempotently() {
+async fn an_ack_lost_wal_put_commits_once_and_the_one_shot_publish_returns_the_commit() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
@@ -354,7 +354,9 @@ async fn ack_lost_wal_put_reports_unknown_outcome_and_replays_idempotently() {
     let content = store_bytes_as_content(&store, &namespace_id, b"ack lost")
         .await
         .expect("stage content");
-    let put = || {
+    let put = prepared_candidate(
+        &store,
+        &namespace_id,
         commit_request(
             "ack-lost-put",
             FilesystemOperation::PutFile {
@@ -365,28 +367,20 @@ async fn ack_lost_wal_put_reports_unknown_outcome_and_replays_idempotently() {
                 expected_inode_id: None,
                 expected_revision_no: None,
             },
-        )
-    };
+        ),
+    )
+    .await;
 
-    // The WAL put landed but its acknowledgment was lost: this must surface as
-    // an unknown outcome, never as definite failure.
-    let error = submit_commit(&store, &namespace_id, put(), &context)
+    let committed = namespace_engine(&store, &namespace_id, &context)
+        .publish_namespace_commits_batch(vec![put])
         .await
-        .expect_err("ack-lost WAL put is not definite failure");
-    assert_eq!(error.code(), ErrorCode::CommitOutcomeUnknown);
+        .expect("publish")
+        .pop()
+        .expect("one result")
+        .expect("the retry replays the landed commit from its receipt");
+    assert_eq!(committed.committed_seq, ChangeSeq(1));
     assert!(store.injected_ack_loss());
-
-    // The documented remedy: retry with the same commit id. The commit is
-    // already visible, so the retry replays it instead of double-committing.
-    let result = submit_commit(&store, &namespace_id, put(), &context)
-        .await
-        .expect("same-commit-id retry replays the committed mutation");
-    assert_eq!(result.committed_seq, ChangeSeq(1));
-
-    let head = load_namespace_read_state(&store, &namespace_id)
-        .await
-        .expect("load head");
-    assert_eq!(head.seq, ChangeSeq(1));
+    assert_eq!(data_wal_keys(&store).await.len(), 1);
 }
 
 #[tokio::test]

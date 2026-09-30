@@ -57,6 +57,7 @@ async fn discover_during_collection(start: ManifestNo, block_next_manifest: bool
                 &namespace_id,
                 expected.state.manifest().manifest_no,
                 None,
+                &Deadline::start(Arc::new(StdMonotonicTimer::default())),
             )
             .await
             .expect("raise discovery hint");

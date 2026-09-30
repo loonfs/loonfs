@@ -5,13 +5,13 @@ use crate::publish::{CommitCandidate, CommitRequest, FilesystemOperation, Prepar
 use crate::trace::phase_span;
 use crate::ByteStream;
 use crate::FsWriter;
+use crate::Result;
 use crate::{
     ChangeSeq, Commit, CommitId, CommitOptions, ContentRef, CopyOptions, CreateDirectoryOptions,
     DeleteOptions, InodeId, MoveOptions, NamespaceId, NamespacePublication, PutFileOptions,
     RestoreRevisionOptions, RevisionNo, UndeleteOptions, UpdateAccessOptions,
     UpdateAttributesOptions,
 };
-use crate::{Result, RuntimeError};
 use futures::StreamExt;
 use loonfs_core::NamespaceWriterEngine;
 use std::sync::Arc;
@@ -912,7 +912,7 @@ impl FsWriter {
 }
 
 pub(crate) struct EnginePublishResult {
-    pub(crate) results: Vec<Result<Commit>>,
+    pub(crate) results: Vec<std::result::Result<Commit, crate::CoreError>>,
     pub(crate) wal_tail_segments: u64,
     pub(crate) wal_tail_inline_bytes: usize,
     pub(crate) wal_tail_observed: bool,
@@ -960,22 +960,17 @@ pub(crate) async fn publish_batch_with_engine(
     let wal_tail_inline_bytes = publish.wal_tail_inline_bytes;
     let wal_tail_observed = publish.wal_tail_observed;
     let wal_tail_discovered = publish.wal_tail_discovered;
-    let results = publish
-        .results
-        .into_iter()
-        .map(|result| result.map_err(RuntimeError::Core))
-        .collect::<Vec<_>>();
     writer.notify_after_publish(
         namespace_id,
         &NamespacePublication {
             namespace_id: namespace_id.clone(),
-            committed_through_seq: highest_committed_seq(&results),
+            committed_through_seq: highest_committed_seq(&publish.results),
             wal_tail_segments,
             wal_tail_inline_bytes,
         },
     );
     EnginePublishResult {
-        results,
+        results: publish.results,
         wal_tail_segments,
         wal_tail_inline_bytes,
         wal_tail_observed,
@@ -984,7 +979,9 @@ pub(crate) async fn publish_batch_with_engine(
 }
 
 /// Returns the highest sequence committed by the batch.
-fn highest_committed_seq(results: &[Result<Commit>]) -> Option<ChangeSeq> {
+fn highest_committed_seq(
+    results: &[std::result::Result<Commit, crate::CoreError>],
+) -> Option<ChangeSeq> {
     results
         .iter()
         .filter_map(|result| result.as_ref().ok())
