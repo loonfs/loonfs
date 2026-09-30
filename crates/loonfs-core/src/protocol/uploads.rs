@@ -805,6 +805,10 @@ pub(crate) async fn upload_proxied_content<S: ObjectStore + ?Sized>(
 /// `already_present` means the create-only object write found an existing
 /// object. The claim stays after any write that may still land, so no earlier
 /// attempt on this session wrote that object. It is a conflict.
+///
+/// A session already staged with this reference is this request's own
+/// record: the provider can resend a compare-and-swap that landed and get a
+/// precondition failure, and the reload then finds the record written.
 async fn record_staged_content<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -823,8 +827,17 @@ async fn record_staged_content<S: ObjectStore + ?Sized>(
                     "staged content recorded for a direct upload session".to_owned(),
                 ));
             };
-            if already_present || matches!(staging, ProxiedStaging::Staged(_)) {
+            if already_present {
                 return Err(CoreError::UploadContentConflict { upload_id });
+            }
+            match staging {
+                ProxiedStaging::Staged(existing) if *existing == content_ref => {
+                    return Ok(UploadSessionUpdate::Noop(session_response(&state)));
+                }
+                ProxiedStaging::Staged(_) => {
+                    return Err(CoreError::UploadContentConflict { upload_id });
+                }
+                ProxiedStaging::Idle | ProxiedStaging::Claimed => {}
             }
             *staging = ProxiedStaging::Staged(content_ref);
             let response = session_response(&state);
@@ -1597,7 +1610,8 @@ mod tests {
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_objectstore::PutMode;
     use loonfs_test_support::stores::{
-        BlockingStore, FailStore, InjectedError, KeyPredicate, OperationClass, RecordingStore,
+        BlockingStore, FailStore, InjectedError, KeyPredicate, OperationClass, OperationContext,
+        OperationKind, RecordingStore,
     };
     use tempfile::tempdir;
 
@@ -1846,6 +1860,59 @@ mod tests {
         let catalog =
             crate::namespace::catalog::load_namespace_catalog_entry(store, namespace_id).await?;
         abort_upload(store, &catalog, upload_id, None, context).await
+    }
+
+    #[tokio::test]
+    async fn a_staging_record_that_lands_and_answers_a_precondition_failure_is_this_requests_own() {
+        let temp_dir = tempdir().expect("tempdir");
+        let inner = LocalFsStore::new(temp_dir.path()).expect("store");
+        let context = context(1_000);
+        let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+        create(&inner, &namespace_id, &context)
+            .await
+            .expect("bootstrap");
+        let begin = begin_service_proxied_upload(&inner, &namespace_id, None, &context)
+            .await
+            .expect("begin upload");
+        let key = upload_session(&namespace_id, &begin.upload_id);
+        // The provider resends the compare-and-swap that recorded the staged
+        // reference and gets a precondition failure for its own write.
+        let store = FailStore::matching(
+            inner,
+            move |operation: &OperationContext<'_>| {
+                operation.key() == key
+                    && matches!(
+                        operation.kind(),
+                        OperationKind::CompareAndSwap { bytes, .. }
+                            if bytes.windows(8).any(|window| window == b"\"staged\"")
+                    )
+            },
+            InjectedError::PreconditionFailed,
+        )
+        .apply_then_fail();
+        store.fail_next(1);
+
+        let staged = upload_content(
+            &store,
+            &namespace_id,
+            &begin.upload_id,
+            None,
+            BYTES,
+            context.now_ms,
+        )
+        .await
+        .expect("the record under the session is this request's own");
+
+        assert!(staged.content_ref().is_some());
+        let state = load_upload_session_state(&store, &namespace_id, &begin.upload_id)
+            .await
+            .expect("session");
+        assert!(matches!(
+            state.mode,
+            UploadSessionMode::ServiceProxied {
+                staging: ProxiedStaging::Staged(_)
+            }
+        ));
     }
 
     #[tokio::test]
