@@ -30,7 +30,6 @@ mod invalidation;
 mod maintenance;
 mod metrics_instruments;
 mod namespace_advance_observer;
-mod namespace_sessions;
 mod namespace_writer;
 mod pagination;
 mod publication;

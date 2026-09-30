@@ -11,18 +11,19 @@ use loonfs::{
     CopyOptions, CreateCheckpointOptions, CreateDirectoryOptions, CreateNamespaceOptions,
     DeleteOptions, DirectoryPageCursor, ErrorCode, FileBytes, FsMaintenance, FsReader, FsWriter,
     FsWriterBuilder, ListChangesOptions, ListChangesResponse, MetadataMaintenanceResponse,
-    MoveOptions, NamespaceDiagnostics, NamespaceId, PageRequest, PaginationPolicy, PathEntry,
-    PutFileOptions, RunMaintenanceRequest, RunMaintenanceResponse, RuntimeError, SharedObjectStore,
-    UploadId, UploadSession,
+    MoveOptions, NamespaceDiagnostics, NamespaceId, NamespaceWriter, PageRequest, PaginationPolicy,
+    PathEntry, PutFileOptions, RunMaintenanceRequest, RunMaintenanceResponse, RuntimeError,
+    SharedObjectStore, UploadId, UploadSession,
 };
 use loonfs_api::MetadataMaintenanceRequest;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::stores::{
     FailStore, InjectedError, KeyPredicate, OperationClass, RecordingStore,
 };
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// A wall clock a test moves by storing a new time.
 #[derive(Debug)]
@@ -195,6 +196,9 @@ pub(crate) struct TestRuntime {
     pub(crate) writer: FsWriter,
     pub(crate) reader: FsReader,
     pub(crate) maintenance: FsMaintenance,
+    /// The fixture holds one handle per namespace it writes, as a host
+    /// would, so its helpers keep publishing through one session.
+    namespace_writers: Mutex<HashMap<NamespaceId, NamespaceWriter>>,
 }
 
 pub(crate) fn runtime(root: &Path, writer_id: &str) -> TestRuntime {
@@ -237,12 +241,31 @@ pub(crate) async fn open_runtime_with_async(
         writer,
         reader,
         maintenance,
+        namespace_writers: Mutex::default(),
     }
 }
 
 /// Direct async access for tests that drive several operations inside one
 /// runtime; everything else goes through the blocking trait below.
 impl TestRuntime {
+    /// Returns the handle this fixture holds for `namespace_id`, opening it
+    /// on first use.
+    pub(crate) fn namespace_writer(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> loonfs::Result<NamespaceWriter> {
+        let mut held = self
+            .namespace_writers
+            .lock()
+            .expect("namespace writer map lock");
+        if let Some(namespace_writer) = held.get(namespace_id) {
+            return Ok(namespace_writer.clone());
+        }
+        let namespace_writer = self.writer.open_namespace(namespace_id)?;
+        held.insert(namespace_id.clone(), namespace_writer.clone());
+        Ok(namespace_writer)
+    }
+
     pub(crate) async fn create_namespace(
         &self,
         namespace_id: &NamespaceId,
@@ -258,7 +281,7 @@ impl TestRuntime {
         bytes: &[u8],
         options: PutFileOptions,
     ) -> loonfs::Result<Commit> {
-        let namespace_writer = self.writer.open_namespace(namespace_id)?;
+        let namespace_writer = self.namespace_writer(namespace_id)?;
         namespace_writer
             .put_file_bytes(absolute_path, bytes, options)
             .await
@@ -271,7 +294,7 @@ impl TestRuntime {
         content_ref: ContentRef,
         options: PutFileOptions,
     ) -> loonfs::Result<Commit> {
-        let namespace_writer = self.writer.open_namespace(namespace_id)?;
+        let namespace_writer = self.namespace_writer(namespace_id)?;
         namespace_writer
             .put_file_content_ref(absolute_path, content_ref, options)
             .await
@@ -360,7 +383,7 @@ impl TestRuntime {
         namespace_id: &NamespaceId,
         checksum_algorithm: ChecksumAlgorithm,
     ) -> loonfs::Result<loonfs::uploads::BeginDirectPutUploadTargetResponse> {
-        let namespace_writer = self.writer.open_namespace(namespace_id)?;
+        let namespace_writer = self.namespace_writer(namespace_id)?;
         namespace_writer
             .create_direct_put_upload_target(checksum_algorithm)
             .await
@@ -372,7 +395,7 @@ impl TestRuntime {
         upload_id: &UploadId,
         content: loonfs::UploadContentClaim,
     ) -> loonfs::Result<UploadSession> {
-        let namespace_writer = self.writer.open_namespace(namespace_id)?;
+        let namespace_writer = self.namespace_writer(namespace_id)?;
         namespace_writer
             .complete_upload_for_mode(upload_id, |_| {
                 Ok(loonfs::uploads::ResolvedUploadCompletion::DirectPut { content })
@@ -582,7 +605,7 @@ impl RuntimeTestExt for TestRuntime {
         bytes: &[u8],
         options: PutFileOptions,
     ) -> loonfs::Result<Commit> {
-        let namespace_writer = self.writer.open_namespace(namespace_id)?;
+        let namespace_writer = self.namespace_writer(namespace_id)?;
         block_on(namespace_writer.put_file_bytes(absolute_path, bytes, options))
     }
 
@@ -592,7 +615,7 @@ impl RuntimeTestExt for TestRuntime {
         absolute_path: &str,
         options: CreateDirectoryOptions,
     ) -> loonfs::Result<Commit> {
-        let namespace_writer = self.writer.open_namespace(namespace_id)?;
+        let namespace_writer = self.namespace_writer(namespace_id)?;
         block_on(namespace_writer.create_directory(absolute_path, options))
     }
 
@@ -602,7 +625,7 @@ impl RuntimeTestExt for TestRuntime {
         absolute_path: &str,
         options: DeleteOptions,
     ) -> loonfs::Result<Commit> {
-        let namespace_writer = self.writer.open_namespace(namespace_id)?;
+        let namespace_writer = self.namespace_writer(namespace_id)?;
         block_on(namespace_writer.delete_path(absolute_path, options))
     }
 
@@ -613,7 +636,7 @@ impl RuntimeTestExt for TestRuntime {
         destination_path: &str,
         options: MoveOptions,
     ) -> loonfs::Result<Commit> {
-        let namespace_writer = self.writer.open_namespace(namespace_id)?;
+        let namespace_writer = self.namespace_writer(namespace_id)?;
         block_on(namespace_writer.move_path(source_path, destination_path, options))
     }
 
@@ -624,12 +647,12 @@ impl RuntimeTestExt for TestRuntime {
         destination_path: &str,
         options: CopyOptions,
     ) -> loonfs::Result<Commit> {
-        let namespace_writer = self.writer.open_namespace(namespace_id)?;
+        let namespace_writer = self.namespace_writer(namespace_id)?;
         block_on(namespace_writer.copy_path(source_path, destination_path, options))
     }
 
     fn begin_upload_blocking(&self, namespace_id: &NamespaceId) -> loonfs::Result<UploadSession> {
-        let namespace_writer = self.writer.open_namespace(namespace_id)?;
+        let namespace_writer = self.namespace_writer(namespace_id)?;
         block_on(namespace_writer.create_upload())
     }
 
@@ -639,7 +662,7 @@ impl RuntimeTestExt for TestRuntime {
         upload_id: &UploadId,
         bytes: &[u8],
     ) -> loonfs::Result<UploadSession> {
-        let namespace_writer = self.writer.open_namespace(namespace_id)?;
+        let namespace_writer = self.namespace_writer(namespace_id)?;
         block_on(namespace_writer.put_upload_content(upload_id, bytes))
     }
 
@@ -648,7 +671,7 @@ impl RuntimeTestExt for TestRuntime {
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
     ) -> loonfs::Result<UploadSession> {
-        let namespace_writer = self.writer.open_namespace(namespace_id)?;
+        let namespace_writer = self.namespace_writer(namespace_id)?;
         block_on(
             namespace_writer.complete_upload(upload_id, ResolvedUploadCompletion::KnownContent),
         )
@@ -660,7 +683,7 @@ impl RuntimeTestExt for TestRuntime {
         namespace_id: &NamespaceId,
         request: CommitRequest,
     ) -> loonfs::Result<Commit> {
-        let namespace_writer = self.writer.open_namespace(namespace_id)?;
+        let namespace_writer = self.namespace_writer(namespace_id)?;
         block_on(namespace_writer.create_commit(request))
     }
 
@@ -669,13 +692,16 @@ impl RuntimeTestExt for TestRuntime {
         namespace_id: &NamespaceId,
         requests: Vec<CommitRequest>,
     ) -> Vec<loonfs::Result<Commit>> {
-        let publisher = self.writer.publisher();
+        let namespace_writer = match self.namespace_writer(namespace_id) {
+            Ok(namespace_writer) => namespace_writer,
+            Err(error) => return requests.iter().map(|_| Err(error.clone())).collect(),
+        };
         block_on(async move {
             // Admitted in one pass, before the publisher's worker can take
             // any of them, so the requests coalesce into one publication.
-            let submissions = requests.into_iter().map(|request| {
-                publisher.submit_candidate(namespace_id.clone(), CommitCandidate::new(request))
-            });
+            let submissions = requests
+                .into_iter()
+                .map(|request| namespace_writer.commit_candidate(CommitCandidate::new(request)));
             futures::future::join_all(submissions).await
         })
     }

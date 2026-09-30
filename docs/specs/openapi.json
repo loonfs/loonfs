@@ -1281,11 +1281,6 @@
             "$ref": "#/components/schemas/InodeId",
             "description": "Inode the failed precondition or operation targeted."
           },
-          "max_writer_sessions": {
-            "description": "Maximum writer sessions admitted by the node.",
-            "minimum": 0,
-            "type": "integer"
-          },
           "namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
             "description": "The deleted namespace that caused the operation to fail."

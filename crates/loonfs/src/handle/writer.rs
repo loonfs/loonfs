@@ -3,10 +3,7 @@
 use super::{owning_runtime, FsReader, HandleBuilderCore, NamespaceWriter};
 use crate::fs::{ReadCore, WriterBits, WriterIdentity};
 use crate::metrics::{MetricsRecorder, ObjectStoreMetricsRecorder};
-use crate::publisher::{
-    CloseNamespaceReport, NamespaceAdvanceHint, NamespaceAdvanceObserver, NamespaceSessionState,
-    PublisherRegistry, WriterSessionStats,
-};
+use crate::publisher::{NamespaceAdvanceHint, NamespaceAdvanceObserver, PublisherRegistry};
 use crate::{
     CapabilityDocument, FsMaintenance, MaintenanceHint, MaintenanceHintObserver, NamespaceId,
     Result, RuntimeCacheConfig, RuntimeCacheStats, RuntimeError, SharedObjectStore, StoreConfig,
@@ -19,17 +16,6 @@ use std::num::NonZeroUsize;
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
-
-/// How a writer treats a namespace it has no open session for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NamespaceSessionPolicy {
-    /// The first mutation opens a session. Used by the reference server and CLI.
-    OpenOnFirstWrite,
-    /// Only [`FsWriter::open_namespace`] opens a session.
-    ///
-    /// A mutation without an open session fails with `writer_session_closed`.
-    ExplicitOpen,
-}
 
 /// Write-capable runtime handle for applications and servers.
 ///
@@ -110,24 +96,24 @@ impl FsWriter {
         self.core.shared_store()
     }
 
-    /// Returns this writer's shared publication service.
+    /// Returns this writer's shared publication service: the table of live
+    /// namespace writer sessions and the admission budgets they share.
     ///
-    /// Direct mutation methods and integrations that submit classified
-    /// candidates use the same per-namespace publishers. Shutdown closes the
-    /// service; callers should not manage its lifecycle separately.
+    /// Shutdown closes the service; callers should not manage its lifecycle
+    /// separately.
     pub fn publisher(&self) -> PublisherRegistry {
         self.publisher.clone()
     }
 
     /// Opens the writer session for `namespace_id` and returns a handle to it.
     ///
-    /// If the session is already open, the handle shares it. Opening does no
-    /// store IO and acquires no writer epoch; the session's first publish
-    /// does. Fails with `writer_capacity_exceeded` when the table is full and
-    /// no session can be closed to make room (see
-    /// [`FsWriterBuilder::max_writer_sessions`]), with
-    /// `writer_session_closed` while a close is draining, and with
-    /// `shutting_down` after shutdown begins.
+    /// If a handle for this namespace is already open in this runtime, the
+    /// new handle shares its session. Opening does no store IO and acquires
+    /// no writer epoch; the session's first publish does. The caller owns
+    /// the session from here on (see [`NamespaceWriter`]). Fails with
+    /// `writer_session_closed` while a [`NamespaceWriter::close`] of this
+    /// namespace's session drains, and with `shutting_down` after shutdown
+    /// begins.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.open_namespace",
@@ -142,43 +128,8 @@ impl FsWriter {
     )]
     pub fn open_namespace(&self, namespace_id: &NamespaceId) -> Result<NamespaceWriter> {
         self.core.record_trace_context(&tracing::Span::current());
-        self.publisher.open_namespace(namespace_id)?;
-        Ok(NamespaceWriter::new(self, namespace_id.clone()))
-    }
-
-    /// Closes and drains the session for `namespace_id`.
-    ///
-    /// Admissions stop for every clone of the publisher. Admitted work
-    /// finishes, and a later open starts a new session. Calling this for a
-    /// closed namespace has no additional effect.
-    #[tracing::instrument(
-        level = "debug",
-        name = "loonfs.close_namespace",
-        err(level = "debug"),
-        skip_all,
-        fields(
-            operation = "close_namespace",
-            namespace_id = %namespace_id,
-            mode = tracing::field::Empty,
-            store_kind = tracing::field::Empty,
-        )
-    )]
-    pub async fn close_namespace(
-        &self,
-        namespace_id: &NamespaceId,
-    ) -> Result<CloseNamespaceReport> {
-        self.core.record_trace_context(&tracing::Span::current());
-        Ok(self.publisher.close_namespace(namespace_id).await?)
-    }
-
-    /// Returns the writer session state for `namespace_id`.
-    pub fn namespace_session_state(&self, namespace_id: &NamespaceId) -> NamespaceSessionState {
-        self.publisher.namespace_session_state(namespace_id)
-    }
-
-    /// Returns this writer's namespace session totals and capacity.
-    pub fn writer_session_stats(&self) -> WriterSessionStats {
-        self.publisher.writer_session_stats()
+        let session = self.publisher.open_session(namespace_id)?;
+        Ok(NamespaceWriter::new(self, session))
     }
 
     /// Closes publication admission before shutdown drains.
@@ -248,8 +199,6 @@ pub struct FsWriterBuilder {
     core: HandleBuilderCore,
     writer_id: Option<String>,
     min_publish_interval_ms: u64,
-    namespace_session_policy: NamespaceSessionPolicy,
-    max_writer_sessions: NonZeroUsize,
     publication_limits: crate::PublicationLimits,
     inline_content: crate::InlineContentOptions,
     max_concurrent_folds: NonZeroUsize,
@@ -263,9 +212,6 @@ impl FsWriterBuilder {
             core,
             writer_id: None,
             min_publish_interval_ms: crate::config::DEFAULT_MIN_PUBLISH_INTERVAL_MS,
-            namespace_session_policy: NamespaceSessionPolicy::OpenOnFirstWrite,
-            max_writer_sessions: NonZeroUsize::new(crate::config::DEFAULT_MAX_WRITER_SESSIONS)
-                .expect("default maximum writer sessions should be nonzero"),
             max_concurrent_folds: NonZeroUsize::new(crate::config::DEFAULT_MAX_CONCURRENT_FOLDS)
                 .expect("default maximum concurrent folds should be nonzero"),
             publication_limits: crate::PublicationLimits::default(),
@@ -301,32 +247,6 @@ impl FsWriterBuilder {
     /// batching that in-flight publications force.
     pub fn min_publish_interval_ms(mut self, min_publish_interval_ms: u64) -> Self {
         self.min_publish_interval_ms = min_publish_interval_ms;
-        self
-    }
-
-    /// Sets how namespaces without an open writer session are handled.
-    /// Defaults to [`NamespaceSessionPolicy::OpenOnFirstWrite`].
-    pub fn namespace_sessions(mut self, policy: NamespaceSessionPolicy) -> Self {
-        self.namespace_session_policy = policy;
-        self
-    }
-
-    /// Sets the maximum number of writer sessions held at once.
-    ///
-    /// At the limit, opening a session for another namespace closes the
-    /// least recently used idle session. A session is idle when it has no
-    /// admitted work or running fold and is neither closing nor fenced.
-    /// Opening fails with `writer_capacity_exceeded` only when no session is
-    /// idle. A closed namespace gets a fresh session and the next writer
-    /// epoch on its next write.
-    ///
-    /// A fenced session is never closed this way, because a fresh session
-    /// for its namespace would reacquire the epoch. Under
-    /// [`NamespaceSessionPolicy::ExplicitOpen`] the host owns session
-    /// lifetime, so nothing is closed and a full table refuses. The default
-    /// is [`crate::DEFAULT_MAX_WRITER_SESSIONS`].
-    pub fn max_writer_sessions(mut self, limit: NonZeroUsize) -> Self {
-        self.max_writer_sessions = limit;
         self
     }
 
@@ -494,8 +414,6 @@ impl FsWriterBuilder {
             Arc::downgrade(&bits),
             runtime,
             std::time::Duration::from_millis(self.min_publish_interval_ms),
-            self.namespace_session_policy,
-            self.max_writer_sessions,
             self.publication_limits,
         );
         Ok(FsWriter {

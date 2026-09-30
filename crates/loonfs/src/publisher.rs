@@ -1,12 +1,19 @@
 //! Runtime publication service for namespace mutations.
 //!
-//! Each namespace has one queue. Concurrent commits may share a WAL segment
-//! and head update. Duplicate commit IDs join in flight, conflicting reuse is
-//! rejected, and namespace deletion is ordered with other mutations.
+//! Each namespace writer session has one queue. Concurrent commits may share
+//! a WAL segment and head update. Duplicate commit IDs join in flight,
+//! conflicting reuse is rejected, and namespace deletion is ordered with
+//! other mutations.
 //!
 //! Admitted work continues if its caller is cancelled. Shutdown closes
 //! admission and drains the queues through
 //! [`FsWriter::shutdown`](crate::FsWriter::shutdown).
+//!
+//! The registry keeps one table of live sessions, for three reasons: an open
+//! returns the session a handle already holds, the retained projection
+//! budget reaches every publisher, and shutdown drains every session. The
+//! host decides how long a session lives by holding its
+//! [`NamespaceWriter`](crate::NamespaceWriter).
 
 mod admission;
 mod inline_content;
@@ -16,8 +23,7 @@ use crate::metrics::{PublishOutcome, RESULT_OK};
 use crate::publish::CommitCandidate;
 use crate::trace::{phase_event, phase_span};
 use crate::{
-    CoreError, DeleteNamespaceOptions, DeleteNamespaceResponse, NamespaceSessionPolicy,
-    RuntimeCacheConfig, RuntimeError,
+    CoreError, DeleteNamespaceOptions, DeleteNamespaceResponse, RuntimeCacheConfig, RuntimeError,
 };
 use admission::{AdmissionPermit, AdmittedWaiter, PublicationAdmission};
 use futures::FutureExt;
@@ -35,7 +41,6 @@ use loonfs_core::publish::{
 use loonfs_core::time::{Deadline, Observation};
 use loonfs_objectstore::timing::MonotonicTimer;
 use std::collections::{HashMap, VecDeque};
-use std::num::NonZeroUsize;
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
@@ -48,7 +53,6 @@ use tracing::Instrument;
 
 type CommitResult = Result<Commit, RuntimeError>;
 type DeleteResult = Result<DeleteNamespaceResponse, RuntimeError>;
-type CloseCompletion = watch::Receiver<Option<CloseNamespaceReport>>;
 
 /// A report that one namespace's durable mutation history advanced.
 ///
@@ -77,7 +81,7 @@ pub type NamespaceAdvanceObserver = Arc<dyn Fn(NamespaceAdvanceHint) + Send + Sy
 /// Result of closing one namespace writer session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CloseNamespaceReport {
-    /// False when no session was open.
+    /// False when the session had already stopped admitting work.
     pub was_open: bool,
     /// Commits admitted before the close and published during the drain.
     pub drained_commits: usize,
@@ -88,39 +92,23 @@ pub struct CloseNamespaceReport {
 /// Current state of one namespace writer session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NamespaceSessionState {
-    /// No session is open.
-    ///
-    /// Under [`NamespaceSessionPolicy::ExplicitOpen`], mutations fail with
-    /// `writer_session_closed`.
+    /// The session admits work.
+    Open,
+    /// Another writer acquired a later epoch. Mutations fail with
+    /// `writer_fenced` for the rest of the session.
+    Fenced,
+    /// The session admits no more work. It was closed, its namespace was
+    /// deleted, or the runtime is shutting down.
     Closed,
-    /// The session is admitting work.
-    Open {
-        /// Whether another writer superseded this session.
-        fenced: bool,
-        /// Commits waiting to be published.
-        queued_commits: usize,
-    },
-    /// A close is draining admitted work.
-    Closing,
 }
 
-/// Totals for the namespace writer sessions held by one writer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct WriterSessionStats {
-    /// Sessions admitting work.
-    pub open: usize,
-    /// Sessions draining a close.
-    pub closing: usize,
-    /// Open sessions that have been fenced.
-    pub fenced: usize,
-    /// Maximum sessions this writer may hold at once.
-    pub capacity: usize,
-}
-
-/// Registry of per-namespace publishers owned by one writer.
+/// The live writer sessions of one writer, and the admission budgets they
+/// share.
 ///
-/// Clones share the same publishers and worker tasks. Submit through the
-/// registry returned by [`FsWriter::publisher`](crate::FsWriter::publisher).
+/// Clones share the same sessions and worker tasks. The table holds a
+/// session while a [`NamespaceWriter`](crate::NamespaceWriter) holds it or
+/// while work it admitted is still running. Nothing here decides how many
+/// sessions exist or how long they live.
 ///
 /// Shutdown closes admission and then drains admitted work. Prefer
 /// [`FsWriter::shutdown`](crate::FsWriter::shutdown), which closes admission
@@ -142,72 +130,98 @@ pub struct PublisherRegistry {
     min_publish_interval: Duration,
 }
 
-/// State shared by all publishers in this registry: admission status,
-/// publisher instances, retained projections, and contained panic count.
+/// State shared by all publishers in this registry: admission status, the
+/// session table, retained projections, and contained panic count.
 struct RegistryShared {
     admission: Arc<PublicationAdmission>,
     state: Mutex<RegistryState>,
-    /// Publication, deletion, and namespace-close units whose panic a task
-    /// survived. Tasks contain panics to keep the registry usable, so this —
-    /// not a task join error — is what a drain reports.
+    /// Publication and deletion units whose panic a task survived. Tasks
+    /// contain panics to keep the registry usable, so this — not a task
+    /// join error — is what a drain reports.
     panicked_units: AtomicUsize,
 }
 
 struct RegistryState {
     closed: bool,
-    policy: NamespaceSessionPolicy,
-    capacity: NonZeroUsize,
-    publishers: HashMap<NamespaceId, NamespacePublisher>,
-    closing: HashMap<NamespaceId, CloseCompletion>,
+    sessions: HashMap<NamespaceId, LiveSession>,
     projections: RetainedProjections,
-    session_order: SessionOrder,
 }
 
-impl RegistryState {
-    fn session_counts(&self) -> (usize, usize) {
-        (
-            self.publishers.len() - self.closing.len(),
-            self.closing.len(),
-        )
-    }
+/// One entry in the table of live sessions.
+struct LiveSession {
+    publisher: NamespacePublisher,
+    /// Weak: the handles own the session, so the table must not keep it
+    /// alive.
+    session: Weak<NamespaceSession>,
+}
 
-    /// Drops a session whose close has nothing left to drain, with the
-    /// projection it retained.
-    fn remove_closed_session(&mut self, namespace_id: &NamespaceId) -> RetainedProjectionTotals {
-        self.publishers.remove(namespace_id);
-        self.closing.remove(namespace_id);
-        self.projections.forget(namespace_id);
-        self.session_order.forget(namespace_id);
-        self.projections.totals()
+/// One namespace's writer session, shared by every clone of its
+/// [`NamespaceWriter`](crate::NamespaceWriter).
+///
+/// Dropping the last one ends the session. Work it already admitted still
+/// publishes, and the table forgets the session once that work finishes.
+pub(crate) struct NamespaceSession {
+    publisher: NamespacePublisher,
+}
+
+impl Drop for NamespaceSession {
+    fn drop(&mut self) {
+        self.publisher.forget_if_ended();
     }
 }
 
-/// The order this writer last used its sessions in, so a full table can
-/// close the least recently used idle one.
-#[derive(Debug, Default)]
-struct SessionOrder {
-    last_used: HashMap<NamespaceId, u64>,
-    order: Recency<NamespaceId>,
-}
-
-impl SessionOrder {
-    fn touch(&mut self, namespace_id: &NamespaceId) {
-        let stamp = self.order.touch(namespace_id);
-        self.last_used.insert(namespace_id.clone(), stamp);
-        let last_used = &self.last_used;
-        self.order.compact(last_used.len(), |namespace_id, stamp| {
-            last_used.get(namespace_id) == Some(&stamp)
-        });
+impl NamespaceSession {
+    pub(crate) fn namespace_id(&self) -> &NamespaceId {
+        &self.publisher.namespace_id
     }
 
-    fn forget(&mut self, namespace_id: &NamespaceId) {
-        self.last_used.remove(namespace_id);
+    /// Submits one already-classified candidate. Admitted work continues if
+    /// the caller is cancelled.
+    pub(crate) async fn submit_candidate(&self, candidate: CommitCandidate) -> CommitResult {
+        self.publisher.submit_candidate(candidate).await
     }
 
-    fn oldest(&mut self) -> Option<NamespaceId> {
-        let last_used = &self.last_used;
-        self.order
-            .pop_oldest(|namespace_id, stamp| last_used.get(namespace_id) == Some(&stamp))
+    /// Submits a namespace deletion, sequenced as a barrier: mutations
+    /// admitted before it publish first, and mutations admitted after it
+    /// fail once the delete succeeds.
+    pub(crate) async fn submit_delete(&self, options: DeleteNamespaceOptions) -> DeleteResult {
+        self.publisher.submit_delete(options).await
+    }
+
+    pub(crate) fn state(&self) -> NamespaceSessionState {
+        self.publisher.session_state()
+    }
+
+    pub(crate) async fn wait_for_fold(&self) -> Result<(), RuntimeError> {
+        self.publisher.wait_for_fold().await
+    }
+
+    /// Refuses new work from every handle that shares this session, waits
+    /// for admitted work and the running fold, and forgets the session.
+    ///
+    /// The worker and the fold task forget the session too when they exit,
+    /// so a cancelled close still leaves the table clean.
+    pub(crate) async fn close(&self) -> Result<CloseNamespaceReport, CoreError> {
+        let publisher = &self.publisher;
+        let drained_commits = publisher.close_session()?;
+        publisher.forget_if_ended();
+        publisher.wait_for_worker().await;
+        if let Err(error) = publisher.wait_for_fold().await {
+            phase_event!(
+                publisher.read_core,
+                "wal_fold",
+                publisher.namespace_id,
+                tracing::Level::WARN,
+                error = %error.public_message(),
+                "wal fold failed while the namespace session closed"
+            );
+        }
+        publisher.forget_if_ended();
+        Ok(CloseNamespaceReport {
+            was_open: drained_commits.is_some(),
+            drained_commits: drained_commits.unwrap_or(0),
+            fenced: publisher.session_is_fenced(),
+        })
     }
 }
 
@@ -219,22 +233,6 @@ impl RegistryShared {
         self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
-    fn evict(
-        &self,
-        namespace_id: &NamespaceId,
-        instruments: &crate::metrics::RuntimeInstruments,
-    ) -> RetainedProjectionTotals {
-        let mut state = self.lock_state();
-        if !state.closing.contains_key(namespace_id) {
-            state.publishers.remove(namespace_id);
-            state.session_order.forget(namespace_id);
-        }
-        state.projections.forget(namespace_id);
-        let (open, closing) = state.session_counts();
-        instruments.publisher_sessions(open, closing);
-        state.projections.totals()
     }
 
     /// Records the namespace's retained projection and evicts projections until
@@ -262,9 +260,9 @@ impl RegistryShared {
                 break;
             };
             if state
-                .publishers
+                .sessions
                 .get(&victim)
-                .is_none_or(NamespacePublisher::invalidate_projection)
+                .is_none_or(|live| live.publisher.invalidate_projection())
             {
                 state.projections.remove_entry(&victim);
                 instruments.publisher_projection_evicted();
@@ -383,8 +381,6 @@ impl PublisherRegistry {
         writer: Weak<WriterBits>,
         runtime: Handle,
         min_publish_interval: Duration,
-        policy: NamespaceSessionPolicy,
-        capacity: NonZeroUsize,
         publication_limits: crate::PublicationLimits,
     ) -> Self {
         Self {
@@ -392,12 +388,8 @@ impl PublisherRegistry {
                 admission: Arc::new(PublicationAdmission::new(publication_limits)),
                 state: Mutex::new(RegistryState {
                     closed: false,
-                    policy,
-                    capacity,
-                    publishers: HashMap::new(),
-                    closing: HashMap::new(),
+                    sessions: HashMap::new(),
                     projections: RetainedProjections::default(),
-                    session_order: SessionOrder::default(),
                 }),
                 panicked_units: AtomicUsize::new(0),
             }),
@@ -409,69 +401,50 @@ impl PublisherRegistry {
         }
     }
 
-    /// Submits a namespace deletion, sequenced as a barrier: mutations
-    /// admitted before it publish first, and mutations admitted after it
-    /// fail once the delete succeeds.
-    pub async fn submit_delete(
+    /// Returns the session for `namespace_id`, starting one when the table
+    /// has none.
+    ///
+    /// A session whose last handle dropped stays in the table until its
+    /// admitted work finishes, and an open before then continues it: a
+    /// second session would acquire a new epoch and fence that work.
+    pub(crate) fn open_session(
         &self,
-        namespace_id: NamespaceId,
-        options: DeleteNamespaceOptions,
-    ) -> DeleteResult {
-        let receiver = {
-            let mut state = self.shared.lock_state();
-            let publisher = self.publisher_for(&mut state, &namespace_id, false)?;
-            publisher.admit_delete(options)?
-        };
-        receive_delete(receiver).await
-    }
-
-    /// Submits one already-classified candidate; the runtime's direct
-    /// mutation paths funnel through this.
-    pub async fn submit_candidate(
-        &self,
-        namespace_id: NamespaceId,
-        candidate: CommitCandidate,
-    ) -> CommitResult {
-        let publisher = {
-            let mut state = self.shared.lock_state();
-            let publisher = self.publisher_for(&mut state, &namespace_id, false)?;
-            publisher.check_admission(&publisher.lock_state())?;
-            publisher
-        };
-        let candidate = self.plan_inline_candidate(&namespace_id, candidate, &publisher)?;
-        // The permit marks the session busy, so it is taken under the
-        // registry lock that closes idle sessions, against a fresh lookup.
-        let (publisher, permit) = {
-            let mut state = self.shared.lock_state();
-            let publisher = self.publisher_for(&mut state, &namespace_id, false)?;
-            publisher.check_admission(&publisher.lock_state())?;
-            let permit = self
-                .shared
-                .admission
-                .acquire_candidate(&namespace_id, &candidate.candidate)?;
-            (publisher, permit)
-        };
-        let candidate = self
-            .stage_inline_candidate(&namespace_id, candidate, &publisher, &permit)
-            .await?;
-        PublicationAdmission::validate_candidate(&candidate)?;
-        submit_with_admission(
-            &namespace_id,
-            candidate,
-            self.timer.as_ref(),
-            |commit_id, candidate, semantic_identity, waiter, enqueued_at| {
-                let mut state = self.shared.lock_state();
-                let publisher = self.publisher_for(&mut state, &namespace_id, false)?;
-                publisher.admit(
-                    commit_id,
-                    candidate,
-                    semantic_identity,
-                    AdmittedWaiter::new(waiter, &permit),
-                    enqueued_at,
-                )
+        namespace_id: &NamespaceId,
+    ) -> Result<Arc<NamespaceSession>, CoreError> {
+        let mut state = self.shared.lock_state();
+        if state.closed {
+            return Err(CoreError::ShuttingDown);
+        }
+        if let Some(live) = state.sessions.get_mut(namespace_id) {
+            if live.publisher.session_closed() {
+                return Err(CoreError::WriterSessionClosed {
+                    namespace_id: namespace_id.clone(),
+                });
+            }
+            if let Some(session) = live.session.upgrade() {
+                return Ok(session);
+            }
+            let session = Arc::new(NamespaceSession {
+                publisher: live.publisher.clone(),
+            });
+            live.session = Arc::downgrade(&session);
+            return Ok(session);
+        }
+        let publisher = NamespacePublisher::new(namespace_id.clone(), self);
+        let session = Arc::new(NamespaceSession {
+            publisher: publisher.clone(),
+        });
+        state.sessions.insert(
+            namespace_id.clone(),
+            LiveSession {
+                publisher,
+                session: Arc::downgrade(&session),
             },
-        )
-        .await
+        );
+        self.read_core
+            .instruments()
+            .publisher_sessions(state.sessions.len());
+        Ok(session)
     }
 
     /// Invalidates the namespace's rebuildable WAL-tail projection without
@@ -483,10 +456,10 @@ impl PublisherRegistry {
     pub(crate) fn invalidate_projection(&self, namespace_id: &NamespaceId) {
         let totals = {
             let mut state = self.shared.lock_state();
-            let Some(publisher) = state.publishers.get(namespace_id) else {
+            let Some(live) = state.sessions.get(namespace_id) else {
                 return;
             };
-            if !publisher.invalidate_projection() {
+            if !live.publisher.invalidate_projection() {
                 return;
             }
             state.projections.remove_entry(namespace_id);
@@ -497,232 +470,24 @@ impl PublisherRegistry {
             .publisher_retained_projections(totals.projections, totals.decoded_bytes);
     }
 
-    #[cfg(test)]
-    fn test_publisher_for(
-        &self,
-        namespace_id: &NamespaceId,
-    ) -> Result<NamespacePublisher, CoreError> {
-        let mut state = self.shared.lock_state();
-        self.publisher_for(&mut state, namespace_id, false)
-    }
-
-    fn publisher_for(
-        &self,
-        state: &mut RegistryState,
-        namespace_id: &NamespaceId,
-        explicit_open: bool,
-    ) -> Result<NamespacePublisher, CoreError> {
-        if state.closed {
-            return Err(CoreError::ShuttingDown);
-        }
-        if state.closing.contains_key(namespace_id) {
-            return Err(CoreError::WriterSessionClosed {
-                namespace_id: namespace_id.clone(),
-            });
-        }
-        if let Some(publisher) = state.publishers.get(namespace_id) {
-            let publisher = publisher.clone();
-            state.session_order.touch(namespace_id);
-            return Ok(publisher);
-        }
-        if !explicit_open && state.policy == NamespaceSessionPolicy::ExplicitOpen {
-            return Err(CoreError::WriterSessionClosed {
-                namespace_id: namespace_id.clone(),
-            });
-        }
-        if state.publishers.len() >= state.capacity.get() && !self.close_idle_session(state) {
-            self.read_core.instruments().publisher_session_refusal();
-            return Err(CoreError::WriterCapacityExceeded {
-                max_writer_sessions: state.capacity.get(),
-            });
-        }
-        let publisher = NamespacePublisher::new(namespace_id.clone(), self);
-        state
-            .publishers
-            .insert(namespace_id.clone(), publisher.clone());
-        state.session_order.touch(namespace_id);
-        let (open, closing) = state.session_counts();
-        self.report_session_counts(open, closing);
-        Ok(publisher)
-    }
-
-    /// Closes the least recently used idle session to make room for another.
-    ///
-    /// Returns false when every session is busy, or when the host opens and
-    /// closes sessions itself under
-    /// [`NamespaceSessionPolicy::ExplicitOpen`]. An idle session has nothing
-    /// to drain, so it settles here as a finished `close_namespace` would,
-    /// without store I/O.
-    fn close_idle_session(&self, state: &mut RegistryState) -> bool {
-        if state.policy == NamespaceSessionPolicy::ExplicitOpen {
-            return false;
-        }
-        for _ in 0..state.publishers.len() {
-            let Some(namespace_id) = state.session_order.oldest() else {
-                return false;
-            };
-            let closed = !state.closing.contains_key(&namespace_id)
-                && state
-                    .publishers
-                    .get(&namespace_id)
-                    .is_some_and(NamespacePublisher::close_session_admission_if_idle);
-            if closed {
-                let totals = state.remove_closed_session(&namespace_id);
-                let instruments = self.read_core.instruments();
-                instruments.publisher_idle_session_closed();
-                instruments
-                    .publisher_retained_projections(totals.projections, totals.decoded_bytes);
-                return true;
-            }
-            state.session_order.touch(&namespace_id);
-        }
-        false
-    }
-
-    pub(crate) fn open_namespace(&self, namespace_id: &NamespaceId) -> Result<(), CoreError> {
-        let mut state = self.shared.lock_state();
-        self.publisher_for(&mut state, namespace_id, true)?;
-        Ok(())
-    }
-
-    pub(crate) async fn close_namespace(
-        &self,
-        namespace_id: &NamespaceId,
-    ) -> Result<CloseNamespaceReport, CoreError> {
-        let (completion, close_in_progress) = {
-            let mut state = self.shared.lock_state();
-            if state.closed {
-                return Err(CoreError::ShuttingDown);
-            }
-            let Some(publisher) = state.publishers.get(namespace_id).cloned() else {
-                return Ok(CloseNamespaceReport {
-                    was_open: false,
-                    drained_commits: 0,
-                    fenced: false,
-                });
-            };
-            if let Some(completion) = state.closing.get(namespace_id) {
-                (completion.clone(), true)
-            } else {
-                // Flipping admission while the registry lock is held is the close
-                // linearization point.
-                let drained_commits = publisher.close_session_admission();
-                let (sender, completion) = watch::channel(None);
-                state
-                    .closing
-                    .insert(namespace_id.clone(), completion.clone());
-                let (open, closing) = state.session_counts();
-                self.report_session_counts(open, closing);
-                let shared = Arc::clone(&self.shared);
-                let namespace_id = namespace_id.clone();
-                self.runtime.spawn(async move {
-                    finish_namespace_close(
-                        shared,
-                        publisher,
-                        namespace_id,
-                        drained_commits,
-                        sender,
-                    )
-                    .await;
-                });
-                (completion, false)
-            }
-        };
-        let mut report = wait_for_close(completion).await?;
-        if close_in_progress {
-            report.was_open = false;
-            report.drained_commits = 0;
-        }
-        Ok(report)
-    }
-
-    pub(crate) fn namespace_session_state(
-        &self,
-        namespace_id: &NamespaceId,
-    ) -> NamespaceSessionState {
-        let publisher = {
-            let state = self.shared.lock_state();
-            if state.closing.contains_key(namespace_id) {
-                return NamespaceSessionState::Closing;
-            }
-            state.publishers.get(namespace_id).cloned()
-        };
-        let Some(publisher) = publisher else {
-            return NamespaceSessionState::Closed;
-        };
-        NamespaceSessionState::Open {
-            fenced: publisher.session_is_fenced(),
-            queued_commits: publisher.queued_commits(),
-        }
-    }
-
-    pub(crate) fn writer_session_stats(&self) -> WriterSessionStats {
-        let (publishers, open, closing, capacity) = {
-            let state = self.shared.lock_state();
-            let publishers = state
-                .publishers
-                .iter()
-                .filter_map(|(namespace_id, publisher)| {
-                    (!state.closing.contains_key(namespace_id)).then_some(publisher.clone())
-                })
-                .collect::<Vec<_>>();
-            let (open, closing) = state.session_counts();
-            (publishers, open, closing, state.capacity.get())
-        };
-        WriterSessionStats {
-            open,
-            closing,
-            fenced: publishers
-                .iter()
-                .filter(|publisher| publisher.session_is_fenced())
-                .count(),
-            capacity,
-        }
+    fn live_publisher(&self, namespace_id: &NamespaceId) -> Option<NamespacePublisher> {
+        self.shared
+            .lock_state()
+            .sessions
+            .get(namespace_id)
+            .map(|live| live.publisher.clone())
     }
 
     pub(crate) async fn wal_tail_inline_bytes(&self, namespace_id: &NamespaceId) -> Option<usize> {
-        let publisher = self
-            .shared
-            .lock_state()
-            .publishers
-            .get(namespace_id)
-            .cloned()?;
+        let publisher = self.live_publisher(namespace_id)?;
         let slot = publisher.engine.lock().await;
         slot.wal_tail_inline_bytes()
     }
 
     pub(crate) async fn record_fold_outcome(&self, namespace_id: &NamespaceId) {
-        let publisher = self
-            .shared
-            .lock_state()
-            .publishers
-            .get(namespace_id)
-            .cloned();
-        if let Some(publisher) = publisher {
+        if let Some(publisher) = self.live_publisher(namespace_id) {
             publisher.engine.lock().await.record_fold_outcome(None);
         }
-    }
-
-    pub(crate) async fn wait_for_fold(
-        &self,
-        namespace_id: &NamespaceId,
-    ) -> Result<(), RuntimeError> {
-        let publisher = self
-            .shared
-            .lock_state()
-            .publishers
-            .get(namespace_id)
-            .cloned();
-        if let Some(publisher) = publisher {
-            publisher.wait_for_fold().await?;
-        }
-        Ok(())
-    }
-
-    fn report_session_counts(&self, open: usize, closing: usize) {
-        self.read_core
-            .instruments()
-            .publisher_sessions(open, closing);
     }
 
     /// Whether [`Self::close_admission`] has run: later submissions fail
@@ -739,17 +504,18 @@ impl PublisherRegistry {
         let publishers: Vec<NamespacePublisher> = {
             let mut state = self.shared.lock_state();
             state.closed = true;
-            state.publishers.values().cloned().collect()
+            state
+                .sessions
+                .values()
+                .map(|live| live.publisher.clone())
+                .collect()
         };
-        // Close each publisher without holding the registry lock. Publisher
-        // operations may acquire their own state before the registry, so
-        // shutdown must not acquire those locks in the opposite order.
         for publisher in publishers {
             publisher.close_admission();
         }
     }
 
-    /// Waits for all current publisher workers to finish.
+    /// Waits for all current publisher workers and folds to finish.
     ///
     /// Returns an error if any publication or deletion panicked and the worker
     /// contained the panic. Call [`Self::close_admission`] first to prevent new
@@ -758,12 +524,10 @@ impl PublisherRegistry {
         let publishers: Vec<NamespacePublisher> = self
             .shared
             .lock_state()
-            .publishers
+            .sessions
             .values()
-            .cloned()
+            .map(|live| live.publisher.clone())
             .collect();
-        // Awaited outside the registry lock, for the same nesting reason as
-        // the admission sweep.
         for publisher in &publishers {
             publisher.wait_for_worker().await;
         }
@@ -772,16 +536,6 @@ impl PublisherRegistry {
             if let Err(error) = publisher.wait_for_fold().await {
                 task_error.get_or_insert(error);
             }
-        }
-        let closes = self
-            .shared
-            .lock_state()
-            .closing
-            .values()
-            .cloned()
-            .collect::<Vec<_>>();
-        for completion in closes {
-            let _ = wait_for_close(completion).await;
         }
         let panicked = self.shared.panicked_units.load(Ordering::SeqCst);
         if panicked > 0 {
@@ -794,69 +548,6 @@ impl PublisherRegistry {
         }
         Ok(())
     }
-}
-
-async fn wait_for_close(
-    mut completion: CloseCompletion,
-) -> Result<CloseNamespaceReport, CoreError> {
-    loop {
-        if let Some(report) = *completion.borrow_and_update() {
-            return Ok(report);
-        }
-        // The sender drops without a report only when the runtime shut down
-        // under the close task.
-        if completion.changed().await.is_err() {
-            return Err(CoreError::ShuttingDown);
-        }
-    }
-}
-
-async fn finish_namespace_close(
-    shared: Arc<RegistryShared>,
-    publisher: NamespacePublisher,
-    namespace_id: NamespaceId,
-    drained_commits: usize,
-    sender: watch::Sender<Option<CloseNamespaceReport>>,
-) {
-    let fenced = match AssertUnwindSafe(async {
-        publisher.wait_for_worker().await;
-        if let Err(error) = publisher.wait_for_fold().await {
-            phase_event!(
-                publisher.read_core,
-                "wal_fold",
-                publisher.namespace_id,
-                tracing::Level::WARN,
-                error = %error.public_message(),
-                "wal fold failed while the namespace session closed"
-            );
-        }
-        publisher.session_is_fenced()
-    })
-    .catch_unwind()
-    .await
-    {
-        Ok(fenced) => fenced,
-        Err(_) => {
-            shared.panicked_units.fetch_add(1, Ordering::SeqCst);
-            publisher.session_is_fenced()
-        }
-    };
-    let totals = {
-        let mut state = shared.lock_state();
-        let totals = state.remove_closed_session(&namespace_id);
-        let (open, closing) = state.session_counts();
-        publisher
-            .read_core
-            .instruments()
-            .publisher_sessions(open, closing);
-        totals
-    };
-    publisher.report_retained_projections(totals);
-    let _ = sender.send(Some(CloseNamespaceReport {
-        was_open: true,
-        drained_commits,
-        fenced,
-    }));
 }
 
 #[derive(Clone)]
@@ -872,7 +563,7 @@ struct NamespacePublisher {
     /// tail, so a publication cannot change that tail before the reservation.
     engine: Arc<AsyncMutex<EngineSlot>>,
     session: SharedWriterSessionState,
-    /// Weak: the registry map owns its publishers, and a strong reference
+    /// Weak: the session table owns its publishers, and a strong reference
     /// back would cycle the whole structure into a leak. A publisher whose
     /// registry is gone keeps serving, with an unowned worker.
     shared: Weak<RegistryShared>,
@@ -924,6 +615,8 @@ enum PublisherAdmissionState {
     /// Set by the registry's admission close. Later admissions fail with
     /// `shutting_down`; everything already queued keeps publishing.
     Closed,
+    /// Set by [`NamespaceSession::close`]. Later admissions fail with
+    /// `writer_session_closed`; everything already queued keeps publishing.
     SessionClosed,
     /// Terminal: set once a delete succeeds. Admissions fail fast from then
     /// on without touching the store.
@@ -948,6 +641,28 @@ struct NamespacePublisherState {
     /// queued when its last batch settled, so the next request publishes
     /// immediately.
     last_publish: Option<Observation>,
+}
+
+impl NamespacePublisherState {
+    /// Whether the session is over and nothing it admitted can still
+    /// publish. A session is over once no handle holds it, or once it was
+    /// closed or its namespace deleted.
+    fn has_ended(&self, held: bool) -> bool {
+        let deleted = matches!(self.admission, PublisherAdmissionState::Deleted);
+        let over =
+            !held || deleted || matches!(self.admission, PublisherAdmissionState::SessionClosed);
+        // A deleted session's worker takes nothing more from its queue.
+        let worker_running = !deleted
+            && self
+                .worker
+                .as_ref()
+                .is_some_and(|worker| !*worker.liveness.borrow());
+        let fold_running = self
+            .fold
+            .as_ref()
+            .is_some_and(|fold| !*fold.liveness.borrow());
+        over && !worker_running && !fold_running
+    }
 }
 
 struct WorkerHandle {
@@ -1141,34 +856,68 @@ impl NamespacePublisher {
         }
     }
 
-    fn close_session_admission(&self) -> usize {
-        let mut state = self.lock_state();
-        if matches!(state.admission, PublisherAdmissionState::Open) {
-            state.admission = PublisherAdmissionState::SessionClosed;
+    /// Closes admission for every handle that shares this session and
+    /// returns how many commits were admitted before the close, or `None`
+    /// when the session no longer admitted work. Fails with `shutting_down`
+    /// after shutdown begins.
+    fn close_session(&self) -> Result<Option<usize>, CoreError> {
+        let shared = self.shared.upgrade();
+        let registry = shared.as_ref().map(|shared| shared.lock_state());
+        if registry.as_ref().is_some_and(|registry| registry.closed) {
+            return Err(CoreError::ShuttingDown);
         }
-        state.in_flight.len()
+        let mut state = self.lock_state();
+        if !matches!(state.admission, PublisherAdmissionState::Open) {
+            return Ok(None);
+        }
+        state.admission = PublisherAdmissionState::SessionClosed;
+        Ok(Some(state.in_flight.len()))
     }
 
-    /// Closes admission only when a close would have nothing to drain: no
-    /// admitted work, no running or requested fold, and a session that is
-    /// open and not fenced. Reports whether it closed.
-    ///
-    /// Admitted work counts from the permit on, so a caller still staging
-    /// content keeps its session. A fenced session stays so its namespace
-    /// keeps failing with `writer_fenced` instead of reacquiring the epoch.
-    fn close_session_admission_if_idle(&self) -> bool {
-        let mut state = self.lock_state();
-        let idle = matches!(state.admission, PublisherAdmissionState::Open)
-            && state
-                .fold
-                .as_ref()
-                .is_none_or(|fold| fold.task.is_finished())
-            && !self.admission.has_admitted_work(&self.namespace_id)
-            && !self.session_is_fenced();
-        if idle {
-            state.admission = PublisherAdmissionState::SessionClosed;
+    fn session_closed(&self) -> bool {
+        matches!(
+            self.lock_state().admission,
+            PublisherAdmissionState::SessionClosed
+        )
+    }
+
+    fn session_state(&self) -> NamespaceSessionState {
+        if !matches!(self.lock_state().admission, PublisherAdmissionState::Open) {
+            NamespaceSessionState::Closed
+        } else if self.session_is_fenced() {
+            NamespaceSessionState::Fenced
+        } else {
+            NamespaceSessionState::Open
         }
-        idle
+    }
+
+    /// Removes this session from the table once it has ended and nothing it
+    /// admitted is still running. Dropping the last handle, the worker's
+    /// exit, the fold's exit, a close, and a landed delete each call this,
+    /// so whichever of them comes last removes the session.
+    fn forget_if_ended(&self) {
+        let Some(shared) = self.shared.upgrade() else {
+            return;
+        };
+        let totals = {
+            let mut registry = shared.lock_state();
+            let held = match registry.sessions.get(&self.namespace_id) {
+                Some(live) if Arc::ptr_eq(&live.publisher.state, &self.state) => {
+                    live.session.strong_count() > 0
+                }
+                _ => return,
+            };
+            if !self.lock_state().has_ended(held) {
+                return;
+            }
+            registry.sessions.remove(&self.namespace_id);
+            registry.projections.forget(&self.namespace_id);
+            self.read_core
+                .instruments()
+                .publisher_sessions(registry.sessions.len());
+            registry.projections.totals()
+        };
+        self.report_retained_projections(totals);
     }
 
     /// Returns the error for the current admission state, or succeeds when open.
@@ -1191,10 +940,6 @@ impl NamespacePublisher {
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
             WriterSessionState::Fenced(_)
         )
-    }
-
-    fn queued_commits(&self) -> usize {
-        queued_candidates(&self.lock_state())
     }
 
     /// Drops the engine's tail projection, reporting whether it took the
@@ -1234,6 +979,36 @@ impl NamespacePublisher {
         self.read_core
             .instruments()
             .publisher_retained_projections(totals.projections, totals.decoded_bytes);
+    }
+
+    /// Places the candidate's inline content, then admits it before awaiting
+    /// its result.
+    ///
+    /// Once the candidate enters the queue, cancelling the caller only drops
+    /// result delivery; the worker still owns and publishes the request.
+    async fn submit_candidate(&self, candidate: CommitCandidate) -> CommitResult {
+        self.check_admission(&self.lock_state())?;
+        let plan = self.plan_inline_candidate(candidate)?;
+        let permit = self
+            .admission
+            .acquire_candidate(&self.namespace_id, &plan.candidate)?;
+        let candidate = self.stage_inline_candidate(plan, &permit).await?;
+        PublicationAdmission::validate_candidate(&candidate)?;
+        submit_with_admission(
+            &self.namespace_id,
+            candidate,
+            self.timer.as_ref(),
+            |commit_id, candidate, semantic_identity, waiter, enqueued_at| {
+                self.admit(
+                    commit_id,
+                    candidate,
+                    semantic_identity,
+                    AdmittedWaiter::new(waiter, &permit),
+                    enqueued_at,
+                )
+            },
+        )
+        .await
     }
 
     /// Admits the request before awaiting its result.
@@ -1344,7 +1119,6 @@ impl NamespacePublisher {
     /// `namespace_deleted` once it succeeds. If the delete fails (for
     /// example a stale `expected_head_seq`), later requests publish
     /// normally — nothing is rejected for a delete that did not happen.
-    #[cfg(test)]
     async fn submit_delete(&self, options: DeleteNamespaceOptions) -> DeleteResult {
         let receiver = self.admit_delete(options)?;
         receive_delete(receiver).await
@@ -1422,6 +1196,7 @@ impl NamespacePublisher {
                 .await
                 .expect("publication semaphore is never closed");
             let Some(item) = self.take_next_item() else {
+                self.forget_if_ended();
                 return;
             };
 
@@ -1702,17 +1477,17 @@ impl NamespacePublisher {
         let (exit, liveness) = watch::channel(false);
         let publisher = self.clone();
         let task = self.runtime.spawn(async move {
-            let _exit = FoldExit(exit);
-            if started.await.is_err() {
-                return;
-            }
-            if AssertUnwindSafe(publisher.run_fold())
-                .catch_unwind()
-                .await
-                .is_err()
+            let exit = FoldExit(exit);
+            if started.await.is_ok()
+                && AssertUnwindSafe(publisher.run_fold())
+                    .catch_unwind()
+                    .await
+                    .is_err()
             {
                 publisher.record_panic();
             }
+            drop(exit);
+            publisher.forget_if_ended();
         });
         state.fold = Some(FoldHandle {
             fold_id,
@@ -1829,15 +1604,11 @@ impl NamespacePublisher {
                 state.admission = PublisherAdmissionState::Deleted;
                 take_queued_waiters(&mut state)
             };
-            // The publisher is terminal; drop it from the registry map
-            // so the map stays bounded by live namespaces. Clones still
-            // in flight fail fast on `Deleted`, and a later submission
-            // gets a fresh publisher whose publish fails on the durable
-            // tombstone.
-            if let Some(shared) = self.shared.upgrade() {
-                let totals = shared.evict(&self.namespace_id, self.read_core.instruments());
-                self.report_retained_projections(totals);
-            }
+            // A deleted session has ended. It leaves the table before the
+            // delete's callers hear the outcome, so an open after that
+            // starts a fresh session whose publish fails on the durable
+            // tombstone. Handles to this session fail fast on `Deleted`.
+            self.forget_if_ended();
             for waiter in queued.commits {
                 let _ = waiter.send(Err(self.namespace_deleted().into()));
             }

@@ -144,12 +144,6 @@ pub struct ServerConfig {
     #[serde(default)]
     pub content_token_secret: SecretString,
     pub writer_id: String,
-    /// Maximum writer sessions held by this server. When the table is full,
-    /// a request for another namespace closes the least recently used idle
-    /// session first. Requests answer `writer_capacity_exceeded` only when
-    /// every session is busy.
-    #[serde(default = "default_max_writer_sessions")]
-    pub max_writer_sessions: usize,
     /// Maximum WAL folds this server runs concurrently. A sustained
     /// `loonfs.publisher.wal_folds_waiting` gauge means this cap is too low.
     #[serde(default = "default_max_concurrent_folds")]
@@ -325,10 +319,6 @@ fn default_snapshot_max_live_per_namespace() -> usize {
 
 fn default_max_concurrent_uploads() -> usize {
     loonfs_http::DEFAULT_MAX_CONCURRENT_UPLOADS
-}
-
-fn default_max_writer_sessions() -> usize {
-    loonfs::DEFAULT_MAX_WRITER_SESSIONS
 }
 
 fn default_max_concurrent_folds() -> usize {
@@ -628,7 +618,6 @@ impl ServerConfig {
                 "snapshot_max_live_per_namespace",
                 self.snapshot_max_live_per_namespace as u64,
             ),
-            ("max_writer_sessions", self.max_writer_sessions as u64),
             ("max_concurrent_folds", self.max_concurrent_folds as u64),
             ("max_concurrent_uploads", self.max_concurrent_uploads as u64),
             (
@@ -1468,10 +1457,6 @@ root = "/tmp/loonfs-server"
         let config = load_server_config(&path).expect("valid config");
         assert_eq!(config.max_download_bytes, 256 * 1024 * 1024);
         assert_eq!(
-            config.max_writer_sessions,
-            loonfs::DEFAULT_MAX_WRITER_SESSIONS
-        );
-        assert_eq!(
             config.max_concurrent_folds,
             loonfs::DEFAULT_MAX_CONCURRENT_FOLDS
         );
@@ -1484,7 +1469,6 @@ root = "/tmp/loonfs-server"
 
         for field in [
             "max_download_bytes",
-            "max_writer_sessions",
             "max_concurrent_folds",
             "max_concurrent_uploads",
             "max_concurrent_downloads",

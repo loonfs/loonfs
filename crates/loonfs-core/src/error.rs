@@ -146,8 +146,6 @@ pub enum CoreError {
     CommitQueueFull,
     #[error("writer session for namespace `{namespace_id}` is closed; new work is not admitted")]
     WriterSessionClosed { namespace_id: NamespaceId },
-    #[error("writer session capacity is {max_writer_sessions}; new work is not admitted")]
-    WriterCapacityExceeded { max_writer_sessions: usize },
     /// The service is shutting down. New requests are rejected, while requests
     /// accepted earlier may finish.
     #[error("shutting down; new work is not admitted")]
@@ -422,7 +420,6 @@ impl CoreError {
             CoreError::ContentPreparation(_) => ErrorCode::ContentNotPrepared,
             CoreError::CommitQueueFull => ErrorCode::CommitQueueFull,
             CoreError::WriterSessionClosed { .. } => ErrorCode::WriterSessionClosed,
-            CoreError::WriterCapacityExceeded { .. } => ErrorCode::WriterCapacityExceeded,
             CoreError::ShuttingDown => ErrorCode::ShuttingDown,
             CoreError::ContentNotMaterialized { .. } => ErrorCode::ContentNotMaterialized,
             // An over-budget publication stops before its next write and is retryable
@@ -511,7 +508,6 @@ impl CoreError {
             | CoreError::ContentPreparation(_)
             | CoreError::CommitQueueFull
             | CoreError::WriterSessionClosed { .. }
-            | CoreError::WriterCapacityExceeded { .. }
             | CoreError::ShuttingDown
             | CoreError::ContentNotMaterialized { .. }
             | CoreError::CheckpointUnavailable(_)
@@ -574,12 +570,6 @@ impl CoreError {
                 commit_id: CommitId::parse(commit_id).ok(),
                 committed_seq: *committed_seq,
                 committed_fingerprint: committed_fingerprint.clone(),
-                ..ErrorDetails::default()
-            }),
-            CoreError::WriterCapacityExceeded {
-                max_writer_sessions,
-            } => Some(ErrorDetails {
-                max_writer_sessions: Some(*max_writer_sessions),
                 ..ErrorDetails::default()
             }),
             CoreError::RebootstrapRequired {
@@ -824,17 +814,6 @@ mod tests {
         assert_eq!(details.active_writer_epoch, Some(WriterEpoch(4)));
         assert_eq!(details.active_writer_id, None);
         assert_eq!(details.active_acquired_at_ms, None);
-
-        let capacity = CoreError::WriterCapacityExceeded {
-            max_writer_sessions: 12,
-        };
-        assert_eq!(
-            capacity
-                .details()
-                .expect("writer capacity details")
-                .max_writer_sessions,
-            Some(12)
-        );
 
         // A conflict decided against a durable receipt names where the
         // commit id landed and what landed there, which is what a retry

@@ -1,8 +1,8 @@
 //! Inline placement and permit-held fallback staging.
 
-use super::{AdmissionPermit, NamespacePublisher, PreparedCandidate, PublisherRegistry};
+use super::{AdmissionPermit, NamespacePublisher, PreparedCandidate};
 use crate::publish::CommitCandidate;
-use crate::{CoreError, NamespaceId, Result};
+use crate::{CoreError, Result};
 use loonfs_api::wire::wal::MAX_WAL_INLINE_CONTENT_BYTES;
 use loonfs_core::publish::InlineContent;
 
@@ -12,15 +12,14 @@ pub(super) struct InlineCandidatePlan {
     segment_inline_values: usize,
 }
 
-impl PublisherRegistry {
+impl NamespacePublisher {
     pub(super) fn plan_inline_candidate(
         &self,
-        namespace_id: &NamespaceId,
         candidate: CommitCandidate,
-        publisher: &NamespacePublisher,
     ) -> Result<InlineCandidatePlan> {
+        let namespace_id = &self.namespace_id;
         let values = candidate.ordered_inline_content(namespace_id)?;
-        let mut remaining = publisher.inline_content.inline_content_segment_budget_bytes;
+        let mut remaining = self.inline_content.inline_content_segment_budget_bytes;
         let segment_inline_values = values
             .iter()
             .take_while(|value| {
@@ -47,36 +46,31 @@ impl PublisherRegistry {
 
     pub(super) async fn stage_inline_candidate(
         &self,
-        namespace_id: &NamespaceId,
         mut plan: InlineCandidatePlan,
-        publisher: &NamespacePublisher,
         permit: &AdmissionPermit,
     ) -> Result<PreparedCandidate> {
         if plan.ordered_inline_content.is_empty() {
             return Ok(plan.candidate);
         }
         let kept = {
-            let slot = publisher.engine.lock().await;
+            let slot = self.engine.lock().await;
             // Until a publish observes the tail, admit at most one segment budget.
             let unfolded_bytes = slot.wal_tail_inline_bytes().unwrap_or(
-                publisher
-                    .inline_content
+                self.inline_content
                     .inline_content_tail_limit_bytes
-                    .saturating_sub(publisher.inline_content.inline_content_segment_budget_bytes),
+                    .saturating_sub(self.inline_content.inline_content_segment_budget_bytes),
             );
             permit.reserve_inline(
                 plan.ordered_inline_content[..plan.segment_inline_values]
                     .iter()
                     .map(|value| value.bytes().len()),
                 unfolded_bytes,
-                publisher.inline_content.inline_content_tail_limit_bytes,
+                self.inline_content.inline_content_tail_limit_bytes,
             )
         };
         self.stage_inline_values(
-            namespace_id,
             &mut plan.candidate.candidate,
             &plan.ordered_inline_content[kept..],
-            publisher,
         )
         .await?;
         PreparedCandidate::new(plan.candidate.candidate).map_err(Into::into)
@@ -84,16 +78,15 @@ impl PublisherRegistry {
 
     async fn stage_inline_values(
         &self,
-        namespace_id: &NamespaceId,
         candidate: &mut CommitCandidate,
         values: &[InlineContent],
-        publisher: &NamespacePublisher,
     ) -> Result<()> {
         if values.is_empty() {
             return Ok(());
         }
+        let namespace_id = &self.namespace_id;
         {
-            let slot = publisher.engine.lock().await;
+            let slot = self.engine.lock().await;
             if slot
                 .engine
                 .as_ref()

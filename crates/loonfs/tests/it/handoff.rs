@@ -4,9 +4,9 @@
 
 use crate::common::{collect_path_entries, directory_options, expect_code, writer};
 use loonfs::{
-    CreateNamespaceOptions, ErrorCode, FsMaintenance, FsReader, FsWriter, ManifestNo,
-    MetadataMaintenanceOptions, NamespaceId, NamespaceSessionPolicy, NamespaceSessionState,
-    NamespaceWriter, PutFileOptions, SharedObjectStore,
+    CreateNamespaceOptions, ErrorCode, FsMaintenance, FsReader, ManifestNo,
+    MetadataMaintenanceOptions, NamespaceId, NamespaceSessionState, NamespaceWriter,
+    PutFileOptions, SharedObjectStore,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::stores::{
@@ -15,16 +15,6 @@ use loonfs_test_support::stores::{
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use tempfile::tempdir;
-
-async fn explicit_writer(store: SharedObjectStore, writer_id: &str) -> FsWriter {
-    FsWriter::builder_with_store(store)
-        .writer_id(writer_id)
-        .min_publish_interval_ms(0)
-        .namespace_sessions(NamespaceSessionPolicy::ExplicitOpen)
-        .build()
-        .await
-        .expect("build explicit writer")
-}
 
 fn file_options() -> PutFileOptions {
     PutFileOptions::new(loonfs_test_support::test_actor())
@@ -125,10 +115,7 @@ async fn a_takeover_during_a_paused_publish_fences_the_old_node() {
     assert_eq!(failing.attempts(), 0);
     assert_eq!(
         namespace_writer_a.session_state(),
-        NamespaceSessionState::Open {
-            fenced: true,
-            queued_commits: 0,
-        }
+        NamespaceSessionState::Fenced
     );
     failing.clear();
 
@@ -144,8 +131,8 @@ async fn a_closed_session_does_not_reopen_for_a_stale_request() {
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("create local-fs store"));
     let namespace_id = NamespaceId::parse("closed-session").expect("namespace id");
-    let writer_a = explicit_writer(store.clone(), "session-writer-a").await;
-    let writer_b = explicit_writer(store, "session-writer-b").await;
+    let writer_a = writer(store.clone(), "session-writer-a").await;
+    let writer_b = writer(store, "session-writer-b").await;
     writer_a
         .create_namespace(
             &namespace_id,
@@ -183,7 +170,7 @@ async fn a_closed_session_does_not_reopen_for_a_stale_request() {
 
     let namespace_writer_a = writer_a
         .open_namespace(&namespace_id)
-        .expect("explicitly reopen writer A session");
+        .expect("reopen writer A session");
     namespace_writer_a
         .create_directory("/from-a-reopened", directory_options())
         .await

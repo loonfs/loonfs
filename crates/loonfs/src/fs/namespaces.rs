@@ -125,9 +125,7 @@ impl NamespaceWriter {
     ) -> Result<DeleteNamespaceResponse> {
         self.require_administrator().await?;
         self.core.record_trace_context(&tracing::Span::current());
-        self.publisher
-            .submit_delete(self.namespace_id.clone(), options)
-            .await
+        self.session.submit_delete(options).await
     }
 }
 

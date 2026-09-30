@@ -564,25 +564,13 @@ fn concurrent_puts_coalesce_into_one_wal_segment() {
         let put_b = admitted_put("batch-b", "/docs/b.txt", content_b);
         let put_c = admitted_put("batch-c", "/docs/c.txt", content_c);
         let put_d = admitted_put("batch-d", "/docs/d.txt", content_d);
-        let publisher = fs.writer.publisher();
+        let namespace_writer = fs.namespace_writer(&namespace_id).expect("open namespace");
 
         let puts = tokio::join!(
-            publisher.submit_candidate(
-                namespace_id.clone(),
-                CommitCandidate::prepared(put_a.0, put_a.1),
-            ),
-            publisher.submit_candidate(
-                namespace_id.clone(),
-                CommitCandidate::prepared(put_b.0, put_b.1),
-            ),
-            publisher.submit_candidate(
-                namespace_id.clone(),
-                CommitCandidate::prepared(put_c.0, put_c.1),
-            ),
-            publisher.submit_candidate(
-                namespace_id.clone(),
-                CommitCandidate::prepared(put_d.0, put_d.1),
-            ),
+            namespace_writer.commit_candidate(CommitCandidate::prepared(put_a.0, put_a.1)),
+            namespace_writer.commit_candidate(CommitCandidate::prepared(put_b.0, put_b.1)),
+            namespace_writer.commit_candidate(CommitCandidate::prepared(put_c.0, put_c.1)),
+            namespace_writer.commit_candidate(CommitCandidate::prepared(put_d.0, put_d.1)),
         );
         puts.0.expect("put a");
         puts.1.expect("put b");

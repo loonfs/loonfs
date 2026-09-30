@@ -849,9 +849,7 @@ impl NamespaceWriter {
             Some(subject) => candidate.with_subject(subject.clone()),
             None => candidate,
         };
-        self.publisher
-            .submit_candidate(self.namespace_id.clone(), candidate)
-            .await
+        self.session.submit_candidate(candidate).await
     }
 
     async fn commit_one(

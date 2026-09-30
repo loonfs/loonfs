@@ -247,7 +247,6 @@ The codes that populate it:
 | --- | --- |
 | `namespace_deleted` | `namespace_id` identifies the deleted namespace, including a fork's source or target |
 | `writer_fenced` | `fenced_writer_epoch`, `active_writer_epoch`, plus `active_writer_id` and `active_acquired_at_ms` when the current manifest records a writer block. Writer ids are process labels, so two runs on one machine can share one; the acquisition stamp is what tells them apart |
-| `writer_capacity_exceeded` | `max_writer_sessions` |
 | `path_conflict` | `expected_inode_id`, `actual_inode_id` (absent when unbound); `precondition_index` for a failed request precondition |
 | `stale_revision` | `inode_id`, `expected_revision_no`, `actual_revision_no` (absent when the inode has no current revision or is not visible); `precondition_index` for a failed request precondition |
 | `stale_attributes` | `inode_id`, `expected_attributes_revision_no` (absent when the caller stated no expectation), `actual_attributes_revision_no` (absent when the inode is not visible); `precondition_index` for a failed request precondition |
@@ -310,7 +309,6 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | `outcome_unknown` | 503 | The outcome of a write other than a commit was not observed; the operation may or may not have taken effect. Read the resource before retrying. |
 | `commit_queue_full` | 503 | The namespace write queue is full; back off and retry. |
 | `writer_session_closed` | 503 | This node holds no open writer session for the namespace. The request was not admitted; retry on the node the namespace is assigned to. |
-| `writer_capacity_exceeded` | 503 | This node holds its maximum number of writer sessions and every one is busy, so none can be closed to make room (section 5.3). The request was not admitted; retry on another node, or wait for a session to settle in a single-node deployment. |
 | `server_busy` | 503 | The server is at its configured concurrency limit for this kind of work (proxied upload bodies or proxied content reads); back off and retry. |
 | `shutting_down` | 503 | The serving process closed admission for shutdown; work admitted earlier still settles. Retry against a live instance. |
 | `deadline_exceeded` | 503 | The server cancelled a bounded request at its configured `request_deadline_ms`. A commit may still land after this response; reconcile it by commit id before retrying. |
@@ -326,8 +324,8 @@ The full registry (`ErrorCode` in `loonfs-api`):
 Automated retry is narrower than the HTTP status. Raw transport failures may
 be retried. Of the registered error codes, only `commit_queue_full`,
 `server_busy`, and `shutting_down` can clear without caller or operator action.
-`writer_session_closed` and `writer_capacity_exceeded` are resolved by routing
-the request to another node, not by waiting, and carry no `Retry-After` header.
+`writer_session_closed` is resolved by routing the request to the node that
+holds the namespace, not by waiting, and carries no `Retry-After` header.
 `checkpoint_unavailable`, `maintenance_required`, and `index_lagging` require
 maintenance. `storage_permission_denied` requires the operator to fix the
 storage credentials or bucket policy. `commit_outcome_unknown`,
@@ -834,14 +832,22 @@ The error's `details` name the epoch and writer that displaced it, so an
 operator can tell a planned failover from two writers misconfigured against
 one namespace.
 
-A node closes a session to hand a namespace off. Closing writes nothing durable.
-The next node's first publish acquires the next writer epoch. A request sent to
-a node without the namespace's open session fails with `writer_session_closed`.
-A node holds a bounded number of sessions. At the limit, opening another
-closes the least recently used idle session. A session is idle when it has no
-admitted work or running fold and is neither closing nor fenced. The node
-refuses with `writer_capacity_exceeded` when no session is idle, or at the
-limit when it opens sessions only on explicit assignment.
+The host owns each writer session. A session opens when the host opens a
+namespace for writing, and it lives until the host closes it or stops holding
+it. The runtime never opens a session on its own and never closes one to make
+room for another; it keeps no cap on how many sessions exist. Opening a
+session writes nothing durable; its first publish acquires the next writer
+epoch.
+
+A node closes a session to hand a namespace off. Closing refuses new work at
+once, lets admitted work publish, and writes nothing durable. The next node's
+first publish acquires the next writer epoch. A request that reaches a session
+after its close began fails with `writer_session_closed`.
+
+The reference server opens a namespace's session on the first request that
+writes to it and keeps it open, with no cap and no eviction. It stops holding
+the session when the namespace is deleted or when a request finds that the
+namespace does not exist.
 
 The standard mutation operations are defined in [the format specification](format.md#66-operations-and-wal-deltas). `POST /commits` (section 6.8) exposes those operations
 over HTTP. The same identity, durability, and visibility rules apply to every

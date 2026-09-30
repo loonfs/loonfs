@@ -144,7 +144,6 @@ error_codes! {
     OutcomeUnknown => "outcome_unknown",
     CommitQueueFull => "commit_queue_full",
     WriterSessionClosed => "writer_session_closed",
-    WriterCapacityExceeded => "writer_capacity_exceeded",
     ServerBusy => "server_busy",
     ShuttingDown => "shutting_down",
     DeadlineExceeded => "deadline_exceeded",
@@ -194,7 +193,6 @@ impl ErrorCode {
             ErrorCode::DeadlineExceeded => ErrorKind::DeadlineExceeded,
             ErrorCode::CommitQueueFull
             | ErrorCode::WriterSessionClosed
-            | ErrorCode::WriterCapacityExceeded
             | ErrorCode::ServerBusy
             | ErrorCode::ShuttingDown
             | ErrorCode::CheckpointUnavailable
@@ -279,7 +277,6 @@ impl ErrorCode {
             | ErrorCode::CommitOutcomeUnknown
             | ErrorCode::OutcomeUnknown
             | ErrorCode::WriterSessionClosed
-            | ErrorCode::WriterCapacityExceeded
             | ErrorCode::DeadlineExceeded
             | ErrorCode::CheckpointUnavailable
             | ErrorCode::ContentNotMaterialized

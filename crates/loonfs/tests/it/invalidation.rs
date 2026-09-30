@@ -83,6 +83,7 @@ async fn first_projections_decoded_bytes(ns_fence: &NamespaceId, ns_other: &Name
         recorder.clone(),
     )
     .await;
+    let mut namespace_writers = Vec::new();
     for (namespace_id, path) in [(ns_fence, "/a1.txt"), (ns_other, "/spill.txt")] {
         writer
             .create_namespace(
@@ -100,6 +101,7 @@ async fn first_projections_decoded_bytes(ns_fence: &NamespaceId, ns_other: &Name
             )
             .await
             .expect("first put");
+        namespace_writers.push(namespace_writer);
     }
     let bytes = retention_gauge(&recorder, "loonfs.publisher.retained_projection_bytes");
     usize::try_from(bytes).expect("retained bytes are positive")

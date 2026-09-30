@@ -498,7 +498,7 @@ impl RuntimeInstruments {
             .set(i64::try_from(queue_depth).unwrap_or(i64::MAX));
     }
 
-    pub(crate) fn publisher_sessions(&self, open: usize, closing: usize) {
+    pub(crate) fn publisher_sessions(&self, open: usize) {
         let Some(installed) = &self.installed else {
             return;
         };
@@ -506,10 +506,6 @@ impl RuntimeInstruments {
             .publisher
             .sessions_open
             .set(i64::try_from(open).unwrap_or(i64::MAX));
-        installed
-            .publisher
-            .sessions_closing
-            .set(i64::try_from(closing).unwrap_or(i64::MAX));
     }
 
     /// Reports the WAL-tail projections this writer retains across its
@@ -584,20 +580,6 @@ impl RuntimeInstruments {
             return;
         };
         installed.publisher.tail_replays.increment(1);
-    }
-
-    pub(crate) fn publisher_idle_session_closed(&self) {
-        let Some(installed) = &self.installed else {
-            return;
-        };
-        installed.publisher.idle_sessions_closed.increment(1);
-    }
-
-    pub(crate) fn publisher_session_refusal(&self) {
-        let Some(installed) = &self.installed else {
-            return;
-        };
-        installed.publisher.session_refusals.increment(1);
     }
 
     /// Reports one publication result delivered to its caller.
@@ -1165,12 +1147,9 @@ struct PublisherInstruments {
     write_stop_refusals: Arc<dyn CounterHandle>,
     projection_evictions: Arc<dyn CounterHandle>,
     tail_replays: Arc<dyn CounterHandle>,
-    idle_sessions_closed: Arc<dyn CounterHandle>,
-    session_refusals: Arc<dyn CounterHandle>,
     batch_size: Arc<dyn HistogramHandle>,
     queue_depth: Arc<dyn GaugeHandle>,
     sessions_open: Arc<dyn GaugeHandle>,
-    sessions_closing: Arc<dyn GaugeHandle>,
     retained_projections: Arc<dyn GaugeHandle>,
     retained_projection_bytes: Arc<dyn GaugeHandle>,
     publishes: LabeledCounters<PublishOutcome>,
@@ -1215,16 +1194,6 @@ impl PublisherInstruments {
                 "Publishes that reread the WAL tail from the store instead of using a retained projection",
                 &[],
             ),
-            idle_sessions_closed: recorder.register_counter(
-                "loonfs.publisher.idle_sessions_closed",
-                "Idle writer sessions closed to make room for another namespace",
-                &[],
-            ),
-            session_refusals: recorder.register_counter(
-                "loonfs.publisher.session_refusals",
-                "Writer sessions refused because the session limit was reached",
-                &[],
-            ),
             batch_size: recorder.register_histogram(
                 "loonfs.publisher.batch_size",
                 "Candidates in one published batch",
@@ -1241,12 +1210,7 @@ impl PublisherInstruments {
             ),
             sessions_open: recorder.register_gauge(
                 "loonfs.publisher.sessions_open",
-                "Open namespace writer sessions",
-                &[],
-            ),
-            sessions_closing: recorder.register_gauge(
-                "loonfs.publisher.sessions_closing",
-                "Namespace writer sessions draining a close",
+                "Namespace writer sessions that a handle holds or whose admitted work is still running",
                 &[],
             ),
             // Totals, not samples: these are what the writer holds across

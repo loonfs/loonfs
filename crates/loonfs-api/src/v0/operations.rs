@@ -81,10 +81,6 @@ pub struct ErrorDetails {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub active_acquired_at_ms: Option<u64>,
-    /// Maximum writer sessions admitted by the node.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "openapi", schema(nullable = false))]
-    pub max_writer_sessions: Option<usize>,
     /// Inode the failed precondition or operation targeted.
     #[serde(
         default,

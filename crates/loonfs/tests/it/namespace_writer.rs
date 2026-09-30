@@ -1,4 +1,5 @@
-//! The per-namespace writer handle: opening, sharing, closing, and epochs.
+//! The per-namespace writer handle: opening, sharing, closing, dropping,
+//! and epochs.
 
 #![allow(clippy::panic)]
 
@@ -197,13 +198,7 @@ async fn fencing_lasts_until_close_and_a_reopened_handle_takes_a_new_epoch() {
             ErrorCode::WriterFenced,
         );
     }
-    assert_eq!(
-        handle_a.session_state(),
-        NamespaceSessionState::Open {
-            fenced: true,
-            queued_commits: 0,
-        }
-    );
+    assert_eq!(handle_a.session_state(), NamespaceSessionState::Fenced);
     let report = handle_a.close().await.expect("close fenced session");
     assert!(report.fenced);
 
@@ -215,4 +210,148 @@ async fn fencing_lasts_until_close_and_a_reopened_handle_takes_a_new_epoch() {
         .await
         .expect("the reopened session acquires a new epoch");
     assert_eq!(writer_epoch(&store, &namespace_id).await, taken_over + 1);
+}
+
+#[tokio::test]
+async fn dropping_the_last_clone_ends_the_session_and_a_kept_clone_keeps_it_open() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store: SharedObjectStore =
+        Arc::new(LocalFsStore::new(temp_dir.path()).expect("create store"));
+    let writer = writer(store.clone(), "drop-ends").await;
+    let namespace_id = NamespaceId::parse("drop-ends").expect("namespace id");
+    create_namespace(&writer, &namespace_id).await;
+
+    let namespace_writer = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
+    let kept = namespace_writer.clone();
+    namespace_writer
+        .create_directory("/first", directory_options())
+        .await
+        .expect("first session publishes");
+    let first_epoch = writer_epoch(&store, &namespace_id).await;
+    drop(namespace_writer);
+
+    let shared = writer
+        .open_namespace(&namespace_id)
+        .expect("open while a clone is kept");
+    shared
+        .create_directory("/shared", directory_options())
+        .await
+        .expect("the kept session publishes");
+    assert_eq!(
+        writer_epoch(&store, &namespace_id).await,
+        first_epoch,
+        "a kept clone keeps the session and its epoch"
+    );
+
+    drop(kept);
+    drop(shared);
+    writer
+        .publisher()
+        .drain()
+        .await
+        .expect("let the dropped session's admitted work finish");
+    let reopened = writer
+        .open_namespace(&namespace_id)
+        .expect("reopen namespace");
+    assert_eq!(reopened.session_state(), NamespaceSessionState::Open);
+    reopened
+        .create_directory("/reopened", directory_options())
+        .await
+        .expect("the new session publishes");
+    assert_eq!(
+        writer_epoch(&store, &namespace_id).await,
+        first_epoch + 1,
+        "dropping the last clone ended the session"
+    );
+}
+
+#[tokio::test]
+async fn shutdown_publishes_the_commits_open_handles_queued_before_it_returns() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("shutdown-drain").expect("namespace id");
+    let blocking = Arc::new(BlockingStore::matching(
+        LocalFsStore::new(temp_dir.path()).expect("create store"),
+        data_wal_put_for(&namespace_id),
+    ));
+    let writer = writer(blocking.clone(), "shutdown-drain").await;
+    create_namespace(&writer, &namespace_id).await;
+    let namespace_writer = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
+
+    blocking.block_next();
+    let first = tokio::spawn({
+        let namespace_writer = namespace_writer.clone();
+        async move {
+            namespace_writer
+                .create_directory("/first", directory_options())
+                .await
+        }
+    });
+    blocking.wait_until_blocked().await;
+    let mut queued = Box::pin(namespace_writer.create_directory("/queued", directory_options()));
+    assert!(futures::poll!(queued.as_mut()).is_pending());
+
+    let mut shutdown = Box::pin(writer.shutdown());
+    assert!(
+        futures::poll!(shutdown.as_mut()).is_pending(),
+        "the parked publish keeps shutdown waiting"
+    );
+    blocking.release();
+    shutdown.await.expect("shut down the writer");
+
+    match futures::poll!(queued.as_mut()) {
+        std::task::Poll::Ready(result) => {
+            result.expect("the queued commit publishes");
+        }
+        std::task::Poll::Pending => panic!("shutdown returned before the queued commit published"),
+    }
+    first
+        .await
+        .expect("join the parked commit")
+        .expect("the parked commit publishes");
+}
+
+#[tokio::test]
+async fn the_runtime_holds_as_many_sessions_as_the_host_opens() {
+    // More than the 1,024 sessions the runtime once capped.
+    const NAMESPACES: usize = 1_025;
+
+    let temp_dir = tempdir().expect("tempdir");
+    let store: SharedObjectStore =
+        Arc::new(LocalFsStore::new(temp_dir.path()).expect("create store"));
+    let writer = writer(store.clone(), "no-cap").await;
+    let namespace_writers = (0..NAMESPACES)
+        .map(|index| {
+            let namespace_id =
+                NamespaceId::parse(format!("no-cap-{index:04}")).expect("namespace id");
+            writer
+                .open_namespace(&namespace_id)
+                .expect("every open succeeds")
+        })
+        .collect::<Vec<_>>();
+
+    let first = namespace_writers[0].namespace_id().clone();
+    create_namespace(&writer, &first).await;
+    namespace_writers[0]
+        .create_directory("/written", directory_options())
+        .await
+        .expect("the first session publishes");
+    let epoch = writer_epoch(&store, &first).await;
+    writer
+        .open_namespace(&first)
+        .expect("open the first namespace again")
+        .create_directory("/again", directory_options())
+        .await
+        .expect("publish through the first session");
+    assert_eq!(
+        writer_epoch(&store, &first).await,
+        epoch,
+        "the first session is still the one open"
+    );
+    assert!(namespace_writers
+        .iter()
+        .all(|namespace_writer| namespace_writer.session_state() == NamespaceSessionState::Open));
 }

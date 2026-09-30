@@ -130,10 +130,9 @@ async fn publish_same_content_files(
         .collect::<Vec<_>>();
     // Every candidate is admitted before the publisher's worker can take
     // any of them, so they coalesce into one publication.
-    let publisher = writer.publisher();
     let submissions = candidates
         .into_iter()
-        .map(|candidate| publisher.submit_candidate(namespace_id.clone(), candidate));
+        .map(|candidate| namespace_writer.commit_candidate(candidate));
     for result in futures::future::join_all(submissions).await {
         result.expect("publish batch file");
     }
