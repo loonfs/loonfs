@@ -11,7 +11,7 @@ use super::{
 use axum::extract::State;
 use axum::Json;
 use loonfs::content_tokens::{
-    mint_content_token, CompletedUploadReceipt, ContentToken, ContentTokenError,
+    mint_content_token, CompletedUploadEvidence, ContentToken, ContentTokenError,
 };
 use loonfs::publish::PreparedContent;
 use loonfs::uploads::ResolvedUploadCompletion;
@@ -75,15 +75,15 @@ impl<'a> ContentTokenVerifier<'a> {
             .map_err(ApiResponseError::for_namespace(namespace_id))
     }
 
-    fn mint_receipt(
+    fn mint_token(
         self,
-        receipt: Option<&CompletedUploadReceipt>,
+        evidence: Option<&CompletedUploadEvidence>,
         now_ms: u64,
     ) -> Result<Option<ContentToken>, ApiResponseError> {
-        let Some(receipt) = receipt else {
+        let Some(evidence) = evidence else {
             return Ok(None);
         };
-        match mint_content_token(self.secret, receipt, now_ms) {
+        match mint_content_token(self.secret, evidence, now_ms) {
             Ok(token) => Ok(Some(token)),
             Err(ContentTokenError::Expired) => Ok(None),
             Err(error) => Err(content_token_error(error)),
@@ -456,11 +456,11 @@ fn content_token_error(error: ContentTokenError) -> ApiResponseError {
 fn with_content_token(
     mut response: UploadSession,
     verifier: ContentTokenVerifier<'_>,
-    receipt: Option<&CompletedUploadReceipt>,
+    evidence: Option<&CompletedUploadEvidence>,
     now_ms: u64,
 ) -> Result<UploadSession, ApiResponseError> {
     if let UploadSessionStatus::Completed { content_token, .. } = &mut response.status {
-        *content_token = verifier.mint_receipt(receipt, now_ms)?;
+        *content_token = verifier.mint_token(evidence, now_ms)?;
     }
     Ok(response)
 }
@@ -579,7 +579,7 @@ pub(super) async fn complete_upload(
     Ok(Json(with_content_token(
         completed.response,
         ContentTokenVerifier::new(state.options.content_token_secret.expose()),
-        completed.receipt.as_ref(),
+        completed.evidence.as_ref(),
         writer.now_ms().map_err(ApiResponseError::runtime)?,
     )?))
 }
@@ -663,7 +663,7 @@ pub(super) async fn get_upload(
     Ok(Json(with_content_token(
         view.session,
         ContentTokenVerifier::new(state.options.content_token_secret.expose()),
-        view.receipt.as_ref(),
+        view.evidence.as_ref(),
         writer.now_ms().map_err(ApiResponseError::runtime)?,
     )?))
 }
@@ -722,7 +722,7 @@ mod completion_body_tests {
         r#"{"size_bytes":5,"checksum":{"algorithm":"crc64nvme","value":"0123456789abcdef"}}"#;
 
     #[tokio::test]
-    async fn completed_status_omits_the_token_when_the_receipt_expires_before_minting() {
+    async fn completed_status_omits_the_token_when_the_evidence_expires_before_minting() {
         let directory = tempfile::tempdir().expect("tempdir");
         let store =
             loonfs_objectstore::local_fs_store::LocalFsStore::new(directory.path()).expect("store");
@@ -754,17 +754,17 @@ mod completion_body_tests {
             .expect("complete");
         let loonfs::uploads::UploadSessionView {
             session: status,
-            receipt,
+            evidence,
             ..
         } = writer
             .get_upload(&namespace_id, &upload.upload_id)
             .await
             .expect("eligible status");
-        let receipt = receipt.expect("receipt eligible at status read");
+        let evidence = evidence.expect("evidence eligible at status read");
         let response = with_content_token(
             status,
             ContentTokenVerifier::new("secret"),
-            Some(&receipt),
+            Some(&evidence),
             u64::MAX,
         )
         .ok()

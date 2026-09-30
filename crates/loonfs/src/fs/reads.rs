@@ -25,15 +25,15 @@ mod tests;
 /// head, so the head test does work only for a read pinned at the live head.
 fn validate_pinned_directory_cursor(
     cursor: Option<&DirectoryPageCursor>,
-    pinned_head_seq: ChangeSeq,
+    captured_seq: ChangeSeq,
     pin_id: Option<&PinId>,
 ) -> Result<()> {
     let Some(cursor) = cursor else {
         return Ok(());
     };
-    if cursor.head_seq != pinned_head_seq {
+    if cursor.head_seq != captured_seq {
         return Err(CoreError::InvalidCursor(format!(
-            "directory cursor head `{}` does not match pinned head `{pinned_head_seq}`",
+            "directory cursor head `{}` does not match pinned head `{captured_seq}`",
             cursor.head_seq
         ))
         .into());

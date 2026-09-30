@@ -5,10 +5,10 @@
 //! object key instead of as `#[source]` chains. The server and CLI use source
 //! chains where these constraints do not apply.
 
-use crate::checkpoint::ManifestLoadError;
 use crate::commit::{CommitValidationError, WalPublishError};
 use crate::commit_engine::ContentPreparationError;
 use crate::control_object::ControlObjectLoadError;
+use crate::manifest::ManifestLoadError;
 use crate::metadata::VisiblePathError;
 use crate::storage::content::DurableContentValidationError;
 use crate::wal::{WalSegmentError, WalTailLoadError};
@@ -246,7 +246,7 @@ pub enum CoreError {
     Forbidden { inode_id: InodeId },
     /// A caller-supplied `expected_head_seq` did not match the current head.
     ///
-    /// Unlike [`WalPublishError::StaleHead`], this error reports a failed
+    /// Unlike [`WalPublishError::NumberTaken`], this error reports a failed
     /// explicit precondition. It includes both sequence numbers so the caller can
     /// decide whether to retry. Both errors use the `stale_head` code.
     #[error("expected head sequence {expected}, found {actual}")]
@@ -310,8 +310,8 @@ impl MetadataProjectionLoadError {
             Self::WalTailLoad(error) => error.code(),
             Self::WalReplay(_) => ErrorCode::NamespaceCorrupt,
             Self::ManifestLoad(error) => match error.failure_class() {
-                crate::checkpoint::ManifestLoadFailureClass::Corrupt => ErrorCode::NamespaceCorrupt,
-                crate::checkpoint::ManifestLoadFailureClass::Store => ErrorCode::ServerError,
+                crate::manifest::ManifestLoadFailureClass::Corrupt => ErrorCode::NamespaceCorrupt,
+                crate::manifest::ManifestLoadFailureClass::Store => ErrorCode::ServerError,
             },
         }
     }
@@ -484,7 +484,7 @@ impl CoreError {
                 | DurableContentValidationError::ContentChecksumMismatch { .. },
             )
             | CoreError::WalPublish(
-                WalPublishError::StaleHead | WalPublishError::PublishBudgetExceeded { .. },
+                WalPublishError::NumberTaken | WalPublishError::PublishBudgetExceeded { .. },
             )
             | CoreError::MetadataView(_)
             | CoreError::VisiblePath(_)

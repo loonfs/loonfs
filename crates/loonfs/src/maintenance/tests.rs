@@ -913,7 +913,7 @@ async fn wal_fold_finished_hints_coalesce_and_follow_ups_admit_once() {
     assert_eq!(
         metadata.runs.load(Ordering::SeqCst),
         0,
-        "a due-tail publication does not schedule a metadata flush"
+        "a due-tail publication does not schedule a metadata fold"
     );
 
     runner.handle().hint(MaintenanceHint::WalFoldFinished {

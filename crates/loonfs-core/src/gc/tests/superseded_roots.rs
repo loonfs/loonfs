@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::authorize::{Authorizer, ReadAccess};
-use crate::checkpoint::{flush_wal, reorganize_metadata_step, MetadataReorganizeOutcome};
+use crate::manifest::{compaction_step, fold_wal, CompactionStepOutcome};
 use crate::namespace::control::{load_current_manifest, raise_hint, LoadedManifest};
 use loonfs_api::MetadataFamilyGroup;
 use loonfs_objectstore::keys::metadata_segment_object_key;
@@ -14,10 +14,10 @@ async fn seed_segments<S: ObjectStore>(store: &S, namespace_id: &NamespaceId) ->
         .expect("bootstrap");
     for name in ["one", "two"] {
         write_test_file(store, namespace_id, &format!("/docs/{name}"), name, &setup).await;
-        flush_wal(store, namespace_id).await.expect("flush");
+        fold_wal(store, namespace_id).await.expect("fold");
     }
     assert!(store
-        .list_prefix(&checkpoint_prefix(namespace_id))
+        .list_prefix(&pin_prefix(namespace_id))
         .await
         .expect("list pins")
         .is_empty());
@@ -27,7 +27,7 @@ async fn seed_segments<S: ObjectStore>(store: &S, namespace_id: &NamespaceId) ->
 }
 
 async fn compact_bindings<S: ObjectStore>(store: &S, namespace_id: &NamespaceId) -> LoadedManifest {
-    let outcome = reorganize_metadata_step(
+    let outcome = compaction_step(
         store,
         namespace_id,
         loonfs_api::CompactorEpoch(0),
@@ -38,7 +38,7 @@ async fn compact_bindings<S: ObjectStore>(store: &S, namespace_id: &NamespaceId)
     .expect("compact bindings");
     assert!(matches!(
         outcome,
-        MetadataReorganizeOutcome::UnitPublished {
+        CompactionStepOutcome::UnitPublished {
             group: MetadataFamilyGroup::Bindings,
             ..
         }

@@ -199,7 +199,7 @@ async fn rejected_deletion_writes_nothing_before_folding_inline_content() {
             acquired_writer.clone(),
             &context,
             &deadline,
-            crate::checkpoint::MetadataLsmPolicy::default(),
+            crate::manifest::MetadataLsmPolicy::default(),
         )
         .await
         .expect_err("deletion rejected before folding");

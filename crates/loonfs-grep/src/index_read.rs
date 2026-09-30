@@ -18,7 +18,7 @@ use std::sync::Arc;
 /// index, and data blocks; 128 KiB covers a segment of one or two 64 KiB data
 /// blocks.
 const WHOLE_SEGMENT_LOAD_MAX_BYTES: u64 = 128 * 1024;
-// Matches the private metadata span limit in checkpoint/data_block_load.rs.
+// Matches the private metadata span limit in manifest/data_block_load.rs.
 const MAX_BULK_LOAD_BYTES: u64 = 4 * 1024 * 1024;
 
 pub(crate) fn index_segment_corrupt(

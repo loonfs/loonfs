@@ -1,6 +1,6 @@
 //! Shared cache for decoded immutable objects.
 
-use crate::checkpoint::ManifestLoadError;
+use crate::manifest::ManifestLoadError;
 use crate::recency::Recency;
 use loonfs_api::wire::sst_blocks::{DecodedDataBlock, SegmentFilter, SegmentIndexEntry};
 use std::collections::HashMap;

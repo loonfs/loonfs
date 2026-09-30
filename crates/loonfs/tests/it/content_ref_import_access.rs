@@ -128,7 +128,7 @@ async fn by_reference_reads_require_publication_in_the_reading_view() {
         .build()
         .await
         .expect("maintenance")
-        .flush_wal(&source)
+        .fold_wal(&source)
         .await
         .expect("materialize private content");
     let reader = writer.reader().as_subject(subject("stranger"));

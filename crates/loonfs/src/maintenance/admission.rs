@@ -959,7 +959,7 @@ mod tests {
         assert_eq!(
             claimed(admission.finish(&busy, concluded(MaintenanceConclusion::Progressed), NOW)),
             Some(peer.clone()),
-            "one unit per step: the peer runs before the busy key folds again"
+            "one unit per step: the peer runs before the busy key merges again"
         );
         assert_eq!(
             claimed(admission.finish(&peer, idle(), NOW)),
@@ -978,7 +978,7 @@ mod tests {
         assert_eq!(
             claimed(admission.finish(&key, concluded(MaintenanceConclusion::Progressed), NOW)),
             Some(key.clone()),
-            "a sole progressing key folds its backlog without waiting"
+            "a sole progressing key merges its backlog without waiting"
         );
         assert_eq!(claimed(admission.finish(&key, idle(), NOW)), None);
     }

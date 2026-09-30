@@ -1,7 +1,7 @@
 //! Sweep candidates against the live set loaded for this call.
 use super::families::CandidateFamily;
 use super::live_set::LiveSet;
-use super::reap::{grace_age, sweep_checkpoint_record, CheckpointSweep, GraceAge};
+use super::reap::{grace_age, sweep_pin, GraceAge, PinSweep};
 use super::uploads::{sweep_upload_session, PublicationView, UploadSessionSweep};
 use crate::context::MutationContext;
 use crate::control_update::load_upload_session_state;
@@ -40,7 +40,7 @@ impl<S: ObjectStore + ?Sized> Sweep<'_, '_, S> {
                 self.process_aged_family(family, key, |counts| &mut counts.manifests)
                     .await
             }
-            CandidateFamily::Checkpoints => self.process_checkpoint(key).await,
+            CandidateFamily::Pins => self.process_pin(key).await,
             CandidateFamily::UploadSessions => self.process_upload_session(key).await,
         }
     }
@@ -75,8 +75,8 @@ impl<S: ObjectStore + ?Sized> Sweep<'_, '_, S> {
         }
         Ok(())
     }
-    async fn process_checkpoint(&mut self, key: &str) -> Result<()> {
-        let decision = sweep_checkpoint_record(
+    async fn process_pin(&mut self, key: &str) -> Result<()> {
+        let decision = sweep_pin(
             self.store,
             key,
             self.grace_window_ms,
@@ -85,13 +85,11 @@ impl<S: ObjectStore + ?Sized> Sweep<'_, '_, S> {
         )
         .await?;
         let count = match decision {
-            CheckpointSweep::DeleteFork => &mut self.report.deleted_checkpoints_by_owner.fork,
-            CheckpointSweep::DeleteUser => &mut self.report.deleted_checkpoints_by_owner.user,
-            CheckpointSweep::DeleteSnapshot => {
-                &mut self.report.deleted_checkpoints_by_owner.snapshot
-            }
-            CheckpointSweep::Gone => return Ok(()),
-            CheckpointSweep::Retain { reclaimable_at_ms } => {
+            PinSweep::DeleteFork => &mut self.report.deleted_checkpoints_by_owner.fork,
+            PinSweep::DeleteUser => &mut self.report.deleted_checkpoints_by_owner.user,
+            PinSweep::DeleteSnapshot => &mut self.report.deleted_checkpoints_by_owner.snapshot,
+            PinSweep::Gone => return Ok(()),
+            PinSweep::Retain { reclaimable_at_ms } => {
                 self.report.retain(RetainedReason::CheckpointNotDeletable);
                 self.note_reclamation_deadline(reclaimable_at_ms);
                 return Ok(());

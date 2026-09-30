@@ -154,7 +154,7 @@ async fn fences_fold_and_are_reclaimed_at_the_folded_boundary() {
     acquire_writer_epoch(&store, &namespace_id, &setup)
         .await
         .expect("first fence");
-    crate::checkpoint::flush_wal(&store, &namespace_id)
+    crate::manifest::fold_wal(&store, &namespace_id)
         .await
         .expect("fold fence");
     acquire_writer_epoch(&store, &namespace_id, &setup)
@@ -189,10 +189,10 @@ async fn fences_fold_and_are_reclaimed_at_the_folded_boundary() {
 }
 
 #[tokio::test]
-async fn a_same_sequence_writer_acquisition_does_not_cover_a_fence_flush() {
+async fn a_same_sequence_writer_acquisition_does_not_cover_a_fence_fold() {
     use loonfs_test_support::stores::{BlockingStore, OperationClass};
     let directory = tempfile::tempdir().expect("directory");
-    let namespace_id = NamespaceId::parse("flush-race").expect("namespace");
+    let namespace_id = NamespaceId::parse("fold-race").expect("namespace");
     let store = BlockingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::exact(loonfs_objectstore::keys::metadata_manifest_object(
@@ -207,15 +207,15 @@ async fn a_same_sequence_writer_acquisition_does_not_cover_a_fence_flush() {
         .await
         .expect("first fence");
     store.block_next();
-    let (flushed, acquired) =
-        futures::join!(crate::checkpoint::flush_wal(&store, &namespace_id), async {
+    let (folded, acquired) =
+        futures::join!(crate::manifest::fold_wal(&store, &namespace_id), async {
             store.wait_until_blocked().await;
             let acquired = acquire_writer_epoch(store.inner(), &namespace_id, &setup).await;
             store.release();
             acquired
         });
     acquired.expect("second fence");
-    flushed.expect("flush retries");
+    folded.expect("fold retries");
     let current = load_current_manifest(&store, &namespace_id)
         .await
         .expect("manifest");
@@ -242,9 +242,9 @@ async fn an_acquisition_held_past_the_revalidation_bound_reloads_before_fencing(
     let (acquired, ()) = futures::join!(
         acquire_writer(&store, &namespace_id, &setup, timer.clone()),
         async {
-            // The claim has landed and its hint raise is held. Meanwhile a flush
-            // folds the first fence, a compactor claim supersedes the flush, and
-            // collection removes the flushed manifest and the folded fence.
+            // The claim has landed and its hint raise is held. Meanwhile a fold
+            // folds the first fence, a compactor claim supersedes the fold, and
+            // collection removes the folded manifest and the folded fence.
             store.wait_until_blocked().await;
             let claim = load_current_manifest(store.inner(), &namespace_id)
                 .await
@@ -252,10 +252,10 @@ async fn an_acquisition_held_past_the_revalidation_bound_reloads_before_fencing(
                 .state
                 .manifest()
                 .manifest_no;
-            crate::checkpoint::flush_wal(store.inner(), &namespace_id)
+            crate::manifest::fold_wal(store.inner(), &namespace_id)
                 .await
-                .expect("flush");
-            crate::checkpoint::claim_compactor(store.inner(), &namespace_id)
+                .expect("fold");
+            crate::manifest::claim_compactor(store.inner(), &namespace_id)
                 .await
                 .expect("compactor claim");
             for key in [
@@ -635,7 +635,7 @@ async fn a_bounded_tail_load_names_the_missing_segment() {
 }
 
 #[tokio::test]
-async fn a_flush_and_collection_during_tip_discovery_cannot_reuse_a_wal_number() {
+async fn a_fold_and_collection_during_tip_discovery_cannot_reuse_a_wal_number() {
     use loonfs_test_support::stores::MetadataMapStore;
     let directory = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("tip-gc").expect("namespace");
@@ -672,10 +672,10 @@ async fn a_flush_and_collection_during_tip_discovery_cannot_reuse_a_wal_number()
     store.block_next();
     let (published, ()) = futures::join!(publish(&mut engine, &store, "after-gc"), async {
         store.wait_until_blocked().await;
-        crate::checkpoint::flush_wal(store.inner(), &namespace_id)
+        crate::manifest::fold_wal(store.inner(), &namespace_id)
             .await
             .expect("fold old WAL");
-        crate::checkpoint::advance_retention_floor(store.inner(), &namespace_id)
+        crate::manifest::advance_retention_floor(store.inner(), &namespace_id)
             .await
             .expect("advance floor");
         let aged = MutationContext {
@@ -938,11 +938,11 @@ async fn a_writer_resuming_after_its_fence_was_collected_does_not_acknowledge_it
             .expect("decode fence");
             assert_eq!(fence.payload().writer_epoch, WriterEpoch(2));
             assert!(fence.payload().records.is_empty());
-            crate::checkpoint::flush_wal_with_deadline(
+            crate::manifest::fold_wal_with_deadline(
                 blocked.inner(),
                 &namespace_id,
                 &Deadline::start(timer_b.clone()),
-                crate::checkpoint::MetadataLsmPolicy::default(),
+                crate::manifest::MetadataLsmPolicy::default(),
             )
             .await
             .expect("fold takeover and commit");

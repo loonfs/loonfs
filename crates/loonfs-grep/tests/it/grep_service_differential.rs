@@ -262,7 +262,7 @@ async fn planless_scan_returns_exact_materialized_and_wal_boundary_revisions_onc
             },
         )
         .await
-        .expect("flush materialized commit");
+        .expect("fold materialized commit");
     let materialized_manifest =
         control::metadata_manifest(&fixture.store, &fixture.namespace_id).await;
     assert_eq!(
@@ -342,7 +342,7 @@ async fn planless_scan_deduplicates_an_inode_revised_across_materialization() {
             },
         )
         .await
-        .expect("flush materialized revision");
+        .expect("fold materialized revision");
     fixture
         .writer
         .put_file_bytes(

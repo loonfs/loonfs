@@ -13,7 +13,7 @@
 | **WAL segment** | A numbered immutable object containing contiguous commits, or no commits when fencing a writer. |
 | **Fence** | A zero-record WAL object used to establish a writer epoch in WAL order without creating a logical commit. |
 | **Content publication** | Permanent metadata evidence that a content ID was committed; collection uses it to decide completed-upload cleanup. |
-| **Flush / WAL fold** | Materializing committed WAL into metadata segments and publishing a manifest so later readers replay less history. |
+| **Fold** | Materializing committed WAL into metadata segments and publishing a manifest so later readers replay less history. The CLI command `loonfs maintenance flush` runs a fold, and the maintenance response reports it in `wal_flush`. |
 | **Inode** | The identity and creation metadata of a filesystem item. Its ID remains unchanged when the item is renamed or moved within a namespace. |
 | **Directory binding / direntry** | A parent inode, name, and child inode association that places an item in the tree. |
 | **Binding version** | The sequence and delta position of a particular bind. The API represents this pair as an opaque token. |
@@ -23,7 +23,7 @@
 | **Revision** | One committed content state of a file, ordered by a revision number scoped to that inode. |
 | **Content object** | The complete bytes of one piece of file content, stored immutably under `namespaces/{owner_namespace_id}/content/{content_id}`. |
 | **Content reference** | A `blob_v1` record containing the original owner namespace, content ID, complete size, and checksum. It identifies content; it does not prove that the content object exists yet. |
-| **Inline content** | File bytes carried in the WAL commit that references them. A flush writes them to a content object before the WAL object can be collected ([format section 1.5](format.md#15-file-contents-and-ownership)). |
+| **Inline content** | File bytes carried in the WAL commit that references them. A fold writes them to a content object before the WAL object can be collected ([format section 1.5](format.md#15-file-contents-and-ownership)). |
 | **Upload session** | A durable record for one upload, with a fixed identity and mode and an open, completed, or aborted status. Completion alone does not commit a file. |
 | **Admission evidence** | The in-process proof or the signed content token that admits an externally supplied content reference to publication ([format section 5.5](format.md#55-admission-proofs)). It is bound to the namespace and the complete reference. It is valid while the clock reads before its expiry. |
 | **Metadata segment** | An immutable, sorted set of rows in one metadata family, stored in independently readable blocks. |

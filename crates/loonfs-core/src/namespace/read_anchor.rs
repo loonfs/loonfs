@@ -1,8 +1,8 @@
 //! Loads a manifest and rechecks its successor around WAL tip discovery.
 
-use crate::checkpoint::{metadata_basis_from_manifest, MetadataSegmentCache};
 use crate::control_object::ControlObjectLoadError;
 use crate::error::{CoreError, Result as CoreResult};
+use crate::manifest::{metadata_basis_from_manifest, MetadataSegmentCache};
 use crate::namespace::basis::MetadataBasis;
 use crate::namespace::control::{load_current_manifest_with_hint, LoadedHint, LoadedManifest};
 use crate::namespace::state::NamespaceReadState;

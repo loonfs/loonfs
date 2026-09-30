@@ -60,7 +60,7 @@ async fn publish_after_retry_delay(remaining_ms: u64, apply_then_fail: bool) -> 
     let issued = loonfs_core::time::current_time_ms().expect("wall time");
     let token = loonfs_core::content::mint_content_token(
         "secret",
-        completed.receipt.as_ref().expect("receipt"),
+        completed.evidence.as_ref().expect("evidence"),
         issued,
     )
     .expect("token");

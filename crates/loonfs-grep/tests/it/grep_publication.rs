@@ -107,7 +107,7 @@ async fn a_collected_publication_does_not_abandon_a_successors_backfill_checkpoi
     };
     let (outcome, checkpoint_id) = tokio::join!(enable, advance);
     assert!(
-        control::checkpoint_record(&base, &namespace_id, &checkpoint_id)
+        control::pin(&base, &namespace_id, &checkpoint_id)
             .await
             .is_some(),
         "uncertain publication cleanup must preserve the successor's checkpoint"

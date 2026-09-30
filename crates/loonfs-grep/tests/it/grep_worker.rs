@@ -27,7 +27,7 @@ use loonfs_grep::{
     GramIndexBuildPolicy, GrepBuildOutcome, GrepError, GrepReorganizeOutcome, GrepService,
     GrepWorker, GREP_GC_GRACE_WINDOW_MS,
 };
-use loonfs_objectstore::keys::checkpoint_record;
+use loonfs_objectstore::keys::pin;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{ObjectStore, PutMode};
 use loonfs_test_support::ids::nonzero_usize;
@@ -110,7 +110,7 @@ async fn new_query_page(
     .await
 }
 
-async fn flush_wal_and_advance_retention(
+async fn fold_wal_and_advance_retention(
     maintenance: &FsMaintenance,
     namespace_id: &NamespaceId,
 ) -> ChangeSeq {
@@ -123,7 +123,7 @@ async fn flush_wal_and_advance_retention(
             },
         )
         .await
-        .expect("flush wal");
+        .expect("fold wal");
     maintenance
         .advance_retention_floor(namespace_id)
         .await
@@ -339,11 +339,9 @@ async fn grep_worker_lifecycle_uses_and_releases_checkpointed_backfill() {
     assert_eq!(error.code(), ErrorCode::NotSupported);
 
     drive_worker_to_current(&worker, &namespace_id, policy).await;
-    assert!(
-        control::checkpoint_record(&store, &namespace_id, &checkpoint_id)
-            .await
-            .is_none()
-    );
+    assert!(control::pin(&store, &namespace_id, &checkpoint_id)
+        .await
+        .is_none());
     let response = new_query(&store, &namespace_id, &request("needle"))
         .await
         .expect("materialized query");
@@ -778,7 +776,7 @@ async fn retention_gap_and_vanished_checkpoint_restart_fresh_backfill() {
         )
         .await
         .expect("write after watermark");
-    let retention_floor_seq = flush_wal_and_advance_retention(&maintenance, &namespace_id).await;
+    let retention_floor_seq = fold_wal_and_advance_retention(&maintenance, &namespace_id).await;
     assert!(retention_floor_seq > ChangeSeq(0));
 
     // The feed can no longer reach the watermark, which the worker must
@@ -905,7 +903,7 @@ async fn retention_passing_a_backfill_checkpoint_never_serves_a_partial_query() 
         )
         .await
         .expect("write during backfill");
-    let retention_floor_seq = flush_wal_and_advance_retention(&maintenance, &namespace_id).await;
+    let retention_floor_seq = fold_wal_and_advance_retention(&maintenance, &namespace_id).await;
     assert!(retention_floor_seq > captured_seq);
 
     // Checkpoint pages remain readable after retention passes their basis,
@@ -987,8 +985,8 @@ async fn an_expired_backfill_pin_keeps_enumerating_until_deleted() {
     let checkpoint_id = assert_fresh_backfill_attempt(&store, &namespace_id).await;
 
     // Age the pin out from under the backfill without releasing it.
-    let key = checkpoint_record(&namespace_id, &checkpoint_id);
-    let mut record = control::checkpoint_record(&store, &namespace_id, &checkpoint_id)
+    let key = pin(&namespace_id, &checkpoint_id);
+    let mut record = control::pin(&store, &namespace_id, &checkpoint_id)
         .await
         .expect("backfill pin");
     assert!(
@@ -1015,11 +1013,9 @@ async fn an_expired_backfill_pin_keeps_enumerating_until_deleted() {
         .expect("write the expired record");
 
     drive_worker_to_current(&worker, &namespace_id, GramIndexBuildPolicy::default()).await;
-    assert!(
-        control::checkpoint_record(&store, &namespace_id, &checkpoint_id)
-            .await
-            .is_none()
-    );
+    assert!(control::pin(&store, &namespace_id, &checkpoint_id)
+        .await
+        .is_none());
     let response = new_query(&store, &namespace_id, &request("needle"))
         .await
         .expect("query after a backfill on an expired pin");
@@ -1057,11 +1053,9 @@ async fn assert_fresh_backfill_attempt(
         manifest.manifest_state().segments().is_empty(),
         "a rebootstrap discards the incomplete projection"
     );
-    assert!(
-        control::checkpoint_record(store, namespace_id, checkpoint_id)
-            .await
-            .is_some()
-    );
+    assert!(control::pin(store, namespace_id, checkpoint_id)
+        .await
+        .is_some());
     checkpoint_id.clone()
 }
 

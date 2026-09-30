@@ -7,7 +7,7 @@ pub use crate::storage::content::{
     prepare_existing_content_ref, prepare_stored_content, store_bytes_as_content, StoredContent,
 };
 pub use crate::storage::content_admission::{
-    mint_content_token, verify_content_token, CompletedUploadReceipt, ContentTokenError,
+    mint_content_token, verify_content_token, CompletedUploadEvidence, ContentTokenError,
     PreparedContent,
 };
 pub use crate::storage::content_location::ContentLocation;

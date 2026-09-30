@@ -29,7 +29,7 @@ use crate::storage::content::{
     identify_streamed_payload, stage_bytes_under_content_id, stage_streamed_under_content_id,
     verify_durable_content_checksum, DurableContentValidationError, StreamedPayloadKind,
 };
-use crate::storage::content_admission::{CompletedUploadReceipt, PreparedContent};
+use crate::storage::content_admission::{CompletedUploadEvidence, PreparedContent};
 use bytes::Bytes;
 use loonfs_api::options::DirectMultipartUploadOptions;
 use loonfs_api::v0::{
@@ -1258,8 +1258,8 @@ impl AbandonedUpload {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UploadSessionView {
     pub session: UploadSession,
-    /// Fresh receipt for a completed session inside its minting window.
-    pub receipt: Option<CompletedUploadReceipt>,
+    /// Fresh evidence for a completed session inside its minting window.
+    pub evidence: Option<CompletedUploadEvidence>,
     /// Object key of an open `direct_put` session, for the server to presign.
     pub direct_put_object_key: Option<String>,
 }
@@ -1275,11 +1275,11 @@ pub(crate) async fn get_upload_status<S: ObjectStore + ?Sized>(
     authorize_upload_subject(namespace_id, catalog.access(), subject)?;
     let loaded = load_upload_session_state(store, namespace_id, upload_id).await?;
     ensure_session_subject(&loaded, subject)?;
-    let receipt = match &loaded.status {
+    let evidence = match &loaded.status {
         UploadSessionRecordStatus::Completed {
             completed_at_ms,
             content_ref,
-        } => receipt_within_window(content_ref, *completed_at_ms, now_ms),
+        } => evidence_within_window(content_ref, *completed_at_ms, now_ms),
         UploadSessionRecordStatus::Open { .. } | UploadSessionRecordStatus::Aborted { .. } => None,
     };
     let direct_put_object_key = if matches!(loaded.status, UploadSessionRecordStatus::Open { .. })
@@ -1291,7 +1291,7 @@ pub(crate) async fn get_upload_status<S: ObjectStore + ?Sized>(
     };
     Ok(UploadSessionView {
         session: session_response(&loaded),
-        receipt,
+        evidence,
         direct_put_object_key,
     })
 }
@@ -1332,7 +1332,7 @@ fn session_response(state: &UploadSessionPayload) -> UploadSession {
 }
 
 /// What a completed upload hands back: the wire response, the in-process
-/// admission a same-process publication uses, and the receipt a remote one
+/// admission a same-process publication uses, and the evidence a remote one
 /// carries back.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompletedUpload {
@@ -1341,9 +1341,9 @@ pub struct CompletedUpload {
     /// Admission for a publication in this process, which needs no token but
     /// expires at the completed session's final admission horizon.
     pub prepared: PreparedContent,
-    /// Receipt for a publication elsewhere, or `None` once the session has
-    /// stopped minting them.
-    pub receipt: Option<CompletedUploadReceipt>,
+    /// Evidence for a publication elsewhere, or `None` once the session has
+    /// stopped minting it.
+    pub evidence: Option<CompletedUploadEvidence>,
 }
 
 fn completed_upload(
@@ -1366,7 +1366,7 @@ fn completed_upload(
             completed_at_ms.saturating_add(COMPLETED_UPLOAD_ADMISSION_WINDOW_MS),
             Some(upload_id.clone()),
         ),
-        receipt: receipt_within_window(content_ref, completed_at_ms, now_ms),
+        evidence: evidence_within_window(content_ref, completed_at_ms, now_ms),
     }
 }
 
@@ -1378,19 +1378,19 @@ fn completed_status(content_ref: &ContentRef, completed_at_ms: u64) -> UploadSes
     }
 }
 
-/// Mints a receipt only while the completed session is still inside its
+/// Mints evidence only while the completed session is still inside its
 /// receipt window.
 ///
 /// The window is what makes content reclamation decidable: past it no new
-/// receipt exists, so no new metadata reference to this content can appear
+/// evidence exists, so no new metadata reference to this content can appear
 /// (`limits::CONTENT_RECLAMATION_GRACE_MS`).
-fn receipt_within_window(
+fn evidence_within_window(
     content_ref: &ContentRef,
     completed_at_ms: u64,
     now_ms: u64,
-) -> Option<CompletedUploadReceipt> {
+) -> Option<CompletedUploadEvidence> {
     (now_ms.saturating_sub(completed_at_ms) < COMPLETED_UPLOAD_RECEIPT_WINDOW_MS).then(|| {
-        CompletedUploadReceipt::for_completed_session(content_ref.clone(), completed_at_ms)
+        CompletedUploadEvidence::for_completed_session(content_ref.clone(), completed_at_ms)
     })
 }
 
@@ -2537,7 +2537,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn only_a_completed_session_mints_a_receipt() {
+    async fn only_a_completed_session_mints_evidence() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let setup = context(1_000);
@@ -2546,20 +2546,20 @@ mod tests {
 
         let crate::UploadSessionView {
             session: open,
-            receipt,
+            evidence,
             ..
         } = get_upload_status(&store, &namespace_id, &upload_id, None, 1_500)
             .await
             .expect("status of an open session");
         assert!(matches!(open.status, UploadSessionStatus::Open { .. }));
-        assert!(receipt.is_none(), "an open session attests nothing");
+        assert!(evidence.is_none(), "an open session attests nothing");
 
         complete(&store, &namespace_id, &upload_id, &context(2_000))
             .await
             .expect("complete");
         let crate::UploadSessionView {
             session: completed,
-            receipt,
+            evidence,
             ..
         } = get_upload_status(&store, &namespace_id, &upload_id, None, 2_500)
             .await
@@ -2569,7 +2569,7 @@ mod tests {
             UploadSessionStatus::Completed { .. }
         ));
         assert_eq!(
-            receipt.expect("a completed session mints").content_ref(),
+            evidence.expect("a completed session mints").content_ref(),
             &content_ref
         );
 
@@ -2582,7 +2582,7 @@ mod tests {
             .expect("abort");
         let crate::UploadSessionView {
             session: aborted,
-            receipt,
+            evidence,
             ..
         } = get_upload_status(&store, &namespace_id, &begin.upload_id, None, 3_500)
             .await
@@ -2591,7 +2591,7 @@ mod tests {
             aborted.status,
             UploadSessionStatus::Aborted { .. }
         ));
-        assert!(receipt.is_none(), "an aborted session attests nothing");
+        assert!(evidence.is_none(), "an aborted session attests nothing");
     }
 
     #[tokio::test]
@@ -2606,22 +2606,22 @@ mod tests {
             .await
             .expect("complete");
 
-        // Long after the first receipt would have expired, the durable
-        // session still answers with a usable one.
+        // Long after the first evidence would have expired, the durable
+        // session still answers with usable evidence.
         let much_later = completed_at_ms + COMPLETED_UPLOAD_RECEIPT_WINDOW_MS - 1;
         let crate::UploadSessionView {
             session: _,
-            receipt,
+            evidence,
             ..
         } = get_upload_status(&store, &namespace_id, &upload_id, None, much_later)
             .await
             .expect("status inside the receipt window");
-        assert_eq!(receipt.expect("still minting").content_ref(), &content_ref);
+        assert_eq!(evidence.expect("still minting").content_ref(), &content_ref);
 
         let past = completed_at_ms + COMPLETED_UPLOAD_RECEIPT_WINDOW_MS;
         let crate::UploadSessionView {
             session: status,
-            receipt,
+            evidence,
             ..
         } = get_upload_status(&store, &namespace_id, &upload_id, None, past)
             .await
@@ -2636,8 +2636,8 @@ mod tests {
         };
         assert_eq!(completed, Some((content_ref.clone(), None)));
         assert!(
-            receipt.is_none(),
-            "past the window no receipt exists, which is what lets content GC decide"
+            evidence.is_none(),
+            "past the window no evidence exists, which is what lets content GC decide"
         );
 
         // The same rule governs a very late idempotent completion replay.
@@ -2646,7 +2646,7 @@ mod tests {
             .expect("replay still succeeds");
         assert_eq!(replay.response.content_ref(), Some(&content_ref));
         assert!(replay.response.content_token().is_none());
-        assert!(replay.receipt.is_none());
+        assert!(replay.evidence.is_none());
     }
     async fn delete_upload_namespace<S: ObjectStore>(store: &S, namespace_id: &NamespaceId) {
         crate::commit_engine::delete_namespace(
@@ -2734,7 +2734,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn deleted_namespace_refuses_upload_status_receipts() {
+    async fn deleted_namespace_refuses_upload_status_evidence() {
         let directory = tempdir().expect("tempdir");
         let inner = LocalFsStore::new(directory.path()).expect("store");
         let (namespace_id, upload_id, _, _) = staged_session(&inner, &context(1_000)).await;

@@ -1,0 +1,2493 @@
+//! Checkpoint retention, compaction, and publication budgets.
+
+use super::*;
+use crate::time::Deadline;
+use loonfs_objectstore::keys::{pin_prefix, wal_segment_prefix};
+
+async fn current_manifest_no<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+) -> ManifestNo {
+    load_current_manifest(store, namespace_id)
+        .await
+        .expect("read metadata manifest")
+        .state
+        .manifest()
+        .manifest_no
+}
+
+fn run_segment_object_keys(manifest: &NamespaceManifestEnvelope) -> Vec<String> {
+    runs_newest_first(manifest.payload())
+        .into_iter()
+        .flat_map(|run| {
+            run.segments.into_iter().flat_map(|family_segments| {
+                family_segments
+                    .segments
+                    .into_iter()
+                    .map(|descriptor| metadata_segment_object_key(&descriptor))
+            })
+        })
+        .collect()
+}
+
+// Independent uploads have different content ids and commit fingerprints.
+fn metadata_states_equivalent_ignoring_content_identity(
+    left: &MetadataState,
+    right: &MetadataState,
+) -> bool {
+    let normalize = |state: &MetadataState| {
+        MANIFEST_ROW_FAMILIES
+            .into_iter()
+            .map(|family| {
+                let mut rows = manifest_rows_for_family(state, family)
+                    .into_iter()
+                    .map(|row| match row {
+                        MetadataRow::FileRevision(crate::metadata::RevisionRecord {
+                            inode_id,
+                            revision_no,
+                            committed_seq,
+                            commit_id,
+                            committed_at_ms,
+                            committed_by,
+                            delta_index,
+                            content_ref,
+                        }) => MetadataRow::FileRevision(crate::metadata::RevisionRecord {
+                            inode_id,
+                            revision_no,
+                            committed_seq,
+                            commit_id,
+                            committed_at_ms,
+                            committed_by,
+                            delta_index,
+                            content_ref: loonfs_api::ContentRef {
+                                content_id: loonfs_api::ContentId::parse(
+                                    "con_00000000000000000000000000000000",
+                                )
+                                .expect("placeholder content id"),
+                                ..content_ref
+                            },
+                        }),
+                        MetadataRow::Commit(mut record) => {
+                            record.semantic_commit_fingerprint =
+                                serde_json::from_str(r#""<normalized>""#).expect("fingerprint");
+                            for delta in &mut record.deltas {
+                                if let loonfs_api::wire::wal::WalDelta::AppendFileRevision {
+                                    content_ref,
+                                    ..
+                                } = &mut delta.delta
+                                {
+                                    content_ref.content_id = loonfs_api::ContentId::parse(
+                                        "con_00000000000000000000000000000000",
+                                    )
+                                    .expect("placeholder content id");
+                                }
+                            }
+                            MetadataRow::Commit(record)
+                        }
+                        MetadataRow::ContentPublication(mut record) => {
+                            record.content_id = loonfs_api::ContentId::parse(
+                                "con_00000000000000000000000000000000",
+                            )
+                            .expect("placeholder content id");
+                            MetadataRow::ContentPublication(record)
+                        }
+                        other => other,
+                    })
+                    .collect::<Vec<_>>();
+                rows.sort_by_cached_key(|row| row.row_key_for_family(family));
+                (family, rows)
+            })
+            .collect::<Vec<_>>()
+    };
+    normalize(left) == normalize(right)
+}
+
+fn assert_manifest_rows_have_unique_keys(metadata_state: &MetadataState) {
+    for family in MANIFEST_ROW_FAMILIES {
+        let rows = manifest_rows_for_family(metadata_state, family);
+        let mut seen = BTreeSet::new();
+        for row in rows {
+            let row_key = row.row_key_for_family(family);
+            assert!(
+                seen.insert(row_key.clone()),
+                "duplicate metadata row key `{row_key}` in {family:?}"
+            );
+        }
+    }
+}
+
+type FamilyRunShape = (ApiMetadataRowFamily, u64, usize);
+type ManifestRunShape = (ChangeSeq, RunTier, Vec<FamilyRunShape>);
+
+fn manifest_run_shape(manifest: &NamespaceManifestEnvelope) -> Vec<ManifestRunShape> {
+    runs_newest_first(manifest.payload())
+        .into_iter()
+        .map(|run| {
+            let segments = run
+                .segments
+                .into_iter()
+                .map(|family_segments| {
+                    let row_count = family_segments
+                        .segments
+                        .iter()
+                        .map(|descriptor| descriptor.row_count)
+                        .sum();
+                    (
+                        family_segments.family,
+                        row_count,
+                        family_segments.segments.len(),
+                    )
+                })
+                .collect();
+            (run.run_seq, run.tier, segments)
+        })
+        .collect()
+}
+
+/// Deterministic timer advancing a fixed step per reading, so publication
+/// budgets are consumed by observations instead of wall time.
+#[derive(Debug)]
+struct SteppingTimer {
+    now_ms: std::sync::atomic::AtomicU64,
+    step_ms: u64,
+}
+
+impl SteppingTimer {
+    fn new(step_ms: u64) -> Self {
+        Self {
+            now_ms: std::sync::atomic::AtomicU64::new(0),
+            step_ms,
+        }
+    }
+}
+
+impl crate::time::MonotonicTimer for SteppingTimer {
+    fn monotonic_now_ms(&self) -> u64 {
+        self.now_ms
+            .fetch_add(self.step_ms, std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[tokio::test]
+async fn retention_advancement_uses_published_manifest_and_updates_floor_only() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store =
+        RecordingStore::metadata_segments(LocalFsStore::new(temp_dir.path()).expect("store"));
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context)
+        .await
+        .expect("bootstrap");
+
+    store.reset();
+    let unchanged = advance_retention_floor(&store, &namespace_id)
+        .await
+        .expect("initial manifest already covers floor zero");
+    assert_eq!(unchanged.retention_floor_seq, ChangeSeq(0));
+    assert_eq!(
+        store.count(OperationClass::Read),
+        0,
+        "retention should validate manifest descriptors without loading metadata segment payloads"
+    );
+
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/hello.txt",
+        b"hello\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write hello");
+    create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("create checkpoint");
+    let manifest = load_current_manifest(&store, &namespace_id)
+        .await
+        .expect("load metadata manifest")
+        .state;
+    let referenced_segment_count = load_manifest_segments_for_inspection(
+        &store,
+        None,
+        &namespace_id,
+        &manifest.manifest().manifest_no,
+    )
+    .await
+    .expect("load current manifest")
+    .manifest()
+    .payload()
+    .runs
+    .iter()
+    .flat_map(|run| &run.segments)
+    .map(metadata_segment_object_key)
+    .collect::<BTreeSet<_>>()
+    .len();
+    store.reset();
+    let advanced = advance_retention_floor(&store, &namespace_id)
+        .await
+        .expect("advance retention");
+    assert_eq!(advanced.retention_floor_seq, ChangeSeq(1));
+    assert_eq!(
+        store.count(OperationClass::Read),
+        0,
+        "retention should advance from manifest descriptors without materializing rows"
+    );
+    assert_eq!(
+        store.count(OperationClass::Head),
+        referenced_segment_count,
+        "retention should verify each distinct referenced segment"
+    );
+
+    assert_eq!(read_floor_seq(&store, &namespace_id).await, ChangeSeq(1));
+    assert_eq!(
+        store
+            .list_prefix(&format!("namespaces/{}/wal/", namespace_id.as_str()))
+            .await
+            .expect("list wal")
+            .len(),
+        3
+    );
+    assert!(store
+        .head(&current_manifest_key(&store, &namespace_id).await)
+        .await
+        .expect("manifest head")
+        .is_some());
+}
+
+#[tokio::test]
+async fn retention_floor_does_not_advance_past_a_missing_basis_segment() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context)
+        .await
+        .expect("bootstrap");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/hello.txt",
+        b"hello\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write hello");
+    create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("create checkpoint");
+
+    let manifest = load_current_manifest(&store, &namespace_id)
+        .await
+        .expect("load metadata manifest")
+        .state;
+    let segments = load_manifest_segments_for_inspection(
+        &store,
+        None,
+        &namespace_id,
+        &manifest.manifest().manifest_no,
+    )
+    .await
+    .expect("load current manifest");
+    let missing_key = segments
+        .manifest()
+        .payload()
+        .runs
+        .iter()
+        .flat_map(|run| &run.segments)
+        .next()
+        .map(metadata_segment_object_key)
+        .expect("current manifest references a segment");
+    store
+        .delete(&missing_key)
+        .await
+        .expect("delete referenced segment");
+
+    let error = advance_retention_floor(&store, &namespace_id)
+        .await
+        .expect_err("missing basis segment blocks floor advancement");
+    assert!(matches!(
+        error,
+        CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(
+            ManifestLoadError::MissingSegment { object_key }
+        )) if object_key == missing_key
+    ));
+    assert_eq!(
+        read_floor_seq(&store, &namespace_id).await,
+        ChangeSeq(0),
+        "the missing basis remains replayable from the prior floor"
+    );
+}
+
+#[tokio::test]
+async fn retention_floor_does_not_advance_when_a_basis_segment_cannot_be_checked() {
+    let temp_dir = tempdir().expect("tempdir");
+    let setup_store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&setup_store, &namespace_id, &context)
+        .await
+        .expect("bootstrap");
+    write_file_bytes(
+        &setup_store,
+        &namespace_id,
+        "/docs/hello.txt",
+        b"hello\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write hello");
+    create_checkpoint(&setup_store, &namespace_id, &context)
+        .await
+        .expect("create checkpoint");
+
+    let manifest = load_current_manifest(&setup_store, &namespace_id)
+        .await
+        .expect("load metadata manifest")
+        .state;
+    let segments = load_manifest_segments_for_inspection(
+        &setup_store,
+        None,
+        &namespace_id,
+        &manifest.manifest().manifest_no,
+    )
+    .await
+    .expect("load current manifest");
+    let selected_key = segments
+        .manifest()
+        .payload()
+        .runs
+        .iter()
+        .flat_map(|run| &run.segments)
+        .next()
+        .map(metadata_segment_object_key)
+        .expect("current manifest references a segment");
+    let failed_key = selected_key.clone();
+    let store = FailStore::matching(
+        setup_store,
+        move |operation| {
+            operation.key() == selected_key
+                && matches!(
+                    operation.kind(),
+                    loonfs_test_support::stores::OperationKind::Head
+                )
+        },
+        InjectedError::Transport("injected segment probe failure".to_owned()),
+    );
+    store.fail_next(1);
+
+    let error = advance_retention_floor(&store, &namespace_id)
+        .await
+        .expect_err("failed basis probe blocks floor advancement");
+    assert_eq!(error.code(), ErrorCode::ServerError);
+    assert!(matches!(
+        error,
+        CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(
+            ManifestLoadError::ReadSegment { object_key, .. }
+        )) if object_key == failed_key
+    ));
+    assert_eq!(store.attempts(), 1);
+    assert_eq!(
+        read_floor_seq(store.inner(), &namespace_id).await,
+        ChangeSeq(0),
+        "the failed probe leaves the prior floor in place"
+    );
+}
+
+#[tokio::test]
+async fn retention_floor_advancement_preserves_writer_identity() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context)
+        .await
+        .expect("bootstrap");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/hello.txt",
+        b"hello\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write hello");
+    create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("create checkpoint");
+    let before = load_current_projection(&store, &namespace_id)
+        .await
+        .expect("load before retention")
+        .head;
+
+    advance_retention_floor(&store, &namespace_id)
+        .await
+        .expect("advance retention");
+    let after = load_current_projection(&store, &namespace_id)
+        .await
+        .expect("load after retention")
+        .head;
+
+    assert_eq!(read_floor_seq(&store, &namespace_id).await, ChangeSeq(1));
+    assert_eq!(after, before);
+}
+
+/// Reads the files one checkpoint pins, or the error that says it no longer
+/// pins anything.
+async fn read_checkpoint_files<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    checkpoint_id: &PinId,
+) -> crate::error::Result<Vec<InodeId>> {
+    let page = crate::pin::list_checkpoint_files_page(
+        store,
+        None,
+        &crate::namespace::control::load_namespace_read_state(store, namespace_id).await?,
+        checkpoint_id,
+        loonfs_api::PageRequest {
+            cursor: None,
+            limit: EffectiveLimit::new(NonZeroU32::new(64).expect("nonzero")),
+        },
+        crate::pin::ListCheckpointFilesOptions::default(),
+    )
+    .await?;
+    Ok(page.files.into_iter().map(|file| file.inode_id).collect())
+}
+
+#[tokio::test]
+async fn deleting_a_pin_never_reuses_its_id() {
+    // A deleted pin id is never reused. A caller asking for
+    // a pin again — even at the same instant, over the same basis, under the
+    // same owner name — gets a brand new record, so the delete can never be
+    // undone by racing it.
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context)
+        .await
+        .expect("bootstrap");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/file.txt",
+        b"body\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write");
+    let first = create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("create checkpoint");
+    assert!(
+        !read_checkpoint_files(&store, &namespace_id, &first.checkpoint_id)
+            .await
+            .expect("the first pin serves")
+            .is_empty()
+    );
+
+    let delete = crate::pin::delete_checkpoint(&store, &namespace_id, &first.checkpoint_id);
+    let recreate = create_checkpoint(&store, &namespace_id, &context);
+    let (delete, second) = tokio::join!(delete, recreate);
+    assert_eq!(delete.expect("delete").checkpoint_id, first.checkpoint_id);
+    let second = second.expect("a concurrent create takes a fresh pin");
+    assert_ne!(
+        second.checkpoint_id, first.checkpoint_id,
+        "a new pin never lands on a deleted record's key"
+    );
+
+    assert!(load_pin(&store, &namespace_id, &first.checkpoint_id)
+        .await
+        .expect("load pin")
+        .is_none());
+    let error = read_checkpoint_files(&store, &namespace_id, &first.checkpoint_id)
+        .await
+        .expect_err("a deleted record serves no read");
+    assert_eq!(error.code(), ErrorCode::CheckpointNotFound);
+    assert!(
+        !read_checkpoint_files(&store, &namespace_id, &second.checkpoint_id)
+            .await
+            .expect("the new pin serves")
+            .is_empty()
+    );
+
+    assert_eq!(
+        crate::pin::delete_checkpoint(&store, &namespace_id, &first.checkpoint_id)
+            .await
+            .expect_err("second delete")
+            .code(),
+        ErrorCode::CheckpointNotFound
+    );
+}
+
+#[tokio::test]
+async fn each_create_mints_its_own_record_and_carries_its_own_expiry() {
+    // Re-creating a checkpoint is not a renewal of an earlier one. Every
+    // call is its own pin with its own id, its own creation instant, and
+    // exactly the expiry it asked for; earlier records are left alone.
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let owner = |expires_at_ms| loonfs_api::wire::control::PinOwner::User {
+        name: "test-pin".to_owned(),
+        expires_at_ms,
+    };
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context)
+        .await
+        .expect("bootstrap");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/file.txt",
+        b"body\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write");
+
+    let first = crate::pin::create_pin(&store, &namespace_id, owner(Some(10_000)), &context)
+        .await
+        .map(crate::pin::checkpoint_summary)
+        .expect("create checkpoint");
+    assert_eq!(first.expires_at_ms, Some(10_000));
+
+    let mut later_context = test_context();
+    later_context.now_ms = 2_000;
+    let mut minted = BTreeSet::from([first.checkpoint_id.clone()]);
+    for expiry in [Some(99_000), Some(5_000), None] {
+        let next = crate::pin::create_pin(&store, &namespace_id, owner(expiry), &later_context)
+            .await
+            .map(crate::pin::checkpoint_summary)
+            .expect("create checkpoint");
+        assert!(
+            minted.insert(next.checkpoint_id.clone()),
+            "each pin gets an id of its own"
+        );
+        assert_eq!(next.expires_at_ms, expiry);
+        let record = load_pin(&store, &namespace_id, &next.checkpoint_id)
+            .await
+            .expect("read pin")
+            .expect("record exists")
+            .state;
+        assert_eq!(record.owner.expires_at_ms(), expiry);
+        assert_eq!(record.created_at_ms, 2_000);
+    }
+
+    // The very first record is untouched by any of it: a pin taken without
+    // an expiry, or with one, is held until something deletes it.
+    let original = load_pin(&store, &namespace_id, &first.checkpoint_id)
+        .await
+        .expect("read pin")
+        .expect("record exists")
+        .state;
+    assert_eq!(original.created_at_ms, 1_000, "creation instant is history");
+    assert_eq!(original.owner.expires_at_ms(), Some(10_000));
+}
+
+#[tokio::test]
+async fn an_expired_pin_still_enumerates_its_files_until_deleted() {
+    // No clock reads on the checkpoint read path. Delete is the whole
+    // authority: until a pass turns the passed expiry into a delete, the
+    // record is still a garbage-collection root, so the state behind it is
+    // provably still there and serving it is safe.
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context)
+        .await
+        .expect("bootstrap");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/file.txt",
+        b"body\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write");
+    let already_expired = crate::pin::create_pin(
+        &store,
+        &namespace_id,
+        loonfs_api::wire::control::PinOwner::User {
+            name: "test-pin".to_owned(),
+            expires_at_ms: Some(context.now_ms),
+        },
+        &context,
+    )
+    .await
+    .map(crate::pin::checkpoint_summary)
+    .expect("create checkpoint whose expiry has already passed");
+    assert!(
+        load_pin(&store, &namespace_id, &already_expired.checkpoint_id)
+            .await
+            .expect("load pin")
+            .is_some()
+    );
+    assert!(
+        !read_checkpoint_files(&store, &namespace_id, &already_expired.checkpoint_id)
+            .await
+            .expect("an expired but undeleted pin still serves")
+            .is_empty()
+    );
+
+    // The pass that deletes it is what ends the reads.
+    crate::gc::gc_namespace(
+        &store,
+        &namespace_id,
+        &crate::gc::GcConfig::default(),
+        &mutation_context(
+            "expired",
+            context.now_ms + crate::gc::GcConfig::default().grace_window_ms,
+        ),
+    )
+    .await
+    .expect("gc pass");
+    let error = read_checkpoint_files(&store, &namespace_id, &already_expired.checkpoint_id)
+        .await
+        .expect_err("a deleted pin serves nothing");
+    assert_eq!(error.code(), ErrorCode::CheckpointNotFound);
+}
+
+#[tokio::test]
+async fn a_pin_without_a_ttl_is_held_until_it_is_deleted() {
+    // No expiry means no clock: the record stays a serving pin however far
+    // the wall clock moves, and only an explicit delete ends it.
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context)
+        .await
+        .expect("bootstrap");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/file.txt",
+        b"body\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write");
+    let pin = create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("create checkpoint");
+    assert_eq!(pin.expires_at_ms, None);
+
+    let mut distant = test_context();
+    distant.now_ms = u64::MAX / 2;
+    for _ in 0..3 {
+        crate::gc::gc_namespace(
+            &store,
+            &namespace_id,
+            &crate::gc::GcConfig::default(),
+            &distant,
+        )
+        .await
+        .expect("gc pass");
+    }
+    load_pin(&store, &namespace_id, &pin.checkpoint_id)
+        .await
+        .expect("read pin")
+        .expect("an unexpiring pin survives every pass");
+    assert!(
+        !read_checkpoint_files(&store, &namespace_id, &pin.checkpoint_id)
+            .await
+            .expect("the pin still serves")
+            .is_empty()
+    );
+
+    crate::pin::delete_checkpoint(&store, &namespace_id, &pin.checkpoint_id)
+        .await
+        .expect("delete");
+    let error = read_checkpoint_files(&store, &namespace_id, &pin.checkpoint_id)
+        .await
+        .expect_err("delete ends it");
+    assert_eq!(error.code(), ErrorCode::CheckpointNotFound);
+}
+
+#[tokio::test]
+async fn checkpoint_creation_deletes_its_pin_when_the_floor_passed_its_manifest() {
+    let directory = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(directory.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context)
+        .await
+        .expect("bootstrap");
+    let initial = crate::namespace::read_anchor::load_read_anchor(&store, &namespace_id)
+        .await
+        .expect("initial manifest");
+    write_file_bytes(&store, &namespace_id, "/file", b"content", &context, None)
+        .await
+        .expect("write");
+    crate::manifest::fold_wal(&store, &namespace_id)
+        .await
+        .expect("fold");
+    advance_retention_floor(&store, &namespace_id)
+        .await
+        .expect("advance floor");
+    let store = loonfs_test_support::stores::RecordingStore::new(
+        store,
+        loonfs_test_support::stores::KeyPredicate::prefix(pin_prefix(&namespace_id)),
+    );
+    let error = crate::pin::create_pin_at_basis(
+        &store,
+        &namespace_id,
+        loonfs_api::wire::control::PinOwner::User {
+            name: "old".to_owned(),
+            expires_at_ms: None,
+        },
+        initial.basis().manifest().clone(),
+        &context,
+    )
+    .await
+    .map(crate::pin::checkpoint_summary)
+    .expect_err("floor passed pin");
+    assert_eq!(error.code(), ErrorCode::CheckpointUnavailable);
+    assert!(store
+        .list_prefix(&pin_prefix(&namespace_id))
+        .await
+        .expect("pins")
+        .is_empty());
+    assert_eq!(store.counts().create_if_absent_puts, 1);
+    assert_eq!(store.counts().deletes, 1);
+}
+
+#[tokio::test]
+async fn pin_verification_rejects_a_deleted_namespace() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context)
+        .await
+        .expect("bootstrap");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/file.txt",
+        b"body\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write");
+    let checkpoint = create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("create checkpoint");
+    let record = load_pin(&store, &namespace_id, &checkpoint.checkpoint_id)
+        .await
+        .expect("load checkpoint")
+        .expect("checkpoint exists")
+        .state;
+
+    let acquired = acquire_writer_epoch(&store, &namespace_id, &context)
+        .await
+        .expect("writer");
+    crate::namespace::delete::delete_namespace(
+        &store,
+        &namespace_id,
+        Default::default(),
+        acquired,
+        &context,
+        &crate::time::Deadline::start(Arc::new(crate::time::StdMonotonicTimer::default())),
+        MetadataLsmPolicy::default(),
+    )
+    .await
+    .expect("delete");
+
+    let verified = crate::pin::record::verify_pin_basis(&store, &record)
+        .await
+        .expect("verification runs");
+    assert_eq!(
+        verified,
+        crate::pin::record::PinBasisVerification::Invalid,
+        "a tombstoned namespace cannot acquire a new checkpoint dependency"
+    );
+}
+
+#[tokio::test]
+async fn pin_basis_verification_store_failure_deletes_the_record() {
+    let directory = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(directory.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context)
+        .await
+        .expect("bootstrap");
+    let initial = crate::namespace::read_anchor::load_read_anchor(&store, &namespace_id)
+        .await
+        .expect("initial manifest");
+    let store = loonfs_test_support::stores::FailStore::new(
+        store,
+        loonfs_test_support::stores::KeyPredicate::exact(loonfs_objectstore::keys::hint(
+            &namespace_id,
+        )),
+        loonfs_test_support::stores::OperationClass::Read,
+        loonfs_test_support::stores::InjectedError::Transport("verification failed".to_owned()),
+    );
+    store.fail_next(1);
+    let error = crate::pin::create_pin_at_basis(
+        &store,
+        &namespace_id,
+        loonfs_api::wire::control::PinOwner::User {
+            name: "failed".to_owned(),
+            expires_at_ms: None,
+        },
+        initial.basis().manifest().clone(),
+        &context,
+    )
+    .await
+    .map(crate::pin::checkpoint_summary)
+    .expect_err("verification failed");
+    assert_eq!(error.code(), ErrorCode::ServerError);
+    assert!(store
+        .list_prefix(&pin_prefix(&namespace_id))
+        .await
+        .expect("pins")
+        .is_empty());
+}
+
+async fn wal_segment_count<S: ObjectStore>(store: &S, namespace_id: &NamespaceId) -> usize {
+    store
+        .list_prefix(&wal_segment_prefix(namespace_id))
+        .await
+        .expect("list wal segments")
+        .len()
+}
+
+#[tokio::test]
+async fn publish_backpressure_rejects_at_the_longest_tail_the_head_describes() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context)
+        .await
+        .expect("bootstrap");
+    let boundary = usize::try_from(crate::limits::MAX_UNFOLDED_WAL_SEGMENTS)
+        .expect("the write-stop bound fits a segment count");
+
+    let mut engine = NamespaceCommitEngine::new(namespace_id.clone());
+    let tail_options = PublishTailOptions::default();
+    for round in 0..boundary - 2 {
+        let request = CommitRequest::single(
+            CommitId::generate(),
+            loonfs_test_support::test_actor(),
+            None,
+            FilesystemOperation::CreateDirectory {
+                path: AbsolutePath::parse(format!("/file-{round}")).expect("path"),
+                parents: false,
+            },
+        );
+        engine
+            .publish_batch(
+                &store,
+                vec![CommitCandidate::new(request)],
+                &context,
+                &tail_options,
+                &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+            )
+            .await
+            .results
+            .remove(0)
+            .expect("write within backpressure window");
+    }
+    let hint_key = hint(&namespace_id);
+    let segment_prefix = wal_segment_prefix(&namespace_id);
+    let store = RecordingStore::new(
+        store,
+        KeyPredicate::new(move |key| key == hint_key || key.starts_with(&segment_prefix)),
+    );
+    let request = CommitRequest::single(
+        CommitId::parse("at-the-boundary").expect("commit id"),
+        loonfs_test_support::test_actor(),
+        None,
+        FilesystemOperation::CreateDirectory {
+            path: AbsolutePath::parse("/at-the-boundary").expect("path"),
+            parents: false,
+        },
+    );
+    let original = engine
+        .publish_batch(
+            &store,
+            vec![CommitCandidate::new(request.clone())],
+            &context,
+            &tail_options,
+            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+        )
+        .await
+        .results
+        .pop()
+        .expect("one result")
+        .expect("the publish that lands exactly at the bound is still admitted");
+    assert_eq!(wal_segment_count(&store, &namespace_id).await, boundary + 1);
+    store.reset();
+
+    let replay = engine
+        .publish_batch(
+            &store,
+            vec![CommitCandidate::new(request.clone())],
+            &context,
+            &tail_options,
+            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+        )
+        .await;
+    assert_eq!(replay.results.len(), 1);
+    assert_eq!(
+        replay.results[0].as_ref().expect("replay at the bound"),
+        &original
+    );
+    assert_eq!(
+        replay.wal_tail_segments,
+        crate::limits::MAX_UNFOLDED_WAL_SEGMENTS
+    );
+    assert_eq!(store.counts().puts, 0);
+    assert_eq!(store.counts().compare_and_swaps, 0);
+
+    let mut conflict = request.clone();
+    conflict.operations = vec![FilesystemOperation::CreateDirectory {
+        path: AbsolutePath::parse("/different").expect("path"),
+        parents: false,
+    }];
+    let mut new_request = conflict.clone();
+    new_request.commit_id = CommitId::parse("one-too-many").expect("commit id");
+    for (candidate, expected_code) in [
+        (conflict, ErrorCode::CommitIdReuseConflict),
+        (new_request.clone(), ErrorCode::MaintenanceRequired),
+    ] {
+        let result = engine
+            .publish_batch(
+                &store,
+                vec![CommitCandidate::new(candidate)],
+                &context,
+                &tail_options,
+                &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+            )
+            .await;
+        assert_eq!(result.results.len(), 1);
+        assert_eq!(
+            result.results[0]
+                .as_ref()
+                .expect_err("refused request")
+                .code(),
+            expected_code
+        );
+    }
+    let mixed = engine
+        .publish_batch(
+            &store,
+            vec![
+                CommitCandidate::new(request),
+                CommitCandidate::new(new_request.clone()),
+                CommitCandidate::new(new_request),
+            ],
+            &context,
+            &tail_options,
+            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+        )
+        .await;
+    assert_eq!(mixed.results.len(), 3);
+    assert_eq!(
+        mixed.results[0].as_ref().expect("mixed batch replay"),
+        &original
+    );
+    for result in &mixed.results[1..] {
+        assert_eq!(
+            result
+                .as_ref()
+                .expect_err("new primary and alias refused")
+                .code(),
+            ErrorCode::MaintenanceRequired
+        );
+    }
+    assert_eq!(
+        mixed.wal_tail_segments,
+        crate::limits::MAX_UNFOLDED_WAL_SEGMENTS
+    );
+    assert_eq!(
+        store.counts().puts,
+        0,
+        "no WAL put or head write at the bound"
+    );
+    assert_eq!(
+        store.counts().compare_and_swaps,
+        0,
+        "no head swap at the bound"
+    );
+
+    // Reads never gate: the change feed still serves the whole tail.
+    let view = load_current_metadata_view(&store, &namespace_id)
+        .await
+        .expect("load feed view");
+    let changes = list_changes_after(
+        &view,
+        ChangeSeq(0),
+        EffectiveLimit::new(NonZeroU32::new(200).expect("nonzero")),
+    )
+    .await
+    .expect("list changes");
+    assert_eq!(
+        changes.through_seq,
+        ChangeSeq(u64::try_from(boundary - 1).expect("data segments"))
+    );
+}
+
+#[tokio::test]
+async fn checkpoints_append_past_the_threshold_and_compaction_drains() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    let policy = MetadataLsmPolicy {
+        max_delta_runs: NonZeroUsize::new(2).expect("test run limit should be nonzero"),
+        ..MetadataLsmPolicy::default()
+    };
+    bootstrap_namespace(&store, &namespace_id, &context)
+        .await
+        .expect("bootstrap");
+
+    let rounds = DEFAULT_MAX_DELTA_RUNS + 2;
+    for index in 1..=u64::try_from(rounds).expect("round count fits") {
+        write_file_and_checkpoint(&store, &namespace_id, &context, index).await;
+    }
+
+    let appended = load_manifest_materialization_for_inspection(
+        &store,
+        &namespace_id,
+        current_manifest_no(&store, &namespace_id).await,
+    )
+    .await
+    .expect("load appended manifest");
+    assert_eq!(delta_runs(&appended.manifest).len(), rounds);
+    assert!(delta_runs(&appended.manifest).len() > DEFAULT_MAX_DELTA_RUNS);
+    assert_eq!(appended.manifest.payload().base_seq(), ChangeSeq(0));
+
+    // Compaction merges one family group per unit, each publishing its
+    // own manifest — the manifest chain is the progress record.
+    let mut units = 0usize;
+    let mut last_manifest_no = None;
+    loop {
+        let report = super::compaction_step(
+            &store,
+            &namespace_id,
+            loonfs_api::CompactorEpoch(0),
+            policy,
+            MetadataCompactionPolicy::default(),
+        )
+        .await
+        .expect("compaction step");
+        match report {
+            super::CompactionStepOutcome::UnitPublished { manifest_no, .. } => {
+                units += 1;
+                if let Some(previous) = last_manifest_no {
+                    assert!(manifest_no > previous, "units must advance the manifest");
+                }
+                last_manifest_no = Some(manifest_no);
+            }
+            super::CompactionStepOutcome::Superseded | super::CompactionStepOutcome::Fenced => {
+                panic!("no concurrent publisher exists in this test")
+            }
+            super::CompactionStepOutcome::NotNeeded { .. } => break,
+            super::CompactionStepOutcome::CompactionPlanned { .. } => {
+                panic!("test compaction budget should admit a progress-making subset")
+            }
+        }
+    }
+    assert!(
+        units >= 2,
+        "several family groups should merge, got {units}"
+    );
+
+    let drained = load_manifest_materialization_for_inspection(
+        &store,
+        &namespace_id,
+        current_manifest_no(&store, &namespace_id).await,
+    )
+    .await
+    .expect("load drained manifest");
+    let materialization_after = load_current_projection(&store, &namespace_id)
+        .await
+        .expect("materialization");
+    assert!(delta_runs(&drained.manifest).is_empty());
+    assert_eq!(
+        drained.manifest.payload().base_seq(),
+        ChangeSeq(u64::try_from(rounds).expect("round count fits"))
+    );
+    assert!(metadata_states_equivalent(
+        &materialization_after.metadata_state,
+        &drained.metadata_state
+    ));
+}
+
+#[tokio::test]
+async fn compaction_step_honors_run_row_and_decoded_byte_budgets() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store =
+        RecordingStore::metadata_segments(LocalFsStore::new(temp_dir.path()).expect("store"));
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context)
+        .await
+        .expect("bootstrap");
+    for index in 1..=5 {
+        write_file_bytes(
+            &store,
+            &namespace_id,
+            &format!("/docs/file-{index}.txt"),
+            b"body\n",
+            &context,
+            None,
+        )
+        .await
+        .expect("write file");
+        create_checkpoint(&store, &namespace_id, &context)
+            .await
+            .expect("create checkpoint");
+    }
+
+    let manifest_before = current_manifest_no(&store, &namespace_id).await;
+    let tiny_byte_policy = MetadataLsmPolicy {
+        max_delta_runs: NonZeroUsize::MIN,
+        max_input_runs_per_step: NonZeroUsize::new(2).expect("test run budget should be nonzero"),
+        max_decoded_input_bytes_per_step: NonZeroUsize::MIN,
+        ..MetadataLsmPolicy::default()
+    };
+    store.reset();
+    let blocked = super::compaction_step(
+        &store,
+        &namespace_id,
+        loonfs_api::CompactorEpoch(0),
+        tiny_byte_policy,
+        MetadataCompactionPolicy::default(),
+    )
+    .await
+    .expect("budgeted step");
+    let super::CompactionStepOutcome::CompactionPlanned { group, .. } = blocked else {
+        panic!("one byte must not admit a metadata run");
+    };
+    assert_eq!(
+        current_manifest_no(&store, &namespace_id).await,
+        manifest_before,
+        "a step that plans a compaction must not publish"
+    );
+    assert_eq!(store.count(OperationClass::Put), 0);
+    assert!(
+        store.count(OperationClass::Read) <= group.families().len(),
+        "byte preflight should read only the oldest candidate's index sections"
+    );
+
+    let policy = MetadataLsmPolicy {
+        max_delta_runs: NonZeroUsize::MIN,
+        max_input_runs_per_step: NonZeroUsize::new(2).expect("test run budget should be nonzero"),
+        max_decoded_input_rows_per_step: NonZeroUsize::new(6)
+            .expect("test row budget should be nonzero"),
+        ..MetadataLsmPolicy::default()
+    };
+    store.reset();
+    let published = super::compaction_step(
+        &store,
+        &namespace_id,
+        loonfs_api::CompactorEpoch(0),
+        policy,
+        MetadataCompactionPolicy::default(),
+    )
+    .await
+    .expect("bounded step");
+    let super::CompactionStepOutcome::UnitPublished {
+        group,
+        input_runs,
+        decoded_input_rows,
+        decoded_input_bytes,
+        ..
+    } = published
+    else {
+        panic!("two oldest runs should fit the test budgets");
+    };
+    assert_eq!(input_runs, 2);
+    assert!(input_runs <= policy.max_input_runs_per_step.get());
+    assert!(decoded_input_rows <= policy.max_decoded_input_rows_per_step.get() as u64);
+    assert!(decoded_input_bytes <= policy.max_decoded_input_bytes_per_step.get() as u64);
+    assert!(
+        store.count(OperationClass::Read) <= input_runs * group.families().len() * 2,
+        "the step should read index and data sections only for selected-run family segments"
+    );
+}
+
+#[tokio::test]
+async fn bounded_compaction_converges_to_unbounded_shape_and_preserves_intermediate_reads() {
+    let bounded_dir = tempdir().expect("bounded tempdir");
+    let unbounded_dir = tempdir().expect("unbounded tempdir");
+    let bounded_store = LocalFsStore::new(bounded_dir.path()).expect("bounded store");
+    let unbounded_store = LocalFsStore::new(unbounded_dir.path()).expect("unbounded store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    for store in [&bounded_store, &unbounded_store] {
+        bootstrap_namespace(store, &namespace_id, &context)
+            .await
+            .expect("bootstrap");
+        for index in 1..=6 {
+            let commit_id =
+                CommitId::parse(format!("bounded-convergence-{index}")).expect("commit id");
+            write_file_bytes(
+                store,
+                &namespace_id,
+                &format!("/docs/file-{index}.txt"),
+                format!("file {index}\n").as_bytes(),
+                &context,
+                Some(&commit_id),
+            )
+            .await
+            .expect("write file");
+            create_checkpoint(store, &namespace_id, &context)
+                .await
+                .expect("create checkpoint");
+        }
+    }
+
+    let visible_before = load_current_projection(&bounded_store, &namespace_id)
+        .await
+        .expect("visible state before bounded compaction");
+    let unlimited = NonZeroUsize::new(usize::MAX).expect("usize max should be nonzero");
+    let bounded_policy = MetadataLsmPolicy {
+        max_delta_runs: NonZeroUsize::new(4).expect("test trigger should be nonzero"),
+        max_input_runs_per_step: NonZeroUsize::new(2).expect("test run budget should be nonzero"),
+        max_decoded_input_rows_per_step: unlimited,
+        max_decoded_input_bytes_per_step: unlimited,
+        ..MetadataLsmPolicy::default()
+    };
+    let first = super::compaction_step(
+        &bounded_store,
+        &namespace_id,
+        loonfs_api::CompactorEpoch(0),
+        bounded_policy,
+        MetadataCompactionPolicy::default(),
+    )
+    .await
+    .expect("first bounded step");
+    assert!(matches!(
+        first,
+        super::CompactionStepOutcome::UnitPublished { input_runs: 2, .. }
+    ));
+    let visible_between = load_current_projection(&bounded_store, &namespace_id)
+        .await
+        .expect("visible state between bounded steps");
+    assert!(metadata_states_equivalent(
+        &visible_before.metadata_state,
+        &visible_between.metadata_state
+    ));
+
+    let (bounded_manifest_no, bounded_steps_after_first) =
+        drain_compaction(&bounded_store, &namespace_id, bounded_policy).await;
+    let unbounded_policy = MetadataLsmPolicy {
+        max_delta_runs: NonZeroUsize::new(4).expect("test trigger should be nonzero"),
+        max_input_runs_per_step: unlimited,
+        max_decoded_input_rows_per_step: unlimited,
+        max_decoded_input_bytes_per_step: unlimited,
+        ..MetadataLsmPolicy::default()
+    };
+    let (unbounded_manifest_no, unbounded_steps) =
+        drain_compaction(&unbounded_store, &namespace_id, unbounded_policy).await;
+    assert!(
+        bounded_steps_after_first < 128,
+        "compaction did not converge"
+    );
+    assert!(unbounded_steps < 128, "compaction did not converge");
+    assert!(bounded_steps_after_first + 1 > unbounded_steps);
+
+    let bounded = load_manifest_materialization_for_inspection(
+        &bounded_store,
+        &namespace_id,
+        bounded_manifest_no,
+    )
+    .await
+    .expect("load bounded result");
+    let unbounded = load_manifest_materialization_for_inspection(
+        &unbounded_store,
+        &namespace_id,
+        unbounded_manifest_no,
+    )
+    .await
+    .expect("load unbounded result");
+    assert!(metadata_states_equivalent_ignoring_content_identity(
+        &bounded.metadata_state,
+        &unbounded.metadata_state
+    ));
+    // Independent family groups may finish in a different order when their
+    // sizes differ. Compare the resulting shapes without the publication order.
+    let mut bounded_shape = manifest_run_shape(&bounded.manifest);
+    let mut unbounded_shape = manifest_run_shape(&unbounded.manifest);
+    bounded_shape.sort();
+    unbounded_shape.sort();
+    assert_eq!(bounded_shape, unbounded_shape);
+    assert!(delta_runs(&bounded.manifest).is_empty());
+
+    let later_commit = CommitId::parse("bounded-convergence-later").expect("commit id");
+    write_file_bytes(
+        &bounded_store,
+        &namespace_id,
+        "/docs/later.txt",
+        b"later\n",
+        &context,
+        Some(&later_commit),
+    )
+    .await
+    .expect("write later file");
+    create_checkpoint(&bounded_store, &namespace_id, &context)
+        .await
+        .expect("checkpoint later file");
+    let below_trigger = super::compaction_step(
+        &bounded_store,
+        &namespace_id,
+        loonfs_api::CompactorEpoch(0),
+        bounded_policy,
+        MetadataCompactionPolicy::default(),
+    )
+    .await
+    .expect("below-trigger step");
+    assert!(matches!(
+        below_trigger,
+        super::CompactionStepOutcome::NotNeeded { delta_runs: 1 }
+    ));
+}
+
+#[tokio::test]
+async fn whole_run_compaction_rewrites_base_segments() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    let policy = MetadataLsmPolicy {
+        max_delta_runs: NonZeroUsize::MIN,
+        max_rows_per_segment: NonZeroUsize::new(2)
+            .expect("test segment row budget should be nonzero"),
+        ..MetadataLsmPolicy::default()
+    };
+    bootstrap_namespace(&store, &namespace_id, &context)
+        .await
+        .expect("bootstrap");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/hot/original.txt",
+        b"hot\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write hot");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/cold/original.txt",
+        b"cold\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write cold");
+
+    let first_manifest_no = checkpoint_then_compact(&store, &namespace_id, &context, policy).await;
+    let first_materialized =
+        load_manifest_materialization_for_inspection(&store, &namespace_id, first_manifest_no)
+            .await
+            .expect("load first manifest");
+    let first_run_keys = run_segment_object_keys(&first_materialized.manifest);
+
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/hot/after-delta.txt",
+        b"hot 2\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write hot delta");
+    checkpoint_then_compact(&store, &namespace_id, &context, policy).await;
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/hot/after-compact.txt",
+        b"hot 3\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write hot compact");
+    let compacted = create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("compacted checkpoint");
+    let compacted_manifest_no = drain_compaction(
+        &store,
+        &namespace_id,
+        MetadataLsmPolicy {
+            max_delta_runs: NonZeroUsize::MIN,
+            ..policy
+        },
+    )
+    .await
+    .0;
+    let compacted_materialized =
+        load_manifest_materialization_for_inspection(&store, &namespace_id, compacted_manifest_no)
+            .await
+            .expect("load compacted manifest");
+    let materialization_after = load_current_projection(&store, &namespace_id)
+        .await
+        .expect("materialization");
+    let compacted_run_keys = run_segment_object_keys(&compacted_materialized.manifest);
+    let compacted_run_prefix = format!("namespaces/{}/segments/seg_", namespace_id.as_str());
+
+    assert_eq!(
+        compacted_materialized.manifest.payload().base_seq(),
+        compacted.captured_seq
+    );
+    assert!(delta_runs(&compacted_materialized.manifest).is_empty());
+    // Every family group rebuilds on its own and takes a run number of its
+    // own, so a fully merged manifest holds one base run per group that has
+    // rows, and nothing else.
+    for (families, base_runs) in base_runs_per_family_group(&compacted_materialized.manifest) {
+        assert!(
+            base_runs.len() <= 1,
+            "{families:?} holds base runs {base_runs:?} after a full merge"
+        );
+    }
+    assert!(!compacted_run_keys.is_empty());
+    assert!(compacted_run_keys
+        .iter()
+        .all(|key| key.starts_with(&compacted_run_prefix)));
+    assert!(compacted_run_keys
+        .iter()
+        .all(|key| !first_run_keys.contains(key)));
+    assert_manifest_rows_have_unique_keys(&compacted_materialized.metadata_state);
+    assert!(metadata_states_equivalent(
+        &materialization_after.metadata_state,
+        &compacted_materialized.metadata_state
+    ));
+}
+
+#[tokio::test]
+async fn whole_run_compaction_resegments_row_key_range_families_with_delta_runs() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    let policy = MetadataLsmPolicy {
+        max_delta_runs: NonZeroUsize::MIN,
+        max_rows_per_segment: NonZeroUsize::new(2)
+            .expect("test segment row budget should be nonzero"),
+        ..MetadataLsmPolicy::default()
+    };
+    bootstrap_namespace(&store, &namespace_id, &context)
+        .await
+        .expect("bootstrap");
+    for index in 0..6 {
+        let path = format!("/docs/file-{index}.txt");
+        write_file_bytes(&store, &namespace_id, &path, b"initial\n", &context, None)
+            .await
+            .expect("write initial file");
+    }
+
+    let first_manifest_no = checkpoint_then_compact(&store, &namespace_id, &context, policy).await;
+    let first_materialized =
+        load_manifest_materialization_for_inspection(&store, &namespace_id, first_manifest_no)
+            .await
+            .expect("load first manifest");
+    let revision_keys_before = base_segment_object_keys_for_family(
+        &first_materialized.manifest,
+        ApiMetadataRowFamily::Revisions,
+    );
+    assert!(revision_keys_before.len() >= 3);
+
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/file-0.txt",
+        b"delta\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write delta revision");
+    checkpoint_then_compact(&store, &namespace_id, &context, policy).await;
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/file-0.txt",
+        b"compact\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write compaction revision");
+    let _compacted = create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("compacted checkpoint");
+    let compacted_manifest_no = drain_compaction(
+        &store,
+        &namespace_id,
+        MetadataLsmPolicy {
+            max_delta_runs: NonZeroUsize::MIN,
+            ..policy
+        },
+    )
+    .await
+    .0;
+    let compacted_materialized =
+        load_manifest_materialization_for_inspection(&store, &namespace_id, compacted_manifest_no)
+            .await
+            .expect("load compacted manifest");
+    let revision_keys_after = base_segment_object_keys_for_family(
+        &compacted_materialized.manifest,
+        ApiMetadataRowFamily::Revisions,
+    );
+    let materialization_after = load_current_projection(&store, &namespace_id)
+        .await
+        .expect("materialization");
+
+    assert!(delta_runs(&compacted_materialized.manifest).is_empty());
+    // Groups untouched since the first fold keep their older base run, so
+    // several base runs may coexist; what matters is that no delta remains.
+    assert!(runs_newest_first(compacted_materialized.manifest.payload())
+        .iter()
+        .all(|run| run.tier == RunTier::Base));
+    assert!(revision_keys_after
+        .iter()
+        .all(|key| !revision_keys_before.contains(key)));
+    assert!(metadata_states_equivalent(
+        &materialization_after.metadata_state,
+        &compacted_materialized.metadata_state
+    ));
+    assert_manifest_rows_have_unique_keys(&compacted_materialized.metadata_state);
+}
+
+#[tokio::test]
+async fn compaction_resumes_from_the_manifest_after_interruption() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    let policy = MetadataLsmPolicy {
+        max_delta_runs: NonZeroUsize::MIN,
+        ..MetadataLsmPolicy::default()
+    };
+    bootstrap_namespace(&store, &namespace_id, &context)
+        .await
+        .expect("bootstrap");
+    for index in 1..=3 {
+        write_file_and_checkpoint(&store, &namespace_id, &context, index).await;
+    }
+
+    // One unit runs, then the process "crashes": nothing is carried over
+    // but the published manifest.
+    let first_report = super::compaction_step(
+        &store,
+        &namespace_id,
+        loonfs_api::CompactorEpoch(0),
+        policy,
+        MetadataCompactionPolicy::default(),
+    )
+    .await
+    .expect("first unit");
+    let super::CompactionStepOutcome::UnitPublished {
+        group: first_group, ..
+    } = first_report
+    else {
+        panic!("expected a published unit, got {:?}", first_report);
+    };
+
+    // A checkpoint lands in between, adding a fresh delta run.
+    write_file_and_checkpoint(&store, &namespace_id, &context, 9).await;
+
+    // A fresh sequence of steps reads the live manifest and finishes the
+    // job, including the delta the interleaved checkpoint added.
+    let mut merged_groups = vec![first_group];
+    loop {
+        let report = super::compaction_step(
+            &store,
+            &namespace_id,
+            loonfs_api::CompactorEpoch(0),
+            policy,
+            MetadataCompactionPolicy::default(),
+        )
+        .await
+        .expect("resumed unit");
+        match report {
+            super::CompactionStepOutcome::UnitPublished { group, .. } => {
+                merged_groups.push(group);
+            }
+            super::CompactionStepOutcome::Superseded | super::CompactionStepOutcome::Fenced => {
+                panic!("no concurrent publisher exists in this test")
+            }
+            super::CompactionStepOutcome::NotNeeded { .. } => break,
+            super::CompactionStepOutcome::CompactionPlanned { .. } => {
+                panic!("test compaction budget should admit a progress-making subset")
+            }
+        }
+    }
+    assert!(merged_groups.len() >= 2);
+
+    let drained = load_manifest_materialization_for_inspection(
+        &store,
+        &namespace_id,
+        current_manifest_no(&store, &namespace_id).await,
+    )
+    .await
+    .expect("load drained manifest");
+    let materialization_after = load_current_projection(&store, &namespace_id)
+        .await
+        .expect("materialization");
+    assert!(delta_runs(&drained.manifest).is_empty());
+    assert!(metadata_states_equivalent(
+        &materialization_after.metadata_state,
+        &drained.metadata_state
+    ));
+}
+
+#[tokio::test]
+async fn a_namespace_retains_from_birth_before_retention_advances() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context)
+        .await
+        .expect("bootstrap");
+
+    let head = crate::namespace::control::load_namespace_read_state(&store, &namespace_id)
+        .await
+        .expect("head");
+    let floor = load_current_manifest(&store, &head.namespace_id)
+        .await
+        .expect("missing floor defaults")
+        .state
+        .retention_floor_seq();
+    assert_eq!(floor, ChangeSeq(0));
+}
+
+#[tokio::test]
+async fn over_budget_wal_fold_aborts_without_publishing() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = MutationContext {
+        writer_id: loonfs_api::WriterId::parse("budget-test").expect("writer id"),
+        now_ms: 1_000,
+    };
+    bootstrap_namespace(&store, &namespace_id, &context)
+        .await
+        .expect("bootstrap");
+    put_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/budget.txt",
+        b"body",
+        DestinationBehavior::NoReplace,
+        &context,
+        None,
+    )
+    .await
+    .expect("seed file");
+    let manifest_before = load_current_manifest(&store, &namespace_id)
+        .await
+        .expect("read manifest")
+        .state;
+
+    // Every reading advances 20 minutes against the 15-minute budget: the
+    // pre-CAS check observes the publication as over budget.
+    let overrun = Deadline::start(Arc::new(SteppingTimer::new(20 * 60 * 1000)));
+    let error = super::fold::fold_wal_with_deadline(
+        &store,
+        &namespace_id,
+        &overrun,
+        MetadataLsmPolicy::default(),
+    )
+    .await
+    .expect_err("over-budget publication must abort");
+    assert!(
+        matches!(error, CoreError::MetadataPublicationBudgetExceeded { .. }),
+        "expected budget error, got {error:?}"
+    );
+
+    let manifest_after = load_current_manifest(&store, &namespace_id)
+        .await
+        .expect("read manifest")
+        .state;
+    assert_eq!(
+        manifest_after, manifest_before,
+        "an aborted publication must not publish a manifest"
+    );
+
+    // The in-budget retry publishes normally over fresh outputs.
+    let advanced = super::fold::fold_wal(&store, &namespace_id)
+        .await
+        .expect("in-budget retry succeeds");
+    assert_eq!(advanced.outcome, loonfs_api::FlushWalOutcome::Published);
+    assert!(advanced.manifest_no > manifest_before.manifest().manifest_no);
+}
+
+#[tokio::test]
+async fn over_budget_compaction_aborts_without_publishing() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = MutationContext {
+        writer_id: loonfs_api::WriterId::parse("budget-test").expect("writer id"),
+        now_ms: 1_000,
+    };
+    bootstrap_namespace(&store, &namespace_id, &context)
+        .await
+        .expect("bootstrap");
+    put_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/merge.txt",
+        b"body",
+        DestinationBehavior::NoReplace,
+        &context,
+        None,
+    )
+    .await
+    .expect("seed file");
+    super::fold::fold_wal(&store, &namespace_id)
+        .await
+        .expect("publish a delta run to merge");
+    let manifest_before = load_current_manifest(&store, &namespace_id)
+        .await
+        .expect("read manifest")
+        .state;
+
+    let merge_everything = MetadataLsmPolicy {
+        max_delta_runs: NonZeroUsize::MIN,
+        ..Default::default()
+    };
+    let overrun = Deadline::start(Arc::new(SteppingTimer::new(20 * 60 * 1000)));
+    let error = super::compaction_step::compaction_step_with_deadline(
+        &store,
+        &namespace_id,
+        loonfs_api::CompactorEpoch(0),
+        merge_everything,
+        MetadataCompactionPolicy::default(),
+        &overrun,
+    )
+    .await
+    .expect_err("over-budget compaction must abort");
+    assert!(
+        matches!(error, CoreError::MetadataPublicationBudgetExceeded { .. }),
+        "expected budget error, got {error:?}"
+    );
+
+    let manifest_after = load_current_manifest(&store, &namespace_id)
+        .await
+        .expect("read manifest")
+        .state;
+    assert_eq!(manifest_after, manifest_before);
+
+    let report = super::compaction_step::compaction_step(
+        &store,
+        &namespace_id,
+        loonfs_api::CompactorEpoch(0),
+        merge_everything,
+        MetadataCompactionPolicy::default(),
+    )
+    .await
+    .expect("in-budget retry merges the unit");
+    assert!(matches!(
+        report,
+        super::CompactionStepOutcome::UnitPublished { .. }
+    ));
+}
+
+/// Runs the selector exactly as a step runs it — same family group, same
+/// policy — and returns the group beside what the selector chose.
+async fn select_compaction_window<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    policy: MetadataLsmPolicy,
+    requested_group: Option<MetadataFamilyGroup>,
+) -> (
+    MetadataFamilyGroup,
+    super::compaction_step::CompactionSelection,
+) {
+    let manifest_number = current_manifest_number(store, namespace_id).await;
+    let segments =
+        load_manifest_segments_for_inspection(store, None, namespace_id, &manifest_number)
+            .await
+            .expect("load manifest segments");
+    let group = requested_group.unwrap_or_else(|| {
+        super::compaction_step::select_family_group(
+            segments.scan_runs.as_ref(),
+            segments.manifest().payload(),
+            MetadataCompactionPolicy::default(),
+            policy,
+        )
+        .expect("a family group with delta rows to merge")
+    });
+    let frozen_floor_seq = read_floor_seq(store, namespace_id).await;
+    let selection = super::compaction_step::select_compaction_input(
+        &segments,
+        group,
+        policy,
+        frozen_floor_seq,
+        &super::compaction_step::MetadataCompactionPolicy::default(),
+    )
+    .await
+    .expect("select a compaction input");
+    (group, selection)
+}
+
+/// The bounded merge a selection chose, or `None` when it chose a streaming
+/// compaction instead.
+fn bounded_merge(
+    selection: super::compaction_step::CompactionSelection,
+) -> Option<super::compaction_step::CompactionInput> {
+    match selection.plan {
+        super::compaction_step::CompactionPlan::BoundedMerge(input) => Some(input),
+        _ => None,
+    }
+}
+
+/// Rows one run holds in one family group: the quantity the per-step row
+/// budget is measured against.
+fn group_run_rows(segments: &[MetadataFamilySegments], group: &[ApiMetadataRowFamily]) -> u64 {
+    segments
+        .iter()
+        .filter(|family_segments| group.contains(&family_segments.family))
+        .flat_map(|family_segments| &family_segments.segments)
+        .map(|descriptor| descriptor.row_count)
+        .sum()
+}
+
+fn group_segment_object_keys(
+    segments: &[MetadataFamilySegments],
+    group: &[ApiMetadataRowFamily],
+) -> Vec<String> {
+    segments
+        .iter()
+        .filter(|family_segments| group.contains(&family_segments.family))
+        .flat_map(|family_segments| &family_segments.segments)
+        .map(metadata_segment_object_key)
+        .collect()
+}
+
+/// A per-step row budget one row short of what the group's base run needs,
+/// with the trigger forced so a single delta run still merges.
+fn policy_that_cannot_merge_the_base(base_rows: u64) -> MetadataLsmPolicy {
+    let row_budget = usize::try_from(base_rows).expect("test row counts are small") - 1;
+    MetadataLsmPolicy {
+        small_run_bytes: NonZeroUsize::MIN,
+        max_delta_runs: NonZeroUsize::MIN,
+        max_decoded_input_rows_per_step: NonZeroUsize::new(row_budget)
+            .expect("test row budget should be nonzero"),
+        ..MetadataLsmPolicy::default()
+    }
+}
+
+#[tokio::test]
+async fn comparable_runs_over_the_step_budget_plan_a_base_compaction() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context)
+        .await
+        .expect("bootstrap");
+
+    // A compacted base first, then delta runs stacked above it.
+    for index in 1..=4 {
+        write_file_and_checkpoint(&store, &namespace_id, &context, index).await;
+    }
+    drain_compaction(
+        &store,
+        &namespace_id,
+        MetadataLsmPolicy {
+            max_delta_runs: NonZeroUsize::MIN,
+            ..MetadataLsmPolicy::default()
+        },
+    )
+    .await;
+    for index in 5..=8 {
+        write_file_and_checkpoint(&store, &namespace_id, &context, index).await;
+    }
+
+    let before = load_manifest_materialization_for_inspection(
+        &store,
+        &namespace_id,
+        current_manifest_no(&store, &namespace_id).await,
+    )
+    .await
+    .expect("load the parked manifest");
+    let (group, _) =
+        select_compaction_window(&store, &namespace_id, MetadataLsmPolicy::default(), None).await;
+    let base = base_tier(&before.manifest);
+    let base_rows = group_run_rows(&base, group.families());
+    let base_segments = group_segment_object_keys(&base, group.families());
+    assert!(base_rows > 1, "the base run must hold rows in this group");
+    let policy = policy_that_cannot_merge_the_base(base_rows);
+
+    let (_, selection) = select_compaction_window(&store, &namespace_id, policy, None).await;
+    let bottom = selection
+        .group_bottom_over_budget
+        .expect("a base run over the budget must raise the alarm");
+    let super::compaction_step::CompactionPlan::StreamingCompaction(spec) = selection.plan else {
+        panic!("comparable input sizes warrant a base rewrite");
+    };
+    assert_eq!(bottom.rows, base_rows);
+    assert_eq!(bottom.tier, RunTier::Base);
+    assert_eq!(
+        spec.input_runs(),
+        group_runs(&before.manifest, group.families()).len()
+    );
+    publish_planned_compaction(&store, &namespace_id, &context, policy, &spec).await;
+
+    let after = load_manifest_materialization_for_inspection(
+        &store,
+        &namespace_id,
+        current_manifest_no(&store, &namespace_id).await,
+    )
+    .await
+    .expect("load the drained manifest");
+    // The job rebuilt the group, so it is one base run and the frozen base's
+    // segments are gone. That is the whole point: they could not be rewritten
+    // by any step, and a run nothing rewrites is a run nothing reclaims.
+    assert_eq!(
+        group_runs(&after.manifest, group.families()).len(),
+        1,
+        "the group must end in one run"
+    );
+    assert_eq!(group_base_runs(&after.manifest, group.families()).len(), 1);
+    let remaining = run_segment_object_keys(&after.manifest);
+    for segment_key in &base_segments {
+        assert!(
+            !remaining.contains(segment_key),
+            "the frozen base's segments must be replaced by the rebuilt run"
+        );
+    }
+    let projection = load_current_projection(&store, &namespace_id)
+        .await
+        .expect("materialization");
+    assert!(metadata_states_equivalent(
+        &projection.metadata_state,
+        &after.metadata_state
+    ));
+}
+
+#[tokio::test]
+async fn a_merge_above_the_base_keeps_the_rows_that_shadow_it() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context)
+        .await
+        .expect("bootstrap");
+
+    // The base run holds both bindings.
+    for name in ["keep", "gone"] {
+        write_file_bytes(
+            &store,
+            &namespace_id,
+            &format!("/docs/{name}.txt"),
+            b"body\n",
+            &context,
+            None,
+        )
+        .await
+        .expect("seed file");
+    }
+    // A base far larger than the delta runs, written 32 files per commit.
+    for batch in 0..16 {
+        let paths: Vec<_> = (batch * 32..(batch + 1) * 32)
+            .map(|index| format!("/docs/retained-{index}.txt"))
+            .collect();
+        write_files_bytes(&store, &namespace_id, &paths, b"body", &context)
+            .await
+            .expect("grow the base");
+    }
+    create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("checkpoint the seed");
+    drain_compaction(
+        &store,
+        &namespace_id,
+        MetadataLsmPolicy {
+            max_delta_runs: NonZeroUsize::MIN,
+            ..MetadataLsmPolicy::default()
+        },
+    )
+    .await;
+
+    // One delta run cancels a binding the base holds, a second delta run
+    // lands above it, and the floor moves past the cancellation.
+    let deleted = delete_path(&store, &namespace_id, "/docs/gone.txt", &context, None)
+        .await
+        .expect("delete");
+    create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("checkpoint the delete");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/extra.txt",
+        b"body\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write extra");
+    create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("checkpoint the extra file");
+    advance_retention_floor(&store, &namespace_id)
+        .await
+        .expect("advance the floor");
+    assert!(
+        read_floor_seq(&store, &namespace_id).await >= deleted.committed_seq,
+        "the floor must sit past the cancelling row for this test to mean anything"
+    );
+
+    let before = load_manifest_materialization_for_inspection(
+        &store,
+        &namespace_id,
+        current_manifest_no(&store, &namespace_id).await,
+    )
+    .await
+    .expect("load the manifest before the merge");
+    let (group, _) = select_compaction_window(
+        &store,
+        &namespace_id,
+        MetadataLsmPolicy::default(),
+        Some(MetadataFamilyGroup::Bindings),
+    )
+    .await;
+    assert!(
+        group
+            .families()
+            .contains(&ApiMetadataRowFamily::DirentryBinds),
+        "this test is about the binding families, got {group:?}"
+    );
+    let base_rows = group_run_rows(&base_tier(&before.manifest), group.families());
+    let policy = policy_that_cannot_merge_the_base(base_rows);
+
+    let (_, selection) = select_compaction_window(
+        &store,
+        &namespace_id,
+        policy,
+        Some(MetadataFamilyGroup::Bindings),
+    )
+    .await;
+    let input = bounded_merge(selection).expect("the delta runs must still merge");
+    let newest_input = input
+        .runs
+        .iter()
+        .map(|run| run.run_seq)
+        .max()
+        .expect("the window holds runs");
+    assert_eq!(
+        input.placement,
+        super::compaction_step::MergePlacement::Delta {
+            output_seq: newest_input
+        },
+        "a merge above the base writes a delta run at its newest input's sequence"
+    );
+    assert!(input.runs.len() > 1);
+    let base_before = group_base_runs(&before.manifest, group.families());
+
+    // The same window also remains a delta when its execution needs a job.
+    let job_policy = MetadataLsmPolicy {
+        max_decoded_input_bytes_per_step: NonZeroUsize::MIN,
+        ..policy
+    };
+    let (_, selection) = select_compaction_window(
+        &store,
+        &namespace_id,
+        job_policy,
+        Some(MetadataFamilyGroup::Bindings),
+    )
+    .await;
+    let super::compaction_step::CompactionPlan::StreamingCompaction(spec) = selection.plan else {
+        panic!("one byte cannot admit a synchronous merge");
+    };
+    assert_eq!(
+        spec.inputs(),
+        input.runs.iter().map(|run| run.run_no).collect::<Vec<_>>()
+    );
+    publish_planned_compaction(&store, &namespace_id, &context, job_policy, &spec).await;
+
+    let after = load_manifest_materialization_for_inspection(
+        &store,
+        &namespace_id,
+        current_manifest_no(&store, &namespace_id).await,
+    )
+    .await
+    .expect("load the manifest after the merge");
+    // The merge wrote a delta run, not a second base run: the group's base is
+    // exactly the one it was, and the merged rows sit at the identity of the
+    // newest run the window held, which is where that run stood.
+    assert_eq!(
+        group_base_runs(&after.manifest, group.families()),
+        base_before,
+        "a merge above the base must not mint a base run"
+    );
+    let merged_delta_runs = group_delta_runs(&after.manifest, group.families());
+    let [merged_delta] = &merged_delta_runs[..] else {
+        panic!("the merged delta runs must leave exactly one delta run");
+    };
+    assert_eq!(
+        (merged_delta.run_seq, merged_delta.tier),
+        (newest_input, RunTier::Delta),
+        "the merged delta run must stand where the newest input run stood"
+    );
+    // A merge that skipped older runs drops nothing, so the row set is
+    // exactly what it was: the cancelling row still shadows the base's
+    // binding and the deleted file stays deleted.
+    assert!(
+        metadata_states_equivalent(&before.metadata_state, &after.metadata_state),
+        "a merge above the base must be a pure rewrite"
+    );
+    assert!(
+        after
+            .metadata_state
+            .direntry_binds()
+            .iter()
+            .any(|binding| !binding.is_bound()),
+        "the cancelling row must survive the merge"
+    );
+    let projection = load_current_projection(&store, &namespace_id)
+        .await
+        .expect("materialization");
+    assert!(metadata_states_equivalent(
+        &projection.metadata_state,
+        &after.metadata_state
+    ));
+}
+
+#[tokio::test]
+async fn a_run_in_the_middle_over_the_budget_stops_the_window() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context)
+        .await
+        .expect("bootstrap");
+
+    write_file_and_checkpoint(&store, &namespace_id, &context, 1).await;
+    drain_compaction(
+        &store,
+        &namespace_id,
+        MetadataLsmPolicy {
+            max_delta_runs: NonZeroUsize::MIN,
+            ..MetadataLsmPolicy::default()
+        },
+    )
+    .await;
+    // One wide delta run, then a narrow one above it.
+    for index in 2..=7 {
+        write_file_bytes(
+            &store,
+            &namespace_id,
+            &format!("/docs/file-{index}.txt"),
+            b"body\n",
+            &context,
+            None,
+        )
+        .await
+        .expect("write file");
+    }
+    create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("checkpoint the wide run");
+    write_file_and_checkpoint(&store, &namespace_id, &context, 8).await;
+
+    let before = load_manifest_materialization_for_inspection(
+        &store,
+        &namespace_id,
+        current_manifest_no(&store, &namespace_id).await,
+    )
+    .await
+    .expect("load the manifest");
+    let (group, _) =
+        select_compaction_window(&store, &namespace_id, MetadataLsmPolicy::default(), None).await;
+    let base_rows = group_run_rows(&base_tier(&before.manifest), group.families());
+    let mut delta_rows = delta_runs(&before.manifest)
+        .iter()
+        .map(|run| group_run_rows(&run.segments, group.families()))
+        .collect::<Vec<_>>();
+    delta_rows.sort_unstable();
+    let (narrow, wide) = (delta_rows[0], delta_rows[1]);
+
+    // The budget admits the base run together with the narrow delta run,
+    // and rules out the wide one that sits between them. Reaching past the
+    // wide run is the illegal move this pins.
+    let row_budget = base_rows + narrow;
+    assert!(
+        row_budget < base_rows + wide && row_budget < wide,
+        "budget {row_budget} must exclude the wide run ({wide}) alone and beside the base ({base_rows})"
+    );
+    let policy = MetadataLsmPolicy {
+        max_delta_runs: NonZeroUsize::MIN,
+        max_decoded_input_rows_per_step: NonZeroUsize::new(
+            usize::try_from(row_budget).expect("test row counts are small"),
+        )
+        .expect("test row budget should be nonzero"),
+        ..MetadataLsmPolicy::default()
+    };
+
+    let (_, selection) = select_compaction_window(&store, &namespace_id, policy, None).await;
+    assert!(
+        selection.group_bottom_over_budget.is_none(),
+        "the base run fits here, so nothing should claim it does not"
+    );
+    assert!(
+        matches!(
+            selection.plan,
+            super::compaction_step::CompactionPlan::StreamingCompaction(_)
+        ),
+        "no legal window exists; the selector must hand the group to a streaming compaction \
+         rather than assemble one across the wide run"
+    );
+
+    let manifest_before = current_manifest_no(&store, &namespace_id).await;
+    let report = super::compaction_step(
+        &store,
+        &namespace_id,
+        loonfs_api::CompactorEpoch(0),
+        policy,
+        MetadataCompactionPolicy::default(),
+    )
+    .await
+    .expect("compaction step");
+    assert!(
+        matches!(
+            report,
+            super::CompactionStepOutcome::CompactionPlanned { .. }
+        ),
+        "expected a planned compaction, got {:?}",
+        report
+    );
+    assert_eq!(
+        current_manifest_no(&store, &namespace_id).await,
+        manifest_before,
+        "a step that plans a compaction must not publish"
+    );
+}
+
+#[tokio::test]
+async fn repeated_churn_under_small_budgets_leaves_one_base_run_per_group() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context)
+        .await
+        .expect("bootstrap");
+    // Small segments so the merged base is many segments rather than one, and
+    // a row budget the groups outgrow within a couple of cycles.
+    let policy = MetadataLsmPolicy {
+        max_delta_runs: NonZeroUsize::MIN,
+        max_decoded_input_rows_per_step: NonZeroUsize::new(24).expect("nonzero"),
+        max_rows_per_segment: NonZeroUsize::new(4).expect("nonzero"),
+        ..MetadataLsmPolicy::default()
+    };
+
+    let group = group_containing(ApiMetadataRowFamily::DirentryBinds);
+    let mut compacted_groups = 0usize;
+    for cycle in 0..4u64 {
+        for file in 0..4u64 {
+            write_file_bytes(
+                &store,
+                &namespace_id,
+                &format!("/d{cycle}/f{file}.txt"),
+                format!("body {cycle}/{file}\n").as_bytes(),
+                &context,
+                None,
+            )
+            .await
+            .expect("write file");
+        }
+        create_checkpoint(&store, &namespace_id, &context)
+            .await
+            .expect("checkpoint the writes");
+        for file in 0..3u64 {
+            delete_path(
+                &store,
+                &namespace_id,
+                &format!("/d{cycle}/f{file}.txt"),
+                &context,
+                None,
+            )
+            .await
+            .expect("delete a file");
+        }
+        create_checkpoint(&store, &namespace_id, &context)
+            .await
+            .expect("checkpoint the deletions");
+        advance_retention_floor(&store, &namespace_id)
+            .await
+            .expect("advance the floor past the deletions");
+        let visible = visible_namespace(&store, &namespace_id).await;
+
+        let mut settled = false;
+        for _step in 0..512 {
+            let report = super::compaction_step(
+                &store,
+                &namespace_id,
+                loonfs_api::CompactorEpoch(0),
+                policy,
+                MetadataCompactionPolicy::default(),
+            )
+            .await
+            .expect("compaction step");
+            let current = load_manifest_materialization_for_inspection(
+                &store,
+                &namespace_id,
+                current_manifest_no(&store, &namespace_id).await,
+            )
+            .await
+            .expect("load the current manifest");
+            for (merged, base_runs) in base_runs_per_family_group(&current.manifest) {
+                assert!(
+                    base_runs.len() <= 1,
+                    "cycle {cycle}: {merged:?} holds base runs {base_runs:?}"
+                );
+            }
+            assert_eq!(
+                visible_namespace(&store, &namespace_id).await,
+                visible,
+                "cycle {cycle}: a step changed what a read answers"
+            );
+            match report {
+                super::CompactionStepOutcome::NotNeeded { .. } => {
+                    settled = true;
+                    break;
+                }
+                // The group's bottom no longer fits one step and its delta
+                // runs are merged down to one. The step hands the group to a
+                // streaming compaction, which is what merges it. The runner
+                // runs that job in the background; here it runs inline, so
+                // the steps that follow see what they would have seen once it
+                // landed.
+                super::CompactionStepOutcome::CompactionPlanned { spec, .. } => {
+                    publish_planned_compaction(&store, &namespace_id, &context, policy, &spec)
+                        .await;
+                    compacted_groups += 1;
+                }
+                super::CompactionStepOutcome::Superseded | super::CompactionStepOutcome::Fenced => {
+                    panic!("no concurrent publisher exists in this test")
+                }
+                super::CompactionStepOutcome::UnitPublished { .. } => {}
+            }
+        }
+        assert!(
+            settled,
+            "cycle {cycle}: compaction did not settle with nothing left to compact"
+        );
+    }
+
+    assert!(
+        compacted_groups > 0,
+        "a group must have outgrown one step and been rebuilt by a streaming compaction"
+    );
+    let final_manifest = load_manifest_materialization_for_inspection(
+        &store,
+        &namespace_id,
+        current_manifest_no(&store, &namespace_id).await,
+    )
+    .await
+    .expect("load the final manifest");
+    assert_eq!(
+        group_base_runs(&final_manifest.manifest, group).len(),
+        1,
+        "the bindings group must end in one base run"
+    );
+}
+
+#[tokio::test]
+async fn a_floor_past_a_pin_keeps_its_manifest_and_runs_readable_until_deletion() {
+    let directory = tempdir().expect("directory");
+    let store = LocalFsStore::new(directory.path()).expect("store");
+    let namespace_id = NamespaceId::parse("retained-pin").expect("namespace");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context)
+        .await
+        .expect("bootstrap");
+    write_file_bytes(&store, &namespace_id, "/first", b"first", &context, None)
+        .await
+        .expect("first write");
+    let pin = create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("pin");
+    let pinned_files = read_checkpoint_files(&store, &namespace_id, &pin.checkpoint_id)
+        .await
+        .expect("pinned files");
+    let pinned_segments = super::segment_keys_of_the_current_manifest(&store, &namespace_id).await;
+    write_file_bytes(&store, &namespace_id, "/second", b"second", &context, None)
+        .await
+        .expect("second write");
+    crate::manifest::fold_wal(&store, &namespace_id)
+        .await
+        .expect("fold");
+    let current_segments = super::compact_a_family_group(&store, &namespace_id, &context).await;
+    let only_pinned: Vec<_> = pinned_segments
+        .difference(&current_segments)
+        .cloned()
+        .collect();
+    assert!(!only_pinned.is_empty());
+    let floor = advance_retention_floor(&store, &namespace_id)
+        .await
+        .expect("advance floor");
+    assert!(floor.retention_floor_seq > pin.captured_seq);
+    let aged = mutation_context("gc", u64::MAX / 2);
+    crate::gc::gc_namespace(
+        &store,
+        &namespace_id,
+        &crate::gc::GcConfig::default(),
+        &aged,
+    )
+    .await
+    .expect("collect past the floor");
+    assert_eq!(
+        read_checkpoint_files(&store, &namespace_id, &pin.checkpoint_id)
+            .await
+            .expect("pin readable"),
+        pinned_files
+    );
+    for key in &pinned_segments {
+        assert!(store.head(key).await.expect("pinned segment").is_some());
+    }
+    let manifest_key = metadata_manifest_object(&namespace_id, &pin.manifest_no);
+    assert!(store
+        .head(&manifest_key)
+        .await
+        .expect("pinned manifest")
+        .is_some());
+    crate::pin::delete_checkpoint(&store, &namespace_id, &pin.checkpoint_id)
+        .await
+        .expect("delete pin");
+    crate::gc::gc_namespace(
+        &store,
+        &namespace_id,
+        &crate::gc::GcConfig::default(),
+        &aged,
+    )
+    .await
+    .expect("collect deleted basis");
+    assert!(store
+        .head(&manifest_key)
+        .await
+        .expect("deleted manifest")
+        .is_none());
+    for key in &only_pinned {
+        assert!(store.head(key).await.expect("deleted segment").is_none());
+    }
+}

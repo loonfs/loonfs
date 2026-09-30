@@ -214,7 +214,7 @@ fn attributes_root_forks_and_trash_report_their_row_attribution() {
         .stat_path_blocking(&source_id, "/report.txt")
         .expect("stat source before fork");
 
-    fs.flush_wal_blocking(&source_id).expect("flush source");
+    fs.fold_wal_blocking(&source_id).expect("fold source");
     let fork_id = namespace_id("forked");
     fs.fork_namespace_blocking(&source_id, &fork_id)
         .expect("fork namespace");

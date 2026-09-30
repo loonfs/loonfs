@@ -59,7 +59,6 @@
 pub(crate) mod authorize;
 mod binding_version;
 mod block_cache;
-mod checkpoint;
 mod commit_engine;
 mod commit_wal_size;
 mod context;
@@ -69,8 +68,10 @@ mod engine;
 mod error;
 mod gc;
 mod heap_bytes;
+mod manifest;
 mod namespace;
 mod options;
+mod pin;
 mod protocol;
 mod recency;
 mod storage;
@@ -113,8 +114,8 @@ pub mod cache {
     pub use crate::recency::Recency;
     pub use crate::wal::ProjectedWalTail;
 
-    pub use crate::checkpoint::metadata_maintenance_due;
-    pub use crate::checkpoint::{
+    pub use crate::manifest::metadata_maintenance_due;
+    pub use crate::manifest::{
         MetadataSegmentCache, MetadataSegmentCacheConfig, MetadataSegmentCacheStats,
         StoredMetadataBlockCache, StoredMetadataBlockCacheCloseError, StoredMetadataBlockKey,
         StoredMetadataBlockKind, WalTailProjectionCache, WalTailProjectionCacheConfig,
@@ -122,8 +123,8 @@ pub mod cache {
         DEFAULT_WAL_TAIL_PROJECTION_DECODED_BYTES, DEFAULT_WAL_TAIL_PROJECTION_ROWS,
     };
     pub use crate::namespace::status::{
-        load_namespace, load_namespace_diagnostics, load_namespace_flush_basis,
-        NamespaceFlushBasis, NamespaceStorageDiagnostics,
+        load_namespace, load_namespace_diagnostics, load_namespace_fold_basis, NamespaceFoldBasis,
+        NamespaceStorageDiagnostics,
     };
     #[cfg(any(test, feature = "test-support"))]
     pub use crate::namespace::status::{load_namespace_wal_tail_usage, NamespaceWalTailUsage};
@@ -132,11 +133,10 @@ pub mod cache {
 /// Typed loaders for namespace control objects and verified catalog state.
 /// Used by `loonfs` read and write paths and by layout tests.
 pub mod control {
-    pub use crate::checkpoint::{
-        load_checkpoint_read_basis, load_checkpoint_statistics, load_namespace_statistics,
-        load_snapshot_read_basis, CheckpointReadBasis, NamespaceStatistics,
-    };
     pub use crate::control_object::{ControlObjectLoadError, LoadedControl};
+    pub use crate::manifest::{
+        load_checkpoint_statistics, load_namespace_statistics, NamespaceStatistics,
+    };
     pub use crate::namespace::catalog::{
         load_namespace_catalog_entry, VerifiedNamespaceCatalogEntry,
     };
@@ -149,6 +149,9 @@ pub mod control {
     };
     pub use crate::namespace::state::NamespaceReadState;
     pub use crate::namespace::MetadataBasis;
+    pub use crate::pin::{
+        load_checkpoint_read_basis, load_snapshot_read_basis, CheckpointReadBasis,
+    };
     pub use crate::wal::probe_namespace_wal;
 }
 
@@ -169,14 +172,6 @@ pub mod publish {
 }
 
 // Crate-root re-exports used by `loonfs` or required by public return types.
-pub use checkpoint::{
-    fold_wal_tail, next_run_no_after, refill_iterators, select_next_iterator, CheckpointFile,
-    CheckpointFilesPage, CheckpointFilesPageCursor, CheckpointPageCursor, FoldedWalTail,
-    ListCheckpointFilesOptions, MetadataCompactionCancellation, MetadataCompactionJobOutcome,
-    MetadataCompactionPolicy, MetadataCompactionSpec, MetadataFamilyGroup, MetadataLsmPolicy,
-    MetadataReorganizeOutcome, SegmentBlockLoader, SegmentRowIterator,
-};
-pub use checkpoint::{ManifestLoadError, ManifestLoadFailureClass};
 pub use context::MutationContext;
 pub use engine::RuntimeReadContext;
 pub use engine::{
@@ -188,9 +183,20 @@ pub use error::{
     WriterFence,
 };
 pub use gc::{delete_if_aged, gc_namespace, grace_age, GcConfig, GraceAge};
+pub use manifest::{
+    fold_wal_tail, next_run_no_after, refill_iterators, select_next_iterator,
+    CompactionStepOutcome, FoldedWalTail, MetadataCompactionCancellation,
+    MetadataCompactionJobOutcome, MetadataCompactionPolicy, MetadataCompactionSpec,
+    MetadataFamilyGroup, MetadataLsmPolicy, SegmentBlockLoader, SegmentRowIterator,
+};
+pub use manifest::{ManifestLoadError, ManifestLoadFailureClass};
 pub use options::{CreateNamespaceOptions, DeleteNamespaceOptions};
 pub use path::read::{
     CurrentFileState, DirectDownloadByInodeTarget, DirectDownloadTarget, MAX_RESOLVE_CURRENT_FILES,
+};
+pub use pin::{
+    CheckpointFile, CheckpointFilesPage, CheckpointFilesPageCursor, CheckpointPageCursor,
+    ListCheckpointFilesOptions,
 };
 pub use protocol::{
     BeginDirectMultipartUploadTargetResponse, BeginDirectPutUploadTargetResponse,

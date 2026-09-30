@@ -120,7 +120,7 @@ async fn a_completed_upload_token_cannot_publish_after_namespace_deletion() {
         .expect("catalog");
     let token = mint_content_token(
         "secret",
-        completed.receipt.as_ref().expect("completed receipt"),
+        completed.evidence.as_ref().expect("completed evidence"),
         clock.now_ms(),
     )
     .expect("mint token");
@@ -300,7 +300,7 @@ async fn assert_expired_content_stays_rejected_on_retry(elapsed_ms: u64) {
             matches!(
                 result,
                 Err(CoreError::WalPublish(
-                    crate::commit::WalPublishError::StaleHead
+                    crate::commit::WalPublishError::NumberTaken
                 ))
             )
         }) {
@@ -487,10 +487,8 @@ async fn content_expiring_after_the_put_starts_does_not_undo_the_commit() {
 
 #[tokio::test]
 async fn swap_accepts_any_valid_matching_proof_and_expired_receipt_replays_without_content_io() {
-    use crate::checkpoint::{
-        MetadataCompactionPolicy, MetadataLsmPolicy, MetadataReorganizeOutcome,
-    };
     use crate::content::{mint_content_token, verify_content_token};
+    use crate::manifest::{CompactionStepOutcome, MetadataCompactionPolicy, MetadataLsmPolicy};
     use crate::namespace::catalog::load_namespace_catalog_entry;
     use loonfs_test_support::stores::{RecordedOperation, RecordingStore};
     use std::num::NonZeroUsize;
@@ -514,7 +512,7 @@ async fn swap_accepts_any_valid_matching_proof_and_expired_receipt_replays_witho
     for upload in [&completed, &unused] {
         let token = mint_content_token(
             "secret",
-            upload.receipt.as_ref().expect("receipt"),
+            upload.evidence.as_ref().expect("evidence"),
             setup.now_ms,
         )
         .expect("mint");
@@ -564,11 +562,11 @@ async fn swap_accepts_any_valid_matching_proof_and_expired_receipt_replays_witho
         "{:?}",
         store.snapshot()
     );
-    crate::checkpoint::flush_wal(&store, &namespace_id)
+    crate::manifest::fold_wal(&store, &namespace_id)
         .await
-        .expect("flush commits");
+        .expect("fold commits");
     loop {
-        let outcome = crate::checkpoint::reorganize_metadata_step(
+        let outcome = crate::manifest::compaction_step(
             &store,
             &namespace_id,
             loonfs_api::CompactorEpoch(0),
@@ -579,13 +577,13 @@ async fn swap_accepts_any_valid_matching_proof_and_expired_receipt_replays_witho
             MetadataCompactionPolicy::default(),
         )
         .await
-        .expect("reorganize metadata");
-        if matches!(outcome, MetadataReorganizeOutcome::UnitPublished { .. }) {
+        .expect("compact metadata");
+        if matches!(outcome, CompactionStepOutcome::UnitPublished { .. }) {
             continue;
         }
         assert!(
-            matches!(outcome, MetadataReorganizeOutcome::NotNeeded { .. }),
-            "unexpected reorganization outcome: {outcome:?}"
+            matches!(outcome, CompactionStepOutcome::NotNeeded { .. }),
+            "unexpected compaction outcome: {outcome:?}"
         );
         break;
     }
@@ -630,7 +628,7 @@ async fn swap_accepts_any_valid_matching_proof_and_expired_receipt_replays_witho
 }
 
 #[tokio::test]
-async fn retained_receipt_minting_stops_at_the_upload_issuance_deadline() {
+async fn retained_evidence_minting_stops_at_the_upload_issuance_deadline() {
     use crate::content::mint_content_token;
     use crate::limits::{COMPLETED_UPLOAD_RECEIPT_WINDOW_MS, CONTENT_RECEIPT_TTL_MS};
     use base64::Engine as _;
@@ -643,10 +641,10 @@ async fn retained_receipt_minting_stops_at_the_upload_issuance_deadline() {
         .await
         .expect("bootstrap");
     let completed = completed_upload(&store, &namespace_id, &setup).await;
-    let receipt = completed.receipt.expect("eligible receipt");
+    let evidence = completed.evidence.expect("eligible evidence");
     let deadline_ms = setup.now_ms + COMPLETED_UPLOAD_RECEIPT_WINDOW_MS;
     for now_ms in [setup.now_ms, deadline_ms - 1] {
-        let token = mint_content_token("secret", &receipt, now_ms).expect("eligible mint");
+        let token = mint_content_token("secret", &evidence, now_ms).expect("eligible mint");
         let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(token.token.split_once('.').expect("signed token").0)
             .expect("payload");
@@ -657,7 +655,7 @@ async fn retained_receipt_minting_stops_at_the_upload_issuance_deadline() {
     }
     for now_ms in [deadline_ms, setup.now_ms + CONTENT_RECLAMATION_GRACE_MS * 2] {
         assert_eq!(
-            mint_content_token("secret", &receipt, now_ms),
+            mint_content_token("secret", &evidence, now_ms),
             Err(ContentTokenError::Expired)
         );
     }

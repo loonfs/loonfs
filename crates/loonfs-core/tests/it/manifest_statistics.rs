@@ -157,7 +157,7 @@ async fn cached_and_replayed_folds_count_commits_once_and_reads_use_only_manifes
         .await
         .expect("repeat fold");
         namespace_engine(&store, &ns, &context)
-            .flush_wal()
+            .fold_wal()
             .await
             .expect("restart fold");
         store.reset();
@@ -235,7 +235,7 @@ async fn forks_start_activity_at_zero_and_inherit_the_selected_checkpoint_footpr
             .expect("checkpoint statistics exclude newer WAL"),
         baseline
     );
-    engine.flush_wal().await.expect("fold parent");
+    engine.fold_wal().await.expect("fold parent");
     let layout_snapshot = engine
         .create_snapshot("layout".to_owned(), u64::MAX / 2)
         .await
@@ -315,7 +315,7 @@ async fn forks_start_activity_at_zero_and_inherit_the_selected_checkpoint_footpr
     .await
     .expect("child write");
     let child_engine = namespace_engine(&store, &child, &context);
-    child_engine.flush_wal().await.expect("fold child");
+    child_engine.fold_wal().await.expect("fold child");
     let observed = load_namespace_statistics(&store, &child)
         .await
         .expect("first metered observation");
@@ -371,7 +371,7 @@ async fn deleting_and_undeleting_a_subtree_preserves_retained_inodes() {
         .expect("directory")
         .inode_id;
     let engine = namespace_engine(&store, &ns, &context);
-    engine.flush_wal().await.expect("fold");
+    engine.fold_wal().await.expect("fold");
     let before = load_namespace_statistics(&store, &ns)
         .await
         .expect("activity");
@@ -388,7 +388,7 @@ async fn deleting_and_undeleting_a_subtree_preserves_retained_inodes() {
     )
     .await
     .expect("delete subtree");
-    engine.flush_wal().await.expect("fold delete");
+    engine.fold_wal().await.expect("fold delete");
     let during = load_namespace_statistics(&store, &ns)
         .await
         .expect("activity");
@@ -405,7 +405,7 @@ async fn deleting_and_undeleting_a_subtree_preserves_retained_inodes() {
     )
     .await
     .expect("undelete");
-    engine.flush_wal().await.expect("fold undelete");
+    engine.fold_wal().await.expect("fold undelete");
     let after = load_namespace_statistics(&store, &ns)
         .await
         .expect("activity");
@@ -520,7 +520,7 @@ async fn failed_and_unacknowledged_fold_publications_do_not_double_count() {
             store
         };
         store.fail_next(1);
-        let result = namespace_engine(&store, &ns, &context).flush_wal().await;
+        let result = namespace_engine(&store, &ns, &context).fold_wal().await;
         assert_eq!(result.is_ok(), applied);
         let observed = load_namespace_statistics(&store, &ns)
             .await
@@ -532,7 +532,7 @@ async fn failed_and_unacknowledged_fold_publications_do_not_double_count() {
         store.clear();
         for _ in 0..2 {
             namespace_engine(&store, &ns, &context)
-                .flush_wal()
+                .fold_wal()
                 .await
                 .expect("restart and retry");
         }

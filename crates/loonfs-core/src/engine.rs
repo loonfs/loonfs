@@ -3,10 +3,6 @@
 
 use crate::authorize::{Authorizer, CommitAuthority, ReadAccess};
 use crate::cache::{MetadataSegmentCache, WalTailProjectionCache};
-use crate::checkpoint::{
-    CheckpointFilesPage, CheckpointFilesPageCursor, CheckpointPageCursor,
-    ListCheckpointFilesOptions,
-};
 use crate::commit_engine::CommitCandidate;
 use crate::context::MutationContext;
 use crate::error::{CoreError, Result};
@@ -19,6 +15,10 @@ use crate::options::{CreateNamespaceOptions, DeleteNamespaceOptions};
 use crate::path::read::{
     load_metadata_view, load_metadata_view_for_authorization, CurrentFileState,
     DirectDownloadByInodeTarget, DirectDownloadTarget, LoadedMetadataView, ReadLoadContext,
+};
+use crate::pin::{
+    CheckpointFilesPage, CheckpointFilesPageCursor, CheckpointPageCursor,
+    ListCheckpointFilesOptions,
 };
 use crate::protocol::{
     BeginDirectMultipartUploadTargetResponse, BeginDirectPutUploadTargetResponse, CompletedUpload,
@@ -128,12 +128,12 @@ pub struct NamespaceEngine<S, M> {
     wall_clock: Arc<dyn crate::time::WallClock>,
     subject: Option<Subject>,
     authorization_head: Option<RuntimeReadContext>,
-    lsm_policy: crate::checkpoint::MetadataLsmPolicy,
+    lsm_policy: crate::manifest::MetadataLsmPolicy,
     /// A narrowed per-step row budget, so a test can reach a frozen base
     /// without writing the hundred thousand rows the shipped budget admits.
-    /// See [`Self::starve_reorganization_row_budget`].
+    /// See [`Self::starve_compaction_row_budget`].
     #[cfg(any(test, feature = "test-support"))]
-    reorganization_row_budget: Option<std::num::NonZeroUsize>,
+    compaction_row_budget: Option<std::num::NonZeroUsize>,
     /// A narrowed per-segment row budget, so a test can get many compacted
     /// segments from a few thousand rows. See [`Self::narrow_segment_row_budget`].
     #[cfg(any(test, feature = "test-support"))]
@@ -354,9 +354,9 @@ impl<S: ObjectStore> NamespaceEngine<S, ReadOnly> {
             wall_clock: Arc::new(crate::time::SystemWallClock),
             subject: None,
             authorization_head: None,
-            lsm_policy: crate::checkpoint::MetadataLsmPolicy::default(),
+            lsm_policy: crate::manifest::MetadataLsmPolicy::default(),
             #[cfg(any(test, feature = "test-support"))]
-            reorganization_row_budget: None,
+            compaction_row_budget: None,
             #[cfg(any(test, feature = "test-support"))]
             segment_row_budget: None,
         }
@@ -373,9 +373,9 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             wall_clock: Arc::new(crate::time::SystemWallClock),
             subject: None,
             authorization_head: None,
-            lsm_policy: crate::checkpoint::MetadataLsmPolicy::default(),
+            lsm_policy: crate::manifest::MetadataLsmPolicy::default(),
             #[cfg(any(test, feature = "test-support"))]
-            reorganization_row_budget: None,
+            compaction_row_budget: None,
             #[cfg(any(test, feature = "test-support"))]
             segment_row_budget: None,
         }
@@ -386,23 +386,19 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         &self.mode.writer_id
     }
 
-    /// Sets the budgets this engine's WAL flushes, reorganizations, and
-    /// compactions run under.
-    pub fn with_metadata_lsm_policy(
-        mut self,
-        policy: crate::checkpoint::MetadataLsmPolicy,
-    ) -> Self {
+    /// Sets the budgets this engine's WAL folds and compactions run under.
+    pub fn with_metadata_lsm_policy(mut self, policy: crate::manifest::MetadataLsmPolicy) -> Self {
         self.lsm_policy = policy;
         self
     }
 
-    /// The reorganization budgets this engine plans and compacts under.
-    fn metadata_lsm_policy(&self) -> crate::checkpoint::MetadataLsmPolicy {
+    /// The compaction budgets this engine plans and compacts under.
+    fn metadata_lsm_policy(&self) -> crate::manifest::MetadataLsmPolicy {
         let policy = self.lsm_policy;
         #[cfg(any(test, feature = "test-support"))]
-        let policy = crate::checkpoint::MetadataLsmPolicy {
+        let policy = crate::manifest::MetadataLsmPolicy {
             max_decoded_input_rows_per_step: self
-                .reorganization_row_budget
+                .compaction_row_budget
                 .unwrap_or(policy.max_decoded_input_rows_per_step),
             max_rows_per_segment: self
                 .segment_row_budget
@@ -412,8 +408,8 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         policy
     }
 
-    /// Narrows the rows one reorganization step may decode, so a namespace a
-    /// test can build in seconds has a base run no step can fold.
+    /// Narrows the rows one compaction step may decode, so a namespace a
+    /// test can build in seconds has a base run no step can compact.
     ///
     /// That state — a frozen base with delta runs piling up above it — is what
     /// the streaming compaction exists for, and the shipped budget only
@@ -422,11 +418,11 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// and publishing the job is the shipped path.
     #[cfg(any(test, feature = "test-support"))]
     #[must_use]
-    pub fn starve_reorganization_row_budget(
+    pub fn starve_compaction_row_budget(
         mut self,
         max_decoded_input_rows_per_step: std::num::NonZeroUsize,
     ) -> Self {
-        self.reorganization_row_budget = Some(max_decoded_input_rows_per_step);
+        self.compaction_row_budget = Some(max_decoded_input_rows_per_step);
         self
     }
 
@@ -715,7 +711,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     ) -> Result<CheckpointFilesPage> {
         // Rejects a mismatched or deleted namespace before any read work.
         self.ensure_live_context(context)?;
-        crate::checkpoint::list_checkpoint_files_page(
+        crate::pin::list_checkpoint_files_page(
             &self.store,
             Some(context.segment_cache.as_ref()),
             &context.head,
@@ -1174,7 +1170,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
 }
 
 impl<S: ObjectStore, M> NamespaceEngine<S, M> {
-    /// Returns an upload session. Completed uploads include a new receipt so
+    /// Returns an upload session. Completed uploads include new evidence so
     /// the caller can retry publication without uploading the content again.
     pub async fn get_upload_status(
         &self,
@@ -1204,7 +1200,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     pub async fn create_checkpoint(&self, name: String, ttl_ms: Option<u64>) -> Result<Checkpoint> {
         let context = self.mutation_context()?;
         let expires_at_ms = ttl_ms.map(|ttl_ms| context.now_ms.saturating_add(ttl_ms));
-        crate::checkpoint::create_checkpoint(
+        crate::pin::create_pin(
             &self.store,
             &self.namespace_id,
             PinOwner::User {
@@ -1214,13 +1210,13 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             &context,
         )
         .await
-        .map(crate::checkpoint::checkpoint_summary)
+        .map(crate::pin::checkpoint_summary)
     }
 
     /// Creates a snapshot of the current namespace state.
     pub async fn create_snapshot(&self, name: String, expires_at_ms: u64) -> Result<Checkpoint> {
         let context = self.mutation_context()?;
-        crate::checkpoint::create_checkpoint(
+        crate::pin::create_pin(
             &self.store,
             &self.namespace_id,
             PinOwner::Snapshot {
@@ -1230,7 +1226,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             &context,
         )
         .await
-        .map(crate::checkpoint::checkpoint_summary)
+        .map(crate::pin::checkpoint_summary)
     }
 }
 
@@ -1241,7 +1237,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         &self,
         request: PageRequest<CheckpointPageCursor>,
     ) -> Result<Page<loonfs_api::Checkpoint, CheckpointPageCursor>> {
-        crate::checkpoint::list_checkpoints_page(&self.store, &self.namespace_id, request).await
+        crate::pin::list_checkpoints_page(&self.store, &self.namespace_id, request).await
     }
 }
 
@@ -1254,7 +1250,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         &self,
         checkpoint_id: &PinId,
     ) -> Result<DeleteCheckpointResponse> {
-        crate::checkpoint::delete_checkpoint(&self.store, &self.namespace_id, checkpoint_id).await
+        crate::pin::delete_checkpoint(&self.store, &self.namespace_id, checkpoint_id).await
     }
 
     /// Extends a live snapshot without passing its lifetime ceiling.
@@ -1264,7 +1260,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         requested_expires_at_ms: u64,
         max_lifetime_ms: u64,
     ) -> Result<Checkpoint> {
-        crate::checkpoint::extend_snapshot_expiry(
+        crate::pin::extend_snapshot_expiry(
             &self.store,
             &self.namespace_id,
             checkpoint_id,
@@ -1279,19 +1275,19 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// Deletes a snapshot pin. A missing id returns `snapshot_not_found`.
     pub async fn delete_snapshot(&self, checkpoint_id: &PinId) -> Result<DeleteSnapshotResponse> {
         self.mutation_context()?;
-        crate::checkpoint::delete_snapshot(&self.store, &self.namespace_id, checkpoint_id).await
+        crate::pin::delete_snapshot(&self.store, &self.namespace_id, checkpoint_id).await
     }
 
-    /// Flushes the visible WAL tail and publishes a
+    /// Folds the visible WAL tail and publishes a
     /// manifest covering the current head.
     ///
     /// This is the latest-state maintenance operation: it absorbs the visible
     /// WAL tail into a new manifest, creating no
     /// pin. Superseded manifests become garbage-collection
     /// candidates once nothing pins them.
-    pub async fn flush_wal(&self) -> Result<FlushWalResponse> {
+    pub async fn fold_wal(&self) -> Result<FlushWalResponse> {
         self.mutation_context()?;
-        crate::checkpoint::flush_wal_with_deadline(
+        crate::manifest::fold_wal_with_deadline(
             &self.store,
             &self.namespace_id,
             &crate::time::Deadline::start(Arc::new(crate::time::StdMonotonicTimer::default())),
@@ -1302,16 +1298,16 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
 
     /// Claims the namespace compactor epoch for a maintenance runtime.
     pub async fn claim_compactor(&self) -> Result<CompactorEpoch> {
-        crate::checkpoint::claim_compactor(&self.store, &self.namespace_id).await
+        crate::manifest::claim_compactor(&self.store, &self.namespace_id).await
     }
 
     /// Merges one bounded run window under the claimed compactor epoch.
-    pub async fn reorganize_metadata(
+    pub async fn metadata_compaction_step(
         &self,
-        compaction_policy: crate::checkpoint::MetadataCompactionPolicy,
+        compaction_policy: crate::manifest::MetadataCompactionPolicy,
         compactor_epoch: CompactorEpoch,
-    ) -> Result<crate::checkpoint::MetadataReorganizeOutcome> {
-        crate::checkpoint::reorganize_metadata_step(
+    ) -> Result<crate::manifest::CompactionStepOutcome> {
+        crate::manifest::compaction_step(
             &self.store,
             &self.namespace_id,
             compactor_epoch,
@@ -1324,11 +1320,11 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// Publishes a streaming merge while its epoch and elapsed time remain valid.
     pub async fn run_metadata_compaction(
         &self,
-        spec: &crate::checkpoint::MetadataCompactionSpec,
+        spec: &crate::manifest::MetadataCompactionSpec,
         compactor_epoch: CompactorEpoch,
-        cancellation: &crate::checkpoint::MetadataCompactionCancellation,
-    ) -> Result<crate::checkpoint::MetadataCompactionJobOutcome> {
-        crate::checkpoint::run_metadata_compaction_job(
+        cancellation: &crate::manifest::MetadataCompactionCancellation,
+    ) -> Result<crate::manifest::MetadataCompactionJobOutcome> {
+        crate::manifest::run_metadata_compaction_job(
             &self.store,
             &self.namespace_id,
             compactor_epoch,
@@ -1342,7 +1338,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// Advances the retention floor when a verified checkpoint makes it safe.
     pub async fn advance_retention_floor(&self) -> Result<AdvanceRetentionResponse> {
         self.mutation_context()?;
-        crate::checkpoint::advance_retention_floor(&self.store, &self.namespace_id).await
+        crate::manifest::advance_retention_floor(&self.store, &self.namespace_id).await
     }
 
     /// Builds the mutation context for this engine's writer identity.
@@ -1357,7 +1353,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::checkpoint::WalTailProjectionCacheConfig;
+    use crate::manifest::WalTailProjectionCacheConfig;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use tempfile::tempdir;
 
@@ -1451,7 +1447,7 @@ mod tests {
         );
         let crate::UploadSessionView {
             session: status,
-            receipt,
+            evidence,
             ..
         } = reader
             .get_upload_status(&begun.upload_id, None)
@@ -1459,6 +1455,6 @@ mod tests {
             .expect("reader engine reads upload status");
 
         assert_eq!(status.upload_id, begun.upload_id);
-        assert!(receipt.is_none());
+        assert!(evidence.is_none());
     }
 }

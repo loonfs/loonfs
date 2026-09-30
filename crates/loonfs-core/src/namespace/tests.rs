@@ -179,7 +179,7 @@ async fn nested_forks_read_copied_runs_without_source_control_reads() {
         "child",
     )
     .await
-    .expect("unflushed child data");
+    .expect("unfolded child data");
     fork_namespace(
         &store,
         &target,
@@ -278,10 +278,10 @@ async fn a_pending_hint_cannot_name_a_manifest_collected_after_its_replacement()
         super::control::raise_hint(&store, &namespace_id, ManifestNo(2), Some(known), &deadline),
         async {
             store.wait_until_blocked().await;
-            crate::checkpoint::flush_wal(store.inner(), &namespace_id)
+            crate::manifest::fold_wal(store.inner(), &namespace_id)
                 .await
                 .expect("replace manifest");
-            crate::checkpoint::advance_retention_floor(store.inner(), &namespace_id)
+            crate::manifest::advance_retention_floor(store.inner(), &namespace_id)
                 .await
                 .expect("advance floor");
             let aged = MutationContext {
@@ -355,7 +355,7 @@ async fn fork_into_a_deleted_id_writes_no_source_pin() {
     assert_eq!(store.counts().compare_and_swaps, 0);
     assert_eq!(store.counts().deletes, 0);
     assert!(store
-        .list_prefix(&loonfs_objectstore::keys::checkpoint_prefix(&source))
+        .list_prefix(&loonfs_objectstore::keys::pin_prefix(&source))
         .await
         .expect("source pins")
         .is_empty());
@@ -367,7 +367,7 @@ async fn a_fork_that_loses_target_publication_deletes_its_source_pin() {
         let directory = tempdir().expect("directory");
         let source = NamespaceId::parse("source").expect("source");
         let target = NamespaceId::parse("target").expect("target");
-        let pin_prefix = loonfs_objectstore::keys::checkpoint_prefix(&source);
+        let pin_prefix = loonfs_objectstore::keys::pin_prefix(&source);
         let store = BlockingStore::new(
             LocalFsStore::new(directory.path()).expect("store"),
             KeyPredicate::prefix(&pin_prefix),

@@ -78,7 +78,7 @@ async fn an_unchanged_view_resolves_the_path_once() {
         .build()
         .await
         .expect("build maintenance")
-        .flush_wal(&namespace_id)
+        .fold_wal(&namespace_id)
         .await
         .expect("move the file's rows into metadata segments");
 

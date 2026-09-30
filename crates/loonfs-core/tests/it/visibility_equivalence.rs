@@ -14,7 +14,7 @@ use loonfs_api::{
 use loonfs_core::content::{prepare_stored_content, store_bytes_as_content};
 use loonfs_core::publish::{CommitCandidate, CommitRequest, FilesystemOperation};
 use loonfs_core::{
-    CreateNamespaceOptions, Error as CoreError, ErrorCode, MetadataReorganizeOutcome,
+    CompactionStepOutcome, CreateNamespaceOptions, Error as CoreError, ErrorCode,
     NamespaceWriterEngine, RuntimeReadContext,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -57,7 +57,7 @@ impl VisibilityHarness {
             .expect("acquire writer");
         assert!(results[0].is_err());
         engine
-            .flush_wal()
+            .fold_wal()
             .await
             .expect("fold the acquisition fence into a base run");
         Self {
@@ -780,20 +780,20 @@ async fn undelete_preserves_later_interior_mutations_and_nested_deletions() {
 
 #[derive(Clone, Copy)]
 enum MaintenanceOrder {
-    ReorganizeThenRetain,
-    RetainThenReorganize,
+    CompactThenRetain,
+    RetainThenCompact,
 }
 
 #[tokio::test]
-async fn retention_and_reorganization_in_both_orders_preserve_ancestor_bindings() {
+async fn retention_and_compaction_in_both_orders_preserve_ancestor_bindings() {
     run_maintenance_order(
         "visibility-maintenance-a",
-        MaintenanceOrder::ReorganizeThenRetain,
+        MaintenanceOrder::CompactThenRetain,
     )
     .await;
     run_maintenance_order(
         "visibility-maintenance-b",
-        MaintenanceOrder::RetainThenReorganize,
+        MaintenanceOrder::RetainThenCompact,
     )
     .await;
 }
@@ -809,7 +809,7 @@ async fn run_maintenance_order(namespace: &str, order: MaintenanceOrder) {
         )
         .await
         .expect("create movable subtree");
-    harness.engine.flush_wal().await.expect("flush first run");
+    harness.engine.fold_wal().await.expect("fold first run");
     let old = harness.inode_id("/old").await;
     let branch = harness.inode_id("/old/branch").await;
     let live = harness.inode_id("/old/branch/live.txt").await;
@@ -822,7 +822,7 @@ async fn run_maintenance_order(namespace: &str, order: MaintenanceOrder) {
         )
         .await
         .expect("create subtree retained under a tombstone");
-    harness.engine.flush_wal().await.expect("flush second run");
+    harness.engine.fold_wal().await.expect("fold second run");
     let grave = harness.inode_id("/grave").await;
     let deep = harness.inode_id("/grave/deep").await;
     let dead = harness.inode_id("/grave/deep/dead.txt").await;
@@ -831,12 +831,12 @@ async fn run_maintenance_order(namespace: &str, order: MaintenanceOrder) {
         .move_path("/old/branch", "/moved")
         .await
         .expect("move branch out of old parent");
-    harness.engine.flush_wal().await.expect("flush third run");
+    harness.engine.fold_wal().await.expect("fold third run");
     harness
         .delete("/old", DeleteDirectoryBehavior::NonRecursive)
         .await
         .expect("delete empty old parent");
-    harness.engine.flush_wal().await.expect("flush fourth run");
+    harness.engine.fold_wal().await.expect("fold fourth run");
     harness
         .put_file(
             "/old/reused.txt",
@@ -845,14 +845,14 @@ async fn run_maintenance_order(namespace: &str, order: MaintenanceOrder) {
         )
         .await
         .expect("reuse old path");
-    harness.engine.flush_wal().await.expect("flush fifth run");
+    harness.engine.fold_wal().await.expect("fold fifth run");
     let reused_old = harness.inode_id("/old").await;
     let reused_file = harness.inode_id("/old/reused.txt").await;
     harness
         .delete("/grave", DeleteDirectoryBehavior::Recursive)
         .await
         .expect("delete retained descendant subtree");
-    harness.engine.flush_wal().await.expect("flush sixth run");
+    harness.engine.fold_wal().await.expect("fold sixth run");
     for (index, bytes) in [b"live two".as_slice(), b"live three".as_slice()]
         .into_iter()
         .enumerate()
@@ -863,9 +863,9 @@ async fn run_maintenance_order(namespace: &str, order: MaintenanceOrder) {
             .unwrap_or_else(|error| panic!("replace for run {} failed: {error}", index + 7));
         harness
             .engine
-            .flush_wal()
+            .fold_wal()
             .await
-            .unwrap_or_else(|error| panic!("flush run {} failed: {error}", index + 7));
+            .unwrap_or_else(|error| panic!("fold run {} failed: {error}", index + 7));
     }
 
     let expected = [
@@ -885,21 +885,21 @@ async fn run_maintenance_order(namespace: &str, order: MaintenanceOrder) {
         .await;
 
     match order {
-        MaintenanceOrder::ReorganizeThenRetain => {
-            drain_reorganization(&harness, &expected, "before retention").await;
+        MaintenanceOrder::CompactThenRetain => {
+            drain_compaction(&harness, &expected, "before retention").await;
             harness
                 .engine
                 .advance_retention_floor()
                 .await
-                .expect("advance retention after reorganization");
+                .expect("advance retention after compaction");
         }
-        MaintenanceOrder::RetainThenReorganize => {
+        MaintenanceOrder::RetainThenCompact => {
             harness
                 .engine
                 .advance_retention_floor()
                 .await
-                .expect("advance retention before reorganization");
-            drain_reorganization(&harness, &expected, "after retention").await;
+                .expect("advance retention before compaction");
+            drain_compaction(&harness, &expected, "after retention").await;
         }
     }
 
@@ -907,13 +907,13 @@ async fn run_maintenance_order(namespace: &str, order: MaintenanceOrder) {
     harness
         .assert_equivalence(
             &after_maintenance,
-            "after retention and reorganization",
+            "after retention and compaction",
             &expected,
         )
         .await;
 }
 
-async fn drain_reorganization(
+async fn drain_compaction(
     harness: &VisibilityHarness,
     expected: &[ExpectedInode<'_>],
     checkpoint: &str,
@@ -922,33 +922,33 @@ async fn drain_reorganization(
     for _ in 0..16 {
         let report = harness
             .engine
-            .reorganize_metadata(
+            .metadata_compaction_step(
                 loonfs_core::MetadataCompactionPolicy::default(),
                 loonfs_api::CompactorEpoch(0),
             )
             .await
-            .expect("reorganize metadata");
+            .expect("compact metadata");
         match report {
-            MetadataReorganizeOutcome::NotNeeded { .. } => {
-                assert!(published_units > 0, "scenario must force reorganization");
+            CompactionStepOutcome::NotNeeded { .. } => {
+                assert!(published_units > 0, "scenario must force compaction");
                 return;
             }
-            MetadataReorganizeOutcome::UnitPublished { .. } => {
+            CompactionStepOutcome::UnitPublished { .. } => {
                 published_units += 1;
                 let context = harness.read_context().await;
                 harness
                     .assert_equivalence(&context, checkpoint, expected)
                     .await;
             }
-            MetadataReorganizeOutcome::Superseded | MetadataReorganizeOutcome::Fenced => {
-                panic!("single-writer test must not supersede reorganization")
+            CompactionStepOutcome::Superseded | CompactionStepOutcome::Fenced => {
+                panic!("single-writer test must not supersede compaction")
             }
-            MetadataReorganizeOutcome::CompactionPlanned { .. } => {
+            CompactionStepOutcome::CompactionPlanned { .. } => {
                 panic!("default budget must admit the visibility scenario")
             }
         }
     }
-    panic!("reorganization did not drain within the family-group bound");
+    panic!("compaction did not drain within the family-group bound");
 }
 
 #[tokio::test]
@@ -1080,7 +1080,7 @@ async fn revision_history_pages_survive_wal_folds_and_compaction() {
             .await
             .expect("write revision");
         if revision < 8 {
-            harness.engine.flush_wal().await.expect("flush revision");
+            harness.engine.fold_wal().await.expect("fold revision");
         }
     }
     let inode_id = harness.inode_id("/history.txt").await;
@@ -1126,12 +1126,8 @@ async fn revision_history_pages_survive_wal_folds_and_compaction() {
     // The first page combines a WAL revision with stored revisions. After
     // compaction, the same history comes entirely from the single family.
     assert_history(&harness, inode_id).await;
-    harness
-        .engine
-        .flush_wal()
-        .await
-        .expect("flush last revision");
-    drain_reorganization(
+    harness.engine.fold_wal().await.expect("fold last revision");
+    drain_compaction(
         &harness,
         &[
             ExpectedInode::visible(InodeId(1), "/"),

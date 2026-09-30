@@ -140,7 +140,7 @@ async fn valid_content_admission_skips_durable_content_validation() {
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    // A receipt exists only for a session the store already says completed,
+    // Evidence exists only for a session the store already says completed,
     // so the token this test admits has to come from a real upload.
     let engine = namespace_engine(&store, &namespace_id, &context);
     let upload = engine.begin_upload(None).await.expect("begin upload");
@@ -168,9 +168,9 @@ async fn valid_content_admission_skips_durable_content_validation() {
     let token = mint_content_token(
         "test-content-token-secret",
         completed
-            .receipt
+            .evidence
             .as_ref()
-            .expect("a completed session mints a receipt"),
+            .expect("a completed session mints evidence"),
         context.now_ms,
     )
     .expect("mint token");
@@ -1088,10 +1088,10 @@ async fn a_re_minted_receipt_publishes_after_the_first_one_expired() {
         )
         .await
         .expect("complete upload");
-    // The receipt the completion handed back, past its life.
+    // The evidence the completion handed back, past its life.
     let first = mint_content_token(
         "test-content-token-secret",
-        completed.receipt.as_ref().expect("completion mints"),
+        completed.evidence.as_ref().expect("completion mints"),
         0,
     )
     .expect("mint");
@@ -1101,13 +1101,13 @@ async fn a_re_minted_receipt_publishes_after_the_first_one_expired() {
         &first,
         CONTENT_RECEIPT_TTL_MS + 1,
     )
-    .expect_err("an expired receipt is refused at admission");
+    .expect_err("expired evidence is refused at admission");
     assert_eq!(refused, ContentTokenError::Expired);
 
     // Reading the session mints another one for the same durable bytes.
     let loonfs_core::UploadSessionView {
         session: status,
-        receipt,
+        evidence,
         ..
     } = engine
         .get_upload_status(&upload.upload_id, None)
@@ -1124,7 +1124,7 @@ async fn a_re_minted_receipt_publishes_after_the_first_one_expired() {
     }
     let re_minted = mint_content_token(
         "test-content-token-secret",
-        receipt.as_ref().expect("the status read re-mints"),
+        evidence.as_ref().expect("the status read re-mints"),
         CONTENT_RECEIPT_TTL_MS + 1,
     )
     .expect("re-mint");
@@ -1134,7 +1134,7 @@ async fn a_re_minted_receipt_publishes_after_the_first_one_expired() {
         &re_minted,
         CONTENT_RECEIPT_TTL_MS + 2,
     )
-    .expect("a re-minted receipt is admitted");
+    .expect("re-minted evidence is admitted");
 
     let responses = publish_namespace_commits_batch(
         &store,
@@ -1158,5 +1158,5 @@ async fn a_re_minted_receipt_publishes_after_the_first_one_expired() {
         .into_iter()
         .next()
         .expect("one response")
-        .expect("publishing with a re-minted receipt succeeds");
+        .expect("publishing with re-minted evidence succeeds");
 }

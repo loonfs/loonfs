@@ -1,16 +1,16 @@
 //! Age checks and pin deletion decisions.
 
-use super::fork_checkpoints::fork_checkpoint_is_retained;
+use super::fork_pins::fork_pin_is_retained;
 use super::live_set::LiveSet;
-use crate::checkpoint::record::load_checkpoint_record_at_key;
 use crate::context::MutationContext;
 use crate::control_object::ControlObjectLoadError;
 use crate::error::{CoreError, Result};
+use crate::pin::record::load_pin_at_key;
 use loonfs_api::wire::control::PinOwner;
 use loonfs_api::RetainedReason;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 
-pub(super) enum CheckpointSweep {
+pub(super) enum PinSweep {
     DeleteFork,
     DeleteUser,
     DeleteSnapshot,
@@ -21,26 +21,26 @@ pub(super) enum CheckpointSweep {
     },
 }
 
-pub(super) async fn sweep_checkpoint_record<S: ObjectStore + ?Sized>(
+pub(super) async fn sweep_pin<S: ObjectStore + ?Sized>(
     store: &S,
     key: &str,
     grace_window_ms: u64,
     live: &LiveSet,
     context: &MutationContext,
-) -> Result<CheckpointSweep> {
-    let record = match load_checkpoint_record_at_key(store, key).await {
+) -> Result<PinSweep> {
+    let record = match load_pin_at_key(store, key).await {
         Ok(loaded) => loaded.state,
-        Err(ControlObjectLoadError::MissingObject { .. }) => return Ok(CheckpointSweep::Gone),
+        Err(ControlObjectLoadError::MissingObject { .. }) => return Ok(PinSweep::Gone),
         Err(error) => return Err(CoreError::ControlObjectLoad(error)),
     };
     let deletion = match &record.owner {
-        PinOwner::User { .. } => CheckpointSweep::DeleteUser,
-        PinOwner::Snapshot { .. } => CheckpointSweep::DeleteSnapshot,
+        PinOwner::User { .. } => PinSweep::DeleteUser,
+        PinOwner::Snapshot { .. } => PinSweep::DeleteSnapshot,
         PinOwner::Fork {
             target_namespace_id,
         } => {
             return Ok(
-                match fork_checkpoint_is_retained(
+                match fork_pin_is_retained(
                     store,
                     &record,
                     target_namespace_id,
@@ -49,10 +49,10 @@ pub(super) async fn sweep_checkpoint_record<S: ObjectStore + ?Sized>(
                 )
                 .await?
                 {
-                    false => CheckpointSweep::DeleteFork,
+                    false => PinSweep::DeleteFork,
                     true => {
                         tracing::debug!(object_key = key, "retaining fork pin");
-                        CheckpointSweep::Retain {
+                        PinSweep::Retain {
                             reclaimable_at_ms: None,
                         }
                     }
@@ -70,7 +70,7 @@ pub(super) async fn sweep_checkpoint_record<S: ObjectStore + ?Sized>(
     let reclaimable_at_ms = expires_at_ms.into_iter().chain(ages_out_at_ms).min();
     Ok(match reclaimable_at_ms {
         Some(at_ms) if context.now_ms >= at_ms => deletion,
-        _ => CheckpointSweep::Retain { reclaimable_at_ms },
+        _ => PinSweep::Retain { reclaimable_at_ms },
     })
 }
 

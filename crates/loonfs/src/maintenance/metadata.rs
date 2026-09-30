@@ -10,7 +10,7 @@ use crate::{
 };
 use async_trait::async_trait;
 
-/// Flushes the WAL tail and runs bounded metadata reorganization.
+/// Folds the WAL tail and runs bounded metadata compaction.
 pub struct MetadataMaintenanceJob {
     maintenance: FsMaintenance,
     options: MetadataMaintenanceOptions,
@@ -48,11 +48,11 @@ impl MaintenanceJob for MetadataMaintenanceJob {
             .maintain_metadata_step(namespace_id, self.options.clone())
             .await
         {
-            Ok((metadata, idle_flush_at_ms)) => {
+            Ok((metadata, idle_fold_at_ms)) => {
                 let mut report = MaintenanceRunReport::concluded(metadata_conclusion(&metadata));
                 // A publication's wake can arrive before the tail is idle: the
                 // clock moved back, or a later publication's hint was dropped.
-                report.not_before_ms = idle_flush_at_ms;
+                report.not_before_ms = idle_fold_at_ms;
                 if metadata.reorganize == (ReorganizeStepOutcome::CompactionRequired {}) {
                     report.conclusion = MaintenanceConclusion::Blocked;
                     report.follow_up =
@@ -80,7 +80,7 @@ impl MaintenanceJob for MetadataMaintenanceJob {
     }
 
     fn should_run_after_publication(&self, publication: &NamespacePublication) -> bool {
-        self.options.flush_is_due(
+        self.options.fold_is_due(
             publication.wal_tail_segments,
             publication.wal_tail_inline_bytes,
         )
@@ -104,13 +104,13 @@ fn metadata_has_nothing_to_maintain(error: &RuntimeError) -> bool {
 }
 
 fn metadata_conclusion(step: &MetadataMaintenanceResponse) -> MaintenanceConclusion {
-    let flush = match step.wal_flush {
+    let fold = match step.wal_flush {
         WalFlushStepOutcome::Flushed { .. } => Some(MaintenanceConclusion::Progressed),
         WalFlushStepOutcome::AlreadyPublished { .. }
         | WalFlushStepOutcome::RetriesExhausted { .. } => Some(MaintenanceConclusion::Superseded),
         WalFlushStepOutcome::NotNeeded => None,
     };
-    let reorganize = match step.reorganize {
+    let compaction = match step.reorganize {
         ReorganizeStepOutcome::UnitPublished {} => Some(MaintenanceConclusion::Progressed),
         ReorganizeStepOutcome::ManifestAdvanced {} | ReorganizeStepOutcome::Fenced {} => {
             Some(MaintenanceConclusion::Superseded)
@@ -118,7 +118,7 @@ fn metadata_conclusion(step: &MetadataMaintenanceResponse) -> MaintenanceConclus
         ReorganizeStepOutcome::CompactionRequired {} => Some(MaintenanceConclusion::Blocked),
         ReorganizeStepOutcome::NotNeeded {} => None,
     };
-    [flush, reorganize]
+    [fold, compaction]
         .into_iter()
         .flatten()
         .max_by_key(|conclusion| conclusion_precedence(*conclusion))

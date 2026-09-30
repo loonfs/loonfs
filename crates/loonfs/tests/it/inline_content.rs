@@ -202,9 +202,9 @@ async fn imports_read_the_owners_tail_before_folding_and_object_after_folding() 
                 source.clone(),
                 WriterId::parse("fold").expect("writer"),
             )
-            .flush_wal()
+            .fold_wal()
             .await
-            .expect("flush source");
+            .expect("fold source");
         }
         recording.reset();
         let path = if folded { "/folded" } else { "/tail" };

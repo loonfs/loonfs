@@ -3,19 +3,18 @@
 //! younger than the pass's grace window or has no provider timestamp.
 
 use super::reap::{grace_age, GraceAge};
-use crate::checkpoint::load_namespace_manifest_envelope_if_present;
-use crate::checkpoint::record::checkpoint_key_ids;
 use crate::context::MutationContext;
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::limits::NAMESPACE_RETIREMENT_GRACE_MS;
+use crate::manifest::load_namespace_manifest_envelope_if_present;
 use crate::namespace::read_anchor::NamespaceReadAnchor;
-use crate::wal::{object_is_required, required_from};
+use crate::pin::record::pin_key_ids;
+use crate::wal::{live_folded_wal_no, object_is_required};
 use futures::StreamExt;
 use loonfs_api::wire::manifest::NamespaceManifestPayload;
 use loonfs_api::{ManifestNo, NamespaceId, WalNo};
 use loonfs_objectstore::keys::{
-    checkpoint_prefix, metadata_manifest_object, metadata_manifest_prefix,
-    metadata_segment_object_key,
+    metadata_manifest_object, metadata_manifest_prefix, metadata_segment_object_key, pin_prefix,
 };
 use loonfs_objectstore::layout::manifest_no_of;
 use loonfs_objectstore::ObjectStore;
@@ -38,7 +37,7 @@ pub(super) struct LiveSet {
     has_pins: bool,
     grace_window_ms: u64,
     now_ms: u64,
-    required_wal_from: Option<WalNo>,
+    live_folded_wal_no: Option<WalNo>,
 }
 
 impl LiveSet {
@@ -60,7 +59,7 @@ impl LiveSet {
             has_pins: false,
             grace_window_ms: grace_window_ms.max(NAMESPACE_RETIREMENT_GRACE_MS),
             now_ms: context.now_ms,
-            required_wal_from: required_from(&anchor.read_state),
+            live_folded_wal_no: live_folded_wal_no(&anchor.read_state),
         };
         let mut manifests = BTreeSet::new();
         // A tombstone roots its runs like any current manifest: an import from
@@ -75,7 +74,7 @@ impl LiveSet {
                 &anchor.manifest.object_key,
             ));
         }
-        let prefix = checkpoint_prefix(namespace_id);
+        let prefix = pin_prefix(namespace_id);
         let mut listing = store.list_prefix_stream(&prefix);
         while let Some(key) = listing
             .next()
@@ -84,10 +83,10 @@ impl LiveSet {
             .map_err(|error| CoreError::store(&prefix, &error))?
         {
             live.has_pins = true;
-            if !super::families::CandidateFamily::Checkpoints.recognizes(&key) {
+            if !super::families::CandidateFamily::Pins.recognizes(&key) {
                 continue;
             }
-            let (_, pin_id) = checkpoint_key_ids(&key).map_err(CoreError::ControlObjectLoad)?;
+            let (_, pin_id) = pin_key_ids(&key).map_err(CoreError::ControlObjectLoad)?;
             if live
                 .load_manifest(store, namespace_id, pin_id.manifest_no(), &mut manifests)
                 .await?
@@ -98,20 +97,18 @@ impl LiveSet {
             // cleanup attempt. Another collector can also remove a released
             // pin's basis after this pass listed it. Only tolerate absence
             // when the same owner/grace rules used by the sweep allow it.
-            match super::reap::sweep_checkpoint_record(store, &key, grace_window_ms, &live, context)
-                .await?
-            {
-                super::reap::CheckpointSweep::Retain { .. } => {
+            match super::reap::sweep_pin(store, &key, grace_window_ms, &live, context).await? {
+                super::reap::PinSweep::Retain { .. } => {
                     return Err(missing_root_manifest(
                         namespace_id,
                         pin_id.manifest_no(),
                         &key,
                     ));
                 }
-                super::reap::CheckpointSweep::Gone
-                | super::reap::CheckpointSweep::DeleteUser
-                | super::reap::CheckpointSweep::DeleteSnapshot
-                | super::reap::CheckpointSweep::DeleteFork => {}
+                super::reap::PinSweep::Gone
+                | super::reap::PinSweep::DeleteUser
+                | super::reap::PinSweep::DeleteSnapshot
+                | super::reap::PinSweep::DeleteFork => {}
             }
         }
         let prefix = metadata_manifest_prefix(namespace_id);
@@ -180,8 +177,8 @@ impl LiveSet {
     }
 
     pub(super) fn protects_wal(&self, key: &str) -> bool {
-        self.required_wal_from
-            .is_some_and(|floor| object_is_required(key, floor))
+        self.live_folded_wal_no
+            .is_some_and(|folded_wal_no| object_is_required(key, folded_wal_no))
     }
 
     pub(super) fn deadline(&self, tombstone: &NamespaceManifestPayload) -> u64 {

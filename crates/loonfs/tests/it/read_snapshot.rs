@@ -57,9 +57,9 @@ async fn read_during_compaction_and_collection(
             .expect("file");
         runtime
             .maintenance
-            .flush_wal(&namespace)
+            .fold_wal(&namespace)
             .await
-            .expect("flush");
+            .expect("fold");
     }
     let segment_keys = store
         .list_prefix(&loonfs_objectstore::keys::metadata_segment_prefix(
@@ -147,9 +147,9 @@ async fn read_during_compaction_and_collection(
             .expect("replace captured file");
         runtime
             .maintenance
-            .flush_wal(&namespace)
+            .fold_wal(&namespace)
             .await
-            .expect("flush replacement");
+            .expect("fold replacement");
         let mut published = false;
         let mut converged = false;
         for _ in 0..16 {
@@ -1266,9 +1266,9 @@ async fn a_missing_current_segment_stays_corrupt_and_manifest_read_failures_prop
         .expect("file");
     runtime
         .maintenance
-        .flush_wal(&namespace_id)
+        .fold_wal(&namespace_id)
         .await
-        .expect("flush");
+        .expect("fold");
     let reader = loonfs::FsReader::builder_with_store(store.clone())
         .build()
         .await

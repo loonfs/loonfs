@@ -26,7 +26,7 @@ fn inserts(kind: &str) -> String {
 /// `store_root`.
 ///
 /// Maintenance is serve-only so the two servers read the same manifest: an
-/// automatic flush between them would publish segments the first server
+/// automatic fold between them would publish segments the first server
 /// never saw, and a miss on those would say nothing about the cache.
 fn test_config_with_local_cache(
     store_root: &Path,

@@ -111,7 +111,7 @@ async fn retired_fork_reclaims_without_reading_inherited_segments() {
     assert!(requests.iter().any(|operation| matches!(operation,
         loonfs_test_support::stores::RecordedOperation::Delete { key } if key.starts_with("namespaces/target/content/")
     )));
-    assert!(!checkpoint_exists(&store, &source, source_pin).await);
+    assert!(!pin_exists(&store, &source, source_pin).await);
     assert!(read_upload_session(&store, &target, &upload.upload_id)
         .await
         .is_some());
@@ -288,7 +288,7 @@ async fn a_fork_basis_naming_its_pin_with_a_different_checksum_is_corrupt() {
     let basis = payload.fork_basis.as_mut().expect("fork basis");
     basis.manifest.payload_checksum = format!("sha256:{}", "0".repeat(64));
     let pin_id = basis.source_pin_id.clone();
-    let bytes = crate::checkpoint::publish::encode_manifest(payload).expect("manifest");
+    let bytes = crate::manifest::publish::encode_manifest(payload).expect("manifest");
     store
         .put_overwrite(&current.object_key, bytes.into_bytes().into())
         .await
@@ -305,5 +305,5 @@ async fn a_fork_basis_naming_its_pin_with_a_different_checksum_is_corrupt() {
     assert!(matches!(error, CoreError::NamespaceCorrupt(_)));
     assert_eq!(store.counts().puts, 0);
     assert_eq!(store.counts().deletes, 0);
-    assert!(checkpoint_exists(&store, &source, &pin_id).await);
+    assert!(pin_exists(&store, &source, &pin_id).await);
 }

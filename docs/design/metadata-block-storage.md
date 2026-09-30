@@ -1,6 +1,6 @@
 # Metadata block storage
 
-LoonFS stores filesystem metadata in immutable segments arranged as a log-structured merge tree. Each namespace manifest describes the complete set of segments needed to reconstruct its materialized state. Recent changes are read from the write-ahead log, or WAL, until a flush writes them into new segments.
+LoonFS stores filesystem metadata in immutable segments arranged as a log-structured merge tree. Each namespace manifest describes the complete set of segments needed to reconstruct its materialized state. Recent changes are read from the write-ahead log, or WAL, until a fold writes them into new segments.
 
 The main storage tradeoff is between object size and read amplification. Larger objects reduce object counts and can be efficient to write, but a metadata lookup should not require downloading an entire object. LoonFS therefore divides each segment into independently readable sections.
 
@@ -52,9 +52,9 @@ The implementation also combines reads when transferring some additional bytes i
 
 These are read-path optimizations. They do not change block boundaries, checksum coverage, or the visibility rules applied to the rows.
 
-## Flushes and compaction
+## Folds and compaction
 
-A flush and a compaction both publish manifests, but they perform different work. A flush materializes the visible WAL tail into a new run, which is a delta run except for the first flush over an empty manifest. The rows it encodes are proportional to the changes since the previous flush, but the complete manifest still describes the retained file set. A compaction merges complete runs for one family group; runs outside its window remain referenced without being rewritten.
+A fold and a compaction both publish manifests, but they perform different work. A fold materializes the visible WAL tail into a new run, which is a delta run except for the first fold over an empty manifest. The rows it encodes are proportional to the changes since the previous fold, but the complete manifest still describes the retained file set. A compaction merges complete runs for one family group; runs outside its window remain referenced without being rewritten.
 
 Each published file set replaces the previous one through the next numbered manifest put-if-absent, and readers use the earlier manifest until that put succeeds. The [storage format](../specs/format.md#10-retention-and-compaction) defines where a merged run is placed and which rows it can remove. [Streaming compaction](metadata-streaming-compaction.md) describes window selection, resource bounds, and restart behavior.
 

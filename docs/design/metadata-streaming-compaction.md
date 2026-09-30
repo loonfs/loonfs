@@ -1,6 +1,6 @@
 # Metadata streaming compaction
 
-LoonFS stores metadata in immutable runs. WAL flushes add delta runs, and compaction merges selected runs into a more efficient layout. An ordinary maintenance step limits its input by run count, decoded rows, and decoded bytes. A selected window that exceeds those limits runs as a streaming job instead.
+LoonFS stores metadata in immutable runs. WAL folds add delta runs, and compaction merges selected runs into a more efficient layout. An ordinary maintenance step limits its input by run count, decoded rows, and decoded bytes. A selected window that exceeds those limits runs as a streaming job instead.
 
 Both paths use the same merge and retention rules. A streaming job processes the selected window incrementally, writes segments as they fill, and publishes the completed output in one numbered manifest. Readers continue using the earlier file set until that publication succeeds.
 
@@ -52,7 +52,7 @@ Output uses fresh IDs under `namespaces/{namespace_id}/segments/`. Published des
 
 ## Binding retention
 
-The slot and child indexes each hold bound and unbound versions. A rebuild that includes the oldest run groups rows by slot or child. It keeps every version above the floor, and it keeps the newest version at or below the floor when that version is bound. An unbound version is a tombstone. Only this kind of rebuild can remove it, together with the older versions it hides. A rebuild above the oldest run keeps every row.
+The slot and child indexes each hold bound and unbound versions. A compaction that includes the oldest run groups rows by slot or child. It keeps every version above the floor, and it keeps the newest version at or below the floor when that version is bound. An unbound version is a tombstone. Only this kind of compaction can remove it, together with the older versions it hides. A compaction above the oldest run keeps every row.
 
 Binding keys sort positions oldest first. The retention operator holds at most one floor version until its slot or child ends or a row above the floor arrives. Both execution paths read each index as a separate sorted stream and apply the same rule to each.
 

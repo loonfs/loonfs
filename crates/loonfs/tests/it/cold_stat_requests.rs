@@ -1,5 +1,5 @@
 //! Pins the cold first-stat request shape: a fresh handle resolving a path
-//! over a manifest that carries several unfolded delta runs must not pay a
+//! over a manifest that carries several unmerged delta runs must not pay a
 //! per-run filter fetch (the manifest's inline filter copies answer those),
 //! and every metadata-segment object it does touch is small enough to load
 //! whole with a single ranged GET.
@@ -68,8 +68,8 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
         .await
         .expect("create namespace");
     // Publish the namespace's first manifest up front, so each maintenance
-    // step below adds exactly one delta run to it. A flush needs a tail to
-    // flush, so one seed commit comes first; its run holds a single name
+    // step below adds exactly one delta run to it. A fold needs a tail to
+    // fold, so one seed commit comes first; its run holds a single name
     // that sorts past every name looked up below, so range pruning rules it
     // out of those lookups.
     writer
@@ -82,7 +82,7 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
         .await
         .expect("seed the first manifest");
     maintenance
-        .flush_wal(&namespace_id)
+        .fold_wal(&namespace_id)
         .await
         .expect("publish first manifest");
     let catalog = loonfs_core::control::load_namespace_catalog_entry(&store, &namespace_id)
@@ -172,7 +172,7 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
         .collect();
     assert!(
         direntry_delta_runs.len() >= RUNS,
-        "expected at least {RUNS} unfolded delta direntry runs, found {}",
+        "expected at least {RUNS} unmerged delta direntry runs, found {}",
         direntry_delta_runs.len()
     );
     assert!(

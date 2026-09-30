@@ -149,7 +149,7 @@ impl Shape {
     }
 
     /// Files share one small inline value unless `distinct_bytes` gives each
-    /// file its own; a shared value keeps the flush to one content write.
+    /// file its own; a shared value keeps the fold to one content write.
     /// A dense commit also replaces the grants of `directories`.
     fn candidate(
         &self,
@@ -291,7 +291,7 @@ async fn seed(store: &SharedObjectStore, shape: &Shape) {
         .build()
         .await
         .expect("maintenance");
-    let flush = MetadataMaintenanceOptions {
+    let fold = MetadataMaintenanceOptions {
         max_wal_tail_segments: std::num::NonZeroU64::MIN,
         ..Default::default()
     };
@@ -322,9 +322,9 @@ async fn seed(store: &SharedObjectStore, shape: &Shape) {
             .await
             .expect("seed commit");
         maintenance
-            .maintain_metadata(&namespace_id, flush.clone())
+            .maintain_metadata(&namespace_id, fold.clone())
             .await
-            .expect("flush");
+            .expect("fold");
         let mut next = shape.folded_entries;
         for commit in 0..shape.tail_commits {
             let end = next + shape.tail_entries_per_commit;

@@ -40,16 +40,15 @@ pub const MAX_COMMIT_MESSAGE_BYTES: usize = 4096;
 /// Maximum attempts for a bounded compare-and-swap or allocation contention loop.
 pub const CONTENTION_RETRY_LIMIT: usize = 8;
 
-/// Longest visible WAL tail, in segments, a namespace may carry unflushed.
+/// Longest visible WAL tail, in segments, a namespace may carry unfolded.
 /// Every publish surface rejects at this length with `maintenance_required`,
 /// so a landed publication never leaves more than this behind.
-pub const MAX_UNFLUSHED_WAL_SEGMENTS: u64 = 128;
+pub const MAX_UNFOLDED_WAL_SEGMENTS: u64 = 128;
 
 /// Visible WAL-tail length, in segments, that starts an automatic WAL fold.
 pub const FOLD_AT_WAL_SEGMENTS: u64 = 32;
 
-const _: () =
-    assert!(0 < FOLD_AT_WAL_SEGMENTS && FOLD_AT_WAL_SEGMENTS < MAX_UNFLUSHED_WAL_SEGMENTS);
+const _: () = assert!(0 < FOLD_AT_WAL_SEGMENTS && FOLD_AT_WAL_SEGMENTS < MAX_UNFOLDED_WAL_SEGMENTS);
 
 /// Provider retry-admission deadline, in milliseconds. This alone does not
 /// bound a final retry's backoff and request phase.
@@ -68,7 +67,7 @@ pub const PROVIDER_PUBLICATION_REQUEST_BOUND_MS: u64 =
 /// Maximum elapsed time from observing a tip to initiating its next numbered put.
 pub const WAL_PUBLISH_BUDGET_MS: u64 = 60_000;
 
-/// Self-enforced budget for one metadata publication: a flush, a compaction
+/// Self-enforced budget for one metadata publication: a fold, a compaction
 /// step, a claim, a deletion, a fork installation, a retention advance, or a
 /// grep step. It runs from the start of the publication, before the publisher
 /// loads the manifest it builds on, until the manifest put-if-absent is

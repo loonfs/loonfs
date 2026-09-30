@@ -296,7 +296,7 @@ namespace.
 | `loonfs.namespace_head_cache.entries` | Gauge | Heads in the cache now. |
 | `loonfs.metadata_segment_cache.retained_decoded_bytes` | Gauge | Decoded bytes the metadata segment cache holds, up to `runtime_cache.metadata_segment_cache_max_decoded_bytes`. |
 | `loonfs.publisher.projection_evictions` | Counter | A publish-side WAL-tail projection is evicted at the projection budget. |
-| `loonfs.publisher.tail_replays` | Counter | A publish rereads the WAL tail from the store instead of using a retained projection. This happens on a session's first publish, after an eviction or a failed publish, when the namespace's last write was more than a minute ago, and when a flush the publisher did not run has published a new manifest. |
+| `loonfs.publisher.tail_replays` | Counter | A publish rereads the WAL tail from the store instead of using a retained projection. This happens on a session's first publish, after an eviction or a failed publish, when the namespace's last write was more than a minute ago, and when a fold the publisher did not run has published a new manifest. |
 | `loonfs.publisher.idle_sessions_closed` | Counter | An idle session closes to make room at the `max_writer_sessions` limit. |
 | `loonfs.publisher.session_refusals` | Counter | A request fails with `writer_capacity_exceeded`. |
 | `loonfs.maintenance.keys_admitted` | Gauge | Keys the runner reconciles. |
@@ -350,7 +350,7 @@ counted in any budget and sit on top.
 | Publication queue | `publication.max_estimated_bytes` | 64 MiB | Estimated bytes of admitted commit requests | Steady |
 | Proxied uploads | `max_concurrent_uploads` | 8 uploads | At most one 8 MiB transfer part per upload body | Per request |
 | Proxied downloads | `max_concurrent_downloads` | 16 streams | One 8 MiB read chunk per content stream | Per request |
-| Block memo | `runtime_cache.max_block_memo_bytes` | 64 MiB | Metadata blocks one read, publication, fold, or WAL flush keeps | Per operation |
+| Block memo | `runtime_cache.max_block_memo_bytes` | 64 MiB | Metadata blocks one read, publication, or fold keeps | Per operation |
 | Merge input | `max_merge_input_bytes` | 64 MiB | Decoded blocks one compaction or maintenance step merges | Per operation |
 | Segment output | None | 32 MiB | Encoded segments one fold, compaction, or maintenance step holds while it writes them | Per operation |
 | WAL folds | `max_concurrent_folds` | 2 | Folds running at once | Concurrency |
@@ -359,7 +359,7 @@ counted in any budget and sit on top.
 | Publications | `publication.max_concurrent_publications` | 8 | Publications running at once | Concurrency |
 
 A fold holds a block memo and its segment output, so it can use up to 96 MiB.
-A maintenance run can flush the WAL tail and then merge, one after the other.
+A maintenance run can fold the WAL tail and then merge, one after the other.
 It holds the larger of its block memo and its merge input, plus its segment
 output, so it can also use up to 96 MiB.
 
@@ -369,8 +369,8 @@ decoded input at once. A lower value therefore moves work from maintenance
 steps to compactions.
 
 The segment output budget has no setting. A segment larger than the budget
-is written alone. A checkpoint, snapshot, or fork that has to flush the WAL
-tail first runs that flush with the default 64 MiB block memo.
+is written alone. A checkpoint, snapshot, or fork that has to fold the WAL
+tail first runs that fold with the default 64 MiB block memo.
 
 Maintenance requests sent to the API run outside
 `max_concurrent_maintenance`. Writer sessions and head anchors are limited by
@@ -447,9 +447,9 @@ max_block_memo_bytes = 8388608
 Each read keeps at most 8 MiB. Three cases can still pass the limit:
 
 - Many large reads at once, because reads have no concurrency limit.
-- A namespace delete that flushes the WAL tail. It runs as a publication and
+- A namespace delete that folds the WAL tail. It runs as a publication and
   adds a 32 MiB segment output.
-- A checkpoint, snapshot, or fork that flushes the WAL tail. That flush keeps
+- A checkpoint, snapshot, or fork that folds the WAL tail. That fold keeps
   the default 64 MiB block memo.
 
 `max_writer_sessions` defaults to 1,024. At the limit, a request for another
@@ -510,7 +510,7 @@ at most the segment budget, and its first publish observes the tail. The tail
 can exceed the limit by at most the segment budget: for a new session's first
 inline commit, and after a put whose outcome is unknown. Another writer can make
 the remembered size stale until this session's next publish. The
-`MAX_UNFLUSHED_WAL_SEGMENTS` write stop refuses new commits regardless of the
+`MAX_UNFOLDED_WAL_SEGMENTS` write stop refuses new commits regardless of the
 inline tail limit.
 
 If a commit already succeeded, retrying the same request returns the original
@@ -554,7 +554,8 @@ requests, and finishing shutdown work. The default shutdown deadline is
 600 seconds. Docker and the Helm chart should allow 660 seconds before
 sending `SIGKILL`.
 
-Before an upgrade, flush each namespace with the current version:
+Before an upgrade, fold each namespace with the current version. The `flush`
+command runs the fold:
 
 ```bash
 loonfs maintenance flush --namespace <namespace>
@@ -576,7 +577,7 @@ The chart stops the old pod before starting the new one. The API is
 unavailable during this period. Run the smoke test after the rollout.
 
 Roll back only to a release whose notes say it reads this release's durable
-format. A flush is not a format downgrade. To roll back the Helm release:
+format. A fold is not a format downgrade. To roll back the Helm release:
 
 ```bash
 helm rollback loonfs-server --namespace loonfs

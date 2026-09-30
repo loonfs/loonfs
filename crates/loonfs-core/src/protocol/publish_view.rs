@@ -1,12 +1,12 @@
 //! Publish-time metadata and the numbered WAL tip retained between batches.
 
-use crate::checkpoint::VerifiedMetadataSegments;
-use crate::checkpoint::{
+use crate::error::{CoreError, MetadataProjectionLoadError, Result};
+use crate::limits::MAX_UNFOLDED_WAL_SEGMENTS;
+use crate::manifest::VerifiedMetadataSegments;
+use crate::manifest::{
     load_basis_metadata_segments, metadata_basis_from_manifest, LoadedMetadataBasis,
     MetadataSegmentCache,
 };
-use crate::error::{CoreError, MetadataProjectionLoadError, Result};
-use crate::limits::MAX_UNFLUSHED_WAL_SEGMENTS;
 use crate::metadata::{CommitReceiptRecord, MetadataView};
 use crate::namespace::basis::MetadataBasis;
 use crate::namespace::read_anchor::{load_read_anchor, NamespaceReadAnchor};
@@ -63,8 +63,8 @@ pub struct PublishTailOptions {
 impl Default for PublishTailOptions {
     fn default() -> Self {
         Self {
-            max_tail_rows: crate::checkpoint::DEFAULT_WAL_TAIL_PROJECTION_ROWS,
-            max_tail_decoded_bytes: crate::checkpoint::DEFAULT_WAL_TAIL_PROJECTION_DECODED_BYTES,
+            max_tail_rows: crate::manifest::DEFAULT_WAL_TAIL_PROJECTION_ROWS,
+            max_tail_decoded_bytes: crate::manifest::DEFAULT_WAL_TAIL_PROJECTION_DECODED_BYTES,
         }
     }
 }
@@ -218,7 +218,7 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
             tail_discovered,
             manifest_segments,
             tail_state,
-            write_stop: (projection.wal_tail_segments >= MAX_UNFLUSHED_WAL_SEGMENTS)
+            write_stop: (projection.wal_tail_segments >= MAX_UNFOLDED_WAL_SEGMENTS)
                 .then_some(projection.wal_tail_segments),
         },
         projection,

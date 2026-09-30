@@ -3,15 +3,12 @@
 
 use super::control::load_current_manifest_if_present;
 use super::create::publish_namespace;
-use crate::checkpoint::record::{
-    delete_failed_pin, load_owned_checkpoint_record, write_checkpoint_record, CheckpointOwnerKind,
-};
-use crate::checkpoint::{
-    classify_live_snapshot, create_checkpoint, load_namespace_manifest_envelope,
-};
 use crate::context::MutationContext;
 use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, Result};
+use crate::manifest::load_namespace_manifest_envelope;
+use crate::pin::record::{delete_failed_pin, load_owned_pin, write_pin, PinOwnerKind};
+use crate::pin::{classify_live_snapshot, create_pin};
 use crate::time::{Deadline, MonotonicTimer};
 use loonfs_api::wire::control::{ForkBasis, NamespaceStatus, PinOwner, PinPayload};
 use loonfs_api::wire::manifest::NamespaceManifestPayload;
@@ -45,7 +42,7 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
         target_namespace_id: new_namespace_id.clone(),
     };
     let source_record = if let Some(snapshot_id) = snapshot_id {
-        create_snapshot_fork_checkpoint(
+        create_snapshot_fork_pin(
             store,
             source_namespace_id,
             snapshot_id,
@@ -55,7 +52,7 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
         )
         .await?
     } else {
-        create_checkpoint(store, source_namespace_id, owner, context).await?
+        create_pin(store, source_namespace_id, owner, context).await?
     };
     let source_manifest = load_namespace_manifest_envelope(
         store,
@@ -64,8 +61,8 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
     )
     .await
     .map_err(|err| CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(err)))?;
-    crate::checkpoint::ensure_manifest_reference_matches(
-        "fork checkpoint",
+    crate::manifest::ensure_manifest_reference_matches(
+        "fork pin",
         &source_record.manifest(),
         &source_manifest,
     )?;
@@ -95,7 +92,7 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
             error,
             CoreError::NamespaceExists { .. } | CoreError::NamespaceDeleted { .. }
         ) {
-            match target_retains_checkpoint(store, &source_record, new_namespace_id).await {
+            match target_retains_pin(store, &source_record, new_namespace_id).await {
                 Ok(true) => {}
                 Ok(false) => {
                     delete_failed_pin(store, source_namespace_id, &source_record.pin_id, &error)
@@ -103,7 +100,7 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
                 }
                 Err(check_error) => tracing::warn!(
                     namespace_id = %source_namespace_id,
-                    checkpoint_id = %source_record.pin_id,
+                    pin_id = %source_record.pin_id,
                     original_error = %error,
                     check_error = %check_error,
                     "kept a fork pin whose target could not be read after installation failed"
@@ -115,7 +112,7 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
     crate::namespace::status::load_namespace(store, new_namespace_id).await
 }
 
-async fn create_snapshot_fork_checkpoint<S: ObjectStore + ?Sized>(
+async fn create_snapshot_fork_pin<S: ObjectStore + ?Sized>(
     store: &S,
     source_namespace_id: &NamespaceId,
     snapshot_id: &PinId,
@@ -133,7 +130,7 @@ async fn create_snapshot_fork_checkpoint<S: ObjectStore + ?Sized>(
         ..snapshot
     };
     let verification = async {
-        write_checkpoint_record(store, &record).await?;
+        write_pin(store, &record).await?;
         load_snapshot_fork_basis(store, source_namespace_id, snapshot_id, context, deadline).await
     }
     .await;
@@ -157,17 +154,17 @@ async fn load_snapshot_fork_basis<S: ObjectStore + ?Sized>(
             .await
             .map_err(CoreError::ControlObjectLoad)?;
     crate::namespace::control::ensure_namespace_live(&source_head)?;
-    let snapshot = load_owned_checkpoint_record(
+    let snapshot = load_owned_pin(
         store,
         source_namespace_id,
         snapshot_id,
-        CheckpointOwnerKind::Snapshot,
+        PinOwnerKind::Snapshot,
     )
     .await?;
     Ok(classify_live_snapshot(snapshot, context.now_at(deadline))?.state)
 }
 
-pub(crate) async fn target_retains_checkpoint<S: ObjectStore + ?Sized>(
+pub(crate) async fn target_retains_pin<S: ObjectStore + ?Sized>(
     store: &S,
     record: &PinPayload,
     target_namespace_id: &NamespaceId,

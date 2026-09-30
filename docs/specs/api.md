@@ -1009,10 +1009,11 @@ Races and supersessions are outcomes, not errors.
 
 A deleted namespace accepts only a run with `kind` set to `gc` or `grep_gc`; other jobs return `namespace_deleted`. Retirement follows [format section 9.5](format.md#95-retirement).
 
-`wal_flush.outcome` has four values. `not_needed` means the WAL tail was below the threshold and had not gone idle (see the `metadata` options below). `flushed` means this step published the next current manifest. `already_published` means the current manifest already covered the captured WAL tail, so this step published no manifest. `retries_exhausted` means concurrent updates prevented every attempt from publishing; nothing was flushed, and a later step can try again.
+`wal_flush.outcome` reports the WAL fold and has four values. `not_needed` means the WAL tail was below the threshold and had not gone idle (see the `metadata` options below). `flushed` means this step published the next current manifest. `already_published` means the current manifest already covered the captured WAL tail, so this step published no manifest. `retries_exhausted` means concurrent updates prevented every attempt from publishing; nothing was folded, and a later step can try again.
 
-`reorganize.outcome` has five values. `not_needed` means no bounded merge is
-due. `unit_published` means this run published one bounded merge.
+`reorganize.outcome` reports the compaction step and has five values.
+`not_needed` means no bounded merge is due. `unit_published` means this run
+published one bounded merge.
 `compaction_required` means a family group needs streaming compaction; run the
 `metadata_compaction` job. `manifest_advanced` means another publisher changed the
 current manifest first. Segments this run wrote remain unreferenced, and a
@@ -1032,7 +1033,7 @@ byte, and segment counts. `cancelled` means the caller cancelled the job.
 or all publication attempts lost. `fenced` means another process advanced
 the manifest's compactor epoch. These last three outcomes publish no manifest.
 
-For `metadata`, `max_wal_tail_segments` overrides the flush threshold. Zero and values above the write-rejection threshold return `invalid_request`. A tail below the threshold is still flushed once it goes idle: its newest commit is as old as the server's configured idle period, 15 minutes by default, on the server's clock ([format: maintenance policy](format.md#73-recovery-material-and-maintenance-policy)). A server can turn this rule off. Replay history is retained unless the request uses `kind: "retention"`. For `gc`, `grace_window_ms` overrides the grace window. A grace window below the derived safety floor returns `invalid_request`. Upload sessions keep their leases and completed content keeps its derived reclamation grace ([format: upload cleanup](format.md#116-upload-session-cleanup)).
+For `metadata`, `max_wal_tail_segments` overrides the fold threshold. Zero and values above the write-rejection threshold return `invalid_request`. A tail below the threshold is still folded once it goes idle: its newest commit is as old as the server's configured idle period, 15 minutes by default, on the server's clock ([format: maintenance policy](format.md#73-recovery-material-and-maintenance-policy)). A server can turn this rule off. Replay history is retained unless the request uses `kind: "retention"`. For `gc`, `grace_window_ms` overrides the grace window. A grace window below the derived safety floor returns `invalid_request`. Upload sessions keep their leases and completed content keeps its derived reclamation grace ([format: upload cleanup](format.md#116-upload-session-cleanup)).
 
 Responses contain counts for that call. Concurrent calls can overlap deletion
 attempts, so these counts are operational summaries. No collection state is
@@ -2956,7 +2957,7 @@ Namespace creation and forking produce no change-feed event.
 
 The new namespace reads inherited content at each reference's owner key and starts its own
 metadata history. The fork shares the source's existing content and
-metadata objects without copying the filesystem. Forking the current head may first flush the
+metadata objects without copying the filesystem. Forking the current head may first fold the
 source's outstanding WAL tail, which writes that tail's inline content to content objects.
 The fork creates a fork-owned source checkpoint so the
 source-owned immutable metadata segments stay available for as long as the

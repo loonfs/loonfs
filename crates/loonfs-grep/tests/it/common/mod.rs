@@ -222,13 +222,12 @@ pub(crate) mod control {
             .state
     }
 
-    pub(crate) async fn checkpoint_record(
+    pub(crate) async fn pin(
         store: &SharedObjectStore,
         namespace_id: &NamespaceId,
         checkpoint_id: &PinId,
     ) -> Option<PinPayload> {
-        let bytes =
-            control_bytes(store, &keys::checkpoint_record(namespace_id, checkpoint_id)).await?;
+        let bytes = control_bytes(store, &keys::pin(namespace_id, checkpoint_id)).await?;
         Some(
             decode_control_object::<PinPayload>(&bytes, ControlObjectKind::Pin)
                 .expect("decode pin")

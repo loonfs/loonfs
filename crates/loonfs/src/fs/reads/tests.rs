@@ -177,7 +177,7 @@ async fn create_compacted_directory(
             .await
             .expect("file batch");
         maintenance
-            .flush_wal(namespace_id)
+            .fold_wal(namespace_id)
             .await
             .expect("fold file batch");
     }

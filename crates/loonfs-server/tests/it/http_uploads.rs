@@ -516,7 +516,7 @@ async fn http_upload_status_re_mints_and_abort_is_terminal() {
             }],
         },
     )
-    .expect("a re-minted receipt admits its content");
+    .expect("re-minted evidence admits its content");
     let commit: Commit =
         serde_json::from_reader(commit.into_reader()).expect("decode commit response");
     assert_eq!(commit.committed_seq, ChangeSeq(1));

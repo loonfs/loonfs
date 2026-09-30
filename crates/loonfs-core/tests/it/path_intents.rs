@@ -585,7 +585,7 @@ async fn wide_directory_listing_resolves_tail_unbinds_cross_directory_renames_an
     for index in 0..70u32 {
         if index % 32 == 0 {
             namespace_engine(&store, &namespace_id, &context)
-                .flush_wal()
+                .fold_wal()
                 .await
                 .expect("fold seed writes");
         }

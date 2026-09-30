@@ -19,7 +19,7 @@ pub(crate) use self::frame::{WalSegmentError, WalTailLoadError};
 pub use self::projected_tail::ProjectedWalTail;
 pub(crate) use self::publish::publish_segment;
 pub(crate) use self::reader::{load_replayed_wal_tail, replay_discovered_tail};
-pub(crate) use self::reclaim::{object_is_required, required_from};
+pub(crate) use self::reclaim::{live_folded_wal_no, object_is_required};
 pub(crate) use self::writer::prepare_segment;
 
 #[cfg(test)]

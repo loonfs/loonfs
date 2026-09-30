@@ -2640,7 +2640,7 @@ async fn a_late_fold_does_not_republish_an_already_folded_tail() {
     writer
         .maintenance_handle("late-fold-maintenance")
         .expect("maintenance handle")
-        .flush_wal(&namespace_b)
+        .fold_wal(&namespace_b)
         .await
         .expect("fold the waiting namespace tail");
     assert_eq!(recording.count(OperationClass::Put), 1);
@@ -2648,7 +2648,7 @@ async fn a_late_fold_does_not_republish_an_already_folded_tail() {
         .publisher()
         .submit_candidate(
             namespace_b.clone(),
-            CommitCandidate::new(create_directory_request("after-flush", "after-flush")),
+            CommitCandidate::new(create_directory_request("after-fold", "after-fold")),
         )
         .await
         .expect("refresh the retained projection below the fold threshold");

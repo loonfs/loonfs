@@ -6,7 +6,7 @@ use futures::stream::{self, BoxStream};
 use futures::TryStreamExt;
 use loonfs_api::ManifestNo;
 use loonfs_objectstore::keys::{
-    checkpoint_record, hint, metadata_manifest_object, metadata_segment, wal_segment,
+    hint, metadata_manifest_object, metadata_segment, pin, wal_segment,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::metrics::{
@@ -263,9 +263,9 @@ async fn instrumented_store_forwards_start_after_listing() {
     let second = format!("{prefix}pin_00000000000000000001-0000000000000002.json");
     for key in [&first, &second] {
         store
-            .put_overwrite(key, bytes(b"checkpoint"))
+            .put_overwrite(key, bytes(b"pin"))
             .await
-            .expect("put checkpoint");
+            .expect("put pin");
     }
 
     let keys = store
@@ -319,12 +319,12 @@ async fn classifies_durable_key_families() {
         .expect("put segment");
     store
         .put_overwrite(
-            &checkpoint_record(
+            &pin(
                 &loonfs_api::NamespaceId::parse("ns-1").expect("valid namespace id"),
                 &loonfs_api::PinId::parse("pin_00000000000000000001-0000000000000001")
-                    .expect("valid checkpoint id"),
+                    .expect("valid pin id"),
             ),
-            bytes(b"checkpoint"),
+            bytes(b"pin"),
         )
         .await
         .expect("put pin");

@@ -1,10 +1,10 @@
 //! The frozen-base policy over a live runtime: amortized bounded work and
 //! explicit compaction.
 //!
-//! These tests need a family group whose base run no bounded step can fold,
+//! These tests need a family group whose base run no bounded step can compact,
 //! with delta runs still arriving above it. The shipped row budget only
 //! reaches that state at a scale no test can write, so the budget is narrowed
-//! through [`FsMaintenance::starve_reorganization_row_budget`]. Everything else —
+//! through [`FsMaintenance::starve_compaction_row_budget`]. Everything else —
 //! planning, admission, the executor, the finalizer — is the shipped path.
 
 use crate::metrics::{DefaultMetricsRecorder, MetricValue, MetricsSnapshot};
@@ -158,7 +158,7 @@ async fn a_maintenance_gc_step_records_the_pass_counters_once() {
 }
 
 /// Writes one file and folds the tail, so each call leaves one more delta run.
-async fn write_and_flush(
+async fn write_and_fold(
     writer: &FsWriter,
     maintenance: &FsMaintenance,
     namespace_id: &NamespaceId,
@@ -174,7 +174,7 @@ async fn write_and_flush(
         .await
         .expect("put a file");
     maintenance
-        .flush_wal(namespace_id)
+        .fold_wal(namespace_id)
         .await
         .expect("fold the tail");
 }
@@ -183,7 +183,7 @@ async fn write_and_flush(
 /// with retention-eligible churn inside it, and then leaves delta runs piling
 /// up above that base.
 ///
-/// The order matters. The churn is folded into the base while the retention
+/// The order matters. The churn is merged into the base while the retention
 /// floor is still at the bottom, so nothing drops on the way in and the rows a
 /// rebuild may drop are in the base when the rebuild reads it. The floor is
 /// advanced past that churn next, and the delta runs come last, because they
@@ -202,7 +202,7 @@ async fn namespace_with_a_frozen_base(
         .await
         .expect("create the namespace");
     for index in 0..24 {
-        write_and_flush(
+        write_and_fold(
             writer,
             maintenance,
             namespace_id,
@@ -224,17 +224,17 @@ async fn namespace_with_a_frozen_base(
             .expect("rename a file");
     }
     maintenance
-        .flush_wal(namespace_id)
+        .fold_wal(namespace_id)
         .await
         .expect("fold the tail");
 
-    // Fold everything into one base run per group, under the shipped budgets
+    // Merge everything into one base run per group, under the shipped budgets
     // and with the floor still at the bottom, so the churn lands in the base.
     for _ in 0..64 {
         let response = maintenance
-            .flush_wal(namespace_id)
+            .fold_wal(namespace_id)
             .await
-            .expect("fold a unit");
+            .expect("merge a unit");
         if response.reorganize == (ReorganizeStepOutcome::NotNeeded {}) {
             break;
         }
@@ -262,7 +262,7 @@ async fn namespace_with_a_frozen_base(
 /// always available above it.
 ///
 /// The maintenance here is the starved one, which is what makes these runs pile up:
-/// its steps can no longer fold the group they land in, so each write leaves
+/// its steps can no longer merge the group they land in, so each write leaves
 /// one more delta run behind rather than being merged into the base.
 async fn sustained_writes(
     writer: &FsWriter,
@@ -270,7 +270,7 @@ async fn sustained_writes(
     namespace_id: &NamespaceId,
 ) {
     for index in 0..10 {
-        write_and_flush(
+        write_and_fold(
             writer,
             maintenance,
             namespace_id,
@@ -376,8 +376,8 @@ async fn compaction_planning_survives_restart_and_explicit_work_has_bounded_fan_
     }
     let store = LocalFsStore::new(temp_dir.path()).expect("create local-fs store");
     let budget = budget_that_starves_the_bindings_base(&store, &explicit).await;
-    let standalone = standalone.starve_reorganization_row_budget(budget);
-    let scheduled = scheduled.starve_reorganization_row_budget(budget);
+    let standalone = standalone.starve_compaction_row_budget(budget);
+    let scheduled = scheduled.starve_compaction_row_budget(budget);
     for namespace in [&explicit, &automatic] {
         sustained_writes(&writer, &standalone, namespace).await;
     }
@@ -408,7 +408,7 @@ async fn compaction_planning_survives_restart_and_explicit_work_has_bounded_fan_
     let fresh_scheduled = fresh_writer
         .maintenance_handle("fresh-scheduled-maintenance")
         .expect("build a fresh shared maintenance handle")
-        .starve_reorganization_row_budget(budget);
+        .starve_compaction_row_budget(budget);
     let response = fresh_scheduled
         .run_maintenance(&automatic, metadata_request())
         .await
@@ -496,7 +496,7 @@ async fn an_immediate_step_reports_the_compaction_the_explicit_call_runs() {
     namespace_with_a_frozen_base(&writer, &standalone, &namespace).await;
     let store = LocalFsStore::new(temp_dir.path()).expect("create local-fs store");
     let budget = budget_that_starves_the_bindings_base(&store, &namespace).await;
-    let standalone = standalone.starve_reorganization_row_budget(budget);
+    let standalone = standalone.starve_compaction_row_budget(budget);
     sustained_writes(&writer, &standalone, &namespace).await;
 
     let response = standalone
@@ -609,9 +609,9 @@ async fn explicit_compaction_merges_twenty_deltas_and_reads_the_large_base_once(
             .await
             .expect("write the base attribute history");
     }
-    maintenance.flush_wal(&namespace).await.expect("flush base");
+    maintenance.fold_wal(&namespace).await.expect("fold base");
     let maintenance =
-        maintenance.starve_reorganization_row_budget(NonZeroUsize::new(16).expect("nonzero"));
+        maintenance.starve_compaction_row_budget(NonZeroUsize::new(16).expect("nonzero"));
     for revision in 0..20 {
         let mut options = UpdateAttributesOptions::new(loonfs_test_support::test_actor());
         options.remove = keys.clone();
@@ -624,9 +624,9 @@ async fn explicit_compaction_merges_twenty_deltas_and_reads_the_large_base_once(
             .await
             .expect("write delta");
         maintenance
-            .run_wal_flush(&namespace)
+            .run_wal_fold(&namespace)
             .await
-            .expect("flush delta");
+            .expect("fold delta");
     }
 
     let attribute_runs = |manifest: &NamespaceManifestPayload| {
@@ -775,10 +775,10 @@ async fn maintenance_clones_share_one_claim_and_never_reclaim_after_fencing() {
     store.reset();
     assert!(matches!(
         maintenance
-            .reorganize_once(&namespace, MetadataCompactionPolicy::SizeTiered)
+            .compact_once(&namespace, MetadataCompactionPolicy::SizeTiered)
             .await
             .expect("no work"),
-        super::ReorganizationStep::Concluded(ReorganizeStepOutcome::NotNeeded {})
+        super::CompactionStep::Concluded(ReorganizeStepOutcome::NotNeeded {})
     ));
     assert_eq!(store.counts().puts, 0);
     let cloned = maintenance.clone();
@@ -815,9 +815,9 @@ async fn maintenance_clones_share_one_claim_and_never_reclaim_after_fencing() {
     );
     assert_eq!(
         maintenance
-            .run_reorganization(&namespace, MetadataCompactionPolicy::SizeTiered)
+            .run_compaction_step(&namespace, MetadataCompactionPolicy::SizeTiered)
             .await
-            .expect("fenced reorganization"),
+            .expect("fenced compaction"),
         ReorganizeStepOutcome::Fenced {}
     );
     assert_eq!(store.counts().puts, 0);

@@ -7,8 +7,8 @@ use super::durable_cache::{
 use super::manifest_index;
 use super::view_session::{latest_visible_binding, LeafRevisionPrefetch};
 use super::visibility::{self, MetadataVisibilityReads};
-use crate::checkpoint::VerifiedMetadataSegments;
 use crate::error::CoreError;
+use crate::manifest::VerifiedMetadataSegments;
 use crate::metadata::{
     active_deletion_from_tombstone, recoverable_deletion_from_active_record, AccessRevisionRecord,
     ActiveDeletionRecord, AttributesRevisionRecord, CommitReceiptRecord, DirentryBindingRecord,
@@ -34,7 +34,7 @@ use std::sync::Arc;
 pub(super) const DIRECTORY_PAGE_RAW_SCAN_LIMIT: usize = 64;
 
 /// Rows one trash page fetches per manifest round-trip. A page's entries are
-/// listed rows; undelete markers share the range until reorganization folds
+/// listed rows; undelete markers share the range until compaction removes
 /// each pair away, so the raw scan runs a little ahead of the page.
 const ACTIVE_DELETION_RAW_SCAN_LIMIT: usize = 64;
 

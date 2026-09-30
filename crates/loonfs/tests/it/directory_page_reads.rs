@@ -64,7 +64,7 @@ async fn directory_pages_use_bindings_and_load_revision_heads_concurrently() {
         .await
         .expect("directory");
     maintenance
-        .flush_wal(&namespace_id)
+        .fold_wal(&namespace_id)
         .await
         .expect("fold parents");
     let parent_inode_keys = family_keys(&store, &namespace_id, MetadataRowFamily::Inodes).await;
@@ -81,7 +81,7 @@ async fn directory_pages_use_bindings_and_load_revision_heads_concurrently() {
                 .expect("create file");
         }
         maintenance
-            .flush_wal(&namespace_id)
+            .fold_wal(&namespace_id)
             .await
             .expect("fold batch");
     }
@@ -100,7 +100,7 @@ async fn directory_pages_use_bindings_and_load_revision_heads_concurrently() {
             .expect("replace file");
     }
     maintenance
-        .flush_wal(&namespace_id)
+        .fold_wal(&namespace_id)
         .await
         .expect("fold replacements");
     let child_inode_keys: BTreeSet<_> =
