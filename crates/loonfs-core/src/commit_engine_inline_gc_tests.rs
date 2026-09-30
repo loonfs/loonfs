@@ -14,7 +14,7 @@ async fn collect_aged_wal(
     let config = GcConfig::default();
     let aged = MetadataMapStore::aged(
         store.clone(),
-        KeyPredicate::prefix(wal_segment_prefix(namespace_id)),
+        KeyPredicate::prefix(wal_prefix(namespace_id)),
     );
     gc_namespace(
         &aged,
@@ -71,7 +71,7 @@ async fn gc_keeps_inline_wal_until_fold_publication_then_reads_use_objects() {
     .await
     .expect("publish");
     let wal_before = store
-        .list_prefix(&wal_segment_prefix(namespace_id))
+        .list_prefix(&wal_prefix(namespace_id))
         .await
         .expect("list WAL");
     assert!(!wal_before.is_empty());
@@ -101,7 +101,7 @@ async fn gc_keeps_inline_wal_until_fold_publication_then_reads_use_objects() {
         collect_aged_wal(&store, namespace_id, &context).await;
         assert_eq!(
             store
-                .list_prefix(&wal_segment_prefix(namespace_id))
+                .list_prefix(&wal_prefix(namespace_id))
                 .await
                 .expect("WAL"),
             wal_before
@@ -116,7 +116,7 @@ async fn gc_keeps_inline_wal_until_fold_publication_then_reads_use_objects() {
     );
     collect_aged_wal(&store, namespace_id, &context).await;
     assert!(store
-        .list_prefix(&wal_segment_prefix(namespace_id))
+        .list_prefix(&wal_prefix(namespace_id))
         .await
         .expect("collected WAL")
         .is_empty());
@@ -160,7 +160,7 @@ async fn losing_fold_keeps_objects_after_the_winners_wal_is_collected() {
         assert_eq!(folded.response.outcome, FlushWalOutcome::Published);
         collect_aged_wal(&store, namespace_id, &context).await;
         assert!(store
-            .list_prefix(&wal_segment_prefix(namespace_id))
+            .list_prefix(&wal_prefix(namespace_id))
             .await
             .expect("collected WAL")
             .is_empty());

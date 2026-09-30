@@ -1165,13 +1165,13 @@ mod tests {
         let head = load_namespace_read_state(&store, &namespace_id)
             .await
             .expect("state");
-        let key = loonfs_objectstore::keys::wal_segment(&namespace_id, &head.wal_no);
+        let key = loonfs_objectstore::keys::wal_object(&namespace_id, &head.wal_no);
         let bytes = store.get(&key, None).await.expect("WAL").expect("exists");
-        let mut payload = loonfs_api::wire::wal::decode_wal_segment_envelope_zstd(&bytes)
+        let mut payload = loonfs_api::wire::wal::decode_wal_object_envelope_zstd(&bytes)
             .expect("decode")
             .into_payload();
         payload.next_inode_id = InodeId(payload.next_inode_id.0 + 1);
-        let bytes = loonfs_api::wire::wal::encode_wal_segment_envelope_zstd(payload)
+        let bytes = loonfs_api::wire::wal::encode_wal_object_envelope_zstd(payload)
             .expect("encode")
             .into_bytes();
         store

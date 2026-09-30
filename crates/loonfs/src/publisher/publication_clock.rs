@@ -10,7 +10,7 @@ async fn publish_after_retry_delay(remaining_ms: u64, apply_then_fail: bool) -> 
     let delayed = Arc::clone(&clock);
     let retry_time = Arc::new(AtomicU64::new(0));
     let delay_until = Arc::clone(&retry_time);
-    let wal_prefix = wal_segment_prefix(&namespace_id);
+    let wal_prefix = wal_prefix(&namespace_id);
     let store = FailStore::matching(
         LocalFsStore::new(directory.path()).expect("store"),
         move |operation| {
@@ -71,7 +71,7 @@ async fn publish_after_retry_delay(remaining_ms: u64, apply_then_fail: bool) -> 
     clock.set(started);
     retry_time.store(started + 10, AtomicOrdering::SeqCst);
     Arc::get_mut(&mut runtime.core.inner)
-        .expect("unshared read core")
+        .expect("unshared runtime core")
         .wall_clock = clock.clone();
     let mut publisher = standalone_publisher(&namespace_id, &runtime);
     publisher.timer = clock;

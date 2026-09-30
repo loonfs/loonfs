@@ -870,7 +870,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
 
 impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// Publishes already-classified mutation candidates as one batch: one WAL
-    /// segment, one numbered WAL put, one result per candidate in order.
+    /// object, one numbered WAL put, one result per candidate in order.
     pub async fn publish_namespace_commits_batch(
         &self,
         candidates: Vec<CommitCandidate>,

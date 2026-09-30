@@ -10,7 +10,6 @@
 | **Commit receipt** | A durable row that maps a commit ID to its committed sequence. The commit row at that sequence stores the semantic fingerprint. |
 | **Semantic fingerprint** | A digest of the canonical logical request, used to detect conflicting reuse of a commit ID. |
 | **WAL** | The ordered log of immutable, consecutively numbered WAL objects. |
-| **WAL segment** | A numbered immutable object containing contiguous commits, or no commits when fencing a writer. |
 | **Fence** | A zero-record WAL object used to establish a writer epoch in WAL order without creating a logical commit. |
 | **Content publication** | Permanent metadata evidence that a content ID was committed; collection uses it to decide completed-upload cleanup. |
 | **Fold** | Materializing committed WAL into metadata segments and publishing a manifest so later readers replay less history. The CLI command `loonfs maintenance flush` runs a fold, and the maintenance response reports it in `wal_flush`. |

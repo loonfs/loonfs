@@ -1,6 +1,6 @@
 //! The maintenance capability of a writable runtime.
 
-use crate::fs::{ReadCore, WriterIdentity};
+use crate::fs::{RuntimeCore, WriterIdentity};
 use crate::publisher::PublisherRegistry;
 use crate::{NamespaceId, Result};
 use loonfs_api::CompactorEpoch;
@@ -16,7 +16,7 @@ use std::sync::Arc;
 /// created with.
 #[derive(Clone)]
 pub struct Maintenance {
-    pub(crate) core: ReadCore,
+    pub(crate) core: RuntimeCore,
     pub(crate) publisher: PublisherRegistry,
     pub(crate) actor: WriterIdentity,
     pub(crate) compactor_epochs: Arc<tokio::sync::Mutex<BTreeMap<NamespaceId, CompactorEpoch>>>,
@@ -32,7 +32,11 @@ pub struct Maintenance {
 }
 
 impl Maintenance {
-    pub(super) fn new(core: ReadCore, publisher: PublisherRegistry, actor: WriterIdentity) -> Self {
+    pub(super) fn new(
+        core: RuntimeCore,
+        publisher: PublisherRegistry,
+        actor: WriterIdentity,
+    ) -> Self {
         Self {
             core,
             publisher,

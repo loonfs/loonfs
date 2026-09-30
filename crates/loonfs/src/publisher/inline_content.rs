@@ -95,7 +95,7 @@ impl NamespacePublisher {
                 return Ok(());
             }
         }
-        let (reader, context) = self.read_core.pinned_read(namespace_id).await?;
+        let (reader, context) = self.runtime_core.pinned_read(namespace_id).await?;
         if reader
             .find_commit_receipt(&context, candidate.commit_id())
             .await?
@@ -105,10 +105,12 @@ impl NamespacePublisher {
         }
         let writer = self.writer.upgrade().ok_or(CoreError::ShuttingDown)?;
         let catalog = self
-            .read_core
+            .runtime_core
             .load_namespace_catalog_cached(namespace_id)
             .await?;
-        let engine = self.read_core.writer_engine(&writer.identity, namespace_id);
+        let engine = self
+            .runtime_core
+            .writer_engine(&writer.identity, namespace_id);
         for value in values {
             let proof = engine
                 .stage_owned_bytes(

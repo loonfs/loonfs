@@ -1,7 +1,7 @@
 //! Publish-time metadata and the numbered WAL tip retained between batches.
 
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
-use crate::limits::MAX_UNFOLDED_WAL_SEGMENTS;
+use crate::limits::MAX_UNFOLDED_WAL_OBJECTS;
 use crate::manifest::VerifiedMetadataSegments;
 use crate::manifest::{
     load_basis_metadata_segments, metadata_basis_from_manifest, LoadedMetadataBasis,
@@ -14,7 +14,7 @@ use crate::namespace::state::NamespaceReadState;
 use crate::namespace::writer_epoch::ensure_writer_not_fenced;
 use crate::storage::inline_content::InlineContent;
 use crate::wal::ProjectedWalTail;
-use crate::wal::{replay_discovered_tail, ValidatedWalTail, WalSegmentError};
+use crate::wal::{replay_discovered_tail, ValidatedWalTail, WalObjectError};
 use loonfs_api::wire::control::AcquiredWriter;
 use loonfs_api::wire::wal::WalCommitPayload;
 use loonfs_api::{CommitId, NamespaceId};
@@ -95,7 +95,7 @@ pub(crate) struct FoldInProgress {
     from: NamespaceReadState,
     /// Rows and inline content of every commit published since `from`.
     since: Arc<ProjectedWalTail>,
-    segments_since: u64,
+    wal_objects_since: u64,
 }
 
 impl PublishTailProjection {
@@ -103,7 +103,7 @@ impl PublishTailProjection {
         self.fold = Some(FoldInProgress {
             from: self.head.clone(),
             since: Arc::new(ProjectedWalTail::default()),
-            segments_since: 0,
+            wal_objects_since: 0,
         });
     }
 
@@ -112,7 +112,7 @@ impl PublishTailProjection {
             if basis.0.head_seq == fold.from.seq {
                 self.basis = basis;
                 self.tail_state = fold.since;
-                self.wal_tail_segments = fold.segments_since;
+                self.wal_tail_segments = fold.wal_objects_since;
                 self.head.folded_wal_no = fold.from.wal_no;
                 return true;
             }
@@ -124,7 +124,7 @@ impl PublishTailProjection {
         &mut self,
         inline_content: &[InlineContent],
         records: &[WalCommitPayload],
-    ) -> std::result::Result<(), WalSegmentError> {
+    ) -> std::result::Result<(), WalObjectError> {
         if let Some(fold) = &mut self.fold {
             let since = Arc::make_mut(&mut fold.since);
             for value in inline_content {
@@ -133,7 +133,7 @@ impl PublishTailProjection {
             for record in records {
                 since.apply_commit(record)?;
             }
-            fold.segments_since += 1;
+            fold.wal_objects_since += 1;
         }
         Ok(())
     }
@@ -218,7 +218,7 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
             tail_discovered,
             manifest_segments,
             tail_state,
-            write_stop: (projection.wal_tail_segments >= MAX_UNFOLDED_WAL_SEGMENTS)
+            write_stop: (projection.wal_tail_segments >= MAX_UNFOLDED_WAL_OBJECTS)
                 .then_some(projection.wal_tail_segments),
         },
         projection,
@@ -234,7 +234,7 @@ fn load_publish_tail_projection<S: ObjectStore + ?Sized>(
     let manifest_head = loaded_basis.replay_head(head);
     let replayed = replay_discovered_tail(&manifest_head, &loaded_basis.base_state, tail)
         .map_err(CoreError::MetadataProjection)?;
-    let wal_tail_segments = head.unfolded_wal_segments();
+    let wal_tail_segments = head.unfolded_wal_objects();
     let projection = PublishTailProjection {
         basis,
         head: head.clone(),

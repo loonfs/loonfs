@@ -8,7 +8,7 @@
 
 use crate::{EffectiveLimit, GcConfig, MetadataCompactionPolicy, Result, RuntimeError};
 use loonfs_api::{CreateCheckpointRequest, GcRequest, MetadataMaintenanceRequest};
-use loonfs_core::limits::{FOLD_AT_WAL_SEGMENTS, MAX_UNFOLDED_WAL_SEGMENTS};
+use loonfs_core::limits::{FOLD_AT_WAL_OBJECTS, MAX_UNFOLDED_WAL_OBJECTS};
 use std::num::{NonZeroU64, NonZeroUsize};
 
 pub use loonfs_api::options::{
@@ -21,7 +21,7 @@ pub use loonfs_api::options::{
 /// Overrides for the metadata-upkeep action.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataMaintenanceOptions {
-    /// Fold the visible WAL tail once it reaches this many segments.
+    /// Fold the visible WAL tail once it reaches this many WAL objects.
     pub max_wal_tail_segments: NonZeroU64,
     /// Fold once unfolded inline bytes reach this size; defaults to 2 MiB.
     /// Applies only when the runtime's publisher knows the count.
@@ -37,7 +37,7 @@ pub struct MetadataMaintenanceOptions {
 impl Default for MetadataMaintenanceOptions {
     fn default() -> Self {
         Self {
-            max_wal_tail_segments: const { NonZeroU64::new(FOLD_AT_WAL_SEGMENTS).unwrap() },
+            max_wal_tail_segments: const { NonZeroU64::new(FOLD_AT_WAL_OBJECTS).unwrap() },
             inline_content_fold_at_bytes: NonZeroUsize::new(
                 crate::InlineContentOptions::default().inline_content_fold_at_bytes,
             )
@@ -60,12 +60,12 @@ impl MetadataMaintenanceOptions {
                 param: "/max_wal_tail_segments",
             });
         };
-        let reject_writes_at_segments = MAX_UNFOLDED_WAL_SEGMENTS;
-        if max_wal_tail_segments.get() > reject_writes_at_segments {
+        let reject_writes_at_wal_objects = MAX_UNFOLDED_WAL_OBJECTS;
+        if max_wal_tail_segments.get() > reject_writes_at_wal_objects {
             return Err(RuntimeError::InvalidRequest {
                 message: format!(
                     "max_wal_tail_segments may not exceed the write-rejection threshold \
-                 ({reject_writes_at_segments})"
+                 ({reject_writes_at_wal_objects})"
                 ),
                 param: "/max_wal_tail_segments",
             });
@@ -208,7 +208,7 @@ mod tests {
 
     #[test]
     fn a_useless_fold_threshold_is_rejected() {
-        for threshold in [0, MAX_UNFOLDED_WAL_SEGMENTS + 1] {
+        for threshold in [0, MAX_UNFOLDED_WAL_OBJECTS + 1] {
             let error = MetadataMaintenanceOptions::from_request(MetadataMaintenanceRequest {
                 max_wal_tail_segments: Some(threshold),
             })

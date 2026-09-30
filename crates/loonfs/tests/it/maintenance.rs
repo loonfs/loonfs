@@ -220,7 +220,7 @@ fn maintenance_step_below_threshold_is_not_needed() {
 }
 
 #[test]
-fn maintenance_step_at_segment_threshold_folds_the_wal() {
+fn maintenance_step_at_wal_object_threshold_folds_the_wal() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "step-publish-test");
     let namespace_id = namespace_id("demo");
@@ -321,7 +321,7 @@ fn metadata_run_does_not_advance_retention() {
     )
     .expect("put second file");
     fs.maintenance_run_namespace_blocking(&namespace_id, metadata_request(1))
-        .expect("fold second segment");
+        .expect("fold second WAL object");
     let response = fs
         .maintenance_run_namespace_blocking(
             &namespace_id,
@@ -785,9 +785,9 @@ async fn a_delayed_fenced_compaction_does_not_forget_a_newer_claim() {
 }
 
 #[test]
-fn maintenance_step_counts_segments_not_commits() {
+fn maintenance_step_counts_wal_objects_not_commits() {
     let temp_dir = tempdir().expect("tempdir");
-    let fs = runtime(temp_dir.path(), "step-segment-count-test");
+    let fs = runtime(temp_dir.path(), "step-wal-object-count-test");
     let namespace_id = namespace_id("demo");
 
     fs.create_namespace_blocking(
@@ -816,11 +816,11 @@ fn maintenance_step_counts_segments_not_commits() {
     assert_eq!(upkeep(&response).wal_flush, WalFlushStepOutcome::NotNeeded);
 
     fs.mutate_blocking(&namespace_id, create_directory_request("create-c", "/c"))
-        .expect("second segment commit");
+        .expect("second WAL object commit");
 
     let response = fs
         .maintenance_run_namespace_blocking(&namespace_id, metadata_request(3))
-        .expect("maintenance pass at segment threshold");
+        .expect("maintenance pass at WAL object threshold");
     assert_eq!(
         upkeep(&response).wal_flush,
         WalFlushStepOutcome::Flushed {
@@ -915,7 +915,7 @@ async fn a_cold_metadata_job_probes_with_its_configured_options() {
             PutFileOptions::new(loonfs_test_support::test_actor()),
         )
         .await
-        .expect("write one WAL segment");
+        .expect("write one WAL object");
     drop(runtime);
     let runtime = open_runtime_async(store(temp_dir.path()), "writer-b").await;
     let defaults = MetadataMaintenanceJob::new(runtime.maintenance.clone());
@@ -945,7 +945,7 @@ async fn a_cold_metadata_job_probes_with_its_configured_options() {
             PutFileOptions::new(loonfs_test_support::test_actor()),
         )
         .await
-        .expect("write another segment");
+        .expect("write another WAL object");
     runtime
         .create_checkpoint(&namespace)
         .await

@@ -115,7 +115,7 @@ The local provider is a development and test provider supported on Unix-family p
 
 ## 6. LoonFS Design Implications
 
-1. **WAL/head flush cadence:** one update per second is the same-key CAS ceiling for GCS and R2. For more throughput, write immutable segment objects and update multiple sharded heads or a batched manifest.
+1. **WAL/head flush cadence:** one update per second is the same-key CAS ceiling for GCS and R2. For more throughput, write immutable WAL objects and update multiple sharded heads or a batched manifest.
 2. **Immutable content path:** content-addressed or monotonic keys can scale through multipart upload and distributed prefixes. 
 3. **Checksums:** LoonFS should own end-to-end integrity. Provider checksums help validate transport/storage, but ETag/checksum semantics diverge sharply across providers and multipart modes.
 

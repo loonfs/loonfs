@@ -5,7 +5,7 @@ use crate::config::StoreConfig;
 use crate::resolve::ResolvedTarget;
 use loonfs::{CreateNamespaceOptions, MaintenanceConclusion, MetadataMaintenanceOptions};
 use loonfs_api::NamespaceId;
-use loonfs_core::test_support::append_wal_segments;
+use loonfs_core::test_support::append_wal_objects;
 use loonfs_core::MutationContext;
 use loonfs_grep::{GREP_GC_JOB, GREP_INDEX_JOB};
 use tempfile::tempdir;
@@ -77,7 +77,7 @@ async fn seed_wal_backlog(store: &SharedObjectStore, namespace_id: &NamespaceId)
         )
         .await
         .expect("create namespace");
-    append_wal_segments(
+    append_wal_objects(
         store.as_ref(),
         namespace_id,
         PUBLISHES_PAST_THE_CHECKPOINT_THRESHOLD,
@@ -167,7 +167,7 @@ async fn a_drain_settles_every_assigned_key_and_does_the_work_it_finds() {
             .expect("diagnostics after the drain");
         assert!(
             status.wal_tail_segments < checkpoint_threshold(),
-            "`{namespace_id}` kept a WAL tail of {} segments past the checkpoint threshold",
+            "`{namespace_id}` kept a WAL tail of {} objects past the checkpoint threshold",
             status.wal_tail_segments
         );
         assert!(status.current_manifest_no.is_some(), "{namespace_id}");
@@ -284,7 +284,7 @@ async fn hosting_an_assignment_maintains_a_cold_namespace_until_the_signal() {
         .expect("diagnostics after hosting");
     assert!(
         status.wal_tail_segments < checkpoint_threshold(),
-        "the hosted runner left a WAL tail of {} segments",
+        "the hosted runner left a WAL tail of {} objects",
         status.wal_tail_segments
     );
 }

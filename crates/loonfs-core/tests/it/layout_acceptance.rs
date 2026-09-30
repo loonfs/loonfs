@@ -13,7 +13,7 @@ use loonfs_core::publish::{
 use loonfs_core::time::Deadline;
 use loonfs_core::{gc_namespace, GcConfig};
 use loonfs_core::{CreateNamespaceOptions, MutationContext, ResolvedUploadCompletion};
-use loonfs_objectstore::keys::wal_segment_prefix;
+use loonfs_objectstore::keys::wal_prefix;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::timing::StdMonotonicTimer;
 use loonfs_objectstore::ObjectStore;
@@ -85,11 +85,11 @@ async fn reads_commits_and_change_feed_never_list() {
         .await
         .expect("bootstrap");
 
-    // Foreign junk in the segment collection must be invisible to every
+    // Foreign junk among the WAL objects must be invisible to every
     // hot path.
     store
         .put_if_absent(
-            &format!("{}zz-junk.tmp", wal_segment_prefix(&namespace_id)),
+            &format!("{}zz-junk.tmp", wal_prefix(&namespace_id)),
             Bytes::from_static(b"junk"),
         )
         .await

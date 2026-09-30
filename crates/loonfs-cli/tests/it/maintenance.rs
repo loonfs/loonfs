@@ -1155,8 +1155,8 @@ fn maintenance_and_changes_commands_report_the_same_shapes_in_both_modes() {
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0]["checkpoint_id"], checkpoint_id.as_str());
 
-        // `maintenance flush` runs metadata maintenance with a flush threshold of one.
-        // segment, so it reports both halves and nothing else.
+        // `maintenance flush` runs metadata maintenance with a flush threshold of one
+        // WAL object, so it reports both halves and nothing else.
         let flush = harness.run(&["--json", "maintenance", "flush", "--profile", profile]);
         assert_success(&flush);
         let flush_data = json_data(&flush);

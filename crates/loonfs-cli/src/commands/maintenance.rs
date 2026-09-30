@@ -231,7 +231,7 @@ async fn run_maintenance_checkpoint_delete(
     Ok(context.output(kind, CommandData::CheckpointDeleted(response)))
 }
 
-/// One metadata-upkeep pass at a threshold of one segment.
+/// One metadata-upkeep pass at a threshold of one WAL object.
 ///
 /// The fold an operator asks for explicitly runs whatever the tail length,
 /// and the reorganization unit rides along: upkeep is one action, and the

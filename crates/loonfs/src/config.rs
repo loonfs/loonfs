@@ -15,7 +15,7 @@ pub(crate) const DEFAULT_MAX_CACHED_WAL_TAIL_PROJECTION_DECODED_BYTES: usize =
 /// for one namespace (see [`crate::publisher`]). A request to an idle
 /// namespace publishes immediately; the interval only paces requests that
 /// queued behind a publish, so concurrent submissions amortize into fewer,
-/// larger WAL segments. Zero
+/// larger WAL objects. Zero
 /// keeps only the batching that in-flight publications force.
 pub(crate) const DEFAULT_MIN_PUBLISH_INTERVAL_MS: u64 = 15;
 /// Default maximum WAL-tail folds one writer runs concurrently.
@@ -67,14 +67,14 @@ impl Default for PublicationLimits {
     }
 }
 
-/// Writer policy for content carried in WAL segments.
+/// Writer policy for content carried in WAL objects.
 /// Retrying a completed inline commit does not upload its content again while
 /// the commit receipt is retained. See `docs/specs/api.md`, section 5.2.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InlineContentOptions {
     /// Maximum size prepared inline; defaults to 64 KiB. `None` disables inline preparation.
     pub inline_content_threshold_bytes: Option<usize>,
-    /// Maximum inline bytes in one WAL segment; defaults to 1 MiB.
+    /// Maximum inline bytes in one WAL object; defaults to 1 MiB.
     pub inline_content_segment_budget_bytes: usize,
     /// Unfolded inline bytes that make a fold due; defaults to 2 MiB.
     pub inline_content_fold_at_bytes: usize,
@@ -84,7 +84,7 @@ pub struct InlineContentOptions {
     /// not observed the tail admits at most the segment budget. The tail can
     /// exceed the limit by at most the segment budget: for a new session's
     /// first inline commit, and after a put whose outcome is unknown.
-    /// `MAX_UNFOLDED_WAL_SEGMENTS` stops new commits regardless of this limit.
+    /// `MAX_UNFOLDED_WAL_OBJECTS` stops new commits regardless of this limit.
     pub inline_content_tail_limit_bytes: usize,
 }
 
@@ -102,7 +102,7 @@ impl Default for InlineContentOptions {
 impl InlineContentOptions {
     pub(crate) fn validate(&self) -> crate::Result<()> {
         use loonfs_api::wire::wal::{
-            MAX_WAL_INLINE_CONTENT_BYTES, MAX_WAL_SEGMENT_INLINE_CONTENT_BYTES,
+            MAX_WAL_INLINE_CONTENT_BYTES, MAX_WAL_OBJECT_INLINE_CONTENT_BYTES,
         };
         if self
             .inline_content_threshold_bytes
@@ -113,10 +113,10 @@ impl InlineContentOptions {
             )));
         }
         if self.inline_content_segment_budget_bytes == 0
-            || self.inline_content_segment_budget_bytes > MAX_WAL_SEGMENT_INLINE_CONTENT_BYTES
+            || self.inline_content_segment_budget_bytes > MAX_WAL_OBJECT_INLINE_CONTENT_BYTES
         {
             return Err(crate::RuntimeError::Config(format!(
-                "`inline_content_segment_budget_bytes` must be between 1 and {MAX_WAL_SEGMENT_INLINE_CONTENT_BYTES}"
+                "`inline_content_segment_budget_bytes` must be between 1 and {MAX_WAL_OBJECT_INLINE_CONTENT_BYTES}"
             )));
         }
         if self.inline_content_fold_at_bytes == 0 || self.inline_content_tail_limit_bytes == 0 {

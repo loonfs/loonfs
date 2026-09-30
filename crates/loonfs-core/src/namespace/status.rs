@@ -46,7 +46,7 @@ pub async fn load_namespace_wal_tail_usage<S: ObjectStore + ?Sized>(
     .map_err(CoreError::MetadataProjection)?;
     Ok(NamespaceWalTailUsage {
         head_seq: loaded.read_state.seq,
-        wal_tail_segments: loaded.read_state.unfolded_wal_segments(),
+        wal_tail_segments: loaded.read_state.unfolded_wal_objects(),
         wal_tail_inline_bytes: tail.projected_tail.inline_bytes(),
     })
 }
@@ -120,7 +120,7 @@ pub async fn load_namespace_diagnostics<S: ObjectStore + ?Sized>(
 ) -> Result<NamespaceStorageDiagnostics> {
     let loaded = load_read_anchor(store, expected_namespace_id).await?;
     super::control::ensure_namespace_live(&loaded.read_state)?;
-    let wal_tail_segments = loaded.read_state.unfolded_wal_segments();
+    let wal_tail_segments = loaded.read_state.unfolded_wal_objects();
     let retention_floor_seq = loaded.retention_floor_seq();
     let manifest_no = loaded.manifest.state.manifest().manifest_no;
     let wal_tail_newest_commit_at_ms = loaded.tail.newest_commit_at_ms();

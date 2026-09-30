@@ -12,12 +12,12 @@ use crate::path::read::load_current_metadata_view;
 use crate::protocol::PublishTailOptions;
 use crate::test_support::ops::create;
 use crate::time::{Deadline, StdMonotonicTimer};
-use loonfs_api::wire::wal::{decode_wal_segment_envelope_zstd, encode_wal_segment_envelope_zstd};
+use loonfs_api::wire::wal::{decode_wal_object_envelope_zstd, encode_wal_object_envelope_zstd};
 use loonfs_api::{
     AbsolutePath, AttributeInclusion, ChangeSeq, CommitId, ErrorCode, InodeId, ManifestNo,
     NamespaceId, WalNo, WriterEpoch, WriterId,
 };
-use loonfs_objectstore::keys::{hint, metadata_manifest_object, wal_segment, wal_segment_prefix};
+use loonfs_objectstore::keys::{hint, metadata_manifest_object, wal_object, wal_prefix};
 use loonfs_objectstore::{local_fs_store::LocalFsStore, ObjectStore};
 use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::stores::{
@@ -47,11 +47,10 @@ async fn readers_reject_invalid_numbers_epochs_sequences_and_allocation_summarie
             .await
             .expect("fence");
     }
-    let key = wal_segment(&namespace_id, &WalNo(2));
-    let original = decode_wal_segment_envelope_zstd(
-        &store.get(&key, None).await.expect("get").expect("fence"),
-    )
-    .expect("decode");
+    let key = wal_object(&namespace_id, &WalNo(2));
+    let original =
+        decode_wal_object_envelope_zstd(&store.get(&key, None).await.expect("get").expect("fence"))
+            .expect("decode");
 
     for changed in 0..5 {
         let mut payload = original.payload().clone();
@@ -62,7 +61,7 @@ async fn readers_reject_invalid_numbers_epochs_sequences_and_allocation_summarie
             3 => payload.head_seq = ChangeSeq(1),
             _ => payload.next_inode_id = InodeId(3),
         }
-        let bytes = encode_wal_segment_envelope_zstd(payload)
+        let bytes = encode_wal_object_envelope_zstd(payload)
             .expect("encode")
             .into_bytes();
         store
@@ -87,7 +86,7 @@ async fn a_cold_anchor_reads_each_wal_object_once() {
     let namespace_id = NamespaceId::parse("hinted-fences").expect("namespace");
     let store = RecordingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
-        KeyPredicate::prefix(wal_segment_prefix(&namespace_id)),
+        KeyPredicate::prefix(wal_prefix(&namespace_id)),
     );
     create(&store, &namespace_id, &context(1_000))
         .await
@@ -124,15 +123,18 @@ async fn a_cold_anchor_reads_each_wal_object_once() {
     assert_eq!(
         gets,
         (1..=15)
-            .map(|number| wal_segment(&namespace_id, &WalNo(number)))
+            .map(|number| wal_object(&namespace_id, &WalNo(number)))
             .collect::<Vec<_>>()
     );
-    let absent_reads = gets.len() - anchor.tail.segments().len();
+    let absent_reads = gets.len() - anchor.tail.objects().len();
     assert_eq!(absent_reads, 3);
     assert!(absent_reads <= 7);
 
-    let missing = wal_segment(&namespace_id, &WalNo(10));
-    store.delete(&missing).await.expect("remove middle segment");
+    let missing = wal_object(&namespace_id, &WalNo(10));
+    store
+        .delete(&missing)
+        .await
+        .expect("remove middle WAL object");
     let error = crate::namespace::read_anchor::load_read_anchor(&store, &namespace_id)
         .await
         .expect_err("gap in discovery window");
@@ -174,12 +176,12 @@ async fn fences_fold_and_are_reclaimed_at_the_folded_boundary() {
         .expect("collect");
     assert_eq!(report.deleted.wal_segments, 1);
     assert!(store
-        .head(&wal_segment(&namespace_id, &WalNo(1)))
+        .head(&wal_object(&namespace_id, &WalNo(1)))
         .await
         .expect("first")
         .is_none());
     assert!(store
-        .head(&wal_segment(&namespace_id, &WalNo(2)))
+        .head(&wal_object(&namespace_id, &WalNo(2)))
         .await
         .expect("second")
         .is_some());
@@ -260,7 +262,7 @@ async fn an_acquisition_held_past_the_revalidation_bound_reloads_before_fencing(
                 .expect("compactor claim");
             for key in [
                 metadata_manifest_object(&namespace_id, &claim.successor().expect("next")),
-                wal_segment(&namespace_id, &WalNo(1)),
+                wal_object(&namespace_id, &WalNo(1)),
             ] {
                 store.inner().delete(&key).await.expect("collect");
             }
@@ -275,7 +277,7 @@ async fn an_acquisition_held_past_the_revalidation_bound_reloads_before_fencing(
     assert_eq!(anchor.manifest.state.manifest(), current.state.manifest());
     assert_eq!(anchor.read_state.wal_no, WalNo(2));
     assert!(store
-        .head(&wal_segment(&namespace_id, &WalNo(1)))
+        .head(&wal_object(&namespace_id, &WalNo(1)))
         .await
         .expect("head")
         .is_none());
@@ -296,7 +298,7 @@ async fn fence_retries_whose_anchor_loads_outlast_the_wal_budget_end_with_the_ac
                 metadata
             },
         ),
-        KeyPredicate::prefix(wal_segment_prefix(&namespace_id)),
+        KeyPredicate::prefix(wal_prefix(&namespace_id)),
         OperationClass::PutCreateIfAbsent,
         InjectedError::PreconditionFailed,
     );
@@ -312,7 +314,7 @@ async fn fence_retries_whose_anchor_loads_outlast_the_wal_budget_end_with_the_ac
     ));
     assert_eq!(store.attempts(), 1);
     assert!(store
-        .list_prefix(&wal_segment_prefix(&namespace_id))
+        .list_prefix(&wal_prefix(&namespace_id))
         .await
         .expect("WAL")
         .is_empty());
@@ -365,7 +367,7 @@ async fn a_number_collision_returns_after_one_attempt_and_a_retry_commits_the_ne
     store.reset();
     let blocked = BlockingStore::new(
         store.clone(),
-        KeyPredicate::exact(wal_segment(&namespace_id, &WalNo(3))),
+        KeyPredicate::exact(wal_object(&namespace_id, &WalNo(3))),
         OperationClass::PutCreateIfAbsent,
     );
     blocked.block_next();
@@ -432,7 +434,7 @@ async fn a_stale_writer_collides_with_the_fence_and_writes_nothing_else() {
     assert_eq!(store.counts().puts, 1);
     assert_eq!(store.counts().compare_and_swaps, 0);
     assert!(store
-        .head(&wal_segment(&namespace_id, &WalNo(4)))
+        .head(&wal_object(&namespace_id, &WalNo(4)))
         .await
         .expect("next")
         .is_none());
@@ -488,7 +490,7 @@ async fn cold_open_probes_past_a_lagging_hint_and_reads_a_missing_hint_as_absent
         .await
         .expect("tip");
     assert!(store.snapshot().iter().any(|operation| operation.key()
-        == wal_segment(&namespace_id, &WalNo(4))
+        == wal_object(&namespace_id, &WalNo(4))
         && matches!(
             operation,
             loonfs_test_support::stores::RecordedOperation::Get { .. }
@@ -512,7 +514,7 @@ async fn a_number_published_during_a_window_is_read_again_not_reported_missing()
     let namespace_id = NamespaceId::parse("window-race").expect("namespace");
     let store = BlockingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
-        KeyPredicate::prefix(wal_segment(&namespace_id, &WalNo(6))),
+        KeyPredicate::prefix(wal_object(&namespace_id, &WalNo(6))),
         OperationClass::Get,
     );
     create(&store, &namespace_id, &context(1_000))
@@ -537,12 +539,12 @@ async fn a_number_published_during_a_window_is_read_again_not_reported_missing()
     );
     let anchor = anchor.expect("discovery across concurrent publishes");
     assert_eq!(anchor.read_state.wal_no, WalNo(6));
-    assert_eq!(anchor.tail.segments().len(), 6);
+    assert_eq!(anchor.tail.objects().len(), 6);
 }
 
 #[tokio::test]
 async fn a_bounded_tail_load_overlaps_reads_and_matches_sequential_replay() {
-    use super::reader::{load_wal_segment, load_wal_tail, WalWalk};
+    use super::reader::{load_wal_object, load_wal_tail, WalWalk};
     use crate::store_waves::STORE_READ_WAVE;
 
     let directory = tempdir().expect("directory");
@@ -560,20 +562,18 @@ async fn a_bounded_tail_load_overlaps_reads_and_matches_sequential_replay() {
     let mut walk = WalWalk::after(&namespace_id, WalNo(0), ChangeSeq(0), WriterEpoch(1));
     let mut sequential = Vec::new();
     for number in 1..=20 {
-        let loaded = load_wal_segment(&store, &namespace_id, WalNo(number)).await;
+        let loaded = load_wal_object(&store, &namespace_id, WalNo(number)).await;
         let envelope = loaded
             .envelope
             .expect("sequential load")
-            .expect("sequential segment");
+            .expect("sequential WAL object");
         sequential.push(
             walk.validate(loaded.object_key, envelope)
                 .expect("sequential validation"),
         );
     }
-    let watched = ConcurrencyWatchStore::new(
-        store,
-        KeyPredicate::prefix(wal_segment_prefix(&namespace_id)),
-    );
+    let watched =
+        ConcurrencyWatchStore::new(store, KeyPredicate::prefix(wal_prefix(&namespace_id)));
     let tail = load_wal_tail(
         &watched,
         super::WalTailLoadRequest {
@@ -595,7 +595,7 @@ async fn a_bounded_tail_load_overlaps_reads_and_matches_sequential_replay() {
 }
 
 #[tokio::test]
-async fn a_bounded_tail_load_names_the_missing_segment() {
+async fn a_bounded_tail_load_names_the_missing_wal_object() {
     let directory = tempdir().expect("directory");
     let store = LocalFsStore::new(directory.path()).expect("store");
     let namespace_id = NamespaceId::parse("gap").expect("namespace");
@@ -606,16 +606,16 @@ async fn a_bounded_tail_load_names_the_missing_segment() {
     for name in ["one", "two", "three"] {
         publish(&mut engine, &store, name).await.expect(name);
     }
-    let missing = wal_segment(&namespace_id, &WalNo(3));
+    let missing = wal_object(&namespace_id, &WalNo(3));
     store
         .delete(&missing)
         .await
-        .expect("remove the middle segment");
-    let lowest_missing = wal_segment(&namespace_id, &WalNo(2));
+        .expect("remove the middle WAL object");
+    let lowest_missing = wal_object(&namespace_id, &WalNo(2));
     store
         .delete(&lowest_missing)
         .await
-        .expect("remove an earlier segment");
+        .expect("remove an earlier WAL object");
     let error = super::reader::load_wal_tail(
         &store,
         super::WalTailLoadRequest {
@@ -660,7 +660,7 @@ async fn a_fold_and_collection_during_tip_discovery_cannot_reuse_a_wal_number() 
     );
     let store = BlockingStore::new(
         store,
-        KeyPredicate::exact(wal_segment(&namespace_id, &WalNo(1))),
+        KeyPredicate::exact(wal_object(&namespace_id, &WalNo(1))),
         OperationClass::Read,
     );
     create(&store, &namespace_id, &context(1_000))
@@ -687,7 +687,7 @@ async fn a_fold_and_collection_during_tip_discovery_cannot_reuse_a_wal_number() 
             .expect("collect old WAL");
         assert!(store
             .inner()
-            .head(&wal_segment(&namespace_id, &WalNo(1)))
+            .head(&wal_object(&namespace_id, &WalNo(1)))
             .await
             .expect("old fence")
             .is_none());
@@ -700,12 +700,12 @@ async fn a_fold_and_collection_during_tip_discovery_cannot_reuse_a_wal_number() 
         ChangeSeq(2)
     );
     assert!(store
-        .head(&wal_segment(&namespace_id, &WalNo(1)))
+        .head(&wal_object(&namespace_id, &WalNo(1)))
         .await
         .expect("old number")
         .is_none());
     assert!(store
-        .head(&wal_segment(&namespace_id, &WalNo(3)))
+        .head(&wal_object(&namespace_id, &WalNo(3)))
         .await
         .expect("new number")
         .is_some());
@@ -737,9 +737,9 @@ async fn a_warm_probe_reports_a_broken_chain_at_its_own_epoch_as_corruption() {
     let loaded = crate::namespace::read_anchor::load_read_anchor(&store, &namespace_id)
         .await
         .expect("warm head");
-    let fence = decode_wal_segment_envelope_zstd(
+    let fence = decode_wal_object_envelope_zstd(
         &store
-            .get(&wal_segment(&namespace_id, &loaded.read_state.wal_no), None)
+            .get(&wal_object(&namespace_id, &loaded.read_state.wal_no), None)
             .await
             .expect("get")
             .expect("fence"),
@@ -754,14 +754,14 @@ async fn a_warm_probe_reports_a_broken_chain_at_its_own_epoch_as_corruption() {
     broken.head_seq = ChangeSeq(5);
     store
         .put_if_absent(
-            &wal_segment(&namespace_id, &broken.wal_no),
-            encode_wal_segment_envelope_zstd(broken)
+            &wal_object(&namespace_id, &broken.wal_no),
+            encode_wal_object_envelope_zstd(broken)
                 .expect("encode")
                 .into_bytes()
                 .into(),
         )
         .await
-        .expect("same-epoch segment");
+        .expect("same-epoch WAL object");
     let mut warm = crate::RuntimeReadContext {
         basis: loaded.basis(),
         head: loaded.read_state,
@@ -795,25 +795,25 @@ async fn fence_publication_enforces_the_wal_budget_before_the_put() {
     let namespace_id = NamespaceId::parse("fence-budget").expect("namespace");
     let store = RecordingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
-        KeyPredicate::prefix(wal_segment_prefix(&namespace_id)),
+        KeyPredicate::prefix(wal_prefix(&namespace_id)),
     );
     let head = crate::namespace::state::NamespaceReadState::initial(
         namespace_id.clone(),
         1_000,
         loonfs_test_support::test_actor(),
     );
-    let fence = super::prepare_segment(namespace_id, WriterEpoch(1), &head, &[]).expect("fence");
+    let fence = super::prepare_wal_object(namespace_id, WriterEpoch(1), &head, &[]).expect("fence");
     let timer = std::sync::Arc::new(loonfs_test_support::clock::ManualClock::new(0));
     let expired = crate::time::Observation::now(timer.clone());
     timer.advance_ms(1);
     let boundary = crate::time::Observation::now(timer.clone());
     timer.advance_ms(crate::limits::WAL_PUBLISH_BUDGET_MS);
-    let error = super::publish_segment(&store, &fence, &expired)
+    let error = super::publish_wal_object(&store, &fence, &expired)
         .await
         .expect_err("expired budget");
     assert_eq!(error.code(), ErrorCode::StaleHead);
     assert_eq!(store.counts().puts, 0);
-    super::publish_segment(&store, &fence, &boundary)
+    super::publish_wal_object(&store, &fence, &boundary)
         .await
         .expect("budget boundary");
     assert_eq!(store.counts().create_if_absent_puts, 1);
@@ -830,7 +830,7 @@ async fn a_wal_put_returning_after_its_budget_has_an_unknown_outcome() {
             LocalFsStore::new(directory.path()).expect("store"),
             KeyPredicate::any(),
         ),
-        KeyPredicate::prefix(wal_segment_prefix(&namespace_id)),
+        KeyPredicate::prefix(wal_prefix(&namespace_id)),
         move |metadata| {
             timer.advance_ms(crate::limits::WAL_PUBLISH_BUDGET_MS + 1);
             metadata
@@ -842,8 +842,8 @@ async fn a_wal_put_returning_after_its_budget_has_an_unknown_outcome() {
         loonfs_test_support::test_actor(),
     );
     let fence =
-        super::prepare_segment(namespace_id.clone(), WriterEpoch(1), &head, &[]).expect("fence");
-    let error = super::publish_segment(&store, &fence, &tip)
+        super::prepare_wal_object(namespace_id.clone(), WriterEpoch(1), &head, &[]).expect("fence");
+    let error = super::publish_wal_object(&store, &fence, &tip)
         .await
         .expect_err("late put must not acknowledge publication");
     assert!(matches!(
@@ -855,7 +855,7 @@ async fn a_wal_put_returning_after_its_budget_has_an_unknown_outcome() {
     assert!(store
         .inner()
         .inner()
-        .head(&wal_segment(&namespace_id, &WalNo(1)))
+        .head(&wal_object(&namespace_id, &WalNo(1)))
         .await
         .expect("landed fence")
         .is_some());
@@ -897,7 +897,7 @@ async fn a_writer_resuming_after_its_fence_was_collected_does_not_acknowledge_it
         .expect("writer A observes its tip");
     let blocked = BlockingStore::new(
         store,
-        KeyPredicate::exact(wal_segment(&namespace_id, &WalNo(3))),
+        KeyPredicate::exact(wal_object(&namespace_id, &WalNo(3))),
         OperationClass::PutCreateIfAbsent,
     );
     blocked.block_next();
@@ -926,8 +926,8 @@ async fn a_writer_resuming_after_its_fence_was_collected_does_not_acknowledge_it
                 .results
                 .remove(0)
                 .expect("writer B takes the epoch and commits");
-            let fence_key = wal_segment(&namespace_id, &WalNo(3));
-            let fence = decode_wal_segment_envelope_zstd(
+            let fence_key = wal_object(&namespace_id, &WalNo(3));
+            let fence = decode_wal_object_envelope_zstd(
                 &blocked
                     .inner()
                     .get(&fence_key, None)
@@ -983,7 +983,7 @@ async fn a_writer_resuming_after_its_fence_was_collected_does_not_acknowledge_it
     );
     assert!(blocked
         .inner()
-        .head(&wal_segment(&namespace_id, &WalNo(3)))
+        .head(&wal_object(&namespace_id, &WalNo(3)))
         .await
         .expect("late put landed")
         .is_some());

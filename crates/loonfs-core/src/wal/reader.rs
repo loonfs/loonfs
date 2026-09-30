@@ -1,34 +1,34 @@
-//! Reads numbered WAL segments: one at a time after a position, or a bounded tail between two heads.
+//! Reads numbered WAL objects: one at a time after a position, or a bounded tail between two heads.
 // This module is the physical WAL boundary.
 #![allow(clippy::disallowed_methods)]
 
 use super::frame::ReplayedWalTail;
-use super::replay::{project_validated_wal_tail, validate_wal_segment_for_replay};
+use super::replay::{project_validated_wal_tail, validate_wal_object_for_replay};
 use super::{
-    ValidatedWalSegment, ValidatedWalTail, WalSegmentError, WalTailLoadError, WalTailLoadRequest,
+    ValidatedWalObject, ValidatedWalTail, WalObjectError, WalTailLoadError, WalTailLoadRequest,
 };
 use crate::error::MetadataProjectionLoadError;
 use crate::metadata::MetadataState;
 use crate::namespace::state::NamespaceReadState;
 use crate::store_waves::STORE_READ_WAVE;
 use futures::{stream, StreamExt};
-use loonfs_api::wire::wal::{decode_wal_segment_envelope_zstd, WalSegmentEnvelope};
+use loonfs_api::wire::wal::{decode_wal_object_envelope_zstd, WalObjectEnvelope};
 use loonfs_api::{ChangeSeq, NamespaceId, WalNo, WriterEpoch};
-use loonfs_objectstore::keys::wal_segment;
+use loonfs_objectstore::keys::wal_object;
 use loonfs_objectstore::ObjectStore;
 
 // Missing and malformed objects still need their numbered key in caller diagnostics.
-pub(super) struct LoadedWalSegment {
+pub(super) struct LoadedWalObject {
     pub(super) object_key: String,
-    pub(super) envelope: Result<Option<WalSegmentEnvelope>, WalTailLoadError>,
+    pub(super) envelope: Result<Option<WalObjectEnvelope>, WalTailLoadError>,
 }
 
-pub(super) async fn load_wal_segment<S: ObjectStore + ?Sized>(
+pub(super) async fn load_wal_object<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     wal_no: WalNo,
-) -> LoadedWalSegment {
-    let object_key = wal_segment(namespace_id, &wal_no);
+) -> LoadedWalObject {
+    let object_key = wal_object(namespace_id, &wal_no);
     let envelope = async {
         let Some(bytes) =
             store
@@ -43,9 +43,9 @@ pub(super) async fn load_wal_segment<S: ObjectStore + ?Sized>(
             return Ok(None);
         };
         let envelope =
-            decode_wal_segment_envelope_zstd(&bytes).map_err(|error| WalTailLoadError::Replay {
+            decode_wal_object_envelope_zstd(&bytes).map_err(|error| WalTailLoadError::Replay {
                 object_key: object_key.clone(),
-                error: WalSegmentError::Codec(error.to_string()),
+                error: WalObjectError::Codec(error.to_string()),
             })?;
         if envelope.payload().wal_no != wal_no {
             return Err(WalTailLoadError::NumberMismatch {
@@ -55,7 +55,7 @@ pub(super) async fn load_wal_segment<S: ObjectStore + ?Sized>(
         if envelope.payload().namespace_id != *namespace_id {
             return Err(WalTailLoadError::Replay {
                 object_key: object_key.clone(),
-                error: WalSegmentError::NamespaceMismatch {
+                error: WalObjectError::NamespaceMismatch {
                     expected: namespace_id.clone(),
                     actual: envelope.payload().namespace_id.clone(),
                 },
@@ -64,13 +64,13 @@ pub(super) async fn load_wal_segment<S: ObjectStore + ?Sized>(
         Ok(Some(envelope))
     }
     .await;
-    LoadedWalSegment {
+    LoadedWalObject {
         object_key,
         envelope,
     }
 }
 
-/// Reads consecutive numbered segments after a position, each validated as
+/// Reads consecutive numbered objects after a position, each validated as
 /// the contiguous successor of the one before.
 pub(super) struct WalWalk<'a> {
     namespace_id: &'a NamespaceId,
@@ -102,25 +102,25 @@ impl<'a> WalWalk<'a> {
     }
 
     pub(super) fn object_key(&self) -> String {
-        wal_segment(self.namespace_id, &self.wal_no)
+        wal_object(self.namespace_id, &self.wal_no)
     }
 
     pub(super) fn validate(
         &mut self,
         object_key: String,
-        envelope: WalSegmentEnvelope,
-    ) -> Result<ValidatedWalSegment, WalTailLoadError> {
+        envelope: WalObjectEnvelope,
+    ) -> Result<ValidatedWalObject, WalTailLoadError> {
         let payload = envelope.payload();
         if payload.writer_epoch < self.epoch || payload.writer_epoch > self.epoch_bound {
             return Err(WalTailLoadError::Replay {
                 object_key,
-                error: WalSegmentError::WriterEpochMismatch {
+                error: WalObjectError::WriterEpochMismatch {
                     expected_max: self.epoch_bound,
                     actual: payload.writer_epoch,
                 },
             });
         }
-        validate_wal_segment_for_replay(self.seq, &envelope).map_err(|error| {
+        validate_wal_object_for_replay(self.seq, &envelope).map_err(|error| {
             WalTailLoadError::Replay {
                 object_key: object_key.clone(),
                 error,
@@ -129,7 +129,7 @@ impl<'a> WalWalk<'a> {
         self.wal_no = payload.wal_no;
         self.seq = payload.head_seq;
         self.epoch = payload.writer_epoch;
-        Ok(ValidatedWalSegment::new(object_key, envelope))
+        Ok(ValidatedWalObject::new(object_key, envelope))
     }
 }
 
@@ -144,10 +144,10 @@ pub(super) async fn load_wal_tail<S: ObjectStore + ?Sized>(
         request.writer_epoch,
     );
     let mut loaded = stream::iter(request.base_wal_no.0..request.tip_wal_no.0)
-        .map(|number| load_wal_segment(store, request.namespace_id, WalNo(number + 1)))
+        .map(|number| load_wal_object(store, request.namespace_id, WalNo(number + 1)))
         .buffered(STORE_READ_WAVE);
-    let mut segments = Vec::new();
-    while let Some(LoadedWalSegment {
+    let mut objects = Vec::new();
+    while let Some(LoadedWalObject {
         object_key,
         envelope,
     }) = loaded.next().await
@@ -155,7 +155,7 @@ pub(super) async fn load_wal_tail<S: ObjectStore + ?Sized>(
         let envelope = envelope?.ok_or_else(|| WalTailLoadError::MissingWalObject {
             object_key: object_key.clone(),
         })?;
-        segments.push(walk.validate(object_key, envelope)?);
+        objects.push(walk.validate(object_key, envelope)?);
     }
     if walk.seq() != request.head_seq {
         return Err(WalTailLoadError::HeadSeqMismatch {
@@ -164,7 +164,7 @@ pub(super) async fn load_wal_tail<S: ObjectStore + ?Sized>(
             actual: walk.seq(),
         });
     }
-    Ok(ValidatedWalTail::new(segments))
+    Ok(ValidatedWalTail::new(objects))
 }
 
 pub(crate) async fn load_replayed_wal_tail<S: ObjectStore + ?Sized>(

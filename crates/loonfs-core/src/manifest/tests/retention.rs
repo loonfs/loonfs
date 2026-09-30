@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::time::Deadline;
-use loonfs_objectstore::keys::{pin_prefix, wal_segment_prefix};
+use loonfs_objectstore::keys::{pin_prefix, wal_prefix};
 
 async fn current_manifest_no<S: ObjectStore + ?Sized>(
     store: &S,
@@ -857,11 +857,11 @@ async fn pin_basis_verification_store_failure_deletes_the_record() {
         .is_empty());
 }
 
-async fn wal_segment_count<S: ObjectStore>(store: &S, namespace_id: &NamespaceId) -> usize {
+async fn wal_object_count<S: ObjectStore>(store: &S, namespace_id: &NamespaceId) -> usize {
     store
-        .list_prefix(&wal_segment_prefix(namespace_id))
+        .list_prefix(&wal_prefix(namespace_id))
         .await
-        .expect("list wal segments")
+        .expect("list WAL objects")
         .len()
 }
 
@@ -874,8 +874,8 @@ async fn publish_backpressure_rejects_at_the_longest_tail_the_head_describes() {
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    let boundary = usize::try_from(crate::limits::MAX_UNFOLDED_WAL_SEGMENTS)
-        .expect("the write-stop bound fits a segment count");
+    let boundary = usize::try_from(crate::limits::MAX_UNFOLDED_WAL_OBJECTS)
+        .expect("the write-stop bound fits a WAL object count");
 
     let mut engine = NamespaceCommitEngine::new(namespace_id.clone());
     let tail_options = PublishTailOptions::default();
@@ -903,10 +903,10 @@ async fn publish_backpressure_rejects_at_the_longest_tail_the_head_describes() {
             .expect("write within backpressure window");
     }
     let hint_key = hint(&namespace_id);
-    let segment_prefix = wal_segment_prefix(&namespace_id);
+    let wal_prefix = wal_prefix(&namespace_id);
     let store = RecordingStore::new(
         store,
-        KeyPredicate::new(move |key| key == hint_key || key.starts_with(&segment_prefix)),
+        KeyPredicate::new(move |key| key == hint_key || key.starts_with(&wal_prefix)),
     );
     let request = CommitRequest::single(
         CommitId::parse("at-the-boundary").expect("commit id"),
@@ -930,7 +930,7 @@ async fn publish_backpressure_rejects_at_the_longest_tail_the_head_describes() {
         .pop()
         .expect("one result")
         .expect("the publish that lands exactly at the bound is still admitted");
-    assert_eq!(wal_segment_count(&store, &namespace_id).await, boundary + 1);
+    assert_eq!(wal_object_count(&store, &namespace_id).await, boundary + 1);
     store.reset();
 
     let replay = engine
@@ -949,7 +949,7 @@ async fn publish_backpressure_rejects_at_the_longest_tail_the_head_describes() {
     );
     assert_eq!(
         replay.wal_tail_segments,
-        crate::limits::MAX_UNFOLDED_WAL_SEGMENTS
+        crate::limits::MAX_UNFOLDED_WAL_OBJECTS
     );
     assert_eq!(store.counts().puts, 0);
     assert_eq!(store.counts().compare_and_swaps, 0);
@@ -1012,7 +1012,7 @@ async fn publish_backpressure_rejects_at_the_longest_tail_the_head_describes() {
     }
     assert_eq!(
         mixed.wal_tail_segments,
-        crate::limits::MAX_UNFOLDED_WAL_SEGMENTS
+        crate::limits::MAX_UNFOLDED_WAL_OBJECTS
     );
     assert_eq!(
         store.counts().puts,
@@ -1038,7 +1038,7 @@ async fn publish_backpressure_rejects_at_the_longest_tail_the_head_describes() {
     .expect("list changes");
     assert_eq!(
         changes.through_seq,
-        ChangeSeq(u64::try_from(boundary - 1).expect("data segments"))
+        ChangeSeq(u64::try_from(boundary - 1).expect("data WAL objects"))
     );
 }
 

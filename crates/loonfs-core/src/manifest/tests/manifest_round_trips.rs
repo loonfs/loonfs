@@ -53,7 +53,7 @@ async fn a_publish_projection_fold_writes_the_replayed_tail_rows() {
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    crate::test_support::append_wal_segments(&store, &namespace_id, 3, &context)
+    crate::test_support::append_wal_objects(&store, &namespace_id, 3, &context)
         .await
         .expect("build WAL tail");
     let expected_tail = Arc::clone(

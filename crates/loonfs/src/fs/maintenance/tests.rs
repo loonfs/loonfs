@@ -37,7 +37,7 @@ const BINDINGS: MetadataFamilyGroup = MetadataFamilyGroup::Bindings;
 /// A writer and two maintenance handles over one store.
 ///
 /// This is the shape the explicit compaction path exists for. The second
-/// maintenance is the contrast — it shares the writer's read core and caches.
+/// maintenance is the contrast — it shares the writer's runtime core and caches.
 async fn manual_deployment(
     root: &std::path::Path,
 ) -> (

@@ -2,7 +2,7 @@
 //!
 //! Durable objects declare `kind`, `format_version`, and `payload_checksum`
 //! before their payload. Checksums cover the stored payload bytes rather than
-//! a re-encoding. JSON control objects and CBOR WAL segments use the same
+//! a re-encoding. JSON control objects and CBOR WAL objects use the same
 //! validation rules and errors.
 
 use crate::digest::sha256_digest;
@@ -51,7 +51,7 @@ pub enum EnvelopeCodecError {
     Decompress(String),
     /// Reports a WAL document that exceeds the decompressed format limit.
     #[error("decompressed WAL document exceeds the {max_bytes}-byte limit")]
-    WalSegmentTooLarge {
+    WalObjectTooLarge {
         /// Largest accepted decompressed document.
         max_bytes: usize,
     },
@@ -62,7 +62,7 @@ pub enum EnvelopeCodecError {
     InvalidWalInlineContent {
         /// Commit containing the rejected entry.
         seq: crate::ChangeSeq,
-        /// Content whose entry violates a rule or exceeds the segment total.
+        /// Content whose entry violates a rule or exceeds the WAL object total.
         content_id: crate::ContentId,
         /// Format rule violated by the entry.
         reason: &'static str,

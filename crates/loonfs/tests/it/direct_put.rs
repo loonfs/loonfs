@@ -33,11 +33,11 @@ use std::path::Path;
 use std::sync::Arc;
 use tempfile::tempdir;
 
-async fn wal_segment_count(store: &SharedObjectStore, namespace_id: &NamespaceId) -> usize {
+async fn wal_object_count(store: &SharedObjectStore, namespace_id: &NamespaceId) -> usize {
     use futures::StreamExt;
     store
         .list_prefix_stream(&format!("namespaces/{}/wal/", namespace_id.as_str()))
-        .map(|key| key.expect("list wal segments"))
+        .map(|key| key.expect("list WAL objects"))
         .collect::<Vec<_>>()
         .await
         .len()
@@ -485,7 +485,7 @@ fn path_mutations_return_the_commit_id_they_committed_under() {
 }
 
 #[test]
-fn concurrent_puts_coalesce_into_one_wal_segment() {
+fn concurrent_puts_coalesce_into_one_wal_object() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
     let object_store = store(temp_dir.path());
@@ -540,7 +540,7 @@ fn concurrent_puts_coalesce_into_one_wal_segment() {
         }
         let [content_a, content_b, content_c, content_d] =
             prepared_contents.try_into().expect("four prepared refs");
-        let segments_before = wal_segment_count(&object_store, &namespace_id).await;
+        let wal_objects_before = wal_object_count(&object_store, &namespace_id).await;
         let admitted_put =
             |commit_id: &str, path: &str, prepared: loonfs_core::content::PreparedContent| {
                 let content_ref = prepared.content_ref().clone();
@@ -578,8 +578,8 @@ fn concurrent_puts_coalesce_into_one_wal_segment() {
         puts.2.expect("put c");
         puts.3.expect("put d");
 
-        let segments_after = wal_segment_count(&object_store, &namespace_id).await;
-        assert_eq!(segments_after - segments_before, 2);
+        let wal_objects_after = wal_object_count(&object_store, &namespace_id).await;
+        assert_eq!(wal_objects_after - wal_objects_before, 2);
 
         for (path, bytes) in [
             ("/docs/a.txt", b"alpha" as &[u8]),
@@ -612,11 +612,11 @@ fn zero_interval_publishes_sequential_submissions_immediately() {
         )
         .await
         .expect("create namespace");
-        let segments_before = wal_segment_count(&object_store, &namespace_id).await;
+        let wal_objects_before = wal_object_count(&object_store, &namespace_id).await;
 
         // Sequential awaited puts leave nothing to batch: with a zero
         // pacing interval each publishes immediately as its own WAL
-        // segment. (Concurrent submissions may still batch behind an
+        // object. (Concurrent submissions may still batch behind an
         // in-flight publication — that is load-driven, not timer-driven.)
         for (path, bytes) in [
             ("/docs/a.txt", b"alpha".as_slice()),
@@ -633,8 +633,8 @@ fn zero_interval_publishes_sequential_submissions_immediately() {
             .expect("sequential put");
         }
 
-        let segments_after = wal_segment_count(&object_store, &namespace_id).await;
-        assert_eq!(segments_after - segments_before, 4);
+        let wal_objects_after = wal_object_count(&object_store, &namespace_id).await;
+        assert_eq!(wal_objects_after - wal_objects_before, 4);
     });
 }
 

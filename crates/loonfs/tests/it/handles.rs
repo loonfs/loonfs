@@ -14,7 +14,7 @@ use loonfs::{
     MetadataMaintenanceJob, MetadataMaintenanceOptions, NamespaceId, PutFileOptions,
     RuntimeCacheConfig, RuntimeError, SharedObjectStore, StoreConfig, Writable,
 };
-use loonfs_core::test_support::append_wal_segments;
+use loonfs_core::test_support::append_wal_objects;
 use loonfs_core::MutationContext;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
@@ -101,10 +101,10 @@ async fn fill_wal_tail_to_write_stop<S: ObjectStore + ?Sized>(
     let current = loonfs_core::control::load_namespace_read_state(store, namespace_id)
         .await
         .expect("tail state");
-    append_wal_segments(
+    append_wal_objects(
         store,
         namespace_id,
-        loonfs_core::limits::MAX_UNFOLDED_WAL_SEGMENTS
+        loonfs_core::limits::MAX_UNFOLDED_WAL_OBJECTS
             - (current.wal_no.0 - current.folded_wal_no.0)
             - 1,
         &MutationContext {
@@ -582,7 +582,7 @@ fn a_runner_retries_a_failed_writer_fold_without_another_write() {
         let namespace = writer
             .open_namespace(&namespace_id)
             .expect("open namespace");
-        append_wal_segments(
+        append_wal_objects(
             failing.as_ref(),
             &namespace_id,
             wal_tail_segment_threshold() - 1,
@@ -763,11 +763,11 @@ fn a_failed_fold_preserves_the_write_stop_until_the_store_recovers() {
         let namespace = writer
             .open_namespace(&namespace_id)
             .expect("open namespace");
-        let seed_segments = wal_tail_segment_threshold() - 1;
-        append_wal_segments(
+        let seed_wal_objects = wal_tail_segment_threshold() - 1;
+        append_wal_objects(
             failing.as_ref(),
             &namespace_id,
-            seed_segments,
+            seed_wal_objects,
             &MutationContext {
                 writer_id: loonfs_api::WriterId::parse("fold-failure-seed").expect("writer id"),
                 now_ms: 1_000,
@@ -777,7 +777,7 @@ fn a_failed_fold_preserves_the_write_stop_until_the_store_recovers() {
         .expect("seed WAL tail below fold threshold");
 
         failing.fail_all();
-        for round in 0..(loonfs_core::limits::MAX_UNFOLDED_WAL_SEGMENTS - seed_segments - 2) {
+        for round in 0..(loonfs_core::limits::MAX_UNFOLDED_WAL_OBJECTS - seed_wal_objects - 2) {
             namespace
                 .put_file_bytes(
                     &format!("/failed-fold/file-{round}.txt"),
@@ -853,7 +853,7 @@ fn a_threshold_crossing_publish_returns_before_its_fold_completes() {
         let namespace = writer
             .open_namespace(&namespace_id)
             .expect("open namespace");
-        append_wal_segments(
+        append_wal_objects(
             blocking.inner(),
             &namespace_id,
             wal_tail_segment_threshold() - 1,

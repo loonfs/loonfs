@@ -499,7 +499,7 @@ and `InlineContentOptions`. These settings do not change reader format limits.
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `inline_content_threshold_bytes` | 64 KiB | Prepares content at or under this size inline; `None` in embedded options or `false` in server TOML disables inline writes. |
-| `inline_content_segment_budget_bytes` | 1 MiB | Limits inline bytes in one WAL segment and stages overflow in operation order. |
+| `inline_content_segment_budget_bytes` | 1 MiB | Limits inline bytes in one WAL object and stages overflow in operation order. |
 | `inline_content_fold_at_bytes` | 2 MiB | Makes an automatic fold due when unfolded inline bytes reach this size. |
 | `inline_content_tail_limit_bytes` | 32 MiB | Stages new content when unfolded and admitted inline bytes would exceed this size. |
 
@@ -510,7 +510,7 @@ at most the segment budget, and its first publish observes the tail. The tail
 can exceed the limit by at most the segment budget: for a new session's first
 inline commit, and after a put whose outcome is unknown. Another writer can make
 the remembered size stale until this session's next publish. The
-`MAX_UNFOLDED_WAL_SEGMENTS` write stop refuses new commits regardless of the
+`MAX_UNFOLDED_WAL_OBJECTS` write stop refuses new commits regardless of the
 inline tail limit.
 
 If a commit already succeeded, retrying the same request returns the original
@@ -524,7 +524,7 @@ trigger cannot exceed the tail limit. Inline payloads count toward the existing
 publication byte limits. Explicit metadata maintenance uses
 `MetadataMaintenanceOptions::inline_content_fold_at_bytes`, also 2 MiB by default,
 when a writer-derived handle has an observed tail count. Maintenance probes use
-the segment threshold, the time of the tail's newest commit, and manifest
+the WAL object threshold, the time of the tail's newest commit, and manifest
 descriptors; they do not replay the tail.
 
 ## Optional local cache

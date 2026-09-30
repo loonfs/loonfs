@@ -94,7 +94,7 @@ enum Rows {
 }
 
 /// One dataset shape. Every namespace holds `folded_entries` in metadata
-/// segments and `tail_commits` unfolded WAL segments on top.
+/// segments and `tail_commits` unfolded WAL objects on top.
 struct Shape {
     label: &'static str,
     namespaces: usize,

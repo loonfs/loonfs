@@ -53,7 +53,7 @@ async fn an_own_fold_replays_only_later_objects_after_projection_invalidation() 
         .rev()
         .find_map(|operation| match operation {
             RecordedOperation::Put { key, .. }
-                if key.starts_with(&wal_segment_prefix(&engine.namespace_id)) =>
+                if key.starts_with(&wal_prefix(&engine.namespace_id)) =>
             {
                 Some(key)
             }
@@ -82,7 +82,7 @@ async fn an_own_fold_replays_only_later_objects_after_projection_invalidation() 
             matches!(operation, RecordedOperation::Get { .. })
                 && operation
                     .key()
-                    .starts_with(&wal_segment_prefix(&engine.namespace_id))
+                    .starts_with(&wal_prefix(&engine.namespace_id))
         })
         .map(RecordedOperation::key)
         .collect::<Vec<_>>();
@@ -180,7 +180,7 @@ async fn an_own_fold_discovers_later_commits_after_the_projection_is_dropped() {
             .iter()
             .filter(|operation| {
                 matches!(operation, RecordedOperation::Get { .. })
-                    && family(operation) == Some(DurableObjectFamily::WalSegment)
+                    && family(operation) == Some(DurableObjectFamily::WalObject)
             })
             .map(|operation| {
                 loonfs_objectstore::layout::wal_no_of(operation.key()).expect("WAL number")
@@ -612,7 +612,7 @@ async fn a_fold_reanchors_with_only_the_commits_published_since_it_began() {
             .rev()
             .find_map(|operation| match operation {
                 RecordedOperation::Put { key, .. }
-                    if key.starts_with(&wal_segment_prefix(&engine.namespace_id)) =>
+                    if key.starts_with(&wal_prefix(&engine.namespace_id)) =>
                 {
                     Some(key)
                 }
@@ -624,10 +624,10 @@ async fn a_fold_reanchors_with_only_the_commits_published_since_it_began() {
             .await
             .expect("WAL read")
             .expect("WAL object");
-        let segment = decode_wal_segment_envelope_zstd(&bytes).expect("WAL decode");
+        let wal_object = decode_wal_object_envelope_zstd(&bytes).expect("WAL decode");
         expected.insert_inline_content(value.content_ref().clone(), value.bytes().clone());
         expected
-            .apply_commit(&segment.payload().records[0])
+            .apply_commit(&wal_object.payload().records[0])
             .expect("later rows");
     }
     let folded = fold_wal_tail(
@@ -664,6 +664,6 @@ async fn a_fold_reanchors_with_only_the_commits_published_since_it_began() {
         .expect("after fold");
     assert!(store.snapshot().iter().all(|operation| !matches!(operation,
         RecordedOperation::Get { key, .. } | RecordedOperation::GetWithMetadata { key, .. }
-        if key.ends_with("hint.json") || key.starts_with(&wal_segment_prefix(&engine.namespace_id))
+        if key.ends_with("hint.json") || key.starts_with(&wal_prefix(&engine.namespace_id))
     )));
 }

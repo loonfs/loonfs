@@ -7,7 +7,7 @@ use crate::common::commit_split_support::*;
 use crate::common::{namespace_engine, read_context};
 use loonfs_api::{
     v0::FilesystemChange,
-    wire::wal::{decode_wal_segment_envelope_zstd, WalDelta},
+    wire::wal::{decode_wal_object_envelope_zstd, WalDelta},
     AbsolutePath, ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior,
     DirectoryPageCursor, InodeId, InodeKind, NameKey, NamespaceId, Page, PageRequest, PathEntry,
     RevisionNo,
@@ -1091,13 +1091,13 @@ async fn name_key_stays_typed_through_planning_and_fingerprint() {
         .await
         .expect("read wal")
         .expect("wal exists");
-    let segment = decode_wal_segment_envelope_zstd(&wal_bytes).expect("decode segment");
-    assert_eq!(segment.payload().records.len(), 1);
+    let wal_object = decode_wal_object_envelope_zstd(&wal_bytes).expect("decode WAL object");
+    assert_eq!(wal_object.payload().records.len(), 1);
     assert_eq!(
-        segment.payload().records[0].semantic_commit_fingerprint,
+        wal_object.payload().records[0].semantic_commit_fingerprint,
         expected_fingerprint
     );
-    assert!(segment.payload().records[0]
+    assert!(wal_object.payload().records[0]
         .deltas
         .iter()
         .any(|delta| matches!(
@@ -1183,8 +1183,8 @@ async fn path_intents_in_one_batch_see_tentative_state_and_continue_the_seq_ladd
         .await
         .expect("read wal")
         .expect("wal exists");
-    let segment = decode_wal_segment_envelope_zstd(&wal_bytes).expect("decode segment");
-    assert_eq!(segment.payload().records.len(), 2);
+    let wal_object = decode_wal_object_envelope_zstd(&wal_bytes).expect("decode WAL object");
+    assert_eq!(wal_object.payload().records.len(), 2);
 
     let copied = copy_file_path(
         &store,

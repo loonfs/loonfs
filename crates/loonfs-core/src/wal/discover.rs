@@ -1,7 +1,7 @@
 //! Discovers the WAL tip and advances cached namespace views.
 
 use super::frame::{ValidatedWalTail, WalTailLoadError};
-use super::reader::{load_wal_segment, WalWalk};
+use super::reader::{load_wal_object, WalWalk};
 use super::replay::project_validated_wal_tail;
 use crate::cache::WalTailProjectionCacheKey;
 use crate::control_object::ControlObjectLoadError;
@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 pub(crate) struct DiscoveredTail {
     pub(crate) head: NamespaceReadState,
-    pub(crate) segments: ValidatedWalTail,
+    pub(crate) tail: ValidatedWalTail,
 }
 
 pub(crate) async fn discover_tail<S: ObjectStore + ?Sized>(
@@ -25,11 +25,11 @@ pub(crate) async fn discover_tail<S: ObjectStore + ?Sized>(
     manifest: &LoadedManifest,
 ) -> Result<DiscoveredTail, ControlObjectLoadError> {
     let mut head = NamespaceReadState::from(manifest.state.envelope.payload());
-    let mut segments = Vec::new();
+    let mut objects = Vec::new();
     if head.status.is_deleted() {
         return Ok(DiscoveredTail {
             head,
-            segments: ValidatedWalTail::new(segments),
+            tail: ValidatedWalTail::new(objects),
         });
     }
     let mut walk = WalWalk::after(namespace_id, head.wal_no, head.seq, head.writer_epoch);
@@ -39,7 +39,7 @@ pub(crate) async fn discover_tail<S: ObjectStore + ?Sized>(
         let first = head.wal_no.0 + 1;
         let end = (head.wal_no.0 + window as u64).min(MAX_PUBLIC_INTEGER);
         let loaded = stream::iter(head.wal_no.0..end)
-            .map(|number| load_wal_segment(store, namespace_id, WalNo(number + 1)))
+            .map(|number| load_wal_object(store, namespace_id, WalNo(number + 1)))
             .buffered(window)
             .collect::<Vec<_>>()
             .await;
@@ -59,7 +59,7 @@ pub(crate) async fn discover_tail<S: ObjectStore + ?Sized>(
                     // may have been published before a later number was read. Read it
                     // again; only a number still absent is missing.
                     let again =
-                        load_wal_segment(store, namespace_id, WalNo(first + index as u64)).await;
+                        load_wal_object(store, namespace_id, WalNo(first + index as u64)).await;
                     match again.envelope.map_err(wal_error)? {
                         Some(envelope) => (again.object_key, envelope),
                         None => {
@@ -70,9 +70,9 @@ pub(crate) async fn discover_tail<S: ObjectStore + ?Sized>(
                     }
                 }
             };
-            let segment = walk.validate(object_key, envelope).map_err(wal_error)?;
-            head = head.after_segment(segment.envelope().payload());
-            segments.push(segment);
+            let object = walk.validate(object_key, envelope).map_err(wal_error)?;
+            head = head.after_wal_object(object.envelope().payload());
+            objects.push(object);
         }
         if ended || end == MAX_PUBLIC_INTEGER {
             break;
@@ -81,7 +81,7 @@ pub(crate) async fn discover_tail<S: ObjectStore + ?Sized>(
     }
     Ok(DiscoveredTail {
         head,
-        segments: ValidatedWalTail::new(segments),
+        tail: ValidatedWalTail::new(objects),
     })
 }
 
@@ -110,10 +110,10 @@ pub(super) fn corrupt(object_key: &str, error: impl std::fmt::Display) -> Contro
     }
 }
 
-/// Probes the next WAL number and extends the cached tail with returned segments.
-/// Returns false when the next segment has another writer epoch, which requires
+/// Probes the next WAL number and extends the cached tail with returned objects.
+/// Returns false when the next object has another writer epoch, which requires
 /// full discovery. Writer acquisition raises the epoch, so a
-/// segment at the cached epoch must continue the cached head.
+/// WAL object at the cached epoch must continue the cached head.
 pub async fn probe_namespace_wal<S: ObjectStore + ?Sized>(
     store: &S,
     context: &mut RuntimeReadContext,
@@ -128,24 +128,24 @@ pub async fn probe_namespace_wal<S: ObjectStore + ?Sized>(
     let namespace_id = state.namespace_id.clone();
     let mut walk = WalWalk::after(&namespace_id, state.wal_no, state.seq, state.writer_epoch);
     while let Ok(wal_no) = state.wal_no.successor() {
-        let loaded = load_wal_segment(store, &state.namespace_id, wal_no).await;
+        let loaded = load_wal_object(store, &state.namespace_id, wal_no).await;
         let Some(envelope) = loaded.envelope.map_err(wal_error)? else {
             break;
         };
         if envelope.payload().writer_epoch != state.writer_epoch {
             return Ok(false);
         }
-        let segment = walk
+        let object = walk
             .validate(loaded.object_key, envelope)
             .map_err(wal_error)?;
         if state.wal_no == context.head.wal_no {
             projected_tail = context.tail_cache.get(&cache_key);
         }
         let before = state.clone();
-        state = state.after_segment(segment.envelope().payload());
+        state = state.after_wal_object(object.envelope().payload());
         if let Some(current) = projected_tail {
-            let object_key = segment.object_key().to_owned();
-            let tail = ValidatedWalTail::new(vec![segment]);
+            let object_key = object.object_key().to_owned();
+            let tail = ValidatedWalTail::new(vec![object]);
             let replayed = project_validated_wal_tail(&before, &current, &tail)
                 .map_err(|error| corrupt(&object_key, error))?;
             projected_tail = Some(Arc::new(replayed.projected_tail));

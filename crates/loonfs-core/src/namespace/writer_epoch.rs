@@ -1,4 +1,4 @@
-//! Writer acquisition through a manifest epoch and a numbered fence segment.
+//! Writer acquisition through a manifest epoch and a numbered fence WAL object.
 
 use crate::context::MutationContext;
 use crate::error::{CoreError, Result, WriterFence};
@@ -8,7 +8,7 @@ use crate::namespace::read_anchor::{
 };
 use crate::namespace::state::NamespaceReadState;
 use crate::time::{Deadline, MonotonicTimer};
-use crate::wal::{prepare_segment, publish_segment};
+use crate::wal::{prepare_wal_object, publish_wal_object};
 use loonfs_api::wire::control::{AcquiredWriter, WriterBlock};
 use loonfs_api::NamespaceId;
 use loonfs_objectstore::ObjectStore;
@@ -57,11 +57,11 @@ pub(crate) async fn acquire_writer<S: ObjectStore + ?Sized>(
         let head = &anchor.read_state;
         ensure_writer_not_fenced(head, &acquired)?;
         super::control::ensure_namespace_live(head)?;
-        let fence = prepare_segment(namespace_id.clone(), acquired.writer_epoch, head, &[])
+        let fence = prepare_wal_object(namespace_id.clone(), acquired.writer_epoch, head, &[])
             .map_err(|error| CoreError::Internal(format!("WAL fence build failed: {error}")))?;
-        match publish_segment(store, &fence, &tip).await {
+        match publish_wal_object(store, &fence, &tip).await {
             Ok(()) => {
-                anchor.read_state = head.after_segment(fence.envelope().payload());
+                anchor.read_state = head.after_wal_object(fence.envelope().payload());
                 anchor.tail.push_published(fence.envelope().clone());
                 return Ok((acquired, anchor));
             }

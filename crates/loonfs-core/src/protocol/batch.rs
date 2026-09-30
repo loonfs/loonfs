@@ -1,4 +1,4 @@
-//! Batch publication: admitted mutation candidates become one WAL segment
+//! Batch publication: admitted mutation candidates become one WAL object
 //! plus one numbered WAL put, with outcomes fanned back to every
 //! candidate slot.
 
@@ -16,7 +16,7 @@ use crate::namespace::state::NamespaceReadState;
 use crate::path::write::PublishPlanningSession;
 use crate::storage::inline_content::InlineContent;
 use crate::time::{Deadline, Observation};
-use crate::wal::{prepare_segment, publish_segment};
+use crate::wal::{prepare_wal_object, publish_wal_object};
 use loonfs_api::v0::Commit;
 use loonfs_api::wire::wal::WalCommitPayload;
 use loonfs_api::NamespaceId;
@@ -203,7 +203,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
     if accepted_commits.is_empty() {
         return PublishBatchAgainstViewResult::unchanged(finish_batch_outcomes(&slots));
     }
-    let wal = match prepare_segment(
+    let wal = match prepare_wal_object(
         namespace_id.clone(),
         view.acquired_writer.writer_epoch,
         &view.head,
@@ -217,7 +217,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
             )
         }
     };
-    let resulting_head = view.head.after_segment(wal.envelope().payload());
+    let resulting_head = view.head.after_wal_object(wal.envelope().payload());
     let elapsed_ms = clock.batch.elapsed_ms();
     let Some(publication_now_ms) = context.now_ms.checked_add(elapsed_ms) else {
         return abort_batch(
@@ -238,7 +238,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
             }
         }
     }
-    if let Err(error) = publish_segment(store, &wal, &clock.tip).await {
+    if let Err(error) = publish_wal_object(store, &wal, &clock.tip).await {
         return abort_batch(slots, &error);
     }
 
@@ -348,7 +348,7 @@ mod tests {
     use crate::test_support::ops::create;
     use crate::time::StdMonotonicTimer;
     use loonfs_api::{AbsolutePath, ChangeSeq, CommitId, MAX_PUBLIC_INTEGER};
-    use loonfs_objectstore::keys::{hint, wal_segment_prefix};
+    use loonfs_objectstore::keys::{hint, wal_prefix};
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_objectstore::ObjectStore;
     use tempfile::tempdir;
@@ -469,7 +469,7 @@ mod tests {
             .expect("read hint")
             .expect("hint exists");
         let wal_before = store
-            .list_prefix(&wal_segment_prefix(&namespace_id))
+            .list_prefix(&wal_prefix(&namespace_id))
             .await
             .expect("list WAL before");
 
@@ -516,7 +516,7 @@ mod tests {
         );
         assert_eq!(
             store
-                .list_prefix(&wal_segment_prefix(&namespace_id))
+                .list_prefix(&wal_prefix(&namespace_id))
                 .await
                 .expect("list WAL after"),
             wal_before

@@ -9,7 +9,7 @@ use loonfs::{
     NamespaceId, PutFileOptions, ReorganizeStepOutcome, RuntimeCacheConfig, SharedObjectStore,
     StoredMetadataBlockKind,
 };
-use loonfs_core::limits::FOLD_AT_WAL_SEGMENTS;
+use loonfs_core::limits::FOLD_AT_WAL_OBJECTS;
 use loonfs_core::test_support::{
     RecordedStoredMetadataBlockCall, RecordingStoredMetadataBlockCache,
 };
@@ -190,14 +190,14 @@ fn runtime_publish_reuses_wal_tail_projection_for_sequential_writes() {
             "/seed-a",
             CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
         )
-        .expect("seed first WAL segment");
+        .expect("seed first WAL object");
     setup
         .create_directory_blocking(
             &namespace_id,
             "/seed-b",
             CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
         )
-        .expect("seed second WAL segment");
+        .expect("seed second WAL object");
 
     raw_store.reset_wal_get_count();
     measured
@@ -261,7 +261,7 @@ async fn runtime_publish_reuses_wal_tail_projection_while_a_fold_runs() {
         .open_namespace(&namespace_id)
         .expect("open namespace");
     recording.inner().block_next();
-    for number in 0..FOLD_AT_WAL_SEGMENTS + 3 {
+    for number in 0..FOLD_AT_WAL_OBJECTS + 3 {
         recording.reset();
         namespace
             .create_directory(
@@ -270,7 +270,7 @@ async fn runtime_publish_reuses_wal_tail_projection_while_a_fold_runs() {
             )
             .await
             .expect("publish directory");
-        if tail_segments.load(Ordering::SeqCst) == FOLD_AT_WAL_SEGMENTS {
+        if tail_segments.load(Ordering::SeqCst) == FOLD_AT_WAL_OBJECTS {
             recording.inner().wait_until_blocked().await;
         }
         if number > 0 {
@@ -280,7 +280,7 @@ async fn runtime_publish_reuses_wal_tail_projection_while_a_fold_runs() {
                 .filter(|operation| {
                     operation
                         .key()
-                        .starts_with(&loonfs_objectstore::keys::wal_segment_prefix(&namespace_id))
+                        .starts_with(&loonfs_objectstore::keys::wal_prefix(&namespace_id))
                 })
                 .collect::<Vec<_>>();
             assert_eq!(wal.len(), 1, "publish {number}: {wal:?}");
@@ -310,7 +310,7 @@ async fn runtime_publish_reuses_wal_tail_projection_while_a_fold_runs() {
         )
         .await
         .expect("publish after fold");
-    assert!(tail_segments.load(Ordering::SeqCst) < FOLD_AT_WAL_SEGMENTS);
+    assert!(tail_segments.load(Ordering::SeqCst) < FOLD_AT_WAL_OBJECTS);
     let operations = recording.take();
     let mut manifest_gets = 0;
     let mut wal_puts = 0;
@@ -324,8 +324,7 @@ async fn runtime_publish_reuses_wal_tail_projection_while_a_fold_runs() {
             loonfs_test_support::stores::RecordedOperation::Get { key, .. }
                 if key.starts_with(&format!("namespaces/{namespace_id}/segments/")) => {}
             loonfs_test_support::stores::RecordedOperation::Put { key, .. }
-                if key
-                    .starts_with(&loonfs_objectstore::keys::wal_segment_prefix(&namespace_id)) =>
+                if key.starts_with(&loonfs_objectstore::keys::wal_prefix(&namespace_id)) =>
             {
                 wal_puts += 1;
             }
@@ -341,7 +340,7 @@ async fn runtime_publish_reuses_wal_tail_projection_while_a_fold_runs() {
 }
 
 #[test]
-fn runtime_publish_and_read_allow_multi_segment_wal_tail() {
+fn runtime_publish_and_read_allow_multi_object_wal_tail() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
     let raw_store = Arc::new(RuntimeStoreProbe::new(temp_dir.path(), &namespace_id));
@@ -362,25 +361,25 @@ fn runtime_publish_and_read_allow_multi_segment_wal_tail() {
             "/seed-a",
             CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
         )
-        .expect("seed first WAL segment");
+        .expect("seed first WAL object");
     setup
         .create_directory_blocking(
             &namespace_id,
             "/seed-b",
             CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
         )
-        .expect("seed second WAL segment");
+        .expect("seed second WAL object");
 
     measured_read
         .stat_path_blocking(&namespace_id, "/seed-a")
-        .expect("read projects the visible WAL tail without a segment limit");
+        .expect("read projects the visible WAL tail without a WAL object limit");
     measured_publish
         .create_directory_blocking(
             &namespace_id,
             "/should-succeed",
             CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
         )
-        .expect("publish projects the visible WAL tail without a segment limit");
+        .expect("publish projects the visible WAL tail without a WAL object limit");
 }
 
 #[test]
@@ -582,7 +581,7 @@ fn runtime_wal_tail_projection_cache_skips_oversized_projection() {
                     assert!(*result_bytes > 0);
                     key.clone()
                 }
-                other => panic!("expected WAL segment read, got {other:?}"),
+                other => panic!("expected WAL object read, got {other:?}"),
             })
             .collect::<Vec<_>>();
         replayed.sort();

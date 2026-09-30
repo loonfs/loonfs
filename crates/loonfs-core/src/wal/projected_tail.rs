@@ -1,6 +1,6 @@
 //! Metadata rows and inline content from the unfolded WAL tail.
 
-use super::frame::WalSegmentError;
+use super::frame::WalObjectError;
 use crate::heap_bytes::{arc_bytes, hash_map_table_bytes, HeapBytes};
 use crate::metadata::MetadataState;
 use bytes::Bytes;
@@ -37,13 +37,10 @@ impl ProjectedWalTail {
         }
     }
 
-    pub(crate) fn apply_commit(
-        &mut self,
-        record: &WalCommitPayload,
-    ) -> Result<(), WalSegmentError> {
+    pub(crate) fn apply_commit(&mut self, record: &WalCommitPayload) -> Result<(), WalObjectError> {
         let activity = committed_activity(&record.deltas)
             .and_then(|activity| self.activity.checked_add(activity))
-            .ok_or(WalSegmentError::ActivityOverflow)?;
+            .ok_or(WalObjectError::ActivityOverflow)?;
         self.rows.apply_committed_wal_record_mut(record);
         self.activity = activity;
         Ok(())

@@ -11,7 +11,7 @@ use crate::control_object::ControlObjectLoadError;
 use crate::manifest::ManifestLoadError;
 use crate::metadata::VisiblePathError;
 use crate::storage::content::DurableContentValidationError;
-use crate::wal::{WalSegmentError, WalTailLoadError};
+use crate::wal::{WalObjectError, WalTailLoadError};
 use loonfs_api::{
     BindingVersion, ChangeSeq, CommitId, ErrorDetails, InodeId, InodeKind, NamespaceId,
     PrincipalScope, RevisionNo, UploadId, WriterEpoch, WriterId,
@@ -84,7 +84,7 @@ pub enum CoreError {
          this deployment buffers for one read"
     )]
     ContentTooLarge { size_bytes: u64, max_bytes: u64 },
-    #[error("commit is too large for one WAL segment: estimated {estimated_bytes} bytes exceeds `MAX_WAL_SEGMENT_BYTES` ({max_bytes} bytes)")]
+    #[error("commit is too large for one WAL object: estimated {estimated_bytes} bytes exceeds `MAX_WAL_OBJECT_BYTES` ({max_bytes} bytes)")]
     CommitTooLarge {
         estimated_bytes: usize,
         max_bytes: usize,
@@ -297,7 +297,7 @@ pub enum MetadataProjectionLoadError {
     #[error(transparent)]
     ManifestLoad(#[from] ManifestLoadError),
     #[error("WAL replay failed: {0}")]
-    WalReplay(#[from] WalSegmentError),
+    WalReplay(#[from] WalObjectError),
 }
 
 impl MetadataProjectionLoadError {

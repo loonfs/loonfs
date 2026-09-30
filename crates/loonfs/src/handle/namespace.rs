@@ -1,7 +1,7 @@
 //! The handle for one namespace, in a read-only or a writable mode.
 
 use super::{LoonFs, ReadOnly, Writable};
-use crate::fs::ReadCore;
+use crate::fs::RuntimeCore;
 use crate::publisher::{CloseNamespaceReport, NamespaceSession, NamespaceSessionState};
 use crate::{NamespaceId, Result};
 use loonfs_api::Subject;
@@ -34,7 +34,7 @@ use std::sync::Arc;
 /// session by itself and never closes one to make room for another.
 #[derive(Clone)]
 pub struct Namespace<M> {
-    pub(crate) core: ReadCore,
+    pub(crate) core: RuntimeCore,
     pub(crate) namespace_id: NamespaceId,
     pub(crate) mode: M,
     /// Held exactly when the mode is [`Writable`]. The mode type is shared
@@ -87,7 +87,7 @@ impl<M> Namespace<M> {
 }
 
 impl Namespace<ReadOnly> {
-    pub(crate) fn new(core: ReadCore, namespace_id: NamespaceId) -> Self {
+    pub(crate) fn new(core: RuntimeCore, namespace_id: NamespaceId) -> Self {
         Self {
             core,
             namespace_id,

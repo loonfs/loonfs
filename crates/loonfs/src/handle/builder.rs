@@ -2,7 +2,7 @@
 
 use super::{LoonFs, ReadOnly, Writable};
 use crate::config::ReadConfig;
-use crate::fs::{ReadCore, WriterBits, WriterIdentity};
+use crate::fs::{RuntimeCore, WriterBits, WriterIdentity};
 use crate::metrics::{
     fan_out_object_store_recorder, MetricsRecorder, ObjectStoreMetricsRecorder, RuntimeInstruments,
 };
@@ -40,7 +40,7 @@ enum StoreSource {
     Shared(SharedObjectStore),
 }
 
-/// What the read core opens from, in every mode.
+/// What the runtime core opens from, in every mode.
 struct CoreSettings {
     source: StoreSource,
     max_read_content_bytes: Option<u64>,
@@ -219,7 +219,7 @@ impl LoonFsBuilder<Writable> {
     ///
     /// A request to an idle namespace publishes immediately; the interval
     /// only paces requests that queued behind a publish, so concurrent
-    /// publishes amortize into fewer, larger WAL segments — with each caller still awaiting its own
+    /// publishes amortize into fewer, larger WAL objects — with each caller still awaiting its own
     /// durable, visible result. Defaults to 15 ms; zero keeps only the
     /// batching that in-flight publications force.
     pub fn min_publish_interval_ms(mut self, min_publish_interval_ms: u64) -> Self {
@@ -334,12 +334,12 @@ impl LoonFsBuilder<Writable> {
 
 impl CoreSettings {
     /// Resolves the object-store client, wraps it for metrics when the
-    /// builder was given a recorder, and opens the read core.
+    /// builder was given a recorder, and opens the runtime core.
     ///
     /// A builder given no recorder of either kind wraps nothing: the store
     /// the core holds is the store it was handed, and the instrument set it
     /// carries reports nowhere.
-    fn open(self) -> Result<ReadCore> {
+    fn open(self) -> Result<RuntimeCore> {
         let (store, derived_kind) = match self.source {
             StoreSource::Config(config) => {
                 let kind = TraceStoreKind::from(config.kind());
@@ -362,7 +362,7 @@ impl CoreSettings {
             ) as SharedObjectStore,
             None => store,
         };
-        Ok(ReadCore::open(
+        Ok(RuntimeCore::open(
             store,
             ReadConfig {
                 max_read_content_bytes: self.max_read_content_bytes,

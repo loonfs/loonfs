@@ -22,7 +22,10 @@ pub struct NamespaceReadState {
 }
 
 impl NamespaceReadState {
-    pub(crate) fn after_segment(&self, payload: &loonfs_api::wire::wal::WalSegmentPayload) -> Self {
+    pub(crate) fn after_wal_object(
+        &self,
+        payload: &loonfs_api::wire::wal::WalObjectPayload,
+    ) -> Self {
         Self {
             seq: payload.head_seq,
             next_inode_id: payload.next_inode_id,
@@ -31,8 +34,8 @@ impl NamespaceReadState {
         }
     }
 
-    /// Counts the WAL segments after the last folded position, including fences.
-    pub fn unfolded_wal_segments(&self) -> u64 {
+    /// Counts the WAL objects after the last folded position, including fences.
+    pub fn unfolded_wal_objects(&self) -> u64 {
         self.wal_no.0 - self.folded_wal_no.0
     }
 }

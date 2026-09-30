@@ -7,8 +7,8 @@ use loonfs_api::{ManifestNo, UploadId};
 /// [durable object key grammar]: https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a8-object-keys
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DurableObjectFamily {
-    /// Classifies an immutable segment in a namespace's numbered WAL.
-    WalSegment,
+    /// Classifies an immutable numbered object in a namespace's WAL.
+    WalObject,
     /// Starts forward discovery of namespace manifests.
     Hint,
     /// Classifies an immutable numbered namespace manifest.
@@ -60,10 +60,10 @@ pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
             owner_namespace_id,
             Some(content_id),
         )),
-        ["namespaces", namespace, "wal", segment] => segment
+        ["namespaces", namespace, "wal", object] => object
             .strip_suffix(".wal.zst")
             .filter(|identifier| parse_wal_no(identifier).is_some())
-            .map(|identifier| parsed(DurableObjectFamily::WalSegment, namespace, Some(identifier))),
+            .map(|identifier| parsed(DurableObjectFamily::WalObject, namespace, Some(identifier))),
         ["namespaces", namespace, "hint.json"] => {
             Some(parsed(DurableObjectFamily::Hint, namespace, None))
         }
@@ -101,10 +101,10 @@ pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
     }
 }
 
-/// Parses the fixed-width WAL number in a segment key.
+/// Parses the fixed-width WAL number in a WAL object key.
 pub fn wal_no_of(key: &str) -> Option<loonfs_api::WalNo> {
     let parsed = parse_object_key(key)?;
-    if parsed.family() != DurableObjectFamily::WalSegment {
+    if parsed.family() != DurableObjectFamily::WalObject {
         return None;
     }
     parse_wal_no(parsed.identifier()?)
@@ -159,7 +159,7 @@ mod tests {
     use super::{parse_object_key, DurableObjectFamily};
     use crate::keys::{
         content_blob, hint, metadata_manifest_object, metadata_segment, metadata_segment_prefix,
-        pin, upload_session, wal_segment, wal_segment_prefix,
+        pin, upload_session, wal_object, wal_prefix,
     };
     use loonfs_api::{
         ContentId, ManifestNo, MetadataSegmentId, NamespaceId, PinId, UploadId, WalNo,
@@ -178,8 +178,8 @@ mod tests {
             ContentId::parse("con_abcdef0123456789abcdef0123456789").expect("content id");
         let cases = [
             (
-                wal_segment(&namespace_id, &wal_no),
-                DurableObjectFamily::WalSegment,
+                wal_object(&namespace_id, &wal_no),
+                DurableObjectFamily::WalObject,
                 Some("00000000000000000001"),
             ),
             (hint(&namespace_id), DurableObjectFamily::Hint, None),
@@ -237,8 +237,8 @@ mod tests {
         let segment = metadata_segment(&namespace_id, &segment_id);
 
         assert!(segment.starts_with(&metadata_segment_prefix(&namespace_id)));
-        let wal_segments = wal_segment_prefix(&namespace_id);
-        assert!(!hint(&namespace_id).starts_with(&wal_segments));
+        let wal_objects = wal_prefix(&namespace_id);
+        assert!(!hint(&namespace_id).starts_with(&wal_objects));
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! The writable [`Namespace`] handle's path mutations and commits, and the
 //! publication pipeline they go through.
 
-use super::core::{ReadCore, WriterBits};
+use super::core::{RuntimeCore, WriterBits};
 use crate::publish::{CommitCandidate, CommitRequest, FilesystemOperation, PreparedContent};
 use crate::trace::phase_span;
 use crate::ByteStream;
@@ -874,7 +874,7 @@ pub(crate) struct EnginePublishResult {
 }
 
 /// Publishes already-classified candidates as one batch — one WAL
-/// segment, one numbered WAL put — through the namespace
+/// object, one numbered WAL put — through the namespace
 /// publisher's own commit engine, and settles the runtime state the
 /// batch produced: read caches, publish observer, maintenance.
 ///
@@ -882,7 +882,7 @@ pub(crate) struct EnginePublishResult {
 /// borrowing it here keeps engine construction and locking in that one
 /// place. Results match candidates in order.
 pub(crate) async fn publish_batch_with_engine(
-    core: &ReadCore,
+    core: &RuntimeCore,
     writer: &Arc<WriterBits>,
     namespace_id: &NamespaceId,
     engine: &mut loonfs_core::publish::NamespaceCommitEngine,

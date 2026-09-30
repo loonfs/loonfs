@@ -23,7 +23,7 @@ use crate::time::{Deadline, MonotonicTimer, Observation, StdMonotonicTimer};
 use crate::wal::ProjectedWalTail;
 use loonfs_api::v0::Commit;
 use loonfs_api::wire::control::AcquiredWriter;
-use loonfs_api::wire::wal::{MAX_WAL_INLINE_CONTENT_BYTES, MAX_WAL_SEGMENT_INLINE_CONTENT_BYTES};
+use loonfs_api::wire::wal::{MAX_WAL_INLINE_CONTENT_BYTES, MAX_WAL_OBJECT_INLINE_CONTENT_BYTES};
 #[cfg(test)]
 use loonfs_api::ChangeSeq;
 use loonfs_api::{CommitId, ContentId, DeleteNamespaceResponse, ManifestNo, NamespaceId};
@@ -407,10 +407,10 @@ impl CommitCandidate {
             }
         }
         let inline_bytes = self.inline_content_bytes();
-        if inline_bytes > MAX_WAL_SEGMENT_INLINE_CONTENT_BYTES {
+        if inline_bytes > MAX_WAL_OBJECT_INLINE_CONTENT_BYTES {
             return Err(CoreError::InvalidCommitRequest(format!(
                 "mutation has {inline_bytes} inline content bytes; maximum is {}",
-                MAX_WAL_SEGMENT_INLINE_CONTENT_BYTES
+                MAX_WAL_OBJECT_INLINE_CONTENT_BYTES
             )));
         }
         let prepared_count = match &self.content {
@@ -1030,7 +1030,7 @@ mod tests {
         ChangeSeq, ContentRef, PrincipalId, PrincipalScope, PrincipalSet, Subject, SubjectId,
         WriterEpoch,
     };
-    use loonfs_objectstore::keys::wal_segment_prefix;
+    use loonfs_objectstore::keys::wal_prefix;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_objectstore::ObjectStore;
     use loonfs_test_support::stores::{
@@ -1266,9 +1266,9 @@ mod tests {
         CommitCandidate::new(create_dir_request(commit_id, display_name))
     }
 
-    async fn wal_segment_count(store: &LocalFsStore, namespace_id: &NamespaceId) -> usize {
+    async fn wal_object_count(store: &LocalFsStore, namespace_id: &NamespaceId) -> usize {
         store
-            .list_prefix_stream(&wal_segment_prefix(namespace_id))
+            .list_prefix_stream(&wal_prefix(namespace_id))
             .collect::<Vec<_>>()
             .await
             .len()
@@ -1361,7 +1361,7 @@ mod tests {
         // fence check uses and the closing etag recheck.
         let store = StdArc::new(BlockingStore::new(
             LocalFsStore::new(temp_dir.path()).expect("store"),
-            KeyPredicate::prefix(wal_segment_prefix(&namespace_id)),
+            KeyPredicate::prefix(wal_prefix(&namespace_id)),
             OperationClass::Read,
         ));
 
@@ -1519,7 +1519,7 @@ mod tests {
     }
 
     /// Advances an entire publish budget per reading, so every publish
-    /// observes an expired budget between segment PUT and WAL put.
+    /// observes an expired budget before its WAL object PUT.
     #[derive(Debug)]
     struct ExpiredBudgetTimer(AtomicU64);
 
@@ -1755,7 +1755,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn publish_over_budget_writes_no_segment_and_a_retry_rebuilds() {
+    async fn publish_over_budget_writes_no_wal_object_and_a_retry_rebuilds() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -1801,7 +1801,7 @@ mod tests {
             .expect("read head");
         assert_eq!(head_after.seq, head_before.seq);
         assert_eq!(head_after.wal_no, head_before.wal_no);
-        assert_eq!(wal_segment_count(&store, &namespace_id).await, 1);
+        assert_eq!(wal_object_count(&store, &namespace_id).await, 1);
 
         let mut healthy = NamespaceCommitEngine::new(namespace_id.clone());
         let retried = healthy
@@ -1815,7 +1815,7 @@ mod tests {
             .await;
         let response = retried.results[0].as_ref().expect("rebuilt publish");
         assert_eq!(response.committed_seq, ChangeSeq(1));
-        assert_eq!(wal_segment_count(&store, &namespace_id).await, 3);
+        assert_eq!(wal_object_count(&store, &namespace_id).await, 3);
         let head_final = load_namespace_read_state(&store, &namespace_id)
             .await
             .expect("read head");

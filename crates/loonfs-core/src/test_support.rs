@@ -20,9 +20,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
 
-/// Appends one small commit per WAL segment without folding the tail.
+/// Appends one small commit per WAL object without folding the tail.
 #[cfg(any(test, feature = "test-support"))]
-pub async fn append_wal_segments<S: loonfs_objectstore::ObjectStore + ?Sized>(
+pub async fn append_wal_objects<S: loonfs_objectstore::ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &loonfs_api::NamespaceId,
     count: u64,

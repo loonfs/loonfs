@@ -1,7 +1,7 @@
 //! Runtime caches for control-object reads and WAL-tail projections.
 //! WAL probes observe commits; interval checks observe manifest changes.
 
-use crate::fs::ReadCore;
+use crate::fs::RuntimeCore;
 use crate::metrics::RuntimeInstruments;
 use crate::trace::phase_span;
 use crate::{CoreError, NamespaceId, PinId, Recency, RuntimeCacheConfig};
@@ -246,7 +246,7 @@ fn namespace_slot_is_live(
         .is_some_and(|(_, last_touch)| *last_touch == stamp)
 }
 
-impl ReadCore {
+impl RuntimeCore {
     pub(crate) fn cached_read_context(
         &self,
         namespace_id: &NamespaceId,

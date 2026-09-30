@@ -12,7 +12,7 @@ use crate::protocol::{
 };
 use crate::test_support::ops::create;
 use loonfs_api::{AbsolutePath, DestinationBehavior, WriterId};
-use loonfs_objectstore::keys::{content_blob, hint, wal_segment_prefix};
+use loonfs_objectstore::keys::{content_blob, hint, wal_prefix};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::stores::{BlockingStore, KeyPredicate, OperationClass};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -231,9 +231,9 @@ async fn content_reclaimed_during_view_load_cannot_be_published() {
     assert_eq!(head_after.wal_no, head_before.wal_no);
     assert_eq!(
         store
-            .list_prefix(&wal_segment_prefix(&namespace_id))
+            .list_prefix(&wal_prefix(&namespace_id))
             .await
-            .expect("WAL segments")
+            .expect("WAL objects")
             .len(),
         1
     );
@@ -349,7 +349,7 @@ async fn assert_expired_content_stays_rejected_on_retry(elapsed_ms: u64) {
     );
     assert_eq!(
         store
-            .list_prefix(&wal_segment_prefix(&namespace_id))
+            .list_prefix(&wal_prefix(&namespace_id))
             .await
             .expect("WAL")
             .len(),
@@ -380,7 +380,7 @@ async fn content_expiring_after_the_put_starts_does_not_undo_the_commit() {
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let store = BlockingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
-        KeyPredicate::prefix(wal_segment_prefix(&namespace_id)),
+        KeyPredicate::prefix(wal_prefix(&namespace_id)),
         OperationClass::Put,
     );
     let setup = context(1_000);
@@ -455,9 +455,9 @@ async fn content_expiring_after_the_put_starts_does_not_undo_the_commit() {
     );
     assert_eq!(
         store
-            .list_prefix(&wal_segment_prefix(&namespace_id))
+            .list_prefix(&wal_prefix(&namespace_id))
             .await
-            .expect("WAL segments")
+            .expect("WAL objects")
             .len(),
         3
     );
@@ -618,7 +618,7 @@ async fn swap_accepts_any_valid_matching_proof_and_expired_receipt_replays_witho
                     ..
                 }
             ) && family
-                == Some(loonfs_objectstore::layout::DurableObjectFamily::WalSegment);
+                == Some(loonfs_objectstore::layout::DurableObjectFamily::WalObject);
             family != Some(loonfs_objectstore::layout::DurableObjectFamily::ContentBlob)
                 && !reads_wal
         }),

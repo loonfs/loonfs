@@ -10,11 +10,11 @@ use crate::storage::content::store_bytes_as_content;
 use crate::test_support::ops::create;
 use bytes::Bytes;
 use loonfs_api::v0::PathEntryKind;
-use loonfs_api::wire::wal::{decode_wal_segment_envelope_zstd, WalDelta};
+use loonfs_api::wire::wal::{decode_wal_object_envelope_zstd, WalDelta};
 use loonfs_api::{
     AbsolutePath, AttributeInclusion, ContentRef, DestinationBehavior, FlushWalOutcome, WriterId,
 };
-use loonfs_objectstore::keys::wal_segment_prefix;
+use loonfs_objectstore::keys::wal_prefix;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::stores::{KeyPredicate, RecordedOperation, RecordingStore};
 
@@ -131,14 +131,14 @@ async fn inline_publication_writes_only_wal_and_replays_metadata_in_entry_order(
             _ => None,
         })
         .expect("WAL put");
-    assert!(key.starts_with(&wal_segment_prefix(&engine.namespace_id)));
+    assert!(key.starts_with(&wal_prefix(&engine.namespace_id)));
     let bytes = store
         .get(&key, None)
         .await
         .expect("get WAL")
         .expect("WAL exists");
-    let segment = decode_wal_segment_envelope_zstd(&bytes).expect("decode WAL");
-    let record = &segment.payload().records[0];
+    let wal_object = decode_wal_object_envelope_zstd(&bytes).expect("decode WAL");
+    let record = &wal_object.payload().records[0];
     assert_eq!(record.inline_content.len(), values.len());
     for (entry, value) in record.inline_content.iter().zip(values.iter().rev()) {
         assert_eq!(entry.content_id, value.content_ref().content_id);
@@ -260,7 +260,7 @@ async fn invalid_inline_candidates_write_nothing() {
     );
     let excessive_total = candidate(
         "total",
-        (0..=MAX_WAL_SEGMENT_INLINE_CONTENT_BYTES / MAX_WAL_INLINE_CONTENT_BYTES)
+        (0..=MAX_WAL_OBJECT_INLINE_CONTENT_BYTES / MAX_WAL_INLINE_CONTENT_BYTES)
             .map(|_| {
                 inline(
                     &engine.namespace_id,
@@ -353,7 +353,7 @@ async fn inline_tail_replay_matches_publication_and_materializes_before_metadata
     let advanced = engine.wal_fold_input().expect("projection");
     assert_eq!(advanced.tail_state.inline_bytes(), 11);
     let wal_before = store
-        .list_prefix(&wal_segment_prefix(&engine.namespace_id))
+        .list_prefix(&wal_prefix(&engine.namespace_id))
         .await
         .expect("list WAL");
     engine.invalidate_projection();
@@ -415,7 +415,7 @@ async fn inline_tail_replay_matches_publication_and_materializes_before_metadata
         );
         assert_eq!(
             store
-                .list_prefix(&wal_segment_prefix(&engine.namespace_id))
+                .list_prefix(&wal_prefix(&engine.namespace_id))
                 .await
                 .expect("WAL remains"),
             wal_before

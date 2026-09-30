@@ -18,7 +18,7 @@ use loonfs::{
     CreateNamespaceOptions, LoonFs, MaintenanceJobId, MaintenanceRegistry, MaintenanceRunner,
     MetadataMaintenanceJob, MetadataMaintenanceOptions, NamespaceId, StoreConfig, Writable,
 };
-use loonfs_core::test_support::append_wal_segments;
+use loonfs_core::test_support::append_wal_objects;
 use loonfs_core::MutationContext;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::block_on::block_on;
@@ -55,7 +55,7 @@ async fn writer(root: &Path) -> LoonFs<Writable> {
 
 async fn fill_wal_tail_past_threshold(root: &Path, namespace_id: &NamespaceId) {
     let store = LocalFsStore::new(root).expect("open tail store");
-    append_wal_segments(
+    append_wal_objects(
         &store,
         namespace_id,
         u64::from(writes_past_wal_tail_threshold()),

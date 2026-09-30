@@ -1,17 +1,17 @@
-//! WAL segment and tail framing types, shared by the writer, reader, and
+//! WAL object and tail framing types, shared by the writer, reader, and
 //! replay paths.
 
 use crate::namespace::state::NamespaceReadState;
-use loonfs_api::wire::wal::{WalSegmentEnvelope, WalSegmentPayload};
+use loonfs_api::wire::wal::{WalObjectEnvelope, WalObjectPayload};
 use loonfs_api::{ChangeSeq, NamespaceId, WalNo, WriterEpoch};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub(crate) type PreparedWalSegment = loonfs_api::wire::envelope::EncodedEnvelope<WalSegmentPayload>;
+pub(crate) type PreparedWalObject = loonfs_api::wire::envelope::EncodedEnvelope<WalObjectPayload>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
-pub enum WalSegmentError {
-    #[error("WAL segment namespace mismatch: expected `{expected}`, actual `{actual}`")]
+pub enum WalObjectError {
+    #[error("WAL object namespace mismatch: expected `{expected}`, actual `{actual}`")]
     NamespaceMismatch {
         expected: NamespaceId,
         actual: NamespaceId,
@@ -30,13 +30,13 @@ pub enum WalSegmentError {
     #[error("WAL number cannot exceed 9007199254740991")]
     NumberOverflow,
     #[error(
-        "WAL segment writer epoch mismatch: expected at most `{expected_max}`, actual `{actual}`"
+        "WAL object writer epoch mismatch: expected at most `{expected_max}`, actual `{actual}`"
     )]
     WriterEpochMismatch {
         expected_max: WriterEpoch,
         actual: WriterEpoch,
     },
-    #[error("WAL segment summary does not match its records")]
+    #[error("WAL object summary does not match its records")]
     SegmentSummaryMismatch,
 }
 
@@ -51,13 +51,13 @@ pub(super) struct WalTailLoadRequest<'a> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ValidatedWalSegment {
+pub(crate) struct ValidatedWalObject {
     object_key: String,
-    envelope: WalSegmentEnvelope,
+    envelope: WalObjectEnvelope,
 }
 
-impl ValidatedWalSegment {
-    pub(super) fn new(object_key: String, envelope: WalSegmentEnvelope) -> Self {
+impl ValidatedWalObject {
+    pub(super) fn new(object_key: String, envelope: WalObjectEnvelope) -> Self {
         Self {
             object_key,
             envelope,
@@ -68,32 +68,32 @@ impl ValidatedWalSegment {
         &self.object_key
     }
 
-    pub(crate) fn envelope(&self) -> &WalSegmentEnvelope {
+    pub(crate) fn envelope(&self) -> &WalObjectEnvelope {
         &self.envelope
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ValidatedWalTail {
-    segments: Vec<ValidatedWalSegment>,
+    objects: Vec<ValidatedWalObject>,
 }
 
 impl ValidatedWalTail {
-    pub(crate) fn new(segments: Vec<ValidatedWalSegment>) -> Self {
-        Self { segments }
+    pub(crate) fn new(objects: Vec<ValidatedWalObject>) -> Self {
+        Self { objects }
     }
 
-    pub(crate) fn segments(&self) -> &[ValidatedWalSegment] {
-        &self.segments
+    pub(crate) fn objects(&self) -> &[ValidatedWalObject] {
+        &self.objects
     }
 
     /// The `committed_at_ms` of the newest commit in the tail. A tail of
     /// fences alone has none.
     pub(crate) fn newest_commit_at_ms(&self) -> Option<u64> {
-        self.segments
+        self.objects
             .iter()
             .rev()
-            .find_map(|segment| segment.envelope().payload().records.last())
+            .find_map(|object| object.envelope().payload().records.last())
             .map(|commit| commit.committed_at_ms)
     }
 
@@ -101,12 +101,12 @@ impl ValidatedWalTail {
         clippy::disallowed_methods,
         reason = "published WAL framing owns its numbered object key"
     )]
-    pub(crate) fn push_published(&mut self, envelope: WalSegmentEnvelope) {
+    pub(crate) fn push_published(&mut self, envelope: WalObjectEnvelope) {
         let payload = envelope.payload();
         let object_key =
-            loonfs_objectstore::keys::wal_segment(&payload.namespace_id, &payload.wal_no);
-        self.segments
-            .push(ValidatedWalSegment::new(object_key, envelope));
+            loonfs_objectstore::keys::wal_object(&payload.namespace_id, &payload.wal_no);
+        self.objects
+            .push(ValidatedWalObject::new(object_key, envelope));
     }
 }
 
@@ -133,7 +133,7 @@ pub enum WalTailLoadError {
     #[error("WAL object `{object_key}` failed replay validation: {error}")]
     Replay {
         object_key: String,
-        error: WalSegmentError,
+        error: WalObjectError,
     },
 }
 

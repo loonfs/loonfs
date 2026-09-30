@@ -174,7 +174,7 @@ pub struct ServerConfig {
     /// Minimum interval between publication starts per namespace, in
     /// milliseconds. A request to an idle namespace publishes immediately;
     /// the interval paces requests that queued behind a publish, so hot
-    /// namespaces amortize into fewer, larger WAL segments. The server default favors batch economy over
+    /// namespaces amortize into fewer, larger WAL objects. The server default favors batch economy over
     /// the embedded default's latency bias.
     #[serde(default = "default_min_publish_interval_ms")]
     pub min_publish_interval_ms: u64,

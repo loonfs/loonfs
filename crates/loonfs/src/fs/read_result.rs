@@ -1,7 +1,7 @@
 //! Read failure classification and one refresh of an ordinary read.
 
 use super::reads::ReadPin;
-use super::ReadCore;
+use super::RuntimeCore;
 use crate::{CoreError, NamespaceId, Result, RuntimeError, SharedObjectStore};
 use loonfs_core::control::{
     load_checkpoint_read_basis, load_namespace_current_manifest, load_snapshot_read_basis,
@@ -15,7 +15,7 @@ use tracing::Instrument;
 /// would. A checkpoint or snapshot that still admits roots the segment, so
 /// the original error stands as corruption.
 pub(super) async fn classify_read_result<T>(
-    core: &ReadCore,
+    core: &RuntimeCore,
     context: &RuntimeReadContext,
     pin: &ReadPin,
     result: Result<T>,
@@ -54,7 +54,7 @@ pub(super) async fn classify_read_result<T>(
     result
 }
 
-impl ReadCore {
+impl RuntimeCore {
     pub(crate) async fn read<T, F, Fut>(&self, namespace_id: &NamespaceId, read: F) -> Result<T>
     where
         F: Fn(NamespaceReaderEngine<SharedObjectStore>, RuntimeReadContext) -> Fut,

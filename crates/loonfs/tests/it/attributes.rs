@@ -32,7 +32,7 @@ fn maximum_small_attribute_updates_reopen_after_one_wal_publication() {
     let namespace_id = namespace_id("large-attributes");
     let counted = Arc::new(RecordingStore::new(
         store(temp_dir.path()),
-        KeyPredicate::prefix(loonfs_objectstore::keys::wal_segment_prefix(&namespace_id)),
+        KeyPredicate::prefix(loonfs_objectstore::keys::wal_prefix(&namespace_id)),
     ));
     let fs = open_runtime(counted.clone(), "large-attributes-writer");
     fs.create_namespace_blocking(
@@ -90,7 +90,7 @@ fn maximum_small_attribute_updates_reopen_after_one_wal_publication() {
                     .collect(),
             },
         )
-        .expect("maximum updates fit one segment");
+        .expect("maximum updates fit one WAL object");
     assert_eq!(counted.count(OperationClass::PutCreateIfAbsent), 1);
     block_on(fs.writer.shutdown()).expect("shutdown");
     drop(fs);

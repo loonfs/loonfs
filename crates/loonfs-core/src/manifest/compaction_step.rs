@@ -232,7 +232,7 @@ pub(super) async fn compaction_step_with_deadline<S: ObjectStore + ?Sized>(
 
 /// Checks WAL and manifest descriptors without decoding segment rows.
 ///
-/// `wal_tail_due` gets the unfolded WAL segment count and the newest tail
+/// `wal_tail_due` gets the unfolded WAL object count and the newest tail
 /// commit's `committed_at_ms`, and says whether the tail alone makes
 /// maintenance due.
 pub async fn metadata_maintenance_due<S: ObjectStore + ?Sized>(
@@ -247,7 +247,7 @@ pub async fn metadata_maintenance_due<S: ObjectStore + ?Sized>(
         .map_err(CoreError::ControlObjectLoad)?;
     crate::namespace::control::ensure_namespace_live(&anchor.read_state)?;
     if wal_tail_due(
-        anchor.read_state.unfolded_wal_segments(),
+        anchor.read_state.unfolded_wal_objects(),
         anchor.tail.newest_commit_at_ms(),
     ) {
         return Ok(true);

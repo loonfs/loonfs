@@ -260,7 +260,7 @@ impl Maintenance {
         }
     }
 
-    /// Folds the WAL tail at the segment threshold, at the inline byte
+    /// Folds the WAL tail at the WAL object threshold, at the inline byte
     /// threshold when the writer knows the count, or once the tail's newest
     /// commit is `idle_fold_after_ms` old on this handle's wall clock. Then
     /// runs one bounded compaction step.
@@ -317,7 +317,7 @@ impl Maintenance {
         Ok((response, idle_fold_at_ms))
     }
 
-    /// Checks the WAL segment threshold, the age of the tail's newest commit,
+    /// Checks the WAL object threshold, the age of the tail's newest commit,
     /// and manifest descriptors without replaying the tail.
     ///
     /// The age is measured on this handle's wall clock. Inline byte thresholds
@@ -805,12 +805,12 @@ impl Maintenance {
 
     /// Folds any visible WAL tail, then runs one compaction step.
     ///
-    /// This is equivalent to a metadata maintenance pass with a one-segment
-    /// fold threshold. It reports both the fold and compaction outcomes.
+    /// This is equivalent to a metadata maintenance pass with a fold threshold of
+    /// one WAL object. It reports both the fold and compaction outcomes.
     /// An empty WAL tail reports [`WalFlushStepOutcome::NotNeeded`].
     ///
     /// This checks only whether a WAL tail exists. It does not require the
-    /// head to contain enough hints to count every segment.
+    /// head to contain enough hints to count every WAL object.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.maintenance.wal_fold",
