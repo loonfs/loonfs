@@ -3,7 +3,7 @@
 use loonfs::publish::{CommitRequest, FilesystemOperation};
 use loonfs::{
     CreateNamespaceOptions, CreateSnapshotOptions, DeleteNamespaceOptions, ForkNamespaceOptions,
-    FsWriter, ListChangesOptions, StatPathOptions,
+    FsWriter, ListChangesOptions, SnapshotPolicy, StatPathOptions,
 };
 use loonfs_api::v0::FilesystemChange;
 use loonfs_api::{
@@ -124,14 +124,22 @@ async fn namespace_operations_need_an_administrator_or_no_subject() {
     };
     assert_eq!(
         member
-            .create_snapshot_with_quota(&namespace, snapshot_options.clone(), now_ms, 10)
+            .create_snapshot(
+                &namespace,
+                snapshot_options.clone(),
+                SnapshotPolicy::default().max_live_per_namespace
+            )
             .await
             .expect_err("member snapshot")
             .code(),
         ErrorCode::Forbidden
     );
     let snapshot = root
-        .create_snapshot_with_quota(&namespace, snapshot_options, now_ms, 10)
+        .create_snapshot(
+            &namespace,
+            snapshot_options,
+            SnapshotPolicy::default().max_live_per_namespace,
+        )
         .await
         .expect("root snapshot");
     assert_eq!(
@@ -321,14 +329,13 @@ async fn a_revoked_administrator_cannot_delete_a_snapshot_through_the_former_wri
     let root = writer.as_subject(subject("root", "prn_root"));
     let now_ms = loonfs_core::time::current_time_ms().expect("clock");
     let snapshot = root
-        .create_snapshot_with_quota(
+        .create_snapshot(
             &namespace,
             CreateSnapshotOptions {
                 name: "protected".to_owned(),
                 expires_at_ms: now_ms + 60_000,
             },
-            now_ms,
-            10,
+            SnapshotPolicy::default().max_live_per_namespace,
         )
         .await
         .expect("create snapshot");
@@ -452,6 +459,7 @@ async fn snapshot_after_administrator_change() -> (
                 name: "old-admin".to_owned(),
                 expires_at_ms: loonfs_core::time::current_time_ms().expect("clock") + 60_000,
             },
+            SnapshotPolicy::default().max_live_per_namespace,
         )
         .await
         .expect("snapshot");

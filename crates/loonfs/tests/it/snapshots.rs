@@ -7,13 +7,14 @@ use crate::common::*;
 use loonfs::{
     CheckpointOwnerSummary, CreateCheckpointOptions, CreateNamespaceOptions, CreateSnapshotOptions,
     DeleteNamespaceOptions, ErrorCode, FsMaintenance, FsReader, FsWriter, ListSnapshotsResponse,
-    NamespaceId, PageRequest, PaginationPolicy, PutFileOptions, SharedObjectStore,
+    NamespaceId, PageRequest, PaginationPolicy, PutFileOptions, SharedObjectStore, SnapshotPolicy,
 };
 use loonfs_objectstore::keys::checkpoint_prefix;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{
     BlockingStore, FailStore, InjectedError, KeyPredicate, OperationClass, OperationKind,
+    RecordingStore,
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -66,6 +67,7 @@ fn a_created_snapshot_is_listed_with_its_snapshot_owner() {
             name: "report-run".to_owned(),
             expires_at_ms,
         },
+        SnapshotPolicy::default().max_live_per_namespace,
     ))
     .expect("create snapshot");
     assert_eq!(
@@ -117,6 +119,7 @@ async fn snapshot_create_recovers_an_ambiguously_landed_record_write() {
                 name: "report-run".to_owned(),
                 expires_at_ms: u64::MAX,
             },
+            SnapshotPolicy::default().max_live_per_namespace,
         )
         .await
         .expect("reconcile the durable snapshot record");
@@ -162,6 +165,7 @@ async fn snapshot_extension_recovers_an_ambiguously_landed_record_write() {
                 name: "report-run".to_owned(),
                 expires_at_ms: u64::MAX - 1,
             },
+            SnapshotPolicy::default().max_live_per_namespace,
         )
         .await
         .expect("create snapshot");
@@ -206,6 +210,7 @@ async fn snapshot_delete_reports_an_uncertain_delete_without_recreating_the_pin(
                 name: "report-run".to_owned(),
                 expires_at_ms: u64::MAX,
             },
+            SnapshotPolicy::default().max_live_per_namespace,
         )
         .await
         .expect("create snapshot");
@@ -229,6 +234,65 @@ async fn snapshot_delete_reports_an_uncertain_delete_without_recreating_the_pin(
         .await
         .expect("list snapshots");
     assert!(listed.snapshots.is_empty());
+}
+
+#[tokio::test]
+async fn a_namespace_at_its_snapshot_limit_refuses_a_create_without_writing() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = namespace_id("snapshot-quota-full");
+    let store = Arc::new(RecordingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
+        KeyPredicate::prefix(checkpoint_prefix(&namespace_id)),
+    ));
+    let object_store: SharedObjectStore = store.clone();
+    let fs = open_runtime_async(object_store, "snapshot-quota-full").await;
+    fs.create_namespace(
+        &namespace_id,
+        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+    )
+    .await
+    .expect("create namespace");
+    let options = |name: &str| CreateSnapshotOptions {
+        name: name.to_owned(),
+        expires_at_ms: u64::MAX,
+    };
+    fs.writer
+        .create_snapshot(&namespace_id, options("kept"), 1)
+        .await
+        .expect("create the snapshot that fills the limit");
+    fs.put_file_bytes(
+        &namespace_id,
+        "/after.txt",
+        b"after",
+        PutFileOptions::new(loonfs_test_support::test_actor()),
+    )
+    .await
+    .expect("leave a WAL tail for a create to flush");
+    let manifest_no = fs
+        .maintenance
+        .get_namespace_diagnostics(&namespace_id)
+        .await
+        .expect("diagnostics before the refused create")
+        .current_manifest_no;
+    store.reset();
+
+    assert_core_error_kind(
+        fs.writer
+            .create_snapshot(&namespace_id, options("refused"), 1)
+            .await,
+        ErrorCode::SnapshotQuotaExceeded,
+    );
+
+    let counts = store.counts();
+    assert_eq!((counts.puts, counts.deletes), (0, 0));
+    assert_eq!(
+        fs.maintenance
+            .get_namespace_diagnostics(&namespace_id)
+            .await
+            .expect("diagnostics after the refused create")
+            .current_manifest_no,
+        manifest_no
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -292,20 +356,18 @@ async fn concurrent_snapshot_creates_cannot_both_claim_the_last_quota_slot() {
     .await
     .expect("create namespace");
 
-    checkpoint_list_gate.arm();
     checkpoint_write_gate.arm();
     checkpoint_delete_gate.arm();
     let first_writer = fs.writer.clone();
     let first_namespace = namespace_id.clone();
     let first = tokio::spawn(async move {
         first_writer
-            .create_snapshot_with_quota(
+            .create_snapshot(
                 &first_namespace,
                 CreateSnapshotOptions {
                     name: "first".to_owned(),
                     expires_at_ms: u64::MAX,
                 },
-                0,
                 1,
             )
             .await
@@ -314,21 +376,21 @@ async fn concurrent_snapshot_creates_cannot_both_claim_the_last_quota_slot() {
     let second_namespace = namespace_id.clone();
     let second = tokio::spawn(async move {
         second_writer
-            .create_snapshot_with_quota(
+            .create_snapshot(
                 &second_namespace,
                 CreateSnapshotOptions {
                     name: "second".to_owned(),
                     expires_at_ms: u64::MAX,
                 },
-                0,
                 1,
             )
             .await
     });
 
     wait_for_operations(&checkpoint_writes, 2).await;
+    checkpoint_list_gate.arm();
     checkpoint_write_gate.release();
-    wait_for_operations(&checkpoint_lists, 2).await;
+    wait_for_operations(&checkpoint_lists, 4).await;
     checkpoint_list_gate.release();
     wait_for_operations(&checkpoint_deletes, 2).await;
     checkpoint_delete_gate.release();
@@ -489,6 +551,7 @@ async fn shared_read_options_select_the_snapshot_for_paths_and_inodes() {
                 name: "options".to_owned(),
                 expires_at_ms: u64::MAX,
             },
+            SnapshotPolicy::default().max_live_per_namespace,
         )
         .await
         .expect("snapshot");

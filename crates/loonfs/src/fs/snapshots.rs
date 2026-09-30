@@ -153,6 +153,13 @@ impl FsReader {
 
 impl FsWriter {
     /// Creates a snapshot of the current namespace state.
+    ///
+    /// Returns `snapshot_quota_exceeded` and writes nothing when the namespace
+    /// already holds `max_live` live snapshots. It counts again after it
+    /// writes the pin and, when the count is over `max_live`, deletes the pin
+    /// and returns the same error, so two creates that race at the limit can
+    /// both be refused. A failed delete is logged, and the pin stays until it
+    /// expires.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.snapshot_create",
@@ -169,37 +176,31 @@ impl FsWriter {
         &self,
         namespace_id: &NamespaceId,
         options: CreateSnapshotOptions,
+        max_live: usize,
     ) -> Result<Checkpoint> {
         self.core.record_trace_context(&tracing::Span::current());
         self.require_administrator(namespace_id).await?;
-        let result = self
-            .core
-            .writer_engine(&self.bits.identity, namespace_id)
+        self.ensure_live_snapshot_limit(namespace_id, max_live, 1)
+            .await?;
+        let engine = self.core.writer_engine(&self.bits.identity, namespace_id);
+        let result = engine
             .create_snapshot(options.name, options.expires_at_ms)
             .await
             .map_err(RuntimeError::from);
-        self.finish_namespace_mutation(namespace_id, result)
-    }
-
-    /// Creates a snapshot only when the namespace has quota for it.
-    ///
-    /// A caller that exceeds the quota deletes its tentative snapshot before
-    /// returning the quota error.
-    pub async fn create_snapshot_with_quota(
-        &self,
-        namespace_id: &NamespaceId,
-        options: CreateSnapshotOptions,
-        now_ms: u64,
-        max_live: usize,
-    ) -> Result<Checkpoint> {
-        self.require_administrator(namespace_id).await?;
-        let checkpoint = self.create_snapshot(namespace_id, options).await?;
+        let checkpoint = self.finish_namespace_mutation(namespace_id, result)?;
         if let Err(error) = self
-            .ensure_live_snapshot_limit(namespace_id, now_ms, max_live, 0)
+            .ensure_live_snapshot_limit(namespace_id, max_live, 0)
             .await
         {
-            self.delete_snapshot(namespace_id, &checkpoint.checkpoint_id)
-                .await?;
+            if let Err(cleanup_error) = engine.delete_snapshot(&checkpoint.checkpoint_id).await {
+                tracing::warn!(
+                    namespace_id = %namespace_id,
+                    snapshot_id = %checkpoint.checkpoint_id,
+                    error = %error,
+                    cleanup_error = %cleanup_error,
+                    "failed to delete a refused snapshot; it stays until it expires"
+                );
+            }
             return Err(error);
         }
         Ok(checkpoint)
@@ -208,23 +209,14 @@ impl FsWriter {
     async fn ensure_live_snapshot_limit(
         &self,
         namespace_id: &NamespaceId,
-        now_ms: u64,
         max_live: usize,
         additional_live: usize,
     ) -> Result<()> {
+        let now_ms = self.core.now_ms()?;
         let page_limit = loonfs_api::PaginationPolicy::default().max_limit();
-        let mut cursor = None;
-        let mut live_with_additional = additional_live;
-        let quota_error = || {
-            RuntimeError::Core(loonfs_core::Error::SnapshotQuotaExceeded {
-                namespace_id: namespace_id.clone(),
-                max_live,
-            })
-        };
-        if live_with_additional > max_live {
-            return Err(quota_error());
-        }
         let engine = self.core.writer_engine(&self.bits.identity, namespace_id);
+        let mut live = additional_live;
+        let mut cursor = None;
         loop {
             let page = engine
                 .list_checkpoints_page(PageRequest {
@@ -233,15 +225,19 @@ impl FsWriter {
                 })
                 .await
                 .map_err(RuntimeError::from)?;
-            for checkpoint in page.items {
-                if SnapshotSummary::from_checkpoint(checkpoint)
-                    .is_some_and(|snapshot| snapshot.expires_at_ms > now_ms)
-                {
-                    live_with_additional = live_with_additional.saturating_add(1);
-                    if live_with_additional > max_live {
-                        return Err(quota_error());
-                    }
-                }
+            live += page
+                .items
+                .into_iter()
+                .filter_map(SnapshotSummary::from_checkpoint)
+                .filter(|snapshot| snapshot.expires_at_ms > now_ms)
+                .count();
+            if live > max_live {
+                return Err(RuntimeError::Core(
+                    loonfs_core::Error::SnapshotQuotaExceeded {
+                        namespace_id: namespace_id.clone(),
+                        max_live,
+                    },
+                ));
             }
             let Some(next_cursor) = page.next_cursor else {
                 return Ok(());

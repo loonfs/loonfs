@@ -469,13 +469,12 @@ pub(super) async fn create_snapshot(
     let now_ms = writer.now_ms().map_err(ApiResponseError::runtime)?;
     let expires_at_ms = snapshot_expiry_from_ttl(&state, now_ms, request.ttl_ms)?;
     let checkpoint = writer
-        .create_snapshot_with_quota(
+        .create_snapshot(
             &namespace_id,
             CreateSnapshotOptions {
                 name: request.name,
                 expires_at_ms,
             },
-            now_ms,
             state.options.snapshot_policy.max_live_per_namespace,
         )
         .await

@@ -9,7 +9,7 @@ use loonfs::{
     ChangeSeq, CommitId, CreateCheckpointOptions, CreateNamespaceOptions, CreateSnapshotOptions,
     DeleteNamespaceOptions, ErrorCode, ManifestNo, MetadataCompactionOutcome, NamespaceId,
     PutFileOptions, ReorganizeStepOutcome, RunMaintenanceRequest, RunMaintenanceResponse,
-    SharedObjectStore, WalFlushStepOutcome,
+    SharedObjectStore, SnapshotPolicy, WalFlushStepOutcome,
 };
 use loonfs_api::wire::manifest::decode_namespace_manifest_json;
 use loonfs_api::{AdvanceRetentionRequest, GcRequest, MetadataCompactionRequest};
@@ -98,6 +98,7 @@ fn namespace_diagnostics_counts_user_and_live_snapshot_records_only() {
             name: "expired".to_owned(),
             expires_at_ms: 1,
         },
+        SnapshotPolicy::default().max_live_per_namespace,
     ))
     .expect("create expired snapshot record");
     block_on(fs.writer.create_snapshot(
@@ -106,6 +107,7 @@ fn namespace_diagnostics_counts_user_and_live_snapshot_records_only() {
             name: "live".to_owned(),
             expires_at_ms: u64::MAX,
         },
+        SnapshotPolicy::default().max_live_per_namespace,
     ))
     .expect("create live snapshot");
     fs.fork_namespace_blocking(&source, &target)
