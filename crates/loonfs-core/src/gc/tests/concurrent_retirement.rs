@@ -23,6 +23,7 @@ async fn overlapping_retirement_retries_lost_delete_ack_and_preserves_a_live_sib
             &loonfs_test_support::test_actor(),
             None,
             &setup,
+            Arc::new(StdMonotonicTimer::default()),
         )
         .await
         .expect("fork");

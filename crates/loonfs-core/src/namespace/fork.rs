@@ -3,7 +3,7 @@
 
 use super::control::load_current_manifest_if_present;
 use super::create::publish_namespace;
-use crate::checkpoint::record::{delete_checkpoint_record, write_checkpoint_record};
+use crate::checkpoint::record::{delete_failed_pin, write_checkpoint_record};
 use crate::checkpoint::{
     classify_live_snapshot, create_checkpoint, load_checkpoint_record,
     load_namespace_manifest_envelope,
@@ -11,8 +11,7 @@ use crate::checkpoint::{
 use crate::context::MutationContext;
 use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, Result};
-use crate::limits::PIN_VERIFY_BUDGET_MS;
-use crate::time::{Deadline, StdMonotonicTimer};
+use crate::time::{Deadline, MonotonicTimer};
 use loonfs_api::wire::control::{ForkBasis, NamespaceStatus, PinOwner, PinPayload};
 use loonfs_api::wire::manifest::NamespaceManifestPayload;
 use loonfs_api::{ManifestNo, Namespace, NamespaceId, PinId, WriterEpoch};
@@ -26,8 +25,9 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
     actor_id: &loonfs_api::ActorId,
     snapshot_id: Option<&PinId>,
     context: &MutationContext,
+    timer: Arc<dyn MonotonicTimer>,
 ) -> Result<Namespace> {
-    let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
+    let deadline = Deadline::start(timer);
     let target = super::control::load_current_manifest_if_present(store, new_namespace_id).await?;
     if let Some(target) = target {
         return Err(if target.state.envelope.payload().status.is_deleted() {
@@ -44,8 +44,15 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
         target_namespace_id: new_namespace_id.clone(),
     };
     let source_record = if let Some(snapshot_id) = snapshot_id {
-        create_snapshot_fork_checkpoint(store, source_namespace_id, snapshot_id, owner, context)
-            .await?
+        create_snapshot_fork_checkpoint(
+            store,
+            source_namespace_id,
+            snapshot_id,
+            owner,
+            context,
+            &deadline,
+        )
+        .await?
     } else {
         create_checkpoint(store, source_namespace_id, owner, context).await?
     };
@@ -86,9 +93,21 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
         if matches!(
             error,
             CoreError::NamespaceExists { .. } | CoreError::NamespaceDeleted { .. }
-        ) && !target_retains_checkpoint(store, &source_record, new_namespace_id).await?
-        {
-            delete_checkpoint_record(store, source_namespace_id, &source_record.pin_id).await?;
+        ) {
+            match target_retains_checkpoint(store, &source_record, new_namespace_id).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    delete_failed_pin(store, source_namespace_id, &source_record.pin_id, &error)
+                        .await;
+                }
+                Err(check_error) => tracing::warn!(
+                    namespace_id = %source_namespace_id,
+                    checkpoint_id = %source_record.pin_id,
+                    original_error = %error,
+                    check_error = %check_error,
+                    "kept a fork pin whose target could not be read after installation failed"
+                ),
+            }
         }
         return Err(error);
     }
@@ -101,8 +120,8 @@ async fn create_snapshot_fork_checkpoint<S: ObjectStore + ?Sized>(
     snapshot_id: &PinId,
     owner: PinOwner,
     context: &MutationContext,
+    deadline: &Deadline,
 ) -> Result<PinPayload> {
-    let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
     let source_head =
         crate::namespace::control::load_namespace_read_state(store, source_namespace_id)
             .await
@@ -113,7 +132,7 @@ async fn create_snapshot_fork_checkpoint<S: ObjectStore + ?Sized>(
             .await?
             .filter(|record| matches!(record.state.owner, PinOwner::Snapshot { .. })),
         snapshot_id,
-        context.now_ms,
+        context.now_at(deadline),
     )?
     .state;
     let record = PinPayload {
@@ -123,23 +142,11 @@ async fn create_snapshot_fork_checkpoint<S: ObjectStore + ?Sized>(
         ..snapshot
     };
     write_checkpoint_record(store, &record).await?;
-    let rechecked = verify_snapshot_fork_basis(
-        store,
-        source_namespace_id,
-        snapshot_id,
-        context.now_ms,
-        &deadline,
-    )
-    .await;
-    if let Err(error) = rechecked {
-        delete_checkpoint_record(store, source_namespace_id, &record.pin_id).await?;
+    if let Err(error) =
+        verify_snapshot_fork_basis(store, source_namespace_id, snapshot_id, context, deadline).await
+    {
+        delete_failed_pin(store, source_namespace_id, &record.pin_id, &error).await;
         return Err(error);
-    }
-    if deadline.elapsed_ms() > PIN_VERIFY_BUDGET_MS {
-        delete_checkpoint_record(store, source_namespace_id, &record.pin_id).await?;
-        return Err(CoreError::CheckpointUnavailable(
-            "snapshot fork verification exceeded its budget".to_owned(),
-        ));
     }
     Ok(record)
 }
@@ -148,7 +155,7 @@ async fn verify_snapshot_fork_basis<S: ObjectStore + ?Sized>(
     store: &S,
     source_namespace_id: &NamespaceId,
     snapshot_id: &PinId,
-    now_ms: u64,
+    context: &MutationContext,
     deadline: &Deadline,
 ) -> Result<()> {
     let snapshot = load_checkpoint_record(store, source_namespace_id, snapshot_id)
@@ -157,11 +164,7 @@ async fn verify_snapshot_fork_basis<S: ObjectStore + ?Sized>(
             snapshot_id: snapshot_id.clone(),
             reason: "deleted".to_owned(),
         })?;
-    classify_live_snapshot(
-        Some(snapshot),
-        snapshot_id,
-        now_ms.saturating_add(deadline.elapsed_ms()),
-    )?;
+    classify_live_snapshot(Some(snapshot), snapshot_id, context.now_at(deadline))?;
     Ok(())
 }
 

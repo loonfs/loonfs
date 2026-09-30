@@ -59,6 +59,7 @@ async fn retired_fork_reclaims_without_reading_inherited_segments() {
         &loonfs_test_support::test_actor(),
         None,
         &setup,
+        Arc::new(StdMonotonicTimer::default()),
     )
     .await
     .expect("fork target");
@@ -275,6 +276,7 @@ async fn a_fork_basis_naming_its_pin_with_a_different_checksum_is_corrupt() {
         &loonfs_test_support::test_actor(),
         None,
         &setup,
+        Arc::new(StdMonotonicTimer::default()),
     )
     .await
     .expect("fork");

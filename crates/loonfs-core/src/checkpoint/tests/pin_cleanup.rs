@@ -73,8 +73,9 @@ async fn abandoned_pins_with_collected_bases_can_be_reaped_after_failed_cleanup(
             }
         );
         assert_eq!(
-            creation.expect_err("cleanup failed").code(),
-            ErrorCode::ServerError
+            creation.expect_err("verification failed").code(),
+            ErrorCode::CheckpointUnavailable,
+            "a failed cleanup keeps the verification error"
         );
         assert_eq!(store.inner().attempts(), 1);
         store.inner().clear();

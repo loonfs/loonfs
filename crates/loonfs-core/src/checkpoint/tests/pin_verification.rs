@@ -295,6 +295,7 @@ async fn fork_owned_checkpoints_reject_user_release() {
         &loonfs_test_support::test_actor(),
         None,
         &setup,
+        Arc::new(StdMonotonicTimer::default()),
     )
     .await
     .expect("fork");

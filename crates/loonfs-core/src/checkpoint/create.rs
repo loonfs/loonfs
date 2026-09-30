@@ -2,7 +2,7 @@
 
 use super::flush::{try_flush_wal, TryFlushWal};
 use super::record::{
-    delete_checkpoint_record, verify_checkpoint_basis, write_checkpoint_record,
+    delete_failed_pin, verify_checkpoint_basis, write_checkpoint_record,
     CheckpointBasisVerification,
 };
 use super::runs::MetadataLsmPolicy;
@@ -16,8 +16,6 @@ use loonfs_api::wire::control::{PinOwner, PinPayload};
 use loonfs_api::{NamespaceId, PinId};
 use loonfs_objectstore::ObjectStore;
 use std::sync::Arc;
-
-pub(crate) use crate::limits::PIN_VERIFY_BUDGET_MS;
 
 /// Longest accepted user checkpoint name. A label bound, not a durable
 /// format limit.
@@ -86,39 +84,16 @@ pub(crate) async fn create_checkpoint_at_basis<S: ObjectStore + ?Sized>(
         created_at_ms: context.now_ms,
         owner,
     };
-    let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
     write_checkpoint_record(store, &record).await?;
-
-    let verification = match verify_checkpoint_basis(store, &record).await {
-        Ok(verification) => verification,
-        Err(error) => {
-            // Cleanup is best effort on an error and must not replace its
-            // original classification.
-            if let Err(cleanup_error) =
-                delete_checkpoint_record(store, namespace_id, &checkpoint_id).await
-            {
-                tracing::warn!(
-                    namespace_id = %namespace_id,
-                    checkpoint_id = %checkpoint_id,
-                    original_error = %error,
-                    cleanup_error = %cleanup_error,
-                    "failed to delete a pin after basis verification failed"
-                );
-            }
-            return Err(error);
+    let error = match verify_checkpoint_basis(store, &record).await {
+        Ok(CheckpointBasisVerification::Verified) => return Ok(record),
+        Ok(CheckpointBasisVerification::Invalid) => {
+            CoreError::CheckpointUnavailable("checkpoint publication retry exhausted".to_owned())
         }
+        Err(error) => error,
     };
-    let within_budget = deadline.elapsed_ms() <= PIN_VERIFY_BUDGET_MS;
-    if verification == CheckpointBasisVerification::Verified && within_budget {
-        return Ok(record);
-    }
-
-    // Overrunning the budget counts as verification failure: the record
-    // may have raced the grace window, so it must not stand as a root.
-    delete_checkpoint_record(store, namespace_id, &checkpoint_id).await?;
-    Err(CoreError::CheckpointUnavailable(
-        "checkpoint publication retry exhausted".to_owned(),
-    ))
+    delete_failed_pin(store, namespace_id, &checkpoint_id, &error).await;
+    Err(error)
 }
 
 fn validate_checkpoint_owner(owner: &PinOwner) -> Result<()> {

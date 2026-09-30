@@ -158,6 +158,7 @@ async fn snapshot_fork_survives_snapshot_deletion_during_an_older_gc_pass() {
             &loonfs_test_support::test_actor(),
             Some(&fixture.snapshot.pin_id),
             &fixture.context,
+            Arc::new(StdMonotonicTimer::default()),
         )
         .await
         .expect("install historical fork")
@@ -215,6 +216,7 @@ async fn snapshot_fork_refuses_a_snapshot_deleted_before_post_write_verification
             &actor,
             Some(&fixture.snapshot.pin_id),
             &fixture.context,
+            Arc::new(StdMonotonicTimer::default()),
         ),
         async {
             gate.wait_until_blocked().await;
@@ -262,4 +264,60 @@ async fn snapshot_fork_refuses_a_snapshot_deleted_before_post_write_verification
     .await
     .expect("later collection sees no historical root");
     fixture.assert_replaced_present(false).await;
+}
+
+#[tokio::test]
+async fn snapshot_fork_refuses_a_snapshot_that_expired_after_the_fork_call_began() {
+    let directory = tempdir().expect("directory");
+    let source = NamespaceId::parse("snapshot-source").expect("source");
+    let target = NamespaceId::parse("snapshot-target").expect("target");
+    let inner = LocalFsStore::new(directory.path()).expect("store");
+    let context = test_context();
+    bootstrap_namespace(&inner, &source, &context)
+        .await
+        .expect("bootstrap");
+    let snapshot = crate::checkpoint::create_checkpoint(
+        &inner,
+        &source,
+        PinOwner::Snapshot {
+            name: "short".into(),
+            expires_at_ms: context.now_ms + 10,
+        },
+        &context,
+    )
+    .await
+    .expect("snapshot");
+    let store = BlockingStore::new(
+        RecordingStore::new(inner, KeyPredicate::prefix(checkpoint_prefix(&source))),
+        KeyPredicate::exact(hint(&target)),
+        OperationClass::Read,
+    );
+    let clock = Arc::new(loonfs_test_support::clock::ManualClock::new(0));
+    let actor = loonfs_test_support::test_actor();
+    store.block_next();
+    let (fork, ()) = tokio::join!(
+        crate::namespace::fork::fork_namespace(
+            &store,
+            &source,
+            &target,
+            &actor,
+            Some(&snapshot.pin_id),
+            &context,
+            clock.clone(),
+        ),
+        async {
+            store.wait_until_blocked().await;
+            clock.advance_ms(10);
+            store.release();
+        }
+    );
+    assert!(
+        matches!(fork, Err(CoreError::SnapshotGone { .. })),
+        "{fork:?}"
+    );
+    assert_eq!(
+        store.inner().counts().create_if_absent_puts,
+        0,
+        "the first expiry check refuses before a fork pin is written"
+    );
 }

@@ -45,12 +45,7 @@ pub(crate) async fn extend_snapshot_expiry<S: ObjectStore + ?Sized>(
     retry_while_contended(
         || async {
             let loaded = load_checkpoint_record(store, namespace_id, checkpoint_id).await?;
-            let elapsed_ms = deadline.elapsed_ms();
-            let now_ms = context
-                .now_ms
-                .checked_add(elapsed_ms)
-                .ok_or_else(|| CoreError::Internal("snapshot renewal time overflow".to_owned()))?;
-            let loaded = classify_live_snapshot(loaded, checkpoint_id, now_ms)?;
+            let loaded = classify_live_snapshot(loaded, checkpoint_id, context.now_at(&deadline))?;
             let mut next = loaded.state.clone();
             let lifetime_ceiling = next.created_at_ms.saturating_add(max_lifetime_ms);
             let expires_at_ms = snapshot_expiry_mut(&mut next.owner)

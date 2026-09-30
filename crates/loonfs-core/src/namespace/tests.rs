@@ -5,6 +5,7 @@ use crate::commit_engine::NamespaceCommitEngine;
 use crate::context::MutationContext;
 use crate::path::read::load_current_metadata_view;
 use crate::test_support::ops::create;
+use crate::time::StdMonotonicTimer;
 use crate::wal::tests::publish;
 use loonfs_api::{AttributeInclusion, ErrorCode, ManifestNo, NamespaceId, WriterId};
 use loonfs_objectstore::{
@@ -15,6 +16,7 @@ use loonfs_objectstore::{
 use loonfs_test_support::stores::{
     BlockingStore, FailStore, InjectedError, KeyPredicate, OperationClass, RecordingStore,
 };
+use std::sync::Arc;
 use tempfile::tempdir;
 
 fn context() -> MutationContext {
@@ -118,9 +120,17 @@ async fn an_ambiguous_first_manifest_confirms_only_a_forks_creation() {
     .await
     .expect("allow existing returns the landed namespace");
     assert_eq!(adopted, existing);
-    let created = fork_namespace(&store, &source, &target, &actor_id, None, &context())
-        .await
-        .expect("fork source pin proves authorship from matching bytes");
+    let created = fork_namespace(
+        &store,
+        &source,
+        &target,
+        &actor_id,
+        None,
+        &context(),
+        Arc::new(StdMonotonicTimer::default()),
+    )
+    .await
+    .expect("fork source pin proves authorship from matching bytes");
     assert!(created.fork_basis.is_some());
     assert_eq!(store.attempts(), 2);
     assert_eq!(store.remaining(), 0);
@@ -148,6 +158,7 @@ async fn nested_forks_read_copied_runs_without_source_control_reads() {
         &loonfs_test_support::test_actor(),
         None,
         &context(),
+        Arc::new(StdMonotonicTimer::default()),
     )
     .await
     .expect("fork");
@@ -176,6 +187,7 @@ async fn nested_forks_read_copied_runs_without_source_control_reads() {
         &loonfs_test_support::test_actor(),
         None,
         &context(),
+        Arc::new(StdMonotonicTimer::default()),
     )
     .await
     .expect("nested fork");
@@ -333,6 +345,7 @@ async fn fork_into_a_deleted_id_writes_no_source_pin() {
         &loonfs_test_support::test_actor(),
         None,
         &context,
+        Arc::new(StdMonotonicTimer::default()),
     )
     .await
     .expect_err("deleted target");
@@ -363,7 +376,15 @@ async fn a_fork_that_loses_target_publication_deletes_its_source_pin() {
         let actor = loonfs_test_support::test_actor();
         create(&store, &source, &setup).await.expect("source");
         store.block_next();
-        let fork = fork_namespace(&store, &source, &target, &actor, None, &setup);
+        let fork = fork_namespace(
+            &store,
+            &source,
+            &target,
+            &actor,
+            None,
+            &setup,
+            Arc::new(StdMonotonicTimer::default()),
+        );
         let competing_create = async {
             store.wait_until_blocked().await;
             create(store.inner(), &target, &setup)
