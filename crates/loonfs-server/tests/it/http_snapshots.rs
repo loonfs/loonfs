@@ -359,16 +359,16 @@ async fn http_snapshots_keep_owner_operations_and_listings_separate() {
         snapshot.snapshot_id.as_str(),
     )
     .expect_err("maintenance delete must refuse snapshot");
-    assert_eq!(status, 400);
-    assert!(error.message.contains("snapshot delete operation"));
+    assert_eq!(status, 404);
+    assert_eq!(error.code, "checkpoint_not_found");
     let (status, error) = delete_snapshot(
         &harness.server_url,
         namespace.as_str(),
         checkpoint.checkpoint_id.as_str(),
     )
     .expect_err("snapshot delete must refuse user checkpoint");
-    assert_eq!(status, 400);
-    assert!(error.message.contains("checkpoint delete operation"));
+    assert_eq!(status, 404);
+    assert_eq!(error.code, "snapshot_not_found");
 
     let checkpoints: serde_json::Value = retry_result_on_macos_teardown_einval(|| {
         decode_response(

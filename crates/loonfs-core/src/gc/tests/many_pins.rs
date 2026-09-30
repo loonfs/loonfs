@@ -19,12 +19,15 @@ async fn one_pass_deletes_an_aged_upload_and_every_expired_snapshot_among_many_p
     let permanent = create_checkpoint(&store, &namespace_id, &setup)
         .await
         .expect("permanent pin");
-    let basis =
-        crate::checkpoint::load_checkpoint_record(&store, &namespace_id, &permanent.checkpoint_id)
-            .await
-            .expect("pin")
-            .expect("record")
-            .state;
+    let basis = crate::checkpoint::record::load_checkpoint_record(
+        &store,
+        &namespace_id,
+        &permanent.checkpoint_id,
+    )
+    .await
+    .expect("pin")
+    .expect("record")
+    .state;
     for number in 0..1025 {
         let record = PinPayload {
             pin_id: PinId::parse(format!(

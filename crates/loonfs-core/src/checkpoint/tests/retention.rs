@@ -509,7 +509,7 @@ async fn deleting_a_pin_never_reuses_its_id() {
     let error = read_checkpoint_files(&store, &namespace_id, &first.checkpoint_id)
         .await
         .expect_err("a deleted record serves no read");
-    assert_eq!(error.code(), ErrorCode::CheckpointUnavailable);
+    assert_eq!(error.code(), ErrorCode::CheckpointNotFound);
     assert!(
         !read_checkpoint_files(&store, &namespace_id, &second.checkpoint_id)
             .await
@@ -657,7 +657,7 @@ async fn an_expired_pin_still_enumerates_its_files_until_deleted() {
     let error = read_checkpoint_files(&store, &namespace_id, &already_expired.checkpoint_id)
         .await
         .expect_err("a deleted pin serves nothing");
-    assert_eq!(error.code(), ErrorCode::CheckpointUnavailable);
+    assert_eq!(error.code(), ErrorCode::CheckpointNotFound);
 }
 
 #[tokio::test]
@@ -715,7 +715,7 @@ async fn a_pin_without_a_ttl_is_held_until_it_is_deleted() {
     let error = read_checkpoint_files(&store, &namespace_id, &pin.checkpoint_id)
         .await
         .expect_err("delete ends it");
-    assert_eq!(error.code(), ErrorCode::CheckpointUnavailable);
+    assert_eq!(error.code(), ErrorCode::CheckpointNotFound);
 }
 
 #[tokio::test]

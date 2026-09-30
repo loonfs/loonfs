@@ -279,9 +279,9 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | `method_not_allowed` | 405 | The path exists but does not serve this HTTP method. |
 | `namespace_not_found` | 404 | The namespace has no installed manifest, so it does not exist. |
 | `namespace_deleted` | 410 | The namespace id is permanently deleted and can never be created or forked into again. Ordinary operations fail. The response's details identify the deleted namespace. |
-| `checkpoint_not_found` | 404 | The checkpoint id names no existing pin. |
-| `snapshot_not_found` | 404 | The snapshot id names no pin. Refresh state or choose another snapshot. |
-| `snapshot_gone` | 410 | The snapshot has expired, or was deleted while a fork was verifying its selected snapshot. |
+| `checkpoint_not_found` | 404 | The checkpoint id names no user checkpoint: no pin exists under it, or the pin belongs to a snapshot or a fork. |
+| `snapshot_not_found` | 404 | The snapshot id names no snapshot: no pin exists under it, or the pin belongs to a user checkpoint or a fork. Refresh state or choose another snapshot. |
+| `snapshot_gone` | 410 | The snapshot exists and has expired. |
 | `path_not_found` | 404 | No visible entry at the path. In an ACL namespace, a checked entry on which the subject holds no right also answers this code. |
 | `inode_not_found` | 404 | The requested visible or retained inode does not exist. In an ACL namespace, a checked inode on which the subject holds no right also answers this code. |
 | `revision_not_found` | 404 | The file has no such revision. |
@@ -291,7 +291,7 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | `content_not_prepared` | 409 | A path put or explicit create/replace operation references external content without a matching admission, or carries a rejected relevant token. Prepare the content and retry with its proof. |
 | `path_conflict` | 409 | The destination path is already bound. |
 | `directory_not_empty` | 409 | The directory has children and the operation is not recursive. |
-| `stale_head` | 409 | The write raced a head advance, or a caller-supplied `expected_head_seq` does not match the head; retry against fresh state. A read also returns this code when its manifest's segments were collected and a newer manifest exists; read again against current state. A read at a snapshot or checkpoint that finds a segment missing answers what a new read of its pin would: `snapshot_not_found`, `snapshot_gone`, or `checkpoint_unavailable` when the pin was deleted or expired during the read, and `namespace_corrupt` when the pin still exists. |
+| `stale_head` | 409 | The write raced a head advance, or a caller-supplied `expected_head_seq` does not match the head; retry against fresh state. A read also returns this code when its manifest's segments were collected and a newer manifest exists; read again against current state. A read at a snapshot or checkpoint that finds a segment missing answers what a new read of its pin would: `snapshot_not_found` or `checkpoint_not_found` when the pin was deleted during the read, `snapshot_gone` when it expired, and `namespace_corrupt` when the pin still exists. |
 | `stale_revision` | 409 | A caller-supplied base revision is no longer current. |
 | `stale_attributes` | 409 | The inode's attribute revision moved while the update was being decided. Two things raise it: a caller-supplied expected attribute revision that is no longer current, and the revision precondition every attribute update carries even when the caller states no expectation. Re-read the attributes and retry. |
 | `stale_access` | 409 | The inode's access revision moved while the update was being decided. Re-read the access row and retry. |
@@ -315,7 +315,7 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | `shutting_down` | 503 | The serving process closed admission for shutdown; work admitted earlier still settles. Retry against a live instance. |
 | `deadline_exceeded` | 503 | The server cancelled a bounded request at its configured `request_deadline_ms`. A commit may still land after this response; reconcile it by commit id before retrying. |
 | `content_not_materialized` | 503 | The file is committed, but a direct download requires a content object that this deployment cannot create. Read through the proxied content route, or retry after a fold writes the object. |
-| `checkpoint_unavailable` | 503 | Required checkpoint state is unavailable: not yet published, deleted during the operation, or referenced material is missing. Retry after maintenance. |
+| `checkpoint_unavailable` | 503 | Required checkpoint state is unavailable: the pin exists but its manifest is gone, pin creation could not verify its basis, or a metadata publication ran past its budget before publishing. Retry after maintenance. |
 | `maintenance_required` | 503 | Namespace metadata requires maintenance before the request can be served; run maintenance and retry. The WAL write-stop threshold refuses new commits. A commit id the namespace already knows is still answered from its receipt. |
 | `index_lagging` | 503 | The grep index trails the head past the exhaustive-scan budget. Run maintenance or set `allow_stale`, then retry. |
 | `storage_permission_denied` | 503 | The backing object store rejected the deployment's storage credentials for this operation. Fix the storage credentials or bucket policy; an unchanged retry will not succeed. |
@@ -942,7 +942,7 @@ The table below lists the retry class for every v0 operation.
 | Read namespace diagnostics | `get_namespace_diagnostics` | `idempotent` | `GET /v0/maintenance/namespaces/{ns}/diagnostics` |
 | Create a checkpoint | `create_checkpoint` | `not_idempotent` | `POST /v0/maintenance/namespaces/{ns}/checkpoints`; requires `name` and accepts `ttl_ms` |
 | List checkpoints | `list_checkpoints` | `idempotent` | `GET /v0/maintenance/namespaces/{ns}/checkpoints?limit=100&cursor=...` |
-| Delete a checkpoint | `delete_checkpoint` | `not_idempotent` | `DELETE /v0/maintenance/namespaces/{ns}/checkpoints/{checkpoint_id}` (deletes the pin; a missing id returns `checkpoint_not_found`; other owners are rejected) |
+| Delete a checkpoint | `delete_checkpoint` | `not_idempotent` | `DELETE /v0/maintenance/namespaces/{ns}/checkpoints/{checkpoint_id}` (deletes the pin; a missing id or the id of a snapshot or fork pin returns `checkpoint_not_found`) |
 | Run one maintenance job | `run_maintenance` | `not_idempotent` | `POST /v0/maintenance/namespaces/{ns}/runs`; the body names one job with `kind` |
 | Search file contents | `grep` | `idempotent` | `GET /v0/namespaces/{ns}/grep?pattern=needle&case_insensitive=false&path_prefix=%2Fsrc&allow_scan=false&allow_stale=false&limit=100&cursor=...`; requires the `query.grep` feature and an active index |
 | Read grep index status | `get_grep_index` | `idempotent` | `GET /v0/maintenance/namespaces/{ns}/grep/index` |
@@ -2945,10 +2945,11 @@ The `fork_basis` object identifies the captured source:
 
 The optional `snapshot_id` request field selects a live user snapshot of the
 source namespace. Without it, the server captures the current head. The
-snapshot must remain live through verification after the fork-owned checkpoint is written. Missing
-snapshots and ids owned by another namespace or checkpoint kind return
-`snapshot_not_found`. Expired snapshots and snapshots deleted during fork
-verification return `snapshot_gone`.
+snapshot and the source namespace must remain live through verification after
+the fork-owned checkpoint is written. Missing snapshots, including one deleted
+during fork verification, and ids owned by another namespace or checkpoint kind
+return `snapshot_not_found`. Expired snapshots return `snapshot_gone`. A source
+deleted during fork verification returns `namespace_deleted`.
 Forking does not extend the snapshot, and later deletion does not affect the fork.
 The fork records the `Loonfs-Actor` header as `created_by`, independently of the source's creator.
 Namespace creation and forking produce no change-feed event.

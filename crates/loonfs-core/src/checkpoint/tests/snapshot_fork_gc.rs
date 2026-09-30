@@ -242,7 +242,7 @@ async fn snapshot_fork_refuses_a_snapshot_deleted_before_post_write_verification
             gate.release();
         }
     );
-    assert!(matches!(fork, Err(CoreError::SnapshotGone { .. })));
+    assert!(matches!(fork, Err(CoreError::SnapshotNotFound { .. })));
     assert!(fixture
         .store
         .list_prefix(&checkpoint_prefix(&fixture.source))
@@ -264,6 +264,65 @@ async fn snapshot_fork_refuses_a_snapshot_deleted_before_post_write_verification
     .await
     .expect("later collection sees no historical root");
     fixture.assert_replaced_present(false).await;
+}
+
+#[tokio::test]
+async fn snapshot_fork_refuses_a_source_deleted_before_post_write_verification() {
+    let fixture = Fixture::new().await;
+    let writer = acquire_writer_epoch(fixture.store.as_ref(), &fixture.source, &fixture.context)
+        .await
+        .expect("writer");
+    let gate = BlockingStore::new(
+        fixture.store.clone(),
+        KeyPredicate::prefix(checkpoint_prefix(&fixture.source)),
+        OperationClass::PutCreateIfAbsent,
+    );
+    gate.block_next();
+    let actor = loonfs_test_support::test_actor();
+    let (fork, ()) = tokio::join!(
+        crate::namespace::fork::fork_namespace(
+            &gate,
+            &fixture.source,
+            &fixture.target,
+            &actor,
+            Some(&fixture.snapshot.pin_id),
+            &fixture.context,
+            Arc::new(StdMonotonicTimer::default()),
+        ),
+        async {
+            gate.wait_until_blocked().await;
+            crate::namespace::delete::delete_namespace(
+                fixture.store.as_ref(),
+                &fixture.source,
+                Default::default(),
+                writer,
+                &fixture.context,
+                &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+                MetadataLsmPolicy::default(),
+            )
+            .await
+            .expect("delete source before the fork pin lands");
+            gate.release();
+        }
+    );
+    assert_eq!(
+        fork.expect_err("deleted source").code(),
+        ErrorCode::NamespaceDeleted
+    );
+    assert_eq!(
+        fixture
+            .store
+            .list_prefix(&checkpoint_prefix(&fixture.source))
+            .await
+            .expect("pins"),
+        [checkpoint_record(&fixture.source, &fixture.snapshot.pin_id)]
+    );
+    assert!(fixture
+        .store
+        .head(&metadata_manifest_object(&fixture.target, &ManifestNo(1)))
+        .await
+        .expect("no target installed")
+        .is_none());
 }
 
 #[tokio::test]

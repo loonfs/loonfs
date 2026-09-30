@@ -422,7 +422,7 @@ async fn pinned_reads_report_their_deleted_pin_when_a_segment_is_missing() {
         pinned_checkpoint
             .get_path_entry("/file", Default::default())
             .await,
-        ErrorCode::CheckpointUnavailable,
+        ErrorCode::CheckpointNotFound,
     );
     runtime.writer.shutdown().await.expect("shutdown");
 }
@@ -937,7 +937,7 @@ async fn a_deleted_checkpoint_refuses_a_pin_instead_of_reading_current_state() {
             .reader
             .pin_namespace_at_checkpoint(&namespace_id, &checkpoint.checkpoint_id)
             .await,
-        ErrorCode::CheckpointUnavailable,
+        ErrorCode::CheckpointNotFound,
     );
 }
 

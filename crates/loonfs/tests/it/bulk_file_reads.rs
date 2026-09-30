@@ -610,7 +610,7 @@ async fn a_deleted_checkpoint_refuses_enumeration_instead_of_answering_current_s
         )
         .await
         .expect_err("a deleted checkpoint pins nothing to enumerate");
-    assert_eq!(error.code(), ErrorCode::CheckpointUnavailable);
+    assert_eq!(error.code(), ErrorCode::CheckpointNotFound);
 
     let missing = loonfs::PinId::parse("pin_00000000000000000001-0123456789abcdef")
         .expect("valid checkpoint id");
@@ -627,7 +627,7 @@ async fn a_deleted_checkpoint_refuses_enumeration_instead_of_answering_current_s
         )
         .await
         .expect_err("a checkpoint that never existed pins nothing either");
-    assert_eq!(error.code(), ErrorCode::CheckpointUnavailable);
+    assert_eq!(error.code(), ErrorCode::CheckpointNotFound);
 }
 
 #[tokio::test]

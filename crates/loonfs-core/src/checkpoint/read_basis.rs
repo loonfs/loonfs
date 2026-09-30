@@ -3,7 +3,7 @@
 use super::cache::MetadataSegmentCache;
 use super::error::ManifestLoadError;
 use super::load::{head_from_manifest, load_manifest_segments};
-use super::record::load_checkpoint_record;
+use super::record::{load_owned_checkpoint_record, CheckpointOwnerKind};
 use super::scan::VerifiedMetadataSegments;
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::namespace::basis::MetadataBasis;
@@ -28,14 +28,21 @@ pub struct CheckpointReadBasis {
     pub basis: MetadataBasis,
 }
 
-/// Loads the manifest `checkpoint_id` pins.
+/// Loads the manifest the user pin `checkpoint_id` pins.
 pub(crate) async fn load_pinned_checkpoint_basis<'a, S: ObjectStore + ?Sized>(
     store: &'a S,
     segment_cache: Option<&'a MetadataSegmentCache>,
     namespace_id: &NamespaceId,
     checkpoint_id: &PinId,
 ) -> Result<PinnedCheckpointBasis<'a, S>> {
-    let record = load_pinning_checkpoint_record(store, namespace_id, checkpoint_id).await?;
+    let record = load_owned_checkpoint_record(
+        store,
+        namespace_id,
+        checkpoint_id,
+        CheckpointOwnerKind::User,
+    )
+    .await?
+    .state;
     load_pinned_checkpoint_basis_from_record(store, segment_cache, record).await
 }
 
@@ -63,15 +70,22 @@ pub(crate) async fn load_pinned_checkpoint_basis_from_record<'a, S: ObjectStore 
 ///
 /// Namespace identity and lifecycle fields come from `live_head`. Sequence
 /// data comes from the checkpoint's manifest, so later WAL entries are not
-/// replayed. Missing or deleted checkpoints return `checkpoint_unavailable`.
+/// replayed. An id that names no user pin returns `checkpoint_not_found`, and
+/// a pin whose manifest is gone returns `checkpoint_unavailable`.
 pub async fn load_checkpoint_read_basis<S: ObjectStore + ?Sized>(
     store: &S,
     segment_cache: Option<&MetadataSegmentCache>,
     live_head: &NamespaceReadState,
     checkpoint_id: &PinId,
 ) -> Result<CheckpointReadBasis> {
-    let record =
-        load_pinning_checkpoint_record(store, &live_head.namespace_id, checkpoint_id).await?;
+    let record = load_owned_checkpoint_record(
+        store,
+        &live_head.namespace_id,
+        checkpoint_id,
+        CheckpointOwnerKind::User,
+    )
+    .await?
+    .state;
     load_checkpoint_read_basis_from_record(store, segment_cache, live_head, record).await
 }
 
@@ -88,25 +102,4 @@ pub(crate) async fn load_checkpoint_read_basis_from_record<S: ObjectStore + ?Siz
         head: head_from_manifest(live_head, envelope),
         basis: MetadataBasis(manifest),
     })
-}
-
-/// Loads an active pin.
-async fn load_pinning_checkpoint_record<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    checkpoint_id: &PinId,
-) -> Result<PinPayload> {
-    let Some(record) = load_checkpoint_record(store, namespace_id, checkpoint_id)
-        .await?
-        .map(|loaded| loaded.state)
-    else {
-        return Err(missing_checkpoint(namespace_id, checkpoint_id));
-    };
-    Ok(record)
-}
-
-fn missing_checkpoint(namespace_id: &NamespaceId, checkpoint_id: &PinId) -> CoreError {
-    CoreError::CheckpointUnavailable(format!(
-        "checkpoint `{checkpoint_id}` does not exist in namespace `{namespace_id}`"
-    ))
 }

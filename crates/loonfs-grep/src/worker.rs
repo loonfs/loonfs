@@ -612,15 +612,17 @@ fn backfilling_manifest(
     .map_err(|error| core_state_error(namespace_id, error))
 }
 
-/// The two answers that mean "the state this projection was built from is
-/// gone": the change feed's cursor fell below the retention floor, and the
-/// checkpoint enumeration's record no longer pins its manifest. Every other
-/// failure is a failure.
+/// The answers that mean "the state this projection was built from is
+/// gone": the change feed's cursor fell below the retention floor, the
+/// checkpoint enumeration's pin is gone, or it no longer pins its manifest.
+/// Every other failure is a failure.
 fn rebootstrap_required(error: &GrepError) -> bool {
     matches!(
         error,
         GrepError::Runtime(RuntimeError::Core(
-            CoreError::RebootstrapRequired { .. } | CoreError::CheckpointUnavailable(_)
+            CoreError::RebootstrapRequired { .. }
+                | CoreError::CheckpointNotFound { .. }
+                | CoreError::CheckpointUnavailable(_)
         ))
     )
 }

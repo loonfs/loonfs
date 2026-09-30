@@ -73,7 +73,7 @@ async fn checkpoint_exists<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     checkpoint_id: &PinId,
 ) -> bool {
-    crate::checkpoint::load_checkpoint_record(store, namespace_id, checkpoint_id)
+    crate::checkpoint::record::load_checkpoint_record(store, namespace_id, checkpoint_id)
         .await
         .expect("read pin")
         .is_some()
@@ -1581,12 +1581,15 @@ async fn gc_keeps_a_basis_pinned_by_another_owner_after_one_release() {
         loonfs_api::DeletedCheckpointsByOwner::default()
     );
 
-    let keeper =
-        crate::checkpoint::load_checkpoint_record(&store, &namespace_id, &first.checkpoint_id)
-            .await
-            .expect("read keeper record")
-            .expect("the surviving owner's record stays")
-            .state;
+    let keeper = crate::checkpoint::record::load_checkpoint_record(
+        &store,
+        &namespace_id,
+        &first.checkpoint_id,
+    )
+    .await
+    .expect("read keeper record")
+    .expect("the surviving owner's record stays")
+    .state;
     assert!(
         crate::checkpoint::load_namespace_manifest_envelope(
             &store,
@@ -1629,12 +1632,15 @@ async fn gc_retains_active_checkpoint_bases() {
         report.deleted_checkpoints_by_owner,
         loonfs_api::DeletedCheckpointsByOwner::default()
     );
-    let first_record =
-        crate::checkpoint::load_checkpoint_record(&store, &namespace_id, &first.checkpoint_id)
-            .await
-            .expect("read first checkpoint")
-            .expect("first checkpoint exists")
-            .state;
+    let first_record = crate::checkpoint::record::load_checkpoint_record(
+        &store,
+        &namespace_id,
+        &first.checkpoint_id,
+    )
+    .await
+    .expect("read first checkpoint")
+    .expect("first checkpoint exists")
+    .state;
     assert!(crate::checkpoint::load_namespace_manifest_envelope(
         &store,
         &namespace_id,
