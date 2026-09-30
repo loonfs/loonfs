@@ -7,12 +7,6 @@ bind = "127.0.0.1:9400"
 auth_token = "dev-token"
 content_token_secret = "dev-content-token-secret"
 writer_id = "loonfs-server-local"
-# Maximum writer sessions held by this server. When the table is full, a
-# request for another namespace closes the least recently used idle session
-# first; requests answer `writer_capacity_exceeded` only when every session
-# is busy. Defaults to 1024.
-#max_writer_sessions = 1024
-
 # Maximum WAL folds this server runs at once. A sustained
 # `loonfs.publisher.wal_folds_waiting` gauge means the cap is too low.
 # Defaults to 2.
@@ -92,8 +86,9 @@ writer_id = "loonfs-server-local"
 # and read-side WAL-tail projections. The two budgets under it bound
 # WAL-tail projections by size, counted once for the read side and once for
 # the publish side. The WAL-tail projections the writer's namespace
-# publishers retain are bounded by those two budgets only. Writer sessions
-# are bounded by `max_writer_sessions`, not by any of these.
+# publishers retain are bounded by those two budgets only. None of these
+# bound writer sessions: the server keeps one for each namespace it has
+# written since it started.
 #[runtime_cache]
 #manifest_revalidation_interval_ms = 1000
 #max_cached_namespaces = 64

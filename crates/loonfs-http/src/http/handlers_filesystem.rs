@@ -570,6 +570,7 @@ pub(super) async fn create_commit(
         Some((
             payload_class(usize::try_from(put_bytes).unwrap_or(usize::MAX)),
             content_preparation_for_puts(
+                &state.namespaces,
                 &namespace_writer,
                 ContentTokenVerifier::new(state.options.content_token_secret.expose()),
                 &namespace_id,
@@ -619,7 +620,7 @@ pub(super) async fn create_commit(
         namespace_writer.create_commit(request).await
     };
     let response = response_result.map_err(|error| {
-        ApiResponseError::runtime_for_namespace(&namespace_id, error)
+        ApiResponseError::runtime_for_namespace_writer(&state.namespaces, &namespace_id, error)
             .with_commit_id(&commit_id_for_errors)
     })?;
     Ok(Json(response))

@@ -106,9 +106,8 @@ async fn park_two_puts(temp_dir: &Path) -> ParkedPuts {
     // The publish task is parked inside the blocked CAS with its batch
     // already taken, so this submission deterministically opens the next
     // batch behind it.
-    let registry = writer.publisher();
     let mut second: BoxFuture<'static, loonfs::Result<Commit>> = {
-        let namespace_id = namespace_id.clone();
+        let namespace_writer = namespace_writer.clone();
         let request = CommitRequest::single(
             CommitId::parse("parked-second").expect("valid commit id"),
             loonfs_test_support::test_actor(),
@@ -123,11 +122,8 @@ async fn park_two_puts(temp_dir: &Path) -> ParkedPuts {
             },
         );
         Box::pin(async move {
-            registry
-                .submit_candidate(
-                    namespace_id,
-                    CommitCandidate::prepared(request, vec![prepared]),
-                )
+            namespace_writer
+                .commit_candidate(CommitCandidate::prepared(request, vec![prepared]))
                 .await
         })
     };

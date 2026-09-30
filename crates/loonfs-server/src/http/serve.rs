@@ -368,10 +368,6 @@ pub(super) async fn build_handles(
     let mut writer_builder = FsWriter::builder_with_store(store.clone())
         .writer_id(config.writer_id.clone())
         .min_publish_interval_ms(config.min_publish_interval_ms)
-        .max_writer_sessions(
-            std::num::NonZeroUsize::new(config.max_writer_sessions)
-                .expect("validated maximum writer sessions should be nonzero"),
-        )
         .publication_limits(config.publication.resolve())
         .inline_content(config.inline_content.resolve())
         .max_concurrent_folds(

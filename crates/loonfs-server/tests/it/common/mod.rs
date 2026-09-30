@@ -301,7 +301,6 @@ pub(crate) fn test_config(
         auth_token: Some(auth_token.into()),
         content_token_secret: content_token_secret.into(),
         writer_id: writer_id.to_owned(),
-        max_writer_sessions: loonfs::DEFAULT_MAX_WRITER_SESSIONS,
         max_concurrent_folds: loonfs::DEFAULT_MAX_CONCURRENT_FOLDS,
         publication: Default::default(),
         inline_content: Default::default(),

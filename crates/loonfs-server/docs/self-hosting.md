@@ -297,8 +297,7 @@ namespace.
 | `loonfs.metadata_segment_cache.retained_decoded_bytes` | Gauge | Decoded bytes the metadata segment cache holds, up to `runtime_cache.metadata_segment_cache_max_decoded_bytes`. |
 | `loonfs.publisher.projection_evictions` | Counter | A publish-side WAL-tail projection is evicted at the projection budget. |
 | `loonfs.publisher.tail_replays` | Counter | A publish rereads the WAL tail from the store instead of using a retained projection. This happens on a session's first publish, after an eviction or a failed publish, when the namespace's last write was more than a minute ago, and when a fold the publisher did not run has published a new manifest. |
-| `loonfs.publisher.idle_sessions_closed` | Counter | An idle session closes to make room at the `max_writer_sessions` limit. |
-| `loonfs.publisher.session_refusals` | Counter | A request fails with `writer_capacity_exceeded`. |
+| `loonfs.publisher.sessions_open` | Gauge | Writer sessions the server holds: one for each namespace it has written since it started, plus any whose admitted work is still finishing. |
 | `loonfs.maintenance.keys_admitted` | Gauge | Keys the runner reconciles. |
 | `loonfs.maintenance.keys_queued` | Gauge | Keys waiting for a `max_concurrent_maintenance` permit. |
 | `loonfs.maintenance.oldest_queued_ms` | Gauge | How long the oldest queued key has waited. |
@@ -346,7 +345,6 @@ counted in any budget and sit on top.
 | Read-side WAL-tail projections | `runtime_cache.max_cached_wal_tail_projection_decoded_bytes` and `runtime_cache.max_cached_wal_tail_projection_rows` | 64 MiB and 1,000,000 rows | WAL tails replayed for reads | Steady |
 | Publish-side WAL-tail projections | The same two settings | 64 MiB and 1,000,000 rows | WAL tails the namespace publishers keep | Steady |
 | Head anchors | `runtime_cache.max_cached_namespaces` | 64 namespaces | Cached namespace heads, and the number of read-side projections | Steady, by count |
-| Writer sessions | `max_writer_sessions` | 1,024 sessions | Sessions held at once | Steady, by count |
 | Publication queue | `publication.max_estimated_bytes` | 64 MiB | Estimated bytes of admitted commit requests | Steady |
 | Proxied uploads | `max_concurrent_uploads` | 8 uploads | At most one 8 MiB transfer part per upload body | Per request |
 | Proxied downloads | `max_concurrent_downloads` | 16 streams | One 8 MiB read chunk per content stream | Per request |
@@ -373,8 +371,7 @@ is written alone. A checkpoint, snapshot, or fork that has to fold the WAL
 tail first runs that fold with the default 64 MiB block memo.
 
 Maintenance requests sent to the API run outside
-`max_concurrent_maintenance`. Writer sessions and head anchors are limited by
-count, not by bytes.
+`max_concurrent_maintenance`. Head anchors are limited by count, not by bytes.
 
 `max_upload_bytes` and `max_download_bytes` limit the size of one proxied
 transfer. Both default to 256 MiB. They do not reserve memory.
@@ -452,11 +449,14 @@ Each read keeps at most 8 MiB. Three cases can still pass the limit:
 - A checkpoint, snapshot, or fork that folds the WAL tail. That fold keeps
   the default 64 MiB block memo.
 
-`max_writer_sessions` defaults to 1,024. At the limit, a request for another
-namespace closes the least recently used idle session, and answers
-`writer_capacity_exceeded` only when every session is busy. A closed
-namespace acquires a new writer epoch on its next write, so raise the limit if
-the deployment writes more namespaces than this at once.
+The server keeps one writer session for each namespace it has written since
+it started. There is no cap and no eviction. One idle session holds about
+3 KiB of heap, so 10,000 written namespaces hold about 30 MiB. The
+WAL-tail projection a session retains is counted under the publish-side
+projection budget, not here. The server stops holding a session when its
+namespace is deleted, or when a request finds that the namespace does not
+exist. After a restart, the first write to each namespace acquires a new
+writer epoch.
 
 `max_concurrent_folds` defaults to 2. A sustained
 `loonfs.publisher.wal_folds_waiting` gauge means WAL folds are waiting at the

@@ -178,7 +178,7 @@ pub use cache::RuntimeCacheStats;
 pub use config::{
     InlineContentOptions, PublicationLimits, RuntimeCacheConfig,
     DEFAULT_MAX_CONCURRENT_COMPACTIONS, DEFAULT_MAX_CONCURRENT_FOLDS,
-    DEFAULT_MAX_CONCURRENT_MAINTENANCE, DEFAULT_MAX_WRITER_SESSIONS,
+    DEFAULT_MAX_CONCURRENT_MAINTENANCE,
 };
 pub use fs::{
     ChangesPager, CheckpointsPager, FileRevisionsPager, FsReadSnapshot, InodeChildrenPager,
@@ -186,7 +186,7 @@ pub use fs::{
 };
 pub use handle::{
     FsMaintenance, FsMaintenanceBuilder, FsReader, FsReaderBuilder, FsWriter, FsWriterBuilder,
-    NamespaceSessionPolicy, NamespaceWriter,
+    NamespaceWriter,
 };
 pub use maintenance::{
     maintenance_hint_relay, GarbageCollectionJob, MaintenanceAssignment, MaintenanceCancellation,
@@ -203,7 +203,7 @@ pub use options::{
     RestoreRevisionOptions, StatPathOptions, UndeleteOptions, UpdateAccessOptions,
     UpdateAttributesOptions,
 };
-pub use publisher::{CloseNamespaceReport, NamespaceSessionState, WriterSessionStats};
+pub use publisher::{CloseNamespaceReport, NamespaceSessionState};
 pub use trace::{payload_class, TraceMode, TraceStoreKind};
 
 /// Result type used by the embedded runtime.

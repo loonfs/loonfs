@@ -9,7 +9,7 @@
 
 use loonfs::{
     CreateNamespaceOptions, FsMaintenance, FsReader, FsWriter, MetadataMaintenanceOptions,
-    NamespaceId, PageRequest, PaginationPolicy, PutFileOptions, SharedObjectStore,
+    NamespaceId, NamespaceWriter, PageRequest, PaginationPolicy, PutFileOptions, SharedObjectStore,
 };
 use loonfs_api::AbsolutePath;
 
@@ -105,14 +105,12 @@ fn report(phase: &str, gets: &[RecordedGet], segments: &SegmentMap) {
 /// service. Every candidate is admitted before the publisher's worker can
 /// take any of them, so they coalesce into one publication.
 async fn publish_candidates(
-    writer: &FsWriter,
-    namespace_id: &NamespaceId,
+    namespace_writer: &NamespaceWriter,
     candidates: Vec<loonfs::publish::CommitCandidate>,
 ) {
-    let publisher = writer.publisher();
     let submissions = candidates
         .into_iter()
-        .map(|candidate| publisher.submit_candidate(namespace_id.clone(), candidate));
+        .map(|candidate| namespace_writer.commit_candidate(candidate));
     for outcome in futures::future::join_all(submissions).await {
         outcome.expect("publish batch member");
     }
@@ -151,6 +149,9 @@ async fn warm_phase_request_accounting() {
         )
         .await
         .expect("create namespace");
+    let namespace_writer = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
     let catalog = loonfs_core::control::load_namespace_catalog_entry(&store, &namespace_id)
         .await
         .expect("load namespace catalog");
@@ -197,7 +198,7 @@ async fn warm_phase_request_accounting() {
             ));
             index += 1;
         }
-        publish_candidates(&writer, &namespace_id, candidates).await;
+        publish_candidates(&namespace_writer, candidates).await;
         if (index / BATCH).is_multiple_of(STEP_EVERY_BATCHES) {
             maintenance
                 .maintain_metadata(

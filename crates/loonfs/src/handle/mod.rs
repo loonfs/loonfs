@@ -5,8 +5,8 @@
 //! namespaces, and it opens a [`NamespaceWriter`] for each namespace the host
 //! writes. A `NamespaceWriter` carries one namespace's mutations, uploads,
 //! and snapshots, and its commits go through that namespace's writer session.
-//! The writer's [`NamespaceSessionPolicy`] decides how long each session
-//! stays open. [`FsReader`] serves reads, and [`FsMaintenance`] runs explicit
+//! The host owns each session: it lives while the host holds a handle for it.
+//! [`FsReader`] serves reads, and [`FsMaintenance`] runs explicit
 //! maintenance.
 //!
 //! Each handle must be opened in the Tokio runtime where it will be used.
@@ -23,6 +23,6 @@ mod writer;
 pub use maintenance::{FsMaintenance, FsMaintenanceBuilder};
 pub use namespace_writer::NamespaceWriter;
 pub use reader::{FsReader, FsReaderBuilder};
-pub use writer::{FsWriter, FsWriterBuilder, NamespaceSessionPolicy};
+pub use writer::{FsWriter, FsWriterBuilder};
 
 use builder_core::{owning_runtime, HandleBuilderCore};

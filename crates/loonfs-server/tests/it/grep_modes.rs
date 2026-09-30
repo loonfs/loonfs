@@ -749,7 +749,6 @@ fn test_config(store_root: &Path, mode: GrepMode) -> ServerConfig {
         auth_token: Some("test-token".into()),
         content_token_secret: "test-content-token-secret".into(),
         writer_id: format!("grep-mode-{mode:?}"),
-        max_writer_sessions: loonfs::DEFAULT_MAX_WRITER_SESSIONS,
         max_concurrent_folds: loonfs::DEFAULT_MAX_CONCURRENT_FOLDS,
         publication: Default::default(),
         inline_content: Default::default(),

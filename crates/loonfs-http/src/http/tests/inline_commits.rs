@@ -53,10 +53,7 @@ impl Harness {
             )
             .await
             .expect("namespace");
-        let namespace_writer = state
-            .writer
-            .open_namespace(&namespace)
-            .expect("open namespace");
+        let namespace_writer = state.namespaces.open(&namespace).expect("open namespace");
         namespace_writer
             .create_directory(
                 "/warmup",

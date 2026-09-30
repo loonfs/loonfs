@@ -109,7 +109,7 @@ async fn check_terminal_reload_failure(include_replay: bool) {
             .acquire_many(8)
             .await
             .expect("hold publications");
-        let publisher = registry.test_publisher_for(&namespace).expect("publisher");
+        let publisher = namespace_writer.session.publisher.clone();
         let (replayed, first, ()) = tokio::join!(
             namespace_writer.create_directory("/warmup", warmup_options),
             first,
@@ -192,24 +192,22 @@ async fn check_terminal_reload_failure(include_replay: bool) {
 
 #[tokio::test]
 async fn a_new_session_keeps_one_segment_budget_inline_until_it_observes_the_tail() {
-    let (_directory, store, writer, namespace) = writer_with_policy(InlineContentOptions {
-        inline_content_segment_budget_bytes: 4,
-        inline_content_fold_at_bytes: 8,
-        inline_content_tail_limit_bytes: 8,
-        ..policy()
-    })
-    .await;
-    let namespace_writer = writer.open_namespace(&namespace).expect("open namespace");
+    let (_directory, store, writer, namespace, namespace_writer) =
+        writer_with_policy(InlineContentOptions {
+            inline_content_segment_budget_bytes: 4,
+            inline_content_fold_at_bytes: 8,
+            inline_content_tail_limit_bytes: 8,
+            ..policy()
+        })
+        .await;
     for (path, bytes) in [("/four", b"four".as_slice()), ("/three", b"abc")] {
         namespace_writer
             .put_file_bytes(path, bytes, put_options(&path[1..]))
             .await
             .expect("fill tail below the fold trigger");
     }
-    writer
-        .close_namespace(&namespace)
-        .await
-        .expect("close session");
+    namespace_writer.close().await.expect("close session");
+    let namespace_writer = writer.open_namespace(&namespace).expect("reopen namespace");
     let folds = writer
         .bits
         .wal_fold_permits
@@ -230,9 +228,7 @@ async fn a_new_session_keeps_one_segment_budget_inline_until_it_observes_the_tai
         namespace_writer.put_file_bytes("/b", b"bbbb", put_options("b")),
         namespace_writer.put_file_bytes("/c", b"cccc", put_options("c")),
         async {
-            let publisher = registry
-                .test_publisher_for(&namespace)
-                .expect("new session");
+            let publisher = namespace_writer.session.publisher.clone();
             timeout(
                 Duration::from_secs(10),
                 wait_for_queued_candidates(&publisher, 3),
@@ -273,6 +269,7 @@ async fn writer_with_policy(
     Arc<RecordingStore<LocalFsStore>>,
     crate::FsWriter,
     NamespaceId,
+    crate::NamespaceWriter,
 ) {
     writer_with_policy_and_byte_limit(policy, 8192).await
 }
@@ -285,6 +282,7 @@ async fn writer_with_policy_and_byte_limit(
     Arc<RecordingStore<LocalFsStore>>,
     crate::FsWriter,
     NamespaceId,
+    crate::NamespaceWriter,
 ) {
     let directory = tempdir().expect("directory");
     let store = Arc::new(RecordingStore::new(
@@ -321,7 +319,7 @@ async fn writer_with_policy_and_byte_limit(
         .await
         .expect("acquire writer epoch");
     store.reset();
-    (directory, store, writer, namespace)
+    (directory, store, writer, namespace, namespace_writer)
 }
 
 fn put_options(id: &str) -> PutFileOptions {
@@ -372,8 +370,8 @@ async fn written_records(
 
 #[tokio::test]
 async fn small_writes_use_one_wal_put_and_retry_by_bytes() {
-    let (_directory, store, writer, namespace) = writer_with_policy(policy()).await;
-    let namespace_writer = writer.open_namespace(&namespace).expect("open namespace");
+    let (_directory, store, writer, namespace, namespace_writer) =
+        writer_with_policy(policy()).await;
     let options = put_options("small");
     let first = namespace_writer
         .put_file_bytes("/file", b"same", options.clone())
@@ -425,8 +423,8 @@ async fn disabled_and_above_threshold_writes_keep_uploaded_object_identity() {
         },
         policy(),
     ] {
-        let (_directory, store, writer, namespace) = writer_with_policy(options).await;
-        let namespace_writer = writer.open_namespace(&namespace).expect("open namespace");
+        let (_directory, store, writer, _namespace, namespace_writer) =
+            writer_with_policy(options).await;
         let bytes: &[u8] = if writer
             .bits
             .inline_content
@@ -457,8 +455,8 @@ async fn disabled_and_above_threshold_writes_keep_uploaded_object_identity() {
 
 #[tokio::test]
 async fn inline_preparation_makes_no_request_and_retained_values_replay() {
-    let (_directory, store, writer, namespace) = writer_with_policy(policy()).await;
-    let namespace_writer = writer.open_namespace(&namespace).expect("open namespace");
+    let (_directory, store, writer, namespace, namespace_writer) =
+        writer_with_policy(policy()).await;
     for bytes in [b"".as_slice(), b"same"] {
         store.reset();
         let prepared = namespace_writer
@@ -503,8 +501,8 @@ async fn inline_preparation_makes_no_request_and_retained_values_replay() {
 #[tokio::test]
 async fn stream_preparation_preserves_chunks_across_the_threshold() {
     use futures::StreamExt;
-    let (_directory, store, writer, namespace) = writer_with_policy(policy()).await;
-    let namespace_writer = writer.open_namespace(&namespace).expect("open namespace");
+    let (_directory, store, writer, namespace, namespace_writer) =
+        writer_with_policy(policy()).await;
     for (index, chunks) in [
         vec![],
         vec![b"".as_slice(), b"sa", b"me"],
@@ -571,13 +569,13 @@ fn put_operation(path: &str, prepared: &crate::publish::PreparedContent) -> File
 
 #[tokio::test]
 async fn tail_fallback_keeps_inline_identity_across_retries_and_a_fold() {
-    let (_directory, store, writer, namespace) = writer_with_policy(InlineContentOptions {
-        inline_content_fold_at_bytes: 4,
-        inline_content_tail_limit_bytes: 4,
-        ..policy()
-    })
-    .await;
-    let namespace_writer = writer.open_namespace(&namespace).expect("open namespace");
+    let (_directory, store, writer, namespace, namespace_writer) =
+        writer_with_policy(InlineContentOptions {
+            inline_content_fold_at_bytes: 4,
+            inline_content_tail_limit_bytes: 4,
+            ..policy()
+        })
+        .await;
     let fold_permits = writer
         .bits
         .wal_fold_permits
@@ -712,13 +710,13 @@ async fn retained_receipts_answer_retries_before_fallback_when_content_writes_fa
 
 #[tokio::test]
 async fn full_queue_refuses_segment_fallback_without_store_writes() {
-    let (_directory, store, writer, namespace) = writer_with_policy(InlineContentOptions {
-        inline_content_segment_budget_bytes: 4,
-        inline_content_threshold_bytes: Some(8),
-        ..policy()
-    })
-    .await;
-    let namespace_writer = writer.open_namespace(&namespace).expect("open namespace");
+    let (_directory, store, writer, namespace, namespace_writer) =
+        writer_with_policy(InlineContentOptions {
+            inline_content_segment_budget_bytes: 4,
+            inline_content_threshold_bytes: Some(8),
+            ..policy()
+        })
+        .await;
     let registry = writer.publisher();
     let mut permits = Vec::new();
     while let Ok(permit) = registry.shared.admission.acquire(&namespace, 0) {
@@ -744,16 +742,16 @@ async fn segment_fallback_keeps_bulk_commit_order_and_one_atomic_commit() {
     const VALUES: usize = 128;
     const VALUE_BYTES: usize = 16 * 1024;
     const ADMISSION_BYTES: usize = 256 * 1024;
-    let (_directory, store, writer, namespace) = writer_with_policy_and_byte_limit(
-        InlineContentOptions {
-            inline_content_segment_budget_bytes: VALUE_BYTES,
-            inline_content_threshold_bytes: Some(VALUE_BYTES),
-            ..policy()
-        },
-        ADMISSION_BYTES,
-    )
-    .await;
-    let namespace_writer = writer.open_namespace(&namespace).expect("open namespace");
+    let (_directory, store, writer, namespace, namespace_writer) =
+        writer_with_policy_and_byte_limit(
+            InlineContentOptions {
+                inline_content_segment_budget_bytes: VALUE_BYTES,
+                inline_content_threshold_bytes: Some(VALUE_BYTES),
+                ..policy()
+            },
+            ADMISSION_BYTES,
+        )
+        .await;
     let payloads = (0..VALUES)
         .map(|index| Bytes::from(vec![u8::try_from(index).expect("byte index"); VALUE_BYTES]))
         .collect::<Vec<_>>();
@@ -848,8 +846,8 @@ async fn queued_writes_share_tail_reservations_and_split_at_the_segment_budget()
             options.inline_content_fold_at_bytes = 5;
             options.inline_content_tail_limit_bytes = 5;
         }
-        let (_directory, store, writer, namespace) = writer_with_policy(options).await;
-        let namespace_writer = writer.open_namespace(&namespace).expect("open namespace");
+        let (_directory, store, writer, _namespace, namespace_writer) =
+            writer_with_policy(options).await;
         let registry = writer.publisher();
         let slots = registry
             .shared
@@ -858,13 +856,13 @@ async fn queued_writes_share_tail_reservations_and_split_at_the_segment_budget()
             .acquire_many(8)
             .await
             .expect("hold publications");
-        let publisher = registry.test_publisher_for(&namespace).expect("publisher");
+        let publisher = namespace_writer.session.publisher.clone();
         let (first, second, ()) = tokio::join!(
             namespace_writer.put_file_bytes("/one", b"one", put_options("one")),
             namespace_writer.put_file_bytes("/two", b"two", put_options("two")),
             async {
                 timeout(Duration::from_secs(10), async {
-                    while publisher.queued_commits() < 2 {
+                    while queued_candidates(&publisher.lock_state()) < 2 {
                         tokio::task::yield_now().await;
                     }
                 })
@@ -917,13 +915,13 @@ async fn queued_writes_share_tail_reservations_and_split_at_the_segment_budget()
 
 #[tokio::test]
 async fn repeated_projection_invalidation_does_not_repeat_the_tail_limit_overshoot() {
-    let (_directory, _store, writer, namespace) = writer_with_policy(InlineContentOptions {
-        inline_content_fold_at_bytes: 4,
-        inline_content_tail_limit_bytes: 4,
-        ..policy()
-    })
-    .await;
-    let namespace_writer = writer.open_namespace(&namespace).expect("open namespace");
+    let (_directory, _store, writer, namespace, namespace_writer) =
+        writer_with_policy(InlineContentOptions {
+            inline_content_fold_at_bytes: 4,
+            inline_content_tail_limit_bytes: 4,
+            ..policy()
+        })
+        .await;
     let folds = writer
         .bits
         .wal_fold_permits
@@ -1058,12 +1056,12 @@ async fn commit_two_values(writer: &crate::FsWriter, namespace: &NamespaceId, la
 #[tokio::test]
 async fn inline_bytes_make_automatic_and_explicit_folds_due_before_segment_count() {
     for mode in ["automatic", "explicit", "scheduled"] {
-        let (_directory, store, writer, namespace) = writer_with_policy(InlineContentOptions {
-            inline_content_fold_at_bytes: 4,
-            ..policy()
-        })
-        .await;
-        let namespace_writer = writer.open_namespace(&namespace).expect("open namespace");
+        let (_directory, store, writer, namespace, namespace_writer) =
+            writer_with_policy(InlineContentOptions {
+                inline_content_fold_at_bytes: 4,
+                ..policy()
+            })
+            .await;
         let permits = writer
             .bits
             .wal_fold_permits

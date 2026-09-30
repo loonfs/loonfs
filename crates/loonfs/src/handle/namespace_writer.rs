@@ -1,7 +1,9 @@
 //! The writer handle for one namespace.
 
 use crate::fs::{ReadCore, WriterBits};
-use crate::publisher::{CloseNamespaceReport, NamespaceSessionState, PublisherRegistry};
+use crate::publisher::{
+    CloseNamespaceReport, NamespaceSession, NamespaceSessionState, PublisherRegistry,
+};
 use crate::{FsWriter, NamespaceId, Result};
 use loonfs_api::Subject;
 use std::fmt;
@@ -16,20 +18,20 @@ use std::sync::Arc;
 /// the writer epoch that the session's first publish acquires. Methods on
 /// this handle take no namespace id.
 ///
-/// The writer's [`NamespaceSessionPolicy`](crate::NamespaceSessionPolicy)
-/// decides how long a session stays open. By default, a publish opens a
-/// closed session, and when the session table is full, opening another
-/// session closes the least recently used idle one. Under
-/// [`NamespaceSessionPolicy::ExplicitOpen`](crate::NamespaceSessionPolicy::ExplicitOpen),
-/// the host opens sessions with [`FsWriter::open_namespace`] and ends them
-/// with [`Self::close`].
-///
-/// Clones share the session.
+/// The host that holds this handle owns the session. Clones share it, and
+/// the session lives while any clone is held. [`Self::close`] ends it and
+/// waits for the work it admitted. Dropping the last clone also ends it:
+/// work already admitted still publishes, and opening the namespace again
+/// before that work finishes returns the same session. Once a session has
+/// ended, the next [`FsWriter::open_namespace`] starts a new one, and its
+/// first publish acquires a new writer epoch. The runtime never opens a
+/// session by itself and never closes one to make room for another.
 #[derive(Clone)]
 pub struct NamespaceWriter {
     pub(crate) core: ReadCore,
     pub(crate) bits: Arc<WriterBits>,
     pub(crate) publisher: PublisherRegistry,
+    pub(crate) session: Arc<NamespaceSession>,
     pub(crate) namespace_id: NamespaceId,
 }
 
@@ -43,16 +45,13 @@ impl fmt::Debug for NamespaceWriter {
 }
 
 impl NamespaceWriter {
-    /// Builds a handle for `namespace_id` without opening its session. If the
-    /// session is closed, the writer's
-    /// [`NamespaceSessionPolicy`](crate::NamespaceSessionPolicy) decides at
-    /// the first publish whether to open it or to refuse the work.
-    pub(crate) fn new(writer: &FsWriter, namespace_id: NamespaceId) -> Self {
+    pub(crate) fn new(writer: &FsWriter, session: Arc<NamespaceSession>) -> Self {
         Self {
             core: writer.core.clone(),
             bits: Arc::clone(&writer.bits),
             publisher: writer.publisher.clone(),
-            namespace_id,
+            namespace_id: session.namespace_id().clone(),
+            session,
         }
     }
 
@@ -75,21 +74,20 @@ impl NamespaceWriter {
         }
     }
 
-    /// Returns the state of this namespace's writer session.
+    /// Returns the state of this handle's writer session.
     pub fn session_state(&self) -> NamespaceSessionState {
-        self.publisher.namespace_session_state(&self.namespace_id)
+        self.session.state()
     }
 
     /// Refuses new work, drains admitted work, and ends the session.
     ///
-    /// From the moment this is called until the drain finishes, commits and
-    /// deletes through any handle for this namespace fail with
-    /// `writer_session_closed`. After that, the writer's
-    /// [`NamespaceSessionPolicy`](crate::NamespaceSessionPolicy) decides
-    /// whether the next publish opens a new session, and a new session
-    /// acquires a new writer epoch. Closing a session that is not open
-    /// changes nothing, and the report says so. Fails with `shutting_down`
-    /// after shutdown begins.
+    /// From the moment this is called, commits and deletes through every
+    /// clone of this handle fail with `writer_session_closed`, and so does
+    /// [`FsWriter::open_namespace`] for this namespace until the drain
+    /// finishes. After this returns, the next open starts a new session,
+    /// which acquires a new writer epoch. Closing a session that no longer
+    /// admits work only waits for its drain, and the report says it was not
+    /// open. Fails with `shutting_down` after shutdown begins.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.close_namespace",
@@ -104,7 +102,7 @@ impl NamespaceWriter {
     )]
     pub async fn close(self) -> Result<CloseNamespaceReport> {
         self.core.record_trace_context(&tracing::Span::current());
-        Ok(self.publisher.close_namespace(&self.namespace_id).await?)
+        Ok(self.session.close().await?)
     }
 
     /// Waits for the WAL-tail fold this session is running, if any.
@@ -122,7 +120,7 @@ impl NamespaceWriter {
     )]
     pub async fn wait_for_fold(&self) -> Result<()> {
         self.core.record_trace_context(&tracing::Span::current());
-        self.publisher.wait_for_fold(&self.namespace_id).await
+        self.session.wait_for_fold().await
     }
 
     // Namespace deletion lives in `fs/namespaces.rs`; mutation, commit, and

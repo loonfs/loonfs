@@ -725,10 +725,8 @@ async fn an_unprepared_external_ref_fails_typed_without_content_io() {
                 },
             );
             let error: RuntimeError = match entry_point {
-                UnpreparedEntryPoint::Publisher => harness
-                    .writer
-                    .publisher()
-                    .submit_candidate(harness.namespace_id.clone(), CommitCandidate::new(request))
+                UnpreparedEntryPoint::Publisher => namespace_writer
+                    .commit_candidate(CommitCandidate::new(request))
                     .await
                     .expect_err("an unprepared ref must not publish"),
                 UnpreparedEntryPoint::WriterCreateCommit => namespace_writer
@@ -890,21 +888,18 @@ async fn commit_id_replay_performs_no_content_operations() {
     let content_ref = harness.stage_content(b"replayed content").await;
     let intent = put_request("replayed-put", "/file.txt", content_ref.clone());
     let prepared = prepare_content(&harness.store, &harness.namespace_id, &content_ref).await;
-    let original = harness
+    let namespace_writer = harness
         .writer
-        .publisher()
-        .submit_candidate(
-            harness.namespace_id.clone(),
-            CommitCandidate::prepared(intent.clone(), vec![prepared]),
-        )
+        .open_namespace(&harness.namespace_id)
+        .expect("open namespace");
+    let original = namespace_writer
+        .commit_candidate(CommitCandidate::prepared(intent.clone(), vec![prepared]))
         .await
         .expect("publish original put");
     harness.recording.reset();
 
-    let replay = harness
-        .writer
-        .publisher()
-        .submit_candidate(harness.namespace_id.clone(), CommitCandidate::new(intent))
+    let replay = namespace_writer
+        .commit_candidate(CommitCandidate::new(intent))
         .await
         .expect("replay put");
 
@@ -918,30 +913,24 @@ async fn rejected_preparation_replays_durable_receipt_without_content_operations
     let content_ref = harness.stage_content(b"replayed rejected content").await;
     let intent = put_request("rejected-replayed-put", "/file.txt", content_ref.clone());
     let prepared = prepare_content(&harness.store, &harness.namespace_id, &content_ref).await;
-    let original = harness
+    let namespace_writer = harness
         .writer
-        .publisher()
-        .submit_candidate(
-            harness.namespace_id.clone(),
-            CommitCandidate::prepared(intent.clone(), vec![prepared]),
-        )
+        .open_namespace(&harness.namespace_id)
+        .expect("open namespace");
+    let original = namespace_writer
+        .commit_candidate(CommitCandidate::prepared(intent.clone(), vec![prepared]))
         .await
         .expect("publish original put");
     harness.recording.reset();
 
-    let replay = harness
-        .writer
-        .publisher()
-        .submit_candidate(
-            harness.namespace_id.clone(),
-            CommitCandidate::rejected(
-                intent,
-                ContentPreparationError::ContentToken(vec![(
-                    ContentId::generate(),
-                    ContentTokenError::Expired,
-                )]),
-            ),
-        )
+    let replay = namespace_writer
+        .commit_candidate(CommitCandidate::rejected(
+            intent,
+            ContentPreparationError::ContentToken(vec![(
+                ContentId::generate(),
+                ContentTokenError::Expired,
+            )]),
+        ))
         .await
         .expect("rejected preparation must replay the durable receipt");
 
@@ -952,6 +941,10 @@ async fn rejected_preparation_replays_durable_receipt_without_content_operations
 #[tokio::test]
 async fn new_rejected_preparation_fails_before_path_planning_without_content_operations() {
     let harness = TestHarness::new("new-rejected-preparation").await;
+    let namespace_writer = harness
+        .writer
+        .open_namespace(&harness.namespace_id)
+        .expect("open namespace");
     harness.recording.reset();
     let intent = CommitRequest::single(
         CommitId::parse("new-rejected").expect("valid commit id"),
@@ -963,19 +956,14 @@ async fn new_rejected_preparation_fails_before_path_planning_without_content_ope
         },
     );
 
-    let error = harness
-        .writer
-        .publisher()
-        .submit_candidate(
-            harness.namespace_id.clone(),
-            CommitCandidate::rejected(
-                intent,
-                ContentPreparationError::ContentToken(vec![(
-                    ContentId::generate(),
-                    ContentTokenError::Expired,
-                )]),
-            ),
-        )
+    let error = namespace_writer
+        .commit_candidate(CommitCandidate::rejected(
+            intent,
+            ContentPreparationError::ContentToken(vec![(
+                ContentId::generate(),
+                ContentTokenError::Expired,
+            )]),
+        ))
         .await
         .expect_err("new rejected preparation must fail");
 
@@ -1001,6 +989,9 @@ async fn in_flight_duplicate_performs_no_additional_content_operations() {
     ));
     let store: SharedObjectStore = blocking.clone();
     let writer = build_initialized_writer(store.clone(), &namespace_id, "duplicate-writer").await;
+    let namespace_writer = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
     let content_ref =
         loonfs_core::content::store_bytes_as_content(&store, &namespace_id, b"duplicate content")
             .await
@@ -1014,16 +1005,12 @@ async fn in_flight_duplicate_performs_no_additional_content_operations() {
 
     blocking.block_next();
     let primary = {
-        let registry = writer.publisher();
-        let namespace_id = namespace_id.clone();
+        let namespace_writer = namespace_writer.clone();
         let intent = intent.clone();
         let prepared = prepared.clone();
         tokio::spawn(async move {
-            registry
-                .submit_candidate(
-                    namespace_id,
-                    CommitCandidate::prepared(intent, vec![prepared]),
-                )
+            namespace_writer
+                .commit_candidate(CommitCandidate::prepared(intent, vec![prepared]))
                 .await
         })
     };
@@ -1031,11 +1018,9 @@ async fn in_flight_duplicate_performs_no_additional_content_operations() {
     let primary_counts = recording.snapshot();
     assert_content_counts(primary_counts, 0, 0, 0, 0);
 
-    let registry = writer.publisher();
-    let mut duplicate = Box::pin(registry.submit_candidate(
-        namespace_id.clone(),
-        CommitCandidate::prepared(intent, vec![prepared]),
-    ));
+    let mut duplicate = Box::pin(
+        namespace_writer.commit_candidate(CommitCandidate::prepared(intent, vec![prepared])),
+    );
     assert!(
         futures::poll!(duplicate.as_mut()).is_pending(),
         "the duplicate must join the in-flight primary"
@@ -1071,6 +1056,9 @@ async fn stale_head_retry_preserves_content_admission() {
     ));
     let store: SharedObjectStore = conflicting.clone();
     let writer = build_initialized_writer(store.clone(), &namespace_id, "retry-writer").await;
+    let namespace_writer = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
     let content_ref =
         loonfs_core::content::store_bytes_as_content(&store, &namespace_id, b"retry content")
             .await
@@ -1083,12 +1071,8 @@ async fn stale_head_retry_preserves_content_admission() {
     recording.reset();
     conflicting.fail_next(1);
 
-    writer
-        .publisher()
-        .submit_candidate(
-            namespace_id,
-            CommitCandidate::prepared(intent, vec![prepared]),
-        )
+    namespace_writer
+        .commit_candidate(CommitCandidate::prepared(intent, vec![prepared]))
         .await
         .expect("publish after stale-head retry");
 
@@ -1107,6 +1091,9 @@ async fn mixed_batch_publishes_admitted_put_and_rejects_unprepared_put_without_c
     ));
     let store: SharedObjectStore = blocking.clone();
     let writer = build_initialized_writer(store.clone(), &namespace_id, "mixed-writer").await;
+    let namespace_writer = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
     let content_ref =
         loonfs_core::content::store_bytes_as_content(&store, &namespace_id, b"mixed content")
             .await
@@ -1119,47 +1106,34 @@ async fn mixed_batch_publishes_admitted_put_and_rejects_unprepared_put_without_c
 
     blocking.block_next();
     let blocker = {
-        let registry = writer.publisher();
-        let namespace_id = namespace_id.clone();
+        let namespace_writer = namespace_writer.clone();
         tokio::spawn(async move {
-            registry
-                .submit_candidate(
-                    namespace_id,
-                    CommitCandidate::new(CommitRequest::single(
-                        CommitId::parse("mixed-blocker").expect("valid commit id"),
-                        loonfs_test_support::test_actor(),
-                        None,
-                        FilesystemOperation::CreateDirectory {
-                            path: parse_mutation_path("/hold").expect("valid mutation path"),
-                            parents: false,
-                        },
-                    )),
-                )
+            namespace_writer
+                .commit_candidate(CommitCandidate::new(CommitRequest::single(
+                    CommitId::parse("mixed-blocker").expect("valid commit id"),
+                    loonfs_test_support::test_actor(),
+                    None,
+                    FilesystemOperation::CreateDirectory {
+                        path: parse_mutation_path("/hold").expect("valid mutation path"),
+                        parents: false,
+                    },
+                )))
                 .await
         })
     };
     blocking.wait_until_blocked().await;
 
-    let registry = writer.publisher();
-    let mut admitted = Box::pin(registry.submit_candidate(
-        namespace_id.clone(),
-        CommitCandidate::prepared(
-            put_request("mixed-admitted", "/admitted.txt", content_ref.clone()),
-            vec![prepared],
-        ),
-    ));
+    let mut admitted = Box::pin(namespace_writer.commit_candidate(CommitCandidate::prepared(
+        put_request("mixed-admitted", "/admitted.txt", content_ref.clone()),
+        vec![prepared],
+    )));
     assert!(
         futures::poll!(admitted.as_mut()).is_pending(),
         "admitted put must queue behind the blocked publication"
     );
-    let mut unprepared = Box::pin(registry.submit_candidate(
-        namespace_id.clone(),
-        CommitCandidate::new(put_request(
-            "mixed-unprepared",
-            "/unprepared.txt",
-            content_ref.clone(),
-        )),
-    ));
+    let mut unprepared = Box::pin(namespace_writer.commit_candidate(CommitCandidate::new(
+        put_request("mixed-unprepared", "/unprepared.txt", content_ref.clone()),
+    )));
     assert!(
         futures::poll!(unprepared.as_mut()).is_pending(),
         "unprepared put must join the pending batch"

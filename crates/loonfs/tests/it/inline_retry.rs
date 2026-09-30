@@ -2,7 +2,9 @@
 
 use bytes::Bytes;
 use loonfs::publish::{CommitCandidate, CommitRequest, FilesystemOperation, InlineContent};
-use loonfs::{CreateNamespaceOptions, FsWriter, InlineContentOptions, SharedObjectStore};
+use loonfs::{
+    CreateNamespaceOptions, FsWriter, InlineContentOptions, NamespaceWriter, SharedObjectStore,
+};
 use loonfs_api::{
     AbsolutePath, AccessGrants, AccessRight, AccessRights, CommitId, ContentId,
     DestinationBehavior, ErrorCode, NamespaceAccess, NamespaceId, PrincipalId, PrincipalScope,
@@ -101,7 +103,7 @@ async fn open(store: SharedObjectStore, segment_budget: usize) -> FsWriter {
         .expect("writer")
 }
 
-async fn seed(writer: &FsWriter) {
+async fn seed(writer: &FsWriter) -> NamespaceWriter {
     writer
         .create_namespace(
             &namespace(),
@@ -129,6 +131,7 @@ async fn seed(writer: &FsWriter) {
         &[AccessRight::Read, AccessRight::Write, AccessRight::Create],
     )));
     namespace_writer.create_commit(seed).await.expect("seed");
+    namespace_writer
 }
 
 enum ReceiptState {
@@ -148,8 +151,7 @@ async fn retained_receipt_skips_fallback(state: ReceiptState) {
     ));
     let recording = Arc::new(RecordingStore::new(failing.clone(), KeyPredicate::any()));
     let mut writer = open(recording.clone(), 1).await;
-    seed(&writer).await;
-    let mut namespace_writer = writer.open_namespace(&namespace()).expect("open namespace");
+    let mut namespace_writer = seed(&writer).await;
     let original = namespace_writer
         .commit_candidate(inline("retained", "alice", b"recorded"))
         .await
@@ -243,8 +245,7 @@ async fn inline_publication_without_fallback_keeps_its_store_requests() {
         KeyPredicate::any(),
     ));
     let writer = open(recording.clone(), 1024).await;
-    seed(&writer).await;
-    let namespace_writer = writer.open_namespace(&namespace()).expect("open namespace");
+    let namespace_writer = seed(&writer).await;
     recording.reset();
     namespace_writer
         .commit_candidate(inline("inline", "alice", b"recorded"))
@@ -267,10 +268,7 @@ async fn cold_receipt_lookup_does_not_acquire_authority_or_block_other_submissio
     ));
     let recording = Arc::new(RecordingStore::new(blocking.clone(), KeyPredicate::any()));
     let original_writer = open(recording.clone(), 1).await;
-    seed(&original_writer).await;
-    let original_namespace_writer = original_writer
-        .open_namespace(&namespace())
-        .expect("open namespace");
+    let original_namespace_writer = seed(&original_writer).await;
     let original = original_namespace_writer
         .commit_candidate(inline("retained", "alice", b"recorded"))
         .await
@@ -331,8 +329,7 @@ async fn failed_receipt_lookup_writes_no_durable_state() {
     ));
     let recording = Arc::new(RecordingStore::new(failing.clone(), KeyPredicate::any()));
     let writer = open(recording.clone(), 1).await;
-    seed(&writer).await;
-    let namespace_writer = writer.open_namespace(&namespace()).expect("open namespace");
+    let namespace_writer = seed(&writer).await;
     namespace_writer
         .commit_candidate(inline("retained", "alice", b"recorded"))
         .await

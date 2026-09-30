@@ -98,3 +98,21 @@ async fn a_deleted_namespace_leaves_no_writer_handle_in_the_host() {
     let closed = state.namespaces.close(&kept).await.expect("close");
     assert!(closed.is_some(), "the host holds the written namespace");
 }
+
+#[tokio::test]
+async fn a_request_for_a_missing_namespace_leaves_no_writer_handle_in_the_host() {
+    let (_directory, router, state) = host("missing-host").await;
+    let missing = namespace_id("missing");
+    let body = serde_json::json!({
+        "commit_id": "create-missing",
+        "operations": [{"kind": "create_directory", "path": "/missing"}],
+    });
+    let uri = format!("/v0/namespaces/{missing}/commits");
+    assert_eq!(
+        send(&router, Method::POST, &uri, body.to_string()).await,
+        StatusCode::NOT_FOUND
+    );
+
+    let closed = state.namespaces.close(&missing).await.expect("close");
+    assert!(closed.is_none(), "the host kept a handle: {closed:?}");
+}

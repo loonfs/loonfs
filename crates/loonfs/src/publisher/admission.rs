@@ -47,11 +47,6 @@ impl PublicationAdmission {
         self.lock_usage().total.requests
     }
 
-    /// Whether any admitted request for the namespace has not settled.
-    pub(super) fn has_admitted_work(&self, namespace_id: &NamespaceId) -> bool {
-        self.lock_usage().namespaces.contains_key(namespace_id)
-    }
-
     pub(super) fn acquire_candidate(
         self: &Arc<Self>,
         namespace_id: &NamespaceId,

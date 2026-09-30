@@ -8,6 +8,7 @@ use super::{
     AppPath, AppQuery, BindingState, NamespaceIdPath, NoQuery, UploadBodyBytes, UploadBodyStream,
     UploadControlJson, MAX_COMPLETION_BODY_BYTES, MAX_UPLOAD_CONTROL_BODY_BYTES,
 };
+use crate::NamespaceWriters;
 use axum::extract::State;
 use axum::Json;
 use loonfs::content_tokens::{
@@ -64,15 +65,18 @@ impl<'a> ContentTokenVerifier<'a> {
 
     async fn prepare(
         self,
+        namespaces: &NamespaceWriters,
         namespace_writer: &NamespaceWriter,
-        namespace_id: &NamespaceId,
         token: &ContentToken,
         now_ms: u64,
     ) -> Result<Result<PreparedContent, ContentTokenError>, ApiResponseError> {
         namespace_writer
             .prepare_content_token(self.secret, token, now_ms)
             .await
-            .map_err(ApiResponseError::for_namespace(namespace_id))
+            .map_err(ApiResponseError::for_namespace_writer(
+                namespaces,
+                namespace_writer.namespace_id(),
+            ))
     }
 
     fn mint_token(
@@ -148,10 +152,9 @@ pub(super) async fn create_upload(
                 .await
         }
         CreateUploadBody::ServiceProxied {} => {
-            let response = namespace_writer
-                .create_upload()
-                .await
-                .map_err(ApiResponseError::for_namespace(&namespace_id))?;
+            let response = namespace_writer.create_upload().await.map_err(
+                ApiResponseError::for_namespace_writer(&state.namespaces, &namespace_id),
+            )?;
             Ok(Json(response))
         }
     }
@@ -194,7 +197,10 @@ async fn begin_direct_put_upload(
     let mut prepared = namespace_writer
         .create_direct_put_upload_target(checksum_algorithm)
         .await
-        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
+        .map_err(ApiResponseError::for_namespace_writer(
+            &state.namespaces,
+            &namespace_id,
+        ))?;
     fill_direct_put_access(issuer.as_ref(), &prepared.object_key, &mut prepared.session).await?;
     Ok(Json(prepared.session))
 }
@@ -248,7 +254,7 @@ async fn begin_direct_multipart_upload(
         .create_direct_multipart_upload_target(DirectMultipartUploadOptions { part_size_bytes })
         .await
         .map_err(|error| {
-            ApiResponseError::runtime_for_namespace(&namespace_id, error)
+            ApiResponseError::runtime_for_namespace_writer(&state.namespaces, &namespace_id, error)
                 .with_invalid_request_param("/part_size_bytes")
         })?;
 
@@ -315,7 +321,10 @@ pub(super) async fn sign_upload_parts(
     let targets = namespace_writer
         .sign_upload_parts(&upload_id, &request.parts)
         .await
-        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
+        .map_err(ApiResponseError::for_namespace_writer(
+            &state.namespaces,
+            &namespace_id,
+        ))?;
     let parts = sign_parts(issuer.as_ref(), &targets).await?;
 
     Ok(Json(SignUploadPartsResponse {
@@ -389,6 +398,7 @@ pub(super) fn presign_time() -> SystemTime {
 /// or minted for another namespace, is worth saying out
 /// loud even when the request it arrived in went on to publish.
 pub(super) async fn content_preparation_for_puts(
+    namespaces: &NamespaceWriters,
     namespace_writer: &NamespaceWriter,
     verifier: ContentTokenVerifier<'_>,
     namespace_id: &NamespaceId,
@@ -403,7 +413,7 @@ pub(super) async fn content_preparation_for_puts(
         .filter(|token| content_refs.contains(&&token.content_ref))
     {
         match verifier
-            .prepare(namespace_writer, namespace_id, token, now_ms)
+            .prepare(namespaces, namespace_writer, token, now_ms)
             .await?
         {
             Ok(prepared) => prepared_content.push(prepared),
@@ -532,9 +542,9 @@ pub(super) async fn put_upload_content(
         .await
     {
         Ok(response) => Ok(Json(response)),
-        Err(error) => Err(outcome
-            .into_rejection()
-            .unwrap_or_else(|| ApiResponseError::runtime_for_namespace(&namespace_id, error))),
+        Err(error) => Err(outcome.into_rejection().unwrap_or_else(|| {
+            ApiResponseError::runtime_for_namespace_writer(&state.namespaces, &namespace_id, error)
+        })),
     }
 }
 
@@ -587,7 +597,10 @@ pub(super) async fn complete_upload(
     let completed = namespace_writer
         .complete_upload_for_mode(&upload_id, |mode| decode_completion_body(mode, &body))
         .await
-        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
+        .map_err(ApiResponseError::for_namespace_writer(
+            &state.namespaces,
+            &namespace_id,
+        ))?;
     Ok(Json(with_content_token(
         completed.response,
         ContentTokenVerifier::new(state.options.content_token_secret.expose()),
@@ -659,10 +672,9 @@ pub(super) async fn get_upload(
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
     let scoped_writer = subject.map(|subject| namespace_writer.as_subject(subject));
     let namespace_writer = scoped_writer.as_ref().unwrap_or(&namespace_writer);
-    let mut view = namespace_writer
-        .get_upload(&upload_id)
-        .await
-        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
+    let mut view = namespace_writer.get_upload(&upload_id).await.map_err(
+        ApiResponseError::for_namespace_writer(&state.namespaces, &namespace_id),
+    )?;
     if let Some(object_key) = &view.direct_put_object_key {
         let issuer = state
             .direct_transfers
@@ -723,10 +735,9 @@ pub(super) async fn abort_upload(
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
     let scoped_writer = subject.map(|subject| namespace_writer.as_subject(subject));
     let namespace_writer = scoped_writer.as_ref().unwrap_or(&namespace_writer);
-    let response = namespace_writer
-        .abort_upload(&upload_id)
-        .await
-        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
+    let response = namespace_writer.abort_upload(&upload_id).await.map_err(
+        ApiResponseError::for_namespace_writer(&state.namespaces, &namespace_id),
+    )?;
     Ok(Json(response))
 }
 

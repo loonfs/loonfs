@@ -6,7 +6,7 @@ use loonfs::{
     MaintenanceHandle, MaintenanceJob, MaintenanceProbe, NamespaceWriter, SharedObjectStore,
     SnapshotPolicy,
 };
-use loonfs_api::{NamespaceId, SecretString};
+use loonfs_api::{ErrorCode, NamespaceId, SecretString};
 use loonfs_grep::{GrepMaintenanceJob, GrepService, GrepWorker, GREP_INDEX_JOB};
 use loonfs_objectstore::presign::DirectTransferIssuers;
 use loonfs_objectstore::ConfiguredObjectStoreKind;
@@ -76,9 +76,11 @@ impl BindingState {
 
 /// The writer handle this host holds for each namespace.
 ///
-/// The host decides which writer sessions stay open and for how long. This
-/// reference host keeps every namespace it has written open, with no cap and
-/// no eviction.
+/// The host decides which writer sessions stay open and for how long: a
+/// session lives while its handle is held. This reference host keeps every
+/// namespace it has written open, with no cap and no eviction. It stops
+/// holding a handle only when the namespace is deleted or turns out not to
+/// exist.
 pub struct NamespaceWriters {
     writer: FsWriter,
     handles: Mutex<HashMap<NamespaceId, NamespaceWriter>>,
@@ -118,6 +120,18 @@ impl NamespaceWriters {
     /// Stops holding the handle of a deleted namespace.
     pub(crate) fn forget(&self, namespace_id: &NamespaceId) {
         self.lock().remove(namespace_id);
+    }
+
+    /// Stops holding the handle after a request through it found the
+    /// namespace missing or deleted. Without this, the map would keep a
+    /// session for every namespace id a client ever named.
+    pub(crate) fn forget_if_gone(&self, namespace_id: &NamespaceId, code: ErrorCode) {
+        if matches!(
+            code,
+            ErrorCode::NamespaceNotFound | ErrorCode::NamespaceDeleted
+        ) {
+            self.forget(namespace_id);
+        }
     }
 
     fn lock(&self) -> MutexGuard<'_, HashMap<NamespaceId, NamespaceWriter>> {

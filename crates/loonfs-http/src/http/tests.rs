@@ -400,7 +400,6 @@ fn error_detail_fields_match_the_api_spec_table() {
         actual_deletion_seq: Some(ChangeSeq::from(5)),
         expected_head_seq: Some(ChangeSeq::from(6)),
         actual_head_seq: Some(ChangeSeq::from(7)),
-        max_writer_sessions: Some(10_000),
     };
     let serialized = serde_json::to_value(populated).expect("serialize populated error details");
     let registered = serialized

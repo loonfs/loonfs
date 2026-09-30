@@ -30,6 +30,7 @@ use loonfs_test_support::stores::{
     delegate_object_store, BlockingStore, FailStore, InjectedError, KeyPredicate, OperationClass,
     OperationContext, OperationKind, RecordingStore,
 };
+use std::num::NonZeroUsize;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::Condvar;
@@ -324,8 +325,12 @@ fn retained_namespaces(registry: &PublisherRegistry) -> Vec<NamespaceId> {
 
 /// Bootstraps `namespaces` under `writer` and publishes one directory into
 /// each, in order, so the registry's retention order is the namespace order.
-async fn publish_once_into_each(writer: &crate::FsWriter, namespaces: &[NamespaceId]) {
-    let registry = writer.publisher();
+/// The sessions stay in the table while the caller holds the handles.
+async fn publish_once_into_each(
+    writer: &crate::FsWriter,
+    namespaces: &[NamespaceId],
+) -> Vec<crate::NamespaceWriter> {
+    let mut namespace_writers = Vec::new();
     for namespace_id in namespaces {
         writer
             .create_namespace(
@@ -334,14 +339,16 @@ async fn publish_once_into_each(writer: &crate::FsWriter, namespaces: &[Namespac
             )
             .await
             .expect("bootstrap");
-        registry
-            .submit_candidate(
-                namespace_id.clone(),
-                CommitCandidate::new(create_directory_request("seed", "docs")),
-            )
+        let namespace_writer = writer.open_namespace(namespace_id).expect("open namespace");
+        namespace_writer
+            .commit_candidate(CommitCandidate::new(create_directory_request(
+                "seed", "docs",
+            )))
             .await
             .expect("commit");
+        namespace_writers.push(namespace_writer);
     }
+    namespace_writers
 }
 
 fn test_namespaces(count: usize) -> Vec<NamespaceId> {
@@ -495,8 +502,6 @@ fn standalone_publisher(namespace_id: &NamespaceId, runtime: &TestRuntime) -> Na
         Arc::downgrade(&runtime.bits),
         tokio::runtime::Handle::current(),
         TEST_STANDALONE_PACING,
-        NamespaceSessionPolicy::OpenOnFirstWrite,
-        NonZeroUsize::new(crate::DEFAULT_MAX_WRITER_SESSIONS).expect("nonzero session limit"),
         crate::PublicationLimits::default(),
     );
     NamespacePublisher::new(namespace_id.clone(), &registry)
@@ -812,10 +817,10 @@ async fn rejected_duplicate_joins_ready_in_flight_primary() {
         )
         .await
         .expect("bootstrap");
-    let registry = writer.publisher();
-    let publisher = registry
-        .test_publisher_for(&namespace_id)
-        .expect("publisher");
+    let namespace_writer = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
+    let publisher = namespace_writer.session.publisher.clone();
     let request = create_directory_request("ready-primary", "ready-primary");
 
     let primary = try_admit_candidate(
@@ -858,10 +863,10 @@ async fn ready_duplicate_joins_rejected_in_flight_primary() {
         )
         .await
         .expect("bootstrap");
-    let registry = writer.publisher();
-    let publisher = registry
-        .test_publisher_for(&namespace_id)
-        .expect("publisher");
+    let namespace_writer = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
+    let publisher = namespace_writer.session.publisher.clone();
     let request = create_directory_request("rejected-primary", "rejected-primary");
 
     let primary = try_admit_candidate(
@@ -1303,14 +1308,15 @@ async fn a_sequential_follow_up_publishes_at_once() {
         )
         .await
         .expect("bootstrap");
-    let registry = writer.publisher();
+    let namespace_writer = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
     for (commit_id, directory) in [("first", "first"), ("second", "second"), ("first", "first")] {
         tokio::time::timeout(
             Duration::from_millis(399),
-            registry.submit_candidate(
-                namespace_id.clone(),
-                CommitCandidate::new(create_directory_request(commit_id, directory)),
-            ),
+            namespace_writer.commit_candidate(CommitCandidate::new(create_directory_request(
+                commit_id, directory,
+            ))),
         )
         .await
         .expect("a request after its predecessor settled must not be paced")
@@ -1789,20 +1795,20 @@ async fn publisher_batches_concurrent_distinct_commits_into_one_wal_segment() {
         )
         .await
         .expect("bootstrap");
-    let registry = writer.publisher();
+    let namespace_writer = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
 
     // Hold the cold publication in flight so both concurrent submissions are
     // deterministically admitted to the pending batch behind it.
     store.block_next();
     let warmup = {
-        let registry = registry.clone();
-        let namespace_id = namespace_id.clone();
+        let namespace_writer = namespace_writer.clone();
         tokio::spawn(async move {
-            registry
-                .submit_candidate(
-                    namespace_id,
-                    CommitCandidate::new(create_directory_request("warmup", "warmup")),
-                )
+            namespace_writer
+                .commit_candidate(CommitCandidate::new(create_directory_request(
+                    "warmup", "warmup",
+                )))
                 .await
         })
     };
@@ -1815,26 +1821,22 @@ async fn publisher_batches_concurrent_distinct_commits_into_one_wal_segment() {
     let mut request_b = create_directory_request("req-b", "beta");
     request_b.actor_id = actor_b.clone();
     let response_a = {
-        let registry = registry.clone();
-        let namespace_id = namespace_id.clone();
+        let namespace_writer = namespace_writer.clone();
         tokio::spawn(async move {
-            registry
-                .submit_candidate(namespace_id, CommitCandidate::new(request_a))
+            namespace_writer
+                .commit_candidate(CommitCandidate::new(request_a))
                 .await
         })
     };
     let response_b = {
-        let registry = registry.clone();
-        let namespace_id = namespace_id.clone();
+        let namespace_writer = namespace_writer.clone();
         tokio::spawn(async move {
-            registry
-                .submit_candidate(namespace_id, CommitCandidate::new(request_b))
+            namespace_writer
+                .commit_candidate(CommitCandidate::new(request_b))
                 .await
         })
     };
-    let publisher = registry
-        .test_publisher_for(&namespace_id)
-        .expect("publisher");
+    let publisher = namespace_writer.session.publisher.clone();
     wait_for_queued_candidates(&publisher, 2).await;
 
     store.release();
@@ -1938,20 +1940,17 @@ async fn publisher_batches_plain_and_prepared_mutations_together() {
     )
     .await
     .expect("prepare existing content");
-    let registry = writer.publisher();
 
     // Hold the cold publication in flight so both concurrent submissions are
     // deterministically admitted to the pending batch behind it.
     store.block_next();
     let warmup = {
-        let registry = registry.clone();
-        let namespace_id = namespace_id.clone();
+        let namespace_writer = namespace_writer.clone();
         tokio::spawn(async move {
-            registry
-                .submit_candidate(
-                    namespace_id,
-                    CommitCandidate::new(create_directory_request("warmup", "warmup")),
-                )
+            namespace_writer
+                .commit_candidate(CommitCandidate::new(create_directory_request(
+                    "warmup", "warmup",
+                )))
                 .await
         })
     };
@@ -1972,29 +1971,22 @@ async fn publisher_batches_plain_and_prepared_mutations_together() {
         },
     );
     let plain_response = {
-        let registry = registry.clone();
-        let namespace_id = namespace_id.clone();
+        let namespace_writer = namespace_writer.clone();
         tokio::spawn(async move {
-            registry
-                .submit_candidate(namespace_id, CommitCandidate::new(plain))
+            namespace_writer
+                .commit_candidate(CommitCandidate::new(plain))
                 .await
         })
     };
     let prepared_response = {
-        let registry = registry.clone();
-        let namespace_id = namespace_id.clone();
+        let namespace_writer = namespace_writer.clone();
         tokio::spawn(async move {
-            registry
-                .submit_candidate(
-                    namespace_id,
-                    CommitCandidate::prepared(prepared, vec![prepared_content]),
-                )
+            namespace_writer
+                .commit_candidate(CommitCandidate::prepared(prepared, vec![prepared_content]))
                 .await
         })
     };
-    let publisher = registry
-        .test_publisher_for(&namespace_id)
-        .expect("publisher");
+    let publisher = namespace_writer.session.publisher.clone();
     wait_for_queued_candidates(&publisher, 2).await;
 
     store.release();
@@ -2057,18 +2049,19 @@ async fn registry_close_admission_refuses_new_work_while_admitted_work_drains() 
         .await
         .expect("bootstrap");
     let registry = writer.publisher();
+    let namespace_writer = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
 
     // An admitted publication blocks at its WAL put...
     store.block_next();
     let active = {
-        let registry = registry.clone();
-        let namespace_id = namespace_id.clone();
+        let namespace_writer = namespace_writer.clone();
         tokio::spawn(async move {
-            registry
-                .submit_candidate(
-                    namespace_id,
-                    CommitCandidate::new(create_directory_request("active", "active")),
-                )
+            namespace_writer
+                .commit_candidate(CommitCandidate::new(create_directory_request(
+                    "active", "active",
+                )))
                 .await
         })
     };
@@ -2076,23 +2069,16 @@ async fn registry_close_admission_refuses_new_work_while_admitted_work_drains() 
 
     // Admission then closes, and new work is refused.
     registry.close_admission();
-    let refused = registry
-        .submit_candidate(
-            namespace_id.clone(),
-            CommitCandidate::new(create_directory_request("refused", "refused")),
-        )
+    let refused = namespace_writer
+        .commit_candidate(CommitCandidate::new(create_directory_request(
+            "refused", "refused",
+        )))
         .await
         .expect_err("submission after close_admission");
     assert_eq!(refused.code(), ErrorCode::ShuttingDown);
 
     // A publisher clone that predates the sweep also refuses directly.
-    let publisher = registry
-        .shared
-        .lock_state()
-        .publishers
-        .get(&namespace_id)
-        .expect("active publisher exists")
-        .clone();
+    let publisher = namespace_writer.session.publisher.clone();
     let direct = try_admit_commit(
         &publisher,
         &namespace_id,
@@ -2111,9 +2097,9 @@ async fn registry_close_admission_refuses_new_work_while_admitted_work_drains() 
     assert!(registry
         .shared
         .lock_state()
-        .publishers
+        .sessions
         .values()
-        .all(|publisher| publisher_state(publisher).worker.is_none()));
+        .all(|live| publisher_state(&live.publisher).worker.is_none()));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2131,17 +2117,18 @@ async fn worker_survives_panic_and_processes_later_queue_items() {
         .await
         .expect("bootstrap");
     let registry = writer.publisher();
+    let namespace_writer = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
 
     store.arm_blocking_panic();
     let doomed = {
-        let registry = registry.clone();
-        let namespace_id = namespace_id.clone();
+        let namespace_writer = namespace_writer.clone();
         tokio::spawn(async move {
-            registry
-                .submit_candidate(
-                    namespace_id,
-                    CommitCandidate::new(create_directory_request("doomed", "doomed")),
-                )
+            namespace_writer
+                .commit_candidate(CommitCandidate::new(create_directory_request(
+                    "doomed", "doomed",
+                )))
                 .await
         })
     };
@@ -2150,24 +2137,16 @@ async fn worker_survives_panic_and_processes_later_queue_items() {
     // Queued behind the doomed batch: only a worker that survives the panic
     // publishes this one, and the drain must wait for it.
     let queued = {
-        let registry = registry.clone();
-        let namespace_id = namespace_id.clone();
+        let namespace_writer = namespace_writer.clone();
         tokio::spawn(async move {
-            registry
-                .submit_candidate(
-                    namespace_id,
-                    CommitCandidate::new(create_directory_request("queued", "queued")),
-                )
+            namespace_writer
+                .commit_candidate(CommitCandidate::new(create_directory_request(
+                    "queued", "queued",
+                )))
                 .await
         })
     };
-    let publisher = registry
-        .shared
-        .lock_state()
-        .publishers
-        .get(&namespace_id)
-        .expect("publisher exists while blocked")
-        .clone();
+    let publisher = namespace_writer.session.publisher.clone();
     wait_for_queued_candidates(&publisher, 1).await;
 
     store.release_into_panic();
@@ -2237,12 +2216,11 @@ async fn a_fold_reloads_the_tail_when_no_projection_is_retained() {
     .await
     .expect("seed the WAL tail below the fold threshold");
 
-    writer
-        .publisher()
-        .submit_candidate(
-            namespace_id.clone(),
-            CommitCandidate::new(create_directory_request("cross-threshold", "docs")),
-        )
+    namespace_writer
+        .commit_candidate(CommitCandidate::new(create_directory_request(
+            "cross-threshold",
+            "docs",
+        )))
         .await
         .expect("publish across the fold threshold");
     namespace_writer
@@ -2336,9 +2314,8 @@ async fn a_runtime_fold_materializes_inline_content_and_reanchors_to_an_empty_ta
         Vec::new(),
         vec![value.clone()],
     );
-    let registry = writer.publisher();
-    registry
-        .submit_candidate(namespace_id.clone(), candidate.clone())
+    namespace_writer
+        .commit_candidate(candidate.clone())
         .await
         .expect("publish");
     namespace_writer.wait_for_fold().await.expect("fold");
@@ -2364,14 +2341,9 @@ async fn a_runtime_fold_materializes_inline_content_and_reanchors_to_an_empty_ta
         value.bytes().as_ref()
     );
     assert!(store.count(OperationClass::Read) > 0);
-    let publisher = registry
-        .shared
-        .lock_state()
-        .publishers
-        .get(&namespace_id)
-        .cloned()
-        .expect("publisher");
-    let input = publisher
+    let input = namespace_writer
+        .session
+        .publisher
         .engine
         .lock()
         .await
@@ -2387,8 +2359,8 @@ async fn a_runtime_fold_materializes_inline_content_and_reanchors_to_an_empty_ta
         Arc::new(loonfs_core::cache::ProjectedWalTail::default()).weight()
     );
     store.reset();
-    registry
-        .submit_candidate(namespace_id.clone(), candidate)
+    namespace_writer
+        .commit_candidate(candidate)
         .await
         .expect("folded receipt");
     assert_eq!(store.count(OperationClass::Put), 0);
@@ -2444,12 +2416,11 @@ async fn a_failed_fold_notifies_maintenance_and_reloads_the_tail() {
     .expect("seed the WAL tail below the fold threshold");
 
     failing.fail_next(1);
-    writer
-        .publisher()
-        .submit_candidate(
-            namespace_id.clone(),
-            CommitCandidate::new(create_directory_request("cross-threshold", "docs")),
-        )
+    namespace_writer
+        .commit_candidate(CommitCandidate::new(create_directory_request(
+            "cross-threshold",
+            "docs",
+        )))
         .await
         .expect("publish across the fold threshold");
     namespace_writer
@@ -2476,12 +2447,11 @@ async fn a_failed_fold_notifies_maintenance_and_reloads_the_tail() {
     )
     .await
     .expect("another process folds the tail");
-    writer
-        .publisher()
-        .submit_candidate(
-            namespace_id.clone(),
-            CommitCandidate::new(create_directory_request("after-fold", "after-fold")),
-        )
+    namespace_writer
+        .commit_candidate(CommitCandidate::new(create_directory_request(
+            "after-fold",
+            "after-fold",
+        )))
         .await
         .expect("reload the folded tail and publish");
     {
@@ -2538,20 +2508,20 @@ async fn wal_folds_share_the_writer_concurrency_bound() {
         .await
         .expect("seed the WAL tail below the fold threshold");
     }
+    let namespace_writers = namespaces
+        .iter()
+        .map(|namespace_id| writer.open_namespace(namespace_id).expect("open namespace"))
+        .collect::<Vec<_>>();
     blocking.block_next();
     blocking.inner().block_next();
     blocking.inner().inner().block_next();
 
-    for (index, namespace_id) in namespaces.iter().enumerate() {
-        writer
-            .publisher()
-            .submit_candidate(
-                namespace_id.clone(),
-                CommitCandidate::new(create_directory_request(
-                    format!("cross-threshold-{index}"),
-                    "docs",
-                )),
-            )
+    for (index, namespace_writer) in namespace_writers.iter().enumerate() {
+        namespace_writer
+            .commit_candidate(CommitCandidate::new(create_directory_request(
+                format!("cross-threshold-{index}"),
+                "docs",
+            )))
             .await
             .expect("publish across the fold threshold");
         if index == 0 {
@@ -2561,12 +2531,8 @@ async fn wal_folds_share_the_writer_concurrency_bound() {
         }
     }
     assert_eq!(writer.bits.wal_fold_permits.available_permits(), 0);
-    let closing = tokio::spawn({
-        let writer = writer.clone();
-        let namespace_id = namespaces[2].clone();
-        async move { writer.close_namespace(&namespace_id).await }
-    });
-    while writer.namespace_session_state(&namespaces[2]) != NamespaceSessionState::Closing {
+    let closing = tokio::spawn(namespace_writers[2].clone().close());
+    while namespace_writers[2].session_state() != NamespaceSessionState::Closed {
         tokio::task::yield_now().await;
     }
 
@@ -2575,8 +2541,7 @@ async fn wal_folds_share_the_writer_concurrency_bound() {
     blocking.inner().release();
     blocking.inner().inner().wait_until_blocked().await;
     blocking.inner().inner().release();
-    for namespace_id in &namespaces[..2] {
-        let namespace_writer = writer.open_namespace(namespace_id).expect("open namespace");
+    for namespace_writer in &namespace_writers[..2] {
         namespace_writer
             .wait_for_fold()
             .await
@@ -2635,16 +2600,17 @@ async fn a_late_fold_does_not_republish_an_already_folded_tail() {
     let namespace_writer_b = writer.open_namespace(&namespace_b).expect("open namespace");
     recording.inner().block_next();
 
-    for (namespace_id, commit_id) in [(&namespace_a, "cross-a"), (&namespace_b, "cross-b")] {
-        writer
-            .publisher()
-            .submit_candidate(
-                namespace_id.clone(),
-                CommitCandidate::new(create_directory_request(commit_id, "docs")),
-            )
+    for (namespace_writer, commit_id) in [
+        (&namespace_writer_a, "cross-a"),
+        (&namespace_writer_b, "cross-b"),
+    ] {
+        namespace_writer
+            .commit_candidate(CommitCandidate::new(create_directory_request(
+                commit_id, "docs",
+            )))
             .await
             .expect("publish across the fold threshold");
-        if namespace_id == &namespace_a {
+        if namespace_writer.namespace_id() == &namespace_a {
             recording.inner().wait_until_blocked().await;
         } else {
             wait_for_fold_waiters(&writer, 1).await;
@@ -2659,12 +2625,11 @@ async fn a_late_fold_does_not_republish_an_already_folded_tail() {
         .await
         .expect("fold the waiting namespace tail");
     assert_eq!(recording.count(OperationClass::Put), 1);
-    writer
-        .publisher()
-        .submit_candidate(
-            namespace_b.clone(),
-            CommitCandidate::new(create_directory_request("after-fold", "after-fold")),
-        )
+    namespace_writer_b
+        .commit_candidate(CommitCandidate::new(create_directory_request(
+            "after-fold",
+            "after-fold",
+        )))
         .await
         .expect("refresh the retained projection below the fold threshold");
 
@@ -2703,6 +2668,9 @@ async fn successful_delete_waits_for_fold_before_evicting_the_namespace_publishe
         .await
         .expect("bootstrap");
     let registry = writer.publisher();
+    let namespace_writer = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
     append_wal_segments(
         blocking.inner(),
         &namespace_id,
@@ -2716,29 +2684,22 @@ async fn successful_delete_waits_for_fold_before_evicting_the_namespace_publishe
     .expect("seed the WAL tail below the fold threshold");
 
     blocking.block_next();
-    registry
-        .submit_candidate(
-            namespace_id.clone(),
-            CommitCandidate::new(create_directory_request("before", "before")),
-        )
+    namespace_writer
+        .commit_candidate(CommitCandidate::new(create_directory_request(
+            "before", "before",
+        )))
         .await
         .expect("threshold-crossing commit before delete");
     blocking.wait_until_blocked().await;
-    assert_eq!(registry.shared.lock_state().publishers.len(), 1);
-    let publisher = registry
-        .shared
-        .lock_state()
-        .publishers
-        .get(&namespace_id)
-        .cloned()
-        .expect("publisher exists while the fold is parked");
+    assert_eq!(registry.shared.lock_state().sessions.len(), 1);
+    let publisher = namespace_writer.session.publisher.clone();
 
     let mut delete = {
-        let registry = registry.clone();
-        let namespace_id = namespace_id.clone();
+        let namespace_writer = namespace_writer.clone();
         tokio::spawn(async move {
-            registry
-                .submit_delete(namespace_id, DeleteNamespaceOptions::default())
+            namespace_writer
+                .session
+                .submit_delete(DeleteNamespaceOptions::default())
                 .await
         })
     };
@@ -2762,17 +2723,27 @@ async fn successful_delete_waits_for_fold_before_evicting_the_namespace_publishe
         .await
         .expect("delete namespace");
     assert!(
-        registry.shared.lock_state().publishers.is_empty(),
-        "a terminal publisher must not stay in the map"
+        registry.shared.lock_state().sessions.is_empty(),
+        "a deleted session must not stay in the table while its handle is held"
     );
+    let fast = namespace_writer
+        .commit_candidate(CommitCandidate::new(create_directory_request(
+            "fast", "fast",
+        )))
+        .await
+        .expect_err("submission through the deleted session");
+    assert_eq!(fast.code(), ErrorCode::NamespaceDeleted);
 
-    // A later submission builds a fresh publisher and still fails, now
+    // A later open builds a fresh session whose submission still fails, now
     // on the durable tombstone instead of the fast in-memory flag.
-    let late = registry
-        .submit_candidate(
-            namespace_id.clone(),
-            CommitCandidate::new(create_directory_request("late", "late")),
-        )
+    let reopened = writer
+        .open_namespace(&namespace_id)
+        .expect("reopen namespace");
+    assert!(!Arc::ptr_eq(&reopened.session, &namespace_writer.session));
+    let late = reopened
+        .commit_candidate(CommitCandidate::new(create_directory_request(
+            "late", "late",
+        )))
         .await
         .expect_err("submission after delete");
     assert_eq!(late.code(), ErrorCode::NamespaceDeleted);
@@ -2788,20 +2759,11 @@ async fn close_admission_refuses_without_creating_publishers() {
     let registry = writer.publisher();
 
     registry.close_admission();
-    let refused = registry
-        .submit_candidate(
-            namespace_id.clone(),
-            CommitCandidate::new(create_directory_request("nope", "nope")),
-        )
-        .await
-        .expect_err("closed registry refuses commits");
+    let refused = writer
+        .open_namespace(&namespace_id)
+        .expect_err("closed registry refuses to open a session");
     assert_eq!(refused.code(), ErrorCode::ShuttingDown);
-    let refused_delete = registry
-        .submit_delete(namespace_id, DeleteNamespaceOptions::default())
-        .await
-        .expect_err("closed registry refuses deletes");
-    assert_eq!(refused_delete.code(), ErrorCode::ShuttingDown);
-    assert!(registry.shared.lock_state().publishers.is_empty());
+    assert!(registry.shared.lock_state().sessions.is_empty());
     registry.drain().await.expect("nothing to drain");
 }
 
@@ -2820,30 +2782,25 @@ async fn a_delete_admitted_before_close_admission_lands_terminal() {
         .await
         .expect("bootstrap");
     let registry = writer.publisher();
+    let namespace_writer = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
 
     // A publication parks at its WAL put, so the delete deterministically
     // queues behind it instead of being taken first.
     store.block_next();
     let active = {
-        let registry = registry.clone();
-        let namespace_id = namespace_id.clone();
+        let namespace_writer = namespace_writer.clone();
         tokio::spawn(async move {
-            registry
-                .submit_candidate(
-                    namespace_id,
-                    CommitCandidate::new(create_directory_request("active", "active")),
-                )
+            namespace_writer
+                .commit_candidate(CommitCandidate::new(create_directory_request(
+                    "active", "active",
+                )))
                 .await
         })
     };
     store.wait_until_blocked().await;
-    let publisher = registry
-        .shared
-        .lock_state()
-        .publishers
-        .get(&namespace_id)
-        .cloned()
-        .expect("publisher exists once a publish is in flight");
+    let publisher = namespace_writer.session.publisher.clone();
     let delete = spawn_delete(&publisher, DeleteNamespaceOptions::default());
     wait_for_queued_delete(&publisher).await;
 
@@ -2891,6 +2848,9 @@ async fn delete_queued_mid_publish_waits_behind_admitted_work() {
         .await
         .expect("bootstrap");
     let registry = writer.publisher();
+    let namespace_writer = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
 
     // Park the first publication at its WAL put, batch a second commit
     // behind it, then queue the delete: the queued batch must publish
@@ -2899,48 +2859,38 @@ async fn delete_queued_mid_publish_waits_behind_admitted_work() {
     // the delete first.
     store.block_next();
     let before = {
-        let registry = registry.clone();
-        let namespace_id = namespace_id.clone();
+        let namespace_writer = namespace_writer.clone();
         tokio::spawn(async move {
-            registry
-                .submit_candidate(
-                    namespace_id,
-                    CommitCandidate::new(create_directory_request("before", "before")),
-                )
+            namespace_writer
+                .commit_candidate(CommitCandidate::new(create_directory_request(
+                    "before", "before",
+                )))
                 .await
         })
     };
     store.wait_until_blocked().await;
-    let publisher = registry
-        .shared
-        .lock_state()
-        .publishers
-        .get(&namespace_id)
-        .cloned()
-        .expect("publisher exists once a publish is in flight");
+    let publisher = namespace_writer.session.publisher.clone();
 
     // The worker is parked in the blocked CAS, so this admission
     // deterministically queues the next batch instead of being taken.
     let second = {
-        let registry = registry.clone();
-        let namespace_id = namespace_id.clone();
+        let namespace_writer = namespace_writer.clone();
         tokio::spawn(async move {
-            registry
-                .submit_candidate(
-                    namespace_id,
-                    CommitCandidate::new(create_directory_request("second", "second")),
-                )
+            namespace_writer
+                .commit_candidate(CommitCandidate::new(create_directory_request(
+                    "second", "second",
+                )))
                 .await
         })
     };
     wait_for_queued_candidates(&publisher, 1).await;
 
     let delete = {
-        let registry = registry.clone();
-        let namespace_id = namespace_id.clone();
+        let namespace_writer = namespace_writer.clone();
         tokio::spawn(async move {
-            registry
-                .submit_delete(namespace_id, DeleteNamespaceOptions::default())
+            namespace_writer
+                .session
+                .submit_delete(DeleteNamespaceOptions::default())
                 .await
         })
     };
@@ -3018,7 +2968,7 @@ async fn retained_tail_projections_are_not_bounded_by_the_namespace_count() {
     let registry = writer.publisher();
     let namespaces = test_namespaces(NAMESPACES);
 
-    publish_once_into_each(&writer, &namespaces).await;
+    let namespace_writers = publish_once_into_each(&writer, &namespaces).await;
 
     assert_eq!(
         retained_projections(&registry).projections,
@@ -3031,12 +2981,11 @@ async fn retained_tail_projections_are_not_bounded_by_the_namespace_count() {
     );
 
     recording.reset();
-    for namespace_id in &namespaces {
-        registry
-            .submit_candidate(
-                namespace_id.clone(),
-                CommitCandidate::new(create_directory_request("second", "more")),
-            )
+    for namespace_writer in &namespace_writers {
+        namespace_writer
+            .commit_candidate(CommitCandidate::new(create_directory_request(
+                "second", "more",
+            )))
             .await
             .expect("commit");
     }
@@ -3066,12 +3015,13 @@ async fn maintenance_invalidation_leaves_publisher_projection() {
         )
         .await
         .expect("create namespace");
-    writer
-        .publisher()
-        .submit_candidate(
-            namespace_id.clone(),
-            CommitCandidate::new(create_directory_request("seed", "docs")),
-        )
+    let namespace_writer = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
+    namespace_writer
+        .commit_candidate(CommitCandidate::new(create_directory_request(
+            "seed", "docs",
+        )))
         .await
         .expect("publish commit");
     assert_eq!(retained_projections(&writer.publisher()).projections, 1);
@@ -3105,7 +3055,7 @@ async fn retained_tail_projections_stay_within_the_shared_byte_budget() {
     let registry = writer.publisher();
     let namespaces = test_namespaces(NAMESPACES);
 
-    publish_once_into_each(&writer, &namespaces).await;
+    let namespace_writers = publish_once_into_each(&writer, &namespaces).await;
 
     let totals = retained_projections(&registry);
     assert!(
@@ -3135,13 +3085,15 @@ async fn retained_tail_projections_stay_within_the_shared_byte_budget() {
         "each session's first publish has no projection to start from"
     );
 
-    for (namespace_id, replays) in [(&namespaces[NAMESPACES - 1], 0), (&namespaces[0], 1)] {
+    for (namespace_writer, replays) in [
+        (&namespace_writers[NAMESPACES - 1], 0),
+        (&namespace_writers[0], 1),
+    ] {
         let before = counter(&recorder, "loonfs.publisher.tail_replays");
-        registry
-            .submit_candidate(
-                namespace_id.clone(),
-                CommitCandidate::new(create_directory_request("again", "again")),
-            )
+        namespace_writer
+            .commit_candidate(CommitCandidate::new(create_directory_request(
+                "again", "again",
+            )))
             .await
             .expect("commit");
         assert_eq!(
@@ -3176,17 +3128,19 @@ async fn a_publish_past_the_publish_budget_counts_a_tail_replay() {
         .await
         .expect("bootstrap");
     let registry = writer.publisher();
+    let namespace_writer = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
 
     for (commit_id, now_ms) in [
         ("first", 0),
         ("second", loonfs_core::limits::WAL_PUBLISH_BUDGET_MS + 1_000),
     ] {
         timer.set(now_ms);
-        registry
-            .submit_candidate(
-                namespace_id.clone(),
-                CommitCandidate::new(create_directory_request(commit_id, commit_id)),
-            )
+        namespace_writer
+            .commit_candidate(CommitCandidate::new(create_directory_request(
+                commit_id, commit_id,
+            )))
             .await
             .expect("commit");
     }
@@ -3209,7 +3163,7 @@ async fn one_projection_decoded_bytes() -> usize {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
     let writer = test_writer(store).await;
-    publish_once_into_each(&writer, &test_namespaces(1)).await;
+    let _namespace_writers = publish_once_into_each(&writer, &test_namespaces(1)).await;
     let totals = retained_projections(&writer.publisher());
     assert_eq!(totals.projections, 1, "one publish retains one projection");
     totals.decoded_bytes
@@ -3225,7 +3179,7 @@ async fn disabled_runtime_caches_retain_no_tail_projections() {
     let registry = writer.publisher();
     let namespaces = test_namespaces(3);
 
-    publish_once_into_each(&writer, &namespaces).await;
+    let _namespace_writers = publish_once_into_each(&writer, &namespaces).await;
 
     assert_eq!(
         retained_projections(&registry),
@@ -3234,9 +3188,9 @@ async fn disabled_runtime_caches_retain_no_tail_projections() {
     );
     assert_eq!(gauge(&recorder, "loonfs.publisher.retained_projections"), 0);
     assert_eq!(
-        registry.shared.lock_state().publishers.len(),
+        registry.shared.lock_state().sessions.len(),
         namespaces.len(),
-        "publishers and their sessions survive caches being off"
+        "sessions and their publishers survive caches being off"
     );
 
     registry.close_admission();
@@ -3256,11 +3210,12 @@ async fn a_landed_delete_forgets_the_namespace_projection() {
     let registry = writer.publisher();
     let namespaces = test_namespaces(2);
 
-    publish_once_into_each(&writer, &namespaces).await;
+    let namespace_writers = publish_once_into_each(&writer, &namespaces).await;
     assert_eq!(retained_projections(&registry).projections, 2);
 
-    registry
-        .submit_delete(namespaces[0].clone(), DeleteNamespaceOptions::default())
+    namespace_writers[0]
+        .session
+        .submit_delete(DeleteNamespaceOptions::default())
         .await
         .expect("delete namespace");
 
@@ -3301,21 +3256,14 @@ async fn a_skipped_eviction_leaves_the_namespace_accounted() {
         namespaces[2].clone(),
     );
 
-    publish_once_into_each(&writer, &namespaces[..1]).await;
+    let busy_writers = publish_once_into_each(&writer, &namespaces[..1]).await;
     assert_eq!(retained_namespaces(&registry), vec![busy.clone()]);
 
     // Standing in for a publication in flight: the engine is held, so the
     // sweep the next publish runs cannot take it.
-    let busy_publisher = registry
-        .shared
-        .lock_state()
-        .publishers
-        .get(&busy)
-        .expect("the published namespace has a publisher")
-        .clone();
-    let held_engine = busy_publisher.engine.lock().await;
+    let held_engine = busy_writers[0].session.publisher.engine.lock().await;
 
-    publish_once_into_each(&writer, &namespaces[1..2]).await;
+    let _other_writers = publish_once_into_each(&writer, &namespaces[1..2]).await;
 
     let skipped = retained_projections(&registry);
     assert_eq!(
@@ -3330,7 +3278,7 @@ async fn a_skipped_eviction_leaves_the_namespace_accounted() {
     );
 
     drop(held_engine);
-    publish_once_into_each(&writer, &namespaces[2..]).await;
+    let _last_writers = publish_once_into_each(&writer, &namespaces[2..]).await;
 
     assert_eq!(
         retained_namespaces(&registry),
@@ -3372,33 +3320,31 @@ async fn registry_shares_admission_and_publication_slots_after_caller_cancellati
             .expect("bootstrap");
     }
     let registry = writer.publisher();
+    let writer_a = writer.open_namespace(&a).expect("open namespace");
+    let writer_b = writer.open_namespace(&b).expect("open namespace");
     store.block_next();
     let first = {
-        let registry = registry.clone();
-        let namespace = a.clone();
+        let writer_a = writer_a.clone();
         tokio::spawn(async move {
-            registry
-                .submit_candidate(
-                    namespace,
-                    CommitCandidate::new(create_directory_request("first", "first")),
-                )
+            writer_a
+                .commit_candidate(CommitCandidate::new(create_directory_request(
+                    "first", "first",
+                )))
                 .await
         })
     };
     store.wait_until_blocked().await;
     let second = {
-        let registry = registry.clone();
-        let namespace = b.clone();
+        let writer_b = writer_b.clone();
         tokio::spawn(async move {
-            registry
-                .submit_candidate(
-                    namespace,
-                    CommitCandidate::new(create_directory_request("second", "second")),
-                )
+            writer_b
+                .commit_candidate(CommitCandidate::new(create_directory_request(
+                    "second", "second",
+                )))
                 .await
         })
     };
-    let publisher = registry.test_publisher_for(&b).expect("publisher");
+    let publisher = writer_b.session.publisher.clone();
     wait_for_queued_candidates(&publisher, 1).await;
     assert_eq!(
         registry.shared.admission.publications.available_permits(),
@@ -3415,8 +3361,9 @@ async fn registry_shares_admission_and_publication_slots_after_caller_cancellati
         2,
         "disconnected work remains charged"
     );
-    let error = registry
-        .submit_delete(a, DeleteNamespaceOptions::default())
+    let error = writer_a
+        .session
+        .submit_delete(DeleteNamespaceOptions::default())
         .await
         .expect_err("budget remains full");
     assert_eq!(error.code(), ErrorCode::CommitQueueFull);

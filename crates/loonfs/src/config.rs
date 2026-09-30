@@ -18,10 +18,6 @@ pub(crate) const DEFAULT_MAX_CACHED_WAL_TAIL_PROJECTION_DECODED_BYTES: usize =
 /// larger WAL segments. Zero
 /// keeps only the batching that in-flight publications force.
 pub(crate) const DEFAULT_MIN_PUBLISH_INTERVAL_MS: u64 = 15;
-/// Default maximum writer sessions held at once. A full table closes its
-/// least recently used idle session to open another (see
-/// [`FsWriterBuilder::max_writer_sessions`](crate::FsWriterBuilder::max_writer_sessions)).
-pub const DEFAULT_MAX_WRITER_SESSIONS: usize = 1_024;
 /// Default maximum WAL-tail folds one writer runs concurrently.
 pub const DEFAULT_MAX_CONCURRENT_FOLDS: usize = 2;
 /// Default maximum streaming metadata compactions one job runs concurrently.
@@ -169,9 +165,8 @@ pub struct RuntimeCacheConfig {
     ///
     /// It does not count the WAL-tail projections a writer's publishers
     /// retain, which only the two projection budgets bound, or writer
-    /// sessions, which
-    /// [`FsWriterBuilder::max_writer_sessions`](crate::FsWriterBuilder::max_writer_sessions)
-    /// bounds.
+    /// sessions, which live as long as the host holds their
+    /// [`NamespaceWriter`](crate::NamespaceWriter) handles.
     pub max_cached_namespaces: usize,
     /// Maximum metadata rows retained across WAL-tail projections. The read
     /// cache and the publish side each hold their own total against it, so

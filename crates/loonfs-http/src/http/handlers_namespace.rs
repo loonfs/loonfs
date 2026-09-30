@@ -372,10 +372,9 @@ pub(super) async fn delete_namespace(
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
     let scoped_writer = subject.map(|subject| namespace_writer.as_subject(subject));
     let namespace_writer = scoped_writer.as_ref().unwrap_or(&namespace_writer);
-    let response = namespace_writer
-        .delete_namespace(options)
-        .await
-        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
+    let response = namespace_writer.delete_namespace(options).await.map_err(
+        ApiResponseError::for_namespace_writer(&state.namespaces, &namespace_id),
+    )?;
     state.namespaces.forget(&namespace_id);
     Ok(Json(response))
 }
@@ -488,7 +487,7 @@ pub(super) async fn create_snapshot(
         )
         .await
         .map_err(|error| {
-            ApiResponseError::runtime_for_namespace(&namespace_id, error)
+            ApiResponseError::runtime_for_namespace_writer(&state.namespaces, &namespace_id, error)
                 .with_invalid_request_param("/name")
         })?;
     Ok(Json(SnapshotSummary::from_checkpoint(checkpoint).expect(
@@ -600,7 +599,10 @@ pub(super) async fn extend_snapshot(
             state.options.snapshot_policy.max_lifetime_ms,
         )
         .await
-        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
+        .map_err(ApiResponseError::for_namespace_writer(
+            &state.namespaces,
+            &namespace_id,
+        ))?;
     Ok(Json(response))
 }
 
@@ -647,7 +649,10 @@ pub(super) async fn delete_snapshot(
     let response = namespace_writer
         .delete_snapshot(&snapshot_id)
         .await
-        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
+        .map_err(ApiResponseError::for_namespace_writer(
+            &state.namespaces,
+            &namespace_id,
+        ))?;
     Ok(Json(response))
 }
 
@@ -883,7 +888,10 @@ pub(super) async fn run_maintenance(
         let recovered = namespace_writer
             .recover_administrator(&request.principal_id, actor_id)
             .await
-            .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
+            .map_err(ApiResponseError::for_namespace_writer(
+                &state.namespaces,
+                &namespace_id,
+            ))?;
         return Ok(Json(RunMaintenanceResponse::RecoverAdministrator(
             recovered,
         )));
