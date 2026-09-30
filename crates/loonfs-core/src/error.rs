@@ -276,20 +276,12 @@ pub enum MetadataViewError {
         namespace_id: NamespaceId,
         reason: String,
     },
-    #[error(
-        "the cursor was minted at seq `{cursor_seq}`, ahead of the loaded head `{head_seq}`; restart the listing"
-    )]
-    CursorAheadOfHead {
-        cursor_seq: ChangeSeq,
-        head_seq: ChangeSeq,
-    },
 }
 
 impl MetadataViewError {
     pub fn code(&self) -> ErrorCode {
         match self {
             Self::MaintenanceRequired { .. } => ErrorCode::MaintenanceRequired,
-            Self::CursorAheadOfHead { .. } => ErrorCode::RebootstrapRequired,
         }
     }
 }
@@ -817,30 +809,11 @@ mod tests {
 
     #[test]
     fn metadata_view_errors_map_to_actionable_public_codes() {
-        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let head_seq = ChangeSeq(3);
-
-        let cases = [
-            (
-                MetadataViewError::MaintenanceRequired {
-                    namespace_id: namespace_id.clone(),
-                    reason: "retention progress is missing".to_owned(),
-                },
-                ErrorCode::MaintenanceRequired,
-            ),
-            (
-                MetadataViewError::CursorAheadOfHead {
-                    cursor_seq: ChangeSeq(1),
-                    head_seq,
-                },
-                ErrorCode::RebootstrapRequired,
-            ),
-        ];
-
-        for (metadata_error, code) in cases {
-            let error = CoreError::from(metadata_error);
-            assert_eq!(error.code(), code);
-        }
+        let error = CoreError::from(MetadataViewError::MaintenanceRequired {
+            namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
+            reason: "retention progress is missing".to_owned(),
+        });
+        assert_eq!(error.code(), ErrorCode::MaintenanceRequired);
     }
 
     #[test]

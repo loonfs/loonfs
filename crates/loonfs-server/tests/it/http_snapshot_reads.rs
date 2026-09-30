@@ -448,6 +448,7 @@ async fn snapshot_change_feed_stops_at_the_captured_sequence() {
     .expect_err("cursor above snapshot must fail");
     assert_eq!(status, 400);
     assert_eq!(error.code, "invalid_request");
+    assert_eq!(error.param.as_deref(), Some("after_seq"));
     assert!(error.message.contains(&above.to_string()));
     assert!(error.message.contains(&snapshot.captured_seq.to_string()));
 

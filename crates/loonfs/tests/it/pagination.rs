@@ -351,7 +351,7 @@ fn directory_cursor_from_the_future_is_rejected() {
                 cursor: Some(cursor),
             },
         )),
-        ErrorCode::RebootstrapRequired,
+        ErrorCode::InvalidRequest,
     );
 }
 
@@ -881,7 +881,7 @@ fn inode_children_cursor_from_the_future_is_rejected() {
                 cursor: Some(cursor),
             },
         )),
-        ErrorCode::RebootstrapRequired,
+        ErrorCode::InvalidRequest,
     );
 }
 

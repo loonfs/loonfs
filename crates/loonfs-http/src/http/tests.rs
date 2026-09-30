@@ -2219,7 +2219,7 @@ async fn http_revisions_cursor_resumes_after_head_drift_and_rejects_the_future()
     assert_eq!(resumed["revisions"][0]["revision_no"], 1);
     assert!(resumed["next_cursor"].is_null());
 
-    // A cursor from the future stays unanswerable.
+    // A cursor from a head ahead of the serving one was not issued for it.
     let mut future_cursor: loonfs_api::FileRevisionsPageCursor =
         loonfs_api::decode_cursor(&cursor).expect("decode revisions cursor");
     future_cursor.head_seq = loonfs_api::ChangeSeq(future_cursor.head_seq.0 + 1000);
@@ -2233,14 +2233,14 @@ async fn http_revisions_cursor_resumes_after_head_drift_and_rejects_the_future()
         .query("limit", "1")
         .query("cursor", &future_cursor)
         .call()
-        .expect_err("future cursor should answer rebootstrap_required");
+        .expect_err("future cursor should answer invalid_request");
     let ureq::Error::Status(status, response) = error else {
         panic!("expected a status error for a future cursor");
     };
-    assert_eq!(status, 409);
+    assert_eq!(status, 400);
     let body = response.into_string().expect("read future-cursor body");
     let body: serde_json::Value = serde_json::from_str(&body).expect("json future-cursor body");
-    assert_eq!(body["code"], "rebootstrap_required");
+    assert_eq!(body["code"], "invalid_request");
 
     server.abort();
 }

@@ -824,7 +824,7 @@ Retention determines which historical views remain available under the format gu
 
 The floor bounds incremental replay, superseded binding history, old attribute states, and commit receipts. It does not expire file revisions or content-publication evidence. WAL objects are not retained by the floor; collection removes them once folded.
 
-Floor advancement is explicit. The initial sequence floor is 0 for a new root namespace and the fork point for a fork. Automatic flushes do not advance it.
+Floor advancement is explicit. The initial sequence floor is 0 for a new root namespace and the fork point for a fork. Automatic flushes do not advance it. The change feed returns only commits above the floor, so the commit row at the floor is kept and never replayed; a fork's floor is its fork point so that the source's commit at that sequence stays out of the fork's feed.
 
 A floor advance loads the current manifest and verifies that its referenced segments exist. It publishes a successor with the same runs, head summary, allocators, and authority, setting `retention_floor_seq` to the predecessor's `head_seq`. The floor cannot decrease.
 
@@ -853,7 +853,7 @@ The following rules apply only when the selected inputs include the group's olde
 | `revisions` | Retain every file revision, including revisions of deleted files. |
 | `tombstones` | Retain all set and revoke events. |
 | `active_deletions` | Retain listed deletions until revoked. Remove a cancelled `listed`/`removed` pair together. The floor does not expire a recoverable deletion. |
-| `commits`, `commit_receipts` | Remove rows strictly below the floor. |
+| `commits`, `commit_receipts` | Remove rows strictly below the floor. The row at the floor is kept, and the change feed never replays it; in a fork it is the source's commit at the fork point. |
 | `content_publications` | Retain all publication evidence, regardless of floor. |
 | `attributes` | For each inode, retain all revisions above the floor and the newest revision at or below it; remove earlier revisions. |
 | `access` | For each inode, retain all revisions above the floor and the newest revision at or below it; remove earlier revisions. |

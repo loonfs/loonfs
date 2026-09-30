@@ -1304,7 +1304,7 @@
           },
           "retention_floor_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
-            "description": "Oldest sequence still promised for incremental replay."
+            "description": "Oldest position a change feed can resume after. The feed returns\nchanges above it."
           }
         },
         "type": "object"
@@ -2950,7 +2950,7 @@
           },
           "retention_floor_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
-            "description": "Oldest sequence still promised for incremental replay."
+            "description": "Oldest position a change feed can resume after. The feed returns\nchanges above it."
           }
         },
         "required": [
@@ -3117,7 +3117,7 @@
           },
           "retention_floor_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
-            "description": "Oldest sequence still promised for incremental replay."
+            "description": "Oldest position a change feed can resume after. The feed returns\nchanges above it."
           },
           "wal_tail_segments": {
             "description": "Number of visible WAL segments after the current manifest.",

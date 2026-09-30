@@ -487,10 +487,7 @@ async fn snapshot_directory_cursor_resumes_only_at_its_snapshot() {
         first_page.next_cursor.as_deref().expect("next cursor"),
     )
     .expect("decode cursor");
-    assert_eq!(
-        cursor.snapshot_id.as_ref(),
-        Some(&first_snapshot.checkpoint_id)
-    );
+    assert_eq!(cursor.pin_id.as_ref(), Some(&first_snapshot.checkpoint_id));
 
     runtime
         .put_file_bytes(
@@ -533,7 +530,7 @@ async fn snapshot_directory_cursor_resumes_only_at_its_snapshot() {
         ErrorCode::InvalidRequest,
     );
     let mut unbound_cursor = cursor.clone();
-    unbound_cursor.snapshot_id = None;
+    unbound_cursor.pin_id = None;
     assert_core_error_kind(
         second_view
             .list_path_entries_page(
@@ -606,6 +603,95 @@ async fn snapshot_directory_cursor_resumes_only_at_its_snapshot() {
         )
         .await
         .expect("resume the original snapshot");
+    assert_eq!(
+        second_page
+            .entries
+            .iter()
+            .map(|entry| entry.path.as_str())
+            .collect::<Vec<_>>(),
+        ["/e.txt", "/g.txt"]
+    );
+}
+
+#[tokio::test]
+async fn checkpoint_directory_cursor_resumes_only_at_its_checkpoint() {
+    let temp_dir = tempdir().expect("tempdir");
+    let runtime = open_runtime_async(store(temp_dir.path()), "checkpoint-cursor-test").await;
+    let namespace_id = NamespaceId::parse("checkpoint-cursor").expect("namespace id");
+    runtime
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("create namespace");
+    for name in ["a", "c", "e", "g"] {
+        runtime
+            .put_file_bytes(
+                &namespace_id,
+                &format!("/{name}.txt"),
+                name.as_bytes(),
+                PutFileOptions::new(loonfs_test_support::test_actor()),
+            )
+            .await
+            .expect("seed file");
+    }
+    // Both checkpoints and the live head share one sequence, so only the pin
+    // tells the cursor's view apart.
+    let mut views = Vec::new();
+    for _ in 0..2 {
+        let checkpoint = runtime
+            .create_checkpoint(&namespace_id)
+            .await
+            .expect("create checkpoint");
+        views.push(
+            runtime
+                .reader
+                .pin_namespace_at_checkpoint(&namespace_id, &checkpoint.checkpoint_id)
+                .await
+                .expect("pin checkpoint"),
+        );
+    }
+    let limit = PaginationPolicy::default()
+        .resolve_limit(Some(2))
+        .expect("page limit");
+    let first_page = views[0]
+        .list_path_entries_page(
+            "/",
+            PageRequest {
+                limit,
+                cursor: None,
+            },
+            Default::default(),
+        )
+        .await
+        .expect("list first checkpoint page");
+    let cursor = loonfs_api::decode_cursor::<loonfs::DirectoryPageCursor>(
+        first_page.next_cursor.as_deref().expect("next cursor"),
+    )
+    .expect("decode cursor");
+    let request = PageRequest {
+        limit,
+        cursor: Some(cursor),
+    };
+
+    assert_core_error_kind(
+        runtime
+            .reader
+            .list_path_entries_page(&namespace_id, "/", request.clone(), Default::default())
+            .await,
+        ErrorCode::InvalidRequest,
+    );
+    assert_core_error_kind(
+        views[1]
+            .list_path_entries_page("/", request.clone(), Default::default())
+            .await,
+        ErrorCode::InvalidRequest,
+    );
+    let second_page = views[0]
+        .list_path_entries_page("/", request, Default::default())
+        .await
+        .expect("resume the original checkpoint");
     assert_eq!(
         second_page
             .entries

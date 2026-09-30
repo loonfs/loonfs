@@ -10,7 +10,7 @@ use crate::checkpoint::{
 };
 #[cfg(test)]
 use crate::error::MetadataProjectionLoadError;
-use crate::error::{CoreError, MetadataViewError, Result};
+use crate::error::{CoreError, Result};
 use crate::metadata::{
     LeafRevisionPrefetch, MetadataView, MetadataViewSession, ResolvedVisiblePath, RevisionRecord,
     VisibleChildEntry, METADATA_VIEW_SESSION_COUNTER_FIELDS,
@@ -498,15 +498,10 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         request: PageRequest<TrashPageCursor>,
         access: &ReadAccess<'_, S>,
     ) -> Result<Page<TrashEntry, TrashPageCursor>> {
-        if let Some(cursor) = request.cursor.as_ref() {
-            if cursor.head_seq > self.head.seq {
-                return Err(MetadataViewError::CursorAheadOfHead {
-                    cursor_seq: cursor.head_seq,
-                    head_seq: self.head.seq,
-                }
-                .into());
-            }
-        }
+        validate_cursor_head(
+            self.head.seq,
+            request.cursor.as_ref().map(|cursor| cursor.head_seq),
+        )?;
         let start_after = request
             .cursor
             .as_ref()
@@ -712,7 +707,10 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         attributes: AttributeInclusion,
         access: &ReadAccess<'_, S>,
     ) -> Result<Page<PathEntry, DirectoryPageCursor>> {
-        validate_cursor_head(self.head.seq, request.cursor.as_ref())?;
+        validate_cursor_head(
+            self.head.seq,
+            request.cursor.as_ref().map(|cursor| cursor.head_seq),
+        )?;
 
         let absolute_path = parse_absolute_path_for_core(absolute_path)?;
         let mut session = self.metadata_view().session();
@@ -765,7 +763,10 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         attributes: AttributeInclusion,
         access: &ReadAccess<'_, S>,
     ) -> Result<Page<PathEntry, DirectoryPageCursor>> {
-        validate_cursor_head(self.head.seq, request.cursor.as_ref())?;
+        validate_cursor_head(
+            self.head.seq,
+            request.cursor.as_ref().map(|cursor| cursor.head_seq),
+        )?;
 
         let mut session = self.metadata_view().session();
         let mut ancestor_paths = HashMap::new();
@@ -830,7 +831,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             .limit
             .finish_page(&mut children, |last| DirectoryPageCursor {
                 head_seq: self.head.seq,
-                snapshot_id: None,
+                pin_id: None,
                 directory_inode_id: resolved.inode_id,
                 last_name_key: last.binding.name_key.clone(),
             });
@@ -1057,13 +1058,7 @@ fn validate_file_revisions_cursor(
     head_seq: ChangeSeq,
     inode_id: InodeId,
 ) -> Result<()> {
-    if cursor.head_seq > head_seq {
-        return Err(MetadataViewError::CursorAheadOfHead {
-            cursor_seq: cursor.head_seq,
-            head_seq,
-        }
-        .into());
-    }
+    validate_cursor_head(head_seq, Some(cursor.head_seq))?;
     if cursor.inode_id != inode_id {
         return Err(invalid_cursor(
             "file revisions cursor inode does not match the requested file",
