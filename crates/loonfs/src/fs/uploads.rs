@@ -14,33 +14,31 @@ use crate::uploads::{
     MultipartPartTargets, ResolvedUploadCompletion, UploadSessionView,
 };
 use crate::ByteStream;
-use crate::FsWriter;
+use crate::NamespaceWriter;
 use crate::Result;
-use crate::{
-    ChecksumAlgorithm, MaintenanceHint, MaintenanceJobId, NamespaceId, UploadMode, UploadSession,
-};
+use crate::{ChecksumAlgorithm, MaintenanceHint, MaintenanceJobId, UploadMode, UploadSession};
 use loonfs_api::options::DirectMultipartUploadOptions;
 use loonfs_api::v0::UploadPartChecksumClaim;
 use loonfs_api::UploadId;
 
-impl FsWriter {
+impl NamespaceWriter {
     /// Plants the deadline a durable upload session just created.
     ///
     /// The clock is read after the session is durable, so the scheduled time
     /// can only land after the collector's own predicate. Landing early is
     /// the one failure that would cost something: the pass would find the
     /// session retained, park, and have nothing left to bring it back.
-    fn schedule_upload_session_reclamation(&self, namespace_id: &NamespaceId) {
+    fn schedule_upload_session_reclamation(&self) {
         if self.bits.maintenance_hint_observer.is_none() {
             return;
         }
-        let Ok(now_ms) = self.now_ms() else {
+        let Ok(now_ms) = self.core.now_ms() else {
             return;
         };
         self.bits.send_maintenance_hint(
-            namespace_id,
+            &self.namespace_id,
             MaintenanceHint::DueAt {
-                namespace_id: namespace_id.clone(),
+                namespace_id: self.namespace_id.clone(),
                 job: MaintenanceJobId::GC,
                 not_before_ms: upload_session_reclaim_at_ms(now_ms),
             },
@@ -51,17 +49,17 @@ impl FsWriter {
     /// session record itself outlives completion — only a collection pass
     /// removes it — so completion schedules its own pass rather than
     /// relying on the one the session's lease already asked for.
-    fn schedule_completed_upload_reclamation(&self, namespace_id: &NamespaceId) {
+    fn schedule_completed_upload_reclamation(&self) {
         if self.bits.maintenance_hint_observer.is_none() {
             return;
         }
-        let Ok(now_ms) = self.now_ms() else {
+        let Ok(now_ms) = self.core.now_ms() else {
             return;
         };
         self.bits.send_maintenance_hint(
-            namespace_id,
+            &self.namespace_id,
             MaintenanceHint::DueAt {
-                namespace_id: namespace_id.clone(),
+                namespace_id: self.namespace_id.clone(),
                 job: MaintenanceJobId::GC,
                 not_before_ms: completed_upload_reclaim_at_ms(now_ms),
             },
@@ -77,18 +75,18 @@ impl FsWriter {
         fields(
             operation = "begin_upload",
             method = "create_upload",
-            namespace_id = %namespace_id,
+            namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn create_upload(&self, namespace_id: &NamespaceId) -> Result<UploadSession> {
+    pub async fn create_upload(&self) -> Result<UploadSession> {
         self.core.record_trace_context(&tracing::Span::current());
         let response = self
-            .engine(namespace_id)
+            .engine()
             .begin_upload(self.core.subject.as_ref())
             .await?;
-        self.schedule_upload_session_reclamation(namespace_id);
+        self.schedule_upload_session_reclamation();
         Ok(response)
     }
 
@@ -102,22 +100,21 @@ impl FsWriter {
         fields(
             operation = "begin_upload",
             method = "create_direct_put_upload_target",
-            namespace_id = %namespace_id,
+            namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )
     )]
     pub async fn create_direct_put_upload_target(
         &self,
-        namespace_id: &NamespaceId,
         checksum_algorithm: ChecksumAlgorithm,
     ) -> Result<BeginDirectPutUploadTargetResponse> {
         self.core.record_trace_context(&tracing::Span::current());
         let response = self
-            .engine(namespace_id)
+            .engine()
             .begin_direct_put_upload_target(self.core.subject.as_ref(), checksum_algorithm)
             .await?;
-        self.schedule_upload_session_reclamation(namespace_id);
+        self.schedule_upload_session_reclamation();
         Ok(response)
     }
 
@@ -132,22 +129,21 @@ impl FsWriter {
         fields(
             operation = "begin_upload",
             method = "create_direct_multipart_upload_target",
-            namespace_id = %namespace_id,
+            namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )
     )]
     pub async fn create_direct_multipart_upload_target(
         &self,
-        namespace_id: &NamespaceId,
         options: DirectMultipartUploadOptions,
     ) -> Result<BeginDirectMultipartUploadTargetResponse> {
         self.core.record_trace_context(&tracing::Span::current());
         let response = self
-            .engine(namespace_id)
+            .engine()
             .begin_direct_multipart_upload_target(self.core.subject.as_ref(), options)
             .await?;
-        self.schedule_upload_session_reclamation(namespace_id);
+        self.schedule_upload_session_reclamation();
         Ok(response)
     }
 
@@ -159,20 +155,19 @@ impl FsWriter {
         skip_all,
         fields(
             operation = "sign_upload_parts",
-            namespace_id = %namespace_id,
+            namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )
     )]
     pub async fn sign_upload_parts(
         &self,
-        namespace_id: &NamespaceId,
         upload_id: &UploadId,
         requested: &[UploadPartChecksumClaim],
     ) -> Result<MultipartPartTargets> {
         self.core.record_trace_context(&tracing::Span::current());
         Ok(self
-            .engine(namespace_id)
+            .engine()
             .direct_multipart_part_targets(upload_id, self.core.subject.as_ref(), requested)
             .await?)
     }
@@ -186,7 +181,7 @@ impl FsWriter {
         fields(
             operation = "upload_content",
             method = "put_upload_content",
-            namespace_id = %namespace_id,
+            namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
             payload_class = tracing::field::Empty,
@@ -194,7 +189,6 @@ impl FsWriter {
     )]
     pub async fn put_upload_content(
         &self,
-        namespace_id: &NamespaceId,
         upload_id: &UploadId,
         bytes: &[u8],
     ) -> Result<UploadSession> {
@@ -202,7 +196,7 @@ impl FsWriter {
         self.core.record_trace_context(&span);
         span.record("payload_class", crate::trace::payload_class(bytes.len()));
         Ok(self
-            .engine(namespace_id)
+            .engine()
             .upload_content(upload_id, self.core.subject.as_ref(), bytes)
             .await?)
     }
@@ -223,7 +217,7 @@ impl FsWriter {
         fields(
             operation = "upload_content",
             method = "put_upload_content_stream",
-            namespace_id = %namespace_id,
+            namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
             payload_class = "streamed",
@@ -231,13 +225,12 @@ impl FsWriter {
     )]
     pub async fn put_upload_content_stream(
         &self,
-        namespace_id: &NamespaceId,
         upload_id: &UploadId,
         body: ByteStream,
     ) -> Result<UploadSession> {
         self.core.record_trace_context(&tracing::Span::current());
         Ok(self
-            .engine(namespace_id)
+            .engine()
             .upload_streamed_content(upload_id, self.core.subject.as_ref(), body)
             .await?)
     }
@@ -251,26 +244,25 @@ impl FsWriter {
         fields(
             operation = "complete_upload",
             method = "complete_upload",
-            namespace_id = %namespace_id,
+            namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )
     )]
     pub async fn complete_upload(
         &self,
-        namespace_id: &NamespaceId,
         upload_id: &UploadId,
         completion: ResolvedUploadCompletion,
     ) -> Result<CompletedUpload> {
         self.core.record_trace_context(&tracing::Span::current());
         let catalog = self
-            .load_namespace_catalog_for_content_preparation(namespace_id)
+            .load_namespace_catalog_for_content_preparation()
             .await?;
         let completed = self
-            .engine(namespace_id)
+            .engine()
             .complete_upload(&catalog, upload_id, self.core.subject.as_ref(), completion)
             .await?;
-        self.schedule_completed_upload_reclamation(namespace_id);
+        self.schedule_completed_upload_reclamation();
         Ok(completed)
     }
 
@@ -283,14 +275,13 @@ impl FsWriter {
         fields(
             operation = "complete_upload",
             method = "complete_upload_for_mode",
-            namespace_id = %namespace_id,
+            namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )
     )]
     pub async fn complete_upload_for_mode<F>(
         &self,
-        namespace_id: &NamespaceId,
         upload_id: &UploadId,
         resolve: F,
     ) -> Result<CompletedUpload>
@@ -301,13 +292,13 @@ impl FsWriter {
     {
         self.core.record_trace_context(&tracing::Span::current());
         let catalog = self
-            .load_namespace_catalog_for_content_preparation(namespace_id)
+            .load_namespace_catalog_for_content_preparation()
             .await?;
         let completed = self
-            .engine(namespace_id)
+            .engine()
             .complete_upload_for_mode(&catalog, upload_id, self.core.subject.as_ref(), resolve)
             .await?;
-        self.schedule_completed_upload_reclamation(namespace_id);
+        self.schedule_completed_upload_reclamation();
         Ok(completed)
     }
 
@@ -319,19 +310,15 @@ impl FsWriter {
         skip_all,
         fields(
             operation = "abort_upload",
-            namespace_id = %namespace_id,
+            namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn abort_upload(
-        &self,
-        namespace_id: &NamespaceId,
-        upload_id: &UploadId,
-    ) -> Result<UploadSession> {
+    pub async fn abort_upload(&self, upload_id: &UploadId) -> Result<UploadSession> {
         self.core.record_trace_context(&tracing::Span::current());
         Ok(self
-            .engine(namespace_id)
+            .engine()
             .abort_upload(upload_id, self.core.subject.as_ref())
             .await?)
     }
@@ -344,19 +331,15 @@ impl FsWriter {
         skip_all,
         fields(
             operation = "get_upload_status",
-            namespace_id = %namespace_id,
+            namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn get_upload(
-        &self,
-        namespace_id: &NamespaceId,
-        upload_id: &UploadId,
-    ) -> Result<UploadSessionView> {
+    pub async fn get_upload(&self, upload_id: &UploadId) -> Result<UploadSessionView> {
         self.core.record_trace_context(&tracing::Span::current());
         Ok(self
-            .engine(namespace_id)
+            .engine()
             .get_upload_status(upload_id, self.core.subject.as_ref())
             .await?)
     }

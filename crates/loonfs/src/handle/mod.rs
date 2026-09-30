@@ -1,17 +1,28 @@
 //! Purpose-specific filesystem handles.
 //!
-//! [`FsWriter`] mutates namespaces, [`FsReader`] serves reads, and [`FsMaintenance`]
-//! runs explicit maintenance. Each handle must be opened in the Tokio runtime
-//! where it will be used. Prefer builders that accept
-//! [`StoreConfig`](crate::StoreConfig); use `builder_with_store` only when the
-//! supplied store is safe to use from that runtime.
+//! [`FsWriter`] is the write-capable runtime. It owns the store client, the
+//! caches, the admission budgets, and shutdown. It creates and forks
+//! namespaces, and it opens a [`NamespaceWriter`] for each namespace the host
+//! writes. A `NamespaceWriter` carries one namespace's mutations, uploads,
+//! and snapshots, and its commits go through that namespace's writer session.
+//! The writer's [`NamespaceSessionPolicy`] decides how long each session
+//! stays open. [`FsReader`] serves reads, and [`FsMaintenance`] runs explicit
+//! maintenance.
+//!
+//! Each handle must be opened in the Tokio runtime where it will be used.
+//! Prefer builders that accept [`StoreConfig`](crate::StoreConfig); use
+//! `builder_with_store` only when the supplied store is safe to use from that
+//! runtime.
 
 mod builder_core;
 mod maintenance;
+mod namespace_writer;
 mod reader;
 mod writer;
+mod writer_forwarders;
 
 pub use maintenance::{FsMaintenance, FsMaintenanceBuilder};
+pub use namespace_writer::NamespaceWriter;
 pub use reader::{FsReader, FsReaderBuilder};
 pub use writer::{FsWriter, FsWriterBuilder, NamespaceSessionPolicy};
 

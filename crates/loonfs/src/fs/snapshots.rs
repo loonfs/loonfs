@@ -1,8 +1,8 @@
 //! Snapshot reads and mutations.
 
 use crate::{
-    Checkpoint, CreateSnapshotOptions, DeleteSnapshotResponse, FsReader, FsWriter,
-    ListSnapshotsResponse, NamespaceId, Result, RuntimeError, SnapshotSummary,
+    Checkpoint, CreateSnapshotOptions, DeleteSnapshotResponse, FsReader, ListSnapshotsResponse,
+    NamespaceId, NamespaceWriter, Result, RuntimeError, SnapshotSummary,
 };
 use loonfs_api::PageRequest;
 use loonfs_api::PinId;
@@ -151,7 +151,7 @@ impl FsReader {
     }
 }
 
-impl FsWriter {
+impl NamespaceWriter {
     /// Creates a snapshot of the current namespace state.
     ///
     /// Returns `snapshot_quota_exceeded` and writes nothing when the namespace
@@ -167,34 +167,31 @@ impl FsWriter {
         skip_all,
         fields(
             operation = "snapshot_create",
-            namespace_id = %namespace_id,
+            namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )
     )]
     pub async fn create_snapshot(
         &self,
-        namespace_id: &NamespaceId,
         options: CreateSnapshotOptions,
         max_live: usize,
     ) -> Result<Checkpoint> {
         self.core.record_trace_context(&tracing::Span::current());
-        self.require_administrator(namespace_id).await?;
-        self.ensure_live_snapshot_limit(namespace_id, max_live, 1)
-            .await?;
-        let engine = self.core.writer_engine(&self.bits.identity, namespace_id);
+        self.require_administrator().await?;
+        self.ensure_live_snapshot_limit(max_live, 1).await?;
+        let engine = self
+            .core
+            .writer_engine(&self.bits.identity, &self.namespace_id);
         let result = engine
             .create_snapshot(options.name, options.expires_at_ms)
             .await
             .map_err(RuntimeError::from);
-        let checkpoint = self.finish_namespace_mutation(namespace_id, result)?;
-        if let Err(error) = self
-            .ensure_live_snapshot_limit(namespace_id, max_live, 0)
-            .await
-        {
+        let checkpoint = self.finish_namespace_mutation(result)?;
+        if let Err(error) = self.ensure_live_snapshot_limit(max_live, 0).await {
             if let Err(cleanup_error) = engine.delete_snapshot(&checkpoint.checkpoint_id).await {
                 tracing::warn!(
-                    namespace_id = %namespace_id,
+                    namespace_id = %self.namespace_id,
                     snapshot_id = %checkpoint.checkpoint_id,
                     error = %error,
                     cleanup_error = %cleanup_error,
@@ -208,13 +205,14 @@ impl FsWriter {
 
     async fn ensure_live_snapshot_limit(
         &self,
-        namespace_id: &NamespaceId,
         max_live: usize,
         additional_live: usize,
     ) -> Result<()> {
         let now_ms = self.core.now_ms()?;
         let page_limit = loonfs_api::PaginationPolicy::default().max_limit();
-        let engine = self.core.writer_engine(&self.bits.identity, namespace_id);
+        let engine = self
+            .core
+            .writer_engine(&self.bits.identity, &self.namespace_id);
         let mut live = additional_live;
         let mut cursor = None;
         loop {
@@ -234,7 +232,7 @@ impl FsWriter {
             if live > max_live {
                 return Err(RuntimeError::Core(
                     loonfs_core::Error::SnapshotQuotaExceeded {
-                        namespace_id: namespace_id.clone(),
+                        namespace_id: self.namespace_id.clone(),
                         max_live,
                     },
                 ));
@@ -254,7 +252,7 @@ impl FsWriter {
         skip_all,
         fields(
             operation = "snapshot_extend",
-            namespace_id = %namespace_id,
+            namespace_id = %self.namespace_id,
             snapshot_id = %snapshot_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
@@ -262,16 +260,15 @@ impl FsWriter {
     )]
     pub async fn extend_snapshot(
         &self,
-        namespace_id: &NamespaceId,
         snapshot_id: &PinId,
         requested_expires_at_ms: u64,
         max_lifetime_ms: u64,
     ) -> Result<SnapshotSummary> {
-        self.require_administrator(namespace_id).await?;
+        self.require_administrator().await?;
         self.core.record_trace_context(&tracing::Span::current());
         let result = self
             .core
-            .writer_engine(&self.bits.identity, namespace_id)
+            .writer_engine(&self.bits.identity, &self.namespace_id)
             .extend_snapshot(snapshot_id, requested_expires_at_ms, max_lifetime_ms)
             .await
             .map_err(RuntimeError::from)
@@ -282,7 +279,7 @@ impl FsWriter {
                     ))
                 })
             });
-        self.finish_namespace_mutation(namespace_id, result)
+        self.finish_namespace_mutation(result)
     }
 
     /// Deletes a snapshot pin. A missing id returns `snapshot_not_found`.
@@ -293,25 +290,21 @@ impl FsWriter {
         skip_all,
         fields(
             operation = "snapshot_delete",
-            namespace_id = %namespace_id,
+            namespace_id = %self.namespace_id,
             snapshot_id = %snapshot_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn delete_snapshot(
-        &self,
-        namespace_id: &NamespaceId,
-        snapshot_id: &PinId,
-    ) -> Result<DeleteSnapshotResponse> {
-        self.require_administrator(namespace_id).await?;
+    pub async fn delete_snapshot(&self, snapshot_id: &PinId) -> Result<DeleteSnapshotResponse> {
+        self.require_administrator().await?;
         self.core.record_trace_context(&tracing::Span::current());
         let result = self
             .core
-            .writer_engine(&self.bits.identity, namespace_id)
+            .writer_engine(&self.bits.identity, &self.namespace_id)
             .delete_snapshot(snapshot_id)
             .await
             .map_err(RuntimeError::from);
-        self.finish_namespace_mutation(namespace_id, result)
+        self.finish_namespace_mutation(result)
     }
 }

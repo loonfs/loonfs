@@ -1,10 +1,12 @@
-//! [`FsWriter`]'s path mutations, commits, and the publication pipeline.
+//! [`NamespaceWriter`]'s path mutations and commits, and the publication
+//! pipeline they go through.
 
 use super::core::{ReadCore, WriterBits};
 use crate::publish::{CommitCandidate, CommitRequest, FilesystemOperation, PreparedContent};
 use crate::trace::phase_span;
 use crate::ByteStream;
 use crate::FsWriter;
+use crate::NamespaceWriter;
 use crate::Result;
 use crate::{
     ChangeSeq, Commit, CommitId, CommitOptions, ContentRef, CopyOptions, CreateDirectoryOptions,
@@ -52,6 +54,29 @@ impl FsWriter {
         }
         result
     }
+}
+
+impl NamespaceWriter {
+    /// A mutating engine under this writer's identity.
+    pub(crate) fn engine(&self) -> NamespaceWriterEngine<crate::SharedObjectStore> {
+        self.core
+            .writer_engine(&self.bits.identity, &self.namespace_id)
+    }
+
+    /// Drops everything this runtime caches for the namespace: the read
+    /// caches, and the rebuildable half of its publisher's publish state.
+    pub(crate) fn invalidate_namespace(&self) {
+        self.core
+            .invalidate_namespace_read_cache(&self.namespace_id);
+        self.publisher.invalidate_projection(&self.namespace_id);
+    }
+
+    pub(crate) fn finish_namespace_mutation<T>(&self, result: Result<T>) -> Result<T> {
+        if super::should_invalidate_after_result(&result) {
+            self.invalidate_namespace();
+        }
+        result
+    }
 
     /// Writes file bytes to a path.
     ///
@@ -68,7 +93,7 @@ impl FsWriter {
         fields(
             operation = "put",
             method = "put_file_bytes",
-            namespace_id = %namespace_id,
+            namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
             payload_class = tracing::field::Empty,
@@ -76,7 +101,6 @@ impl FsWriter {
     )]
     pub async fn put_file_bytes(
         &self,
-        namespace_id: &NamespaceId,
         absolute_path: &str,
         bytes: &[u8],
         options: PutFileOptions,
@@ -84,8 +108,8 @@ impl FsWriter {
         let span = tracing::Span::current();
         self.core.record_trace_context(&span);
         span.record("payload_class", crate::trace::payload_class(bytes.len()));
-        let prepared_content = self.prepare_file_bytes_inner(namespace_id, bytes).await?;
-        self.put_file_prepared_inner(namespace_id, absolute_path, prepared_content, options)
+        let prepared_content = self.prepare_file_bytes_inner(bytes).await?;
+        self.put_file_prepared_inner(absolute_path, prepared_content, options)
             .await
     }
 
@@ -104,7 +128,7 @@ impl FsWriter {
         fields(
             operation = "put",
             method = "put_file_stream",
-            namespace_id = %namespace_id,
+            namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
             payload_class = "streamed",
@@ -112,14 +136,13 @@ impl FsWriter {
     )]
     pub async fn put_file_stream(
         &self,
-        namespace_id: &NamespaceId,
         absolute_path: &str,
         body: ByteStream,
         options: PutFileOptions,
     ) -> Result<Commit> {
         self.core.record_trace_context(&tracing::Span::current());
-        let prepared_content = self.prepare_file_stream_inner(namespace_id, body).await?;
-        self.put_file_prepared_inner(namespace_id, absolute_path, prepared_content, options)
+        let prepared_content = self.prepare_file_stream_inner(body).await?;
+        self.put_file_prepared_inner(absolute_path, prepared_content, options)
             .await
     }
 
@@ -136,28 +159,20 @@ impl FsWriter {
         fields(
             operation = "prepare",
             method = "prepare_file_bytes",
-            namespace_id = %namespace_id,
+            namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
             payload_class = tracing::field::Empty,
         )
     )]
-    pub async fn prepare_file_bytes(
-        &self,
-        namespace_id: &NamespaceId,
-        bytes: &[u8],
-    ) -> Result<PreparedContent> {
+    pub async fn prepare_file_bytes(&self, bytes: &[u8]) -> Result<PreparedContent> {
         let span = tracing::Span::current();
         self.core.record_trace_context(&span);
         span.record("payload_class", crate::trace::payload_class(bytes.len()));
-        self.prepare_file_bytes_inner(namespace_id, bytes).await
+        self.prepare_file_bytes_inner(bytes).await
     }
 
-    async fn prepare_file_bytes_inner(
-        &self,
-        namespace_id: &NamespaceId,
-        bytes: &[u8],
-    ) -> Result<PreparedContent> {
+    async fn prepare_file_bytes_inner(&self, bytes: &[u8]) -> Result<PreparedContent> {
         if self
             .bits
             .inline_content
@@ -165,15 +180,15 @@ impl FsWriter {
             .is_some_and(|threshold| bytes.len() <= threshold)
         {
             return Ok(PreparedContent::inline(
-                namespace_id.clone(),
+                self.namespace_id.clone(),
                 bytes::Bytes::copy_from_slice(bytes),
             ));
         }
         let catalog = self
-            .load_namespace_catalog_for_content_preparation(namespace_id)
+            .load_namespace_catalog_for_content_preparation()
             .await?;
         Ok(self
-            .engine(namespace_id)
+            .engine()
             .stage_owned_bytes(
                 &catalog,
                 self.core
@@ -195,32 +210,24 @@ impl FsWriter {
         fields(
             operation = "prepare",
             method = "prepare_file_stream",
-            namespace_id = %namespace_id,
+            namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
             payload_class = "streamed",
         )
     )]
-    pub async fn prepare_file_stream(
-        &self,
-        namespace_id: &NamespaceId,
-        body: ByteStream,
-    ) -> Result<PreparedContent> {
+    pub async fn prepare_file_stream(&self, body: ByteStream) -> Result<PreparedContent> {
         self.core.record_trace_context(&tracing::Span::current());
-        self.prepare_file_stream_inner(namespace_id, body).await
+        self.prepare_file_stream_inner(body).await
     }
 
-    async fn prepare_file_stream_inner(
-        &self,
-        namespace_id: &NamespaceId,
-        mut body: ByteStream,
-    ) -> Result<PreparedContent> {
+    async fn prepare_file_stream_inner(&self, mut body: ByteStream) -> Result<PreparedContent> {
         if let Some(threshold) = self.bits.inline_content.inline_content_threshold_bytes {
             let mut buffered = bytes::BytesMut::with_capacity(threshold + 1);
             while buffered.len() <= threshold {
                 let Some(chunk) = body.next().await else {
                     return Ok(PreparedContent::inline(
-                        namespace_id.clone(),
+                        self.namespace_id.clone(),
                         buffered.freeze(),
                     ));
                 };
@@ -240,10 +247,10 @@ impl FsWriter {
             }
         }
         let catalog = self
-            .load_namespace_catalog_for_content_preparation(namespace_id)
+            .load_namespace_catalog_for_content_preparation()
             .await?;
         Ok(self
-            .engine(namespace_id)
+            .engine()
             .stage_owned_stream(
                 &catalog,
                 self.core
@@ -271,7 +278,7 @@ impl FsWriter {
         fields(
             operation = "put",
             method = "put_file_prepared",
-            namespace_id = %namespace_id,
+            namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
             payload_class = tracing::field::Empty,
@@ -279,7 +286,6 @@ impl FsWriter {
     )]
     pub async fn put_file_prepared(
         &self,
-        namespace_id: &NamespaceId,
         absolute_path: &str,
         prepared_content: PreparedContent,
         options: PutFileOptions,
@@ -292,35 +298,31 @@ impl FsWriter {
                 usize::try_from(prepared_content.content_ref().size_bytes).unwrap_or(usize::MAX),
             ),
         );
-        self.put_file_prepared_inner(namespace_id, absolute_path, prepared_content, options)
+        self.put_file_prepared_inner(absolute_path, prepared_content, options)
             .await
     }
 
     async fn put_file_prepared_inner(
         &self,
-        namespace_id: &NamespaceId,
         absolute_path: &str,
         prepared_content: PreparedContent,
         options: PutFileOptions,
     ) -> Result<Commit> {
         let content_ref = prepared_content.content_ref().clone();
-        self.commit_candidate_inner(
-            namespace_id,
-            CommitCandidate::prepared(
-                single_operation(
-                    &options.commit,
-                    FilesystemOperation::PutFile {
-                        path: loonfs_core::path::parse_mutation_path(absolute_path)?,
-                        content_ref: Some(content_ref),
-                        inline_content: None,
-                        behavior: options.behavior,
-                        expected_inode_id: options.expected_inode_id,
-                        expected_revision_no: options.expected_revision_no,
-                    },
-                ),
-                vec![prepared_content],
+        self.commit_candidate_inner(CommitCandidate::prepared(
+            single_operation(
+                &options.commit,
+                FilesystemOperation::PutFile {
+                    path: loonfs_core::path::parse_mutation_path(absolute_path)?,
+                    content_ref: Some(content_ref),
+                    inline_content: None,
+                    behavior: options.behavior,
+                    expected_inode_id: options.expected_inode_id,
+                    expected_revision_no: options.expected_revision_no,
+                },
             ),
-        )
+            vec![prepared_content],
+        ))
         .await
     }
 
@@ -340,7 +342,7 @@ impl FsWriter {
         fields(
             operation = "put",
             method = "put_file_content_ref",
-            namespace_id = %namespace_id,
+            namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
             payload_class = tracing::field::Empty,
@@ -348,7 +350,6 @@ impl FsWriter {
     )]
     pub async fn put_file_content_ref(
         &self,
-        namespace_id: &NamespaceId,
         absolute_path: &str,
         content_ref: ContentRef,
         options: PutFileOptions,
@@ -361,10 +362,8 @@ impl FsWriter {
                 usize::try_from(content_ref.size_bytes).unwrap_or(usize::MAX),
             ),
         );
-        let prepared_content = self
-            .prepare_content_ref_inner(namespace_id, content_ref)
-            .await?;
-        self.put_file_prepared_inner(namespace_id, absolute_path, prepared_content, options)
+        let prepared_content = self.prepare_content_ref_inner(content_ref).await?;
+        self.put_file_prepared_inner(absolute_path, prepared_content, options)
             .await
     }
 
@@ -382,17 +381,13 @@ impl FsWriter {
         fields(
             operation = "prepare",
             method = "prepare_content_ref",
-            namespace_id = %namespace_id,
+            namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
             payload_class = tracing::field::Empty,
         )
     )]
-    pub async fn prepare_content_ref(
-        &self,
-        namespace_id: &NamespaceId,
-        content_ref: ContentRef,
-    ) -> Result<PreparedContent> {
+    pub async fn prepare_content_ref(&self, content_ref: ContentRef) -> Result<PreparedContent> {
         let span = tracing::Span::current();
         self.core.record_trace_context(&span);
         span.record(
@@ -401,19 +396,14 @@ impl FsWriter {
                 usize::try_from(content_ref.size_bytes).unwrap_or(usize::MAX),
             ),
         );
-        self.prepare_content_ref_inner(namespace_id, content_ref)
-            .await
+        self.prepare_content_ref_inner(content_ref).await
     }
 
-    async fn prepare_content_ref_inner(
-        &self,
-        namespace_id: &NamespaceId,
-        content_ref: ContentRef,
-    ) -> Result<PreparedContent> {
+    async fn prepare_content_ref_inner(&self, content_ref: ContentRef) -> Result<PreparedContent> {
         let catalog = self
-            .load_namespace_catalog_for_content_preparation(namespace_id)
+            .load_namespace_catalog_for_content_preparation()
             .await?;
-        let engine = self.engine(namespace_id);
+        let engine = self.engine();
         let (owner, context) = self
             .core
             .pinned_metadata_read(&content_ref.owner_namespace_id)
@@ -469,21 +459,20 @@ impl FsWriter {
         fields(
             operation = "prepare",
             method = "prepare_content_token",
-            namespace_id = %namespace_id,
+            namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )
     )]
     pub async fn prepare_content_token(
         &self,
-        namespace_id: &NamespaceId,
         secret: &str,
         token: &crate::content_tokens::ContentToken,
         now_ms: u64,
     ) -> Result<std::result::Result<PreparedContent, loonfs_core::content::ContentTokenError>> {
         self.core.record_trace_context(&tracing::Span::current());
         let catalog = self
-            .load_namespace_catalog_for_content_preparation(namespace_id)
+            .load_namespace_catalog_for_content_preparation()
             .await?;
         Ok(loonfs_core::content::verify_content_token(
             secret, &catalog, token, now_ms,
@@ -492,9 +481,10 @@ impl FsWriter {
 
     pub(crate) async fn load_namespace_catalog_for_content_preparation(
         &self,
-        namespace_id: &NamespaceId,
     ) -> Result<loonfs_core::control::VerifiedNamespaceCatalogEntry> {
-        self.core.load_namespace_catalog_cached(namespace_id).await
+        self.core
+            .load_namespace_catalog_cached(&self.namespace_id)
+            .await
     }
 
     /// Creates a directory at an absolute path.
@@ -506,20 +496,18 @@ impl FsWriter {
         fields(
             operation = "apply_commit",
             method = "create_directory",
-            namespace_id = %namespace_id,
+            namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )
     )]
     pub async fn create_directory(
         &self,
-        namespace_id: &NamespaceId,
         absolute_path: &str,
         options: CreateDirectoryOptions,
     ) -> Result<Commit> {
         self.core.record_trace_context(&tracing::Span::current());
         self.commit_one(
-            namespace_id,
             &options.commit,
             FilesystemOperation::CreateDirectory {
                 path: loonfs_core::path::parse_mutation_path(absolute_path)?,
@@ -543,20 +531,14 @@ impl FsWriter {
         fields(
             operation = "apply_commit",
             method = "delete_path",
-            namespace_id = %namespace_id,
+            namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn delete_path(
-        &self,
-        namespace_id: &NamespaceId,
-        absolute_path: &str,
-        options: DeleteOptions,
-    ) -> Result<Commit> {
+    pub async fn delete_path(&self, absolute_path: &str, options: DeleteOptions) -> Result<Commit> {
         self.core.record_trace_context(&tracing::Span::current());
         self.commit_one(
-            namespace_id,
             &options.commit,
             FilesystemOperation::DeletePath {
                 path: loonfs_core::path::parse_mutation_path(absolute_path)?,
@@ -576,21 +558,19 @@ impl FsWriter {
         fields(
             operation = "apply_commit",
             method = "move_path",
-            namespace_id = %namespace_id,
+            namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )
     )]
     pub async fn move_path(
         &self,
-        namespace_id: &NamespaceId,
         source_path: &str,
         destination_path: &str,
         options: MoveOptions,
     ) -> Result<Commit> {
         self.core.record_trace_context(&tracing::Span::current());
         self.commit_one(
-            namespace_id,
             &options.commit,
             FilesystemOperation::MovePath {
                 source_path: loonfs_core::path::parse_mutation_path(source_path)?,
@@ -615,21 +595,19 @@ impl FsWriter {
         fields(
             operation = "apply_commit",
             method = "copy_path",
-            namespace_id = %namespace_id,
+            namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )
     )]
     pub async fn copy_path(
         &self,
-        namespace_id: &NamespaceId,
         source_path: &str,
         destination_path: &str,
         options: CopyOptions,
     ) -> Result<Commit> {
         self.core.record_trace_context(&tracing::Span::current());
         self.commit_one(
-            namespace_id,
             &options.commit,
             FilesystemOperation::CopyPath {
                 source_path: loonfs_core::path::parse_mutation_path(source_path)?,
@@ -653,21 +631,19 @@ impl FsWriter {
         fields(
             operation = "apply_commit",
             method = "restore_revision",
-            namespace_id = %namespace_id,
+            namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )
     )]
     pub async fn restore_revision(
         &self,
-        namespace_id: &NamespaceId,
         absolute_path: &str,
         source_revision_no: RevisionNo,
         options: RestoreRevisionOptions,
     ) -> Result<Commit> {
         self.core.record_trace_context(&tracing::Span::current());
         self.commit_one(
-            namespace_id,
             &options.commit,
             FilesystemOperation::RestoreRevision {
                 path: loonfs_core::path::parse_mutation_path(absolute_path)?,
@@ -691,20 +667,18 @@ impl FsWriter {
         fields(
             operation = "apply_commit",
             method = "update_attributes",
-            namespace_id = %namespace_id,
+            namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )
     )]
     pub async fn update_attributes(
         &self,
-        namespace_id: &NamespaceId,
         absolute_path: &str,
         options: UpdateAttributesOptions,
     ) -> Result<Commit> {
         self.core.record_trace_context(&tracing::Span::current());
         self.commit_one(
-            namespace_id,
             &options.commit,
             FilesystemOperation::UpdateAttributes {
                 path: loonfs_core::path::parse_mutation_path(absolute_path)?,
@@ -726,20 +700,18 @@ impl FsWriter {
         fields(
             operation = "apply_commit",
             method = "update_access",
-            namespace_id = %namespace_id,
+            namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )
     )]
     pub async fn update_access(
         &self,
-        namespace_id: &NamespaceId,
         absolute_path: &str,
         options: UpdateAccessOptions,
     ) -> Result<Commit> {
         self.core.record_trace_context(&tracing::Span::current());
         self.commit_one(
-            namespace_id,
             &options.commit,
             FilesystemOperation::UpdateAccess {
                 path: loonfs_api::AbsolutePath::parse(absolute_path)
@@ -762,14 +734,13 @@ impl FsWriter {
         fields(
             operation = "apply_commit",
             method = "undelete",
-            namespace_id = %namespace_id,
+            namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )
     )]
     pub async fn undelete(
         &self,
-        namespace_id: &NamespaceId,
         inode_id: InodeId,
         deletion_seq: ChangeSeq,
         destination_path: Option<&str>,
@@ -782,7 +753,6 @@ impl FsWriter {
             .map(loonfs_core::path::parse_mutation_path)
             .transpose()?;
         self.commit_one(
-            namespace_id,
             &options.commit,
             FilesystemOperation::Undelete {
                 inode_id,
@@ -810,18 +780,14 @@ impl FsWriter {
         fields(
             operation = "apply_commit",
             method = "create_commit",
-            namespace_id = %namespace_id,
+            namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn create_commit(
-        &self,
-        namespace_id: &NamespaceId,
-        request: CommitRequest,
-    ) -> Result<Commit> {
+    pub async fn create_commit(&self, request: CommitRequest) -> Result<Commit> {
         self.core.record_trace_context(&tracing::Span::current());
-        self.commit_candidate_inner(namespace_id, CommitCandidate::new(request))
+        self.commit_candidate_inner(CommitCandidate::new(request))
             .await
     }
 
@@ -837,23 +803,19 @@ impl FsWriter {
         fields(
             operation = "apply_commit",
             method = "commit_prepared",
-            namespace_id = %namespace_id,
+            namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )
     )]
     pub async fn commit_prepared(
         &self,
-        namespace_id: &NamespaceId,
         request: CommitRequest,
         prepared_content: Vec<PreparedContent>,
     ) -> Result<Commit> {
         self.core.record_trace_context(&tracing::Span::current());
-        self.commit_candidate_inner(
-            namespace_id,
-            CommitCandidate::prepared(request, prepared_content),
-        )
-        .await
+        self.commit_candidate_inner(CommitCandidate::prepared(request, prepared_content))
+            .await
     }
 
     /// Publishes one candidate through the core's publication service (see
@@ -869,23 +831,18 @@ impl FsWriter {
         fields(
             operation = "apply_commit",
             method = "commit_candidate",
-            namespace_id = %namespace_id,
+            namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn commit_candidate(
-        &self,
-        namespace_id: &NamespaceId,
-        candidate: CommitCandidate,
-    ) -> Result<Commit> {
+    pub async fn commit_candidate(&self, candidate: CommitCandidate) -> Result<Commit> {
         self.core.record_trace_context(&tracing::Span::current());
-        self.commit_candidate_inner(namespace_id, candidate).await
+        self.commit_candidate_inner(candidate).await
     }
 
     pub(crate) async fn commit_candidate_inner(
         &self,
-        namespace_id: &NamespaceId,
         candidate: CommitCandidate,
     ) -> Result<Commit> {
         let candidate = match &self.core.subject {
@@ -893,21 +850,17 @@ impl FsWriter {
             None => candidate,
         };
         self.publisher
-            .submit_candidate(namespace_id.clone(), candidate)
+            .submit_candidate(self.namespace_id.clone(), candidate)
             .await
     }
 
     async fn commit_one(
         &self,
-        namespace_id: &NamespaceId,
         commit: &CommitOptions,
         operation: FilesystemOperation,
     ) -> Result<Commit> {
-        self.commit_candidate_inner(
-            namespace_id,
-            CommitCandidate::new(single_operation(commit, operation)),
-        )
-        .await
+        self.commit_candidate_inner(CommitCandidate::new(single_operation(commit, operation)))
+            .await
     }
 }
 

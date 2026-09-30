@@ -1,6 +1,6 @@
 //! The write-capable runtime handle.
 
-use super::{owning_runtime, FsReader, HandleBuilderCore};
+use super::{owning_runtime, FsReader, HandleBuilderCore, NamespaceWriter};
 use crate::fs::{ReadCore, WriterBits, WriterIdentity};
 use crate::metrics::{MetricsRecorder, ObjectStoreMetricsRecorder};
 use crate::publisher::{
@@ -33,8 +33,10 @@ pub enum NamespaceSessionPolicy {
 
 /// Write-capable runtime handle for applications and servers.
 ///
-/// `FsWriter` owns the writer identity, mutations, uploads, namespace
-/// lifecycle, and commit publication.
+/// `FsWriter` owns the writer identity, the store client, the caches, the
+/// admission budgets, and shutdown. It creates and forks namespaces. It opens
+/// a [`NamespaceWriter`] for each namespace it writes, and mutations,
+/// uploads, and snapshots live on that handle.
 ///
 /// Build the handle inside the Tokio runtime that will use it. Do not share a
 /// provider client across unrelated runtimes; build another handle from
@@ -117,14 +119,15 @@ impl FsWriter {
         self.publisher.clone()
     }
 
-    /// Opens a session for `namespace_id`, or returns if one is open.
+    /// Opens the writer session for `namespace_id` and returns a handle to it.
     ///
-    /// Fails with `writer_capacity_exceeded` when the table is full and no
-    /// session can be closed to make room (see
+    /// If the session is already open, the handle shares it. Opening does no
+    /// store IO and acquires no writer epoch; the session's first publish
+    /// does. Fails with `writer_capacity_exceeded` when the table is full and
+    /// no session can be closed to make room (see
     /// [`FsWriterBuilder::max_writer_sessions`]), with
     /// `writer_session_closed` while a close is draining, and with
-    /// `shutting_down` after shutdown begins. Opening acquires no writer
-    /// epoch; the first publish does.
+    /// `shutting_down` after shutdown begins.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.open_namespace",
@@ -137,10 +140,10 @@ impl FsWriter {
             store_kind = tracing::field::Empty,
         )
     )]
-    pub fn open_namespace(&self, namespace_id: &NamespaceId) -> Result<()> {
+    pub fn open_namespace(&self, namespace_id: &NamespaceId) -> Result<NamespaceWriter> {
         self.core.record_trace_context(&tracing::Span::current());
         self.publisher.open_namespace(namespace_id)?;
-        Ok(())
+        Ok(NamespaceWriter::new(self, namespace_id))
     }
 
     /// Closes and drains the session for `namespace_id`.
@@ -166,24 +169,6 @@ impl FsWriter {
     ) -> Result<CloseNamespaceReport> {
         self.core.record_trace_context(&tracing::Span::current());
         Ok(self.publisher.close_namespace(namespace_id).await?)
-    }
-
-    /// Waits for this writer's in-flight WAL-tail fold for `namespace_id`.
-    #[tracing::instrument(
-        level = "debug",
-        name = "loonfs.wait_for_fold",
-        err(level = "debug"),
-        skip_all,
-        fields(
-            operation = "wait_for_fold",
-            namespace_id = %namespace_id,
-            mode = tracing::field::Empty,
-            store_kind = tracing::field::Empty,
-        )
-    )]
-    pub async fn wait_for_fold(&self, namespace_id: &NamespaceId) -> Result<()> {
-        self.core.record_trace_context(&tracing::Span::current());
-        self.publisher.wait_for_fold(namespace_id).await
     }
 
     /// Returns the writer session state for `namespace_id`.
@@ -230,8 +215,8 @@ impl FsWriter {
         self.core.now_ms()
     }
 
-    // Namespace lifecycle lives in `fs/namespaces.rs`; mutation, commit,
-    // and upload operations in `fs/writes.rs` and `fs/uploads.rs`.
+    // Namespace create and fork live in `fs/namespaces.rs`. The deprecated
+    // methods that take a namespace id live in `writer_forwarders.rs`.
 
     /// Builds a maintenance handle over this writer's read core and caches.
     /// Uses the publisher's last observed inline byte count for fold decisions.
