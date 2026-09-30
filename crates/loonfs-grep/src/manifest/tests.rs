@@ -1,7 +1,7 @@
 //! Publication confirmation at the metadata budget boundary.
 
 use super::*;
-use loonfs::{Deadline, StoreFailureClass, METADATA_PUBLICATION_BUDGET_MS};
+use loonfs::{CoreError, Deadline, RuntimeError, METADATA_PUBLICATION_BUDGET_MS};
 use loonfs_api::{ManifestNo, RunNo};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::clock::ManualClock;
@@ -60,11 +60,13 @@ async fn publication_returning_at_budget(drop_acknowledgement: bool) {
         let outcome =
             publish_grep_manifest(&store, Some(&first), &state(ManifestNo(2)), &deadline).await;
         if elapsed_ms > METADATA_PUBLICATION_BUDGET_MS {
-            assert!(matches!(outcome, Err(crate::GrepError::StoreUnavailable {
-                object_key: actual_key, message, class: StoreFailureClass::RetryableTransport,
-            }) if actual_key == object_key && message == format!(
-                "manifest publication outcome is unknown after {elapsed_ms}ms (budget {METADATA_PUBLICATION_BUDGET_MS}ms)"
-            )));
+            assert!(
+                matches!(outcome, Err(crate::GrepError::Runtime(RuntimeError::Core(CoreError::OutcomeUnknown {
+                    object_key: actual_key, message,
+                }))) if actual_key == object_key && message == format!(
+                    "the publication took {elapsed_ms}ms, over its {METADATA_PUBLICATION_BUDGET_MS}ms budget"
+                ))
+            );
             assert_eq!(store.inner().inner().counts().compare_and_swaps, 0);
         } else {
             assert_eq!(outcome.expect("within budget").manifest_no(), ManifestNo(2));

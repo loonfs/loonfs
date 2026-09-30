@@ -4,7 +4,7 @@
 
 use bytes::Bytes;
 use loonfs::Deadline;
-use loonfs_api::{ChangeSeq, ManifestNo, NamespaceId, RunNo};
+use loonfs_api::{ChangeSeq, ErrorCode, ManifestNo, NamespaceId, RunNo};
 use loonfs_grep::keyspace::{grep_prefix, hint_key, manifest_key, manifests_prefix};
 use loonfs_grep::manifest::{
     encode_grep_hint, encode_grep_manifest, load_current_grep_manifest, load_grep_manifest,
@@ -343,7 +343,7 @@ async fn ambiguous_manifest_puts_reconcile_the_exact_landed_state() {
         if apply {
             assert_eq!(result.expect("landed manifest").manifest_state(), &next);
         } else {
-            assert!(matches!(result, Err(GrepError::StoreUnavailable { .. })));
+            assert!(matches!(result, Err(error) if error.code() == ErrorCode::OutcomeUnknown));
             let current = load_current_grep_manifest(&store, &namespace_id)
                 .await
                 .expect("reload")
@@ -424,7 +424,7 @@ async fn regressing_successors_fail_on_publication_and_discovery() {
 #[tokio::test]
 async fn a_late_ambiguous_put_cannot_confirm_a_recreated_manifest() {
     use crate::common::GrepHost;
-    use loonfs::{CreateNamespaceOptions, FsWriter, SharedObjectStore, StoreFailureClass};
+    use loonfs::{CoreError, CreateNamespaceOptions, FsWriter, RuntimeError, SharedObjectStore};
     use loonfs_test_support::stores::{BlockingStore, MetadataMapStore};
 
     let directory = tempfile::tempdir().expect("directory");
@@ -505,9 +505,11 @@ async fn a_late_ambiguous_put_cannot_confirm_a_recreated_manifest() {
             blocked.release();
         }
     );
-    assert!(matches!(outcome, Err(GrepError::StoreUnavailable {
-        object_key: actual_key, class: StoreFailureClass::RetryableTransport, ..
-    }) if actual_key == object_key));
+    assert!(
+        matches!(outcome, Err(GrepError::Runtime(RuntimeError::Core(CoreError::OutcomeUnknown {
+        object_key: actual_key, ..
+    }))) if actual_key == object_key)
+    );
     assert_eq!(blocked.inner().remaining(), 0);
     assert_eq!(recorded.counts().create_if_absent_puts, 1);
     assert_eq!(recorded.counts().compare_and_swaps, 0);

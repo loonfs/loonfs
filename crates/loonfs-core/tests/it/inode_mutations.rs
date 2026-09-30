@@ -297,46 +297,49 @@ async fn move_requires_the_current_binding_version() {
     );
     assert_eq!(details.actual_binding_version, Some(fresh_version.clone()));
 
-    for (path, inode_id, actual) in [
-        (
-            "/docs/renamed.txt",
-            report_inode_id,
-            Some(fresh_version.clone()),
-        ),
-        ("/", ROOT_INODE_ID, None),
-    ] {
-        let error = submit_commit(
-            &store,
-            &namespace_id,
-            CommitRequest::single(
-                test_commit_id(Some("binding-precondition")),
-                loonfs_test_support::test_actor(),
-                None,
-                FilesystemOperation::CreateDirectory {
-                    path: AbsolutePath::parse("/unwritten").expect("path"),
-                    parents: false,
-                },
-            )
-            .preconditions(vec![loonfs_api::CommitPrecondition::PathBinding {
-                path: AbsolutePath::parse(path).expect("path"),
-                expected_inode_id: inode_id,
-                expected_binding_version: Some(stale_version.clone()),
-            }]),
-            &context,
+    let binding_precondition = |path: &str, inode_id| {
+        CommitRequest::single(
+            test_commit_id(Some("binding-precondition")),
+            loonfs_test_support::test_actor(),
+            None,
+            FilesystemOperation::CreateDirectory {
+                path: AbsolutePath::parse("/unwritten").expect("path"),
+                parents: false,
+            },
         )
-        .await
-        .expect_err("binding precondition must fail");
-        assert_eq!(error.code(), ErrorCode::BindingVersionMismatch);
-        let details = error.details().expect("precondition details");
-        assert_eq!(details.precondition_index, Some(0));
-        assert_eq!(details.operation_index, None);
-        assert_eq!(details.inode_id, Some(inode_id));
-        assert_eq!(
-            details.expected_binding_version,
-            Some(stale_version.clone())
-        );
-        assert_eq!(details.actual_binding_version, actual);
-    }
+        .preconditions(vec![loonfs_api::CommitPrecondition::PathBinding {
+            path: AbsolutePath::parse(path).expect("path"),
+            expected_inode_id: inode_id,
+            expected_binding_version: Some(stale_version.clone()),
+        }])
+    };
+    let error = submit_commit(
+        &store,
+        &namespace_id,
+        binding_precondition("/docs/renamed.txt", report_inode_id),
+        &context,
+    )
+    .await
+    .expect_err("binding precondition must fail");
+    assert_eq!(error.code(), ErrorCode::BindingVersionMismatch);
+    let details = error.details().expect("precondition details");
+    assert_eq!(details.precondition_index, Some(0));
+    assert_eq!(details.operation_index, None);
+    assert_eq!(details.inode_id, Some(report_inode_id));
+    assert_eq!(
+        details.expected_binding_version,
+        Some(stale_version.clone())
+    );
+    assert_eq!(details.actual_binding_version, Some(fresh_version.clone()));
+    let error = submit_commit(
+        &store,
+        &namespace_id,
+        binding_precondition("/", ROOT_INODE_ID),
+        &context,
+    )
+    .await
+    .expect_err("the root has no binding version to expect");
+    assert_eq!(error.code(), ErrorCode::InvalidRequest);
 
     submit_operation(
         &store,

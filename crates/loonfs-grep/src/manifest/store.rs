@@ -9,7 +9,7 @@ use super::state::{GrepHint, GrepManifestState};
 use crate::keyspace::{hint_key, manifest_key};
 use bytes::Bytes;
 use loonfs::Deadline;
-use loonfs::{StoreFailureClass, METADATA_PUBLICATION_BUDGET_MS};
+use loonfs::{CoreError, StoreFailureClass, METADATA_PUBLICATION_BUDGET_MS};
 use loonfs_api::{ManifestNo, NamespaceId};
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 
@@ -207,19 +207,24 @@ pub async fn publish_grep_manifest<S: ObjectStore + ?Sized>(
             match load_grep_manifest(store, namespace_id, next.manifest_no()).await? {
                 Some(landed) if landed.payload() == next => {}
                 Some(_) => return Err(GrepManifestError::Conflict { object_key }.into()),
-                None => return Err(store_error(&object_key, &error).into()),
+                None => {
+                    return Err(CoreError::OutcomeUnknown {
+                        object_key,
+                        message: error.public_message().into_owned(),
+                    }
+                    .into())
+                }
             }
         }
         Err(error) => return Err(store_error(&object_key, &error).into()),
     }
     let elapsed_ms = deadline.elapsed_ms();
     if elapsed_ms > METADATA_PUBLICATION_BUDGET_MS {
-        return Err(GrepManifestError::Store {
+        return Err(CoreError::OutcomeUnknown {
             object_key,
             message: format!(
-                "manifest publication outcome is unknown after {elapsed_ms}ms (budget {METADATA_PUBLICATION_BUDGET_MS}ms)",
+                "the publication took {elapsed_ms}ms, over its {METADATA_PUBLICATION_BUDGET_MS}ms budget",
             ),
-            class: StoreFailureClass::RetryableTransport,
         }
         .into());
     }

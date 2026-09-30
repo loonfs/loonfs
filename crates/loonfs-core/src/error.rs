@@ -111,7 +111,7 @@ pub enum CoreError {
     ExpectedFile { target: String, kind: InodeKind },
     #[error("expected directory at `{target}` but found `{kind}`")]
     ExpectedDirectory { target: String, kind: InodeKind },
-    #[error("cannot mutate root path")]
+    #[error("the root cannot be mutated and has no binding version")]
     RootMutationForbidden,
     #[error("{}", destination_exists_message(.path, .existing_display_name.as_deref()))]
     DestinationExists {
@@ -126,7 +126,7 @@ pub enum CoreError {
     BindingVersionMismatch {
         inode_id: InodeId,
         expected_binding_version: BindingVersion,
-        actual_binding_version: Option<BindingVersion>,
+        actual_binding_version: BindingVersion,
         precondition_index: Option<u32>,
     },
     #[error("commit id conflict for `{commit_id}`")]
@@ -177,8 +177,8 @@ pub enum CoreError {
         max_live: usize,
     },
     #[error(
-        "metadata publication budget exceeded after {elapsed_ms}ms (budget {budget_ms}ms); \
-         the manifest was not published"
+        "metadata publication ran out of its {budget_ms}ms budget after {elapsed_ms}ms \
+         and stopped before its next write"
     )]
     MetadataPublicationBudgetExceeded { elapsed_ms: u64, budget_ms: u64 },
     #[error("invalid gc configuration: {0}")]
@@ -223,6 +223,8 @@ pub enum CoreError {
         message: String,
         class: StoreFailureClass,
     },
+    #[error("the outcome of the write to `{object_key}` is unknown: {message}")]
+    OutcomeUnknown { object_key: String, message: String },
     #[error("failed to encode `{object_key}`: {message}")]
     Codec { object_key: String, message: String },
     /// Non-store internal failure (codec, overflow, invariant breach). Same
@@ -402,6 +404,7 @@ impl CoreError {
                 classify_store_failure(*class)
             }
             CoreError::WalPublish(error) => error.code(),
+            CoreError::OutcomeUnknown { .. } => ErrorCode::OutcomeUnknown,
             CoreError::InvalidPath(_)
             | CoreError::RootMutationForbidden
             | CoreError::SubjectRequired { .. }
@@ -551,6 +554,7 @@ impl CoreError {
             | CoreError::NamespaceCorrupt(_)
             | CoreError::WriterFenced(_)
             | CoreError::Codec { .. }
+            | CoreError::OutcomeUnknown { .. }
             | CoreError::Internal(_)
             | CoreError::NamespaceExists { .. }
             | CoreError::NamespaceDeleted { .. }
@@ -623,7 +627,7 @@ impl CoreError {
             } => Some(ErrorDetails {
                 inode_id: Some(*inode_id),
                 expected_binding_version: Some(expected_binding_version.clone()),
-                actual_binding_version: actual_binding_version.clone(),
+                actual_binding_version: Some(actual_binding_version.clone()),
                 precondition_index: *precondition_index,
                 ..ErrorDetails::default()
             }),
@@ -730,14 +734,12 @@ impl From<crate::control_update::ControlUpdateError> for CoreError {
     fn from(value: crate::control_update::ControlUpdateError) -> Self {
         use crate::control_update::ControlUpdateError;
         match value {
-            ControlUpdateError::Store {
+            ControlUpdateError::OutcomeUnknown {
                 object_key,
                 message,
-                class,
-            } => CoreError::Store {
+            } => CoreError::OutcomeUnknown {
                 object_key,
                 message,
-                class,
             },
         }
     }
@@ -774,6 +776,7 @@ mod tests {
             ErrorCode::CommitOutcomeUnknown.kind(),
             ErrorKind::OutcomeUnknown
         );
+        assert_eq!(ErrorCode::OutcomeUnknown.kind(), ErrorKind::OutcomeUnknown);
         assert_eq!(
             ErrorCode::NamespaceCorrupt.kind(),
             ErrorKind::DataCorruption

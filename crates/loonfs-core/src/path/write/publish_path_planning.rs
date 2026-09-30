@@ -130,7 +130,7 @@ pub(super) fn check_binding_version<S: ObjectStore + ?Sized>(
         return Err(CoreError::BindingVersionMismatch {
             inode_id: resolved.inode_id,
             expected_binding_version: expected_binding_version.clone(),
-            actual_binding_version: Some(binding_version::encode(current, view.namespace_id)),
+            actual_binding_version: binding_version::encode(current, view.namespace_id),
             precondition_index: None,
         });
     }

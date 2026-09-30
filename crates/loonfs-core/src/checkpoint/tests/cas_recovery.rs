@@ -37,8 +37,7 @@ async fn a_manifest_put_returning_after_its_budget_has_an_unknown_outcome() {
         .expect_err("late put must not acknowledge publication");
     assert!(matches!(
         error,
-        CoreError::Store { object_key: actual_key, class: crate::error::StoreFailureClass::RetryableTransport, .. }
-            if actual_key == object_key
+        CoreError::OutcomeUnknown { object_key: actual_key, .. } if actual_key == object_key
     ));
     assert_eq!(store.inner().counts().create_if_absent_puts, 1);
     assert_eq!(store.inner().counts().compare_and_swaps, 0);
@@ -59,6 +58,43 @@ async fn a_manifest_put_returning_after_its_budget_has_an_unknown_outcome() {
         .await
         .expect("landed manifest")
         .is_some());
+}
+
+#[tokio::test]
+async fn a_manifest_put_that_lands_nowhere_and_loses_its_answer_has_an_unknown_outcome() {
+    let directory = tempdir().expect("directory");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace");
+    let store = LocalFsStore::new(directory.path()).expect("store");
+    create(&store, &namespace_id, &test_context())
+        .await
+        .expect("create");
+    let current = load_current_manifest(&store, &namespace_id)
+        .await
+        .expect("current");
+    let mut payload = current.state.envelope.payload().clone();
+    payload.manifest_no = payload.manifest_no.successor().expect("next manifest");
+    let object_key = metadata_manifest_object(&namespace_id, &payload.manifest_no);
+    let store = FailStore::new(
+        store,
+        KeyPredicate::exact(&object_key),
+        OperationClass::PutCreateIfAbsent,
+        InjectedError::Transport("lost request".to_owned()),
+    );
+    store.fail_next(1);
+    let error = publish_manifest(&store, encode_manifest(payload).expect("manifest"))
+        .await
+        .expect_err("a put nobody can confirm has no answer");
+    assert_eq!(error.code(), ErrorCode::OutcomeUnknown);
+    assert!(matches!(
+        error,
+        CoreError::OutcomeUnknown { object_key: actual_key, .. } if actual_key == object_key
+    ));
+    assert!(store
+        .inner()
+        .head(&object_key)
+        .await
+        .expect("head")
+        .is_none());
 }
 
 #[tokio::test]
@@ -128,12 +164,11 @@ async fn an_ambiguous_manifest_read_back_must_finish_within_its_budget() {
             let outcome =
                 crate::checkpoint::publish::publish_manifest(&store, manifest, &deadline).await;
             if elapsed_ms > METADATA_PUBLICATION_BUDGET_MS {
-                assert!(matches!(outcome, Err(CoreError::Store {
+                assert!(matches!(outcome, Err(CoreError::OutcomeUnknown {
                     object_key: actual_key,
                     message,
-                    class: crate::error::StoreFailureClass::RetryableTransport,
                 }) if actual_key == object_key && message == format!(
-                    "manifest publication outcome is unknown after {elapsed_ms}ms (budget {METADATA_PUBLICATION_BUDGET_MS}ms)"
+                    "the publication took {elapsed_ms}ms, over its {METADATA_PUBLICATION_BUDGET_MS}ms budget"
                 )));
             } else if fork {
                 assert!(matches!(

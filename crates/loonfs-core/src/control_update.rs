@@ -4,7 +4,7 @@ use crate::control_object::{
     expect_identity_field, expect_namespace, load_control_object, ControlObjectLoadError,
     LoadedControl,
 };
-use crate::error::{CoreError, StoreFailureClass};
+use crate::error::CoreError;
 use crate::limits::CONTENTION_RETRY_LIMIT;
 use bytes::Bytes;
 use loonfs_api::wire::control::{
@@ -46,7 +46,7 @@ where
         CasAttempt::Ambiguous(error, context) => match confirm(&error, context).await? {
             WriteEvidence::Landed(outcome) => Ok(Ok(outcome)),
             WriteEvidence::Lost(reason) => Ok(Err(reason)),
-            WriteEvidence::Unknown => Err(E::from(ControlUpdateError::store(&error))),
+            WriteEvidence::Unknown => Err(E::from(ControlUpdateError::outcome_unknown(&error))),
         },
     }
 }
@@ -126,23 +126,18 @@ pub(crate) enum UploadSessionUpdate<T> {
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub(crate) enum ControlUpdateError {
-    #[error("control object store error for `{object_key}`: {message}")]
-    Store {
-        object_key: String,
-        message: String,
-        class: StoreFailureClass,
-    },
+    #[error("the outcome of the write to `{object_key}` is unknown: {message}")]
+    OutcomeUnknown { object_key: String, message: String },
 }
 
 impl ControlUpdateError {
-    fn store(error: &ObjectStoreError) -> Self {
-        Self::Store {
+    fn outcome_unknown(error: &ObjectStoreError) -> Self {
+        Self::OutcomeUnknown {
             object_key: error
                 .object_key()
                 .expect("an ambiguous control write should name its object")
                 .to_owned(),
             message: error.public_message().into_owned(),
-            class: StoreFailureClass::of(error),
         }
     }
 }

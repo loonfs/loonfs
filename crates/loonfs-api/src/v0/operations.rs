@@ -113,7 +113,7 @@ pub struct ErrorDetails {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub expected_binding_version: Option<BindingVersion>,
-    /// Current binding token; absent for the root, which has no binding.
+    /// Current binding token.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub actual_binding_version: Option<BindingVersion>,

@@ -59,7 +59,7 @@ impl Deadline {
             namespace_id = namespace_id.as_str(),
             elapsed_ms,
             budget_ms = METADATA_PUBLICATION_BUDGET_MS,
-            "metadata publication overran its budget; aborting before the manifest put-if-absent",
+            "metadata publication ran out of its budget; stopping before its next write",
         );
         Err(CoreError::MetadataPublicationBudgetExceeded {
             elapsed_ms,
