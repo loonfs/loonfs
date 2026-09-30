@@ -84,9 +84,10 @@ async fn an_unchanged_view_resolves_the_path_once() {
 
     // Without a cached namespace there is no candidate: one ordinary resolution.
     let ordinary = uncached_segment_reader(&store, 0).await;
+    let ordinary_namespace = ordinary.namespace(&namespace_id);
     log.reset();
-    ordinary
-        .get_file_bytes(&namespace_id, PATH)
+    ordinary_namespace
+        .get_file_bytes(PATH)
         .await
         .expect("ordinary read");
     let one_resolution = log.count(OperationClass::Get);
@@ -96,13 +97,14 @@ async fn an_unchanged_view_resolves_the_path_once() {
     );
 
     let speculative = uncached_segment_reader(&store, 8).await;
-    speculative
-        .get_file_bytes(&namespace_id, PATH)
+    let speculative_namespace = speculative.namespace(&namespace_id);
+    speculative_namespace
+        .get_file_bytes(PATH)
         .await
         .expect("read that caches the namespace");
     log.reset();
-    let read = speculative
-        .get_file_bytes(&namespace_id, PATH)
+    let read = speculative_namespace
+        .get_file_bytes(PATH)
         .await
         .expect("speculative read");
     assert_eq!(read.bytes, b"first");
@@ -127,8 +129,9 @@ async fn a_replaced_file_is_not_served_from_the_cached_reference() {
         .build()
         .await
         .expect("build reader");
-    let first = reader
-        .get_file_bytes(&namespace_id, PATH)
+    let namespace = reader.namespace(&namespace_id);
+    let first = namespace
+        .get_file_bytes(PATH)
         .await
         .expect("read that caches the namespace");
     assert_eq!(first.bytes, b"first");
@@ -140,13 +143,13 @@ async fn a_replaced_file_is_not_served_from_the_cached_reference() {
         .await
         .expect("replace file");
 
-    let replaced = reader
-        .get_file_bytes(&namespace_id, PATH)
+    let replaced = namespace
+        .get_file_bytes(PATH)
         .await
         .expect("read after replacement");
     assert_eq!(replaced.bytes, b"again");
-    let settled = reader
-        .get_file_bytes(&namespace_id, PATH)
+    let settled = namespace
+        .get_file_bytes(PATH)
         .await
         .expect("read from the advanced view");
     assert_eq!(settled.bytes, b"again");
@@ -223,11 +226,12 @@ async fn buffered_inline_reads_request_no_content_object_on_either_branch() {
     assert!(result.results[0].is_ok());
     for max_cached_namespaces in [0, 8] {
         let reader = uncached_segment_reader(&store, max_cached_namespaces).await;
+        let namespace = reader.namespace(&namespace_id);
         for (index, value) in values.iter().enumerate() {
             for _ in 0..2 {
                 log.reset();
-                let read = reader
-                    .get_file_bytes(&namespace_id, &format!("/file-{index}"))
+                let read = namespace
+                    .get_file_bytes(&format!("/file-{index}"))
                     .await
                     .expect("inline read");
                 assert_eq!(read.bytes, value.bytes().as_ref());

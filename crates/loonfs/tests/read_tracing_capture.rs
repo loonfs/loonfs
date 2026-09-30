@@ -85,12 +85,13 @@ fn reads_name_their_anchor_and_the_lookup_that_came_back_empty() {
             .await
             .expect("put file");
         let reader = writer.reader();
-        reader
-            .get_path_entry(&namespace_id, "/docs/report.txt", Default::default())
+        let namespace = reader.namespace(&namespace_id);
+        namespace
+            .get_path_entry("/docs/report.txt", Default::default())
             .await
             .expect("stat the file that was just written");
-        let missing = reader
-            .get_path_entry(&namespace_id, "/docs/missing.txt", Default::default())
+        let missing = namespace
+            .get_path_entry("/docs/missing.txt", Default::default())
             .await;
         assert!(missing.is_err(), "a path that was never written is absent");
     });

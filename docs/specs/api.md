@@ -373,14 +373,17 @@ An inode ID is only unique within its namespace. Use `namespace_id` and
 opaque value and MUST NOT create IDs or infer ordering from the numeric suffix.
 
 - The embedded handles and the remote client (`loonfs_client::Client`)
-  expose the same operations under the same names. `loonfs::FsReader` serves
-  reads. `loonfs::FsWriter` creates and forks namespaces, and it opens a
-  `loonfs::NamespaceWriter` for one namespace. `NamespaceWriter` carries that
-  namespace's writes, and its methods take no namespace ID. `FsWriter`,
-  `FsReader`, and the client share the `get_capabilities()` accessor that
-  returns the capability document of section 2.1. For the remote client the
-  document is fetched from `GET /v0/capabilities` and cached; for the embedded
-  handles it is a constant.
+  expose the same operations under the same names. `loonfs::FsReader` and
+  `loonfs::FsWriter` are runtimes. A `loonfs::Namespace` handle acts on one
+  namespace, and its methods take no namespace ID. `FsReader::namespace`
+  returns a `Namespace<ReadOnly>`, which carries that namespace's reads.
+  `FsWriter::open_namespace` returns a `Namespace<Writable>`, which carries
+  the same reads and the namespace's writes. `FsWriter` also creates and forks
+  namespaces. `FsWriter`, `FsReader`, and the client share the
+  `get_capabilities()` accessor that returns the capability document of
+  section 2.1. For the remote client the document is fetched from
+  `GET /v0/capabilities` and cached; for the embedded handles it is a
+  constant.
 - The two surfaces stay aligned by sharing one definition of every option
   struct they both take (`PutFileOptions`, `CreateDirectoryOptions`,
   `DeleteOptions` live in `loonfs-api` and are re-exported by both), not by a
@@ -434,7 +437,7 @@ Inline content becomes durable and visible in the same write
 the commit takes effect when the next numbered WAL segment is written with
 put-if-absent. Accepting a request into a batch does not mean it has committed.
 
-With the embedded `loonfs::NamespaceWriter`, you can prepare content separately
+With an embedded `loonfs::Namespace<Writable>`, you can prepare content separately
 from committing it. Call `prepare_file_bytes` with the file's bytes. Files at or below
 the enabled inline threshold stay in memory; other files are uploaded as
 content objects. To import existing content, call `prepare_content_ref`. The bytes

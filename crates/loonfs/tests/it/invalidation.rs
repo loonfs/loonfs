@@ -203,13 +203,14 @@ async fn fenced_writer_stays_fenced_instead_of_reacquiring() {
         "unexpected error: {still_fenced:?}"
     );
     let reader = writer_a.reader();
-    let entry = reader
-        .get_path_entry(&namespace_id, "/b1.txt", Default::default())
+    let namespace = reader.namespace(&namespace_id);
+    let entry = namespace
+        .get_path_entry("/b1.txt", Default::default())
         .await
         .expect("fencing refreshes the former writer's reader");
     assert_eq!(entry.head_seq, takeover.committed_seq);
-    let bytes = reader
-        .get_file_bytes(&namespace_id, "/b1.txt")
+    let bytes = namespace
+        .get_file_bytes("/b1.txt")
         .await
         .expect("read the new writer's inline content");
     assert_eq!(bytes.entry.head_seq, entry.head_seq);
@@ -550,6 +551,7 @@ async fn a_cached_view_older_than_the_revalidation_bound_rediscovers() {
         .build()
         .await
         .expect("reader");
+    let namespace = reader.namespace(&namespace_id);
     let writer = writer(&store, "revalidation-writer").await;
     writer
         .create_namespace(
@@ -570,15 +572,15 @@ async fn a_cached_view_older_than_the_revalidation_bound_rediscovers() {
         .await
         .expect("commit file");
     writer.publisher().drain().await.expect("finish hints");
-    reader
-        .get_path_entry(&namespace_id, "/file.txt", Default::default())
+    namespace
+        .get_path_entry("/file.txt", Default::default())
         .await
         .expect("seed reader cache");
 
     recording.reset();
     timer.advance_ms(READ_REVALIDATION_BOUND_MS);
-    reader
-        .get_path_entry(&namespace_id, "/file.txt", Default::default())
+    namespace
+        .get_path_entry("/file.txt", Default::default())
         .await
         .expect("rediscover at the revalidation bound");
     let operations = recording.take();
@@ -589,8 +591,8 @@ async fn a_cached_view_older_than_the_revalidation_bound_rediscovers() {
     ));
 
     timer.advance_ms(interval_ms);
-    reader
-        .get_path_entry(&namespace_id, "/file.txt", Default::default())
+    namespace
+        .get_path_entry("/file.txt", Default::default())
         .await
         .expect("revalidate a fresh cached view");
     let operations = recording.take();
@@ -609,9 +611,10 @@ async fn read_across_a_held_successor_probe(
     namespace_id: &NamespaceId,
     pause_ms: u64,
 ) {
+    let namespace = reader.namespace(namespace_id);
     store.inner().block_next();
     let (entry, ()) = futures::join!(
-        reader.get_path_entry(namespace_id, "/file.txt", Default::default()),
+        namespace.get_path_entry("/file.txt", Default::default()),
         async {
             store.inner().wait_until_blocked().await;
             timer.advance_ms(pause_ms);
@@ -645,6 +648,7 @@ async fn warm_answers_are_measured_against_the_previous_check() {
         .build()
         .await
         .expect("reader");
+    let namespace = reader.namespace(&namespace_id);
     let writer = writer(&store, "probe-pause-writer").await;
     writer
         .create_namespace(
@@ -665,8 +669,8 @@ async fn warm_answers_are_measured_against_the_previous_check() {
         .await
         .expect("commit file");
     writer.publisher().drain().await.expect("finish hints");
-    reader
-        .get_path_entry(&namespace_id, "/file.txt", Default::default())
+    namespace
+        .get_path_entry("/file.txt", Default::default())
         .await
         .expect("cache a view");
     let manifest_no = loonfs_core::control::load_namespace_current_manifest(&store, &namespace_id)
@@ -699,8 +703,8 @@ async fn warm_answers_are_measured_against_the_previous_check() {
     // That check replaced the first one, which is now past the bound. A read
     // inside the interval still probes only the WAL.
     timer.advance_ms(interval_ms - 2);
-    reader
-        .get_path_entry(&namespace_id, "/file.txt", Default::default())
+    namespace
+        .get_path_entry("/file.txt", Default::default())
         .await
         .expect("read inside the interval");
     crate::common::assert_wal_probe(recording.take(), &namespace_id, next_wal_no);
@@ -768,6 +772,8 @@ async fn a_seeded_view_carries_the_writers_basis_confirmation() {
         .open_namespace(&namespace_id)
         .expect("open namespace");
     let reader = writer.reader();
+    let other_namespace = reader.namespace(&other_id);
+    let namespace = reader.namespace(&namespace_id);
     for id in [&namespace_id, &other_id] {
         writer
             .create_namespace(
@@ -784,7 +790,7 @@ async fn a_seeded_view_carries_the_writers_basis_confirmation() {
             PutFileOptions::new(loonfs_test_support::test_actor()),
         )
     };
-    let read = || reader.get_path_entry(&namespace_id, "/file.txt", Default::default());
+    let read = || namespace.get_path_entry("/file.txt", Default::default());
     let next_wal_no = || async {
         head_state(&store, &namespace_id)
             .await
@@ -816,8 +822,8 @@ async fn a_seeded_view_carries_the_writers_basis_confirmation() {
 
     // Reading another namespace evicts the cached view. The third put still
     // plans against the basis confirmed at zero, and seeds a new view.
-    reader
-        .get_path_entry(&other_id, "/", Default::default())
+    other_namespace
+        .get_path_entry("/", Default::default())
         .await
         .expect("evict the cached view");
     timer.advance_ms(interval_ms);
@@ -884,6 +890,7 @@ async fn a_seed_on_another_basis_does_not_keep_the_cached_check() {
     )
     .await;
     let reader = writer.reader();
+    let namespace = reader.namespace(&namespace_id);
     let maintenance = FsMaintenance::builder_with_store(store.clone())
         .actor_id("reseeded-maintenance")
         .build()
@@ -924,8 +931,8 @@ async fn a_seed_on_another_basis_does_not_keep_the_cached_check() {
         async {
             recording.inner().wait_until_blocked().await;
             timer.advance_ms(check_after_attempt_ms);
-            reader
-                .get_path_entry(&namespace_id, "/a.txt", Default::default())
+            namespace
+                .get_path_entry("/a.txt", Default::default())
                 .await
                 .expect("check the old basis");
             maintenance
@@ -943,8 +950,8 @@ async fn a_seed_on_another_basis_does_not_keep_the_cached_check() {
     // reader checked the old basis later.
     timer.advance_ms(READ_REVALIDATION_BOUND_MS - check_after_attempt_ms);
     recording.reset();
-    reader
-        .get_path_entry(&namespace_id, "/b.txt", Default::default())
+    namespace
+        .get_path_entry("/b.txt", Default::default())
         .await
         .expect("read on the new basis");
     let operations = recording.take();
@@ -987,6 +994,7 @@ async fn read_after_write_only_probes_the_next_wal_number_without_replay() {
         .open_namespace(&namespace_id)
         .expect("open namespace");
     let reader = writer.reader();
+    let namespace = reader.namespace(&namespace_id);
     for index in 0..3 {
         namespace_writer
             .put_file_bytes(
@@ -1007,8 +1015,8 @@ async fn read_after_write_only_probes_the_next_wal_number_without_replay() {
         )
         .await
         .expect("create snapshot");
-    reader
-        .get_path_entry(&namespace_id, "/docs/warm-0.txt", Default::default())
+    namespace
+        .get_path_entry("/docs/warm-0.txt", Default::default())
         .await
         .expect("warmup stat");
 
@@ -1026,8 +1034,8 @@ async fn read_after_write_only_probes_the_next_wal_number_without_replay() {
         .drain()
         .await
         .expect("finish background hints");
-    let _pinned = reader
-        .pin_namespace_at_snapshot(&namespace_id, &snapshot.checkpoint_id)
+    let _pinned = namespace
+        .pin_namespace_at_snapshot(&snapshot.checkpoint_id)
         .await
         .expect("a pinned read keeps the live read cache");
     let next_wal_no = head_state(&store, &namespace_id)
@@ -1038,8 +1046,8 @@ async fn read_after_write_only_probes_the_next_wal_number_without_replay() {
     recording.reset();
     let before_read = reader.runtime_cache_stats();
 
-    reader
-        .get_path_entry(&namespace_id, "/docs/fresh.txt", Default::default())
+    namespace
+        .get_path_entry("/docs/fresh.txt", Default::default())
         .await
         .expect("read after write");
     crate::common::assert_wal_probe(recording.take(), &namespace_id, next_wal_no);

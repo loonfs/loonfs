@@ -4,9 +4,9 @@ use super::core::{should_invalidate_after_result, ReadCore, WriterBits};
 use crate::maintenance::namespace_reclaim_at_ms;
 use crate::{
     CreateNamespaceOptions, DeleteNamespaceOptions, DeleteNamespaceResponse, ForkNamespaceOptions,
-    Namespace, NamespaceId,
+    NamespaceId,
 };
-use crate::{ErrorCode, FsWriter, MaintenanceHint, MaintenanceJobId, NamespaceWriter};
+use crate::{ErrorCode, FsWriter, MaintenanceHint, MaintenanceJobId, Namespace, Writable};
 use crate::{Result, RuntimeError};
 
 impl FsWriter {
@@ -40,7 +40,7 @@ impl FsWriter {
         &self,
         namespace_id: &NamespaceId,
         options: CreateNamespaceOptions,
-    ) -> Result<Namespace> {
+    ) -> Result<loonfs_api::Namespace> {
         self.core.record_trace_context(&tracing::Span::current());
         let result = self
             .engine(namespace_id)
@@ -68,7 +68,7 @@ impl FsWriter {
         source_namespace_id: &NamespaceId,
         new_namespace_id: &NamespaceId,
         options: ForkNamespaceOptions,
-    ) -> Result<Namespace> {
+    ) -> Result<loonfs_api::Namespace> {
         self.require_administrator(source_namespace_id).await?;
         self.core.record_trace_context(&tracing::Span::current());
         let result = self
@@ -90,7 +90,7 @@ impl FsWriter {
     }
 }
 
-impl NamespaceWriter {
+impl Namespace<Writable> {
     /// Delete and snapshot management belong to the token holder and to
     /// administrators of an ACL namespace.
     pub(super) async fn require_administrator(&self) -> Result<()> {
@@ -125,7 +125,7 @@ impl NamespaceWriter {
     ) -> Result<DeleteNamespaceResponse> {
         self.require_administrator().await?;
         self.core.record_trace_context(&tracing::Span::current());
-        self.session.submit_delete(options).await
+        self.mode.session.submit_delete(options).await
     }
 }
 
@@ -133,7 +133,7 @@ impl NamespaceWriter {
 /// admits it, through the publisher's own commit engine: the session
 /// epoch and fencing that govern this namespace's publications govern
 /// its tombstone swap too. Only the service calls this; everything else
-/// must go through [`NamespaceWriter::delete_namespace`] so the barrier holds.
+/// must go through [`Namespace::delete_namespace`] so the barrier holds.
 pub(crate) async fn delete_namespace_with_engine(
     core: &ReadCore,
     writer: &WriterBits,

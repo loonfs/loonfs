@@ -254,6 +254,7 @@ fn snapshot_pins_report_the_snapshot_view_counter() {
             builder.metrics_recorder(recorder.clone())
         })
         .await;
+        let namespace = fs.reader.namespace(&namespace_id);
         fs.writer
             .create_namespace(
                 &namespace_id,
@@ -276,9 +277,8 @@ fn snapshot_pins_report_the_snapshot_view_counter() {
             )
             .await
             .expect("create checkpoint");
-        let _checkpoint_view = fs
-            .reader
-            .pin_namespace_at_checkpoint(&namespace_id, &checkpoint.checkpoint_id)
+        let _checkpoint_view = namespace
+            .pin_namespace_at_checkpoint(&checkpoint.checkpoint_id)
             .await
             .expect("pin checkpoint");
         let read_snapshot = namespace_writer
@@ -291,9 +291,8 @@ fn snapshot_pins_report_the_snapshot_view_counter() {
             )
             .await
             .expect("create snapshot");
-        let _snapshot_view = fs
-            .reader
-            .pin_namespace_at_snapshot(&namespace_id, &read_snapshot.checkpoint_id)
+        let _snapshot_view = namespace
+            .pin_namespace_at_snapshot(&read_snapshot.checkpoint_id)
             .await
             .expect("pin snapshot");
         (fs.reader.runtime_cache_stats(), recorder.snapshot())
@@ -333,8 +332,9 @@ fn reads_report_head_cache_lookups_and_retained_segment_bytes() {
             .await
             .expect("build reader");
         for namespace_id in [&first, &first, &second] {
-            reader
-                .get_path_entry(namespace_id, "/", Default::default())
+            let namespace = reader.namespace(namespace_id);
+            namespace
+                .get_path_entry("/", Default::default())
                 .await
                 .expect("stat the root");
         }

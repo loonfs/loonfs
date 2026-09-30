@@ -91,9 +91,10 @@ async fn a_streamed_read_holds_one_chunk_of_its_file() {
     let temp_dir = tempdir().expect("tempdir");
     let payload = payload(PAYLOAD_BYTES);
     let (namespace_id, watched, reader) = written_file(temp_dir.path(), &payload).await;
+    let namespace = reader.namespace(&namespace_id);
 
-    let mut stream = reader
-        .read_file_stream(&namespace_id, PATH, chunked())
+    let mut stream = namespace
+        .read_file_stream(PATH, chunked())
         .await
         .expect("open stream");
     assert_eq!(stream.size_bytes(), PAYLOAD_BYTES as u64);
@@ -138,11 +139,9 @@ async fn a_buffered_read_holds_the_whole_file() {
     let temp_dir = tempdir().expect("tempdir");
     let payload = payload(PAYLOAD_BYTES);
     let (namespace_id, watched, reader) = written_file(temp_dir.path(), &payload).await;
+    let namespace = reader.namespace(&namespace_id);
 
-    let read = reader
-        .get_file_bytes(&namespace_id, PATH)
-        .await
-        .expect("buffered read");
+    let read = namespace.get_file_bytes(PATH).await.expect("buffered read");
 
     assert_eq!(read.bytes, payload);
     assert_eq!(
@@ -157,11 +156,12 @@ async fn a_streamed_read_rejects_content_that_stopped_matching_its_reference() {
     let temp_dir = tempdir().expect("tempdir");
     let payload = payload(PAYLOAD_BYTES);
     let (namespace_id, _watched, reader) = written_file(temp_dir.path(), &payload).await;
+    let namespace = reader.namespace(&namespace_id);
 
     // Same length, different bytes: nothing but the digest can tell, which
     // is the case the read exists to catch.
-    let entry = reader
-        .get_path_entry(&namespace_id, PATH, Default::default())
+    let entry = namespace
+        .get_path_entry(PATH, Default::default())
         .await
         .expect("stat file");
     let content_ref = entry.content_ref().cloned().expect("a file has content");
@@ -174,8 +174,8 @@ async fn a_streamed_read_rejects_content_that_stopped_matching_its_reference() {
         .await
         .expect("overwrite content object");
 
-    let mut stream = reader
-        .read_file_stream(&namespace_id, PATH, chunked())
+    let mut stream = namespace
+        .read_file_stream(PATH, chunked())
         .await
         .expect("open stream");
     let error = loop {
@@ -196,6 +196,7 @@ async fn historical_and_snapshot_reads_stream_the_selected_revision() {
     let temp_dir = tempdir().expect("tempdir");
     let payload = payload(PAYLOAD_BYTES);
     let (namespace_id, watched, reader) = written_file(temp_dir.path(), &payload).await;
+    let namespace = reader.namespace(&namespace_id);
     let runtime = open_runtime_async(store(temp_dir.path()), "writer-b").await;
     let namespace_writer = runtime
         .writer
@@ -223,9 +224,8 @@ async fn historical_and_snapshot_reads_stream_the_selected_revision() {
         .await
         .expect("replace");
 
-    let historical = reader
+    let historical = namespace
         .read_file_stream(
-            &namespace_id,
             PATH,
             ReadFileStreamOptions {
                 revision_no: Some(RevisionNo(1)),
@@ -234,8 +234,8 @@ async fn historical_and_snapshot_reads_stream_the_selected_revision() {
         )
         .await
         .expect("historical stream");
-    let pinned = reader
-        .pin_namespace_at_snapshot(&namespace_id, &snapshot.checkpoint_id)
+    let pinned = namespace
+        .pin_namespace_at_snapshot(&snapshot.checkpoint_id)
         .await
         .expect("pin snapshot");
     let snapshot_stream = pinned

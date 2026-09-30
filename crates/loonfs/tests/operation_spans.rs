@@ -78,12 +78,13 @@ fn every_handle_emits_an_operation_span_with_its_namespace() {
             .expect("create namespace");
 
         let reader = writer.reader();
-        reader
-            .get_path_entry(&namespace_id, "/", Default::default())
+        let namespace = reader.namespace(&namespace_id);
+        namespace
+            .get_path_entry("/", Default::default())
             .await
             .expect("stat namespace root");
-        reader
-            .get_namespace(&namespace_id)
+        namespace
+            .get_namespace()
             .await
             .expect("read namespace state");
 

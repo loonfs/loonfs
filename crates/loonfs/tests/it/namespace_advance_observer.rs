@@ -135,6 +135,7 @@ async fn an_observer_panic_leaves_the_commit_the_publisher_and_maintenance_intac
         .expect("runner");
     runner.attach_hints(receiver);
     let namespace_id = NamespaceId::parse("observer-panic").expect("namespace id");
+    let namespace = writer.reader().namespace(&namespace_id);
     writer
         .create_namespace(
             &namespace_id,
@@ -156,9 +157,8 @@ async fn an_observer_panic_leaves_the_commit_the_publisher_and_maintenance_intac
         .expect("the commit was already durable when the observer panicked");
     assert_eq!(first.committed_seq, ChangeSeq(1));
     assert_eq!(
-        writer
-            .reader()
-            .get_file_bytes(&namespace_id, "/note.txt")
+        namespace
+            .get_file_bytes("/note.txt")
             .await
             .expect("read file")
             .bytes,

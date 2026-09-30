@@ -29,6 +29,7 @@ fn collect_up_to_keeps_unused_entries_for_the_next_call() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "path-pager-collect-test");
     let namespace_id = namespace_id("demo");
+    let namespace = fs.reader.namespace(&namespace_id);
     fs.create_namespace_blocking(
         &namespace_id,
         CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
@@ -44,8 +45,7 @@ fn collect_up_to_keeps_unused_entries_for_the_next_call() {
         .expect("put file");
     }
 
-    let mut pager = fs.reader.list_path_entries_pager(
-        &namespace_id,
+    let mut pager = namespace.list_path_entries_pager(
         "/docs",
         PageRequest {
             limit: page_limit(2),
@@ -72,6 +72,7 @@ fn path_entries_pager_preserves_each_page_head() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "path-pager-drift-test");
     let namespace_id = namespace_id("demo");
+    let namespace = fs.reader.namespace(&namespace_id);
     fs.create_namespace_blocking(
         &namespace_id,
         CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
@@ -87,8 +88,7 @@ fn path_entries_pager_preserves_each_page_head() {
         .expect("put file");
     }
 
-    let mut pager = fs.reader.list_path_entries_pager(
-        &namespace_id,
+    let mut pager = namespace.list_path_entries_pager(
         "/docs",
         PageRequest {
             limit: page_limit(2),
@@ -537,6 +537,7 @@ fn inode_children_pages_stay_on_the_renamed_directory() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "inode-children-rename-test");
     let namespace_id = namespace_id("demo");
+    let namespace = fs.reader.namespace(&namespace_id);
     fs.create_namespace_blocking(
         &namespace_id,
         CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
@@ -555,8 +556,7 @@ fn inode_children_pages_stay_on_the_renamed_directory() {
         .stat_path_blocking(&namespace_id, "/docs")
         .expect("stat listed directory");
 
-    let mut pager = fs.reader.list_inode_children_pager(
-        &namespace_id,
+    let mut pager = namespace.list_inode_children_pager(
         docs.inode_id,
         PageRequest {
             limit: page_limit(2),
@@ -599,6 +599,7 @@ fn inode_children_pages_follow_the_directory_to_a_new_ancestor() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "inode-children-move-test");
     let namespace_id = namespace_id("demo");
+    let namespace = fs.reader.namespace(&namespace_id);
     fs.create_namespace_blocking(
         &namespace_id,
         CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
@@ -622,8 +623,7 @@ fn inode_children_pages_follow_the_directory_to_a_new_ancestor() {
         .stat_path_blocking(&namespace_id, "/left/docs")
         .expect("stat listed directory");
 
-    let mut pager = fs.reader.list_inode_children_pager(
-        &namespace_id,
+    let mut pager = namespace.list_inode_children_pager(
         docs.inode_id,
         PageRequest {
             limit: page_limit(2),

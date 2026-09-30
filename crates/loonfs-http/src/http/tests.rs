@@ -1075,6 +1075,9 @@ async fn http_created_state_is_readable_through_runtime() {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     let fs = test_runtime(store.clone(), "runtime-reader").await;
+    let namespace = fs
+        .reader()
+        .namespace(&NamespaceId::parse("demo").expect("valid namespace id"));
     let harness = start_server(store.clone(), temp_dir.path(), "server-writer").await;
 
     harness
@@ -1093,12 +1096,8 @@ async fn http_created_state_is_readable_through_runtime() {
         .await
         .expect("write file through http");
 
-    let file = fs
-        .reader()
-        .get_file_bytes(
-            &NamespaceId::parse("demo").expect("valid namespace id"),
-            "/notes/from-http.txt",
-        )
+    let file = namespace
+        .get_file_bytes("/notes/from-http.txt")
         .await
         .expect("read file through runtime");
     assert_eq!(file.bytes, b"hello from http");
@@ -2322,6 +2321,7 @@ async fn http_content_reads_answer_server_busy_at_the_concurrency_cap() {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     let seed_writer = bootstrap_namespace(&store, "runtime-writer", &namespace_id("demo")).await;
+    let namespace = seed_writer.reader().namespace(&namespace_id("demo"));
     write_file_bytes(
         &seed_writer,
         &namespace_id("demo"),
@@ -2330,9 +2330,8 @@ async fn http_content_reads_answer_server_busy_at_the_concurrency_cap() {
         "download-busy-seed-01",
     )
     .await;
-    let inode_id = seed_writer
-        .reader()
-        .get_path_entry(&namespace_id("demo"), "/note.txt", Default::default())
+    let inode_id = namespace
+        .get_path_entry("/note.txt", Default::default())
         .await
         .expect("stat seeded file")
         .inode_id;
@@ -2505,6 +2504,7 @@ async fn http_content_read_over_the_download_limit_answers_content_too_large() {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     let seed_writer = bootstrap_namespace(&store, "runtime-writer", &namespace_id("demo")).await;
+    let namespace = seed_writer.reader().namespace(&namespace_id("demo"));
     write_file_bytes(
         &seed_writer,
         &namespace_id("demo"),
@@ -2521,15 +2521,13 @@ async fn http_content_read_over_the_download_limit_answers_content_too_large() {
         "download-limit-seed-02",
     )
     .await;
-    let big_inode_id = seed_writer
-        .reader()
-        .get_path_entry(&namespace_id("demo"), "/big.bin", Default::default())
+    let big_inode_id = namespace
+        .get_path_entry("/big.bin", Default::default())
         .await
         .expect("stat big file")
         .inode_id;
-    let small_inode_id = seed_writer
-        .reader()
-        .get_path_entry(&namespace_id("demo"), "/small.bin", Default::default())
+    let small_inode_id = namespace
+        .get_path_entry("/small.bin", Default::default())
         .await
         .expect("stat small file")
         .inode_id;
@@ -2966,10 +2964,10 @@ mod direct_download {
         )
         .await
         .expect("app");
+        let namespace_reader = state.reader.namespace(&namespace);
         for (index, (path, value)) in values.iter().enumerate() {
-            let entry = state
-                .reader
-                .get_path_entry(&namespace, path, Default::default())
+            let entry = namespace_reader
+                .get_path_entry(path, Default::default())
                 .await
                 .expect("entry");
             let (uri, body) = if index == 0 {
@@ -3027,9 +3025,8 @@ mod direct_download {
                     assert_eq!(error.code, ErrorCode::ContentNotMaterialized.as_str());
                     assert_eq!(recording.count(OperationClass::Put), 0);
                     assert_eq!(
-                        state
-                            .reader
-                            .get_file_bytes(&namespace, path)
+                        namespace_reader
+                            .get_file_bytes(path)
                             .await
                             .expect("proxied read")
                             .bytes,
@@ -3940,8 +3937,9 @@ async fn download_body_streams_one_chunk_and_aborts_on_late_corruption() {
                 .build()
                 .await
                 .expect("reader");
-            let entry = reader
-                .get_path_entry(&ns, "/large.bin", Default::default())
+            let namespace = reader.namespace(&ns);
+            let entry = namespace
+                .get_path_entry("/large.bin", Default::default())
                 .await
                 .expect("entry");
 

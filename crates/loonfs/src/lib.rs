@@ -65,14 +65,14 @@ pub use loonfs_api::{
     FlushWalOutcome, FlushWalResponse, GcResponse, InodeId, InodeKind, ListCheckpointsResponse,
     ListFileRevisionsResponse, ListInodeChildrenResponse, ListPathEntriesResponse,
     ListSnapshotsResponse, ManifestNo, MetadataCompactionOutcome, MetadataCompactionRequest,
-    MetadataCompactionResponse, MetadataMaintenanceResponse, NameKey, Namespace,
-    NamespaceDiagnostics, NamespaceId, Page, PageRequest, PaginationPolicy, PathEntry,
-    PathEntryKind, PinId, ReorganizeStepOutcome, RetainedCandidates, RetainedReason, RevisionNo,
-    RunMaintenanceRequest, RunMaintenanceResponse, SnapshotSummary, TrashEntry, UploadId,
-    WalFlushStepOutcome, API_GROUP_FILESYSTEM_V0, API_GROUP_MAINTENANCE_V0,
-    FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_NAMESPACES_CREATE, FEATURE_NAMESPACES_DELETE,
-    FEATURE_NAMESPACES_FORK, FEATURE_SNAPSHOTS, FEATURE_UPLOADS_DIRECT_MULTIPART,
-    FEATURE_UPLOADS_DIRECT_PUT, PROTOCOL_VERSION,
+    MetadataCompactionResponse, MetadataMaintenanceResponse, NameKey, NamespaceDiagnostics,
+    NamespaceId, Page, PageRequest, PaginationPolicy, PathEntry, PathEntryKind, PinId,
+    ReorganizeStepOutcome, RetainedCandidates, RetainedReason, RevisionNo, RunMaintenanceRequest,
+    RunMaintenanceResponse, SnapshotSummary, TrashEntry, UploadId, WalFlushStepOutcome,
+    API_GROUP_FILESYSTEM_V0, API_GROUP_MAINTENANCE_V0, FEATURE_DOWNLOADS_DIRECT_GET,
+    FEATURE_NAMESPACES_CREATE, FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK,
+    FEATURE_SNAPSHOTS, FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT,
+    PROTOCOL_VERSION,
 };
 pub use loonfs_core::cache::{
     DecodedBlock, DecodedBlockCache, DecodedBlockCacheConfig, DecodedBlockCacheObserver,
@@ -127,7 +127,7 @@ pub mod publish {
 /// Content-preparation proof types used by server integrations.
 ///
 /// A server mints a short-lived token after durable upload completion.
-/// [`NamespaceWriter::prepare_content_token`] verifies the token against the
+/// [`Namespace::prepare_content_token`] verifies the token against the
 /// namespace catalog and returns process-local proof that keeps the token's
 /// publication deadline.
 /// Most embedded applications do not need this module.
@@ -186,7 +186,7 @@ pub use fs::{
 };
 pub use handle::{
     FsMaintenance, FsMaintenanceBuilder, FsReader, FsReaderBuilder, FsWriter, FsWriterBuilder,
-    NamespaceWriter,
+    Namespace, ReadOnly, Writable,
 };
 pub use maintenance::{
     maintenance_hint_relay, GarbageCollectionJob, MaintenanceAssignment, MaintenanceCancellation,

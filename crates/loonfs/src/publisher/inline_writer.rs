@@ -78,6 +78,7 @@ async fn check_terminal_reload_failure(include_replay: bool) {
         .build()
         .await
         .expect("writer");
+    let namespace_reader = writer.reader().namespace(&namespace);
     writer
         .create_namespace(
             &namespace,
@@ -109,7 +110,7 @@ async fn check_terminal_reload_failure(include_replay: bool) {
             .acquire_many(8)
             .await
             .expect("hold publications");
-        let publisher = namespace_writer.session.publisher.clone();
+        let publisher = namespace_writer.mode.session.publisher.clone();
         let (replayed, first, ()) = tokio::join!(
             namespace_writer.create_directory("/warmup", warmup_options),
             first,
@@ -169,18 +170,16 @@ async fn check_terminal_reload_failure(include_replay: bool) {
     assert_eq!(recovered.wal_tail_inline_bytes, 4);
     assert_eq!(writer.publisher().shared.admission.used_requests(), 0);
     assert_eq!(
-        writer
-            .reader()
-            .get_file_bytes(&namespace, "/file")
+        namespace_reader
+            .get_file_bytes("/file")
             .await
             .expect("first bytes")
             .bytes,
         b"four"
     );
     assert_eq!(
-        writer
-            .reader()
-            .get_file_bytes(&namespace, "/next")
+        namespace_reader
+            .get_file_bytes("/next")
             .await
             .expect("next bytes")
             .bytes,
@@ -228,7 +227,7 @@ async fn a_new_session_keeps_one_segment_budget_inline_until_it_observes_the_tai
         namespace_writer.put_file_bytes("/b", b"bbbb", put_options("b")),
         namespace_writer.put_file_bytes("/c", b"cccc", put_options("c")),
         async {
-            let publisher = namespace_writer.session.publisher.clone();
+            let publisher = namespace_writer.mode.session.publisher.clone();
             timeout(
                 Duration::from_secs(10),
                 wait_for_queued_candidates(&publisher, 3),
@@ -269,7 +268,7 @@ async fn writer_with_policy(
     Arc<RecordingStore<LocalFsStore>>,
     crate::FsWriter,
     NamespaceId,
-    crate::NamespaceWriter,
+    crate::Namespace<crate::Writable>,
 ) {
     writer_with_policy_and_byte_limit(policy, 8192).await
 }
@@ -282,7 +281,7 @@ async fn writer_with_policy_and_byte_limit(
     Arc<RecordingStore<LocalFsStore>>,
     crate::FsWriter,
     NamespaceId,
-    crate::NamespaceWriter,
+    crate::Namespace<crate::Writable>,
 ) {
     let directory = tempdir().expect("directory");
     let store = Arc::new(RecordingStore::new(
@@ -372,6 +371,7 @@ async fn written_records(
 async fn small_writes_use_one_wal_put_and_retry_by_bytes() {
     let (_directory, store, writer, namespace, namespace_writer) =
         writer_with_policy(policy()).await;
+    let namespace_reader = writer.reader().namespace(&namespace);
     let options = put_options("small");
     let first = namespace_writer
         .put_file_bytes("/file", b"same", options.clone())
@@ -384,9 +384,8 @@ async fn small_writes_use_one_wal_put_and_retry_by_bytes() {
         0
     );
     assert_eq!(
-        writer
-            .reader()
-            .get_file_bytes(&namespace, "/file")
+        namespace_reader
+            .get_file_bytes("/file")
             .await
             .expect("read")
             .bytes,
@@ -457,6 +456,7 @@ async fn disabled_and_above_threshold_writes_keep_uploaded_object_identity() {
 async fn inline_preparation_makes_no_request_and_retained_values_replay() {
     let (_directory, store, writer, namespace, namespace_writer) =
         writer_with_policy(policy()).await;
+    let namespace_reader = writer.reader().namespace(&namespace);
     for bytes in [b"".as_slice(), b"same"] {
         store.reset();
         let prepared = namespace_writer
@@ -475,9 +475,8 @@ async fn inline_preparation_makes_no_request_and_retained_values_replay() {
             .await
             .expect("publish");
         assert_eq!(store.count(OperationClass::Put), 1);
-        let reference = writer
-            .reader()
-            .get_file_bytes(&namespace, path)
+        let reference = namespace_reader
+            .get_file_bytes(path)
             .await
             .expect("read")
             .entry
@@ -503,6 +502,7 @@ async fn stream_preparation_preserves_chunks_across_the_threshold() {
     use futures::StreamExt;
     let (_directory, store, writer, namespace, namespace_writer) =
         writer_with_policy(policy()).await;
+    let namespace_reader = writer.reader().namespace(&namespace);
     for (index, chunks) in [
         vec![],
         vec![b"".as_slice(), b"sa", b"me"],
@@ -535,9 +535,8 @@ async fn stream_preparation_preserves_chunks_across_the_threshold() {
             .await
             .expect("publish");
         assert_eq!(
-            writer
-                .reader()
-                .get_file_bytes(&namespace, &path)
+            namespace_reader
+                .get_file_bytes(&path)
                 .await
                 .expect("read")
                 .bytes,
@@ -576,6 +575,7 @@ async fn tail_fallback_keeps_inline_identity_across_retries_and_a_fold() {
             ..policy()
         })
         .await;
+    let namespace_reader = writer.reader().namespace(&namespace);
     let fold_permits = writer
         .bits
         .wal_fold_permits
@@ -608,9 +608,8 @@ async fn tail_fallback_keeps_inline_identity_across_retries_and_a_fold() {
     assert!(records[0].inline_content.is_empty());
     assert_eq!(records[0].semantic_commit_fingerprint, fingerprint);
     assert!(family_requests(&store, DurableObjectFamily::ContentBlob) > 0);
-    let file = writer
-        .reader()
-        .get_file_bytes(&namespace, "/fallback")
+    let file = namespace_reader
+        .get_file_bytes("/fallback")
         .await
         .expect("read");
     assert_eq!(file.bytes, b"next");
@@ -752,6 +751,7 @@ async fn segment_fallback_keeps_bulk_commit_order_and_one_atomic_commit() {
             ADMISSION_BYTES,
         )
         .await;
+    let namespace_reader = writer.reader().namespace(&namespace);
     let payloads = (0..VALUES)
         .map(|index| Bytes::from(vec![u8::try_from(index).expect("byte index"); VALUE_BYTES]))
         .collect::<Vec<_>>();
@@ -814,9 +814,8 @@ async fn segment_fallback_keeps_bulk_commit_order_and_one_atomic_commit() {
     assert_eq!(staged_content_ids, operation_content_ids);
     for index in [0, VALUES - 1] {
         assert_eq!(
-            writer
-                .reader()
-                .get_file_bytes(&namespace, &format!("/file-{index}"))
+            namespace_reader
+                .get_file_bytes(&format!("/file-{index}"))
                 .await
                 .expect("read")
                 .bytes,
@@ -856,7 +855,7 @@ async fn queued_writes_share_tail_reservations_and_split_at_the_segment_budget()
             .acquire_many(8)
             .await
             .expect("hold publications");
-        let publisher = namespace_writer.session.publisher.clone();
+        let publisher = namespace_writer.mode.session.publisher.clone();
         let (first, second, ()) = tokio::join!(
             namespace_writer.put_file_bytes("/one", b"one", put_options("one")),
             namespace_writer.put_file_bytes("/two", b"two", put_options("two")),
@@ -1062,6 +1061,7 @@ async fn inline_bytes_make_automatic_and_explicit_folds_due_before_segment_count
                 ..policy()
             })
             .await;
+        let namespace_reader = writer.reader().namespace(&namespace);
         let permits = writer
             .bits
             .wal_fold_permits
@@ -1169,9 +1169,8 @@ async fn inline_bytes_make_automatic_and_explicit_folds_due_before_segment_count
         assert_eq!(usage.wal_tail_segments, 0);
         assert_eq!(usage.wal_tail_inline_bytes, 0);
         assert_eq!(
-            writer
-                .reader()
-                .get_file_bytes(&namespace, "/file")
+            namespace_reader
+                .get_file_bytes("/file")
                 .await
                 .expect("read folded content")
                 .bytes,
@@ -1272,6 +1271,7 @@ async fn check_delayed_fold_callback(cache: RuntimeCacheConfig) {
         .build()
         .await
         .expect("writer");
+    let namespace_reader = writer.reader().namespace(&namespace);
     writer
         .create_namespace(
             &namespace,
@@ -1357,9 +1357,8 @@ async fn check_delayed_fold_callback(cache: RuntimeCacheConfig) {
         ("/last", b"last"),
     ] {
         assert_eq!(
-            writer
-                .reader()
-                .get_file_bytes(&namespace, path)
+            namespace_reader
+                .get_file_bytes(path)
                 .await
                 .expect("read")
                 .bytes,

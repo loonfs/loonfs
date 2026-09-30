@@ -285,6 +285,7 @@ fn read_options_project_grouped_attributes_or_none() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "attributes-projection");
     let namespace_id = namespace_id("demo");
+    let namespace = fs.reader.namespace(&namespace_id);
     fs.create_namespace_blocking(
         &namespace_id,
         CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
@@ -312,8 +313,7 @@ fn read_options_project_grouped_attributes_or_none() {
         .expect("stat");
     assert!(default_stat.attributes.is_some());
 
-    let opted_out = block_on(fs.reader.get_path_entry(
-        &namespace_id,
+    let opted_out = block_on(namespace.get_path_entry(
         "/docs/report.txt",
         StatPathOptions {
             include_attributes: loonfs_api::AttributeInclusion::Omit,
@@ -330,8 +330,7 @@ fn read_options_project_grouped_attributes_or_none() {
         assert!(entry.attributes.is_none());
     }
 
-    let projected = block_on(fs.reader.list_path_entries_page(
-        &namespace_id,
+    let projected = block_on(namespace.list_path_entries_page(
         "/docs",
         PageRequest {
             limit: page_limit(16),

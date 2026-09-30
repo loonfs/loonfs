@@ -3,7 +3,7 @@
 use bytes::Bytes;
 use loonfs::publish::{CommitCandidate, CommitRequest, FilesystemOperation, InlineContent};
 use loonfs::{
-    CreateNamespaceOptions, FsWriter, InlineContentOptions, NamespaceWriter, SharedObjectStore,
+    CreateNamespaceOptions, FsWriter, InlineContentOptions, Namespace, SharedObjectStore, Writable,
 };
 use loonfs_api::{
     AbsolutePath, AccessGrants, AccessRight, AccessRights, CommitId, ContentId,
@@ -103,7 +103,7 @@ async fn open(store: SharedObjectStore, segment_budget: usize) -> FsWriter {
         .expect("writer")
 }
 
-async fn seed(writer: &FsWriter) -> NamespaceWriter {
+async fn seed(writer: &FsWriter) -> Namespace<Writable> {
     writer
         .create_namespace(
             &namespace(),

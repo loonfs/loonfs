@@ -499,6 +499,7 @@ async fn a_repeated_grant_principal_is_invalid_and_does_not_commit() {
     )
     .await
     .expect("app");
+    let namespace_reader = state.writer.reader().namespace(&namespace_id("demo"));
     let response = router
         .clone()
         .oneshot(request(
@@ -529,12 +530,7 @@ async fn a_repeated_grant_principal_is_invalid_and_does_not_commit() {
     let error: ApiError = serde_json::from_value(json_body(response).await).expect("error");
     assert_eq!(error.code, ErrorCode::InvalidRequest.as_str());
 
-    let namespace = state
-        .writer
-        .reader()
-        .get_namespace(&namespace_id("demo"))
-        .await
-        .expect("namespace");
+    let namespace = namespace_reader.get_namespace().await.expect("namespace");
     assert_eq!(namespace.head_seq, loonfs_api::ChangeSeq(0));
 }
 

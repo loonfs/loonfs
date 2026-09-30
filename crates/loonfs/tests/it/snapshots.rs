@@ -25,13 +25,14 @@ async fn list_snapshots(
     reader: &FsReader,
     namespace_id: &NamespaceId,
 ) -> loonfs::Result<ListSnapshotsResponse> {
+    let namespace = reader.namespace(namespace_id);
     let request = PageRequest {
         limit: PaginationPolicy::default()
             .resolve_limit(None)
             .expect("default page limit"),
         cursor: None,
     };
-    let mut pager = reader.list_snapshots_pager(namespace_id, request);
+    let mut pager = namespace.list_snapshots_pager(request);
     let mut response = pager.next().await.expect("first page")?;
     while let Some(page) = pager.next().await {
         let page = page?;
@@ -549,12 +550,13 @@ async fn shared_read_options_select_the_snapshot_for_paths_and_inodes() {
         .await
         .expect("file");
     let reader = writer.reader();
-    let root = reader
-        .get_path_entry(&namespace, "/", Default::default())
+    let namespace_reader = reader.namespace(&namespace);
+    let root = namespace_reader
+        .get_path_entry("/", Default::default())
         .await
         .expect("root");
-    let before = reader
-        .get_path_entry(&namespace, "/file", Default::default())
+    let before = namespace_reader
+        .get_path_entry("/file", Default::default())
         .await
         .expect("file");
     let snapshot = namespace_writer
@@ -579,15 +581,15 @@ async fn shared_read_options_select_the_snapshot_for_paths_and_inodes() {
         ..Default::default()
     };
     assert_eq!(
-        reader
-            .get_path_entry(&namespace, "/file", options.clone())
+        namespace_reader
+            .get_path_entry("/file", options.clone())
             .await
             .expect("snapshot path"),
         before
     );
     assert_eq!(
-        reader
-            .get_inode(&namespace, before.inode_id, options)
+        namespace_reader
+            .get_inode(before.inode_id, options)
             .await
             .expect("snapshot inode"),
         before
@@ -598,9 +600,8 @@ async fn shared_read_options_select_the_snapshot_for_paths_and_inodes() {
             .expect("limit"),
         cursor: None,
     };
-    let paths = reader
+    let paths = namespace_reader
         .list_path_entries_page(
-            &namespace,
             "/",
             request.clone(),
             loonfs::ListPathEntriesOptions {
@@ -610,9 +611,8 @@ async fn shared_read_options_select_the_snapshot_for_paths_and_inodes() {
         )
         .await
         .expect("snapshot paths");
-    let inodes = reader
+    let inodes = namespace_reader
         .list_inode_children_page(
-            &namespace,
             root.inode_id,
             request,
             loonfs::ListInodeChildrenOptions {

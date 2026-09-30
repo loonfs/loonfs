@@ -1,8 +1,8 @@
 //! Snapshot reads and mutations.
 
 use crate::{
-    Checkpoint, CreateSnapshotOptions, DeleteSnapshotResponse, FsReader, ListSnapshotsResponse,
-    NamespaceId, NamespaceWriter, Result, RuntimeError, SnapshotSummary,
+    Checkpoint, CreateSnapshotOptions, DeleteSnapshotResponse, ListSnapshotsResponse, Namespace,
+    Result, RuntimeError, SnapshotSummary, Writable,
 };
 use loonfs_api::PageRequest;
 use loonfs_api::PinId;
@@ -57,22 +57,19 @@ impl SnapshotPolicy {
 /// A pager over live snapshots.
 pub type SnapshotsPager = loonfs_api::Pager<ListSnapshotsResponse, RuntimeError>;
 
-impl FsReader {
+impl<M> Namespace<M> {
     /// Creates a snapshot pager beginning at `request.cursor`.
     pub fn list_snapshots_pager(
         &self,
-        namespace_id: &NamespaceId,
         request: PageRequest<CheckpointPageCursor>,
     ) -> SnapshotsPager {
         let cursor = request.cursor.as_ref().map(|cursor| {
             loonfs_api::encode_cursor(cursor).expect("typed checkpoint cursor should encode")
         });
         let limit = request.limit;
-        let reader = self.clone();
-        let namespace_id = namespace_id.clone();
+        let reader = self.read_only();
         loonfs_api::Pager::new(cursor, move |cursor| {
             let reader = reader.clone();
-            let namespace_id = namespace_id.clone();
             async move {
                 let cursor = cursor
                     .as_deref()
@@ -80,7 +77,7 @@ impl FsReader {
                     .transpose()
                     .map_err(|error| crate::CoreError::InvalidCursor(error.to_string()))?;
                 reader
-                    .list_snapshots_page(&namespace_id, PageRequest { limit, cursor })
+                    .list_snapshots_page(PageRequest { limit, cursor })
                     .await
             }
         })
@@ -95,19 +92,18 @@ impl FsReader {
         fields(
             operation = "list_snapshots",
             method = "list_snapshots_page",
-            namespace_id = %namespace_id,
+            namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )
     )]
     pub async fn list_snapshots_page(
         &self,
-        namespace_id: &NamespaceId,
         request: PageRequest<CheckpointPageCursor>,
     ) -> Result<ListSnapshotsResponse> {
         if self.core.subject.is_some() {
             self.core
-                .read(namespace_id, |engine, context| async move {
+                .read(&self.namespace_id, |engine, context| async move {
                     Ok(engine.require_administrator(&context).await?)
                 })
                 .await?;
@@ -117,7 +113,7 @@ impl FsReader {
         let requested = request.limit.as_usize();
         let mut cursor = request.cursor;
         let mut snapshots = Vec::with_capacity(requested);
-        let engine = self.core.reader_engine(namespace_id);
+        let engine = self.core.reader_engine(&self.namespace_id);
         loop {
             let remaining = requested - snapshots.len();
             let limit = NonZeroU32::new(u32::try_from(remaining).map_err(|error| {
@@ -141,7 +137,7 @@ impl FsReader {
                 Some(next_cursor) if snapshots.len() < requested => cursor = Some(next_cursor),
                 next_cursor => {
                     return Ok(ListSnapshotsResponse {
-                        namespace_id: namespace_id.clone(),
+                        namespace_id: self.namespace_id.clone(),
                         snapshots,
                         next_cursor: super::core::encode_next_cursor(next_cursor.as_ref())?,
                     })
@@ -151,7 +147,7 @@ impl FsReader {
     }
 }
 
-impl NamespaceWriter {
+impl Namespace<Writable> {
     /// Creates a snapshot of the current namespace state.
     ///
     /// Returns `snapshot_quota_exceeded` and writes nothing when the namespace
@@ -182,7 +178,7 @@ impl NamespaceWriter {
         self.ensure_live_snapshot_limit(max_live, 1).await?;
         let engine = self
             .core
-            .writer_engine(&self.bits.identity, &self.namespace_id);
+            .writer_engine(&self.mode.bits.identity, &self.namespace_id);
         let result = engine
             .create_snapshot(options.name, options.expires_at_ms)
             .await
@@ -212,7 +208,7 @@ impl NamespaceWriter {
         let page_limit = loonfs_api::PaginationPolicy::default().max_limit();
         let engine = self
             .core
-            .writer_engine(&self.bits.identity, &self.namespace_id);
+            .writer_engine(&self.mode.bits.identity, &self.namespace_id);
         let mut live = additional_live;
         let mut cursor = None;
         loop {
@@ -268,7 +264,7 @@ impl NamespaceWriter {
         self.core.record_trace_context(&tracing::Span::current());
         let result = self
             .core
-            .writer_engine(&self.bits.identity, &self.namespace_id)
+            .writer_engine(&self.mode.bits.identity, &self.namespace_id)
             .extend_snapshot(snapshot_id, requested_expires_at_ms, max_lifetime_ms)
             .await
             .map_err(RuntimeError::from)
@@ -301,7 +297,7 @@ impl NamespaceWriter {
         self.core.record_trace_context(&tracing::Span::current());
         let result = self
             .core
-            .writer_engine(&self.bits.identity, &self.namespace_id)
+            .writer_engine(&self.mode.bits.identity, &self.namespace_id)
             .delete_snapshot(snapshot_id)
             .await
             .map_err(RuntimeError::from);

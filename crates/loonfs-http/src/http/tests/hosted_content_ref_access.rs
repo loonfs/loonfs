@@ -65,7 +65,13 @@ async fn hosted_subject_cannot_import_a_foreign_bare_content_reference() {
     .await
     .expect("app");
     let source = namespace_id("source");
+    let source_namespace = state
+        .writer
+        .reader()
+        .as_subject(subject("administrator"))
+        .namespace(&source);
     let destination = namespace_id("destination");
+    let destination_namespace = state.writer.reader().namespace(&destination);
     state
         .writer
         .create_namespace(
@@ -95,11 +101,8 @@ async fn hosted_subject_cannot_import_a_foreign_bare_content_reference() {
         .put_file_bytes("/private", b"private bytes", options)
         .await
         .expect("publish source");
-    let content_ref = state
-        .writer
-        .reader()
-        .as_subject(subject("administrator"))
-        .get_path_entry(&source, "/private", Default::default())
+    let content_ref = source_namespace
+        .get_path_entry("/private", Default::default())
         .await
         .expect("source entry")
         .content_ref()
@@ -146,10 +149,8 @@ async fn hosted_subject_cannot_import_a_foreign_bare_content_reference() {
     let error: ApiError = serde_json::from_slice(&bytes).expect("api error");
     assert_eq!(error.code, ErrorCode::ContentNotPrepared.as_str());
     assert_eq!(
-        state
-            .writer
-            .reader()
-            .get_file_bytes(&destination, "/imported")
+        destination_namespace
+            .get_file_bytes("/imported")
             .await
             .expect_err("foreign reference was not published")
             .code(),

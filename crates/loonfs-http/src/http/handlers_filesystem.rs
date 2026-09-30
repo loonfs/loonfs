@@ -23,7 +23,7 @@ use axum::Json;
 use loonfs::publish::{CommitCandidate, CommitRequest, ContentPreparationError};
 use loonfs::{
     payload_class, ErrorCode, FsReadSnapshot, FsReader, InodeId, ListChangesOptions,
-    ListInodeChildrenOptions, ListPathEntriesOptions, NamespaceId, PinId, StatPathOptions,
+    ListInodeChildrenOptions, ListPathEntriesOptions, Namespace, PinId, ReadOnly, StatPathOptions,
     TraceMode, TraceStoreKind,
 };
 #[cfg(feature = "openapi")]
@@ -92,10 +92,7 @@ pub(super) struct ChangesQuery {
 
 pub(super) enum ReadTarget {
     Snapshot(Box<FsReadSnapshot>),
-    Live {
-        reader: FsReader,
-        namespace_id: NamespaceId,
-    },
+    Live(Namespace<ReadOnly>),
 }
 
 impl ReadTarget {
@@ -111,12 +108,9 @@ impl ReadTarget {
                     .list_path_entries_page(path, request, options)
                     .await
             }
-            Self::Live {
-                reader,
-                namespace_id,
-            } => {
-                reader
-                    .list_path_entries_page(namespace_id, path, request, options)
+            Self::Live(namespace) => {
+                namespace
+                    .list_path_entries_page(path, request, options)
                     .await
             }
         }
@@ -129,10 +123,7 @@ impl ReadTarget {
     ) -> loonfs::Result<loonfs::PathEntry> {
         match self {
             Self::Snapshot(snapshot) => snapshot.get_path_entry(path, options).await,
-            Self::Live {
-                reader,
-                namespace_id,
-            } => reader.get_path_entry(namespace_id, path, options).await,
+            Self::Live(namespace) => namespace.get_path_entry(path, options).await,
         }
     }
 
@@ -148,12 +139,9 @@ impl ReadTarget {
                     .list_inode_children_page(inode_id, request, options)
                     .await
             }
-            Self::Live {
-                reader,
-                namespace_id,
-            } => {
-                reader
-                    .list_inode_children_page(namespace_id, inode_id, request, options)
+            Self::Live(namespace) => {
+                namespace
+                    .list_inode_children_page(inode_id, request, options)
                     .await
             }
         }
@@ -166,10 +154,7 @@ impl ReadTarget {
     ) -> loonfs::Result<loonfs::PathEntry> {
         match self {
             Self::Snapshot(snapshot) => snapshot.get_inode(inode_id, options).await,
-            Self::Live {
-                reader,
-                namespace_id,
-            } => reader.get_inode(namespace_id, inode_id, options).await,
+            Self::Live(namespace) => namespace.get_inode(inode_id, options).await,
         }
     }
 
@@ -184,10 +169,7 @@ impl ReadTarget {
         };
         match self {
             Self::Snapshot(snapshot) => snapshot.read_file_stream(path, options).await,
-            Self::Live {
-                reader,
-                namespace_id,
-            } => reader.read_file_stream(namespace_id, path, options).await,
+            Self::Live(namespace) => namespace.read_file_stream(path, options).await,
         }
     }
 
@@ -198,14 +180,7 @@ impl ReadTarget {
     ) -> loonfs::Result<loonfs::downloads::DirectDownloadTarget> {
         match self {
             Self::Snapshot(snapshot) => snapshot.create_download(path).await,
-            Self::Live {
-                reader,
-                namespace_id,
-            } => {
-                reader
-                    .create_download(namespace_id, path, revision_no)
-                    .await
-            }
+            Self::Live(namespace) => namespace.create_download(path, revision_no).await,
         }
     }
 }
@@ -427,14 +402,12 @@ pub(super) async fn list_trash(
 ) -> Result<Json<ListTrashResponse>, ApiResponseError> {
     let scoped_reader = subject.map(|subject| state.reader.as_subject(subject));
     let reader = scoped_reader.as_ref().unwrap_or(&state.reader);
-    let response = reader
-        .list_trash_page(
-            &namespace_id,
-            PageRequest {
-                limit: resolve_page_limit(query.limit)?,
-                cursor: decode_optional_cursor(query.cursor)?,
-            },
-        )
+    let namespace = reader.namespace(&namespace_id);
+    let response = namespace
+        .list_trash_page(PageRequest {
+            limit: resolve_page_limit(query.limit)?,
+            cursor: decode_optional_cursor(query.cursor)?,
+        })
         .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
     Ok(Json(response))
@@ -481,10 +454,10 @@ pub(super) async fn list_file_revisions(
 ) -> Result<Json<ListFileRevisionsResponse>, ApiResponseError> {
     let scoped_reader = subject.map(|subject| state.reader.as_subject(subject));
     let reader = scoped_reader.as_ref().unwrap_or(&state.reader);
+    let namespace = reader.namespace(&namespace_id);
     let path = required_query_param(query.path, "path")?;
-    let response = reader
+    let response = namespace
         .list_file_revisions_page(
-            &namespace_id,
             &path,
             PageRequest {
                 limit: resolve_page_limit(query.limit)?,
@@ -671,11 +644,8 @@ pub(super) async fn list_changes(
             .list_changes_page(after_seq, options)
             .await
             .map_err(ApiResponseError::for_namespace(&namespace_id))?,
-        ReadTarget::Live {
-            reader,
-            namespace_id,
-        } => reader
-            .list_changes_page(&namespace_id, after_seq, options)
+        ReadTarget::Live(namespace) => namespace
+            .list_changes_page(after_seq, options)
             .await
             .map_err(ApiResponseError::for_namespace(&namespace_id))?,
     };
@@ -687,14 +657,12 @@ pub(super) async fn pin_requested_snapshot(
     namespace_id: &loonfs_api::NamespaceId,
     snapshot_id: Option<PinId>,
 ) -> Result<ReadTarget, ApiResponseError> {
+    let namespace = reader.namespace(namespace_id);
     let Some(snapshot_id) = snapshot_id else {
-        return Ok(ReadTarget::Live {
-            reader: reader.clone(),
-            namespace_id: namespace_id.clone(),
-        });
+        return Ok(ReadTarget::Live(namespace));
     };
-    reader
-        .pin_namespace_at_snapshot(namespace_id, &snapshot_id)
+    namespace
+        .pin_namespace_at_snapshot(&snapshot_id)
         .await
         .map(|snapshot| ReadTarget::Snapshot(Box::new(snapshot)))
         .map_err(|error| {

@@ -16,7 +16,7 @@ use loonfs::content_tokens::{
 };
 use loonfs::publish::PreparedContent;
 use loonfs::uploads::ResolvedUploadCompletion;
-use loonfs::NamespaceWriter;
+use loonfs::{Namespace, Writable};
 #[cfg(feature = "openapi")]
 use loonfs_api::ApiError;
 use loonfs_api::ErrorCode;
@@ -66,7 +66,7 @@ impl<'a> ContentTokenVerifier<'a> {
     async fn prepare(
         self,
         namespaces: &NamespaceWriters,
-        namespace_writer: &NamespaceWriter,
+        namespace_writer: &Namespace<Writable>,
         token: &ContentToken,
         now_ms: u64,
     ) -> Result<Result<PreparedContent, ContentTokenError>, ApiResponseError> {
@@ -162,7 +162,7 @@ pub(super) async fn create_upload(
 
 async fn begin_direct_put_upload(
     state: &BindingState,
-    namespace_writer: &NamespaceWriter,
+    namespace_writer: &Namespace<Writable>,
     namespace_id: NamespaceId,
     size_bytes: Option<u64>,
 ) -> Result<Json<UploadSession>, ApiResponseError> {
@@ -233,7 +233,7 @@ async fn fill_direct_put_access(
 
 async fn begin_direct_multipart_upload(
     state: &BindingState,
-    namespace_writer: &NamespaceWriter,
+    namespace_writer: &Namespace<Writable>,
     namespace_id: NamespaceId,
     part_size_bytes: Option<u64>,
 ) -> Result<Json<UploadSession>, ApiResponseError> {
@@ -399,7 +399,7 @@ pub(super) fn presign_time() -> SystemTime {
 /// loud even when the request it arrived in went on to publish.
 pub(super) async fn content_preparation_for_puts(
     namespaces: &NamespaceWriters,
-    namespace_writer: &NamespaceWriter,
+    namespace_writer: &Namespace<Writable>,
     verifier: ContentTokenVerifier<'_>,
     namespace_id: &NamespaceId,
     content_refs: &[&ContentRef],

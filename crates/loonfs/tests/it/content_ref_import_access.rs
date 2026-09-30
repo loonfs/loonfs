@@ -93,6 +93,10 @@ async fn create_namespace(writer: &FsWriter, namespace_id: &NamespaceId, access:
 }
 
 async fn publish_inline(writer: &FsWriter, namespace_id: &NamespaceId) -> ContentRef {
+    let namespace = writer
+        .reader()
+        .as_subject(subject("administrator"))
+        .namespace(namespace_id);
     let namespace_writer = writer.open_namespace(namespace_id).expect("open namespace");
     let options = PutFileOptions::new(loonfs_test_support::test_actor());
     namespace_writer
@@ -100,10 +104,8 @@ async fn publish_inline(writer: &FsWriter, namespace_id: &NamespaceId) -> Conten
         .put_file_bytes("/source", b"private inline bytes", options)
         .await
         .expect("publish source");
-    writer
-        .reader()
-        .as_subject(subject("administrator"))
-        .get_path_entry(namespace_id, "/source", Default::default())
+    namespace
+        .get_path_entry("/source", Default::default())
         .await
         .expect("source entry")
         .content_ref()
@@ -133,22 +135,24 @@ async fn by_reference_reads_require_publication_in_the_reading_view() {
         .await
         .expect("materialize private content");
     let reader = writer.reader().as_subject(subject("stranger"));
+    let destination_namespace = reader.namespace(&destination);
+    let source_namespace = reader.namespace(&source);
     assert_eq!(
-        reader
-            .get_file_bytes(&source, "/source")
+        source_namespace
+            .get_file_bytes("/source")
             .await
             .expect_err("private path is unreadable")
             .code(),
         ErrorCode::PathNotFound
     );
-    let pinned = reader
-        .pin_namespace(&destination)
+    let pinned = destination_namespace
+        .pin_namespace()
         .await
         .expect("pin before publication");
     let own_ref = publish_inline(&writer, &destination).await;
     assert_eq!(
-        reader
-            .read_content_ref(&destination, &own_ref, u64::MAX)
+        destination_namespace
+            .read_content_ref(&own_ref, u64::MAX)
             .await
             .expect("current view has published its own reference"),
         b"private inline bytes"
@@ -156,8 +160,8 @@ async fn by_reference_reads_require_publication_in_the_reading_view() {
 
     recording.reset();
     assert_eq!(
-        reader
-            .read_content_ref(&destination, &private_ref, u64::MAX)
+        destination_namespace
+            .read_content_ref(&private_ref, u64::MAX)
             .await
             .expect_err("unrelated namespace has not published private content")
             .code(),
@@ -185,16 +189,17 @@ async fn subject_without_source_rights_cannot_prepare_or_publish_an_inline_tail_
     let (_directory, recording, writer) = open_writer().await;
     let source = namespace_id("source");
     let destination = namespace_id("destination");
+    let destination_namespace = writer.reader().namespace(&destination);
     create_namespace(&writer, &source, acl("administrator")).await;
     create_namespace(&writer, &destination, NamespaceAccess::unrestricted()).await;
     let content_ref = publish_inline(&writer, &source).await;
     let scoped = writer.as_subject(subject("stranger"));
+    let source_namespace = scoped.reader().namespace(&source);
     let namespace_writer = scoped.open_namespace(&destination).expect("open namespace");
 
     assert_eq!(
-        scoped
-            .reader()
-            .get_file_bytes(&source, "/source")
+        source_namespace
+            .get_file_bytes("/source")
             .await
             .expect_err("source read")
             .code(),
@@ -219,9 +224,8 @@ async fn subject_without_source_rights_cannot_prepare_or_publish_an_inline_tail_
         .expect_err("put requires source administrator");
     assert_forbidden_without_writes(recording.as_ref(), error);
     assert_eq!(
-        writer
-            .reader()
-            .get_file_bytes(&destination, "/imported")
+        destination_namespace
+            .get_file_bytes("/imported")
             .await
             .expect_err("refused put publishes nothing")
             .code(),
@@ -343,6 +347,10 @@ async fn deleted_owner_import_uses_updated_access_state_in_the_surviving_head() 
     let (_directory, recording, writer) = open_writer().await;
     let source = namespace_id("source");
     let fork = namespace_id("fork");
+    let namespace = writer
+        .reader()
+        .as_subject(subject("administrator"))
+        .namespace(&fork);
     let destination = namespace_id("destination");
     create_namespace(&writer, &source, acl("administrator")).await;
     create_namespace(&writer, &destination, NamespaceAccess::unrestricted()).await;
@@ -372,10 +380,8 @@ async fn deleted_owner_import_uses_updated_access_state_in_the_surviving_head() 
         .await
         .expect("delete source");
     assert_eq!(
-        writer
-            .reader()
-            .as_subject(subject("administrator"))
-            .pin_namespace(&fork)
+        namespace
+            .pin_namespace()
             .await
             .expect("pin fork")
             .read_content_ref(&content_ref, u64::MAX)

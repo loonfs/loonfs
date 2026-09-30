@@ -73,15 +73,16 @@ async fn warm_reads_and_writes_reuse_their_manifest() {
         .build()
         .await
         .expect("build reader");
-    reader
-        .get_path_entry(&namespace_id, "/docs/file-0.txt", Default::default())
+    let namespace = reader.namespace(&namespace_id);
+    namespace
+        .get_path_entry("/docs/file-0.txt", Default::default())
         .await
         .expect("first stat");
     let warmup = manifest_gets(&recording.take_get_keys());
     assert!(!warmup.is_empty(), "the first read loads its manifest");
 
-    reader
-        .get_path_entry(&namespace_id, "/docs/file-1.txt", Default::default())
+    namespace
+        .get_path_entry("/docs/file-1.txt", Default::default())
         .await
         .expect("second stat");
     let repeats = manifest_gets(&recording.take_get_keys());

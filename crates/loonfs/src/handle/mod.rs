@@ -1,27 +1,32 @@
 //! Purpose-specific filesystem handles.
 //!
-//! [`FsWriter`] is the write-capable runtime. It owns the store client, the
-//! caches, the admission budgets, and shutdown. It creates and forks
-//! namespaces, and it opens a [`NamespaceWriter`] for each namespace the host
-//! writes. A `NamespaceWriter` carries one namespace's mutations, uploads,
-//! and snapshots, and its commits go through that namespace's writer session.
-//! The host owns each session: it lives while the host holds a handle for it.
-//! [`FsReader`] serves reads, and [`FsMaintenance`] runs explicit
-//! maintenance.
+//! The API has two nouns: a runtime and a namespace. The runtime is
+//! [`FsWriter`] or [`FsReader`]. It owns the store client, the caches, and,
+//! for a writer, the admission budgets and shutdown. A [`Namespace`] handle
+//! acts on one namespace, and its methods take no namespace id.
 //!
-//! Each handle must be opened in the Tokio runtime where it will be used.
+//! A namespace handle has one of two modes. A `Namespace<ReadOnly>` comes
+//! from [`FsReader::namespace`]. It reads, owns no writer session, and costs
+//! nothing to create. A `Namespace<Writable>` comes from
+//! [`FsWriter::open_namespace`]. It reads the same way, and it is also the
+//! namespace's writer session, so its mutations, uploads, and snapshots go
+//! through one publication queue. The host owns each session: it lives while
+//! the host holds a handle for it. [`FsWriter`] also creates and forks
+//! namespaces, and [`FsMaintenance`] runs explicit maintenance.
+//!
+//! Each runtime must be opened in the Tokio runtime where it will be used.
 //! Prefer builders that accept [`StoreConfig`](crate::StoreConfig); use
 //! `builder_with_store` only when the supplied store is safe to use from that
 //! runtime.
 
 mod builder_core;
 mod maintenance;
-mod namespace_writer;
+mod namespace;
 mod reader;
 mod writer;
 
 pub use maintenance::{FsMaintenance, FsMaintenanceBuilder};
-pub use namespace_writer::NamespaceWriter;
+pub use namespace::{Namespace, ReadOnly, Writable};
 pub use reader::{FsReader, FsReaderBuilder};
 pub use writer::{FsWriter, FsWriterBuilder};
 

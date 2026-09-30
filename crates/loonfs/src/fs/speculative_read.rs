@@ -1,6 +1,6 @@
 //! Small buffered reads that overlap content I/O with current-path validation.
 
-use crate::{FileBytes, FsReader, NamespaceId, Result};
+use crate::{FileBytes, Namespace, Result};
 use loonfs_core::{ResolvedFileContent, RuntimeReadContext};
 
 /// A path resolved in the cached view, before that view is validated.
@@ -9,16 +9,12 @@ struct CachedFileTarget {
     target: ResolvedFileContent,
 }
 
-impl FsReader {
-    async fn cached_file_target(
-        &self,
-        namespace_id: &NamespaceId,
-        absolute_path: &str,
-    ) -> Option<CachedFileTarget> {
-        let view = self.core.cached_read_context(namespace_id)?;
+impl<M> Namespace<M> {
+    async fn cached_file_target(&self, absolute_path: &str) -> Option<CachedFileTarget> {
+        let view = self.core.cached_read_context(&self.namespace_id)?;
         let target = self
             .core
-            .reader_engine(namespace_id)
+            .reader_engine(&self.namespace_id)
             .resolve_file_content(
                 absolute_path,
                 &view,
@@ -33,12 +29,11 @@ impl FsReader {
     /// is still current: an unchanged view resolves it to the same target.
     async fn current_file_target(
         &self,
-        namespace_id: &NamespaceId,
         absolute_path: &str,
         cached: &CachedFileTarget,
     ) -> Result<ResolvedFileContent> {
         self.core
-            .read(namespace_id, |engine, context| async move {
+            .read(&self.namespace_id, |engine, context| async move {
                 let target =
                     if context.head == cached.view.head && context.basis == cached.view.basis {
                         cached.target.clone()
@@ -56,23 +51,19 @@ impl FsReader {
             .await
     }
 
-    pub(super) async fn get_current_file_bytes(
-        &self,
-        namespace_id: &NamespaceId,
-        absolute_path: &str,
-    ) -> Result<FileBytes> {
+    pub(super) async fn get_current_file_bytes(&self, absolute_path: &str) -> Result<FileBytes> {
         let max_bytes = self.core.inner.config.max_read_content_bytes;
-        let Some(cached) = self.cached_file_target(namespace_id, absolute_path).await else {
+        let Some(cached) = self.cached_file_target(absolute_path).await else {
             return self
                 .core
-                .read(namespace_id, |engine, context| async move {
+                .read(&self.namespace_id, |engine, context| async move {
                     Ok(engine.get_file(absolute_path, &context, max_bytes).await?)
                 })
                 .await;
         };
 
-        let engine = self.core.reader_engine(namespace_id);
-        let current = self.current_file_target(namespace_id, absolute_path, &cached);
+        let engine = self.core.reader_engine(&self.namespace_id);
+        let current = self.current_file_target(absolute_path, &cached);
         let target = if cached.target.supports_speculative_read() {
             let content = engine.get_speculative_file_content(&cached.target);
             tokio::pin!(current, content);

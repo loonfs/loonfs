@@ -1,5 +1,5 @@
-//! The per-namespace writer handle: opening, sharing, closing, dropping,
-//! and epochs.
+//! The per-namespace handle: opening, sharing, closing, dropping, epochs,
+//! and the read-only mode.
 
 #![allow(clippy::panic)]
 
@@ -265,6 +265,66 @@ async fn dropping_the_last_clone_ends_the_session_and_a_kept_clone_keeps_it_open
         first_epoch + 1,
         "dropping the last clone ended the session"
     );
+}
+
+#[tokio::test]
+async fn a_read_only_handle_does_no_io_and_does_not_keep_the_session_open() {
+    let temp_dir = tempdir().expect("tempdir");
+    let recording = Arc::new(RecordingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("create store"),
+        KeyPredicate::any(),
+    ));
+    let store: SharedObjectStore = recording.clone();
+    let writer = writer(store.clone(), "read-only").await;
+    let namespace_id = NamespaceId::parse("read-only").expect("namespace id");
+    create_namespace(&writer, &namespace_id).await;
+
+    recording.reset();
+    let namespace = writer.reader().namespace(&namespace_id);
+    let operations = recording.take();
+    assert!(
+        operations.is_empty(),
+        "creating the handle touched {operations:?}"
+    );
+
+    let namespace_writer = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
+    namespace_writer
+        .create_directory("/first", directory_options())
+        .await
+        .expect("first session publishes");
+    let first_epoch = writer_epoch(&store, &namespace_id).await;
+    let read_only = namespace_writer.read_only();
+    drop(namespace_writer);
+    writer
+        .publisher()
+        .drain()
+        .await
+        .expect("let the dropped session's admitted work finish");
+
+    let reopened = writer
+        .open_namespace(&namespace_id)
+        .expect("reopen namespace");
+    reopened
+        .create_directory("/reopened", directory_options())
+        .await
+        .expect("the new session publishes");
+    assert_eq!(
+        writer_epoch(&store, &namespace_id).await,
+        first_epoch + 1,
+        "a read-only handle does not keep the session open"
+    );
+    for path in ["/first", "/reopened"] {
+        read_only
+            .get_path_entry(path, Default::default())
+            .await
+            .expect("the derived handle reads both sessions' commits");
+        namespace
+            .get_path_entry(path, Default::default())
+            .await
+            .expect("the reader's handle reads both sessions' commits");
+    }
 }
 
 #[tokio::test]

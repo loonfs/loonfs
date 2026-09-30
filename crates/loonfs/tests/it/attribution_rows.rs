@@ -21,6 +21,7 @@ fn embedded_reads_project_commit_attribution_without_rewriting_inode_creation() 
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "attribution-rows");
     let namespace_id = namespace_id("demo");
+    let namespace = fs.reader.namespace(&namespace_id);
     fs.create_namespace_blocking(
         &namespace_id,
         CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
@@ -79,8 +80,7 @@ fn embedded_reads_project_commit_attribution_without_rewriting_inode_creation() 
         RestoreRevisionOptions::new(restorer.clone()),
     ))
     .expect("restore first revision");
-    let revisions = block_on(fs.reader.list_file_revisions_page(
-        &namespace_id,
+    let revisions = block_on(namespace.list_file_revisions_page(
         "/implicit/parent/report.txt",
         PageRequest {
             limit: page_limit(10),
@@ -157,6 +157,7 @@ fn attributes_root_forks_and_trash_report_their_row_attribution() {
     let object_store = store(temp_dir.path());
     let fs = open_runtime(object_store.clone(), "attribution-projections");
     let source_id = namespace_id("source");
+    let source_namespace = fs.reader.namespace(&source_id);
     fs.create_namespace_blocking(
         &source_id,
         CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
@@ -249,13 +250,10 @@ fn attributes_root_forks_and_trash_report_their_row_attribution() {
             },
         )
         .expect("delete subtree");
-    let trash = block_on(fs.reader.list_trash_page(
-        &source_id,
-        PageRequest {
-            limit: page_limit(10),
-            cursor: None,
-        },
-    ))
+    let trash = block_on(source_namespace.list_trash_page(PageRequest {
+        limit: page_limit(10),
+        cursor: None,
+    }))
     .expect("list trash before checkpoint");
     assert_eq!(trash.entries.len(), 1);
     assert_eq!(trash.entries[0].deleted_by, deleter);
@@ -267,13 +265,11 @@ fn attributes_root_forks_and_trash_report_their_row_attribution() {
     drop(fs);
 
     let reopened = open_runtime(object_store, "attribution-projections-reopened");
-    let trash = block_on(reopened.reader.list_trash_page(
-        &source_id,
-        PageRequest {
-            limit: page_limit(10),
-            cursor: None,
-        },
-    ))
+    let reopened_namespace = reopened.reader.namespace(&source_id);
+    let trash = block_on(reopened_namespace.list_trash_page(PageRequest {
+        limit: page_limit(10),
+        cursor: None,
+    }))
     .expect("list trash after checkpoint, retention, and restart");
     assert_eq!(trash.entries.len(), 1);
     assert_eq!(trash.entries[0].deleted_by, deleter);

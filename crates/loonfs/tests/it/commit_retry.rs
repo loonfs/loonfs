@@ -52,9 +52,9 @@ async fn feed_message(
     namespace_id: &NamespaceId,
     seq: ChangeSeq,
 ) -> Option<String> {
-    let page = runtime
-        .reader
-        .list_changes_page(namespace_id, ChangeSeq(0), ListChangesOptions::default())
+    let namespace = runtime.reader.namespace(namespace_id);
+    let page = namespace
+        .list_changes_page(ChangeSeq(0), ListChangesOptions::default())
         .await
         .expect("list changes");
     page.changes
@@ -153,9 +153,9 @@ async fn restart_replays_the_commit_actor_from_the_wal() {
     drop(runtime);
 
     let reopened = open_runtime_async(store(temp_dir.path()), "writer-b").await;
-    let page = reopened
-        .reader
-        .list_changes_page(&namespace_id, ChangeSeq(0), ListChangesOptions::default())
+    let namespace = reopened.reader.namespace(&namespace_id);
+    let page = namespace
+        .list_changes_page(ChangeSeq(0), ListChangesOptions::default())
         .await
         .expect("replay change feed after restart");
     let change = page
@@ -171,6 +171,7 @@ async fn repeating_identical_inline_bytes_under_the_same_commit_id_replays() {
     let temp_dir = tempdir().expect("tempdir");
     let runtime = open_runtime_async(store(temp_dir.path()), "writer-a").await;
     let namespace_id = namespace(&runtime).await;
+    let namespace = runtime.reader.namespace(&namespace_id);
     let commit_id = CommitId::parse("pinned-put").expect("valid commit id");
 
     let first = runtime
@@ -184,9 +185,8 @@ async fn repeating_identical_inline_bytes_under_the_same_commit_id_replays() {
 
     assert_eq!(rerun, first);
     assert_eq!(
-        runtime
-            .reader
-            .get_file_bytes(&namespace_id, PATH)
+        namespace
+            .get_file_bytes(PATH)
             .await
             .expect("read file")
             .bytes,
@@ -199,6 +199,7 @@ async fn reuploading_identical_bytes_above_the_inline_threshold_conflicts() {
     let temp_dir = tempdir().expect("tempdir");
     let runtime = open_runtime_async(store(temp_dir.path()), "writer-a").await;
     let namespace_id = namespace(&runtime).await;
+    let namespace = runtime.reader.namespace(&namespace_id);
     let commit_id = CommitId::parse("pinned-put").expect("valid commit id");
     let payload = vec![7u8; 64 * 1024 + 1];
 
@@ -217,9 +218,8 @@ async fn reuploading_identical_bytes_above_the_inline_threshold_conflicts() {
         Some(first.committed_seq)
     );
     assert_eq!(
-        runtime
-            .reader
-            .get_file_bytes(&namespace_id, PATH)
+        namespace
+            .get_file_bytes(PATH)
             .await
             .expect("read file")
             .bytes,
@@ -232,6 +232,7 @@ async fn different_bytes_under_a_used_commit_id_still_conflict() {
     let temp_dir = tempdir().expect("tempdir");
     let runtime = open_runtime_async(store(temp_dir.path()), "writer-a").await;
     let namespace_id = namespace(&runtime).await;
+    let namespace = runtime.reader.namespace(&namespace_id);
     let commit_id = CommitId::parse("pinned-put").expect("valid commit id");
 
     runtime
@@ -250,9 +251,8 @@ async fn different_bytes_under_a_used_commit_id_still_conflict() {
 
     assert_eq!(error.code(), ErrorCode::CommitIdReuseConflict);
     assert_eq!(
-        runtime
-            .reader
-            .get_file_bytes(&namespace_id, PATH)
+        namespace
+            .get_file_bytes(PATH)
             .await
             .expect("read file")
             .bytes,
@@ -660,6 +660,7 @@ async fn a_retention_trimmed_commit_seq_leaves_the_conflict_standing() {
     })
     .await;
     let namespace_id = namespace(&runtime).await;
+    let namespace = runtime.reader.namespace(&namespace_id);
     let commit_id = CommitId::parse("pinned-put").expect("valid commit id");
 
     let first = runtime
@@ -694,9 +695,8 @@ async fn a_retention_trimmed_commit_seq_leaves_the_conflict_standing() {
 
     assert_eq!(error.code(), ErrorCode::CommitIdReuseConflict);
     assert_eq!(
-        runtime
-            .reader
-            .get_file_bytes(&namespace_id, PATH)
+        namespace
+            .get_file_bytes(PATH)
             .await
             .expect("read file")
             .bytes,
@@ -726,6 +726,7 @@ async fn a_retry_past_the_receipt_horizon_commits_again() {
     // store to read what the compaction actually kept.
     drop(runtime);
     let runtime = open_runtime_async(store(temp_dir.path()), "writer-b").await;
+    let namespace = runtime.reader.namespace(&namespace_id);
 
     // Same id, same bytes — but the receipt is gone, so this is not a
     // replay (which would return the original sequence without committing)
@@ -744,9 +745,8 @@ async fn a_retry_past_the_receipt_horizon_commits_again() {
     // The blast radius the spec documents: a duplicate revision of
     // identical content. The file still reads back the same bytes.
     assert_eq!(
-        runtime
-            .reader
-            .get_file_bytes(&namespace_id, PATH)
+        namespace
+            .get_file_bytes(PATH)
             .await
             .expect("read file")
             .bytes,
@@ -838,6 +838,7 @@ async fn reuploading_an_identical_stream_under_the_same_commit_id_conflicts() {
     let temp_dir = tempdir().expect("tempdir");
     let runtime = open_runtime_async(store(temp_dir.path()), "writer-a").await;
     let namespace_id = namespace(&runtime).await;
+    let namespace = runtime.reader.namespace(&namespace_id);
     let namespace_writer = runtime
         .writer
         .open_namespace(&namespace_id)
@@ -860,9 +861,8 @@ async fn reuploading_an_identical_stream_under_the_same_commit_id_conflicts() {
         Some(first.committed_seq)
     );
     assert_eq!(
-        runtime
-            .reader
-            .get_file_bytes(&namespace_id, PATH)
+        namespace
+            .get_file_bytes(PATH)
             .await
             .expect("read file")
             .bytes,
@@ -875,6 +875,7 @@ async fn different_streamed_bytes_under_a_used_commit_id_still_conflict() {
     let temp_dir = tempdir().expect("tempdir");
     let runtime = open_runtime_async(store(temp_dir.path()), "writer-a").await;
     let namespace_id = namespace(&runtime).await;
+    let namespace = runtime.reader.namespace(&namespace_id);
     let namespace_writer = runtime
         .writer
         .open_namespace(&namespace_id)
@@ -900,9 +901,8 @@ async fn different_streamed_bytes_under_a_used_commit_id_still_conflict() {
 
     assert_eq!(error.code(), ErrorCode::CommitIdReuseConflict);
     assert_eq!(
-        runtime
-            .reader
-            .get_file_bytes(&namespace_id, PATH)
+        namespace
+            .get_file_bytes(PATH)
             .await
             .expect("read file")
             .bytes,

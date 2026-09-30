@@ -118,9 +118,9 @@ async fn directory_pages_use_bindings_and_load_revision_heads_concurrently() {
         .build()
         .await
         .expect("fresh reader");
-    let page = reader
+    let namespace = reader.namespace(&namespace_id);
+    let page = namespace
         .list_path_entries_page(
-            &namespace_id,
             "/files",
             PageRequest {
                 limit: page_limit(300),
@@ -145,12 +145,8 @@ async fn directory_pages_use_bindings_and_load_revision_heads_concurrently() {
         "{concurrency:?}"
     );
     for entry in page.entries {
-        let stat = reader
-            .get_path_entry(
-                &namespace_id,
-                entry.path.as_str(),
-                StatPathOptions::default(),
-            )
+        let stat = namespace
+            .get_path_entry(entry.path.as_str(), StatPathOptions::default())
             .await
             .expect("stat listed file");
         assert_eq!(entry.created_by, actor);

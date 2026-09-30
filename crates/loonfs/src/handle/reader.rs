@@ -1,19 +1,21 @@
 //! The read-only runtime handle.
 
-use super::HandleBuilderCore;
+use super::{HandleBuilderCore, Namespace, ReadOnly};
 use crate::fs::ReadCore;
 use crate::metrics::{MetricsRecorder, ObjectStoreMetricsRecorder};
 use crate::{
-    CapabilityDocument, Result, RuntimeCacheConfig, RuntimeCacheStats, SharedObjectStore,
-    StoreConfig, TraceMode, TraceStoreKind,
+    CapabilityDocument, NamespaceId, Result, RuntimeCacheConfig, RuntimeCacheStats,
+    SharedObjectStore, StoreConfig, TraceMode, TraceStoreKind,
 };
 use loonfs_api::Subject;
 use std::sync::Arc;
 
-/// Read-only handle for latest namespace views.
+/// Read-only runtime handle.
 ///
-/// `FsReader` reads namespace state, paths, content, revisions, and the change
-/// feed. It has no writer identity or session, cannot publish changes, and
+/// `FsReader` owns the store client and the caches that reads use. Reads of
+/// namespace state, paths, content, revisions, and the change feed live on
+/// the read-only [`Namespace`] handle that [`Self::namespace`] returns. A
+/// reader has no writer identity or session, cannot publish changes, and
 /// does not schedule maintenance. Reads check cached control state against
 /// durable state, so a standalone reader does not need writer coordination.
 ///
@@ -52,6 +54,19 @@ impl FsReader {
         Self { core }
     }
 
+    /// Returns a read-only handle on one namespace, for this reader's
+    /// subject.
+    ///
+    /// Does no IO and cannot fail. A namespace that does not exist fails on
+    /// the handle's first read.
+    pub fn namespace(&self, namespace_id: &NamespaceId) -> Namespace<ReadOnly> {
+        Namespace {
+            core: self.core.clone(),
+            namespace_id: namespace_id.clone(),
+            mode: ReadOnly,
+        }
+    }
+
     /// Returns the capability document for this embedded build (API spec,
     /// "Capability discovery").
     pub fn get_capabilities(&self) -> CapabilityDocument {
@@ -62,8 +77,6 @@ impl FsReader {
     pub fn runtime_cache_stats(&self) -> RuntimeCacheStats {
         self.core.runtime_cache_stats()
     }
-
-    // Read operations live in `fs/reads.rs`.
 }
 
 /// Builder for [`FsReader`].

@@ -116,11 +116,12 @@ pub(super) async fn create_download_by_inode(
 ) -> Result<Json<CreateDownloadByInodeResponse>, ApiResponseError> {
     let scoped_reader = subject.map(|subject| state.reader.as_subject(subject));
     let reader = scoped_reader.as_ref().unwrap_or(&state.reader);
+    let namespace = reader.namespace(&namespace_id);
     let inode_id = parse_inode_id(&path.inode_id)?;
     let revision_no = parse_revision_no(&path.revision_no)?;
     let issuer = direct_get_issuer(&state)?;
-    let target = reader
-        .create_download_by_inode(&namespace_id, inode_id, revision_no)
+    let target = namespace
+        .create_download_by_inode(inode_id, revision_no)
         .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
     let access = presigned_access(issuer, &target.object_key).await?;

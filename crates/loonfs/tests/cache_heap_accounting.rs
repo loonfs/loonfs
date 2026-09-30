@@ -365,10 +365,10 @@ async fn list_every_directory(shape: &Shape, reader: FsReader) {
     let reader = shape.reader(reader);
     for index in 0..shape.namespaces {
         let namespace_id = shape.namespace(index);
+        let namespace = reader.namespace(&namespace_id);
         for directory in 0..DIRECTORIES {
-            reader
+            namespace
                 .list_path_entries_page(
-                    &namespace_id,
                     &format!("/d-{directory:04}"),
                     PageRequest {
                         limit: page_limit(1000),
@@ -385,9 +385,9 @@ async fn list_every_directory(shape: &Shape, reader: FsReader) {
 async fn stat_one_path_per_namespace(shape: &Shape, reader: FsReader) {
     let reader = shape.reader(reader);
     for index in 0..shape.namespaces {
-        reader
+        let namespace = reader.namespace(&shape.namespace(index));
+        namespace
             .get_path_entry(
-                &shape.namespace(index),
                 &shape.entry_path(shape.entries() - 1),
                 StatPathOptions::default(),
             )

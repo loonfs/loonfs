@@ -5,8 +5,8 @@
 use crate::common::{collect_path_entries, directory_options, expect_code, writer};
 use loonfs::{
     CreateNamespaceOptions, ErrorCode, FsMaintenance, FsReader, ManifestNo,
-    MetadataMaintenanceOptions, NamespaceId, NamespaceSessionState, NamespaceWriter,
-    PutFileOptions, SharedObjectStore,
+    MetadataMaintenanceOptions, Namespace, NamespaceId, NamespaceSessionState, PutFileOptions,
+    SharedObjectStore, Writable,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::stores::{
@@ -42,7 +42,7 @@ async fn assert_root_paths(
     assert_eq!(&actual, expected);
 }
 
-async fn put_file(namespace_writer: &NamespaceWriter, path: &str) {
+async fn put_file(namespace_writer: &Namespace<Writable>, path: &str) {
     namespace_writer
         .put_file_bytes(path, b"body", file_options())
         .await

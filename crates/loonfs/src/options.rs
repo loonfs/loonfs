@@ -168,7 +168,7 @@ pub struct ReadFileStreamOptions {
     /// holds at once. Defaults to
     /// [`CONTENT_READ_CHUNK_BYTES`](loonfs_core::CONTENT_READ_CHUNK_BYTES);
     /// a caller with a tighter memory budget than that says so here, the way
-    /// a caller of [`FsReader::read_content_ref`](crate::FsReader::read_content_ref)
+    /// a caller of [`Namespace::read_content_ref`](crate::Namespace::read_content_ref)
     /// declares its own. Non-zero by type, so there is no chunk size that
     /// makes no progress.
     pub chunk_bytes: NonZeroU64,

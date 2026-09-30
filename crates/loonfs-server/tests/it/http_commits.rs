@@ -166,6 +166,7 @@ async fn a_batch_commits_once_and_matches_the_same_batch_embedded() {
     .build()
     .await
     .expect("embedded writer");
+    let namespace = writer.reader().namespace(&embedded_ns);
     writer
         .create_namespace(
             &embedded_ns,
@@ -198,9 +199,8 @@ async fn a_batch_commits_once_and_matches_the_same_batch_embedded() {
         .expect("embedded batch commits");
     assert_eq!(embedded_committed.committed_seq, committed.committed_seq);
 
-    let embedded_changes = writer
-        .reader()
-        .list_changes_page(&embedded_ns, ChangeSeq(0), ListChangesOptions::default())
+    let embedded_changes = namespace
+        .list_changes_page(ChangeSeq(0), ListChangesOptions::default())
         .await
         .expect("embedded changes");
 

@@ -1,8 +1,7 @@
-//! Read-only namespace and filesystem operations for [`FsReader`].
+//! Namespace and filesystem reads on a [`Namespace`] handle in any mode.
 
 use super::core::{encode_next_cursor, file_revisions_page_response};
 use crate::downloads::{DirectDownloadByInodeTarget, DirectDownloadTarget};
-use crate::FsReader;
 use crate::Result;
 use crate::{
     ChangeSeq, CheckpointFilesPage, CheckpointFilesPageCursor, ContentRef, CoreError,
@@ -405,7 +404,7 @@ fn pager_request<C: PageCursor>(
     Ok(PageRequest { limit, cursor })
 }
 
-impl FsReader {
+impl<M> Namespace<M> {
     fn read_snapshot(
         &self,
         engine: NamespaceReaderEngine<SharedObjectStore>,
@@ -434,14 +433,14 @@ impl FsReader {
         fields(
             operation = "pin_namespace",
             method = "pin_namespace",
-            namespace_id = %namespace_id,
+            namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn pin_namespace(&self, namespace_id: &NamespaceId) -> Result<FsReadSnapshot> {
+    pub async fn pin_namespace(&self) -> Result<FsReadSnapshot> {
         self.core.record_trace_context(&tracing::Span::current());
-        let (engine, context) = self.core.pinned_metadata_read(namespace_id).await?;
+        let (engine, context) = self.core.pinned_metadata_read(&self.namespace_id).await?;
         Ok(self.read_snapshot(engine, context, ReadPin::Head))
     }
 
@@ -456,7 +455,7 @@ impl FsReader {
         fields(
             operation = "pin_namespace",
             method = "pin_namespace_at_checkpoint",
-            namespace_id = %namespace_id,
+            namespace_id = %self.namespace_id,
             checkpoint_id = %checkpoint_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
@@ -464,13 +463,12 @@ impl FsReader {
     )]
     pub async fn pin_namespace_at_checkpoint(
         &self,
-        namespace_id: &NamespaceId,
         checkpoint_id: &PinId,
     ) -> Result<FsReadSnapshot> {
         self.core.record_trace_context(&tracing::Span::current());
         let (engine, context) = self
             .core
-            .pinned_read_at_checkpoint(namespace_id, checkpoint_id)
+            .pinned_read_at_checkpoint(&self.namespace_id, checkpoint_id)
             .await?;
         Ok(self.read_snapshot(engine, context, ReadPin::Checkpoint(checkpoint_id.clone())))
     }
@@ -484,27 +482,23 @@ impl FsReader {
         fields(
             operation = "pin_namespace",
             method = "pin_namespace_at_snapshot",
-            namespace_id = %namespace_id,
+            namespace_id = %self.namespace_id,
             snapshot_id = %snapshot_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn pin_namespace_at_snapshot(
-        &self,
-        namespace_id: &NamespaceId,
-        snapshot_id: &PinId,
-    ) -> Result<FsReadSnapshot> {
+    pub async fn pin_namespace_at_snapshot(&self, snapshot_id: &PinId) -> Result<FsReadSnapshot> {
         self.core.record_trace_context(&tracing::Span::current());
         let (engine, context) = self
             .core
-            .pinned_read_at_snapshot(namespace_id, snapshot_id)
+            .pinned_read_at_snapshot(&self.namespace_id, snapshot_id)
             .await?;
         self.core.inner.cache_stats.record_snapshot_view_read();
         Ok(self.read_snapshot(engine, context, ReadPin::Snapshot(snapshot_id.clone())))
     }
 
-    /// Returns a namespace's current state.
+    /// Returns this namespace's current state.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.get_namespace",
@@ -512,14 +506,14 @@ impl FsReader {
         skip_all,
         fields(
             operation = "get_namespace",
-            namespace_id = %namespace_id,
+            namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn get_namespace(&self, namespace_id: &NamespaceId) -> Result<Namespace> {
+    pub async fn get_namespace(&self) -> Result<loonfs_api::Namespace> {
         self.core.record_trace_context(&tracing::Span::current());
-        Ok(loonfs_core::cache::load_namespace(self.core.store(), namespace_id).await?)
+        Ok(loonfs_core::cache::load_namespace(self.core.store(), &self.namespace_id).await?)
     }
 
     /// Resolves an absolute path to its authoritative entry at the current
@@ -531,20 +525,19 @@ impl FsReader {
         skip_all,
         fields(
             operation = "stat",
-            namespace_id = %namespace_id,
+            namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )
     )]
     pub async fn get_path_entry(
         &self,
-        namespace_id: &NamespaceId,
         absolute_path: &str,
         options: StatPathOptions,
     ) -> Result<PathEntry> {
         if let Some(snapshot_id) = &options.snapshot_id {
             return self
-                .pin_namespace_at_snapshot(namespace_id, snapshot_id)
+                .pin_namespace_at_snapshot(snapshot_id)
                 .await?
                 .get_path_entry(absolute_path, options)
                 .await;
@@ -552,7 +545,7 @@ impl FsReader {
         let span = tracing::Span::current();
         self.core.record_trace_context(&span);
         self.core
-            .read(namespace_id, |engine, read_context| {
+            .read(&self.namespace_id, |engine, read_context| {
                 let options = options.clone();
                 async move {
                     let entry = engine
@@ -572,20 +565,19 @@ impl FsReader {
         skip_all,
         fields(
             operation = "stat_inode",
-            namespace_id = %namespace_id,
+            namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )
     )]
     pub async fn get_inode(
         &self,
-        namespace_id: &NamespaceId,
         inode_id: InodeId,
         options: StatPathOptions,
     ) -> Result<PathEntry> {
         if let Some(snapshot_id) = &options.snapshot_id {
             return self
-                .pin_namespace_at_snapshot(namespace_id, snapshot_id)
+                .pin_namespace_at_snapshot(snapshot_id)
                 .await?
                 .get_inode(inode_id, options)
                 .await;
@@ -593,7 +585,7 @@ impl FsReader {
         let span = tracing::Span::current();
         self.core.record_trace_context(&span);
         self.core
-            .read(namespace_id, |engine, read_context| {
+            .read(&self.namespace_id, |engine, read_context| {
                 let options = options.clone();
                 async move {
                     let entry = engine.stat_inode(inode_id, options, &read_context).await?;
@@ -606,29 +598,21 @@ impl FsReader {
     /// Creates a directory pager beginning at `request.cursor`.
     pub fn list_path_entries_pager(
         &self,
-        namespace_id: &NamespaceId,
         absolute_path: &str,
         request: PageRequest<DirectoryPageCursor>,
         options: ListPathEntriesOptions,
     ) -> PathEntriesPager {
         let cursor = encoded_pager_cursor(request.cursor.as_ref());
         let limit = request.limit;
-        let reader = self.clone();
-        let namespace_id = namespace_id.clone();
+        let reader = self.read_only();
         let absolute_path = absolute_path.to_owned();
         loonfs_api::Pager::new(cursor, move |cursor| {
             let reader = reader.clone();
-            let namespace_id = namespace_id.clone();
             let absolute_path = absolute_path.clone();
             let options = options.clone();
             async move {
                 reader
-                    .list_path_entries_page(
-                        &namespace_id,
-                        &absolute_path,
-                        pager_request(limit, cursor)?,
-                        options,
-                    )
+                    .list_path_entries_page(&absolute_path, pager_request(limit, cursor)?, options)
                     .await
             }
         })
@@ -647,21 +631,20 @@ impl FsReader {
         fields(
             operation = "list_path_entries",
             method = "list_path_entries_page",
-            namespace_id = %namespace_id,
+            namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )
     )]
     pub async fn list_path_entries_page(
         &self,
-        namespace_id: &NamespaceId,
         absolute_path: &str,
         request: PageRequest<DirectoryPageCursor>,
         options: ListPathEntriesOptions,
     ) -> Result<ListPathEntriesResponse> {
         if let Some(snapshot_id) = &options.snapshot_id {
             return self
-                .pin_namespace_at_snapshot(namespace_id, snapshot_id)
+                .pin_namespace_at_snapshot(snapshot_id)
                 .await?
                 .list_path_entries_page(absolute_path, request, options)
                 .await;
@@ -669,7 +652,7 @@ impl FsReader {
         reject_pinned_directory_cursor(request.cursor.as_ref())?;
         self.core.record_trace_context(&tracing::Span::current());
         let (mut response, next_cursor) = self
-            .list_path_entries_page_typed(namespace_id, absolute_path, request, options)
+            .list_path_entries_page_typed(absolute_path, request, options)
             .await?;
         response.next_cursor = encode_next_cursor(next_cursor.as_ref())?;
         Ok(response)
@@ -677,7 +660,6 @@ impl FsReader {
 
     async fn list_path_entries_page_typed(
         &self,
-        namespace_id: &NamespaceId,
         absolute_path: &str,
         request: PageRequest<DirectoryPageCursor>,
         options: ListPathEntriesOptions,
@@ -685,7 +667,7 @@ impl FsReader {
         let listed_path = AbsolutePath::parse(absolute_path)
             .map_err(|error| CoreError::InvalidPath(error.to_string()))?;
         self.core
-            .read(namespace_id, |engine, read_context| {
+            .read(&self.namespace_id, |engine, read_context| {
                 let request = request.clone();
                 let options = options.clone();
                 let listed_path = listed_path.clone();
@@ -699,7 +681,7 @@ impl FsReader {
                     let head_seq = read_context.head.seq;
                     let next_cursor = page.next_cursor;
                     let response = ListPathEntriesResponse {
-                        namespace_id: namespace_id.clone(),
+                        namespace_id: self.namespace_id.clone(),
                         path: listed_path,
                         head_seq,
                         entries: page.items,
@@ -715,27 +697,19 @@ impl FsReader {
     /// `request.cursor`.
     pub fn list_inode_children_pager(
         &self,
-        namespace_id: &NamespaceId,
         inode_id: InodeId,
         request: PageRequest<DirectoryPageCursor>,
         options: ListInodeChildrenOptions,
     ) -> InodeChildrenPager {
         let cursor = encoded_pager_cursor(request.cursor.as_ref());
         let limit = request.limit;
-        let reader = self.clone();
-        let namespace_id = namespace_id.clone();
+        let reader = self.read_only();
         loonfs_api::Pager::new(cursor, move |cursor| {
             let reader = reader.clone();
-            let namespace_id = namespace_id.clone();
             let options = options.clone();
             async move {
                 reader
-                    .list_inode_children_page(
-                        &namespace_id,
-                        inode_id,
-                        pager_request(limit, cursor)?,
-                        options,
-                    )
+                    .list_inode_children_page(inode_id, pager_request(limit, cursor)?, options)
                     .await
             }
         })
@@ -755,21 +729,20 @@ impl FsReader {
         fields(
             operation = "list_inode_children",
             method = "list_inode_children_page",
-            namespace_id = %namespace_id,
+            namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )
     )]
     pub async fn list_inode_children_page(
         &self,
-        namespace_id: &NamespaceId,
         inode_id: InodeId,
         request: PageRequest<DirectoryPageCursor>,
         options: ListInodeChildrenOptions,
     ) -> Result<ListInodeChildrenResponse> {
         if let Some(snapshot_id) = &options.snapshot_id {
             return self
-                .pin_namespace_at_snapshot(namespace_id, snapshot_id)
+                .pin_namespace_at_snapshot(snapshot_id)
                 .await?
                 .list_inode_children_page(inode_id, request, options)
                 .await;
@@ -777,7 +750,7 @@ impl FsReader {
         reject_pinned_directory_cursor(request.cursor.as_ref())?;
         self.core.record_trace_context(&tracing::Span::current());
         self.core
-            .read(namespace_id, |engine, read_context| {
+            .read(&self.namespace_id, |engine, read_context| {
                 let request = request.clone();
                 let options = options.clone();
                 async move {
@@ -790,7 +763,7 @@ impl FsReader {
                     let head_seq = read_context.head.seq;
                     let next_cursor = encode_next_cursor(page.next_cursor.as_ref())?;
                     Ok(ListInodeChildrenResponse {
-                        namespace_id: namespace_id.clone(),
+                        namespace_id: self.namespace_id.clone(),
                         parent_inode_id: inode_id,
                         head_seq,
                         entries: page.items,
@@ -810,19 +783,14 @@ impl FsReader {
         fields(
             operation = "get_file_bytes",
             method = "get_file_bytes",
-            namespace_id = %namespace_id,
+            namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn get_file_bytes(
-        &self,
-        namespace_id: &NamespaceId,
-        absolute_path: &str,
-    ) -> Result<FileBytes> {
+    pub async fn get_file_bytes(&self, absolute_path: &str) -> Result<FileBytes> {
         self.core.record_trace_context(&tracing::Span::current());
-        self.get_current_file_bytes(namespace_id, absolute_path)
-            .await
+        self.get_current_file_bytes(absolute_path).await
     }
 
     /// Reads a file's current content as bounded chunks instead of one buffer.
@@ -843,20 +811,19 @@ impl FsReader {
         fields(
             operation = "get_file_bytes",
             method = "read_file_stream",
-            namespace_id = %namespace_id,
+            namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )
     )]
     pub async fn read_file_stream(
         &self,
-        namespace_id: &NamespaceId,
         absolute_path: &str,
         options: ReadFileStreamOptions,
     ) -> Result<FileContentStream<SharedObjectStore>> {
         self.core.record_trace_context(&tracing::Span::current());
         self.core
-            .read(namespace_id, |engine, read_context| async move {
+            .read(&self.namespace_id, |engine, read_context| async move {
                 let stream = engine
                     .read_file_stream(
                         absolute_path,
@@ -882,20 +849,19 @@ impl FsReader {
         skip_all,
         fields(
             operation = "begin_download",
-            namespace_id = %namespace_id,
+            namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )
     )]
     pub async fn create_download(
         &self,
-        namespace_id: &NamespaceId,
         absolute_path: &str,
         revision_no: Option<RevisionNo>,
     ) -> Result<DirectDownloadTarget> {
         self.core.record_trace_context(&tracing::Span::current());
         self.core
-            .read(namespace_id, |engine, read_context| async move {
+            .read(&self.namespace_id, |engine, read_context| async move {
                 let target = engine
                     .direct_download_target(absolute_path, revision_no, &read_context)
                     .await?;
@@ -913,20 +879,19 @@ impl FsReader {
         skip_all,
         fields(
             operation = "begin_download_by_inode",
-            namespace_id = %namespace_id,
+            namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )
     )]
     pub async fn create_download_by_inode(
         &self,
-        namespace_id: &NamespaceId,
         inode_id: InodeId,
         revision_no: RevisionNo,
     ) -> Result<DirectDownloadByInodeTarget> {
         self.core.record_trace_context(&tracing::Span::current());
         self.core
-            .read(namespace_id, |engine, read_context| async move {
+            .read(&self.namespace_id, |engine, read_context| async move {
                 let target = engine
                     .direct_download_target_by_inode(inode_id, revision_no, &read_context)
                     .await?;
@@ -950,20 +915,19 @@ impl FsReader {
         skip_all,
         fields(
             operation = "list_checkpoint_files_page",
-            namespace_id = %namespace_id,
+            namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )
     )]
     pub async fn list_checkpoint_files_page(
         &self,
-        namespace_id: &NamespaceId,
         checkpoint_id: &PinId,
         request: PageRequest<CheckpointFilesPageCursor>,
         options: ListCheckpointFilesOptions,
     ) -> Result<CheckpointFilesPage> {
         self.core.record_trace_context(&tracing::Span::current());
-        let (engine, read_context) = self.core.pinned_read(namespace_id).await?;
+        let (engine, read_context) = self.core.pinned_read(&self.namespace_id).await?;
         engine
             .list_checkpoint_files_page(checkpoint_id, request, options, &read_context)
             .await
@@ -985,19 +949,18 @@ impl FsReader {
         skip_all,
         fields(
             operation = "resolve_current_files",
-            namespace_id = %namespace_id,
+            namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )
     )]
     pub async fn resolve_current_files(
         &self,
-        namespace_id: &NamespaceId,
         inode_ids: &[InodeId],
     ) -> Result<Vec<CurrentFileState>> {
         self.core.record_trace_context(&tracing::Span::current());
         self.core
-            .read(namespace_id, |engine, read_context| async move {
+            .read(&self.namespace_id, |engine, read_context| async move {
                 let states = engine
                     .resolve_current_files(inode_ids, &read_context)
                     .await?;
@@ -1023,20 +986,19 @@ impl FsReader {
         skip_all,
         fields(
             operation = "read_content_ref",
-            namespace_id = %namespace_id,
+            namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )
     )]
     pub async fn read_content_ref(
         &self,
-        namespace_id: &NamespaceId,
         content_ref: &ContentRef,
         max_bytes: u64,
     ) -> Result<Vec<u8>> {
         self.core.record_trace_context(&tracing::Span::current());
         self.core
-            .read(namespace_id, |engine, read_context| async move {
+            .read(&self.namespace_id, |engine, read_context| async move {
                 Ok(engine
                     .read_content_ref(content_ref, max_bytes, &read_context)
                     .await?)
@@ -1055,25 +1017,24 @@ impl FsReader {
         skip_all,
         fields(
             operation = "list_trash",
-            namespace_id = %namespace_id,
+            namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )
     )]
     pub async fn list_trash_page(
         &self,
-        namespace_id: &NamespaceId,
         request: PageRequest<loonfs_api::TrashPageCursor>,
     ) -> Result<loonfs_api::ListTrashResponse> {
         self.core.record_trace_context(&tracing::Span::current());
         self.core
-            .read(namespace_id, |engine, read_context| {
+            .read(&self.namespace_id, |engine, read_context| {
                 let request = request.clone();
                 async move {
                     let page = engine.list_trash_page(request, &read_context).await?;
                     let next_cursor = encode_next_cursor(page.next_cursor.as_ref())?;
                     Ok(loonfs_api::ListTrashResponse {
-                        namespace_id: namespace_id.clone(),
+                        namespace_id: self.namespace_id.clone(),
                         head_seq: read_context.head.seq,
                         entries: page.items,
                         next_cursor,
@@ -1084,23 +1045,13 @@ impl FsReader {
     }
 
     /// Creates a trash pager beginning at `request.cursor`.
-    pub fn list_trash_pager(
-        &self,
-        namespace_id: &NamespaceId,
-        request: PageRequest<TrashPageCursor>,
-    ) -> TrashPager {
+    pub fn list_trash_pager(&self, request: PageRequest<TrashPageCursor>) -> TrashPager {
         let cursor = encoded_pager_cursor(request.cursor.as_ref());
         let limit = request.limit;
-        let reader = self.clone();
-        let namespace_id = namespace_id.clone();
+        let reader = self.read_only();
         loonfs_api::Pager::new(cursor, move |cursor| {
             let reader = reader.clone();
-            let namespace_id = namespace_id.clone();
-            async move {
-                reader
-                    .list_trash_page(&namespace_id, pager_request(limit, cursor)?)
-                    .await
-            }
+            async move { reader.list_trash_page(pager_request(limit, cursor)?).await }
         })
     }
 
@@ -1112,14 +1063,13 @@ impl FsReader {
         skip_all,
         fields(
             operation = "list_file_revisions",
-            namespace_id = %namespace_id,
+            namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )
     )]
     pub async fn list_file_revisions_page(
         &self,
-        namespace_id: &NamespaceId,
         absolute_path: &str,
         request: PageRequest<FileRevisionsPageCursor>,
     ) -> Result<ListFileRevisionsResponse> {
@@ -1127,7 +1077,7 @@ impl FsReader {
         let absolute_path = AbsolutePath::parse(absolute_path)
             .map_err(|error| CoreError::InvalidPath(error.to_string()))?;
         self.core
-            .read(namespace_id, |engine, read_context| {
+            .read(&self.namespace_id, |engine, read_context| {
                 let request = request.clone();
                 let absolute_path = absolute_path.clone();
                 async move {
@@ -1135,7 +1085,7 @@ impl FsReader {
                         .list_file_revisions_page(absolute_path.as_str(), request, &read_context)
                         .await?;
                     Ok(file_revisions_page_response(
-                        namespace_id.clone(),
+                        self.namespace_id.clone(),
                         read_context.head.seq,
                         page,
                         inode_id,
@@ -1148,26 +1098,19 @@ impl FsReader {
     /// Creates a path-based revision pager beginning at `request.cursor`.
     pub fn list_file_revisions_pager(
         &self,
-        namespace_id: &NamespaceId,
         absolute_path: &str,
         request: PageRequest<FileRevisionsPageCursor>,
     ) -> FileRevisionsPager {
         let cursor = encoded_pager_cursor(request.cursor.as_ref());
         let limit = request.limit;
-        let reader = self.clone();
-        let namespace_id = namespace_id.clone();
+        let reader = self.read_only();
         let absolute_path = absolute_path.to_owned();
         loonfs_api::Pager::new(cursor, move |cursor| {
             let reader = reader.clone();
-            let namespace_id = namespace_id.clone();
             let absolute_path = absolute_path.clone();
             async move {
                 reader
-                    .list_file_revisions_page(
-                        &namespace_id,
-                        &absolute_path,
-                        pager_request(limit, cursor)?,
-                    )
+                    .list_file_revisions_page(&absolute_path, pager_request(limit, cursor)?)
                     .await
             }
         })
@@ -1181,27 +1124,26 @@ impl FsReader {
         skip_all,
         fields(
             operation = "list_file_revisions_by_inode",
-            namespace_id = %namespace_id,
+            namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )
     )]
     pub async fn list_file_revisions_by_inode_page(
         &self,
-        namespace_id: &NamespaceId,
         inode_id: InodeId,
         request: PageRequest<FileRevisionsPageCursor>,
     ) -> Result<ListFileRevisionsResponse> {
         self.core.record_trace_context(&tracing::Span::current());
         self.core
-            .read(namespace_id, |engine, read_context| {
+            .read(&self.namespace_id, |engine, read_context| {
                 let request = request.clone();
                 async move {
                     let page = engine
                         .list_file_revisions_for_inode_page(inode_id, request, &read_context)
                         .await?;
                     Ok(file_revisions_page_response(
-                        namespace_id.clone(),
+                        self.namespace_id.clone(),
                         read_context.head.seq,
                         page,
                         inode_id,
@@ -1214,24 +1156,17 @@ impl FsReader {
     /// Creates an inode-based revision pager beginning at `request.cursor`.
     pub fn list_file_revisions_by_inode_pager(
         &self,
-        namespace_id: &NamespaceId,
         inode_id: InodeId,
         request: PageRequest<FileRevisionsPageCursor>,
     ) -> FileRevisionsPager {
         let cursor = encoded_pager_cursor(request.cursor.as_ref());
         let limit = request.limit;
-        let reader = self.clone();
-        let namespace_id = namespace_id.clone();
+        let reader = self.read_only();
         loonfs_api::Pager::new(cursor, move |cursor| {
             let reader = reader.clone();
-            let namespace_id = namespace_id.clone();
             async move {
                 reader
-                    .list_file_revisions_by_inode_page(
-                        &namespace_id,
-                        inode_id,
-                        pager_request(limit, cursor)?,
-                    )
+                    .list_file_revisions_by_inode_page(inode_id, pager_request(limit, cursor)?)
                     .await
             }
         })
@@ -1246,20 +1181,19 @@ impl FsReader {
         fields(
             operation = "get_file_bytes",
             method = "get_file_revision_bytes",
-            namespace_id = %namespace_id,
+            namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )
     )]
     pub async fn get_file_revision_bytes(
         &self,
-        namespace_id: &NamespaceId,
         absolute_path: &str,
         revision_no: RevisionNo,
     ) -> Result<FileBytes> {
         self.core.record_trace_context(&tracing::Span::current());
         self.core
-            .read(namespace_id, |engine, read_context| async move {
+            .read(&self.namespace_id, |engine, read_context| async move {
                 let read = engine
                     .get_file_revision(
                         absolute_path,
@@ -1283,20 +1217,19 @@ impl FsReader {
         fields(
             operation = "get_file_revision_bytes_by_inode",
             method = "read_file_revision_stream_by_inode",
-            namespace_id = %namespace_id,
+            namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )
     )]
     pub async fn read_file_revision_stream_by_inode(
         &self,
-        namespace_id: &NamespaceId,
         inode_id: InodeId,
         revision_no: RevisionNo,
     ) -> Result<FileContentStream<SharedObjectStore>> {
         self.core.record_trace_context(&tracing::Span::current());
         self.core
-            .read(namespace_id, |engine, context| async move {
+            .read(&self.namespace_id, |engine, context| async move {
                 Ok(engine
                     .read_file_revision_stream_by_inode(inode_id, revision_no, &context)
                     .await?)
@@ -1313,20 +1246,19 @@ impl FsReader {
         skip_all,
         fields(
             operation = "get_file_revision_bytes_by_inode",
-            namespace_id = %namespace_id,
+            namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )
     )]
     pub async fn get_file_revision_bytes_by_inode(
         &self,
-        namespace_id: &NamespaceId,
         inode_id: InodeId,
         revision_no: RevisionNo,
     ) -> Result<Vec<u8>> {
         self.core.record_trace_context(&tracing::Span::current());
         self.core
-            .read(namespace_id, |engine, read_context| async move {
+            .read(&self.namespace_id, |engine, read_context| async move {
                 let bytes = engine
                     .get_file_revision_for_inode(
                         inode_id,
@@ -1349,20 +1281,19 @@ impl FsReader {
         fields(
             operation = "list_changes",
             method = "list_changes_page",
-            namespace_id = %namespace_id,
+            namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )
     )]
     pub async fn list_changes_page(
         &self,
-        namespace_id: &NamespaceId,
         after_seq: ChangeSeq,
         options: ListChangesOptions,
     ) -> Result<ListChangesResponse> {
         self.core.record_trace_context(&tracing::Span::current());
         self.core
-            .read(namespace_id, |engine, context| {
+            .read(&self.namespace_id, |engine, context| {
                 let options = options.clone();
                 async move { list_changes(&engine, &context, after_seq, options).await }
             })
@@ -1372,20 +1303,16 @@ impl FsReader {
     /// Creates a change-feed pager beginning after `after_seq`.
     pub fn list_changes_pager(
         &self,
-        namespace_id: &NamespaceId,
         after_seq: ChangeSeq,
         options: ListChangesOptions,
     ) -> ChangesPager {
-        let reader = self.clone();
-        let namespace_id = namespace_id.clone();
+        let reader = self.read_only();
         loonfs_api::Pager::new(Some(after_seq), move |after_seq| {
             let reader = reader.clone();
-            let namespace_id = namespace_id.clone();
             let options = options.clone();
             async move {
                 reader
                     .list_changes_page(
-                        &namespace_id,
                         after_seq.expect("change pager should carry a sequence"),
                         options,
                     )

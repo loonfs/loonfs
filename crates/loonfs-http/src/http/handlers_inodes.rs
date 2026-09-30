@@ -211,10 +211,10 @@ pub(super) async fn list_file_revisions_by_inode(
 ) -> Result<Json<ListFileRevisionsResponse>, ApiResponseError> {
     let scoped_reader = subject.map(|subject| state.reader.as_subject(subject));
     let reader = scoped_reader.as_ref().unwrap_or(&state.reader);
+    let namespace = reader.namespace(&namespace_id);
     let inode_id = parse_inode_id(&path.inode_id)?;
-    let response = reader
+    let response = namespace
         .list_file_revisions_by_inode_page(
-            &namespace_id,
             inode_id,
             PageRequest::<FileRevisionsPageCursor> {
                 limit: resolve_page_limit(query.limit)?,
@@ -262,11 +262,12 @@ pub(super) async fn get_file_revision_bytes_by_inode(
 ) -> Result<Response, ApiResponseError> {
     let scoped_reader = subject.map(|subject| state.reader.as_subject(subject));
     let reader = scoped_reader.as_ref().unwrap_or(&state.reader);
+    let namespace = reader.namespace(&namespace_id);
     let inode_id = parse_inode_id(&path.inode_id)?;
     let revision_no = parse_revision_no(&path.revision_no)?;
     let permit = acquire_download_permit(&state)?;
-    let stream = reader
-        .read_file_revision_stream_by_inode(&namespace_id, inode_id, revision_no)
+    let stream = namespace
+        .read_file_revision_stream_by_inode(inode_id, revision_no)
         .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
     streamed_download_response(

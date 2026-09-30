@@ -118,6 +118,7 @@ async fn cold_discovery_seeds_projection_after_control_cache_eviction() {
         .await
         .expect("create namespace");
     }
+    let namespace = fs.reader.namespace(&namespace_id);
     let namespace_writer = fs
         .writer
         .open_namespace(&namespace_id)
@@ -142,9 +143,8 @@ async fn cold_discovery_seeds_projection_after_control_cache_eviction() {
     assert_eq!(before_read.wal_tail_projection_cache_evictions, 1);
     recording.reset();
 
-    let entry = fs
-        .reader
-        .get_path_entry(&namespace_id, "/docs", Default::default())
+    let entry = namespace
+        .get_path_entry("/docs", Default::default())
         .await
         .expect("read published directory");
     assert_eq!(entry.head_seq, ChangeSeq(1));
@@ -540,6 +540,7 @@ fn runtime_wal_tail_projection_cache_skips_oversized_projection() {
             ..RuntimeCacheConfig::default()
         })
     });
+    let namespace = fs.reader.namespace(&namespace_id);
 
     fs.create_namespace_blocking(
         &namespace_id,
@@ -556,8 +557,7 @@ fn runtime_wal_tail_projection_cache_skips_oversized_projection() {
 
     block_on(fs.writer.publisher().drain()).expect("finish hints");
     recording.reset();
-    let _snapshot =
-        block_on(fs.reader.pin_namespace(&namespace_id)).expect("pin the seeded namespace");
+    let _snapshot = block_on(namespace.pin_namespace()).expect("pin the seeded namespace");
     assert_wal_probe(recording.take(), &namespace_id, loonfs_api::WalNo(3));
     for _ in 0..2 {
         fs.get_file_bytes_blocking(&namespace_id, "/file.txt")

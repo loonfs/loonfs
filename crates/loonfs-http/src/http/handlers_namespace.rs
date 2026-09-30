@@ -283,12 +283,12 @@ pub(super) async fn get_namespace(
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(_): AppQuery<NoQuery>,
 ) -> Result<Json<loonfs_api::Namespace>, ApiResponseError> {
-    let namespace = state
-        .reader
-        .get_namespace(&namespace_id)
+    let namespace = state.reader.namespace(&namespace_id);
+    let response = namespace
+        .get_namespace()
         .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
-    Ok(Json(namespace))
+    Ok(Json(response))
 }
 
 #[cfg_attr(
@@ -534,15 +534,13 @@ pub(super) async fn list_snapshots(
 ) -> Result<Json<ListSnapshotsResponse>, ApiResponseError> {
     let scoped_reader = subject.map(|subject| state.reader.as_subject(subject));
     let reader = scoped_reader.as_ref().unwrap_or(&state.reader);
+    let namespace = reader.namespace(&namespace_id);
     let cursor = decode_checkpoint_cursor(query.cursor.as_deref())?;
-    let response = reader
-        .list_snapshots_page(
-            &namespace_id,
-            PageRequest {
-                limit: resolve_page_limit(query.limit)?,
-                cursor,
-            },
-        )
+    let response = namespace
+        .list_snapshots_page(PageRequest {
+            limit: resolve_page_limit(query.limit)?,
+            cursor,
+        })
         .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))
         .map_err(|error| error.with_invalid_request_param("cursor"))?;

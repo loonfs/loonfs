@@ -329,7 +329,7 @@ fn retained_namespaces(registry: &PublisherRegistry) -> Vec<NamespaceId> {
 async fn publish_once_into_each(
     writer: &crate::FsWriter,
     namespaces: &[NamespaceId],
-) -> Vec<crate::NamespaceWriter> {
+) -> Vec<crate::Namespace<crate::Writable>> {
     let mut namespace_writers = Vec::new();
     for namespace_id in namespaces {
         writer
@@ -820,7 +820,7 @@ async fn rejected_duplicate_joins_ready_in_flight_primary() {
     let namespace_writer = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
-    let publisher = namespace_writer.session.publisher.clone();
+    let publisher = namespace_writer.mode.session.publisher.clone();
     let request = create_directory_request("ready-primary", "ready-primary");
 
     let primary = try_admit_candidate(
@@ -866,7 +866,7 @@ async fn ready_duplicate_joins_rejected_in_flight_primary() {
     let namespace_writer = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
-    let publisher = namespace_writer.session.publisher.clone();
+    let publisher = namespace_writer.mode.session.publisher.clone();
     let request = create_directory_request("rejected-primary", "rejected-primary");
 
     let primary = try_admit_candidate(
@@ -1788,6 +1788,7 @@ async fn publisher_batches_concurrent_distinct_commits_into_one_wal_segment() {
     let store = Arc::new(blocking_publication_store(temp_dir.path(), &namespace_id));
     let shared = store.clone() as SharedStore;
     let writer = test_writer(shared.clone()).await;
+    let namespace = writer.reader().namespace(&namespace_id);
     writer
         .create_namespace(
             &namespace_id,
@@ -1836,7 +1837,7 @@ async fn publisher_batches_concurrent_distinct_commits_into_one_wal_segment() {
                 .await
         })
     };
-    let publisher = namespace_writer.session.publisher.clone();
+    let publisher = namespace_writer.mode.session.publisher.clone();
     wait_for_queued_candidates(&publisher, 2).await;
 
     store.release();
@@ -1887,13 +1888,8 @@ async fn publisher_batches_concurrent_distinct_commits_into_one_wal_segment() {
     assert_eq!(batched_actors.get("req-a"), Some(&actor_a));
     assert_eq!(batched_actors.get("req-b"), Some(&actor_b));
 
-    let changes = writer
-        .reader()
-        .list_changes_page(
-            &namespace_id,
-            ChangeSeq(0),
-            crate::ListChangesOptions::default(),
-        )
+    let changes = namespace
+        .list_changes_page(ChangeSeq(0), crate::ListChangesOptions::default())
         .await
         .expect("read change feed");
     let feed_actors = changes
@@ -1986,7 +1982,7 @@ async fn publisher_batches_plain_and_prepared_mutations_together() {
                 .await
         })
     };
-    let publisher = namespace_writer.session.publisher.clone();
+    let publisher = namespace_writer.mode.session.publisher.clone();
     wait_for_queued_candidates(&publisher, 2).await;
 
     store.release();
@@ -2078,7 +2074,7 @@ async fn registry_close_admission_refuses_new_work_while_admitted_work_drains() 
     assert_eq!(refused.code(), ErrorCode::ShuttingDown);
 
     // A publisher clone that predates the sweep also refuses directly.
-    let publisher = namespace_writer.session.publisher.clone();
+    let publisher = namespace_writer.mode.session.publisher.clone();
     let direct = try_admit_commit(
         &publisher,
         &namespace_id,
@@ -2146,7 +2142,7 @@ async fn worker_survives_panic_and_processes_later_queue_items() {
                 .await
         })
     };
-    let publisher = namespace_writer.session.publisher.clone();
+    let publisher = namespace_writer.mode.session.publisher.clone();
     wait_for_queued_candidates(&publisher, 1).await;
 
     store.release_into_panic();
@@ -2332,9 +2328,10 @@ async fn a_runtime_fold_materializes_inline_content_and_reanchors_to_an_empty_ta
         .build()
         .await
         .expect("fresh reader");
+    let namespace = reader.namespace(&namespace_id);
     assert_eq!(
-        reader
-            .get_file_bytes(&namespace_id, "/inline")
+        namespace
+            .get_file_bytes("/inline")
             .await
             .expect("read after fold")
             .bytes,
@@ -2342,6 +2339,7 @@ async fn a_runtime_fold_materializes_inline_content_and_reanchors_to_an_empty_ta
     );
     assert!(store.count(OperationClass::Read) > 0);
     let input = namespace_writer
+        .mode
         .session
         .publisher
         .engine
@@ -2692,12 +2690,13 @@ async fn successful_delete_waits_for_fold_before_evicting_the_namespace_publishe
         .expect("threshold-crossing commit before delete");
     blocking.wait_until_blocked().await;
     assert_eq!(registry.shared.lock_state().sessions.len(), 1);
-    let publisher = namespace_writer.session.publisher.clone();
+    let publisher = namespace_writer.mode.session.publisher.clone();
 
     let mut delete = {
         let namespace_writer = namespace_writer.clone();
         tokio::spawn(async move {
             namespace_writer
+                .mode
                 .session
                 .submit_delete(DeleteNamespaceOptions::default())
                 .await
@@ -2739,7 +2738,10 @@ async fn successful_delete_waits_for_fold_before_evicting_the_namespace_publishe
     let reopened = writer
         .open_namespace(&namespace_id)
         .expect("reopen namespace");
-    assert!(!Arc::ptr_eq(&reopened.session, &namespace_writer.session));
+    assert!(!Arc::ptr_eq(
+        &reopened.mode.session,
+        &namespace_writer.mode.session
+    ));
     let late = reopened
         .commit_candidate(CommitCandidate::new(create_directory_request(
             "late", "late",
@@ -2800,7 +2802,7 @@ async fn a_delete_admitted_before_close_admission_lands_terminal() {
         })
     };
     store.wait_until_blocked().await;
-    let publisher = namespace_writer.session.publisher.clone();
+    let publisher = namespace_writer.mode.session.publisher.clone();
     let delete = spawn_delete(&publisher, DeleteNamespaceOptions::default());
     wait_for_queued_delete(&publisher).await;
 
@@ -2869,7 +2871,7 @@ async fn delete_queued_mid_publish_waits_behind_admitted_work() {
         })
     };
     store.wait_until_blocked().await;
-    let publisher = namespace_writer.session.publisher.clone();
+    let publisher = namespace_writer.mode.session.publisher.clone();
 
     // The worker is parked in the blocked CAS, so this admission
     // deterministically queues the next batch instead of being taken.
@@ -2889,6 +2891,7 @@ async fn delete_queued_mid_publish_waits_behind_admitted_work() {
         let namespace_writer = namespace_writer.clone();
         tokio::spawn(async move {
             namespace_writer
+                .mode
                 .session
                 .submit_delete(DeleteNamespaceOptions::default())
                 .await
@@ -3214,6 +3217,7 @@ async fn a_landed_delete_forgets_the_namespace_projection() {
     assert_eq!(retained_projections(&registry).projections, 2);
 
     namespace_writers[0]
+        .mode
         .session
         .submit_delete(DeleteNamespaceOptions::default())
         .await
@@ -3261,7 +3265,7 @@ async fn a_skipped_eviction_leaves_the_namespace_accounted() {
 
     // Standing in for a publication in flight: the engine is held, so the
     // sweep the next publish runs cannot take it.
-    let held_engine = busy_writers[0].session.publisher.engine.lock().await;
+    let held_engine = busy_writers[0].mode.session.publisher.engine.lock().await;
 
     let _other_writers = publish_once_into_each(&writer, &namespaces[1..2]).await;
 
@@ -3344,7 +3348,7 @@ async fn registry_shares_admission_and_publication_slots_after_caller_cancellati
                 .await
         })
     };
-    let publisher = writer_b.session.publisher.clone();
+    let publisher = writer_b.mode.session.publisher.clone();
     wait_for_queued_candidates(&publisher, 1).await;
     assert_eq!(
         registry.shared.admission.publications.available_permits(),
@@ -3362,6 +3366,7 @@ async fn registry_shares_admission_and_publication_slots_after_caller_cancellati
         "disconnected work remains charged"
     );
     let error = writer_a
+        .mode
         .session
         .submit_delete(DeleteNamespaceOptions::default())
         .await

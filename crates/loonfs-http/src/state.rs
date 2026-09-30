@@ -3,8 +3,8 @@
 use crate::HttpMetrics;
 use loonfs::{
     CloseNamespaceReport, FsMaintenance, FsReader, FsWriter, InlineContentOptions,
-    MaintenanceHandle, MaintenanceJob, MaintenanceProbe, NamespaceWriter, SharedObjectStore,
-    SnapshotPolicy,
+    MaintenanceHandle, MaintenanceJob, MaintenanceProbe, Namespace, SharedObjectStore,
+    SnapshotPolicy, Writable,
 };
 use loonfs_api::{ErrorCode, NamespaceId, SecretString};
 use loonfs_grep::{GrepMaintenanceJob, GrepService, GrepWorker, GREP_INDEX_JOB};
@@ -83,7 +83,7 @@ impl BindingState {
 /// exist.
 pub struct NamespaceWriters {
     writer: FsWriter,
-    handles: Mutex<HashMap<NamespaceId, NamespaceWriter>>,
+    handles: Mutex<HashMap<NamespaceId, Namespace<Writable>>>,
 }
 
 impl NamespaceWriters {
@@ -95,7 +95,7 @@ impl NamespaceWriters {
     }
 
     /// Returns the handle held for `namespace_id`, opening one first if none is held.
-    pub fn open(&self, namespace_id: &NamespaceId) -> loonfs::Result<NamespaceWriter> {
+    pub fn open(&self, namespace_id: &NamespaceId) -> loonfs::Result<Namespace<Writable>> {
         let mut handles = self.lock();
         if let Some(handle) = handles.get(namespace_id) {
             return Ok(handle.clone());
@@ -134,7 +134,7 @@ impl NamespaceWriters {
         }
     }
 
-    fn lock(&self) -> MutexGuard<'_, HashMap<NamespaceId, NamespaceWriter>> {
+    fn lock(&self) -> MutexGuard<'_, HashMap<NamespaceId, Namespace<Writable>>> {
         self.handles.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }

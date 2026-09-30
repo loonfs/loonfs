@@ -1,12 +1,10 @@
-//! [`NamespaceWriter`]'s path mutations and commits, and the publication
-//! pipeline they go through.
+//! The writable [`Namespace`] handle's path mutations and commits, and the
+//! publication pipeline they go through.
 
 use super::core::{ReadCore, WriterBits};
 use crate::publish::{CommitCandidate, CommitRequest, FilesystemOperation, PreparedContent};
 use crate::trace::phase_span;
 use crate::ByteStream;
-use crate::FsWriter;
-use crate::NamespaceWriter;
 use crate::Result;
 use crate::{
     ChangeSeq, Commit, CommitId, CommitOptions, ContentRef, CopyOptions, CreateDirectoryOptions,
@@ -14,6 +12,7 @@ use crate::{
     RestoreRevisionOptions, RevisionNo, UndeleteOptions, UpdateAccessOptions,
     UpdateAttributesOptions,
 };
+use crate::{FsWriter, Namespace, Writable};
 use futures::StreamExt;
 use loonfs_core::NamespaceWriterEngine;
 use std::sync::Arc;
@@ -56,11 +55,11 @@ impl FsWriter {
     }
 }
 
-impl NamespaceWriter {
+impl Namespace<Writable> {
     /// A mutating engine under this writer's identity.
     pub(crate) fn engine(&self) -> NamespaceWriterEngine<crate::SharedObjectStore> {
         self.core
-            .writer_engine(&self.bits.identity, &self.namespace_id)
+            .writer_engine(&self.mode.bits.identity, &self.namespace_id)
     }
 
     /// Drops everything this runtime caches for the namespace: the read
@@ -68,7 +67,9 @@ impl NamespaceWriter {
     pub(crate) fn invalidate_namespace(&self) {
         self.core
             .invalidate_namespace_read_cache(&self.namespace_id);
-        self.publisher.invalidate_projection(&self.namespace_id);
+        self.mode
+            .publisher
+            .invalidate_projection(&self.namespace_id);
     }
 
     pub(crate) fn finish_namespace_mutation<T>(&self, result: Result<T>) -> Result<T> {
@@ -174,6 +175,7 @@ impl NamespaceWriter {
 
     async fn prepare_file_bytes_inner(&self, bytes: &[u8]) -> Result<PreparedContent> {
         if self
+            .mode
             .bits
             .inline_content
             .inline_content_threshold_bytes
@@ -222,7 +224,7 @@ impl NamespaceWriter {
     }
 
     async fn prepare_file_stream_inner(&self, mut body: ByteStream) -> Result<PreparedContent> {
-        if let Some(threshold) = self.bits.inline_content.inline_content_threshold_bytes {
+        if let Some(threshold) = self.mode.bits.inline_content.inline_content_threshold_bytes {
             let mut buffered = bytes::BytesMut::with_capacity(threshold + 1);
             while buffered.len() <= threshold {
                 let Some(chunk) = body.next().await else {
@@ -849,7 +851,7 @@ impl NamespaceWriter {
             Some(subject) => candidate.with_subject(subject.clone()),
             None => candidate,
         };
-        self.session.submit_candidate(candidate).await
+        self.mode.session.submit_candidate(candidate).await
     }
 
     async fn commit_one(
