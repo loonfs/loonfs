@@ -36,7 +36,7 @@ pub(crate) struct RuntimeControlCache {
 pub(crate) struct CachedNamespaceAnchor {
     pub(crate) head: NamespaceReadState,
     pub(crate) basis: MetadataBasis,
-    last_control_check: Option<Observation>,
+    basis_checked: Option<Observation>,
     validation: Arc<NamespaceValidation>,
     completed_validation_no: u64,
 }
@@ -338,19 +338,15 @@ impl ReadCore {
             // within the bound. An answer that arrives later may miss one, however
             // recently its probe was sent, so the new check replaces the previous one
             // only after both answers are in.
-            let fresh = |checked: &Option<Observation>| {
-                checked.as_ref().is_some_and(|checked| {
-                    checked.age_ms() < loonfs_core::limits::READ_REVALIDATION_BOUND_MS
-                })
-            };
-            if fresh(&head.last_control_check) {
+            if let Some(checked) = head
+                .basis_checked
+                .clone()
+                .filter(Observation::is_within_revalidation_bound)
+            {
                 let interval_ms = self
                     .runtime_cache_config()
                     .manifest_revalidation_interval_ms;
-                let check_due = head
-                    .last_control_check
-                    .as_ref()
-                    .is_none_or(|checked| checked.age_ms() >= interval_ms);
+                let check_due = checked.age_ms() >= interval_ms;
                 let observed = Observation::now(Arc::clone(&self.inner.timer));
                 let matches = !check_due || !manifest_has_successor(self.store(), namespace_id, head.basis.manifest_no())
                     .instrument(tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "validation_manifest_probe"))
@@ -359,9 +355,9 @@ impl ReadCore {
                     let mut context = self.runtime_read_context(&head);
                     if loonfs_core::control::probe_namespace_wal(self.store(), &mut context)
                         .instrument(tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "validation_wal_probe"))
-                    .await.map_err(MetadataProjectionLoadError::LoadHead)? && fresh(&head.last_control_check) {
+                    .await.map_err(MetadataProjectionLoadError::LoadHead)? && checked.is_within_revalidation_bound() {
                         if check_due {
-                            head.last_control_check = Some(observed);
+                            head.basis_checked = Some(observed);
                         }
                         head.head = context.head;
                         return Ok(head);
@@ -499,7 +495,7 @@ impl ReadCore {
         let read_context = self.runtime_read_context(&CachedNamespaceAnchor {
             head: pinned.head,
             basis: pinned.basis,
-            last_control_check: None,
+            basis_checked: None,
             validation: Arc::default(),
             completed_validation_no: 0,
         });
@@ -556,12 +552,12 @@ impl ReadCore {
                 let confirms_seed =
                     cached.basis == state.basis && cached.head.wal_no <= state.head.wal_no;
                 (
-                    cached.last_control_check.clone().filter(|_| confirms_seed),
+                    cached.basis_checked.clone().filter(|_| confirms_seed),
                     Arc::clone(&cached.validation),
                 )
             })
             .unwrap_or_default();
-        let last_control_check = cached_check
+        let basis_checked = cached_check
             .into_iter()
             .chain([state.basis_checked])
             .min_by_key(Observation::age_ms);
@@ -570,7 +566,7 @@ impl ReadCore {
             CachedNamespaceAnchor {
                 head: state.head,
                 basis: state.basis,
-                last_control_check,
+                basis_checked,
                 validation,
                 completed_validation_no: 0,
             },
@@ -604,12 +600,12 @@ impl ReadCore {
 
 fn cached_anchor(
     anchor: NamespaceReadAnchor,
-    last_control_check: Option<Observation>,
+    basis_checked: Option<Observation>,
 ) -> CachedNamespaceAnchor {
     CachedNamespaceAnchor {
         basis: anchor.basis(),
         head: anchor.read_state,
-        last_control_check,
+        basis_checked,
         validation: Arc::default(),
         completed_validation_no: 0,
     }

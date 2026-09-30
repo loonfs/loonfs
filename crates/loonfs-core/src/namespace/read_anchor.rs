@@ -61,10 +61,7 @@ pub(crate) async fn load_read_anchor_from_manifest<S: ObjectStore + ?Sized>(
                         manifest.state.manifest().manifest_no,
                     )
                     .await?;
-                    // An absent successor proves nothing once the probe it would confirm is
-                    // older than the revalidation bound when the answer arrives: the
-                    // successor may have been collected while the reader waited.
-                    if successor || observed.age_ms() >= crate::limits::READ_REVALIDATION_BOUND_MS {
+                    if successor || !observed.is_within_revalidation_bound() {
                         observed = crate::time::Observation::now(Arc::new(
                             crate::time::StdMonotonicTimer::default(),
                         ));

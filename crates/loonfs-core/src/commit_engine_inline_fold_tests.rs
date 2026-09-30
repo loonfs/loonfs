@@ -595,7 +595,6 @@ async fn a_fold_reanchors_with_only_the_commits_published_since_it_began() {
         .await
         .expect("before fold");
     let input = engine.begin_wal_fold().expect("fold input");
-    let observed = engine.projection_observed.clone();
     let mut expected = crate::wal::ProjectedWalTail::default();
     for name in ["during-one", "during-two"] {
         let value = inline(&engine.namespace_id, Bytes::from_static(b"during"));
@@ -641,6 +640,7 @@ async fn a_fold_reanchors_with_only_the_commits_published_since_it_began() {
     .await
     .expect("fold");
     assert_eq!(folded.response.outcome, FlushWalOutcome::Published);
+    let observed = engine.projection_observed.clone();
     engine.record_wal_fold(Some(&folded));
     let projection = engine
         .publish_tail_projection
@@ -651,7 +651,7 @@ async fn a_fold_reanchors_with_only_the_commits_published_since_it_began() {
     assert_eq!(projection.head.folded_wal_no, input.head.wal_no);
     assert_eq!(*projection.tail_state, expected);
     let retained = engine.projection_observed.as_ref().expect("observation");
-    let observed = observed.expect("original observation");
+    let observed = observed.expect("tip observation before the fold");
     assert_eq!(retained.age_at(&observed), 0);
     assert_eq!(observed.age_at(retained), 0);
     store.reset();

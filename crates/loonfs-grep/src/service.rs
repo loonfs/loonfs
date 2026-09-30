@@ -17,9 +17,7 @@ use crate::query::{plan_pattern, GramPlanOutcome, GramQueryPlan};
 use crate::reads::{published_revision, resolve_batch_size, NamespaceReads, PinnedNamespaceReads};
 use crate::{GrepError, Result};
 use futures::future::{join_all, try_join_all};
-use loonfs::{
-    CoreError, CurrentFileState, MetadataViewError, Observation, READ_REVALIDATION_BOUND_MS,
-};
+use loonfs::{CoreError, CurrentFileState, MetadataViewError, Observation};
 use loonfs_api::wire::hex::hex_decode_bytes;
 use loonfs_api::wire::sst_blocks::{
     decode_filter_block, index_blocks_for_key_range, key_range_may_intersect,
@@ -99,15 +97,12 @@ impl GrepService {
         store: &S,
         namespace_id: &NamespaceId,
     ) -> Result<MaterializedGrepIndexSnapshot> {
-        // An absent successor confirms the cached manifest only if the answer
-        // arrives within the bound of the previous check, not of this probe.
-        let fresh = |checked: &Observation| checked.age_ms() < READ_REVALIDATION_BOUND_MS;
         let cached = self
             .current_manifests
             .lock()
             .expect("grep manifest cache lock should not be poisoned")
             .get(namespace_id)
-            .filter(|(_, checked)| fresh(checked))
+            .filter(|(_, checked)| checked.is_within_revalidation_bound())
             .and_then(|(state, checked)| Some((state.upgrade()?, checked.clone())));
         let observed = Observation::now(Arc::new(StdMonotonicTimer::default()));
         let confirmed = match cached {
@@ -123,7 +118,7 @@ impl GrepService {
                     }
                     Err(_) => false,
                 };
-                (!successor_present && fresh(&checked)).then_some(state)
+                (!successor_present && checked.is_within_revalidation_bound()).then_some(state)
             }
             None => None,
         };
@@ -1108,6 +1103,7 @@ mod tests {
     #[tokio::test]
     async fn a_cached_manifest_checked_longer_ago_than_the_bound_is_discovered_again() {
         use crate::manifest::{publish_grep_manifest, GrepIndexState};
+        use loonfs::READ_REVALIDATION_BOUND_MS;
         use loonfs_api::{ManifestNo, RunNo};
         use loonfs_objectstore::local_fs_store::LocalFsStore;
         use loonfs_test_support::clock::ManualClock;
