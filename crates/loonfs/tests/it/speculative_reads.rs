@@ -32,9 +32,9 @@ async fn writer_with_file(
         )
         .await
         .expect("create namespace");
-    writer
+    let namespace_writer = writer.open_namespace(namespace_id).expect("open namespace");
+    namespace_writer
         .put_file_bytes(
-            namespace_id,
             PATH,
             b"first",
             PutFileOptions::new(loonfs_test_support::test_actor()),
@@ -120,6 +120,9 @@ async fn a_replaced_file_is_not_served_from_the_cached_reference() {
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("create local-fs store"));
     let namespace_id = NamespaceId::parse("speculative").expect("valid namespace id");
     let writer = writer_with_file(&store, &namespace_id).await;
+    let namespace_writer = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
     let reader = FsReader::builder_with_store(store.clone())
         .build()
         .await
@@ -132,8 +135,8 @@ async fn a_replaced_file_is_not_served_from_the_cached_reference() {
 
     let mut replace = PutFileOptions::new(loonfs_test_support::test_actor());
     replace.behavior = DestinationBehavior::Replace;
-    writer
-        .put_file_bytes(&namespace_id, PATH, b"again", replace)
+    namespace_writer
+        .put_file_bytes(PATH, b"again", replace)
         .await
         .expect("replace file");
 

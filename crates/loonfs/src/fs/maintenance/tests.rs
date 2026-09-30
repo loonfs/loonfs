@@ -99,9 +99,9 @@ async fn a_maintenance_gc_step_records_the_pass_counters_once() {
         )
         .await
         .expect("create namespace");
-    writer
+    let namespace_writer = writer.open_namespace(&namespace).expect("open namespace");
+    namespace_writer
         .put_file_bytes(
-            &namespace,
             "/live.txt",
             b"live",
             PutFileOptions::new(loonfs_test_support::test_actor()),
@@ -164,9 +164,9 @@ async fn write_and_fold(
     namespace_id: &NamespaceId,
     path: &str,
 ) {
-    writer
+    let namespace_writer = writer.open_namespace(namespace_id).expect("open namespace");
+    namespace_writer
         .put_file_bytes(
-            namespace_id,
             path,
             path.as_bytes(),
             PutFileOptions::new(loonfs_test_support::test_actor()),
@@ -201,6 +201,7 @@ async fn namespace_with_a_frozen_base(
         )
         .await
         .expect("create the namespace");
+    let namespace_writer = writer.open_namespace(namespace_id).expect("open namespace");
     for index in 0..24 {
         write_and_fold(
             writer,
@@ -213,9 +214,8 @@ async fn namespace_with_a_frozen_base(
     // Churn: every rename retires one binding and creates another, and a
     // bottom-anchored rebuild below the floor drops the retired pair.
     for index in 0..12 {
-        writer
+        namespace_writer
             .move_path(
-                namespace_id,
                 &format!("/docs/file-{index}.txt"),
                 &format!("/docs/moved-{index}.txt"),
                 MoveOptions::new(loonfs_test_support::test_actor()),
@@ -560,12 +560,12 @@ async fn explicit_compaction_merges_twenty_deltas_and_reads_the_large_base_once(
         )
         .await
         .expect("namespace");
+    let namespace_writer = writer.open_namespace(&namespace).expect("open namespace");
     let keys: Vec<_> = (0..15)
         .map(|index| attribute_key(&format!("key-{index}")))
         .collect();
-    writer
+    namespace_writer
         .put_file_bytes(
-            &namespace,
             "/file",
             b"content",
             PutFileOptions::new(loonfs_test_support::test_actor()),
@@ -594,18 +594,15 @@ async fn explicit_compaction_merges_twenty_deltas_and_reads_the_large_base_once(
                 expected_attributes_revision_no: None,
             })
             .collect();
-        writer
-            .commit_candidate(
-                &namespace,
-                CommitCandidate::new(CommitRequest {
-                    commit_id: CommitId::generate(),
-                    actor_id: loonfs_test_support::test_actor(),
-                    subject: None,
-                    message: None,
-                    preconditions: Vec::new(),
-                    operations,
-                }),
-            )
+        namespace_writer
+            .commit_candidate(CommitCandidate::new(CommitRequest {
+                commit_id: CommitId::generate(),
+                actor_id: loonfs_test_support::test_actor(),
+                subject: None,
+                message: None,
+                preconditions: Vec::new(),
+                operations,
+            }))
             .await
             .expect("write the base attribute history");
     }
@@ -619,8 +616,8 @@ async fn explicit_compaction_merges_twenty_deltas_and_reads_the_large_base_once(
             attribute_key("delta"),
             attribute_text(&revision.to_string()),
         );
-        writer
-            .update_attributes(&namespace, "/file", options)
+        namespace_writer
+            .update_attributes("/file", options)
             .await
             .expect("write delta");
         maintenance

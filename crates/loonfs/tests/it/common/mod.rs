@@ -258,8 +258,9 @@ impl TestRuntime {
         bytes: &[u8],
         options: PutFileOptions,
     ) -> loonfs::Result<Commit> {
-        self.writer
-            .put_file_bytes(namespace_id, absolute_path, bytes, options)
+        let namespace_writer = self.writer.open_namespace(namespace_id)?;
+        namespace_writer
+            .put_file_bytes(absolute_path, bytes, options)
             .await
     }
 
@@ -270,8 +271,9 @@ impl TestRuntime {
         content_ref: ContentRef,
         options: PutFileOptions,
     ) -> loonfs::Result<Commit> {
-        self.writer
-            .put_file_content_ref(namespace_id, absolute_path, content_ref, options)
+        let namespace_writer = self.writer.open_namespace(namespace_id)?;
+        namespace_writer
+            .put_file_content_ref(absolute_path, content_ref, options)
             .await
     }
 
@@ -358,8 +360,9 @@ impl TestRuntime {
         namespace_id: &NamespaceId,
         checksum_algorithm: ChecksumAlgorithm,
     ) -> loonfs::Result<loonfs::uploads::BeginDirectPutUploadTargetResponse> {
-        self.writer
-            .create_direct_put_upload_target(namespace_id, checksum_algorithm)
+        let namespace_writer = self.writer.open_namespace(namespace_id)?;
+        namespace_writer
+            .create_direct_put_upload_target(checksum_algorithm)
             .await
     }
 
@@ -369,8 +372,9 @@ impl TestRuntime {
         upload_id: &UploadId,
         content: loonfs::UploadContentClaim,
     ) -> loonfs::Result<UploadSession> {
-        self.writer
-            .complete_upload_for_mode(namespace_id, upload_id, |_| {
+        let namespace_writer = self.writer.open_namespace(namespace_id)?;
+        namespace_writer
+            .complete_upload_for_mode(upload_id, |_| {
                 Ok(loonfs::uploads::ResolvedUploadCompletion::DirectPut { content })
             })
             .await
@@ -578,10 +582,8 @@ impl RuntimeTestExt for TestRuntime {
         bytes: &[u8],
         options: PutFileOptions,
     ) -> loonfs::Result<Commit> {
-        block_on(
-            self.writer
-                .put_file_bytes(namespace_id, absolute_path, bytes, options),
-        )
+        let namespace_writer = self.writer.open_namespace(namespace_id)?;
+        block_on(namespace_writer.put_file_bytes(absolute_path, bytes, options))
     }
 
     fn create_directory_blocking(
@@ -590,10 +592,8 @@ impl RuntimeTestExt for TestRuntime {
         absolute_path: &str,
         options: CreateDirectoryOptions,
     ) -> loonfs::Result<Commit> {
-        block_on(
-            self.writer
-                .create_directory(namespace_id, absolute_path, options),
-        )
+        let namespace_writer = self.writer.open_namespace(namespace_id)?;
+        block_on(namespace_writer.create_directory(absolute_path, options))
     }
 
     fn delete_path_blocking(
@@ -602,10 +602,8 @@ impl RuntimeTestExt for TestRuntime {
         absolute_path: &str,
         options: DeleteOptions,
     ) -> loonfs::Result<Commit> {
-        block_on(
-            self.writer
-                .delete_path(namespace_id, absolute_path, options),
-        )
+        let namespace_writer = self.writer.open_namespace(namespace_id)?;
+        block_on(namespace_writer.delete_path(absolute_path, options))
     }
 
     fn move_path_blocking(
@@ -615,10 +613,8 @@ impl RuntimeTestExt for TestRuntime {
         destination_path: &str,
         options: MoveOptions,
     ) -> loonfs::Result<Commit> {
-        block_on(
-            self.writer
-                .move_path(namespace_id, source_path, destination_path, options),
-        )
+        let namespace_writer = self.writer.open_namespace(namespace_id)?;
+        block_on(namespace_writer.move_path(source_path, destination_path, options))
     }
 
     fn copy_path_blocking(
@@ -628,14 +624,13 @@ impl RuntimeTestExt for TestRuntime {
         destination_path: &str,
         options: CopyOptions,
     ) -> loonfs::Result<Commit> {
-        block_on(
-            self.writer
-                .copy_path(namespace_id, source_path, destination_path, options),
-        )
+        let namespace_writer = self.writer.open_namespace(namespace_id)?;
+        block_on(namespace_writer.copy_path(source_path, destination_path, options))
     }
 
     fn begin_upload_blocking(&self, namespace_id: &NamespaceId) -> loonfs::Result<UploadSession> {
-        block_on(self.writer.create_upload(namespace_id))
+        let namespace_writer = self.writer.open_namespace(namespace_id)?;
+        block_on(namespace_writer.create_upload())
     }
 
     fn upload_content_blocking(
@@ -644,10 +639,8 @@ impl RuntimeTestExt for TestRuntime {
         upload_id: &UploadId,
         bytes: &[u8],
     ) -> loonfs::Result<UploadSession> {
-        block_on(
-            self.writer
-                .put_upload_content(namespace_id, upload_id, bytes),
-        )
+        let namespace_writer = self.writer.open_namespace(namespace_id)?;
+        block_on(namespace_writer.put_upload_content(upload_id, bytes))
     }
 
     fn complete_upload_blocking(
@@ -655,11 +648,10 @@ impl RuntimeTestExt for TestRuntime {
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
     ) -> loonfs::Result<UploadSession> {
-        block_on(self.writer.complete_upload(
-            namespace_id,
-            upload_id,
-            ResolvedUploadCompletion::KnownContent,
-        ))
+        let namespace_writer = self.writer.open_namespace(namespace_id)?;
+        block_on(
+            namespace_writer.complete_upload(upload_id, ResolvedUploadCompletion::KnownContent),
+        )
         .map(|completed| completed.response)
     }
 
@@ -668,7 +660,8 @@ impl RuntimeTestExt for TestRuntime {
         namespace_id: &NamespaceId,
         request: CommitRequest,
     ) -> loonfs::Result<Commit> {
-        block_on(self.writer.create_commit(namespace_id, request))
+        let namespace_writer = self.writer.open_namespace(namespace_id)?;
+        block_on(namespace_writer.create_commit(request))
     }
 
     fn mutate_batch_blocking(

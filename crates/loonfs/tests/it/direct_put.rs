@@ -276,6 +276,10 @@ fn direct_put_completion_reports_a_failed_read_back_as_a_store_failure() {
         CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
     )
     .expect("create namespace");
+    let namespace_writer = fs
+        .writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
     let claim = direct_put_claim(bytes);
     let begin =
         block_on(fs.create_direct_put_upload_target(&namespace_id, ChecksumAlgorithm::Sha256))
@@ -299,11 +303,7 @@ fn direct_put_completion_reports_a_failed_read_back_as_a_store_failure() {
     );
     let loonfs::uploads::UploadSessionView {
         session: status, ..
-    } = block_on(
-        fs.writer
-            .get_upload(&namespace_id, &begin.session.upload_id),
-    )
-    .expect("get upload status");
+    } = block_on(namespace_writer.get_upload(&begin.session.upload_id)).expect("get upload status");
     assert!(
         matches!(status.status, UploadSessionStatus::Open { .. }),
         "a store failure must not end the session"
@@ -443,6 +443,10 @@ fn path_mutations_return_the_commit_id_they_committed_under() {
         )
         .await
         .expect("create namespace");
+        let namespace_writer = fs
+            .writer
+            .open_namespace(&namespace_id)
+            .expect("open namespace");
 
         let commit_id = CommitId::parse("retry-key-1").expect("valid commit id");
         let first = fs
@@ -467,10 +471,8 @@ fn path_mutations_return_the_commit_id_they_committed_under() {
 
         // Without a caller-supplied id, the generated one is still returned,
         // so every caller holds a reconciliation handle.
-        let generated = fs
-            .writer
+        let generated = namespace_writer
             .create_directory(
-                &namespace_id,
                 "/docs/sub",
                 CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
             )
@@ -495,6 +497,10 @@ fn concurrent_puts_coalesce_into_one_wal_segment() {
         )
         .await
         .expect("create namespace");
+        let namespace_writer = fs
+            .writer
+            .open_namespace(&namespace_id)
+            .expect("open namespace");
 
         // Stage every file's content first: a put publishes only after its
         // bytes are durable, so racing already-staged publishes is what
@@ -505,22 +511,16 @@ fn concurrent_puts_coalesce_into_one_wal_segment() {
                 .expect("load namespace catalog");
         let mut prepared_contents = Vec::new();
         for bytes in [b"alpha" as &[u8], b"beta", b"gamma", b"delta"] {
-            let begin = fs
-                .writer
-                .create_upload(&namespace_id)
+            let begin = namespace_writer
+                .create_upload()
                 .await
                 .expect("begin upload");
-            fs.writer
-                .put_upload_content(&namespace_id, &begin.upload_id, bytes)
+            namespace_writer
+                .put_upload_content(&begin.upload_id, bytes)
                 .await
                 .expect("upload content");
-            let completed = fs
-                .writer
-                .complete_upload(
-                    &namespace_id,
-                    &begin.upload_id,
-                    ResolvedUploadCompletion::KnownContent,
-                )
+            let completed = namespace_writer
+                .complete_upload(&begin.upload_id, ResolvedUploadCompletion::KnownContent)
                 .await
                 .expect("complete upload");
             prepared_contents.push(

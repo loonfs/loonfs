@@ -451,6 +451,10 @@ async fn shutdown_closes_maintenance_admission_before_draining_publications() {
         )
         .await
         .expect("create namespace");
+    let namespace_writer = state
+        .writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
 
     let steps = Arc::new(AtomicUsize::new(0));
     let job = MaintenanceJobId::new("shutdown-order-probe");
@@ -478,12 +482,10 @@ async fn shutdown_closes_maintenance_admission_before_draining_publications() {
     // otherwise keep admitting into.
     blocking.block_next();
     let put = tokio::spawn({
-        let writer = state.writer.clone();
-        let namespace_id = namespace_id.clone();
+        let namespace_writer = namespace_writer.clone();
         async move {
-            writer
+            namespace_writer
                 .put_file_bytes(
-                    &namespace_id,
                     "/parked.txt",
                     b"body",
                     PutFileOptions::new(loonfs_test_support::test_actor()),
@@ -546,6 +548,10 @@ async fn a_namespace_advance_nudges_the_enabled_namespaces_index() {
         )
         .await
         .expect("create namespace");
+    let namespace_writer = state
+        .writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
     state
         .binding
         .grep_worker
@@ -574,10 +580,8 @@ async fn a_namespace_advance_nudges_the_enabled_namespaces_index() {
     );
 
     // The publish is the only trigger from here on: nothing below nudges.
-    state
-        .writer
+    namespace_writer
         .put_file_bytes(
-            &namespace_id,
             "/note.txt",
             b"observer-driven needle\n",
             PutFileOptions::new(loonfs_test_support::test_actor()),

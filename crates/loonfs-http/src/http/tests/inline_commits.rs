@@ -53,10 +53,12 @@ impl Harness {
             )
             .await
             .expect("namespace");
-        state
+        let namespace_writer = state
             .writer
+            .open_namespace(&namespace)
+            .expect("open namespace");
+        namespace_writer
             .create_directory(
-                &namespace,
                 "/warmup",
                 loonfs::CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
             )

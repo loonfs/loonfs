@@ -59,10 +59,12 @@ async fn written_file(
 ) -> (NamespaceId, Arc<BufferWatchStore<LocalFsStore>>, FsReader) {
     let runtime = open_runtime_async(store(root), "writer-a").await;
     let namespace_id = namespace(&runtime).await;
-    runtime
+    let namespace_writer = runtime
         .writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
+    namespace_writer
         .put_file_bytes(
-            &namespace_id,
             PATH,
             bytes,
             PutFileOptions {
@@ -195,10 +197,12 @@ async fn historical_and_snapshot_reads_stream_the_selected_revision() {
     let payload = payload(PAYLOAD_BYTES);
     let (namespace_id, watched, reader) = written_file(temp_dir.path(), &payload).await;
     let runtime = open_runtime_async(store(temp_dir.path()), "writer-b").await;
-    let snapshot = runtime
+    let namespace_writer = runtime
         .writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
+    let snapshot = namespace_writer
         .create_snapshot(
-            &namespace_id,
             CreateSnapshotOptions {
                 name: "before-replace".to_owned(),
                 expires_at_ms: u64::MAX,
@@ -207,10 +211,8 @@ async fn historical_and_snapshot_reads_stream_the_selected_revision() {
         )
         .await
         .expect("snapshot");
-    runtime
-        .writer
+    namespace_writer
         .put_file_bytes(
-            &namespace_id,
             PATH,
             b"tiny",
             PutFileOptions {

@@ -81,10 +81,13 @@ async fn a_tombstoned_namespace_concludes_not_enabled() {
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
     let namespace_id = NamespaceId::parse("deleted").expect("namespace id");
     let writer = seed(store.clone(), &namespace_id).await;
+    let namespace_writer = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
     let worker = worker(store, "deleted-worker").await;
     worker.enable(&namespace_id).await.expect("enable grep");
-    writer
-        .delete_namespace(&namespace_id, DeleteNamespaceOptions::default())
+    namespace_writer
+        .delete_namespace(DeleteNamespaceOptions::default())
         .await
         .expect("delete namespace");
 

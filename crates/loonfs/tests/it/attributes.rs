@@ -40,6 +40,10 @@ fn maximum_small_attribute_updates_reopen_after_one_wal_publication() {
         CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
     )
     .expect("namespace");
+    let namespace_writer = fs
+        .writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
     fs.put_file_bytes_blocking(
         &namespace_id,
         "/file",
@@ -61,8 +65,7 @@ fn maximum_small_attribute_updates_reopen_after_one_wal_publication() {
     assert_eq!(initial.logical_bytes(), MAX_ATTRIBUTES_TOTAL_BYTES);
     let mut options = UpdateAttributesOptions::new(loonfs_test_support::test_actor());
     options.set = set;
-    block_on(fs.writer.update_attributes(&namespace_id, "/file", options))
-        .expect("fill attributes");
+    block_on(namespace_writer.update_attributes("/file", options)).expect("fill attributes");
     counted.reset();
     let response = fs
         .mutate_blocking(
@@ -124,6 +127,10 @@ fn the_write_convenience_matches_a_hand_built_one_operation_commit() {
         CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
     )
     .expect("create namespace");
+    let namespace_writer = fs
+        .writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
     fs.put_file_bytes_blocking(
         &namespace_id,
         "/docs/report.txt",
@@ -160,12 +167,8 @@ fn the_write_convenience_matches_a_hand_built_one_operation_commit() {
     // request under the same id replays it instead of committing twice.
     // Replay is decided on the fingerprint, so this passing is the parity
     // statement: the convenience compiled into the same commit.
-    let convenience = block_on(fs.writer.update_attributes(
-        &namespace_id,
-        "/docs/report.txt",
-        options,
-    ))
-    .expect("convenience update");
+    let convenience = block_on(namespace_writer.update_attributes("/docs/report.txt", options))
+        .expect("convenience update");
     let replayed = fs
         .mutate_blocking(&namespace_id, explicit)
         .expect("the explicit request replays the convenience commit");
@@ -219,6 +222,10 @@ fn a_write_is_visible_to_the_next_stat() {
         CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
     )
     .expect("create namespace");
+    let namespace_writer = fs
+        .writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
     fs.put_file_bytes_blocking(
         &namespace_id,
         "/docs/report.txt",
@@ -227,11 +234,8 @@ fn a_write_is_visible_to_the_next_stat() {
     )
     .expect("put file");
 
-    block_on(
-        fs.writer
-            .update_attributes(&namespace_id, "/docs/report.txt", owner_update()),
-    )
-    .expect("annotate");
+    block_on(namespace_writer.update_attributes("/docs/report.txt", owner_update()))
+        .expect("annotate");
 
     let entry = fs
         .stat_path_blocking(&namespace_id, "/docs/report.txt")
@@ -254,8 +258,7 @@ fn a_write_is_visible_to_the_next_stat() {
 
     // Removing the only key leaves the cleared map, which is a real answer
     // at its own revision rather than an absent one.
-    block_on(fs.writer.update_attributes(
-        &namespace_id,
+    block_on(namespace_writer.update_attributes(
         "/docs/report.txt",
         UpdateAttributesOptions {
             remove: vec![attribute_key("owner")],
@@ -287,6 +290,10 @@ fn read_options_project_grouped_attributes_or_none() {
         CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
     )
     .expect("create namespace");
+    let namespace_writer = fs
+        .writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
     for path in ["/docs/report.txt", "/docs/notes.txt"] {
         fs.put_file_bytes_blocking(
             &namespace_id,
@@ -296,11 +303,8 @@ fn read_options_project_grouped_attributes_or_none() {
         )
         .expect("put file");
     }
-    block_on(
-        fs.writer
-            .update_attributes(&namespace_id, "/docs/report.txt", owner_update()),
-    )
-    .expect("annotate");
+    block_on(namespace_writer.update_attributes("/docs/report.txt", owner_update()))
+        .expect("annotate");
 
     // Stat includes attributes by default.
     let default_stat = fs

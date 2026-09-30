@@ -374,12 +374,15 @@ An inode ID is only unique within its namespace. Use `namespace_id` and
 `inode_id` together when identifying an inode. Clients MUST treat the ID as an
 opaque value and MUST NOT create IDs or infer ordering from the numeric suffix.
 
-- The embedded handles (`loonfs::FsWriter`, `loonfs::FsReader`) and the
-  remote client (`loonfs_client::Client`) expose the same operations under the
-  same names, including the `get_capabilities()` accessor that returns the
-  capability document of section 2.1. For the remote client the document is
-  fetched from `GET /v0/capabilities` and cached; for the embedded handles it
-  is a constant.
+- The embedded handles and the remote client (`loonfs_client::Client`)
+  expose the same operations under the same names. `loonfs::FsReader` serves
+  reads. `loonfs::FsWriter` creates and forks namespaces, and it opens a
+  `loonfs::NamespaceWriter` for one namespace. `NamespaceWriter` carries that
+  namespace's writes, and its methods take no namespace ID. `FsWriter`,
+  `FsReader`, and the client share the `get_capabilities()` accessor that
+  returns the capability document of section 2.1. For the remote client the
+  document is fetched from `GET /v0/capabilities` and cached; for the embedded
+  handles it is a constant.
 - The two surfaces stay aligned by sharing one definition of every option
   struct they both take (`PutFileOptions`, `CreateDirectoryOptions`,
   `DeleteOptions` live in `loonfs-api` and are re-exported by both), not by a
@@ -433,8 +436,8 @@ Inline content becomes durable and visible in the same write
 the commit takes effect when the next numbered WAL segment is written with
 put-if-absent. Accepting a request into a batch does not mean it has committed.
 
-With the embedded `loonfs::FsWriter`, you can prepare content separately from
-committing it. Call `prepare_file_bytes` with the file's bytes. Files at or below
+With the embedded `loonfs::NamespaceWriter`, you can prepare content separately
+from committing it. Call `prepare_file_bytes` with the file's bytes. Files at or below
 the enabled inline threshold stay in memory; other files are uploaded as
 content objects. To import existing content, call `prepare_content_ref`. The bytes
 are verified and copied to a new object owned by the destination namespace.

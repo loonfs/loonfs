@@ -6,7 +6,7 @@ use crate::common::{collect_path_entries, directory_options, expect_code, writer
 use loonfs::{
     CreateNamespaceOptions, ErrorCode, FsMaintenance, FsReader, FsWriter, ManifestNo,
     MetadataMaintenanceOptions, NamespaceId, NamespaceSessionPolicy, NamespaceSessionState,
-    PutFileOptions, SharedObjectStore,
+    NamespaceWriter, PutFileOptions, SharedObjectStore,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::stores::{
@@ -52,9 +52,9 @@ async fn assert_root_paths(
     assert_eq!(&actual, expected);
 }
 
-async fn put_file(writer: &FsWriter, namespace_id: &NamespaceId, path: &str) {
-    writer
-        .put_file_bytes(namespace_id, path, b"body", file_options())
+async fn put_file(namespace_writer: &NamespaceWriter, path: &str) {
+    namespace_writer
+        .put_file_bytes(path, b"body", file_options())
         .await
         .expect("publish file");
 }
@@ -83,25 +83,30 @@ async fn a_takeover_during_a_paused_publish_fences_the_old_node() {
         )
         .await
         .expect("create namespace");
-    writer_a
-        .create_directory(&namespace_id, "/from-a-first", directory_options())
+    let namespace_writer_a = writer_a
+        .open_namespace(&namespace_id)
+        .expect("open writer A");
+    let namespace_writer_b = writer_b
+        .open_namespace(&namespace_id)
+        .expect("open writer B");
+    namespace_writer_a
+        .create_directory("/from-a-first", directory_options())
         .await
         .expect("writer A publishes first");
 
     failing.inner().block_next();
     let parked = tokio::spawn({
-        let writer_a = writer_a.clone();
-        let namespace_id = namespace_id.clone();
+        let namespace_writer_a = namespace_writer_a.clone();
         async move {
-            writer_a
-                .create_directory(&namespace_id, "/from-a-parked", directory_options())
+            namespace_writer_a
+                .create_directory("/from-a-parked", directory_options())
                 .await
         }
     });
     failing.inner().wait_until_blocked().await;
 
-    writer_b
-        .create_directory(&namespace_id, "/from-b", directory_options())
+    namespace_writer_b
+        .create_directory("/from-b", directory_options())
         .await
         .expect("writer B takes over and publishes");
     failing.inner().release();
@@ -112,14 +117,14 @@ async fn a_takeover_during_a_paused_publish_fences_the_old_node() {
 
     failing.fail_all();
     expect_code(
-        writer_a
-            .create_directory(&namespace_id, "/from-a-after-fence", directory_options())
+        namespace_writer_a
+            .create_directory("/from-a-after-fence", directory_options())
             .await,
         ErrorCode::WriterFenced,
     );
     assert_eq!(failing.attempts(), 0);
     assert_eq!(
-        writer_a.namespace_session_state(&namespace_id),
+        namespace_writer_a.session_state(),
         NamespaceSessionState::Open {
             fenced: true,
             queued_commits: 0,
@@ -148,44 +153,44 @@ async fn a_closed_session_does_not_reopen_for_a_stale_request() {
         )
         .await
         .expect("create namespace");
-    writer_a
+    let namespace_writer_a = writer_a
         .open_namespace(&namespace_id)
         .expect("open writer A session");
-    let stale_a = writer_a.clone();
-    writer_a
-        .create_directory(&namespace_id, "/from-a-first", directory_options())
+    let stale_a = namespace_writer_a.clone();
+    namespace_writer_a
+        .create_directory("/from-a-first", directory_options())
         .await
         .expect("writer A publishes");
-    writer_a
-        .close_namespace(&namespace_id)
+    namespace_writer_a
+        .close()
         .await
         .expect("close writer A session");
 
-    for refused in [
-        stale_a.create_directory(&namespace_id, "/from-stale-clone", directory_options()),
-        writer_a.create_directory(&namespace_id, "/from-closed-a", directory_options()),
-    ] {
-        expect_code(refused.await, ErrorCode::WriterSessionClosed);
-    }
+    expect_code(
+        stale_a
+            .create_directory("/from-stale-clone", directory_options())
+            .await,
+        ErrorCode::WriterSessionClosed,
+    );
 
-    writer_b
+    let namespace_writer_b = writer_b
         .open_namespace(&namespace_id)
         .expect("open writer B session");
-    writer_b
-        .create_directory(&namespace_id, "/from-b", directory_options())
+    namespace_writer_b
+        .create_directory("/from-b", directory_options())
         .await
         .expect("writer B publishes");
 
-    writer_a
+    let namespace_writer_a = writer_a
         .open_namespace(&namespace_id)
         .expect("explicitly reopen writer A session");
-    writer_a
-        .create_directory(&namespace_id, "/from-a-reopened", directory_options())
+    namespace_writer_a
+        .create_directory("/from-a-reopened", directory_options())
         .await
         .expect("reopened writer A publishes");
     expect_code(
-        writer_b
-            .create_directory(&namespace_id, "/from-fenced-b", directory_options())
+        namespace_writer_b
+            .create_directory("/from-fenced-b", directory_options())
             .await,
         ErrorCode::WriterFenced,
     );
@@ -205,6 +210,9 @@ async fn a_cold_node_reconstructs_current_state_during_active_writes() {
         )
         .await
         .expect("create namespace");
+    let namespace_writer = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
     let fold_threshold = usize::try_from(
         MetadataMaintenanceOptions::default()
             .max_wal_tail_segments
@@ -215,16 +223,16 @@ async fn a_cold_node_reconstructs_current_state_during_active_writes() {
 
     for index in 0..(fold_threshold - 1) {
         let path = format!("/file-{index:03}.txt");
-        put_file(&writer, &namespace_id, &path).await;
+        put_file(&namespace_writer, &path).await;
         expected.insert(path);
     }
     assert_root_paths(&fresh_reader(store.clone()).await, &namespace_id, &expected).await;
 
     let fold_path = format!("/file-{:03}.txt", fold_threshold - 1);
-    put_file(&writer, &namespace_id, &fold_path).await;
+    put_file(&namespace_writer, &fold_path).await;
     expected.insert(fold_path);
-    writer
-        .wait_for_fold(&namespace_id)
+    namespace_writer
+        .wait_for_fold()
         .await
         .expect("first fold completes");
     let maintenance = FsMaintenance::builder_with_store(store.clone())
@@ -241,7 +249,7 @@ async fn a_cold_node_reconstructs_current_state_during_active_writes() {
 
     for index in fold_threshold..(fold_threshold + 3) {
         let path = format!("/file-{index:03}.txt");
-        put_file(&writer, &namespace_id, &path).await;
+        put_file(&namespace_writer, &path).await;
         expected.insert(path);
     }
     assert_root_paths(&fresh_reader(store).await, &namespace_id, &expected).await;

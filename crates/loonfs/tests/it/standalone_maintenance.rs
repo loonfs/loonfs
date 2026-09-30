@@ -45,9 +45,11 @@ async fn a_fresh_runtime_folds_a_short_tail_once_its_newest_commit_is_idle() {
         )
         .await
         .expect("namespace");
-    writer
+    let namespace_writer = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
+    namespace_writer
         .put_file_bytes(
-            &namespace_id,
             "/file.txt",
             b"body",
             PutFileOptions::new(loonfs_test_support::test_actor()),
@@ -127,10 +129,12 @@ async fn injected_wall_time_collects_objects_the_system_clock_keeps() {
         )
         .await
         .expect("namespace");
+    let namespace_writer = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
     assert_eq!(
-        writer
+        namespace_writer
             .create_directory(
-                &namespace_id,
                 "/directory",
                 CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
             )
@@ -222,13 +226,15 @@ async fn a_registry_runs_every_core_job_without_a_writer() {
         )
         .await
         .expect("namespace");
+    let namespace_writer = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
     let threshold = MetadataMaintenanceOptions::default()
         .max_wal_tail_segments
         .get();
     for index in 0..threshold {
-        writer
+        namespace_writer
             .put_file_bytes(
-                &namespace_id,
                 &format!("/file-{index}.txt"),
                 b"body",
                 PutFileOptions::new(loonfs_test_support::test_actor()),

@@ -19,7 +19,6 @@ mod maintenance;
 mod namespace_writer;
 mod reader;
 mod writer;
-mod writer_forwarders;
 
 pub use maintenance::{FsMaintenance, FsMaintenanceBuilder};
 pub use namespace_writer::NamespaceWriter;

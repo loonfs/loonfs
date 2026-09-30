@@ -35,10 +35,10 @@ async fn build_namespace(store: &SharedObjectStore, namespace_id: &NamespaceId) 
         )
         .await
         .expect("create namespace");
+    let namespace_writer = writer.open_namespace(namespace_id).expect("open namespace");
     for index in 0..4 {
-        writer
+        namespace_writer
             .put_file_bytes(
-                namespace_id,
                 &format!("/docs/file-{index}.txt"),
                 b"body",
                 PutFileOptions::new(loonfs_test_support::test_actor()),
@@ -97,9 +97,11 @@ async fn warm_reads_and_writes_reuse_their_manifest() {
         .build()
         .await
         .expect("build writer");
-    writer
+    let namespace_writer = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
+    namespace_writer
         .put_file_bytes(
-            &namespace_id,
             "/docs/file-5.txt",
             b"body",
             PutFileOptions::new(loonfs_test_support::test_actor()),
@@ -109,9 +111,8 @@ async fn warm_reads_and_writes_reuse_their_manifest() {
     let warmup = manifest_gets(&recording.take_get_keys());
     assert!(!warmup.is_empty(), "the first write loads its manifest");
 
-    writer
+    namespace_writer
         .put_file_bytes(
-            &namespace_id,
             "/docs/file-6.txt",
             b"body",
             PutFileOptions::new(loonfs_test_support::test_actor()),

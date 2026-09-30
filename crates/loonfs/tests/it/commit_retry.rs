@@ -141,14 +141,13 @@ async fn restart_replays_the_commit_actor_from_the_wal() {
     let temp_dir = tempdir().expect("tempdir");
     let runtime = open_runtime_async(store(temp_dir.path()), "writer-a").await;
     let namespace_id = namespace(&runtime).await;
-    let actor = ActorId::parse("replay-worker").expect("actor id");
-    let committed = runtime
+    let namespace_writer = runtime
         .writer
-        .create_directory(
-            &namespace_id,
-            "/replayed",
-            CreateDirectoryOptions::new(actor.clone()),
-        )
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
+    let actor = ActorId::parse("replay-worker").expect("actor id");
+    let committed = namespace_writer
+        .create_directory("/replayed", CreateDirectoryOptions::new(actor.clone()))
         .await
         .expect("commit attributed directory");
     drop(runtime);
@@ -387,18 +386,19 @@ async fn a_single_put_does_not_replay_a_multi_operation_commit() {
     let temp_dir = tempdir().expect("tempdir");
     let runtime = open_runtime_async(store(temp_dir.path()), "writer-a").await;
     let namespace_id = namespace(&runtime).await;
+    let namespace_writer = runtime
+        .writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
     let commit_id = CommitId::parse("pinned-batch").expect("valid commit id");
 
-    let prepared = runtime
-        .writer
-        .prepare_file_bytes(&namespace_id, b"stable bytes\n")
+    let prepared = namespace_writer
+        .prepare_file_bytes(b"stable bytes\n")
         .await
         .expect("prepare content");
     let content_ref = prepared.content_ref().clone();
-    let first = runtime
-        .writer
+    let first = namespace_writer
         .commit_prepared(
-            &namespace_id,
             CommitRequest {
                 preconditions: Vec::new(),
                 commit_id: commit_id.clone(),
@@ -465,24 +465,29 @@ async fn prepared_content_replays_after_restart_with_the_same_message() {
     let temp_dir = tempdir().expect("tempdir");
     let runtime = open_runtime_async(store(temp_dir.path()), "writer-a").await;
     let namespace_id = namespace(&runtime).await;
+    let namespace_writer = runtime
+        .writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
     let commit_id = CommitId::parse("pinned-put").expect("valid commit id");
     let options = || options_with_message(&commit_id, Some("import batch"));
 
-    let prepared = runtime
-        .writer
-        .prepare_file_stream(&namespace_id, streamed(b"stable bytes\n", 3))
+    let prepared = namespace_writer
+        .prepare_file_stream(streamed(b"stable bytes\n", 3))
         .await
         .expect("prepare content once");
-    let first = runtime
-        .writer
-        .put_file_prepared(&namespace_id, PATH, prepared.clone(), options())
+    let first = namespace_writer
+        .put_file_prepared(PATH, prepared.clone(), options())
         .await
         .expect("first put");
     drop(runtime);
     let runtime = open_runtime_async(store(temp_dir.path()), "writer-b").await;
-    let rerun = runtime
+    let namespace_writer = runtime
         .writer
-        .put_file_prepared(&namespace_id, PATH, prepared.clone(), options())
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
+    let rerun = namespace_writer
+        .put_file_prepared(PATH, prepared.clone(), options())
         .await
         .expect("rerunning an identical request is idempotent");
 
@@ -573,6 +578,10 @@ async fn a_changed_message_on_mkdir_still_conflicts() {
     let temp_dir = tempdir().expect("tempdir");
     let runtime = open_runtime_async(store(temp_dir.path()), "writer-a").await;
     let namespace_id = namespace(&runtime).await;
+    let namespace_writer = runtime
+        .writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
     let commit_id = CommitId::parse("pinned-mkdir").expect("valid commit id");
     let options = |message: &str| CreateDirectoryOptions {
         commit: loonfs_api::options::CommitOptions {
@@ -584,21 +593,18 @@ async fn a_changed_message_on_mkdir_still_conflicts() {
         parents: true,
     };
 
-    let first = runtime
-        .writer
-        .create_directory(&namespace_id, "/pinned", options("one"))
+    let first = namespace_writer
+        .create_directory("/pinned", options("one"))
         .await
         .expect("first mkdir");
-    let replay = runtime
-        .writer
-        .create_directory(&namespace_id, "/pinned", options("one"))
+    let replay = namespace_writer
+        .create_directory("/pinned", options("one"))
         .await
         .expect("an identical retry replays");
     assert_eq!(replay, first);
 
-    let error = runtime
-        .writer
-        .create_directory(&namespace_id, "/pinned", options("two"))
+    let error = namespace_writer
+        .create_directory("/pinned", options("two"))
         .await
         .expect_err("a changed message is a different commit");
     assert_eq!(error.code(), ErrorCode::CommitIdReuseConflict);
@@ -609,6 +615,10 @@ async fn a_changed_message_on_a_direct_commit_still_conflicts() {
     let temp_dir = tempdir().expect("tempdir");
     let runtime = open_runtime_async(store(temp_dir.path()), "writer-a").await;
     let namespace_id = namespace(&runtime).await;
+    let namespace_writer = runtime
+        .writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
     let commit_id = CommitId::parse("pinned-commit").expect("valid commit id");
     let request = |message: &str| {
         CommitRequest::single(
@@ -622,21 +632,18 @@ async fn a_changed_message_on_a_direct_commit_still_conflicts() {
         )
     };
 
-    let first = runtime
-        .writer
-        .create_commit(&namespace_id, request("one"))
+    let first = namespace_writer
+        .create_commit(request("one"))
         .await
         .expect("first commit");
-    let replay = runtime
-        .writer
-        .create_commit(&namespace_id, request("one"))
+    let replay = namespace_writer
+        .create_commit(request("one"))
         .await
         .expect("an identical retry replays");
     assert_eq!(replay, first);
 
-    let error = runtime
-        .writer
-        .create_commit(&namespace_id, request("two"))
+    let error = namespace_writer
+        .create_commit(request("two"))
         .await
         .expect_err("a changed message is a different commit");
     assert_eq!(error.code(), ErrorCode::CommitIdReuseConflict);
@@ -764,22 +771,18 @@ async fn concurrent_retries_past_the_receipt_horizon_commit_once() {
     // the conservative in-process cache.
     drop(runtime);
     let runtime = open_runtime_async(store(temp_dir.path()), "writer-b").await;
-
-    let prepared = runtime
+    let namespace_writer = runtime
         .writer
-        .prepare_file_bytes(&namespace_id, b"stable bytes\n")
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
+
+    let prepared = namespace_writer
+        .prepare_file_bytes(b"stable bytes\n")
         .await
         .expect("prepare the new attempt once");
     let (left, right) = tokio::join!(
-        runtime.writer.put_file_prepared(
-            &namespace_id,
-            PATH,
-            prepared.clone(),
-            options(&commit_id)
-        ),
-        runtime
-            .writer
-            .put_file_prepared(&namespace_id, PATH, prepared, options(&commit_id)),
+        namespace_writer.put_file_prepared(PATH, prepared.clone(), options(&commit_id)),
+        namespace_writer.put_file_prepared(PATH, prepared, options(&commit_id)),
     );
     let left = left.expect("first late retry");
     let right = right.expect("second late retry");
@@ -835,27 +838,19 @@ async fn reuploading_an_identical_stream_under_the_same_commit_id_conflicts() {
     let temp_dir = tempdir().expect("tempdir");
     let runtime = open_runtime_async(store(temp_dir.path()), "writer-a").await;
     let namespace_id = namespace(&runtime).await;
+    let namespace_writer = runtime
+        .writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
     let commit_id = CommitId::parse("pinned-stream").expect("valid commit id");
     let payload = vec![7u8; 300_000];
 
-    let first = runtime
-        .writer
-        .put_file_stream(
-            &namespace_id,
-            PATH,
-            streamed(&payload, 64 * 1024),
-            options(&commit_id),
-        )
+    let first = namespace_writer
+        .put_file_stream(PATH, streamed(&payload, 64 * 1024), options(&commit_id))
         .await
         .expect("first streamed put");
-    let rerun = runtime
-        .writer
-        .put_file_stream(
-            &namespace_id,
-            PATH,
-            streamed(&payload, 7_919),
-            options(&commit_id),
-        )
+    let rerun = namespace_writer
+        .put_file_stream(PATH, streamed(&payload, 7_919), options(&commit_id))
         .await
         .expect_err("a fresh upload is a different request");
 
@@ -880,22 +875,22 @@ async fn different_streamed_bytes_under_a_used_commit_id_still_conflict() {
     let temp_dir = tempdir().expect("tempdir");
     let runtime = open_runtime_async(store(temp_dir.path()), "writer-a").await;
     let namespace_id = namespace(&runtime).await;
+    let namespace_writer = runtime
+        .writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
     let commit_id = CommitId::parse("pinned-stream").expect("valid commit id");
 
-    runtime
-        .writer
+    namespace_writer
         .put_file_stream(
-            &namespace_id,
             PATH,
             streamed(&vec![7u8; 300_000], 64 * 1024),
             options(&commit_id),
         )
         .await
         .expect("first streamed put");
-    let error = runtime
-        .writer
+    let error = namespace_writer
         .put_file_stream(
-            &namespace_id,
             PATH,
             streamed(&vec![9u8; 300_000], 64 * 1024),
             options(&commit_id),
@@ -921,6 +916,10 @@ async fn a_streamed_reupload_conflicts_with_a_buffered_first_run() {
     let temp_dir = tempdir().expect("tempdir");
     let runtime = open_runtime_async(store(temp_dir.path()), "writer-a").await;
     let namespace_id = namespace(&runtime).await;
+    let namespace_writer = runtime
+        .writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
     let commit_id = CommitId::parse("pinned-either-way").expect("valid commit id");
     let payload = vec![3u8; 100_000];
 
@@ -928,14 +927,8 @@ async fn a_streamed_reupload_conflicts_with_a_buffered_first_run() {
         .put_file_bytes(&namespace_id, PATH, &payload, options(&commit_id))
         .await
         .expect("first buffered put");
-    let rerun = runtime
-        .writer
-        .put_file_stream(
-            &namespace_id,
-            PATH,
-            streamed(&payload, 8_192),
-            options(&commit_id),
-        )
+    let rerun = namespace_writer
+        .put_file_stream(PATH, streamed(&payload, 8_192), options(&commit_id))
         .await
         .expect_err("a fresh upload is a different request");
 

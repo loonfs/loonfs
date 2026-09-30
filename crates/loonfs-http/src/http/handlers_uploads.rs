@@ -15,7 +15,7 @@ use loonfs::content_tokens::{
 };
 use loonfs::publish::PreparedContent;
 use loonfs::uploads::ResolvedUploadCompletion;
-use loonfs::FsWriter;
+use loonfs::NamespaceWriter;
 #[cfg(feature = "openapi")]
 use loonfs_api::ApiError;
 use loonfs_api::ErrorCode;
@@ -64,13 +64,13 @@ impl<'a> ContentTokenVerifier<'a> {
 
     async fn prepare(
         self,
-        writer: &FsWriter,
+        namespace_writer: &NamespaceWriter,
         namespace_id: &NamespaceId,
         token: &ContentToken,
         now_ms: u64,
     ) -> Result<Result<PreparedContent, ContentTokenError>, ApiResponseError> {
-        writer
-            .prepare_content_token(namespace_id, self.secret, token, now_ms)
+        namespace_writer
+            .prepare_content_token(self.secret, token, now_ms)
             .await
             .map_err(ApiResponseError::for_namespace(namespace_id))
     }
@@ -130,21 +130,26 @@ pub(super) async fn create_upload(
     AppQuery(_): AppQuery<NoQuery>,
     UploadControlJson(request): UploadControlJson<CreateUploadBody, MAX_UPLOAD_CONTROL_BODY_BYTES>,
 ) -> Result<Json<UploadSession>, ApiResponseError> {
-    let scoped_writer = subject.map(|subject| state.writer.as_subject(subject));
-    let writer = scoped_writer.as_ref().unwrap_or(&state.writer);
+    let namespace_writer = state
+        .namespaces
+        .open(&namespace_id)
+        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
+    let scoped_writer = subject.map(|subject| namespace_writer.as_subject(subject));
+    let namespace_writer = scoped_writer.as_ref().unwrap_or(&namespace_writer);
     // Decoding the body settled which transport this is and that it carries
     // that transport's fields and no other's, so there is nothing left here
     // to check before dispatching on it.
     match request {
         CreateUploadBody::DirectPut { size_bytes } => {
-            begin_direct_put_upload(&state, writer, namespace_id, size_bytes).await
+            begin_direct_put_upload(&state, namespace_writer, namespace_id, size_bytes).await
         }
         CreateUploadBody::DirectMultipart { part_size_bytes } => {
-            begin_direct_multipart_upload(&state, writer, namespace_id, part_size_bytes).await
+            begin_direct_multipart_upload(&state, namespace_writer, namespace_id, part_size_bytes)
+                .await
         }
         CreateUploadBody::ServiceProxied {} => {
-            let response = writer
-                .create_upload(&namespace_id)
+            let response = namespace_writer
+                .create_upload()
                 .await
                 .map_err(ApiResponseError::for_namespace(&namespace_id))?;
             Ok(Json(response))
@@ -154,7 +159,7 @@ pub(super) async fn create_upload(
 
 async fn begin_direct_put_upload(
     state: &BindingState,
-    writer: &FsWriter,
+    namespace_writer: &NamespaceWriter,
     namespace_id: NamespaceId,
     size_bytes: Option<u64>,
 ) -> Result<Json<UploadSession>, ApiResponseError> {
@@ -186,8 +191,8 @@ async fn begin_direct_put_upload(
     }
 
     let checksum_algorithm = issuer.stored_checksum_algorithm();
-    let mut prepared = writer
-        .create_direct_put_upload_target(&namespace_id, checksum_algorithm)
+    let mut prepared = namespace_writer
+        .create_direct_put_upload_target(checksum_algorithm)
         .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
     fill_direct_put_access(issuer.as_ref(), &prepared.object_key, &mut prepared.session).await?;
@@ -222,7 +227,7 @@ async fn fill_direct_put_access(
 
 async fn begin_direct_multipart_upload(
     state: &BindingState,
-    writer: &FsWriter,
+    namespace_writer: &NamespaceWriter,
     namespace_id: NamespaceId,
     part_size_bytes: Option<u64>,
 ) -> Result<Json<UploadSession>, ApiResponseError> {
@@ -239,11 +244,8 @@ async fn begin_direct_multipart_upload(
         ));
     }
     // Use the server's default when no part size is requested.
-    let prepared = writer
-        .create_direct_multipart_upload_target(
-            &namespace_id,
-            DirectMultipartUploadOptions { part_size_bytes },
-        )
+    let prepared = namespace_writer
+        .create_direct_multipart_upload_target(DirectMultipartUploadOptions { part_size_bytes })
         .await
         .map_err(|error| {
             ApiResponseError::runtime_for_namespace(&namespace_id, error)
@@ -292,8 +294,6 @@ pub(super) async fn sign_upload_parts(
         MAX_UPLOAD_CONTROL_BODY_BYTES,
     >,
 ) -> Result<Json<SignUploadPartsResponse>, ApiResponseError> {
-    let scoped_writer = subject.map(|subject| state.writer.as_subject(subject));
-    let writer = scoped_writer.as_ref().unwrap_or(&state.writer);
     let upload_id = parse_path_id::<UploadId>("upload_id", &upload_id)?;
     let Some(issuer) = state
         .direct_transfers
@@ -306,8 +306,14 @@ pub(super) async fn sign_upload_parts(
         ));
     };
 
-    let targets = writer
-        .sign_upload_parts(&namespace_id, &upload_id, &request.parts)
+    let namespace_writer = state
+        .namespaces
+        .open(&namespace_id)
+        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
+    let scoped_writer = subject.map(|subject| namespace_writer.as_subject(subject));
+    let namespace_writer = scoped_writer.as_ref().unwrap_or(&namespace_writer);
+    let targets = namespace_writer
+        .sign_upload_parts(&upload_id, &request.parts)
         .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
     let parts = sign_parts(issuer.as_ref(), &targets).await?;
@@ -383,7 +389,7 @@ pub(super) fn presign_time() -> SystemTime {
 /// or minted for another namespace, is worth saying out
 /// loud even when the request it arrived in went on to publish.
 pub(super) async fn content_preparation_for_puts(
-    writer: &FsWriter,
+    namespace_writer: &NamespaceWriter,
     verifier: ContentTokenVerifier<'_>,
     namespace_id: &NamespaceId,
     content_refs: &[&ContentRef],
@@ -397,7 +403,7 @@ pub(super) async fn content_preparation_for_puts(
         .filter(|token| content_refs.contains(&&token.content_ref))
     {
         match verifier
-            .prepare(writer, namespace_id, token, now_ms)
+            .prepare(namespace_writer, namespace_id, token, now_ms)
             .await?
         {
             Ok(prepared) => prepared_content.push(prepared),
@@ -513,12 +519,16 @@ pub(super) async fn put_upload_content(
     AppQuery(_): AppQuery<NoQuery>,
     body: UploadBodyStream,
 ) -> Result<Json<UploadSession>, ApiResponseError> {
-    let scoped_writer = subject.map(|subject| state.writer.as_subject(subject));
-    let writer = scoped_writer.as_ref().unwrap_or(&state.writer);
     let upload_id = parse_path_id::<UploadId>("upload_id", &upload_id)?;
+    let namespace_writer = state
+        .namespaces
+        .open(&namespace_id)
+        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
+    let scoped_writer = subject.map(|subject| namespace_writer.as_subject(subject));
+    let namespace_writer = scoped_writer.as_ref().unwrap_or(&namespace_writer);
     let (stream, outcome) = body.into_stream();
-    match writer
-        .put_upload_content_stream(&namespace_id, &upload_id, stream)
+    match namespace_writer
+        .put_upload_content_stream(&upload_id, stream)
         .await
     {
         Ok(response) => Ok(Json(response)),
@@ -566,21 +576,23 @@ pub(super) async fn complete_upload(
     AppQuery(_): AppQuery<NoQuery>,
     body: UploadBodyBytes<MAX_COMPLETION_BODY_BYTES>,
 ) -> Result<Json<UploadSession>, ApiResponseError> {
-    let scoped_writer = subject.map(|subject| state.writer.as_subject(subject));
-    let writer = scoped_writer.as_ref().unwrap_or(&state.writer);
     let upload_id = parse_path_id::<UploadId>("upload_id", &upload_id)?;
     let body = body.into_bytes();
-    let completed = writer
-        .complete_upload_for_mode(&namespace_id, &upload_id, |mode| {
-            decode_completion_body(mode, &body)
-        })
+    let namespace_writer = state
+        .namespaces
+        .open(&namespace_id)
+        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
+    let scoped_writer = subject.map(|subject| namespace_writer.as_subject(subject));
+    let namespace_writer = scoped_writer.as_ref().unwrap_or(&namespace_writer);
+    let completed = namespace_writer
+        .complete_upload_for_mode(&upload_id, |mode| decode_completion_body(mode, &body))
         .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
     Ok(Json(with_content_token(
         completed.response,
         ContentTokenVerifier::new(state.options.content_token_secret.expose()),
         completed.evidence.as_ref(),
-        writer.now_ms().map_err(ApiResponseError::runtime)?,
+        state.writer.now_ms().map_err(ApiResponseError::runtime)?,
     )?))
 }
 
@@ -640,11 +652,15 @@ pub(super) async fn get_upload(
     AppPath(UploadPathParams { upload_id }): AppPath<UploadPathParams>,
     AppQuery(_): AppQuery<NoQuery>,
 ) -> Result<Json<UploadSession>, ApiResponseError> {
-    let scoped_writer = subject.map(|subject| state.writer.as_subject(subject));
-    let writer = scoped_writer.as_ref().unwrap_or(&state.writer);
     let upload_id = parse_path_id::<UploadId>("upload_id", &upload_id)?;
-    let mut view = writer
-        .get_upload(&namespace_id, &upload_id)
+    let namespace_writer = state
+        .namespaces
+        .open(&namespace_id)
+        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
+    let scoped_writer = subject.map(|subject| namespace_writer.as_subject(subject));
+    let namespace_writer = scoped_writer.as_ref().unwrap_or(&namespace_writer);
+    let mut view = namespace_writer
+        .get_upload(&upload_id)
         .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
     if let Some(object_key) = &view.direct_put_object_key {
@@ -664,7 +680,7 @@ pub(super) async fn get_upload(
         view.session,
         ContentTokenVerifier::new(state.options.content_token_secret.expose()),
         view.evidence.as_ref(),
-        writer.now_ms().map_err(ApiResponseError::runtime)?,
+        state.writer.now_ms().map_err(ApiResponseError::runtime)?,
     )?))
 }
 
@@ -700,11 +716,15 @@ pub(super) async fn abort_upload(
     AppPath(UploadPathParams { upload_id }): AppPath<UploadPathParams>,
     AppQuery(_): AppQuery<NoQuery>,
 ) -> Result<Json<UploadSession>, ApiResponseError> {
-    let scoped_writer = subject.map(|subject| state.writer.as_subject(subject));
-    let writer = scoped_writer.as_ref().unwrap_or(&state.writer);
     let upload_id = parse_path_id::<UploadId>("upload_id", &upload_id)?;
-    let response = writer
-        .abort_upload(&namespace_id, &upload_id)
+    let namespace_writer = state
+        .namespaces
+        .open(&namespace_id)
+        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
+    let scoped_writer = subject.map(|subject| namespace_writer.as_subject(subject));
+    let namespace_writer = scoped_writer.as_ref().unwrap_or(&namespace_writer);
+    let response = namespace_writer
+        .abort_upload(&upload_id)
         .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
     Ok(Json(response))
@@ -713,6 +733,7 @@ pub(super) async fn abort_upload(
 #[cfg(test)]
 mod completion_body_tests {
     use super::*;
+    use loonfs::FsWriter;
     use loonfs_api::{
         v0::{CompletedUploadPart, UploadContentClaim, UploadPartChecksumClaim},
         Checksum, ChecksumAlgorithm,
@@ -739,25 +760,24 @@ mod completion_body_tests {
             )
             .await
             .expect("namespace");
-        let upload = writer.create_upload(&namespace_id).await.expect("upload");
-        writer
-            .put_upload_content(&namespace_id, &upload.upload_id, b"content")
+        let namespace_writer = writer
+            .open_namespace(&namespace_id)
+            .expect("open namespace");
+        let upload = namespace_writer.create_upload().await.expect("upload");
+        namespace_writer
+            .put_upload_content(&upload.upload_id, b"content")
             .await
             .expect("content");
-        let completed = writer
-            .complete_upload(
-                &namespace_id,
-                &upload.upload_id,
-                ResolvedUploadCompletion::KnownContent,
-            )
+        let completed = namespace_writer
+            .complete_upload(&upload.upload_id, ResolvedUploadCompletion::KnownContent)
             .await
             .expect("complete");
         let loonfs::uploads::UploadSessionView {
             session: status,
             evidence,
             ..
-        } = writer
-            .get_upload(&namespace_id, &upload.upload_id)
+        } = namespace_writer
+            .get_upload(&upload.upload_id)
             .await
             .expect("eligible status");
         let evidence = evidence.expect("evidence eligible at status read");

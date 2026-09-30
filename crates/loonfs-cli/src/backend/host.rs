@@ -9,8 +9,8 @@ use loonfs_api::SecretString;
 use loonfs_client::{Body, Client, ClientConfig, TransportError};
 use loonfs_grep::GrepService;
 use loonfs_http::{
-    AuthPolicy, BindingOptions, BindingState, HttpMetrics, DEFAULT_MAX_CONCURRENT_DOWNLOADS,
-    DEFAULT_MAX_CONCURRENT_UPLOADS, DEFAULT_REQUEST_DEADLINE_MS,
+    AuthPolicy, BindingOptions, BindingState, HttpMetrics, NamespaceWriters,
+    DEFAULT_MAX_CONCURRENT_DOWNLOADS, DEFAULT_MAX_CONCURRENT_UPLOADS, DEFAULT_REQUEST_DEADLINE_MS,
 };
 use loonfs_objectstore::ConfiguredObjectStoreKind;
 use std::sync::{Arc, OnceLock};
@@ -49,6 +49,7 @@ pub(crate) fn client(
         download_permits: Arc::new(Semaphore::new(options.max_concurrent_downloads)),
         options,
         writer: host.writer.clone(),
+        namespaces: Arc::new(NamespaceWriters::new(host.writer.clone())),
         reader: host.writer.reader(),
         maintenance: host.maintenance.clone(),
         probe_store: host.writer.object_store(),

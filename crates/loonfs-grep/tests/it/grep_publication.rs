@@ -32,10 +32,12 @@ async fn a_collected_publication_does_not_abandon_a_successors_backfill_checkpoi
         )
         .await
         .expect("namespace");
+    let namespace_writer = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
     for path in ["/first", "/second"] {
-        writer
+        namespace_writer
             .put_file_bytes(
-                &namespace_id,
                 path,
                 b"needle\n",
                 PutFileOptions::new(loonfs_test_support::test_actor()),

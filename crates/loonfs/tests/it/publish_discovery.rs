@@ -35,13 +35,12 @@ async fn acquisition_shares_discovery_and_an_own_fold_needs_none() {
         .build()
         .await
         .expect("fresh writer");
+    let namespace_writer = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
     store.reset();
-    writer
-        .create_directory(
-            &namespace_id,
-            "/first",
-            CreateDirectoryOptions::new(test_actor()),
-        )
+    namespace_writer
+        .create_directory("/first", CreateDirectoryOptions::new(test_actor()))
         .await
         .expect("first publish");
     let requests = store.take();
@@ -71,23 +70,18 @@ async fn acquisition_shares_discovery_and_an_own_fold_needs_none() {
     );
 
     for number in 1..31 {
-        writer
+        namespace_writer
             .create_directory(
-                &namespace_id,
                 &format!("/entry-{number}"),
                 CreateDirectoryOptions::new(test_actor()),
             )
             .await
             .expect("reach fold threshold");
     }
-    writer.wait_for_fold(&namespace_id).await.expect("fold");
+    namespace_writer.wait_for_fold().await.expect("fold");
     store.reset();
-    writer
-        .create_directory(
-            &namespace_id,
-            "/after-fold",
-            CreateDirectoryOptions::new(test_actor()),
-        )
+    namespace_writer
+        .create_directory("/after-fold", CreateDirectoryOptions::new(test_actor()))
         .await
         .expect("publish after fold");
     let requests = store.take();
@@ -142,19 +136,17 @@ async fn a_directory_created_during_a_fold_is_seen_after_the_projection_is_dropp
         .create_namespace(&namespace_id, CreateNamespaceOptions::new(test_actor()))
         .await
         .expect("namespace");
-    writer
-        .create_directory(
-            &namespace_id,
-            "/first",
-            CreateDirectoryOptions::new(test_actor()),
-        )
+    let namespace_writer = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
+    namespace_writer
+        .create_directory("/first", CreateDirectoryOptions::new(test_actor()))
         .await
         .expect("first publish");
     store.inner().block_next();
     for number in 1..31 {
-        writer
+        namespace_writer
             .create_directory(
-                &namespace_id,
                 &format!("/entry-{number}"),
                 CreateDirectoryOptions::new(test_actor()),
             )
@@ -163,12 +155,8 @@ async fn a_directory_created_during_a_fold_is_seen_after_the_projection_is_dropp
     }
     store.inner().wait_until_blocked().await;
     store.reset();
-    writer
-        .create_directory(
-            &namespace_id,
-            "/during",
-            CreateDirectoryOptions::new(test_actor()),
-        )
+    namespace_writer
+        .create_directory("/during", CreateDirectoryOptions::new(test_actor()))
         .await
         .expect("publish during fold");
     let during_wal = store
@@ -196,15 +184,11 @@ async fn a_directory_created_during_a_fold_is_seen_after_the_projection_is_dropp
         .await
         .expect("drop projection during fold");
     store.inner().release();
-    writer.wait_for_fold(&namespace_id).await.expect("fold");
+    namespace_writer.wait_for_fold().await.expect("fold");
     store.reset();
 
-    writer
-        .create_directory(
-            &namespace_id,
-            "/during/child",
-            CreateDirectoryOptions::new(test_actor()),
-        )
+    namespace_writer
+        .create_directory("/during/child", CreateDirectoryOptions::new(test_actor()))
         .await
         .expect("publish depends on the commit made during the fold");
     let requests = store.take();

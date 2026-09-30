@@ -9,6 +9,6 @@ pub use http::metrics::HttpMetrics;
 pub use http::openapi_document;
 pub use http::{api_error_response, authenticate_routes, observe_routes, router};
 pub use state::{
-    AuthPolicy, BindingOptions, BindingState, GrepMaintenance, DEFAULT_MAX_CONCURRENT_DOWNLOADS,
-    DEFAULT_MAX_CONCURRENT_UPLOADS, DEFAULT_REQUEST_DEADLINE_MS,
+    AuthPolicy, BindingOptions, BindingState, GrepMaintenance, NamespaceWriters,
+    DEFAULT_MAX_CONCURRENT_DOWNLOADS, DEFAULT_MAX_CONCURRENT_UPLOADS, DEFAULT_REQUEST_DEADLINE_MS,
 };

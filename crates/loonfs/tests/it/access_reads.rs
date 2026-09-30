@@ -60,6 +60,9 @@ async fn check_buffered_read_access(content_size: usize) {
         )
         .await
         .expect("namespace");
+    let namespace_writer = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
     // Keep the reader's cache independent so a write cannot invalidate it.
     let reader = FsReader::builder_with_store(store)
         .build()
@@ -79,9 +82,8 @@ async fn check_buffered_read_access(content_size: usize) {
             expected_access_revision_no: None,
         },
     ] {
-        writer
+        namespace_writer
             .create_commit(
-                &namespace_id,
                 CommitRequest::single(
                     CommitId::generate(),
                     loonfs_test_support::test_actor(),
@@ -99,13 +101,12 @@ async fn check_buffered_read_access(content_size: usize) {
         .expect("warm read");
     for byte in *b"ab" {
         let bytes = vec![byte; content_size];
-        let prepared = writer
-            .prepare_file_bytes(&namespace_id, &bytes)
+        let prepared = namespace_writer
+            .prepare_file_bytes(&bytes)
             .await
             .expect("prepare file");
-        writer
+        namespace_writer
             .commit_prepared(
-                &namespace_id,
                 CommitRequest::single(
                     CommitId::generate(),
                     loonfs_test_support::test_actor(),
@@ -146,9 +147,8 @@ async fn check_buffered_read_access(content_size: usize) {
         .await
         .expect("shared file before revocation")
         .inode_id;
-    writer
+    namespace_writer
         .create_commit(
-            &namespace_id,
             CommitRequest::single(
                 CommitId::generate(),
                 loonfs_test_support::test_actor(),
@@ -227,10 +227,13 @@ async fn check_former_writer_read(warm_before_handoff: bool) {
         )
         .await
         .expect("namespace");
+    let old_namespace_writer = old_writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
     let options = loonfs::PutFileOptions::new(loonfs_test_support::test_actor());
-    old_writer
+    old_namespace_writer
         .as_subject(subject("prn_root"))
-        .put_file_bytes(&namespace_id, "/team/file", b"private payload", options)
+        .put_file_bytes("/team/file", b"private payload", options)
         .await
         .expect("publish file");
     let access = |grants| FilesystemOperation::UpdateAccess {
@@ -240,9 +243,8 @@ async fn check_former_writer_read(warm_before_handoff: bool) {
         expected_inode_id: None,
         expected_access_revision_no: None,
     };
-    old_writer
+    old_namespace_writer
         .create_commit(
-            &namespace_id,
             CommitRequest::single(
                 CommitId::generate(),
                 loonfs_test_support::test_actor(),
@@ -270,18 +272,19 @@ async fn check_former_writer_read(warm_before_handoff: bool) {
         .build()
         .await
         .expect("peer");
-    peer.create_commit(
-        &namespace_id,
-        CommitRequest::single(
-            CommitId::generate(),
-            loonfs_test_support::test_actor(),
-            None,
-            access(AccessGrants::default()),
+    let peer_namespace_writer = peer.open_namespace(&namespace_id).expect("open namespace");
+    peer_namespace_writer
+        .create_commit(
+            CommitRequest::single(
+                CommitId::generate(),
+                loonfs_test_support::test_actor(),
+                None,
+                access(AccessGrants::default()),
+            )
+            .with_subject(subject("prn_root")),
         )
-        .with_subject(subject("prn_root")),
-    )
-    .await
-    .expect("revoke read access");
+        .await
+        .expect("revoke read access");
     assert_eq!(
         reader
             .get_file_bytes(&namespace_id, "/team/file")

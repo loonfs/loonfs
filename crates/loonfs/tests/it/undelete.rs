@@ -77,6 +77,10 @@ fn undelete_recovers_a_deleted_file_and_positions_stay_scoped() {
         CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
     )
     .expect("create namespace");
+    let namespace_writer = fs
+        .writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
     fs.put_file_bytes_blocking(
         &namespace_id,
         "/docs/report.txt",
@@ -117,8 +121,7 @@ fn undelete_recovers_a_deleted_file_and_positions_stay_scoped() {
 
     // Recovery re-attaches the same inode — identity, content, and the full
     // revision history come back, even at a new path.
-    block_on(fs.writer.undelete(
-        &namespace_id,
+    block_on(namespace_writer.undelete(
         inode_id,
         first_deletion,
         Some("/docs/recovered.txt"),
@@ -148,8 +151,7 @@ fn undelete_recovers_a_deleted_file_and_positions_stay_scoped() {
 
     // The recovered inode is no longer deleted: replaying the handle
     // conflicts.
-    let error = block_on(fs.writer.undelete(
-        &namespace_id,
+    let error = block_on(namespace_writer.undelete(
         inode_id,
         first_deletion,
         Some("/docs/again.txt"),
@@ -171,8 +173,7 @@ fn undelete_recovers_a_deleted_file_and_positions_stay_scoped() {
         )
         .expect("delete recovered file again")
         .committed_seq;
-    let error = block_on(fs.writer.undelete(
-        &namespace_id,
+    let error = block_on(namespace_writer.undelete(
         inode_id,
         first_deletion,
         Some("/docs/stale.txt"),
@@ -192,8 +193,7 @@ fn undelete_recovers_a_deleted_file_and_positions_stay_scoped() {
     assert!(still_gone.is_err(), "stale undelete must not bind anything");
 
     // The current position's handle recovers to the original path.
-    block_on(fs.writer.undelete(
-        &namespace_id,
+    block_on(namespace_writer.undelete(
         inode_id,
         second_deletion,
         Some("/docs/report.txt"),
@@ -218,6 +218,10 @@ fn undelete_recovers_a_deleted_subtree_and_rejects_covered_children() {
         CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
     )
     .expect("create namespace");
+    let namespace_writer = fs
+        .writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
     fs.put_file_bytes_blocking(
         &namespace_id,
         "/docs/notes/a.txt",
@@ -254,8 +258,7 @@ fn undelete_recovers_a_deleted_subtree_and_rejects_covered_children() {
 
     // A child is covered by the subtree root's tombstone, not its own:
     // recovery targets the root.
-    let error = block_on(fs.writer.undelete(
-        &namespace_id,
+    let error = block_on(namespace_writer.undelete(
         child_inode,
         deletion,
         Some("/docs/a-alone.txt"),
@@ -267,8 +270,7 @@ fn undelete_recovers_a_deleted_subtree_and_rejects_covered_children() {
         RuntimeError::Core(error) if error.code() == ErrorCode::NotDeleted
     ));
 
-    block_on(fs.writer.undelete(
-        &namespace_id,
+    block_on(namespace_writer.undelete(
         directory_inode,
         deletion,
         Some("/docs/notes"),
@@ -293,6 +295,10 @@ fn undelete_of_an_ancestor_keeps_independently_deleted_children_hidden() {
         CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
     )
     .expect("create namespace");
+    let namespace_writer = fs
+        .writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
     fs.put_file_bytes_blocking(
         &namespace_id,
         "/docs/notes/secret.txt",
@@ -339,8 +345,7 @@ fn undelete_of_an_ancestor_keeps_independently_deleted_children_hidden() {
 
     // Recovering the ancestor revokes exactly its own deletion: the
     // independently deleted child stays hidden behind its own tombstone.
-    block_on(fs.writer.undelete(
-        &namespace_id,
+    block_on(namespace_writer.undelete(
         directory_inode,
         ancestor_deletion,
         Some("/docs/notes"),
@@ -375,6 +380,10 @@ fn undelete_survives_checkpoints_and_reopen_in_both_orders() {
             CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
         )
         .expect("create namespace");
+        let namespace_writer = fs
+            .writer
+            .open_namespace(&namespace_id)
+            .expect("open namespace");
         fs.put_file_bytes_blocking(
             &namespace_id,
             "/docs/report.txt",
@@ -394,8 +403,7 @@ fn undelete_survives_checkpoints_and_reopen_in_both_orders() {
             )
             .expect("delete")
             .committed_seq;
-        block_on(fs.writer.undelete(
-            &namespace_id,
+        block_on(namespace_writer.undelete(
             inode_id,
             deletion,
             Some("/docs/report.txt"),
@@ -451,8 +459,11 @@ fn undelete_survives_checkpoints_and_reopen_in_both_orders() {
             step.wal_flush
         );
         let fs = open_runtime(object_store.clone(), "undelete-persist-c");
-        block_on(fs.writer.undelete(
-            &namespace_id,
+        let namespace_writer = fs
+            .writer
+            .open_namespace(&namespace_id)
+            .expect("open namespace");
+        block_on(namespace_writer.undelete(
             inode_id,
             second_deletion,
             Some("/docs/report.txt"),
@@ -488,6 +499,10 @@ fn change_feed_reports_the_deletion_position_an_undelete_takes() {
         CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
     )
     .expect("create namespace");
+    let namespace_writer = fs
+        .writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
     fs.put_file_bytes_blocking(
         &namespace_id,
         "/docs/report.txt",
@@ -507,8 +522,7 @@ fn change_feed_reports_the_deletion_position_an_undelete_takes() {
         )
         .expect("delete")
         .committed_seq;
-    block_on(fs.writer.undelete(
-        &namespace_id,
+    block_on(namespace_writer.undelete(
         inode_id,
         deletion,
         Some("/docs/report.txt"),

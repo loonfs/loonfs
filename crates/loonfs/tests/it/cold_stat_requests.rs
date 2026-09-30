@@ -67,14 +67,16 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
         )
         .await
         .expect("create namespace");
+    let namespace_writer = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
     // Publish the namespace's first manifest up front, so each maintenance
     // step below adds exactly one delta run to it. A fold needs a tail to
     // fold, so one seed commit comes first; its run holds a single name
     // that sorts past every name looked up below, so range pruning rules it
     // out of those lookups.
-    writer
+    namespace_writer
         .put_file_bytes(
-            &namespace_id,
             "/tree/dir-000000/seed.txt",
             b"seed",
             PutFileOptions::new(loonfs_test_support::test_actor()),

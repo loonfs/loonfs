@@ -494,9 +494,9 @@ async fn http_metadata_run_folds_an_idle_tail_unless_the_server_turns_the_idle_r
             )
             .await
             .expect("create namespace");
-        writer
+        let namespace_writer = writer.open_namespace(&namespace).expect("open namespace");
+        namespace_writer
             .put_file_bytes(
-                &namespace,
                 "/file.txt",
                 b"body",
                 loonfs::PutFileOptions::new(loonfs_test_support::test_actor()),

@@ -104,12 +104,14 @@ async fn content_prepared_and_never_published_is_reclaimed_with_its_session() {
     let store = store(temp_dir.path());
     let runtime = open_staged_runtime(store.clone(), "prepare-only").await;
     let namespace_id = namespace(&runtime).await;
+    let namespace_writer = runtime
+        .writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
     // A published file, so the reference scan has a root to read and the
     // verdict on the prepared object is "absent" rather than "unknown".
-    runtime
-        .writer
+    namespace_writer
         .put_file_bytes(
-            &namespace_id,
             "/docs/live.txt",
             b"live",
             PutFileOptions::new(loonfs_test_support::test_actor()),
@@ -117,9 +119,8 @@ async fn content_prepared_and_never_published_is_reclaimed_with_its_session() {
         .await
         .expect("published put");
 
-    let prepared = runtime
-        .writer
-        .prepare_file_bytes(&namespace_id, b"never published")
+    let prepared = namespace_writer
+        .prepare_file_bytes(b"never published")
         .await
         .expect("prepare content");
     let orphan_key = content_key(prepared.content_ref());
@@ -157,10 +158,12 @@ async fn a_published_put_keeps_its_content_and_loses_only_the_session_record() {
     let store = store(temp_dir.path());
     let runtime = open_staged_runtime(store.clone(), "published-put").await;
     let namespace_id = namespace(&runtime).await;
-    runtime
+    let namespace_writer = runtime
         .writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
+    namespace_writer
         .put_file_bytes(
-            &namespace_id,
             "/docs/kept.txt",
             b"kept",
             PutFileOptions::new(loonfs_test_support::test_actor()),
@@ -217,17 +220,23 @@ async fn imported_content_survives_collection_in_the_source_namespace() {
         )
         .await
         .expect("fork namespace");
-
-    let source_prepared = runtime
+    let target_writer = runtime
         .writer
-        .prepare_file_bytes(&source, b"owned by the target after import")
+        .open_namespace(&target)
+        .expect("open namespace");
+    let source_writer = runtime
+        .writer
+        .open_namespace(&source)
+        .expect("open namespace");
+
+    let source_prepared = source_writer
+        .prepare_file_bytes(b"owned by the target after import")
         .await
         .expect("prepare source content");
     let source_ref = source_prepared.content_ref().clone();
     let source_key = content_key(&source_ref);
-    let imported = runtime
-        .writer
-        .prepare_content_ref(&target, source_ref)
+    let imported = target_writer
+        .prepare_content_ref(source_ref)
         .await
         .expect("import source content");
     let imported_ref = imported.content_ref().clone();
@@ -237,10 +246,8 @@ async fn imported_content_survives_collection_in_the_source_namespace() {
         "import must mint a fresh identity"
     );
 
-    runtime
-        .writer
+    target_writer
         .put_file_prepared(
-            &target,
             "/imported.txt",
             imported,
             PutFileOptions::new(loonfs_test_support::test_actor()),
@@ -274,6 +281,10 @@ async fn a_conflicting_upload_is_reclaimed_and_the_published_content_survives() 
     let store = store(temp_dir.path());
     let runtime = open_staged_runtime(store.clone(), "retrying-writer").await;
     let namespace_id = namespace(&runtime).await;
+    let namespace_writer = runtime
+        .writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
     let options = || {
         let mut options = PutFileOptions::new(loonfs_test_support::test_actor());
         options.commit.commit_id =
@@ -281,9 +292,8 @@ async fn a_conflicting_upload_is_reclaimed_and_the_published_content_survives() 
         options
     };
 
-    let first = runtime
-        .writer
-        .put_file_bytes(&namespace_id, "/docs/retry.txt", b"same bytes", options())
+    let first = namespace_writer
+        .put_file_bytes("/docs/retry.txt", b"same bytes", options())
         .await
         .expect("first put");
     let committed_content_ref = runtime
@@ -296,9 +306,8 @@ async fn a_conflicting_upload_is_reclaimed_and_the_published_content_survives() 
         .expect("a file carries a content ref");
     let committed_key = content_key(&committed_content_ref);
 
-    let retry = runtime
-        .writer
-        .put_file_bytes(&namespace_id, "/docs/retry.txt", b"same bytes", options())
+    let retry = namespace_writer
+        .put_file_bytes("/docs/retry.txt", b"same bytes", options())
         .await
         .expect_err("the fresh upload conflicts with the committed request");
     assert_eq!(
@@ -355,12 +364,14 @@ async fn staging_that_fails_leaves_a_session_the_expiry_sweep_reclaims() {
     let store: SharedObjectStore = failing.clone();
     let runtime = open_staged_runtime(store.clone(), "failing-writer").await;
     let namespace_id = namespace(&runtime).await;
+    let namespace_writer = runtime
+        .writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
 
     failing.fail_all();
-    runtime
-        .writer
+    namespace_writer
         .put_file_bytes(
-            &namespace_id,
             "/docs/lost.txt",
             b"never lands",
             PutFileOptions::new(loonfs_test_support::test_actor()),
@@ -401,12 +412,14 @@ async fn a_put_pays_two_control_writes_for_the_session_that_owns_its_content() {
     let store: SharedObjectStore = sessions.clone();
     let runtime = open_staged_runtime(store, "counted-writer").await;
     let namespace_id = namespace(&runtime).await;
+    let namespace_writer = runtime
+        .writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
 
     sessions.reset();
-    runtime
-        .writer
+    namespace_writer
         .put_file_bytes(
-            &namespace_id,
             "/docs/counted.txt",
             b"counted",
             PutFileOptions::new(loonfs_test_support::test_actor()),

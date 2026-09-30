@@ -143,7 +143,7 @@ impl FsWriter {
     pub fn open_namespace(&self, namespace_id: &NamespaceId) -> Result<NamespaceWriter> {
         self.core.record_trace_context(&tracing::Span::current());
         self.publisher.open_namespace(namespace_id)?;
-        Ok(NamespaceWriter::new(self, namespace_id))
+        Ok(NamespaceWriter::new(self, namespace_id.clone()))
     }
 
     /// Closes and drains the session for `namespace_id`.
@@ -215,8 +215,7 @@ impl FsWriter {
         self.core.now_ms()
     }
 
-    // Namespace create and fork live in `fs/namespaces.rs`. The deprecated
-    // methods that take a namespace id live in `writer_forwarders.rs`.
+    // Namespace create and fork live in `fs/namespaces.rs`.
 
     /// Builds a maintenance handle over this writer's read core and caches.
     /// Uses the publisher's last observed inline byte count for fold decisions.
@@ -591,17 +590,18 @@ mod tests {
         let (writer, blocking) =
             parked_publication_writer(temp_dir.path(), "shutdown-order-writer", &namespace_id)
                 .await;
+        let namespace_writer = writer
+            .open_namespace(&namespace_id)
+            .expect("open namespace");
 
         // Park a publication so the shutdown's publication drain is still
         // pending when the first poll returns.
         blocking.block_next();
         let put = tokio::spawn({
-            let writer = writer.clone();
-            let namespace_id = namespace_id.clone();
+            let namespace_writer = namespace_writer.clone();
             async move {
-                writer
+                namespace_writer
                     .put_file_bytes(
-                        &namespace_id,
                         "/parked.txt",
                         b"body",
                         PutFileOptions::new(loonfs_test_support::test_actor()),
@@ -618,9 +618,8 @@ mod tests {
         );
         // A mutation submitted into the drain would be work the drain then
         // has to wait for.
-        let refused = writer
+        let refused = namespace_writer
             .put_file_bytes(
-                &namespace_id,
                 "/late.txt",
                 b"body",
                 PutFileOptions::new(loonfs_test_support::test_actor()),

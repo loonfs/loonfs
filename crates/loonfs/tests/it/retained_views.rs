@@ -63,9 +63,9 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
         )
         .await
         .expect("create ACL namespace");
-    writer
+    let namespace_writer = writer.open_namespace(&source).expect("open namespace");
+    namespace_writer
         .create_directory(
-            &source,
             "/docs/nested",
             CreateDirectoryOptions {
                 parents: true,
@@ -79,34 +79,32 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
         ("/docs/deleted.txt", b"deleted".as_slice()),
         ("/docs/recover.txt", b"recovered".as_slice()),
     ] {
-        let prepared = writer
-            .prepare_file_bytes(&source, bytes)
+        let prepared = namespace_writer
+            .prepare_file_bytes(bytes)
             .await
             .expect("prepare inline content");
         assert!(prepared.upload_id().is_none());
-        writer
-            .put_file_prepared(&source, path, prepared, PutFileOptions::new(test_actor()))
+        namespace_writer
+            .put_file_prepared(path, prepared, PutFileOptions::new(test_actor()))
             .await
             .expect("commit inline content");
     }
     let uploaded_bytes = vec![b'u'; 128 * 1024];
-    let prepared = writer
-        .prepare_file_bytes(&source, &uploaded_bytes)
+    let prepared = namespace_writer
+        .prepare_file_bytes(&uploaded_bytes)
         .await
         .expect("stage upload");
     assert!(prepared.upload_id().is_some());
-    writer
+    namespace_writer
         .put_file_prepared(
-            &source,
             "/docs/nested/uploaded.txt",
             prepared,
             PutFileOptions::new(test_actor()),
         )
         .await
         .expect("commit uploaded content");
-    writer
+    namespace_writer
         .put_file_bytes(
-            &source,
             "/docs/inline.txt",
             b"second revision",
             PutFileOptions {
@@ -116,9 +114,8 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
         )
         .await
         .expect("replace inline file");
-    writer
+    namespace_writer
         .move_path(
-            &source,
             "/docs/inline.txt",
             "/docs/renamed.txt",
             MoveOptions::new(test_actor()),
@@ -132,9 +129,8 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
         ),
         (BTreeMap::new(), vec![attribute_key("owner")]),
     ] {
-        writer
+        namespace_writer
             .update_attributes(
-                &source,
                 "/docs/renamed.txt",
                 UpdateAttributesOptions {
                     set,
@@ -156,9 +152,8 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
         ),
         (false, AccessGrants::default()),
     ] {
-        writer
+        namespace_writer
             .update_access(
-                &source,
                 "/docs/nested",
                 UpdateAccessOptions {
                     boundary,
@@ -174,12 +169,8 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
         .await
         .expect("file to delete")
         .inode_id;
-    let deleted = writer
-        .delete_path(
-            &source,
-            "/docs/deleted.txt",
-            DeleteOptions::new(test_actor()),
-        )
+    let deleted = namespace_writer
+        .delete_path("/docs/deleted.txt", DeleteOptions::new(test_actor()))
         .await
         .expect("delete file");
     let restored_inode = writer
@@ -188,17 +179,12 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
         .await
         .expect("file to recover")
         .inode_id;
-    let recover = writer
-        .delete_path(
-            &source,
-            "/docs/recover.txt",
-            DeleteOptions::new(test_actor()),
-        )
+    let recover = namespace_writer
+        .delete_path("/docs/recover.txt", DeleteOptions::new(test_actor()))
         .await
         .expect("delete file before recovery");
-    let restored = writer
+    let restored = namespace_writer
         .undelete(
-            &source,
             restored_inode,
             recover.committed_seq,
             Some("/docs/restored.txt"),
@@ -246,9 +232,8 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
                 checkpoint = Some(captured);
             }
             "floor_advanced" => {
-                head_seq = writer
+                head_seq = namespace_writer
                     .put_file_bytes(
-                        &source,
                         "/later.txt",
                         b"source only",
                         PutFileOptions::new(test_actor()),

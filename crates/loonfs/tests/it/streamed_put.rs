@@ -60,12 +60,14 @@ async fn a_streamed_put_holds_one_part_of_its_payload() {
     let store: SharedObjectStore = watched.clone();
     let runtime = open_runtime_async(store, "writer-a").await;
     let namespace_id = namespace(&runtime).await;
+    let namespace_writer = runtime
+        .writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
     let payload = payload(PAYLOAD_BYTES);
 
-    runtime
-        .writer
+    namespace_writer
         .put_file_stream(
-            &namespace_id,
             PATH,
             streamed(&payload),
             PutFileOptions {

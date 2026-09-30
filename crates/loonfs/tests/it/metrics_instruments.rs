@@ -95,10 +95,13 @@ fn a_writer_with_a_recorder_reports_stores_publications_and_steps() {
             )
             .await
             .expect("create namespace");
+        let namespace_writer = fs
+            .writer
+            .open_namespace(&namespace_id)
+            .expect("open namespace");
         for file in 0..writes {
-            fs.writer
+            namespace_writer
                 .put_file_bytes(
-                    &namespace_id,
                     &format!("/docs/file-{file}.txt"),
                     b"body",
                     PutFileOptions::new(loonfs_test_support::test_actor()),
@@ -106,8 +109,8 @@ fn a_writer_with_a_recorder_reports_stores_publications_and_steps() {
                 .await
                 .expect("put file");
         }
-        fs.writer
-            .wait_for_fold(&namespace_id)
+        namespace_writer
+            .wait_for_fold()
             .await
             .expect("publisher fold settles");
         runner.drain().await.expect("maintenance settles");
@@ -258,6 +261,10 @@ fn snapshot_pins_report_the_snapshot_view_counter() {
             )
             .await
             .expect("create namespace");
+        let namespace_writer = fs
+            .writer
+            .open_namespace(&namespace_id)
+            .expect("open namespace");
         let checkpoint = fs
             .maintenance
             .create_checkpoint(
@@ -274,10 +281,8 @@ fn snapshot_pins_report_the_snapshot_view_counter() {
             .pin_namespace_at_checkpoint(&namespace_id, &checkpoint.checkpoint_id)
             .await
             .expect("pin checkpoint");
-        let read_snapshot = fs
-            .writer
+        let read_snapshot = namespace_writer
             .create_snapshot(
-                &namespace_id,
                 CreateSnapshotOptions {
                     name: "reader".to_owned(),
                     expires_at_ms: u64::MAX,

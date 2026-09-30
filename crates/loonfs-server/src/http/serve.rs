@@ -21,7 +21,9 @@ use loonfs_grep::{
     new_grep_block_cache, GrepGcJob, GrepMaintenanceJob, GrepService, GrepWorker,
     DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
 };
-use loonfs_http::{AuthPolicy, BindingOptions, BindingState, GrepMaintenance, HttpMetrics};
+use loonfs_http::{
+    AuthPolicy, BindingOptions, BindingState, GrepMaintenance, HttpMetrics, NamespaceWriters,
+};
 use loonfs_objectstore::presign::DirectTransferIssuers;
 use loonfs_objectstore::{run_store_contract_probe, StoreProbeReport};
 use std::ffi::OsString;
@@ -297,6 +299,7 @@ pub async fn app(
         )),
         options,
         writer: writer.clone(),
+        namespaces: Arc::new(NamespaceWriters::new(writer.clone())),
         reader,
         maintenance,
         probe_store,

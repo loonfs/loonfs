@@ -7,6 +7,7 @@ mod attribution;
 mod hosted_content_ref_access;
 mod http_access;
 mod inline_commits;
+mod namespace_writers;
 mod pin_deletion;
 mod surface;
 
@@ -644,10 +645,12 @@ async fn maintenance_namespace_diagnostics_route_answers_storage_fields() {
         )
         .await
         .expect("create namespace");
-    state
+    let namespace_writer = state
         .writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
+    namespace_writer
         .put_file_bytes(
-            &namespace_id,
             "/note.txt",
             b"diagnostic tail",
             PutFileOptions::new(loonfs_test_support::test_actor()),
@@ -1029,24 +1032,25 @@ async fn runtime_created_state_is_readable_through_http() {
     )
     .await
     .expect("create namespace through runtime");
-    fs.put_file_bytes(
-        &namespace_id,
-        "/notes/hello.txt",
-        b"hello from runtime",
-        PutFileOptions {
-            behavior: DestinationBehavior::NoReplace,
-            commit: loonfs_api::options::CommitOptions {
-                preconditions: Vec::new(),
-                actor_id: loonfs_test_support::test_actor(),
-                commit_id: Some(CommitId::parse("runtime-put").expect("valid commit id")),
-                message: None,
+    let namespace_writer = fs.open_namespace(&namespace_id).expect("open namespace");
+    namespace_writer
+        .put_file_bytes(
+            "/notes/hello.txt",
+            b"hello from runtime",
+            PutFileOptions {
+                behavior: DestinationBehavior::NoReplace,
+                commit: loonfs_api::options::CommitOptions {
+                    preconditions: Vec::new(),
+                    actor_id: loonfs_test_support::test_actor(),
+                    commit_id: Some(CommitId::parse("runtime-put").expect("valid commit id")),
+                    message: None,
+                },
+                expected_inode_id: None,
+                expected_revision_no: None,
             },
-            expected_inode_id: None,
-            expected_revision_no: None,
-        },
-    )
-    .await
-    .expect("write file through runtime");
+        )
+        .await
+        .expect("write file through runtime");
 
     let harness = start_server(store, temp_dir.path(), "server-writer").await;
     let target = NamespacePath::parse("demo", "/notes/hello.txt").expect("target");
@@ -2617,9 +2621,9 @@ async fn seed_grep_error_namespace_on(writer: &FsWriter, namespace_id: &Namespac
         )
         .await
         .expect("create grep-error namespace");
-    writer
+    let namespace_writer = writer.open_namespace(namespace_id).expect("open namespace");
+    namespace_writer
         .put_file_bytes(
-            namespace_id,
             "/core.txt",
             b"core remains readable",
             PutFileOptions::new(loonfs_test_support::test_actor()),
@@ -2813,24 +2817,25 @@ async fn write_file_bytes(
     bytes: &[u8],
     commit_id: &str,
 ) {
-    fs.put_file_bytes(
-        namespace_id,
-        absolute_path,
-        bytes,
-        PutFileOptions {
-            behavior: DestinationBehavior::Replace,
-            commit: loonfs_api::options::CommitOptions {
-                preconditions: Vec::new(),
-                actor_id: loonfs_test_support::test_actor(),
-                commit_id: Some(CommitId::parse(commit_id).expect("valid test commit id")),
-                message: None,
+    let namespace_writer = fs.open_namespace(namespace_id).expect("open namespace");
+    namespace_writer
+        .put_file_bytes(
+            absolute_path,
+            bytes,
+            PutFileOptions {
+                behavior: DestinationBehavior::Replace,
+                commit: loonfs_api::options::CommitOptions {
+                    preconditions: Vec::new(),
+                    actor_id: loonfs_test_support::test_actor(),
+                    commit_id: Some(CommitId::parse(commit_id).expect("valid test commit id")),
+                    message: None,
+                },
+                expected_inode_id: None,
+                expected_revision_no: None,
             },
-            expected_inode_id: None,
-            expected_revision_no: None,
-        },
-    )
-    .await
-    .unwrap_or_else(|error| panic!("seed `{absolute_path}`: {error}"));
+        )
+        .await
+        .unwrap_or_else(|error| panic!("seed `{absolute_path}`: {error}"));
 }
 
 async fn delete_path_recursive(
@@ -2839,22 +2844,23 @@ async fn delete_path_recursive(
     absolute_path: &str,
     commit_id: &str,
 ) {
-    fs.delete_path(
-        namespace_id,
-        absolute_path,
-        DeleteOptions {
-            behavior: DeleteDirectoryBehavior::Recursive,
-            commit: loonfs_api::options::CommitOptions {
-                preconditions: Vec::new(),
-                actor_id: loonfs_test_support::test_actor(),
-                commit_id: Some(CommitId::parse(commit_id).expect("valid test commit id")),
-                message: None,
+    let namespace_writer = fs.open_namespace(namespace_id).expect("open namespace");
+    namespace_writer
+        .delete_path(
+            absolute_path,
+            DeleteOptions {
+                behavior: DeleteDirectoryBehavior::Recursive,
+                commit: loonfs_api::options::CommitOptions {
+                    preconditions: Vec::new(),
+                    actor_id: loonfs_test_support::test_actor(),
+                    commit_id: Some(CommitId::parse(commit_id).expect("valid test commit id")),
+                    message: None,
+                },
+                expected_inode_id: None,
             },
-            expected_inode_id: None,
-        },
-    )
-    .await
-    .unwrap_or_else(|error| panic!("delete `{absolute_path}`: {error}"));
+        )
+        .await
+        .unwrap_or_else(|error| panic!("delete `{absolute_path}`: {error}"));
 }
 
 fn assert_api_error<T: std::fmt::Debug>(
@@ -2929,14 +2935,14 @@ mod direct_download {
             )
             .await
             .expect("namespace");
+        let namespace_writer = writer.open_namespace(&namespace).expect("open namespace");
         let values = [
             ("/path", Bytes::from_static(b"inline download")),
             ("/inode", Bytes::from_static(b"inline download")),
         ];
         for (path, bytes) in &values {
-            writer
+            namespace_writer
                 .put_file_bytes(
-                    &namespace,
                     path,
                     bytes,
                     PutFileOptions::new(loonfs_test_support::test_actor()),

@@ -26,6 +26,10 @@ fn embedded_reads_project_commit_attribution_without_rewriting_inode_creation() 
         CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
     )
     .expect("create namespace");
+    let namespace_writer = fs
+        .writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
 
     let creator = actor("creator");
     let create = fs
@@ -69,8 +73,7 @@ fn embedded_reads_project_commit_attribution_without_rewriting_inode_creation() 
     assert_eq!(replaced.kind.revision_committed_by(), Some(&replacer));
 
     let restorer = actor("restorer");
-    block_on(fs.writer.restore_revision(
-        &namespace_id,
+    block_on(namespace_writer.restore_revision(
         "/implicit/parent/report.txt",
         RevisionNo(1),
         RestoreRevisionOptions::new(restorer.clone()),
@@ -89,8 +92,7 @@ fn embedded_reads_project_commit_attribution_without_rewriting_inode_creation() 
     assert_eq!(revisions.revisions[2].committed_by, creator);
 
     let source_attribute_editor = actor("source-attribute-editor");
-    block_on(fs.writer.update_attributes(
-        &namespace_id,
+    block_on(namespace_writer.update_attributes(
         "/implicit/parent/report.txt",
         UpdateAttributesOptions {
             set: BTreeMap::from([(attribute_key("owner"), attribute_text("source"))]),
@@ -160,6 +162,10 @@ fn attributes_root_forks_and_trash_report_their_row_attribution() {
         CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
     )
     .expect("create namespace");
+    let namespace_writer = fs
+        .writer
+        .open_namespace(&source_id)
+        .expect("open namespace");
     let root = fs.stat_path_blocking(&source_id, "/").expect("stat root");
     assert_eq!(root.created_by, ActorId::loonfs());
     let root_attributes = root.attributes.expect("root attributes projection");
@@ -175,8 +181,7 @@ fn attributes_root_forks_and_trash_report_their_row_attribution() {
     )
     .expect("create report");
     let updater = actor("metadata-editor");
-    block_on(fs.writer.update_attributes(
-        &source_id,
+    block_on(namespace_writer.update_attributes(
         "/report.txt",
         UpdateAttributesOptions {
             set: BTreeMap::from([(attribute_key("owner"), attribute_text("platform"))]),
@@ -193,8 +198,7 @@ fn attributes_root_forks_and_trash_report_their_row_attribution() {
     assert!(projected.attributes_updated_at_ms.is_some());
 
     let later_updater = actor("metadata-reviewer");
-    block_on(fs.writer.update_attributes(
-        &source_id,
+    block_on(namespace_writer.update_attributes(
         "/report.txt",
         UpdateAttributesOptions {
             set: BTreeMap::from([(attribute_key("stage"), attribute_text("reviewed"))]),

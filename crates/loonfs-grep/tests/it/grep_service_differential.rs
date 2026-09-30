@@ -101,8 +101,9 @@ async fn publish_same_content_files(
     count: usize,
     content: &[u8],
 ) {
-    let prepared = writer
-        .prepare_file_bytes(namespace_id, content)
+    let namespace_writer = writer.open_namespace(namespace_id).expect("open namespace");
+    let prepared = namespace_writer
+        .prepare_file_bytes(content)
         .await
         .expect("prepare shared content");
     let content_ref = prepared.content_ref().clone();
@@ -241,10 +242,12 @@ async fn gram_segment_levels(
 #[tokio::test]
 async fn planless_scan_returns_exact_materialized_and_wal_boundary_revisions_once_each() {
     let fixture = planless_boundary_fixture("grep-planless-boundary").await;
-    fixture
+    let namespace_writer = fixture
         .writer
+        .open_namespace(&fixture.namespace_id)
+        .expect("open namespace");
+    namespace_writer
         .put_file_bytes(
-            &fixture.namespace_id,
             "/materialized.txt",
             b"x materialized\n",
             PutFileOptions::new(loonfs_test_support::test_actor()),
@@ -270,10 +273,8 @@ async fn planless_scan_returns_exact_materialized_and_wal_boundary_revisions_onc
         materialized_head.seq
     );
 
-    fixture
-        .writer
+    namespace_writer
         .put_file_bytes(
-            &fixture.namespace_id,
             "/wal-only.txt",
             b"x wal\n",
             PutFileOptions::new(loonfs_test_support::test_actor()),
@@ -322,10 +323,12 @@ async fn planless_scan_returns_exact_materialized_and_wal_boundary_revisions_onc
 #[tokio::test]
 async fn planless_scan_deduplicates_an_inode_revised_across_materialization() {
     let fixture = planless_boundary_fixture("grep-planless-dedup").await;
-    fixture
+    let namespace_writer = fixture
         .writer
+        .open_namespace(&fixture.namespace_id)
+        .expect("open namespace");
+    namespace_writer
         .put_file_bytes(
-            &fixture.namespace_id,
             "/overlap.txt",
             b"x materialized revision\n",
             PutFileOptions::new(loonfs_test_support::test_actor()),
@@ -343,10 +346,8 @@ async fn planless_scan_deduplicates_an_inode_revised_across_materialization() {
         )
         .await
         .expect("fold materialized revision");
-    fixture
-        .writer
+    namespace_writer
         .put_file_bytes(
-            &fixture.namespace_id,
             "/overlap.txt",
             b"x WAL revision\n",
             PutFileOptions {
@@ -397,6 +398,9 @@ async fn grep_service_pins_query_semantics_response_shapes_and_budgets() {
         )
         .await
         .expect("create namespace");
+    let namespace_writer = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
     worker.enable(&namespace_id).await.expect("enable grep");
     drive_worker_to_current(&worker, &namespace_id, policy).await;
 
@@ -413,9 +417,8 @@ async fn grep_service_pins_query_semantics_response_shapes_and_budgets() {
         ("/reorganize/filler-09.txt", b"reorganize filler nine\n"),
     ];
     for (path, content) in reorganized_corpus {
-        writer
+        namespace_writer
             .put_file_bytes(
-                &namespace_id,
                 path,
                 content,
                 PutFileOptions::new(loonfs_test_support::test_actor()),
@@ -427,9 +430,8 @@ async fn grep_service_pins_query_semantics_response_shapes_and_budgets() {
 
     // Add a new mid-level run, then leave the large batch below at the delta level.
     for round in 10..12u32 {
-        writer
+        namespace_writer
             .put_file_bytes(
-                &namespace_id,
                 &format!("/reorganize/filler-{round:02}.txt"),
                 format!("reorganize filler {round}\n").as_bytes(),
                 PutFileOptions::new(loonfs_test_support::test_actor()),
@@ -457,34 +459,30 @@ async fn grep_service_pins_query_semantics_response_shapes_and_budgets() {
         "the service snapshot must exercise delta, mid, and base segments"
     );
 
-    writer
+    namespace_writer
         .put_file_bytes(
-            &namespace_id,
             "/tail/tail-hit.txt",
             b"ab tail-only-token\n",
             PutFileOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("write unindexed tail hit");
-    writer
+    namespace_writer
         .delete_path(
-            &namespace_id,
             "/docs/deleted.txt",
             DeleteOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("delete indexed file");
-    writer
+    namespace_writer
         .create_directory(
-            &namespace_id,
             "/archive",
             CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("create move destination");
-    writer
+    namespace_writer
         .move_path(
-            &namespace_id,
             "/docs/moved-source.txt",
             "/archive/moved.txt",
             MoveOptions::new(loonfs_test_support::test_actor()),

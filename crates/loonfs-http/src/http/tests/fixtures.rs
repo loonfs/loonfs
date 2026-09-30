@@ -1,6 +1,6 @@
 //! Runtime handles and options for binding tests.
 
-use crate::{AuthPolicy, BindingOptions, BindingState, HttpMetrics};
+use crate::{AuthPolicy, BindingOptions, BindingState, HttpMetrics, NamespaceWriters};
 use loonfs::{FsWriter, SharedObjectStore, SnapshotPolicy, TraceMode, TraceStoreKind};
 use loonfs_api::WriterId;
 use loonfs_grep::{
@@ -85,6 +85,7 @@ pub(super) async fn test_app(
         download_permits: Arc::new(Semaphore::new(options.max_concurrent_downloads)),
         options,
         probe_store: writer.object_store(),
+        namespaces: Arc::new(NamespaceWriters::new(writer.clone())),
         writer,
         reader,
         maintenance,
