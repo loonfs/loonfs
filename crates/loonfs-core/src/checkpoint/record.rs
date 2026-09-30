@@ -125,6 +125,25 @@ pub(crate) async fn delete_checkpoint_record<S: ObjectStore + ?Sized>(
     }
 }
 
+/// Deletes a pin whose creation failed with `error`. A failed delete is
+/// only logged, and collection removes the pin later.
+pub(crate) async fn delete_failed_pin<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    pin_id: &PinId,
+    error: &CoreError,
+) {
+    if let Err(cleanup_error) = delete_checkpoint_record(store, namespace_id, pin_id).await {
+        tracing::warn!(
+            namespace_id = %namespace_id,
+            checkpoint_id = %pin_id,
+            original_error = %error,
+            cleanup_error = %cleanup_error,
+            "failed to delete a pin after its creation failed"
+        );
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CheckpointBasisVerification {
     Verified,

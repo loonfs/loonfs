@@ -231,7 +231,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             Ok(next) => next,
             Err(error) => {
                 self.delete_checkpoint_if_present(namespace_id, &checkpoint.checkpoint_id)
-                    .await?;
+                    .await;
                 return Err(error);
             }
         };
@@ -243,7 +243,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             }),
             Err(GrepError::PublicationConflict { .. }) => {
                 self.delete_checkpoint_if_present(namespace_id, &checkpoint.checkpoint_id)
-                    .await?;
+                    .await;
                 Ok(GrepEnableOutcome::Superseded)
             }
             // A non-conflict failure may be an acknowledgement failure after
@@ -286,7 +286,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             Ok(_) => {
                 if let Some(checkpoint_id) = checkpoint_id {
                     self.delete_checkpoint_if_present(namespace_id, &checkpoint_id)
-                        .await?;
+                        .await;
                 }
                 Ok(GrepDisableOutcome::Disabled)
             }
@@ -416,19 +416,26 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             .await?)
     }
 
+    /// Deletes a backfill checkpoint. A failed delete is only logged, and
+    /// collection removes the checkpoint after it expires.
     async fn delete_checkpoint_if_present(
         &self,
         namespace_id: &NamespaceId,
         checkpoint_id: &PinId,
-    ) -> Result<()> {
+    ) {
         match self
             .maintenance
             .delete_checkpoint(namespace_id, checkpoint_id)
             .await
         {
-            Ok(_) => Ok(()),
-            Err(error) if error.code() == ErrorCode::CheckpointNotFound => Ok(()),
-            Err(error) => Err(error.into()),
+            Ok(_) => {}
+            Err(error) if error.code() == ErrorCode::CheckpointNotFound => {}
+            Err(error) => tracing::warn!(
+                %namespace_id,
+                %checkpoint_id,
+                %error,
+                "failed to delete a grep backfill checkpoint"
+            ),
         }
     }
 
@@ -454,7 +461,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             Ok(next) => next,
             Err(error) => {
                 self.delete_checkpoint_if_present(namespace_id, &checkpoint.checkpoint_id)
-                    .await?;
+                    .await;
                 return Err(error);
             }
         };
@@ -462,7 +469,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             Ok(_) => {
                 if let Some(previous_checkpoint_id) = previous_checkpoint_id {
                     self.delete_checkpoint_if_present(namespace_id, &previous_checkpoint_id)
-                        .await?;
+                        .await;
                 }
                 Ok(GrepBuildOutcome::BackfillRestarted {
                     captured_seq: checkpoint.captured_seq,
@@ -470,7 +477,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             }
             Err(GrepError::PublicationConflict { .. }) => {
                 self.delete_checkpoint_if_present(namespace_id, &checkpoint.checkpoint_id)
-                    .await?;
+                    .await;
                 Ok(GrepBuildOutcome::Superseded)
             }
             // A non-conflict failure may be an acknowledgement failure after
@@ -566,7 +573,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             Ok(_) => {
                 if let Some(checkpoint_id) = completed_checkpoint_id {
                     self.delete_checkpoint_if_present(namespace_id, &checkpoint_id)
-                        .await?;
+                        .await;
                 }
                 Ok(GrepBuildOutcome::Published {
                     built_through_seq,

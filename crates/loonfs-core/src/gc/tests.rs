@@ -446,6 +446,7 @@ async fn fork_protected_bases_survive_source_deletion_until_the_target_dies() {
         &loonfs_test_support::test_actor(),
         None,
         &setup,
+        Arc::new(StdMonotonicTimer::default()),
     )
     .await
     .expect("fork");
@@ -1672,6 +1673,7 @@ async fn retired_targets_release_their_source_pins_and_retry_failed_deletes() {
         &loonfs_test_support::test_actor(),
         None,
         &setup,
+        Arc::new(StdMonotonicTimer::default()),
     )
     .await
     .expect("fork");
@@ -1784,6 +1786,7 @@ async fn a_corrupt_fork_target_manifest_fails_the_pass_and_an_unreadable_hint_re
         &loonfs_test_support::test_actor(),
         None,
         &setup,
+        Arc::new(StdMonotonicTimer::default()),
     )
     .await
     .expect("fork");
@@ -1827,6 +1830,7 @@ async fn gc_never_releases_a_fork_record_while_its_target_lives() {
         &loonfs_test_support::test_actor(),
         None,
         &setup,
+        Arc::new(StdMonotonicTimer::default()),
     )
     .await
     .expect("fork");
@@ -1905,6 +1909,7 @@ async fn a_fork_retry_keeps_young_pins_and_reclaims_the_abandoned_one_after_grac
         &loonfs_test_support::test_actor(),
         None,
         &setup,
+        Arc::new(StdMonotonicTimer::default()),
     )
     .await
     .expect("fork retry after abandonment");
@@ -2695,6 +2700,7 @@ async fn fork_pin_grace_skips_targets_and_aged_pins_read_only_manifest_discovery
             &loonfs_test_support::test_actor(),
             None,
             &setup,
+            Arc::new(StdMonotonicTimer::default()),
         )
         .await
         .expect("fork");

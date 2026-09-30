@@ -92,6 +92,7 @@ async fn live_grandchild_keeps_deleted_ancestors_pinned_until_retirement_runs_le
                 &loonfs_test_support::test_actor(),
                 None,
                 &setup,
+                Arc::new(StdMonotonicTimer::default()),
             )
             .await
             .expect("fork");

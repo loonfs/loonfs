@@ -479,6 +479,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             actor_id,
             snapshot_id,
             &self.mutation_context()?,
+            Arc::new(crate::time::StdMonotonicTimer::default()),
         )
         .await
     }

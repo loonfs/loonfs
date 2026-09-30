@@ -715,14 +715,14 @@ For a pin created from the current head:
 
 1. Flush the observed WAL tail and select a verified current manifest.
 2. Write a fresh pin with put-if-absent.
-3. Load the current manifest again within `PIN_VERIFY_BUDGET_MS`.
+3. Load the current manifest again.
 4. Require the same manifest number and payload checksum, an active namespace, and a retention floor no later than the pinned head sequence.
 
-If another manifest became current, delete the candidate pin and retry from a fresh basis. A deletion, an exceeded verification budget, or exhausted contention retries prevents acknowledgement. Store and cleanup failures also prevent acknowledgement. The number and checksum checks apply even when the new manifest has the same logical sequence.
+If another manifest became current, delete the candidate pin and retry from a fresh basis. A deletion, a store failure, or exhausted contention retries prevents acknowledgement. The creator deletes a pin that fails verification. That deletion is best effort: if it fails, the creator still returns the error that failed verification, and collection decides the pin under section 11.7. Verification has no time limit of its own. The number and checksum checks apply even when the new manifest has the same logical sequence.
 
 This order matters when collection races with pin creation. A collector either captured the pinned manifest as current, or captured a successor after the pin was durable and includes the pin in its complete listing. Once acknowledged, the pin retains its files even if the retention floor later passes its sequence.
 
-A fork of a snapshot uses a different protecting root. It first writes a fork pin for the snapshot's historical manifest, then rereads the snapshot pin and requires it still to exist and be unexpired. It does not require that historical manifest to remain current. Failure deletes the new fork pin and returns `snapshot_gone` when the snapshot was lost; verification remains time-bounded.
+A fork of a snapshot uses a different protecting root. It first writes a fork pin for the snapshot's historical manifest, then rereads the snapshot pin and requires it still to exist and be unexpired. It does not require that historical manifest to remain current. Both expiry checks use the request clock plus elapsed monotonic time since the fork call began. Failure deletes the new fork pin, under the same best-effort rule, and returns `snapshot_gone` when the snapshot was lost. Verification has no time limit of its own. Pins are never recreated, so a snapshot pin that still exists after the fork pin write existed throughout, and every collection pass that listed pins before that write also listed the snapshot pin and rooted the same manifest.
 
 ### 8.3 Reads, deletion, and expiry
 
@@ -771,7 +771,7 @@ A losing manifest-1 put returns to the existing-state checks in section 9.1. Del
 
 A confirmed precondition failure is a conflict. After a put with an unknown transport outcome, the publisher reads the manifest at that number. Another manifest there is a conflict. Identical bytes there confirm the attempt's own success only when the manifest names an object unique to that attempt: a fork's first manifest names its source pin, and a manifest that lists a segment its predecessor does not names a segment that attempt wrote. Every other manifest, including a plain create under section 9.1, a compactor claim, a writer acquisition, or a tombstone, can be rebuilt byte for byte by another publisher, so identical bytes count as the current manifest and the attempt retries from it. Identical bytes count only if the read-back returns within the publication budget (section 11.4). Identical bytes read back after the budget, or a number that is still absent, end the call with an unknown outcome, and a later call starts from current state.
 
-On `namespace_exists` or `namespace_deleted`, a fork installer reloads the target and deletes its source pin unless the target’s fork basis names it. A matching pin ID with a different manifest reference is corruption under section 11.7.
+On `namespace_exists` or `namespace_deleted`, a fork installer reloads the target and deletes its source pin unless the target’s fork basis names it. It returns the original error in every case. If the reload or the deletion fails, the pin stays for collection to decide under section 11.7. A matching pin ID with a different manifest reference is corruption under section 11.7.
 
 An unused fork pin is collected after its installation grace under section 11.7.
 
@@ -1016,7 +1016,7 @@ For a fork pin naming target `T`:
 
 The source discovers the target’s current manifest through its hint. It reads no target WAL and performs no listing. Section 11.8 defines source-pin release.
 
-A candidate pin written too late to verify must be deleted by its creator. If that creator crashes first, its installation grace and owner rules still apply.
+A candidate pin that fails verification is deleted by its creator. If that deletion fails, or the creator crashes first, its installation grace and owner rules still apply.
 
 ### 11.8 Sweeping a retired owner's content
 
@@ -1545,7 +1545,6 @@ Publication and collection use the timing relationships below. Configurable sizi
 | Constant | Milliseconds | Interpretation |
 | --- | ---: | --- |
 | `WAL_PUBLISH_BUDGET_MS` | 60,000 | Observing the planning tip through initiation of its next numbered put. |
-| `PIN_VERIFY_BUDGET_MS` | 60,000 | Pin write through completion of post-write verification. |
 | `METADATA_PUBLICATION_BUDGET_MS` | 900,000 | Start of a bounded manifest publication, including an epoch claim, through initiation of its put. |
 | `PROVIDER_OPERATION_DEADLINE_MS` | 120,000 | Shared client-operation retry budget. |
 | `PROVIDER_ATTEMPT_TIMEOUT_MS` | 30,000 | One control-operation attempt. |
@@ -1563,14 +1562,12 @@ A provider retry can be admitted before its operation deadline, wait up to 15 se
 
 ```text
 GC_MIN_GRACE_WINDOW_MS
-    = max(WAL_PUBLISH_BUDGET_MS, PIN_VERIFY_BUDGET_MS,
-          METADATA_PUBLICATION_BUDGET_MS)
+    = max(WAL_PUBLISH_BUDGET_MS, METADATA_PUBLICATION_BUDGET_MS)
       + PROVIDER_PUBLICATION_REQUEST_BOUND_MS
       + GC_SAFETY_MARGIN_MS
 
 READ_REVALIDATION_BOUND_MS
-    = max(WAL_PUBLISH_BUDGET_MS, PIN_VERIFY_BUDGET_MS,
-          METADATA_PUBLICATION_BUDGET_MS)
+    = max(WAL_PUBLISH_BUDGET_MS, METADATA_PUBLICATION_BUDGET_MS)
       + PROVIDER_PUBLICATION_REQUEST_BOUND_MS
 
 METADATA_COMPACTION_BUDGET_MS

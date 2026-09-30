@@ -9,3 +9,11 @@ pub struct MutationContext {
     pub writer_id: WriterId,
     pub now_ms: u64,
 }
+
+impl MutationContext {
+    /// The request's clock plus the time elapsed since `deadline` started.
+    /// Every expiry check after a read uses this, not the bare request clock.
+    pub(crate) fn now_at(&self, deadline: &crate::time::Deadline) -> u64 {
+        self.now_ms.saturating_add(deadline.elapsed_ms())
+    }
+}

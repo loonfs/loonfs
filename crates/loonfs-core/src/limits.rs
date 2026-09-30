@@ -1,5 +1,5 @@
-//! One source of truth for publication, verification, provider, and
-//! garbage-collection timing bounds.
+//! One source of truth for publication, provider, and garbage-collection
+//! timing bounds.
 //!
 //! The GC grace window's safety proof (format spec, Appendix C) is an
 //! inequality over these constants: every publication measures itself
@@ -68,12 +68,6 @@ pub const PROVIDER_PUBLICATION_REQUEST_BOUND_MS: u64 =
 /// Maximum elapsed time from observing a tip to initiating its next numbered put.
 pub const WAL_PUBLISH_BUDGET_MS: u64 = 60_000;
 
-/// Self-enforced budget between writing a pin and completing
-/// its post-write basis verification. Overrunning it counts as verification
-/// failure: the record may have raced the grace window, so it must not stand
-/// as a root.
-pub const PIN_VERIFY_BUDGET_MS: u64 = 60_000;
-
 /// Self-enforced budget for one metadata publication — WAL flush or
 /// reorganization — measured from before the first segment object is written
 /// until the manifest put-if-absent is initiated. A publication that exceeds
@@ -97,18 +91,18 @@ const fn max_u64(left: u64, right: u64) -> u64 {
 /// Minimum age of an unreachable object before garbage collection or repair
 /// may remove it. The value covers the longest publication budget, provider
 /// operation time, and the combined clock-error and scheduling allowance.
-pub const GC_MIN_GRACE_WINDOW_MS: u64 = max_u64(
-    max_u64(WAL_PUBLISH_BUDGET_MS, PIN_VERIFY_BUDGET_MS),
-    METADATA_PUBLICATION_BUDGET_MS,
-) + PROVIDER_PUBLICATION_REQUEST_BOUND_MS
-    + GC_SAFETY_MARGIN_MS;
+pub const GC_MIN_GRACE_WINDOW_MS: u64 =
+    max_u64(WAL_PUBLISH_BUDGET_MS, METADATA_PUBLICATION_BUDGET_MS)
+        + PROVIDER_PUBLICATION_REQUEST_BOUND_MS
+        + GC_SAFETY_MARGIN_MS;
 
 /// Longest gap a reader may leave between the manifest probe it relies on
 /// and the successor check that confirms it. A successor published after the
 /// probe cannot be collected within this bound: collection waits the grace
 /// window, which reserves this bound plus the clock allowance.
 pub const READ_REVALIDATION_BOUND_MS: u64 =
-    METADATA_PUBLICATION_BUDGET_MS + PROVIDER_PUBLICATION_REQUEST_BOUND_MS;
+    max_u64(WAL_PUBLISH_BUDGET_MS, METADATA_PUBLICATION_BUDGET_MS)
+        + PROVIDER_PUBLICATION_REQUEST_BOUND_MS;
 
 const _: () = assert!(READ_REVALIDATION_BOUND_MS + GC_SAFETY_MARGIN_MS <= GC_MIN_GRACE_WINDOW_MS);
 
@@ -204,10 +198,8 @@ mod tests {
         );
         assert!(
             GC_MIN_GRACE_WINDOW_MS
-                > max_u64(
-                    max_u64(WAL_PUBLISH_BUDGET_MS, PIN_VERIFY_BUDGET_MS),
-                    METADATA_PUBLICATION_BUDGET_MS,
-                ) + PROVIDER_OPERATION_DEADLINE_MS,
+                > max_u64(WAL_PUBLISH_BUDGET_MS, METADATA_PUBLICATION_BUDGET_MS)
+                    + PROVIDER_OPERATION_DEADLINE_MS,
             "the floor keeps a margin above budget plus provider deadline"
         );
     }
