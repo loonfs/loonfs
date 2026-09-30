@@ -300,6 +300,10 @@ pub(crate) async fn run_metadata_compaction_job<S: ObjectStore + ?Sized>(
         );
         return Ok(MetadataCompactionJobOutcome::Abandoned);
     };
+    if segments.manifest().payload().compactor_epoch != compactor_epoch {
+        log_metadata_compaction_outcome(namespace_id, spec, &MetadataCompactionJobOutcome::Fenced);
+        return Ok(MetadataCompactionJobOutcome::Fenced);
+    }
     // What the job is about to read, recorded before it reads anything.
     // Finalization compares the manifest against this, so the run it publishes
     // stands in for exactly the segments it merged.
