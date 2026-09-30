@@ -26,7 +26,7 @@ use loonfs_api::wire::wal::{MAX_WAL_SEGMENT_BYTES, WAL_SEGMENT_OVERHEAD_BYTES};
 use loonfs_api::{ChangeSeq, CommitId, NamespaceId};
 use loonfs_core::cache::Recency;
 use loonfs_core::commit::{
-    is_retryable_wal_publish, reconcile_publish_attempt, CommitFingerprint, WalPublishError,
+    is_retryable_wal_publish, settle_publish_attempt, CommitFingerprint, WalPublishError,
 };
 use loonfs_core::limits::{CONTENTION_RETRY_LIMIT, FOLD_AT_WAL_SEGMENTS};
 use loonfs_core::publish::{
@@ -1587,15 +1587,11 @@ impl NamespacePublisher {
                         .map(|_| Err(CoreError::ShuttingDown))
                         .collect(),
                 };
-                for ((index, candidate), result) in
-                    indices.into_iter().zip(candidates).zip(observed)
-                {
-                    let retry = is_retryable_wal_publish(&result);
-                    results[index] = Some(reconcile_publish_attempt(results[index].take(), result));
-                    if retry {
-                        pending.push((index, candidate));
-                    }
-                }
+                pending = settle_publish_attempt(
+                    &mut results,
+                    indices.into_iter().zip(candidates),
+                    observed,
+                );
                 if pending.is_empty() || attempt + 1 == CONTENTION_RETRY_LIMIT {
                     break;
                 }

@@ -4,9 +4,7 @@
 
 use crate::authorize::CommitAuthority;
 use crate::checkpoint::MetadataSegmentCache;
-use crate::commit::{
-    is_retryable_wal_publish, reconcile_publish_attempt, CommitFingerprint, WalPublishError,
-};
+use crate::commit::{settle_publish_attempt, CommitFingerprint, WalPublishError};
 use crate::context::MutationContext;
 use crate::error::{CoreError, Result, WriterFence};
 use crate::namespace::basis::MetadataBasis;
@@ -971,16 +969,16 @@ pub(crate) async fn publish_namespace_commits_batch<S: ObjectStore + ?Sized>(
     let batch = Deadline::start(Arc::clone(&engine.timer));
     let options = PublishTailOptions::default();
     let mut results = vec![None; candidates.len()];
+    let mut pending: Vec<_> = candidates.into_iter().enumerate().collect();
     for _ in 0..crate::limits::CONTENTION_RETRY_LIMIT {
-        let attempt = engine
-            .publish_batch(store, &candidates, context, &options, &batch)
+        let (indices, attempted): (Vec<_>, Vec<_>) = pending.into_iter().unzip();
+        let observed = engine
+            .publish_batch(store, &attempted, context, &options, &batch)
             .await
             .results;
-        let retry = attempt.iter().any(is_retryable_wal_publish);
-        for (result, current) in results.iter_mut().zip(attempt) {
-            *result = Some(reconcile_publish_attempt(result.take(), current));
-        }
-        if !retry {
+        pending =
+            settle_publish_attempt(&mut results, indices.into_iter().zip(attempted), observed);
+        if pending.is_empty() {
             break;
         }
     }

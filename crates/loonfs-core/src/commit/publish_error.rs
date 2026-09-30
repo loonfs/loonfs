@@ -38,19 +38,29 @@ pub fn is_retryable_wal_publish(result: &Result<Commit, CoreError>) -> bool {
     )
 }
 
-/// Returns the result that stands after another attempt. A later failure does
-/// not prove that an earlier put with an unknown outcome failed; only a
-/// success or a receipt replay settles it.
-pub fn reconcile_publish_attempt(
-    previous: Option<Result<Commit, CoreError>>,
-    current: Result<Commit, CoreError>,
-) -> Result<Commit, CoreError> {
-    match previous {
-        Some(previous @ Err(CoreError::WalPublish(WalPublishError::OutcomeUnknown(_))))
-            if current.is_err() =>
-        {
-            previous
+/// Records one attempt's results and returns the candidates to publish again.
+///
+/// A candidate is published again only while its own result is retried. A
+/// settled result is not attempted again, so a later failure cannot replace
+/// it. A later failure also does not prove that an earlier put with an unknown
+/// outcome failed; only a success or a receipt replay settles that.
+pub fn settle_publish_attempt<C>(
+    results: &mut [Option<Result<Commit, CoreError>>],
+    attempted: impl IntoIterator<Item = (usize, C)>,
+    observed: Vec<Result<Commit, CoreError>>,
+) -> Vec<(usize, C)> {
+    let mut pending = Vec::new();
+    for ((index, candidate), current) in attempted.into_iter().zip(observed) {
+        if is_retryable_wal_publish(&current) {
+            pending.push((index, candidate));
         }
-        _ => current,
+        let unknown = matches!(
+            &results[index],
+            Some(Err(CoreError::WalPublish(error))) if matches!(error, WalPublishError::OutcomeUnknown(_))
+        );
+        if !(unknown && current.is_err()) {
+            results[index] = Some(current);
+        }
     }
+    pending
 }
