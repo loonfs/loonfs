@@ -7,10 +7,12 @@ use super::{
     MaintenanceJobId, MaintenanceProbe, MaintenanceRegistry, MaintenanceRunReport,
 };
 use crate::metrics::{MaintenanceInstruments, MetricsRecorder, RESULT_ERROR};
-use crate::{NamespaceId, Result, RuntimeError};
+use crate::{NamespaceId, Result, RuntimeError, WallClock};
 use futures::FutureExt as _;
+use std::collections::hash_map::RandomState;
 use std::fmt;
 use std::future::Future;
+use std::hash::{BuildHasher, Hasher};
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
@@ -30,65 +32,14 @@ pub(crate) const RECONCILE_INTERVAL_MS: u64 = 60_000;
 /// one long one.
 const MAX_RECONCILE_PROBES_PER_SWEEP: usize = 64;
 
-/// Clock used to schedule durable Unix-millisecond deadlines.
+/// Reads `clock` for scheduling, in Unix milliseconds.
 ///
-/// This clock controls only when a step is attempted. Each job validates
-/// eligibility from durable state, so an early wake can waste a read but
-/// cannot make an unsafe update.
-pub(crate) trait MaintenanceClock: fmt::Debug + Send + Sync {
-    /// Unix milliseconds.
-    fn now_ms(&self) -> u64;
-
-    /// Returns a value in `0..span_ms`, or `0` when `span_ms` is zero.
-    fn jitter_below_ms(&self, span_ms: u64) -> u64;
-}
-
-/// The process clock.
-#[derive(Debug)]
-pub(crate) struct SystemMaintenanceClock {
-    /// Counter behind the backoff jitter, advanced once per draw.
-    jitter: AtomicU64,
-}
-
-/// The odd increment SplitMix64 walks its counter by.
-pub(crate) const JITTER_GAMMA: u64 = 0x9E37_79B9_7F4A_7C15;
-
-impl Default for SystemMaintenanceClock {
-    fn default() -> Self {
-        // Use a per-instance random seed so hosts retry at different times.
-        use std::hash::{BuildHasher, Hasher};
-        let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
-        hasher.write_u64(JITTER_GAMMA);
-        Self {
-            jitter: AtomicU64::new(hasher.finish()),
-        }
-    }
-}
-
-impl MaintenanceClock for SystemMaintenanceClock {
-    fn now_ms(&self) -> u64 {
-        // Treat a pre-epoch system clock as Unix time zero. This leaves durable
-        // deadlines in the future instead of making every deadline immediately due
-        // and causing a tight scheduler loop. Durable mutation paths reject the same
-        // invalid clock independently.
-        loonfs_core::time::current_time_ms().unwrap_or(0)
-    }
-
-    fn jitter_below_ms(&self, span_ms: u64) -> u64 {
-        if span_ms == 0 {
-            return 0;
-        }
-        let counter = self.jitter.fetch_add(JITTER_GAMMA, Ordering::Relaxed);
-        split_mix_64(counter) % span_ms
-    }
-}
-
-/// Applies the SplitMix64 finalizer to the jitter counter.
-pub(crate) fn split_mix_64(counter: u64) -> u64 {
-    let mut mixed = counter;
-    mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    mixed ^ (mixed >> 31)
+/// The reading decides only when a step is attempted; each job checks
+/// eligibility against durable state. An unreadable clock reads as zero,
+/// which leaves durable deadlines in the future instead of making every one
+/// due at once. Durable mutation paths reject the same clock on their own.
+pub(super) fn scheduling_now_ms(clock: &dyn WallClock) -> u64 {
+    clock.now_ms().unwrap_or(0)
 }
 
 /// Cloneable handle for non-blocking maintenance hints.
@@ -98,7 +49,7 @@ pub(crate) fn split_mix_64(counter: u64) -> u64 {
 #[derive(Clone)]
 pub struct MaintenanceHandle {
     inner: Weak<RunnerInner>,
-    clock: Arc<dyn MaintenanceClock>,
+    clock: Arc<dyn WallClock>,
 }
 
 impl fmt::Debug for MaintenanceHandle {
@@ -121,7 +72,7 @@ impl MaintenanceHandle {
     /// derives the not-before time from that reading, so the schedule and
     /// the runner agree on what "now" is.
     pub fn now_ms(&self) -> u64 {
-        self.clock.now_ms()
+        scheduling_now_ms(self.clock.as_ref())
     }
 
     /// Schedules `job` for `namespace_id` when a permit is available.
@@ -196,8 +147,7 @@ pub struct MaintenanceRunnerBuilder {
     registry: MaintenanceRegistry,
     max_concurrent: NonZeroUsize,
     metrics_recorder: Option<Arc<dyn MetricsRecorder>>,
-    #[cfg(test)]
-    clock: Option<Arc<dyn MaintenanceClock>>,
+    wall_clock: Arc<dyn WallClock>,
 }
 
 /// Current process-local scheduler state.
@@ -234,7 +184,7 @@ impl RunnerCounters {
 pub(crate) struct RunnerInner {
     /// Runtime that owns spawned work.
     runtime: tokio::runtime::Handle,
-    clock: Arc<dyn MaintenanceClock>,
+    clock: Arc<dyn WallClock>,
     registry: MaintenanceRegistry,
     /// One lock over the shutdown flag, the admission book, and the task
     /// registry. Registration checks the flag inside the same critical
@@ -274,8 +224,7 @@ impl MaintenanceRunner {
             max_concurrent: NonZeroUsize::new(crate::config::DEFAULT_MAX_CONCURRENT_MAINTENANCE)
                 .expect("default maintenance concurrency should be nonzero"),
             metrics_recorder: None,
-            #[cfg(test)]
-            clock: None,
+            wall_clock: Arc::new(loonfs_core::time::SystemWallClock),
         }
     }
 
@@ -283,16 +232,19 @@ impl MaintenanceRunner {
         registry: MaintenanceRegistry,
         runtime: tokio::runtime::Handle,
         max_concurrent: usize,
-        clock: Arc<dyn MaintenanceClock>,
+        clock: Arc<dyn WallClock>,
         metrics_recorder: Option<Arc<dyn MetricsRecorder>>,
     ) -> Self {
-        let next_reconcile_ms = clock.now_ms().saturating_add(RECONCILE_INTERVAL_MS);
+        let next_reconcile_ms =
+            scheduling_now_ms(clock.as_ref()).saturating_add(RECONCILE_INTERVAL_MS);
+        // Use a per-runner random seed so hosts retry at different times.
+        let jitter = RandomState::new().build_hasher().finish();
         Self {
             inner: Arc::new(RunnerInner {
                 runtime,
                 registry,
                 state: Mutex::new(RunnerState {
-                    admission: Admission::new(max_concurrent, Arc::clone(&clock)),
+                    admission: Admission::new(max_concurrent, Arc::clone(&clock), jitter),
                     tasks: Vec::new(),
                     hint_tasks: Vec::new(),
                     hint_controls: Vec::new(),
@@ -405,7 +357,7 @@ impl MaintenanceRunner {
 
     /// Returns a process-local scheduler snapshot.
     pub fn stats(&self) -> MaintenanceRunnerStats {
-        let now_ms = self.inner.clock.now_ms();
+        let now_ms = scheduling_now_ms(self.inner.clock.as_ref());
         let state = self.inner.lock_state();
         MaintenanceRunnerStats {
             jobs_registered: self.inner.registry.job_ids().len(),
@@ -488,7 +440,7 @@ impl MaintenanceRunner {
     /// arrived obligations, then dispatch.
     #[cfg(test)]
     pub(crate) fn dispatch_now(&self) {
-        let now_ms = self.inner.clock.now_ms();
+        let now_ms = scheduling_now_ms(self.inner.clock.as_ref());
         self.inner.lock_state().admission.promote_due(now_ms);
         dispatch_ready(&self.inner);
     }
@@ -518,9 +470,10 @@ impl MaintenanceRunnerBuilder {
         self
     }
 
-    #[cfg(test)]
-    pub(crate) fn clock(mut self, clock: Arc<dyn MaintenanceClock>) -> Self {
-        self.clock = Some(clock);
+    /// Supplies the wall time the runner schedules against. Pass the clock
+    /// given to the handles whose jobs it runs.
+    pub fn wall_clock(mut self, clock: Arc<dyn WallClock>) -> Self {
+        self.wall_clock = clock;
         self
     }
 
@@ -531,17 +484,11 @@ impl MaintenanceRunnerBuilder {
                 "maintenance runner must be built inside a Tokio runtime".to_owned(),
             )
         })?;
-        #[cfg(test)]
-        let clock = self
-            .clock
-            .unwrap_or_else(|| Arc::new(SystemMaintenanceClock::default()));
-        #[cfg(not(test))]
-        let clock = Arc::new(SystemMaintenanceClock::default()) as Arc<dyn MaintenanceClock>;
         Ok(MaintenanceRunner::new(
             self.registry,
             runtime,
             self.max_concurrent.get(),
-            clock,
+            self.wall_clock,
             self.metrics_recorder,
         ))
     }
@@ -602,7 +549,7 @@ fn nudge_key(
     namespace_id: &NamespaceId,
     not_before_ms: Option<u64>,
 ) {
-    let now_ms = inner.clock.now_ms();
+    let now_ms = scheduling_now_ms(inner.clock.as_ref());
     let key = MaintenanceKey::new(job, namespace_id);
     {
         let mut state = inner.lock_state();
@@ -641,7 +588,7 @@ fn move_next_wake(
     namespace_id: &NamespaceId,
     delay_ms: u64,
 ) {
-    let at_ms = inner.clock.now_ms().saturating_add(delay_ms);
+    let at_ms = scheduling_now_ms(inner.clock.as_ref()).saturating_add(delay_ms);
     let sooner_than_the_timer = {
         let mut state = inner.lock_state();
         if state.admission.is_closed() {
@@ -664,7 +611,7 @@ fn move_next_wake(
 fn dispatch_ready(inner: &Arc<RunnerInner>) {
     let mut dispatched = 0usize;
     loop {
-        let now_ms = inner.clock.now_ms();
+        let now_ms = scheduling_now_ms(inner.clock.as_ref());
         let claimed = inner.lock_state().admission.try_dispatch(now_ms);
         let Some(dispatch) = claimed else {
             break;
@@ -675,7 +622,7 @@ fn dispatch_ready(inner: &Arc<RunnerInner>) {
     // Report the queue remaining after dispatch. Sustained queue growth or rising
     // wait time indicates that the shared permit limit is too low. Metrics are
     // aggregate and do not include namespace IDs.
-    let now_ms = inner.clock.now_ms();
+    let now_ms = scheduling_now_ms(inner.clock.as_ref());
     let (keys_admitted, ready_queued, oldest_queued_ms) = {
         let state = inner.lock_state();
         (
@@ -709,7 +656,7 @@ fn spawn_chain(inner: &Arc<RunnerInner>, dispatch: MaintenanceDispatch) {
     inner.spawn(async move {
         while let Some(dispatch) = chain.dispatch.clone() {
             let outcome = run_step(&chain.inner, &dispatch).await;
-            let now_ms = chain.inner.clock.now_ms();
+            let now_ms = scheduling_now_ms(chain.inner.clock.as_ref());
             chain.dispatch =
                 chain
                     .inner
@@ -877,7 +824,7 @@ async fn scheduler_loop(inner: Weak<RunnerInner>, wake: Arc<Notify>) {
         if inner.lock_state().admission.is_closed() {
             break;
         }
-        let now_ms = inner.clock.now_ms();
+        let now_ms = scheduling_now_ms(inner.clock.as_ref());
         let promoted = inner.lock_state().admission.promote_due(now_ms);
         if promoted > 0 {
             // Distinguishes a wake a durable deadline caused from the far
@@ -908,7 +855,7 @@ async fn wait_for_deadline(delay: Duration, wake: &Notify) {
 /// Returns the delay until the next deadline or reconciliation sweep.
 /// `None` means admission is closed.
 fn next_wake_delay(inner: &Arc<RunnerInner>) -> Option<Duration> {
-    let now_ms = inner.clock.now_ms();
+    let now_ms = scheduling_now_ms(inner.clock.as_ref());
     let state = inner.lock_state();
     if state.admission.is_closed() {
         return None;

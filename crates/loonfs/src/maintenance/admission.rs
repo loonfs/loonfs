@@ -4,9 +4,9 @@
 //! deadlines, and shutdown. The parent module handles async execution,
 //! permits, and timers.
 
-use super::runner::MaintenanceClock;
+use super::runner::scheduling_now_ms;
 use super::{MaintenanceConclusion, MaintenanceJobId, MaintenanceRunReport};
-use crate::NamespaceId;
+use crate::{NamespaceId, WallClock};
 use std::collections::BTreeMap;
 use std::ops::Bound;
 use std::sync::Arc;
@@ -21,6 +21,9 @@ const ERROR_BACKOFF_BASE_MS: u64 = 10;
 /// during a provider outage while still detecting recovery within one
 /// reconciliation interval.
 const ERROR_BACKOFF_CAP_MS: u64 = 60_000;
+
+/// The odd increment SplitMix64 walks its counter by.
+const JITTER_GAMMA: u64 = 0x9E37_79B9_7F4A_7C15;
 
 /// One admitted unit of maintenance: a registered job, and the namespace it
 /// runs against.
@@ -273,16 +276,16 @@ pub(crate) struct Admission {
     /// Where the next reconciliation sweep resumes, so a probe budget
     /// cannot starve the tail of a large admitted set.
     reconcile_cursor: Option<MaintenanceKey>,
-    /// Here for the draw the error backoff jitters with, and for the queue
-    /// timestamp [`Self::nudge`] stamps — an observability field, not an
-    /// input to anything. Every `now_ms` a decision needs is still passed
-    /// in, so the tests below can move time by hand and name the delay they
-    /// expect.
-    clock: Arc<dyn MaintenanceClock>,
+    /// Here only for the queue timestamp [`Self::nudge`] stamps, which feeds
+    /// observability and no decision. Every `now_ms` a decision needs is
+    /// passed in, so the tests below can move time by hand.
+    clock: Arc<dyn WallClock>,
+    /// SplitMix64 counter behind the backoff jitter, advanced once per draw.
+    jitter: u64,
 }
 
 impl Admission {
-    pub(crate) fn new(max_concurrent: usize, clock: Arc<dyn MaintenanceClock>) -> Self {
+    pub(crate) fn new(max_concurrent: usize, clock: Arc<dyn WallClock>, jitter: u64) -> Self {
         Self {
             closed: false,
             next_ticket: 0,
@@ -291,6 +294,7 @@ impl Admission {
             keys: BTreeMap::new(),
             reconcile_cursor: None,
             clock,
+            jitter,
         }
     }
 
@@ -365,7 +369,7 @@ impl Admission {
         // The only decision-free clock reading here: the queue timestamp a
         // trace reports. Every scheduling decision still takes its `now_ms`
         // as an argument.
-        let now_ms = self.clock.now_ms();
+        let now_ms = scheduling_now_ms(self.clock.as_ref());
         self.keys
             .entry(key)
             .or_default()
@@ -589,7 +593,7 @@ impl Admission {
             return;
         };
         let failures = state.consecutive_failures.saturating_add(1);
-        let delay_ms = backoff_delay_ms(failures, self.clock.as_ref());
+        let delay_ms = backoff_delay_ms(failures, &mut self.jitter);
         state.consecutive_failures = failures;
         state.settle(Some(ReadyRun::gated(
             ticket,
@@ -625,12 +629,14 @@ impl Admission {
 
 /// How long a key waits after `consecutive_failures` failed steps.
 ///
-/// Draws a full-jitter delay from the exponential backoff window.
+/// Draws a full-jitter delay from the exponential backoff window, advancing
+/// the `jitter` counter.
 ///
 /// Randomizing each key's delay prevents a provider outage from producing a
 /// synchronized retry wave.
-fn backoff_delay_ms(consecutive_failures: u32, clock: &dyn MaintenanceClock) -> u64 {
-    clock.jitter_below_ms(backoff_window_ms(consecutive_failures))
+fn backoff_delay_ms(consecutive_failures: u32, jitter: &mut u64) -> u64 {
+    *jitter = jitter.wrapping_add(JITTER_GAMMA);
+    split_mix_64(*jitter) % backoff_window_ms(consecutive_failures)
 }
 
 /// The window that delay is drawn from: [`ERROR_BACKOFF_BASE_MS`] doubling
@@ -642,59 +648,28 @@ fn backoff_window_ms(consecutive_failures: u32) -> u64 {
         .min(ERROR_BACKOFF_CAP_MS)
 }
 
+/// Applies the SplitMix64 finalizer to the jitter counter.
+fn split_mix_64(counter: u64) -> u64 {
+    let mut mixed = counter;
+    mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    mixed ^ (mixed >> 31)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::maintenance::runner::{split_mix_64, JITTER_GAMMA};
+    use crate::maintenance::tests::ManualClock;
     use loonfs_test_support::ids::namespace_id;
     use std::collections::BTreeSet;
-    use std::sync::atomic::{AtomicU64, Ordering};
 
     const NOW: u64 = 1_000_000;
+    /// A fixed jitter value. Its first two draws are not zero, so each
+    /// backoff these tests expect holds its retry back.
+    const JITTER: u64 = 1;
 
-    /// The clock these tests inject.
-    ///
-    /// Every scheduling decision takes its `now_ms` as an argument, so this
-    /// exists for one thing: naming the draw the backoff jitters with.
-    /// `Top` puts every delay at the last millisecond of its window, which
-    /// makes an expected retry time something a test can write down;
-    /// `Walking` draws a different value each time, which is what a real
-    /// full-jitter clock does and what desynchronization needs.
-    #[derive(Debug)]
-    enum TestClock {
-        Top,
-        Walking(AtomicU64),
-    }
-
-    impl TestClock {
-        fn top() -> Arc<Self> {
-            Arc::new(Self::Top)
-        }
-
-        fn walking() -> Arc<Self> {
-            Arc::new(Self::Walking(AtomicU64::new(0)))
-        }
-    }
-
-    impl MaintenanceClock for TestClock {
-        fn now_ms(&self) -> u64 {
-            NOW
-        }
-
-        fn jitter_below_ms(&self, span_ms: u64) -> u64 {
-            if span_ms == 0 {
-                return 0;
-            }
-            match self {
-                Self::Top => span_ms - 1,
-                Self::Walking(draws) => draws.fetch_add(1, Ordering::Relaxed) % span_ms,
-            }
-        }
-    }
-
-    /// An admission book whose backoff lands at the top of every window.
     fn book(max_concurrent: usize) -> Admission {
-        Admission::new(max_concurrent, TestClock::top())
+        Admission::new(max_concurrent, ManualClock::at(NOW), JITTER)
     }
 
     fn metadata(name: &str) -> MaintenanceKey {
@@ -720,9 +695,10 @@ mod tests {
         dispatch.map(|dispatch| dispatch.key)
     }
 
-    /// The delay the `Top` clock produces for the nth consecutive failure.
-    fn top_delay_ms(consecutive_failures: u32) -> u64 {
-        backoff_window_ms(consecutive_failures) - 1
+    /// The delay a fresh book draws for one key's nth consecutive failure.
+    fn drawn_delay_ms(consecutive_failures: u32) -> u64 {
+        let mut jitter = JITTER;
+        (1..=consecutive_failures).fold(0, |_, failures| backoff_delay_ms(failures, &mut jitter))
     }
 
     #[test]
@@ -1215,7 +1191,7 @@ mod tests {
         );
         assert_eq!(claimed(admission.try_dispatch(NOW)), None);
         assert_eq!(
-            claimed(admission.try_dispatch(NOW + top_delay_ms(1))),
+            claimed(admission.try_dispatch(NOW + drawn_delay_ms(1))),
             Some(key.clone())
         );
         assert_eq!(
@@ -1224,11 +1200,11 @@ mod tests {
         );
         assert_eq!(
             admission.earliest_deadline_ms(NOW),
-            Some(NOW + top_delay_ms(2)),
+            Some(NOW + drawn_delay_ms(2)),
             "consecutive failures draw from a window twice as wide"
         );
         assert_eq!(
-            admission.earliest_deadline_ms(NOW + top_delay_ms(2)),
+            admission.earliest_deadline_ms(NOW + drawn_delay_ms(2)),
             None,
             "a backoff that has already expired is not something to wake for"
         );
@@ -1249,12 +1225,12 @@ mod tests {
 
     #[test]
     fn every_drawn_delay_stays_inside_its_window() {
-        let clock = TestClock::walking();
+        let mut jitter = JITTER;
         for failures in 1..24_u32 {
             let window_ms = backoff_window_ms(failures);
             for _ in 0..64 {
                 assert!(
-                    backoff_delay_ms(failures, clock.as_ref()) < window_ms,
+                    backoff_delay_ms(failures, &mut jitter) < window_ms,
                     "full jitter draws from inside the window, never past it"
                 );
             }
@@ -1263,7 +1239,7 @@ mod tests {
 
     #[test]
     fn a_burst_of_failures_does_not_come_back_synchronized() {
-        let mut admission = Admission::new(8, TestClock::walking());
+        let mut admission = book(8);
         let keys = [
             metadata("one"),
             metadata("two"),
@@ -1319,7 +1295,7 @@ mod tests {
             None
         );
         assert_eq!(
-            claimed(admission.try_dispatch(NOW + top_delay_ms(1))),
+            claimed(admission.try_dispatch(NOW + drawn_delay_ms(1))),
             Some(key.clone())
         );
         assert_eq!(claimed(admission.finish(&key, idle(), NOW)), None);
@@ -1469,7 +1445,7 @@ mod tests {
             "coalescing into the queued retry must not erase the gate it is serving"
         );
         assert_eq!(
-            claimed(admission.try_dispatch(NOW + top_delay_ms(1))),
+            claimed(admission.try_dispatch(NOW + drawn_delay_ms(1))),
             Some(key),
             "and the retry still comes back when its backoff has passed"
         );
@@ -1496,7 +1472,7 @@ mod tests {
 
     /// A seeded draw.
     ///
-    /// The runner's own SplitMix64 finalizer over a counter: this workspace
+    /// The backoff's own SplitMix64 finalizer over a counter: this workspace
     /// has no `rand` dependency, ambient randomness is banned, and a model
     /// whose failures cannot be replayed is not worth running.
     struct Draws(u64);
@@ -1563,7 +1539,7 @@ mod tests {
                 })
                 .collect();
             Self {
-                admission: Admission::new(cap, TestClock::top()),
+                admission: book(cap),
                 draws: Draws(seed),
                 keys,
                 cap,
