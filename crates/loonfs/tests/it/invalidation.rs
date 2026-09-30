@@ -917,11 +917,11 @@ async fn a_seed_on_another_basis_does_not_keep_the_cached_check() {
         .expect("first put");
     writer.publisher().drain().await.expect("finish hints");
 
-    // The next put starts a budget later, so it discovers the namespace
-    // again, and that discovery is held at the hint. Meanwhile the reader
-    // checks the old basis, and a fold publishes a new one.
+    // The next put starts more than a budget later, so it discovers the
+    // namespace again, and that discovery is held at the hint. Meanwhile the
+    // reader checks the old basis, and a fold publishes a new one.
     let check_after_attempt_ms = 10_000;
-    timer.advance_ms(WAL_PUBLISH_BUDGET_MS);
+    timer.advance_ms(WAL_PUBLISH_BUDGET_MS + 1);
     recording.inner().block_next();
     let (put, ()) = futures::join!(
         namespace_writer.put_file_bytes(

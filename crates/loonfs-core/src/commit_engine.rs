@@ -607,7 +607,7 @@ impl NamespaceCommitEngine {
         let confirmed_recently = self
             .basis_checked
             .as_ref()
-            .is_some_and(|checked| checked.age_at(attempt) < crate::limits::WAL_PUBLISH_BUDGET_MS);
+            .is_some_and(|checked| checked.age_at(attempt) <= crate::limits::WAL_PUBLISH_BUDGET_MS);
         (!confirmed_recently).then(|| projection.basis().manifest_no())
     }
 
@@ -773,15 +773,16 @@ impl NamespaceCommitEngine {
         };
 
         if self.projection_observed.as_ref().is_some_and(|observed| {
-            observed.age_at(&attempt) >= crate::limits::WAL_PUBLISH_BUDGET_MS
+            observed.age_at(&attempt) > crate::limits::WAL_PUBLISH_BUDGET_MS
         }) {
             self.invalidate_projection();
         }
         // A landed put confirms the tip, not the manifest the batch was planned
         // against: another process may have folded since. A basis unconfirmed
-        // for a budget is checked for a successor. A successor, a check that
-        // returns after the revalidation bound, or a failed check reloads the
-        // view instead.
+        // for a budget is checked for a successor. The answer is measured from
+        // the last confirmation, not from this attempt. A successor, an answer
+        // outside the revalidation bound of that confirmation, or a failed
+        // check reloads the view instead.
         if let Some(manifest_no) = self.unconfirmed_basis(&attempt) {
             let successor = crate::namespace::read_anchor::manifest_has_successor(
                 store,
@@ -790,7 +791,10 @@ impl NamespaceCommitEngine {
             )
             .await;
             if matches!(successor, Ok(false))
-                && attempt.age_ms() < crate::limits::READ_REVALIDATION_BOUND_MS
+                && self
+                    .basis_checked
+                    .as_ref()
+                    .is_some_and(Observation::is_within_revalidation_bound)
             {
                 self.basis_checked = Some(attempt.clone());
             } else {
@@ -1637,8 +1641,8 @@ mod tests {
         .await
         .expect("fold");
 
-        // Within a budget of the load the basis is trusted, as before.
-        timer.advance_ms(WAL_PUBLISH_BUDGET_MS - 1);
+        // A budget after the load the basis and the tip are still trusted.
+        timer.advance_ms(WAL_PUBLISH_BUDGET_MS);
         store.reset();
         let second = publish_one(&mut engine, &store, &writer, "beta").await;
         assert_eq!(
@@ -1651,9 +1655,9 @@ mod tests {
         );
         assert_eq!(store.count(OperationClass::Head), 0);
 
-        // A budget after the load the check finds the successor, and the view
-        // is reloaded from the hint before the put.
-        timer.advance_ms(WAL_PUBLISH_BUDGET_MS - 1);
+        // Two budgets after the load the check finds the successor, and the
+        // view is reloaded from the hint before the put.
+        timer.advance_ms(WAL_PUBLISH_BUDGET_MS);
         store.reset();
         let third = publish_one(&mut engine, &store, &writer, "gamma").await;
         let operations = store.take();
@@ -1678,7 +1682,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_basis_check_that_returns_after_the_bound_reloads_instead() {
+    async fn a_basis_check_answered_outside_the_bound_of_the_last_confirmation_reloads_instead() {
         let temp_dir = tempdir().expect("tempdir");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let store = RecordingStore::new(
@@ -1702,8 +1706,9 @@ mod tests {
         timer.advance_ms(WAL_PUBLISH_BUDGET_MS - 1);
         publish_one(&mut engine, &store, &writer, "beta").await;
 
-        // The third publish owes a basis check. It pauses inside the HEAD for
-        // the revalidation bound, so its answer cannot be trusted: the view is
+        // The third publish owes a basis check. Its answer arrives inside the
+        // revalidation bound of the attempt's start but outside the bound of
+        // the confirmation at zero, so it cannot be trusted: the view is
         // reloaded, and the batch itself is then over its budget.
         timer.advance_ms(WAL_PUBLISH_BUDGET_MS - 1);
         store.reset();
@@ -1720,7 +1725,7 @@ mod tests {
             ),
             async {
                 store.inner().wait_until_blocked().await;
-                timer.advance_ms(READ_REVALIDATION_BOUND_MS);
+                timer.advance_ms(READ_REVALIDATION_BOUND_MS - 1);
                 store.inner().release();
             }
         );
