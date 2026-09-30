@@ -46,6 +46,7 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
         principals: PrincipalSet::new(BTreeSet::from([principal.clone()])).expect("principals"),
     };
     let writer = runtime.writer.as_subject(subject.clone());
+    let source_namespace = writer.reader().namespace(&source);
     writer
         .create_namespace(
             &source,
@@ -163,9 +164,8 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
             .await
             .expect("update directory access");
     }
-    let deleted_inode = writer
-        .reader()
-        .get_path_entry(&source, "/docs/deleted.txt", Default::default())
+    let deleted_inode = source_namespace
+        .get_path_entry("/docs/deleted.txt", Default::default())
         .await
         .expect("file to delete")
         .inode_id;
@@ -173,9 +173,8 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
         .delete_path("/docs/deleted.txt", DeleteOptions::new(test_actor()))
         .await
         .expect("delete file");
-    let restored_inode = writer
-        .reader()
-        .get_path_entry(&source, "/docs/recover.txt", Default::default())
+    let restored_inode = source_namespace
+        .get_path_entry("/docs/recover.txt", Default::default())
         .await
         .expect("file to recover")
         .inode_id;
@@ -328,6 +327,8 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
             .await
             .expect("fresh reader")
             .as_subject(subject.clone());
+        let source_namespace = reader.namespace(&source);
+        let fork_namespace = reader.namespace(&fork);
         for (path, mut expected_paths) in [
             ("/", vec!["/docs"]),
             (
@@ -356,8 +357,8 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
                 fork_listing.insert(path, listed.entries);
             }
             if let Some(checkpoint) = &checkpoint {
-                let pinned = reader
-                    .pin_namespace_at_checkpoint(&source, &checkpoint.checkpoint_id)
+                let pinned = source_namespace
+                    .pin_namespace_at_checkpoint(&checkpoint.checkpoint_id)
                     .await
                     .expect("checkpoint view");
                 let historical = pinned
@@ -399,13 +400,14 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
             }
         }
         for namespace in std::iter::once(&source).chain(checkpoint.as_ref().map(|_| &fork)) {
+            let namespace_reader = reader.namespace(namespace);
             for (path, expected) in [
                 ("/docs/renamed.txt", b"second revision".as_slice()),
                 ("/docs/nested/uploaded.txt", uploaded_bytes.as_slice()),
             ] {
                 assert_eq!(
-                    reader
-                        .get_file_bytes(namespace, path)
+                    namespace_reader
+                        .get_file_bytes(path)
                         .await
                         .expect("file bytes")
                         .bytes,
@@ -413,9 +415,8 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
                     "{stage}: {namespace}: {path}"
                 );
             }
-            let revisions = reader
+            let revisions = namespace_reader
                 .list_file_revisions_page(
-                    namespace,
                     "/docs/renamed.txt",
                     PageRequest {
                         limit: page_limit(16),
@@ -427,28 +428,25 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
             assert_eq!(revisions.revisions.len(), 2, "{stage}: {namespace}");
             assert!(revisions.next_cursor.is_none());
             assert_eq!(
-                reader
-                    .get_file_revision_bytes(namespace, "/docs/renamed.txt", RevisionNo(1))
+                namespace_reader
+                    .get_file_revision_bytes("/docs/renamed.txt", RevisionNo(1))
                     .await
                     .expect("first revision bytes")
                     .bytes,
                 b"first revision"
             );
-            let entry = reader
-                .get_path_entry(namespace, "/docs/renamed.txt", Default::default())
+            let entry = namespace_reader
+                .get_path_entry("/docs/renamed.txt", Default::default())
                 .await
                 .expect("cleared attributes");
             let attributes = entry.attributes.expect("attribute projection");
             assert_eq!(attributes.attributes_revision_no, AttributesRevisionNo(2));
             assert_eq!(attributes.attributes, Attributes::default(), "{stage}");
-            let trash = reader
-                .list_trash_page(
-                    namespace,
-                    PageRequest {
-                        limit: page_limit(16),
-                        cursor: None,
-                    },
-                )
+            let trash = namespace_reader
+                .list_trash_page(PageRequest {
+                    limit: page_limit(16),
+                    cursor: None,
+                })
                 .await
                 .expect("trash listing");
             assert!(trash.next_cursor.is_none());
@@ -460,8 +458,8 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
                 "deleted.txt"
             );
             assert_eq!(
-                reader
-                    .get_path_entry(namespace, "/docs/restored.txt", Default::default())
+                namespace_reader
+                    .get_path_entry("/docs/restored.txt", Default::default())
                     .await
                     .expect("restored binding")
                     .inode_id,
@@ -469,8 +467,8 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
                 "{stage}"
             );
             if stage != "cold" {
-                let directory_inode = reader
-                    .get_path_entry(namespace, "/docs/nested", Default::default())
+                let directory_inode = namespace_reader
+                    .get_path_entry("/docs/nested", Default::default())
                     .await
                     .expect("directory")
                     .inode_id;
@@ -536,12 +534,12 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
         }
         if head_seq > restored.committed_seq {
             expect_code(
-                reader.get_file_bytes(&fork, "/later.txt").await,
+                fork_namespace.get_file_bytes("/later.txt").await,
                 ErrorCode::PathNotFound,
             );
             expect_code(
-                reader
-                    .list_changes_page(&source, ChangeSeq(0), Default::default())
+                source_namespace
+                    .list_changes_page(ChangeSeq(0), Default::default())
                     .await,
                 ErrorCode::RebootstrapRequired,
             );

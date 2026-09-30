@@ -1,6 +1,6 @@
 //! The write-capable runtime handle.
 
-use super::{owning_runtime, FsReader, HandleBuilderCore, NamespaceWriter};
+use super::{owning_runtime, FsReader, HandleBuilderCore, Namespace, Writable};
 use crate::fs::{ReadCore, WriterBits, WriterIdentity};
 use crate::metrics::{MetricsRecorder, ObjectStoreMetricsRecorder};
 use crate::publisher::{NamespaceAdvanceHint, NamespaceAdvanceObserver, PublisherRegistry};
@@ -21,8 +21,8 @@ use tokio::sync::Semaphore;
 ///
 /// `FsWriter` owns the writer identity, the store client, the caches, the
 /// admission budgets, and shutdown. It creates and forks namespaces. It opens
-/// a [`NamespaceWriter`] for each namespace it writes, and mutations,
-/// uploads, and snapshots live on that handle.
+/// a writable [`Namespace`] handle for each namespace it writes, and
+/// mutations, uploads, and snapshots live on that handle.
 ///
 /// Build the handle inside the Tokio runtime that will use it. Do not share a
 /// provider client across unrelated runtimes; build another handle from
@@ -110,8 +110,8 @@ impl FsWriter {
     /// If a handle for this namespace is already open in this runtime, the
     /// new handle shares its session. Opening does no store IO and acquires
     /// no writer epoch; the session's first publish does. The caller owns
-    /// the session from here on (see [`NamespaceWriter`]). Fails with
-    /// `writer_session_closed` while a [`NamespaceWriter::close`] of this
+    /// the session from here on (see [`Namespace`]). Fails with
+    /// `writer_session_closed` while a [`Namespace::close`] of this
     /// namespace's session drains, and with `shutting_down` after shutdown
     /// begins.
     #[tracing::instrument(
@@ -126,10 +126,10 @@ impl FsWriter {
             store_kind = tracing::field::Empty,
         )
     )]
-    pub fn open_namespace(&self, namespace_id: &NamespaceId) -> Result<NamespaceWriter> {
+    pub fn open_namespace(&self, namespace_id: &NamespaceId) -> Result<Namespace<Writable>> {
         self.core.record_trace_context(&tracing::Span::current());
         let session = self.publisher.open_session(namespace_id)?;
-        Ok(NamespaceWriter::new(self, session))
+        Ok(Namespace::new(self, session))
     }
 
     /// Closes publication admission before shutdown drains.

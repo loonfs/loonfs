@@ -11,7 +11,7 @@
 
 use loonfs::{
     CreateNamespaceOptions, FsMaintenance, FsReader, FsWriter, MetadataMaintenanceOptions,
-    NamespaceId, NamespaceWriter, PutFileOptions,
+    Namespace, NamespaceId, PutFileOptions, Writable,
 };
 use loonfs_api::wire::manifest::{decode_namespace_manifest_json, MetadataRowFamily};
 use loonfs_api::AbsolutePath;
@@ -26,7 +26,7 @@ use tempfile::tempdir;
 /// service. Every candidate is admitted before the publisher's worker can
 /// take any of them, so they coalesce into one publication.
 async fn publish_candidates(
-    namespace_writer: &NamespaceWriter,
+    namespace_writer: &Namespace<Writable>,
     candidates: Vec<loonfs::publish::CommitCandidate>,
 ) {
     let submissions = candidates
@@ -210,13 +210,10 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
         .build()
         .await
         .expect("build reader");
+    let namespace = reader.namespace(&namespace_id);
     let _ = log.take_gets();
-    let entry = reader
-        .get_path_entry(
-            &namespace_id,
-            "/tree/dir-000000/file-000000042.txt",
-            Default::default(),
-        )
+    let entry = namespace
+        .get_path_entry("/tree/dir-000000/file-000000042.txt", Default::default())
         .await
         .expect("cold stat");
     assert_eq!(

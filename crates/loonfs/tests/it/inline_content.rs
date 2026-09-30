@@ -97,6 +97,7 @@ async fn reader_downloads_materialize_tail_content_by_path_and_inode() {
     for by_inode in [false, true] {
         let namespace_id =
             NamespaceId::parse(if by_inode { "inode" } else { "path" }).expect("namespace");
+        let namespace = reader.namespace(&namespace_id);
         writer
             .create_namespace(
                 &namespace_id,
@@ -105,21 +106,21 @@ async fn reader_downloads_materialize_tail_content_by_path_and_inode() {
             .await
             .expect("namespace");
         let content_ref = publish_inline(&store, &namespace_id, None).await;
-        let inode_id = reader
-            .get_path_entry(&namespace_id, "/file", Default::default())
+        let inode_id = namespace
+            .get_path_entry("/file", Default::default())
             .await
             .expect("entry")
             .inode_id;
         recording.reset();
         let object_key = if by_inode {
-            reader
-                .create_download_by_inode(&namespace_id, inode_id, RevisionNo(1))
+            namespace
+                .create_download_by_inode(inode_id, RevisionNo(1))
                 .await
                 .expect("inode download")
                 .object_key
         } else {
-            reader
-                .create_download(&namespace_id, "/file", None)
+            namespace
+                .create_download("/file", None)
                 .await
                 .expect("path download")
                 .object_key
@@ -161,6 +162,7 @@ async fn imports_read_the_owners_tail_before_folding_and_object_after_folding() 
         .expect("writer");
     let source = NamespaceId::parse("source").expect("source");
     let destination = NamespaceId::parse("destination").expect("destination");
+    let namespace = writer.reader().namespace(&destination);
     let principal = PrincipalId::parse("owner").expect("principal");
     let subject = Subject {
         principal_scope: PrincipalScope::parse("scope").expect("scope"),
@@ -247,9 +249,8 @@ async fn imports_read_the_owners_tail_before_folding_and_object_after_folding() 
         } else {
             assert!(source_operations.is_empty());
         }
-        let file = writer
-            .reader()
-            .get_file_bytes(&destination, path)
+        let file = namespace
+            .get_file_bytes(path)
             .await
             .expect("imported bytes");
         assert_eq!(file.bytes, b"inline content");
@@ -273,6 +274,7 @@ async fn same_namespace_imports_read_inline_bytes_without_a_content_request() {
         .await
         .expect("writer");
     let namespace_id = NamespaceId::parse("same-namespace").expect("namespace");
+    let namespace = writer.reader().namespace(&namespace_id);
     writer
         .create_namespace(
             &namespace_id,
@@ -298,9 +300,8 @@ async fn same_namespace_imports_read_inline_bytes_without_a_content_request() {
         .expect("import before folding");
     assert_eq!(recording.count(OperationClass::Head), 0);
     assert_eq!(recording.count(OperationClass::Read), 0);
-    let file = writer
-        .reader()
-        .get_file_bytes(&namespace_id, "/file")
+    let file = namespace
+        .get_file_bytes("/file")
         .await
         .expect("imported bytes");
     assert_eq!(file.bytes, b"inline content");
@@ -327,7 +328,9 @@ async fn imports_of_fork_content_read_the_deleted_owners_key() {
         let source = NamespaceId::parse("source").expect("source");
         let source_writer = writer.open_namespace(&source).expect("open namespace");
         let fork = NamespaceId::parse("fork").expect("fork");
+        let fork_namespace = writer.reader().namespace(&fork);
         let destination = NamespaceId::parse("destination").expect("destination");
+        let destination_namespace = writer.reader().namespace(&destination);
         for namespace_id in [&source, &destination] {
             writer
                 .create_namespace(
@@ -362,9 +365,8 @@ async fn imports_of_fork_content_read_the_deleted_owners_key() {
             .delete_namespace(DeleteNamespaceOptions::default())
             .await
             .expect("delete source");
-        let entry = writer
-            .reader()
-            .get_path_entry(&fork, "/file", Default::default())
+        let entry = fork_namespace
+            .get_path_entry("/file", Default::default())
             .await
             .expect("fork entry");
         let content_ref = entry.content_ref().expect("fork reference");
@@ -381,9 +383,8 @@ async fn imports_of_fork_content_read_the_deleted_owners_key() {
             .await
             .expect("import after owner deletion");
         assert_eq!(recording.take_get_keys(), vec![source_key]);
-        let file = writer
-            .reader()
-            .get_file_bytes(&destination, "/imported")
+        let file = destination_namespace
+            .get_file_bytes("/imported")
             .await
             .expect("imported bytes");
         assert_eq!(file.bytes, b"inline content");

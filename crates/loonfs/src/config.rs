@@ -166,7 +166,7 @@ pub struct RuntimeCacheConfig {
     /// It does not count the WAL-tail projections a writer's publishers
     /// retain, which only the two projection budgets bound, or writer
     /// sessions, which live as long as the host holds their
-    /// [`NamespaceWriter`](crate::NamespaceWriter) handles.
+    /// writable [`Namespace`](crate::Namespace) handles.
     pub max_cached_namespaces: usize,
     /// Maximum metadata rows retained across WAL-tail projections. The read
     /// cache and the publish side each hold their own total against it, so

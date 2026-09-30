@@ -248,11 +248,11 @@ async fn compacted_directory_page_overlaps_segment_reads(
         Some(subject) => reader.as_subject(subject),
         None => reader,
     };
+    let namespace = reader.namespace(&namespace_id);
     let timer = StdMonotonicTimer::default();
     let started_at_ms = timer.monotonic_now_ms();
-    let page = reader
+    let page = namespace
         .list_path_entries_page(
-            &namespace_id,
             "/directory",
             PageRequest {
                 limit: page_limit(PAGE),

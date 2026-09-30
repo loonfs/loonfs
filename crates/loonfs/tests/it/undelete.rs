@@ -72,6 +72,7 @@ fn undelete_recovers_a_deleted_file_and_positions_stay_scoped() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "undelete-test");
     let namespace_id = namespace_id("demo");
+    let namespace = fs.reader.namespace(&namespace_id);
     fs.create_namespace_blocking(
         &namespace_id,
         CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
@@ -139,13 +140,9 @@ fn undelete_recovers_a_deleted_file_and_positions_stay_scoped() {
         b"draft two"
     );
     assert_eq!(
-        block_on(fs.reader.get_file_revision_bytes(
-            &namespace_id,
-            "/docs/recovered.txt",
-            loonfs::RevisionNo(1),
-        ))
-        .expect("read prior revision through the recovered path")
-        .bytes,
+        block_on(namespace.get_file_revision_bytes("/docs/recovered.txt", loonfs::RevisionNo(1),))
+            .expect("read prior revision through the recovered path")
+            .bytes,
         b"draft one"
     );
 
@@ -494,6 +491,7 @@ fn change_feed_reports_the_deletion_position_an_undelete_takes() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "undelete-feed-test");
     let namespace_id = namespace_id("demo");
+    let namespace = fs.reader.namespace(&namespace_id);
     fs.create_namespace_blocking(
         &namespace_id,
         CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
@@ -530,12 +528,9 @@ fn change_feed_reports_the_deletion_position_an_undelete_takes() {
     ))
     .expect("undelete");
 
-    let changes = block_on(fs.reader.list_changes_page(
-        &namespace_id,
-        ChangeSeq(0),
-        ListChangesOptions::default(),
-    ))
-    .expect("list changes");
+    let changes =
+        block_on(namespace.list_changes_page(ChangeSeq(0), ListChangesOptions::default()))
+            .expect("list changes");
     let mut deleted_seq = None;
     let mut undeleted = None;
     for change in &changes.changes {
@@ -568,6 +563,7 @@ fn the_feed_names_deleted_entries_and_their_writer() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "feed-identity-test");
     let namespace_id = namespace_id("demo");
+    let namespace = fs.reader.namespace(&namespace_id);
     fs.create_namespace_blocking(
         &namespace_id,
         CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
@@ -587,12 +583,9 @@ fn the_feed_names_deleted_entries_and_their_writer() {
     )
     .expect("delete");
 
-    let changes = block_on(fs.reader.list_changes_page(
-        &namespace_id,
-        ChangeSeq(0),
-        ListChangesOptions::default(),
-    ))
-    .expect("list changes");
+    let changes =
+        block_on(namespace.list_changes_page(ChangeSeq(0), ListChangesOptions::default()))
+            .expect("list changes");
 
     // A projection of the feed sees the spelling a person typed — on the
     // deletion as well as the creation — without a second lookup per entry.

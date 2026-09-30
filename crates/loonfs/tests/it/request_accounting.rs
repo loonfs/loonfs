@@ -9,7 +9,8 @@
 
 use loonfs::{
     CreateNamespaceOptions, FsMaintenance, FsReader, FsWriter, MetadataMaintenanceOptions,
-    NamespaceId, NamespaceWriter, PageRequest, PaginationPolicy, PutFileOptions, SharedObjectStore,
+    Namespace, NamespaceId, PageRequest, PaginationPolicy, PutFileOptions, SharedObjectStore,
+    Writable,
 };
 use loonfs_api::AbsolutePath;
 
@@ -105,7 +106,7 @@ fn report(phase: &str, gets: &[RecordedGet], segments: &SegmentMap) {
 /// service. Every candidate is admitted before the publisher's worker can
 /// take any of them, so they coalesce into one publication.
 async fn publish_candidates(
-    namespace_writer: &NamespaceWriter,
+    namespace_writer: &Namespace<Writable>,
     candidates: Vec<loonfs::publish::CommitCandidate>,
 ) {
     let submissions = candidates
@@ -229,19 +230,15 @@ async fn warm_phase_request_accounting() {
         .build()
         .await
         .expect("build reader");
+    let namespace = reader.namespace(&namespace_id);
     let limit = PaginationPolicy::default()
         .resolve_limit(Some(1_000))
         .expect("valid limit");
     let mut listed = 0usize;
     let mut cursor = None;
     loop {
-        let page = reader
-            .list_path_entries_page(
-                &namespace_id,
-                "/hot",
-                PageRequest { limit, cursor },
-                Default::default(),
-            )
+        let page = namespace
+            .list_path_entries_page("/hot", PageRequest { limit, cursor }, Default::default())
             .await
             .expect("list page");
         listed += page.entries.len();
@@ -255,14 +252,14 @@ async fn warm_phase_request_accounting() {
     assert_eq!(listed, FILES);
     report("warm full list", &log.take_gets(), &segments);
 
-    reader
-        .get_path_entry(&namespace_id, "/hot/file-04999.txt", Default::default())
+    namespace
+        .get_path_entry("/hot/file-04999.txt", Default::default())
         .await
         .expect("stat");
     report("warm stat", &log.take_gets(), &segments);
 
-    reader
-        .get_file_bytes(&namespace_id, "/hot/file-05000.txt")
+    namespace
+        .get_file_bytes("/hot/file-05000.txt")
         .await
         .expect("read");
     report("warm read", &log.take_gets(), &segments);

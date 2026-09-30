@@ -14,14 +14,14 @@ use crate::uploads::{
     MultipartPartTargets, ResolvedUploadCompletion, UploadSessionView,
 };
 use crate::ByteStream;
-use crate::NamespaceWriter;
 use crate::Result;
 use crate::{ChecksumAlgorithm, MaintenanceHint, MaintenanceJobId, UploadMode, UploadSession};
+use crate::{Namespace, Writable};
 use loonfs_api::options::DirectMultipartUploadOptions;
 use loonfs_api::v0::UploadPartChecksumClaim;
 use loonfs_api::UploadId;
 
-impl NamespaceWriter {
+impl Namespace<Writable> {
     /// Plants the deadline a durable upload session just created.
     ///
     /// The clock is read after the session is durable, so the scheduled time
@@ -29,13 +29,13 @@ impl NamespaceWriter {
     /// the one failure that would cost something: the pass would find the
     /// session retained, park, and have nothing left to bring it back.
     fn schedule_upload_session_reclamation(&self) {
-        if self.bits.maintenance_hint_observer.is_none() {
+        if self.mode.bits.maintenance_hint_observer.is_none() {
             return;
         }
         let Ok(now_ms) = self.core.now_ms() else {
             return;
         };
-        self.bits.send_maintenance_hint(
+        self.mode.bits.send_maintenance_hint(
             &self.namespace_id,
             MaintenanceHint::DueAt {
                 namespace_id: self.namespace_id.clone(),
@@ -50,13 +50,13 @@ impl NamespaceWriter {
     /// removes it — so completion schedules its own pass rather than
     /// relying on the one the session's lease already asked for.
     fn schedule_completed_upload_reclamation(&self) {
-        if self.bits.maintenance_hint_observer.is_none() {
+        if self.mode.bits.maintenance_hint_observer.is_none() {
             return;
         }
         let Ok(now_ms) = self.core.now_ms() else {
             return;
         };
-        self.bits.send_maintenance_hint(
+        self.mode.bits.send_maintenance_hint(
             &self.namespace_id,
             MaintenanceHint::DueAt {
                 namespace_id: self.namespace_id.clone(),

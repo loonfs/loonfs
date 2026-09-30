@@ -60,6 +60,7 @@ async fn a_streamed_put_holds_one_part_of_its_payload() {
     let store: SharedObjectStore = watched.clone();
     let runtime = open_runtime_async(store, "writer-a").await;
     let namespace_id = namespace(&runtime).await;
+    let namespace = runtime.reader.namespace(&namespace_id);
     let namespace_writer = runtime
         .writer
         .open_namespace(&namespace_id)
@@ -94,9 +95,8 @@ async fn a_streamed_put_holds_one_part_of_its_payload() {
         peaks.peak_live_bytes
     );
     assert_eq!(
-        runtime
-            .reader
-            .get_file_bytes(&namespace_id, PATH)
+        namespace
+            .get_file_bytes(PATH)
             .await
             .expect("read file")
             .bytes,

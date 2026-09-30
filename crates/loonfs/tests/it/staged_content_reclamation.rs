@@ -158,6 +158,7 @@ async fn a_published_put_keeps_its_content_and_loses_only_the_session_record() {
     let store = store(temp_dir.path());
     let runtime = open_staged_runtime(store.clone(), "published-put").await;
     let namespace_id = namespace(&runtime).await;
+    let namespace = runtime.reader.namespace(&namespace_id);
     let namespace_writer = runtime
         .writer
         .open_namespace(&namespace_id)
@@ -170,9 +171,8 @@ async fn a_published_put_keeps_its_content_and_loses_only_the_session_record() {
         )
         .await
         .expect("published put");
-    let content_ref = runtime
-        .reader
-        .get_path_entry(&namespace_id, "/docs/kept.txt", Default::default())
+    let content_ref = namespace
+        .get_path_entry("/docs/kept.txt", Default::default())
         .await
         .expect("stat file")
         .content_ref()
@@ -194,9 +194,8 @@ async fn a_published_put_keeps_its_content_and_loses_only_the_session_record() {
     );
     assert!(exists(&store, &published_key).await);
     assert_eq!(
-        runtime
-            .reader
-            .get_file_bytes(&namespace_id, "/docs/kept.txt")
+        namespace
+            .get_file_bytes("/docs/kept.txt")
             .await
             .expect("read the file back")
             .bytes,
@@ -211,6 +210,7 @@ async fn imported_content_survives_collection_in_the_source_namespace() {
     let runtime = open_staged_runtime(store.clone(), "content-import").await;
     let source = namespace(&runtime).await;
     let target = NamespaceId::parse("target").expect("valid namespace id");
+    let namespace = runtime.reader.namespace(&target);
     runtime
         .writer
         .fork_namespace(
@@ -265,9 +265,8 @@ async fn imported_content_survives_collection_in_the_source_namespace() {
     assert_eq!(target_report.deleted.content_objects, 0);
     assert!(exists(&store, &imported_key).await);
     assert_eq!(
-        runtime
-            .reader
-            .get_file_bytes(&target, "/imported.txt")
+        namespace
+            .get_file_bytes("/imported.txt")
             .await
             .expect("read imported file")
             .bytes,
@@ -281,6 +280,7 @@ async fn a_conflicting_upload_is_reclaimed_and_the_published_content_survives() 
     let store = store(temp_dir.path());
     let runtime = open_staged_runtime(store.clone(), "retrying-writer").await;
     let namespace_id = namespace(&runtime).await;
+    let namespace = runtime.reader.namespace(&namespace_id);
     let namespace_writer = runtime
         .writer
         .open_namespace(&namespace_id)
@@ -296,9 +296,8 @@ async fn a_conflicting_upload_is_reclaimed_and_the_published_content_survives() 
         .put_file_bytes("/docs/retry.txt", b"same bytes", options())
         .await
         .expect("first put");
-    let committed_content_ref = runtime
-        .reader
-        .get_path_entry(&namespace_id, "/docs/retry.txt", Default::default())
+    let committed_content_ref = namespace
+        .get_path_entry("/docs/retry.txt", Default::default())
         .await
         .expect("stat file")
         .content_ref()
@@ -338,9 +337,8 @@ async fn a_conflicting_upload_is_reclaimed_and_the_published_content_survives() 
         "the object the commit named is referenced and stays"
     );
     assert_eq!(
-        runtime
-            .reader
-            .get_file_bytes(&namespace_id, "/docs/retry.txt")
+        namespace
+            .get_file_bytes("/docs/retry.txt")
             .await
             .expect("read the file back")
             .bytes,

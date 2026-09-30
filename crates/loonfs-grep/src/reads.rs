@@ -52,7 +52,8 @@ impl<'a> NamespaceReads<'a> {
     /// Pins one metadata view for a query.
     pub(crate) async fn pin(&self) -> Result<PinnedNamespaceReads<'a>> {
         let reader = self.subject_reader.as_ref().unwrap_or(self.reader);
-        let snapshot = reader.pin_namespace(self.namespace_id).await?;
+        let namespace = reader.namespace(self.namespace_id);
+        let snapshot = namespace.pin_namespace().await?;
         snapshot.require_subject()?;
         Ok(PinnedNamespaceReads {
             reader: self.reader,
@@ -61,7 +62,8 @@ impl<'a> NamespaceReads<'a> {
     }
 
     pub async fn head(&self) -> Result<Namespace> {
-        Ok(self.reader.get_namespace(self.namespace_id).await?)
+        let namespace = self.reader.namespace(self.namespace_id);
+        Ok(namespace.get_namespace().await?)
     }
 
     /// Reads one page of the files a checkpoint pins, in ascending inode-id
@@ -77,10 +79,9 @@ impl<'a> NamespaceReads<'a> {
         cursor: Option<CheckpointFilesPageCursor>,
         limit: usize,
     ) -> Result<CheckpointFilesPage> {
-        Ok(self
-            .reader
+        let namespace = self.reader.namespace(self.namespace_id);
+        Ok(namespace
             .list_checkpoint_files_page(
-                self.namespace_id,
                 checkpoint_id,
                 PageRequest {
                     limit: page_limit(limit).map_err(invalid_page_limit)?,
@@ -102,10 +103,9 @@ impl<'a> NamespaceReads<'a> {
         after_seq: ChangeSeq,
         limit: usize,
     ) -> Result<ListChangesResponse> {
-        Ok(self
-            .reader
+        let namespace = self.reader.namespace(self.namespace_id);
+        Ok(namespace
             .list_changes_page(
-                self.namespace_id,
                 after_seq,
                 ListChangesOptions {
                     limit: Some(page_limit(limit).map_err(invalid_page_limit)?),
@@ -121,10 +121,8 @@ impl<'a> NamespaceReads<'a> {
         content_ref: &ContentRef,
         max_bytes: u64,
     ) -> Result<Vec<u8>> {
-        Ok(self
-            .reader
-            .read_content_ref(self.namespace_id, content_ref, max_bytes)
-            .await?)
+        let namespace = self.reader.namespace(self.namespace_id);
+        Ok(namespace.read_content_ref(content_ref, max_bytes).await?)
     }
 }
 
@@ -154,6 +152,7 @@ impl PinnedNamespaceReads<'_> {
         after_seq: ChangeSeq,
         limit: usize,
     ) -> Result<ListChangesResponse> {
+        let namespace = self.reader.namespace(self.namespace_id());
         let head_seq = self.head_seq();
         if after_seq > head_seq {
             return Err(CoreError::InvalidCursor(format!(
@@ -170,10 +169,8 @@ impl PinnedNamespaceReads<'_> {
                 changes: Vec::new(),
             });
         }
-        let mut page = self
-            .reader
+        let mut page = namespace
             .list_changes_page(
-                self.namespace_id(),
                 after_seq,
                 ListChangesOptions {
                     limit: Some(page_limit(limit).map_err(invalid_page_limit)?),

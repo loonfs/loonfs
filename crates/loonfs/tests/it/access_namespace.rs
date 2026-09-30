@@ -76,18 +76,20 @@ async fn create_namespace() -> (tempfile::TempDir, FsWriter, NamespaceId) {
 #[tokio::test]
 async fn namespace_operations_need_an_administrator_or_no_subject() {
     let (_temp_dir, writer, namespace) = create_namespace().await;
+    let namespace_reader = writer.reader().namespace(&namespace);
     let root = writer.as_subject(subject("root", "prn_root"));
     let member = writer.as_subject(subject("member", "team"));
     assert_eq!(
-        writer
-            .reader()
-            .get_namespace(&namespace)
+        namespace_reader
+            .get_namespace()
             .await
             .expect("namespace")
             .access,
         access_mode()
     );
     let fork = namespace_id("fork");
+    let fork_namespace = writer.reader().namespace(&fork);
+    let member_fork_namespace = member.reader().namespace(&fork);
     let fork_options = ForkNamespaceOptions {
         actor_id: loonfs_test_support::test_actor(),
         snapshot_id: None,
@@ -107,17 +109,11 @@ async fn namespace_operations_need_an_administrator_or_no_subject() {
     let root_namespace_writer = root.open_namespace(&namespace).expect("open namespace");
     let member_namespace_writer = member.open_namespace(&namespace).expect("open namespace");
     assert_eq!(
-        writer
-            .reader()
-            .get_namespace(&fork)
-            .await
-            .expect("fork")
-            .access,
+        fork_namespace.get_namespace().await.expect("fork").access,
         access_mode()
     );
-    member
-        .reader()
-        .get_path_entry(&fork, "/", StatPathOptions::default())
+    member_fork_namespace
+        .get_path_entry("/", StatPathOptions::default())
         .await
         .expect("inherited member grant");
     let now_ms = loonfs_core::time::current_time_ms().expect("clock");
@@ -193,10 +189,12 @@ async fn subject_scope_is_enforced_only_for_acl_namespaces() {
     wrong_scope.principal_scope = PrincipalScope::parse("org_other").expect("scope");
     let expected_message =
         "subject principal scope `org_other` does not match namespace principal scope `org_demo`";
-    let error = writer
+    let wrong_scope_namespace = writer
         .reader()
         .as_subject(wrong_scope.clone())
-        .get_path_entry(&namespace, "/", StatPathOptions::default())
+        .namespace(&namespace);
+    let error = wrong_scope_namespace
+        .get_path_entry("/", StatPathOptions::default())
         .await
         .expect_err("wrong-scope read");
     assert_eq!(error.code(), ErrorCode::Forbidden);
@@ -228,10 +226,12 @@ async fn subject_scope_is_enforced_only_for_acl_namespaces() {
         )
         .await
         .expect("unrestricted namespace");
-    writer
+    let unrestricted_namespace = writer
         .reader()
         .as_subject(wrong_scope.clone())
-        .get_path_entry(&unrestricted, "/", StatPathOptions::default())
+        .namespace(&unrestricted);
+    unrestricted_namespace
+        .get_path_entry("/", StatPathOptions::default())
         .await
         .expect("unrestricted read");
     commit_as(
@@ -254,6 +254,7 @@ fn create_directory(path: &str) -> FilesystemOperation {
 #[tokio::test]
 async fn recovery_restores_an_administrator_and_keeps_the_other_root_grants() {
     let (_temp_dir, writer, namespace) = create_namespace().await;
+    let namespace_reader = writer.reader().namespace(&namespace);
     let namespace_writer = writer.open_namespace(&namespace).expect("open namespace");
     commit_as(
         &writer,
@@ -295,9 +296,8 @@ async fn recovery_restores_an_administrator_and_keeps_the_other_root_grants() {
     )
     .await
     .expect("administrator again");
-    let feed = writer
-        .reader()
-        .list_changes_page(&namespace, ChangeSeq(0), ListChangesOptions { limit: None })
+    let feed = namespace_reader
+        .list_changes_page(ChangeSeq(0), ListChangesOptions { limit: None })
         .await
         .expect("feed");
     let root_rows: Vec<_> = feed
@@ -383,8 +383,9 @@ async fn a_revoked_administrator_cannot_delete_a_snapshot_through_the_former_wri
         .build()
         .await
         .expect("fresh reader");
-    let _snapshot = reader
-        .pin_namespace_at_snapshot(&namespace, &snapshot_id)
+    let namespace_reader = reader.namespace(&namespace);
+    let _snapshot = namespace_reader
+        .pin_namespace_at_snapshot(&snapshot_id)
         .await
         .expect("snapshot still exists");
     peer.shutdown().await.expect("peer shutdown");
@@ -441,6 +442,7 @@ async fn snapshot_after_administrator_change() -> (
 ) {
     let (directory, writer, namespace) = create_namespace().await;
     let root = writer.as_subject(subject("root", "prn_root"));
+    let namespace_reader = root.reader().namespace(&namespace);
     let namespace_writer = root.open_namespace(&namespace).expect("open namespace");
     namespace_writer
         .put_file_bytes(
@@ -450,9 +452,8 @@ async fn snapshot_after_administrator_change() -> (
         )
         .await
         .expect("seed snapshot content");
-    let content = root
-        .reader()
-        .get_path_entry(&namespace, "/file", StatPathOptions::default())
+    let content = namespace_reader
+        .get_path_entry("/file", StatPathOptions::default())
         .await
         .expect("file")
         .content_ref()
@@ -507,16 +508,17 @@ async fn snapshot_admin_reads_reject_a_revoked_administrator() {
     let (_directory, reader, namespace, snapshot_id, content) =
         snapshot_after_administrator_change().await;
     let revoked = reader.as_subject(subject("root", "prn_root"));
+    let namespace_reader = revoked.namespace(&namespace);
     assert_eq!(
-        revoked
-            .list_changes_page(&namespace, ChangeSeq(0), ListChangesOptions::default())
+        namespace_reader
+            .list_changes_page(ChangeSeq(0), ListChangesOptions::default())
             .await
             .expect_err("live feed rejects the old administrator")
             .code(),
         ErrorCode::Forbidden
     );
-    let snapshot = revoked
-        .pin_namespace_at_snapshot(&namespace, &snapshot_id)
+    let snapshot = namespace_reader
+        .pin_namespace_at_snapshot(&snapshot_id)
         .await
         .expect("load historical view");
     assert_eq!(
@@ -549,9 +551,11 @@ async fn snapshot_admin_reads_reject_a_revoked_administrator() {
 async fn snapshot_admin_reads_accept_the_current_administrator() {
     let (_directory, reader, namespace, snapshot_id, content) =
         snapshot_after_administrator_change().await;
-    let snapshot = reader
+    let namespace_reader = reader
         .as_subject(subject("new-root", "prn_new_root"))
-        .pin_namespace_at_snapshot(&namespace, &snapshot_id)
+        .namespace(&namespace);
+    let snapshot = namespace_reader
+        .pin_namespace_at_snapshot(&snapshot_id)
         .await
         .expect("load historical view");
     let changes = snapshot

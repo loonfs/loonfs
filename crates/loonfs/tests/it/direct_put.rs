@@ -491,6 +491,7 @@ fn concurrent_puts_coalesce_into_one_wal_segment() {
     let object_store = store(temp_dir.path());
     block_on(async {
         let fs = open_runtime_async(object_store.clone(), "publication-batch-test").await;
+        let namespace = fs.reader.namespace(&namespace_id);
         fs.create_namespace(
             &namespace_id,
             CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
@@ -586,9 +587,8 @@ fn concurrent_puts_coalesce_into_one_wal_segment() {
             ("/docs/c.txt", b"gamma"),
             ("/docs/d.txt", b"delta"),
         ] {
-            let read = fs
-                .reader
-                .get_file_bytes(&namespace_id, path)
+            let read = namespace
+                .get_file_bytes(path)
                 .await
                 .expect("read coalesced file");
             assert_eq!(read.bytes, bytes);
@@ -652,6 +652,7 @@ fn concurrent_puts_both_commit_after_one_transient_content_failure() {
             })
         })
         .await;
+        let namespace = fs.reader.namespace(&namespace_id);
         fs.create_namespace(
             &namespace_id,
             CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
@@ -682,9 +683,8 @@ fn concurrent_puts_both_commit_after_one_transient_content_failure() {
             ("/docs/b.txt", b"beta" as &[u8], b),
         ] {
             result.expect("both puts survive the transient content failure");
-            let read = fs
-                .reader
-                .get_file_bytes(&namespace_id, path)
+            let read = namespace
+                .get_file_bytes(path)
                 .await
                 .expect("read committed file");
             assert_eq!(read.bytes, bytes);

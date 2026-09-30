@@ -952,6 +952,7 @@ async fn a_cold_metadata_job_probes_with_its_configured_options() {
         .expect("fold a delta below the default trigger");
     drop(runtime);
     let runtime = open_runtime_async(store(temp_dir.path()), "writer-c").await;
+    let namespace_reader = runtime.reader.namespace(&namespace);
     let defaults = MetadataMaintenanceJob::new(runtime.maintenance.clone());
     let immediate = MetadataMaintenanceJob::new(runtime.maintenance.clone()).options(
         MetadataMaintenanceOptions {
@@ -985,18 +986,16 @@ async fn a_cold_metadata_job_probes_with_its_configured_options() {
             == MaintenanceProbe::Idle
         {
             assert_eq!(
-                runtime
-                    .reader
-                    .get_file_bytes(&namespace, "/one.txt")
+                namespace_reader
+                    .get_file_bytes("/one.txt")
                     .await
                     .expect("first file")
                     .bytes,
                 b"one"
             );
             assert_eq!(
-                runtime
-                    .reader
-                    .get_file_bytes(&namespace, "/two.txt")
+                namespace_reader
+                    .get_file_bytes("/two.txt")
                     .await
                     .expect("second file")
                     .bytes,

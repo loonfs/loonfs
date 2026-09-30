@@ -85,13 +85,13 @@ async fn checkpoint_files(
     checkpoint_id: &loonfs::PinId,
     limit: usize,
 ) -> Vec<CheckpointFile> {
+    let namespace = reader.namespace(namespace_id);
     let mut files = Vec::new();
     let mut cursor = None;
     let mut seen: BTreeSet<InodeId> = BTreeSet::new();
     loop {
-        let page = reader
+        let page = namespace
             .list_checkpoint_files_page(
-                namespace_id,
                 checkpoint_id,
                 PageRequest {
                     limit: page_limit(limit),
@@ -225,6 +225,7 @@ async fn checkpoint_enumeration_answers_the_state_it_pinned() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = open_runtime_async(store(temp_dir.path()), "checkpoint-files-test").await;
     let namespace_id = namespace_id("demo");
+    let namespace = fs.reader.namespace(&namespace_id);
     build_mixed_namespace(&fs, &namespace_id).await;
     let namespace_writer = fs
         .writer
@@ -316,10 +317,8 @@ async fn checkpoint_enumeration_answers_the_state_it_pinned() {
          deleted subtree nor anything written later"
     );
 
-    let retained = fs
-        .reader
+    let retained = namespace
         .list_checkpoint_files_page(
-            &namespace_id,
             &checkpoint.checkpoint_id,
             PageRequest {
                 limit: page_limit(100),
@@ -381,6 +380,7 @@ async fn checkpoint_files_page_without_gaps_or_duplicates() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = open_runtime_async(store(temp_dir.path()), "checkpoint-files-paging-test").await;
     let namespace_id = namespace_id("demo");
+    let namespace = fs.reader.namespace(&namespace_id);
     fs.create_namespace(
         &namespace_id,
         CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
@@ -414,10 +414,8 @@ async fn checkpoint_files_page_without_gaps_or_duplicates() {
     // Resuming from every cursor position lands exactly on the remaining
     // tail: no row is re-read, and none is skipped.
     for (index, file) in whole.iter().enumerate() {
-        let resumed = fs
-            .reader
+        let resumed = namespace
             .list_checkpoint_files_page(
-                &namespace_id,
                 &checkpoint.checkpoint_id,
                 PageRequest {
                     limit: page_limit(100),
@@ -440,6 +438,7 @@ async fn an_empty_namespace_answers_one_empty_page() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = open_runtime_async(store(temp_dir.path()), "checkpoint-files-empty-test").await;
     let namespace_id = namespace_id("demo");
+    let namespace = fs.reader.namespace(&namespace_id);
     fs.create_namespace(
         &namespace_id,
         CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
@@ -451,10 +450,8 @@ async fn an_empty_namespace_answers_one_empty_page() {
         .await
         .expect("create checkpoint");
 
-    let page = fs
-        .reader
+    let page = namespace
         .list_checkpoint_files_page(
-            &namespace_id,
             &checkpoint.checkpoint_id,
             PageRequest {
                 limit: page_limit(10),
@@ -575,6 +572,7 @@ async fn a_deleted_checkpoint_refuses_enumeration_instead_of_answering_current_s
     let temp_dir = tempdir().expect("tempdir");
     let fs = open_runtime_async(store(temp_dir.path()), "checkpoint-files-release-test").await;
     let namespace_id = namespace_id("demo");
+    let namespace = fs.reader.namespace(&namespace_id);
     fs.create_namespace(
         &namespace_id,
         CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
@@ -598,10 +596,8 @@ async fn a_deleted_checkpoint_refuses_enumeration_instead_of_answering_current_s
         .await
         .expect("release checkpoint");
 
-    let error = fs
-        .reader
+    let error = namespace
         .list_checkpoint_files_page(
-            &namespace_id,
             &checkpoint.checkpoint_id,
             PageRequest {
                 limit: page_limit(10),
@@ -615,10 +611,8 @@ async fn a_deleted_checkpoint_refuses_enumeration_instead_of_answering_current_s
 
     let missing = loonfs::PinId::parse("pin_00000000000000000001-0123456789abcdef")
         .expect("valid checkpoint id");
-    let error = fs
-        .reader
+    let error = namespace
         .list_checkpoint_files_page(
-            &namespace_id,
             &missing,
             PageRequest {
                 limit: page_limit(10),
@@ -636,6 +630,7 @@ async fn resolve_current_files_answers_the_whole_matrix_in_input_order() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = open_runtime_async(store(temp_dir.path()), "resolve-current-files-test").await;
     let namespace_id = namespace_id("demo");
+    let namespace = fs.reader.namespace(&namespace_id);
     fs.create_namespace(
         &namespace_id,
         CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
@@ -757,9 +752,8 @@ async fn resolve_current_files_answers_the_whole_matrix_in_input_order() {
         unknown,
         directory,
     ];
-    let states = fs
-        .reader
-        .resolve_current_files(&namespace_id, &requested)
+    let states = namespace
+        .resolve_current_files(&requested)
         .await
         .expect("resolve current files");
 
@@ -820,6 +814,7 @@ async fn resolve_current_files_refuses_a_batch_over_the_cap() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = open_runtime_async(store(temp_dir.path()), "resolve-current-files-cap-test").await;
     let namespace_id = namespace_id("demo");
+    let namespace = fs.reader.namespace(&namespace_id);
     fs.create_namespace(
         &namespace_id,
         CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
@@ -841,9 +836,8 @@ async fn resolve_current_files_refuses_a_batch_over_the_cap() {
         .inode_id;
 
     let at_cap = vec![alpha; loonfs::MAX_RESOLVE_CURRENT_FILES];
-    let states = fs
-        .reader
-        .resolve_current_files(&namespace_id, &at_cap)
+    let states = namespace
+        .resolve_current_files(&at_cap)
         .await
         .expect("a batch at the cap is answered");
     assert_eq!(states.len(), loonfs::MAX_RESOLVE_CURRENT_FILES);
@@ -851,9 +845,8 @@ async fn resolve_current_files_refuses_a_batch_over_the_cap() {
 
     let mut over_cap = at_cap;
     over_cap.push(alpha);
-    let error = fs
-        .reader
-        .resolve_current_files(&namespace_id, &over_cap)
+    let error = namespace
+        .resolve_current_files(&over_cap)
         .await
         .expect_err("one past the cap is refused");
     assert_eq!(error.code(), ErrorCode::InvalidRequest);
@@ -881,6 +874,7 @@ async fn read_content_ref_answers_bytes_and_refuses_over_budget_before_fetching(
     })
     .await;
     let namespace_id = namespace_id("demo");
+    let namespace = fs.reader.namespace(&namespace_id);
     fs.create_namespace(
         &namespace_id,
         CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
@@ -904,9 +898,8 @@ async fn read_content_ref_answers_bytes_and_refuses_over_budget_before_fetching(
         .expect("a file carries a content ref");
 
     counting.reset();
-    let bytes = fs
-        .reader
-        .read_content_ref(&namespace_id, &content_ref, content_ref.size_bytes)
+    let bytes = namespace
+        .read_content_ref(&content_ref, content_ref.size_bytes)
         .await
         .expect("read content by reference");
     assert_eq!(bytes, b"alpha bytes");
@@ -917,9 +910,8 @@ async fn read_content_ref_answers_bytes_and_refuses_over_budget_before_fetching(
     );
 
     counting.reset();
-    let error = fs
-        .reader
-        .read_content_ref(&namespace_id, &content_ref, content_ref.size_bytes - 1)
+    let error = namespace
+        .read_content_ref(&content_ref, content_ref.size_bytes - 1)
         .await
         .expect_err("a reference larger than the budget is refused");
     assert_eq!(error.code(), ErrorCode::ContentTooLarge);
@@ -942,6 +934,7 @@ async fn read_content_ref_refuses_bytes_that_do_not_match_the_reference() {
     })
     .await;
     let namespace_id = namespace_id("demo");
+    let namespace = fs.reader.namespace(&namespace_id);
     fs.create_namespace(
         &namespace_id,
         CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
@@ -975,9 +968,8 @@ async fn read_content_ref_refuses_bytes_that_do_not_match_the_reference() {
         .await
         .expect("corrupt the stored content object");
 
-    let error = fs
-        .reader
-        .read_content_ref(&namespace_id, &content_ref, content_ref.size_bytes)
+    let error = namespace
+        .read_content_ref(&content_ref, content_ref.size_bytes)
         .await
         .expect_err("bytes that do not hash to the reference are refused");
     assert_eq!(error.code(), ErrorCode::NamespaceCorrupt);
@@ -1016,15 +1008,13 @@ async fn a_standalone_reader_serves_every_operation() {
         .build()
         .await
         .expect("build a standalone reader");
+    let namespace = reader.namespace(&namespace_id);
 
     let files = checkpoint_files(&reader, &namespace_id, &checkpoint.checkpoint_id, 2).await;
     assert_eq!(files.len(), 4);
 
-    let states = reader
-        .resolve_current_files(
-            &namespace_id,
-            &files.iter().map(|file| file.inode_id).collect::<Vec<_>>(),
-        )
+    let states = namespace
+        .resolve_current_files(&files.iter().map(|file| file.inode_id).collect::<Vec<_>>())
         .await
         .expect("resolve current files through a standalone reader");
     assert!(states.iter().all(|state| state.visible));
@@ -1037,8 +1027,8 @@ async fn a_standalone_reader_serves_every_operation() {
     );
 
     for file in &files {
-        let bytes = reader
-            .read_content_ref(&namespace_id, &file.content_ref, file.size_bytes)
+        let bytes = namespace
+            .read_content_ref(&file.content_ref, file.size_bytes)
             .await
             .expect("read content through a standalone reader");
         assert_eq!(bytes.len() as u64, file.size_bytes);

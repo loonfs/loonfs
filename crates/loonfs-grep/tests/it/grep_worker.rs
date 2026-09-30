@@ -1298,6 +1298,7 @@ async fn a_recursive_delete_hides_matches_and_an_undelete_restores_them() {
         .await
         .expect("writer");
     let reader = writer.reader();
+    let namespace = reader.namespace(&namespace_id);
     writer
         .create_namespace(
             &namespace_id,
@@ -1322,8 +1323,8 @@ async fn a_recursive_delete_hides_matches_and_an_undelete_restores_them() {
     worker.enable(&namespace_id).await.expect("enable");
     drive_worker_to_current(&worker, &namespace_id, GramIndexBuildPolicy::default()).await;
     let segments_before = grep_segment_ids(&store, &namespace_id).await;
-    let docs_inode_id = reader
-        .get_path_entry(&namespace_id, "/docs", Default::default())
+    let docs_inode_id = namespace
+        .get_path_entry("/docs", Default::default())
         .await
         .expect("stat the directory")
         .inode_id;
@@ -1398,6 +1399,7 @@ async fn undeleting_a_subtree_deleted_before_backfill_needs_no_rebuild() {
         .await
         .expect("writer");
     let reader = writer.reader();
+    let namespace = reader.namespace(&namespace_id);
     writer
         .create_namespace(
             &namespace_id,
@@ -1418,8 +1420,8 @@ async fn undeleting_a_subtree_deleted_before_backfill_needs_no_rebuild() {
             .await
             .expect("write file before delete");
     }
-    let docs_inode_id = reader
-        .get_path_entry(&namespace_id, "/docs", Default::default())
+    let docs_inode_id = namespace
+        .get_path_entry("/docs", Default::default())
         .await
         .expect("stat docs before delete")
         .inode_id;
@@ -1500,6 +1502,7 @@ async fn a_failing_worker_step_never_blocks_a_concurrent_commit() {
         .await
         .expect("writer");
     let reader = writer.reader();
+    let namespace = reader.namespace(&namespace_id);
     writer
         .create_namespace(
             &namespace_id,
@@ -1533,8 +1536,8 @@ async fn a_failing_worker_step_never_blocks_a_concurrent_commit() {
     let error = build.expect_err("an unreadable grep manifest fails the step");
     assert_eq!(error.code(), ErrorCode::IndexCorrupt);
     commit.expect("the filesystem commit is unaffected by grep");
-    let read = reader
-        .get_file_bytes(&namespace_id, "/during-failure.txt")
+    let read = namespace
+        .get_file_bytes("/during-failure.txt")
         .await
         .expect("the committed file is readable");
     assert_eq!(read.bytes, b"isolated needle\n");

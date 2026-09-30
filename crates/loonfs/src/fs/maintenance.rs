@@ -892,7 +892,7 @@ impl FsMaintenance {
     }
 }
 
-impl crate::NamespaceWriter {
+impl crate::Namespace<crate::Writable> {
     /// Grants `admin` on the root row to `principal_id`, keeping every other
     /// root grant, through a commit no subject check applies to.
     pub async fn recover_administrator(

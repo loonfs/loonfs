@@ -38,6 +38,7 @@ async fn read_during_compaction_and_collection(
         OperationClass::Get,
     ));
     let runtime = open_runtime_async(store.clone(), "reader-gc-probe").await;
+    let runtime_namespace = runtime.reader.namespace(&namespace);
     runtime
         .create_namespace(
             &namespace,
@@ -97,21 +98,21 @@ async fn read_during_compaction_and_collection(
         .build()
         .await
         .expect("cold reader");
+    let cold_namespace = reader.namespace(&namespace);
     let pinned = if let Some(snapshot) = &snapshot {
         Some(
-            reader
-                .pin_namespace_at_snapshot(&namespace, &snapshot.checkpoint_id)
+            cold_namespace
+                .pin_namespace_at_snapshot(&snapshot.checkpoint_id)
                 .await
                 .expect("durable view"),
         )
     } else if pin_in_memory {
-        Some(reader.pin_namespace(&namespace).await.expect("memory view"))
+        Some(cold_namespace.pin_namespace().await.expect("memory view"))
     } else {
         None
     };
-    let captured = runtime
-        .reader
-        .get_path_entry(&namespace, "/a", Default::default())
+    let captured = runtime_namespace
+        .get_path_entry("/a", Default::default())
         .await
         .expect("captured entry");
     store.block_next();
@@ -119,8 +120,8 @@ async fn read_during_compaction_and_collection(
         match &pinned {
             Some(pinned) => pinned.get_path_entry("/a", Default::default()).await,
             None => {
-                reader
-                    .get_path_entry(&namespace, "/a", Default::default())
+                cold_namespace
+                    .get_path_entry("/a", Default::default())
                     .await
             }
         }
@@ -192,14 +193,15 @@ async fn read_during_compaction_and_collection(
         .build()
         .await
         .expect("fresh reader");
-    let current = fresh
-        .get_file_bytes(&namespace, "/a")
+    let fresh_namespace = fresh.namespace(&namespace);
+    let current = fresh_namespace
+        .get_file_bytes("/a")
         .await
         .expect("current data remains readable");
     assert_eq!(current.bytes, b"current");
     if let Ok(entry) = &result {
-        let current_entry = fresh
-            .get_path_entry(&namespace, "/a", Default::default())
+        let current_entry = fresh_namespace
+            .get_path_entry("/a", Default::default())
             .await
             .expect("current entry");
         assert_eq!(entry, if durable { &captured } else { &current_entry });
@@ -283,12 +285,13 @@ async fn durable_pinned_reads_keep_missing_segments_corrupt_after_manifest_advan
         .build()
         .await
         .expect("cold reader");
-    let pinned_snapshot = reader
-        .pin_namespace_at_snapshot(&namespace_id, &snapshot.checkpoint_id)
+    let namespace = reader.namespace(&namespace_id);
+    let pinned_snapshot = namespace
+        .pin_namespace_at_snapshot(&snapshot.checkpoint_id)
         .await
         .expect("snapshot view");
-    let pinned_checkpoint = reader
-        .pin_namespace_at_checkpoint(&namespace_id, &checkpoint.checkpoint_id)
+    let pinned_checkpoint = namespace
+        .pin_namespace_at_checkpoint(&checkpoint.checkpoint_id)
         .await
         .expect("checkpoint view");
     let captured = load_namespace_current_manifest(store.as_ref(), &namespace_id)
@@ -380,12 +383,13 @@ async fn pinned_reads_report_their_deleted_pin_when_a_segment_is_missing() {
         .build()
         .await
         .expect("cold reader");
-    let pinned_snapshot = reader
-        .pin_namespace_at_snapshot(&namespace_id, &snapshot.checkpoint_id)
+    let namespace = reader.namespace(&namespace_id);
+    let pinned_snapshot = namespace
+        .pin_namespace_at_snapshot(&snapshot.checkpoint_id)
         .await
         .expect("snapshot view");
-    let pinned_checkpoint = reader
-        .pin_namespace_at_checkpoint(&namespace_id, &checkpoint.checkpoint_id)
+    let pinned_checkpoint = namespace
+        .pin_namespace_at_checkpoint(&checkpoint.checkpoint_id)
         .await
         .expect("checkpoint view");
     namespace_writer
@@ -434,6 +438,7 @@ async fn snapshot_directory_cursor_resumes_only_at_its_snapshot() {
     let temp_dir = tempdir().expect("tempdir");
     let runtime = open_runtime_async(store(temp_dir.path()), "snapshot-cursor-test").await;
     let namespace_id = NamespaceId::parse("snapshot-cursor").expect("namespace id");
+    let namespace = runtime.reader.namespace(&namespace_id);
     runtime
         .create_namespace(
             &namespace_id,
@@ -468,9 +473,8 @@ async fn snapshot_directory_cursor_resumes_only_at_its_snapshot() {
         )
         .await
         .expect("create first snapshot");
-    let first_view = runtime
-        .reader
-        .pin_namespace_at_snapshot(&namespace_id, &first_snapshot.checkpoint_id)
+    let first_view = namespace
+        .pin_namespace_at_snapshot(&first_snapshot.checkpoint_id)
         .await
         .expect("pin first snapshot");
     let limit = PaginationPolicy::default()
@@ -512,9 +516,8 @@ async fn snapshot_directory_cursor_resumes_only_at_its_snapshot() {
         )
         .await
         .expect("create second snapshot");
-    let second_view = runtime
-        .reader
-        .pin_namespace_at_snapshot(&namespace_id, &second_snapshot.checkpoint_id)
+    let second_view = namespace
+        .pin_namespace_at_snapshot(&second_snapshot.checkpoint_id)
         .await
         .expect("pin second snapshot");
 
@@ -547,10 +550,8 @@ async fn snapshot_directory_cursor_resumes_only_at_its_snapshot() {
         ErrorCode::InvalidRequest,
     );
     assert_core_error_kind(
-        runtime
-            .reader
+        namespace
             .list_path_entries_page(
-                &namespace_id,
                 "/",
                 PageRequest {
                     limit,
@@ -565,10 +566,8 @@ async fn snapshot_directory_cursor_resumes_only_at_its_snapshot() {
         .parent_inode_id
         .expect("listed entry has root parent");
     assert_core_error_kind(
-        runtime
-            .reader
+        namespace
             .list_inode_children_page(
-                &namespace_id,
                 root_inode_id,
                 PageRequest {
                     limit,
@@ -620,6 +619,7 @@ async fn checkpoint_directory_cursor_resumes_only_at_its_checkpoint() {
     let temp_dir = tempdir().expect("tempdir");
     let runtime = open_runtime_async(store(temp_dir.path()), "checkpoint-cursor-test").await;
     let namespace_id = NamespaceId::parse("checkpoint-cursor").expect("namespace id");
+    let namespace = runtime.reader.namespace(&namespace_id);
     runtime
         .create_namespace(
             &namespace_id,
@@ -647,9 +647,8 @@ async fn checkpoint_directory_cursor_resumes_only_at_its_checkpoint() {
             .await
             .expect("create checkpoint");
         views.push(
-            runtime
-                .reader
-                .pin_namespace_at_checkpoint(&namespace_id, &checkpoint.checkpoint_id)
+            namespace
+                .pin_namespace_at_checkpoint(&checkpoint.checkpoint_id)
                 .await
                 .expect("pin checkpoint"),
         );
@@ -678,9 +677,8 @@ async fn checkpoint_directory_cursor_resumes_only_at_its_checkpoint() {
     };
 
     assert_core_error_kind(
-        runtime
-            .reader
-            .list_path_entries_page(&namespace_id, "/", request.clone(), Default::default())
+        namespace
+            .list_path_entries_page("/", request.clone(), Default::default())
             .await,
         ErrorCode::InvalidRequest,
     );
@@ -709,6 +707,7 @@ async fn pinned_namespace_reads_keep_one_head_across_later_commits() {
     let temp_dir = tempdir().expect("tempdir");
     let runtime = open_runtime_async(store(temp_dir.path()), "snapshot-reader-test").await;
     let namespace_id = NamespaceId::parse("snapshot-reads").expect("namespace id");
+    let namespace = runtime.reader.namespace(&namespace_id);
     runtime
         .create_namespace(
             &namespace_id,
@@ -726,11 +725,7 @@ async fn pinned_namespace_reads_keep_one_head_across_later_commits() {
         .await
         .expect("create initial file");
 
-    let snapshot = runtime
-        .reader
-        .pin_namespace(&namespace_id)
-        .await
-        .expect("pin namespace");
+    let snapshot = namespace.pin_namespace().await.expect("pin namespace");
     assert_eq!(snapshot.head_seq(), created.committed_seq);
     let before = snapshot
         .get_path_entry("/before.txt", Default::default())
@@ -807,15 +802,13 @@ async fn pinned_namespace_reads_keep_one_head_across_later_commits() {
         .expect("resolve pinned inode");
     assert_eq!(states[0].current_revision_no, before.revision_no());
 
-    let latest = runtime
-        .reader
-        .get_file_bytes(&namespace_id, "/before.txt")
+    let latest = namespace
+        .get_file_bytes("/before.txt")
         .await
         .expect("read latest replacement");
     assert_eq!(latest.bytes, b"after");
-    runtime
-        .reader
-        .get_path_entry(&namespace_id, "/later.txt", Default::default())
+    namespace
+        .get_path_entry("/later.txt", Default::default())
         .await
         .expect("latest view sees later file");
 }
@@ -825,6 +818,7 @@ async fn pinned_checkpoint_reads_answer_the_state_the_checkpoint_captured() {
     let temp_dir = tempdir().expect("tempdir");
     let runtime = open_runtime_async(store(temp_dir.path()), "snapshot-checkpoint-test").await;
     let namespace_id = NamespaceId::parse("snapshot-checkpoint-reads").expect("namespace id");
+    let namespace = runtime.reader.namespace(&namespace_id);
     runtime
         .create_namespace(
             &namespace_id,
@@ -867,9 +861,8 @@ async fn pinned_checkpoint_reads_answer_the_state_the_checkpoint_captured() {
         .await
         .expect("create file after the checkpoint");
 
-    let snapshot = runtime
-        .reader
-        .pin_namespace_at_checkpoint(&namespace_id, &checkpoint.checkpoint_id)
+    let snapshot = namespace
+        .pin_namespace_at_checkpoint(&checkpoint.checkpoint_id)
         .await
         .expect("pin namespace at checkpoint");
     let pinned = snapshot
@@ -889,15 +882,13 @@ async fn pinned_checkpoint_reads_answer_the_state_the_checkpoint_captured() {
         .expect_err("later file is absent from the checkpointed view");
     assert_eq!(later_error.code(), ErrorCode::PathNotFound);
 
-    let latest = runtime
-        .reader
-        .get_file_bytes(&namespace_id, "/pinned.txt")
+    let latest = namespace
+        .get_file_bytes("/pinned.txt")
         .await
         .expect("read latest replacement");
     assert_eq!(latest.bytes, b"replaced");
-    runtime
-        .reader
-        .get_path_entry(&namespace_id, "/later.txt", Default::default())
+    namespace
+        .get_path_entry("/later.txt", Default::default())
         .await
         .expect("latest view sees later file");
 }
@@ -908,6 +899,7 @@ async fn a_deleted_checkpoint_refuses_a_pin_instead_of_reading_current_state() {
     let runtime =
         open_runtime_async(store(temp_dir.path()), "snapshot-checkpoint-release-test").await;
     let namespace_id = NamespaceId::parse("snapshot-deleted-checkpoint").expect("namespace id");
+    let namespace = runtime.reader.namespace(&namespace_id);
     runtime
         .create_namespace(
             &namespace_id,
@@ -935,9 +927,8 @@ async fn a_deleted_checkpoint_refuses_a_pin_instead_of_reading_current_state() {
         .expect("release checkpoint");
 
     assert_core_error_kind(
-        runtime
-            .reader
-            .pin_namespace_at_checkpoint(&namespace_id, &checkpoint.checkpoint_id)
+        namespace
+            .pin_namespace_at_checkpoint(&checkpoint.checkpoint_id)
             .await,
         ErrorCode::CheckpointNotFound,
     );
@@ -948,6 +939,7 @@ async fn snapshot_pins_serve_captured_state_and_enforce_release() {
     let temp_dir = tempdir().expect("tempdir");
     let runtime = open_runtime_async(store(temp_dir.path()), "snapshot-lease-read-test").await;
     let namespace_id = NamespaceId::parse("snapshot-lease-reads").expect("namespace id");
+    let namespace = runtime.reader.namespace(&namespace_id);
     runtime
         .create_namespace(
             &namespace_id,
@@ -968,9 +960,8 @@ async fn snapshot_pins_serve_captured_state_and_enforce_release() {
         )
         .await
         .expect("create captured file");
-    let captured = runtime
-        .reader
-        .get_path_entry(&namespace_id, "/pinned.txt", Default::default())
+    let captured = namespace
+        .get_path_entry("/pinned.txt", Default::default())
         .await
         .expect("resolve captured file");
     let now_ms = loonfs::current_time_ms().expect("current time");
@@ -989,9 +980,8 @@ async fn snapshot_pins_serve_captured_state_and_enforce_release() {
         ..Default::default()
     };
     assert_eq!(
-        runtime
-            .reader
-            .get_path_entry(&namespace_id, "/pinned.txt", snapshot_options.clone())
+        namespace
+            .get_path_entry("/pinned.txt", snapshot_options.clone())
             .await
             .expect("read with snapshot options"),
         captured,
@@ -1009,9 +999,8 @@ async fn snapshot_pins_serve_captured_state_and_enforce_release() {
         )
         .await
         .expect("replace captured file");
-    let pinned = runtime
-        .reader
-        .pin_namespace_at_snapshot(&namespace_id, &snapshot.checkpoint_id)
+    let pinned = namespace
+        .pin_namespace_at_snapshot(&snapshot.checkpoint_id)
         .await
         .expect("pin live snapshot");
     assert_eq!(
@@ -1048,9 +1037,8 @@ async fn snapshot_pins_serve_captured_state_and_enforce_release() {
         .await
         .expect("release snapshot");
     assert_core_error_kind(
-        runtime
-            .reader
-            .pin_namespace_at_snapshot(&namespace_id, &snapshot.checkpoint_id)
+        namespace
+            .pin_namespace_at_snapshot(&snapshot.checkpoint_id)
             .await,
         ErrorCode::SnapshotNotFound,
     );
@@ -1099,17 +1087,19 @@ async fn a_reader_judges_snapshot_expiry_on_its_own_wall_clock() {
 
     clock.0.store(EXPIRES_AT_MS - 1, Ordering::SeqCst);
     for reader in [&reader, &writer.reader()] {
-        let pinned = reader
-            .pin_namespace_at_snapshot(&namespace_id, &snapshot.checkpoint_id)
+        let namespace = reader.namespace(&namespace_id);
+        let pinned = namespace
+            .pin_namespace_at_snapshot(&snapshot.checkpoint_id)
             .await
             .expect("the snapshot is live one millisecond before its expiry");
         assert_eq!(pinned.head_seq(), snapshot.captured_seq);
     }
     clock.0.store(EXPIRES_AT_MS, Ordering::SeqCst);
     for reader in [&reader, &writer.reader()] {
+        let namespace = reader.namespace(&namespace_id);
         assert_core_error_kind(
-            reader
-                .pin_namespace_at_snapshot(&namespace_id, &snapshot.checkpoint_id)
+            namespace
+                .pin_namespace_at_snapshot(&snapshot.checkpoint_id)
                 .await,
             ErrorCode::SnapshotGone,
         );
@@ -1121,6 +1111,7 @@ async fn a_pinned_reader_rejects_options_naming_another_snapshot() {
     let temp_dir = tempdir().expect("tempdir");
     let runtime = open_runtime_async(store(temp_dir.path()), "snapshot-mismatch-read-test").await;
     let namespace_id = NamespaceId::parse("snapshot-mismatch-reads").expect("namespace id");
+    let namespace = runtime.reader.namespace(&namespace_id);
     runtime
         .create_namespace(
             &namespace_id,
@@ -1157,9 +1148,8 @@ async fn a_pinned_reader_rejects_options_naming_another_snapshot() {
                 .expect("create snapshot"),
         );
     }
-    let pinned = runtime
-        .reader
-        .pin_namespace_at_snapshot(&namespace_id, &snapshots[0].checkpoint_id)
+    let pinned = namespace
+        .pin_namespace_at_snapshot(&snapshots[0].checkpoint_id)
         .await
         .expect("pin the first snapshot");
     let other = snapshots[1].checkpoint_id.clone();
@@ -1280,10 +1270,8 @@ async fn a_missing_current_segment_stays_corrupt_and_manifest_read_failures_prop
         .build()
         .await
         .expect("reader");
-    let pinned = reader
-        .pin_namespace(&namespace_id)
-        .await
-        .expect("captured view");
+    let namespace = reader.namespace(&namespace_id);
+    let pinned = namespace.pin_namespace().await.expect("captured view");
     for key in store
         .list_prefix(&keys::metadata_segment_prefix(&namespace_id))
         .await
@@ -1293,9 +1281,7 @@ async fn a_missing_current_segment_stays_corrupt_and_manifest_read_failures_prop
     }
     store.reset();
     assert_core_error_kind(
-        reader
-            .get_path_entry(&namespace_id, "/file", Default::default())
-            .await,
+        namespace.get_path_entry("/file", Default::default()).await,
         ErrorCode::NamespaceCorrupt,
     );
     assert_eq!(

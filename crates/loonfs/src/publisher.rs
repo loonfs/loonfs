@@ -12,8 +12,8 @@
 //! The registry keeps one table of live sessions, for three reasons: an open
 //! returns the session a handle already holds, the retained projection
 //! budget reaches every publisher, and shutdown drains every session. The
-//! host decides how long a session lives by holding its
-//! [`NamespaceWriter`](crate::NamespaceWriter).
+//! host decides how long a session lives by holding its writable
+//! [`Namespace`](crate::Namespace).
 
 mod admission;
 mod inline_content;
@@ -106,7 +106,7 @@ pub enum NamespaceSessionState {
 /// share.
 ///
 /// Clones share the same sessions and worker tasks. The table holds a
-/// session while a [`NamespaceWriter`](crate::NamespaceWriter) holds it or
+/// session while a writable [`Namespace`](crate::Namespace) holds it or
 /// while work it admitted is still running. Nothing here decides how many
 /// sessions exist or how long they live.
 ///
@@ -155,8 +155,8 @@ struct LiveSession {
     session: Weak<NamespaceSession>,
 }
 
-/// One namespace's writer session, shared by every clone of its
-/// [`NamespaceWriter`](crate::NamespaceWriter).
+/// One namespace's writer session, shared by every clone of its writable
+/// [`Namespace`](crate::Namespace).
 ///
 /// Dropping the last one ends the session. Work it already admitted still
 /// publishes, and the table forgets the session once that work finishes.

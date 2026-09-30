@@ -69,6 +69,7 @@ async fn check_buffered_read_access(content_size: usize) {
         .await
         .expect("reader")
         .as_subject(subject("viewer"));
+    let namespace = reader.namespace(&namespace_id);
     for operation in [
         FilesystemOperation::CreateDirectory {
             path: AbsolutePath::parse("/team").expect("path"),
@@ -95,8 +96,8 @@ async fn check_buffered_read_access(content_size: usize) {
             .await
             .expect("seed");
     }
-    reader
-        .get_path_entry(&namespace_id, "/team", StatPathOptions::default())
+    namespace
+        .get_path_entry("/team", StatPathOptions::default())
         .await
         .expect("warm read");
     for byte in *b"ab" {
@@ -126,24 +127,24 @@ async fn check_buffered_read_access(content_size: usize) {
             .await
             .expect("publish file");
         for _ in 0..2 {
-            let read = reader
-                .get_file_bytes(&namespace_id, "/team/file")
+            let read = namespace
+                .get_file_bytes("/team/file")
                 .await
                 .expect("read with changed or unchanged metadata");
             assert_eq!(read.bytes, bytes);
         }
         assert_eq!(
-            reader
+            namespace
                 .as_subject(subject("stranger"))
-                .get_file_bytes(&namespace_id, "/team/file")
+                .get_file_bytes("/team/file")
                 .await
                 .expect_err("a shared cache does not grant another subject access")
                 .code(),
             ErrorCode::PathNotFound
         );
     }
-    let inode_id = reader
-        .get_path_entry(&namespace_id, "/team/file", StatPathOptions::default())
+    let inode_id = namespace
+        .get_path_entry("/team/file", StatPathOptions::default())
         .await
         .expect("shared file before revocation")
         .inode_id;
@@ -166,23 +167,23 @@ async fn check_buffered_read_access(content_size: usize) {
         .await
         .expect("revoke");
     assert_eq!(
-        reader
-            .get_file_bytes(&namespace_id, "/team/file")
+        namespace
+            .get_file_bytes("/team/file")
             .await
             .expect_err("cached content cannot bypass revocation")
             .code(),
         ErrorCode::PathNotFound
     );
     assert_eq!(
-        reader
-            .get_path_entry(&namespace_id, "/team", StatPathOptions::default())
+        namespace
+            .get_path_entry("/team", StatPathOptions::default())
             .await
             .expect_err("revoked")
             .code(),
         ErrorCode::PathNotFound
     );
-    let states = reader
-        .resolve_current_files(&namespace_id, &[inode_id])
+    let states = namespace
+        .resolve_current_files(&[inode_id])
         .await
         .expect("resolve revoked file");
     assert_eq!(states.len(), 1);
@@ -256,10 +257,11 @@ async fn check_former_writer_read(warm_before_handoff: bool) {
         .await
         .expect("grant read access");
     let reader = old_writer.reader().as_subject(subject("viewer"));
+    let namespace = reader.namespace(&namespace_id);
     if warm_before_handoff {
         assert_eq!(
-            reader
-                .get_file_bytes(&namespace_id, "/team/file")
+            namespace
+                .get_file_bytes("/team/file")
                 .await
                 .expect("warm read")
                 .bytes,
@@ -286,8 +288,8 @@ async fn check_former_writer_read(warm_before_handoff: bool) {
         .await
         .expect("revoke read access");
     assert_eq!(
-        reader
-            .get_file_bytes(&namespace_id, "/team/file")
+        namespace
+            .get_file_bytes("/team/file")
             .await
             .expect_err("first read observes revocation")
             .code(),
