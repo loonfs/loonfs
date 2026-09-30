@@ -48,6 +48,7 @@ async fn completed_upload<S: ObjectStore + ?Sized>(
         &upload.upload_id,
         None,
         b"completed content",
+        context.now_ms,
     )
     .await
     .expect("stage upload");

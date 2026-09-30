@@ -237,6 +237,7 @@ pub(crate) async fn direct_multipart_part_targets<S: ObjectStore + ?Sized>(
     upload_id: &UploadId,
     subject: Option<&Subject>,
     requested: &[UploadPartChecksumClaim],
+    now_ms: u64,
 ) -> Result<MultipartPartTargets> {
     let catalog = ensure_upload_namespace_available(store, namespace_id).await?;
     authorize_upload_subject(namespace_id, catalog.access(), subject)?;
@@ -252,9 +253,7 @@ pub(crate) async fn direct_multipart_part_targets<S: ObjectStore + ?Sized>(
     }
     let session = load_upload_session_state(store, namespace_id, upload_id).await?;
     ensure_session_subject(&session, subject)?;
-    if let Some(error) = terminal_session_error(&session.status, upload_id.clone()) {
-        return Err(error);
-    }
+    ensure_session_open(&session, now_ms)?;
     let (provider_upload_id, checksum_algorithm) = multipart_session_upload(&session)?;
 
     let mut parts = Vec::with_capacity(requested.len());
@@ -504,18 +503,18 @@ async fn ensure_upload_namespace_available<S: ObjectStore + ?Sized>(
     Ok(VerifiedNamespaceCatalogEntry::from_head(&head))
 }
 
-/// Converts a terminal upload status into the error returned by an operation
-/// that requires an open session.
-fn terminal_session_error(
-    status: &UploadSessionRecordStatus,
-    upload_id: UploadId,
-) -> Option<CoreError> {
-    match status {
-        UploadSessionRecordStatus::Open { .. } => None,
+/// Refuses an operation that needs an open session when the session is
+/// completed, aborted, or open at or past its expiry.
+fn ensure_session_open(session: &UploadSessionPayload, now_ms: u64) -> Result<()> {
+    let upload_id = session.upload_id.clone();
+    match session.status {
+        UploadSessionRecordStatus::Open { expires_at_ms } if now_ms < expires_at_ms => Ok(()),
         UploadSessionRecordStatus::Completed { .. } => {
-            Some(CoreError::UploadAlreadyCompleted { upload_id })
+            Err(CoreError::UploadAlreadyCompleted { upload_id })
         }
-        UploadSessionRecordStatus::Aborted { .. } => Some(CoreError::UploadNotFound { upload_id }),
+        UploadSessionRecordStatus::Open { .. } | UploadSessionRecordStatus::Aborted { .. } => {
+            Err(CoreError::UploadNotFound { upload_id })
+        }
     }
 }
 
@@ -545,13 +544,12 @@ async fn claim_staging_slot<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     upload_id: &UploadId,
+    now_ms: u64,
 ) -> Result<StagingSlot> {
     update_upload_session(store, namespace_id, upload_id, |mut state| {
         let upload_id = upload_id.to_owned();
         async move {
-            if let Some(error) = terminal_session_error(&state.status, upload_id.clone()) {
-                return Err(error);
-            }
+            ensure_session_open(&state, now_ms)?;
             let UploadSessionMode::ServiceProxied { staging } = &mut state.mode else {
                 return Err(CoreError::Internal(
                     "staging slot requested from a direct upload session".to_owned(),
@@ -619,12 +617,11 @@ async fn read_open_proxied_session<S: ObjectStore + ?Sized>(
     catalog: &VerifiedNamespaceCatalogEntry,
     upload_id: &UploadId,
     subject: Option<&Subject>,
+    now_ms: u64,
 ) -> Result<UploadSessionPayload> {
     let session = load_upload_session_state(store, catalog.namespace_id(), upload_id).await?;
     ensure_session_subject(&session, subject)?;
-    if let Some(error) = terminal_session_error(&session.status, upload_id.clone()) {
-        return Err(error);
-    }
+    ensure_session_open(&session, now_ms)?;
     if !matches!(session.mode, UploadSessionMode::ServiceProxied { .. }) {
         return Err(CoreError::InvalidUploadContent(format!(
             "{} sessions must be completed after using the presigned URLs",
@@ -640,11 +637,10 @@ async fn check_staging_ownership<S: ObjectStore + ?Sized>(
     upload_id: &UploadId,
     content_id: &ContentId,
     expected_staging: ProxiedStaging,
+    now_ms: u64,
 ) -> Result<()> {
     let session = load_upload_session_state(store, namespace_id, upload_id).await?;
-    if let Some(error) = terminal_session_error(&session.status, upload_id.clone()) {
-        return Err(error);
-    }
+    ensure_session_open(&session, now_ms)?;
     if session.content_id != *content_id
         || session.mode
             != (UploadSessionMode::ServiceProxied {
@@ -674,6 +670,7 @@ pub(crate) async fn upload_content<S: ObjectStore + ?Sized>(
     upload_id: &UploadId,
     subject: Option<&Subject>,
     bytes: &[u8],
+    now_ms: u64,
 ) -> Result<UploadSession> {
     upload_proxied_content(
         store,
@@ -681,6 +678,7 @@ pub(crate) async fn upload_content<S: ObjectStore + ?Sized>(
         upload_id,
         subject,
         ProxiedPayload::Bytes(bytes),
+        now_ms,
     )
     .await
 }
@@ -691,6 +689,7 @@ pub(crate) async fn upload_streamed_content<S: ObjectStore + ?Sized>(
     upload_id: &UploadId,
     subject: Option<&Subject>,
     body: ByteStream,
+    now_ms: u64,
 ) -> Result<UploadSession> {
     upload_proxied_content(
         store,
@@ -698,6 +697,7 @@ pub(crate) async fn upload_streamed_content<S: ObjectStore + ?Sized>(
         upload_id,
         subject,
         ProxiedPayload::Stream(body),
+        now_ms,
     )
     .await
 }
@@ -708,14 +708,15 @@ pub(crate) async fn upload_proxied_content<S: ObjectStore + ?Sized>(
     upload_id: &UploadId,
     subject: Option<&Subject>,
     payload: ProxiedPayload<'_>,
+    now_ms: u64,
 ) -> Result<UploadSession> {
     let catalog = ensure_upload_namespace_available(store, namespace_id).await?;
     authorize_upload_subject(namespace_id, catalog.access(), subject)?;
-    let mut loaded = read_open_proxied_session(store, &catalog, upload_id, subject).await?;
+    let mut loaded = read_open_proxied_session(store, &catalog, upload_id, subject, now_ms).await?;
 
     // The claim is what makes the write exclusive, so it is taken before any
     // byte is written and released by the same swap that records the result.
-    match claim_staging_slot(store, namespace_id, upload_id).await? {
+    match claim_staging_slot(store, namespace_id, upload_id, now_ms).await? {
         StagingSlot::AlreadyStaged(staged) => {
             let content_ref = match payload {
                 ProxiedPayload::Bytes(bytes) => ContentRef::blob_v1(
@@ -769,6 +770,7 @@ pub(crate) async fn upload_proxied_content<S: ObjectStore + ?Sized>(
                     upload_id,
                     &loaded.content_id,
                     ProxiedStaging::Claimed,
+                    now_ms,
                 )
                 .await
             },
@@ -786,7 +788,15 @@ pub(crate) async fn upload_proxied_content<S: ObjectStore + ?Sized>(
         }
     };
 
-    record_staged_content(store, namespace_id, upload_id, content_ref, already_present).await
+    record_staged_content(
+        store,
+        namespace_id,
+        upload_id,
+        content_ref,
+        already_present,
+        now_ms,
+    )
+    .await
 }
 
 /// Records a staging result and releases its claim in the same
@@ -802,14 +812,13 @@ async fn record_staged_content<S: ObjectStore + ?Sized>(
     upload_id: &UploadId,
     content_ref: ContentRef,
     already_present: bool,
+    now_ms: u64,
 ) -> Result<UploadSession> {
     update_upload_session(store, namespace_id, upload_id, |mut state| {
         let upload_id = upload_id.to_owned();
         let content_ref = content_ref.clone();
         async move {
-            if let Some(error) = terminal_session_error(&state.status, upload_id.clone()) {
-                return Err(error);
-            }
+            ensure_session_open(&state, now_ms)?;
             let UploadSessionMode::ServiceProxied { staging } = &mut state.mode else {
                 return Err(CoreError::Internal(
                     "staged content recorded for a direct upload session".to_owned(),
@@ -884,17 +893,12 @@ where
     let now_ms = context.now_ms;
     let loaded = load_upload_session_state(store, namespace_id, upload_id).await?;
     ensure_session_subject(&loaded, subject)?;
-    // An aborted session answers the same absence its physical deletion
-    // will, before anything about the request's shape is examined.
-    if matches!(loaded.status, UploadSessionRecordStatus::Aborted { .. }) {
-        return Err(CoreError::UploadNotFound {
-            upload_id: upload_id.clone(),
-        });
+    if !matches!(loaded.status, UploadSessionRecordStatus::Completed { .. }) {
+        ensure_session_open(&loaded, now_ms)?;
     }
     let mode = upload_mode(&loaded.mode);
     let completion = resolve(mode).map_err(CoreError::InvalidUploadContent)?;
     let plan = completion_plan(&loaded, &completion)?;
-    // The aborted status was rejected above; the compare-and-swap caller also uses this helper.
     if let Some(completed) = replay_terminal_completion(
         &loaded.status,
         namespace_id,
@@ -1041,6 +1045,7 @@ pub(crate) async fn stage_owned_stream<S: ObjectStore + ?Sized>(
             &session.upload_id,
             &session.content_id,
             ProxiedStaging::Idle,
+            context.now_ms,
         ),
     )
     .await?;
@@ -1650,10 +1655,16 @@ mod tests {
             .boxed()
         };
 
-        let error =
-            upload_streamed_content(&recording, &namespace_id, &session.upload_id, None, body)
-                .await
-                .expect_err("the final session read must succeed");
+        let error = upload_streamed_content(
+            &recording,
+            &namespace_id,
+            &session.upload_id,
+            None,
+            body,
+            1_000,
+        )
+        .await
+        .expect_err("the final session read must succeed");
 
         assert!(matches!(error, CoreError::ControlObjectLoad(_)));
         assert_eq!(recording.count(OperationClass::Read), 1);
@@ -1693,12 +1704,26 @@ mod tests {
             .await
             .expect("begin upload");
 
-        upload_content(&store, &namespace_id, &session.upload_id, None, BYTES)
-            .await
-            .expect_err("the content write fails");
-        let retry = upload_content(&store, &namespace_id, &session.upload_id, None, BYTES)
-            .await
-            .expect_err("the failed write still holds the claim");
+        upload_content(
+            &store,
+            &namespace_id,
+            &session.upload_id,
+            None,
+            BYTES,
+            1_000,
+        )
+        .await
+        .expect_err("the content write fails");
+        let retry = upload_content(
+            &store,
+            &namespace_id,
+            &session.upload_id,
+            None,
+            BYTES,
+            1_000,
+        )
+        .await
+        .expect_err("the failed write still holds the claim");
 
         assert!(matches!(retry, CoreError::UploadContentConflict { .. }));
         let loaded = load_upload_session_state(&store, &namespace_id, &session.upload_id)
@@ -1731,9 +1756,16 @@ mod tests {
         let begin = begin_service_proxied_upload(store, &namespace_id, None, context)
             .await
             .expect("begin upload");
-        let staged = upload_content(store, &namespace_id, &begin.upload_id, None, BYTES)
-            .await
-            .expect("stage upload");
+        let staged = upload_content(
+            store,
+            &namespace_id,
+            &begin.upload_id,
+            None,
+            BYTES,
+            context.now_ms,
+        )
+        .await
+        .expect("stage upload");
         let content_key = content_blob(
             &staged
                 .content_ref()
@@ -2273,7 +2305,7 @@ mod tests {
         complete(&store, &namespace_id, &upload_id, &context(2_000))
             .await
             .expect("complete");
-        let error = upload_content(&store, &namespace_id, &upload_id, None, BYTES)
+        let error = upload_content(&store, &namespace_id, &upload_id, None, BYTES, 2_000)
             .await
             .expect_err("a completed session takes no more bytes");
         assert!(matches!(error, CoreError::UploadAlreadyCompleted { .. }));
@@ -2284,10 +2316,118 @@ mod tests {
         abort(&store, &namespace_id, &aborted.upload_id, &context(3_000))
             .await
             .expect("abort");
-        let error = upload_content(&store, &namespace_id, &aborted.upload_id, None, BYTES)
-            .await
-            .expect_err("an aborted session takes no more bytes");
+        let error = upload_content(
+            &store,
+            &namespace_id,
+            &aborted.upload_id,
+            None,
+            BYTES,
+            3_000,
+        )
+        .await
+        .expect_err("an aborted session takes no more bytes");
         assert!(matches!(error, CoreError::UploadNotFound { .. }));
+    }
+
+    #[tokio::test]
+    async fn an_open_session_takes_upload_work_only_before_its_expiry() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let setup = context(1_000);
+        let (namespace_id, staged_id, _, _) = staged_session(&store, &setup).await;
+        let catalog =
+            crate::namespace::catalog::load_namespace_catalog_entry(&store, &namespace_id)
+                .await
+                .expect("catalog");
+        let proxied_id = begin_service_proxied_upload(&store, &namespace_id, None, &setup)
+            .await
+            .expect("begin proxied upload")
+            .upload_id;
+        let multipart_id = create_upload_session(
+            &store,
+            &catalog,
+            None,
+            NewUploadSession::direct_multipart(
+                ContentId::generate(),
+                "provider-upload",
+                NonZeroU64::new(5 * 1024 * 1024).expect("part size"),
+                DIRECT_MULTIPART_CHECKSUM_ALGORITHM,
+            ),
+            &setup,
+        )
+        .await
+        .expect("begin multipart upload")
+        .upload_id;
+        let part = [UploadPartChecksumClaim {
+            part_number: 1,
+            checksum: Checksum::crc64nvme(BYTES),
+        }];
+        let expires_at_ms = setup.now_ms + UPLOAD_SESSION_LEASE_MS;
+
+        for (now_ms, open) in [(expires_at_ms, false), (expires_at_ms - 1, true)] {
+            let results = [
+                (
+                    "staging",
+                    upload_content(&store, &namespace_id, &proxied_id, None, BYTES, now_ms)
+                        .await
+                        .map(drop),
+                ),
+                (
+                    "part signing",
+                    direct_multipart_part_targets(
+                        &store,
+                        &namespace_id,
+                        &multipart_id,
+                        None,
+                        &part,
+                        now_ms,
+                    )
+                    .await
+                    .map(drop),
+                ),
+                (
+                    "completion",
+                    complete(&store, &namespace_id, &staged_id, &context(now_ms))
+                        .await
+                        .map(drop),
+                ),
+            ];
+            for (operation, result) in results {
+                assert!(
+                    matches!(
+                        (open, &result),
+                        (true, Ok(())) | (false, Err(CoreError::UploadNotFound { .. }))
+                    ),
+                    "{operation} at {now_ms} answered {result:?}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn an_expired_open_session_still_reports_its_status_and_aborts() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let setup = context(1_000);
+        let (namespace_id, upload_id, _, _) = staged_session(&store, &setup).await;
+        let expired = context(setup.now_ms + UPLOAD_SESSION_LEASE_MS);
+
+        let view = get_upload_status(&store, &namespace_id, &upload_id, None, expired.now_ms)
+            .await
+            .expect("status of an expired session");
+        assert!(matches!(
+            view.session.status,
+            UploadSessionStatus::Open { .. }
+        ));
+        let aborted = abort(&store, &namespace_id, &upload_id, &expired)
+            .await
+            .expect("abort an expired session");
+        assert_eq!(
+            aborted.status,
+            UploadSessionStatus::Aborted {
+                aborted_at_ms: expired.now_ms
+            }
+        );
     }
 
     #[tokio::test]
@@ -2448,6 +2588,7 @@ mod tests {
                 part_number: 1,
                 checksum: Checksum::crc64nvme(BYTES),
             }],
+            4_000,
         )
         .await
         .expect_err("deleted namespace");
@@ -2463,7 +2604,7 @@ mod tests {
         let (namespace_id, upload_id, _, _) = staged_session(&inner, &context(1_000)).await;
         delete_upload_namespace(&inner, &namespace_id).await;
         let store = loonfs_test_support::stores::RecordingStore::new(inner, KeyPredicate::any());
-        let error = upload_content(&store, &namespace_id, &upload_id, None, BYTES)
+        let error = upload_content(&store, &namespace_id, &upload_id, None, BYTES, 4_000)
             .await
             .expect_err("deleted namespace");
         assert!(matches!(error, CoreError::NamespaceDeleted { .. }));

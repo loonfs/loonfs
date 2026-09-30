@@ -261,6 +261,7 @@ async fn stage_upload<S: ObjectStore + ?Sized>(
         &begin.upload_id,
         None,
         b"racing upload\n",
+        context.now_ms,
     )
     .await
     .expect("stage upload");
@@ -749,6 +750,7 @@ async fn upload_completion_wins_before_gc_abort_and_the_session_is_retained() {
         .await
         .expect("bootstrap");
     let (upload_id, content_ref) = stage_upload(&store, &namespace_id, &setup).await;
+    let inside = context(setup.now_ms + UPLOAD_SESSION_LEASE_MS - 1);
     let aged = context(setup.now_ms + UPLOAD_SESSION_LEASE_MS + GRACE_MS + 1);
     let content_key = loonfs_objectstore::keys::content_blob(
         &content_ref.owner_namespace_id,
@@ -765,7 +767,7 @@ async fn upload_completion_wins_before_gc_abort_and_the_session_is_retained() {
             &upload_id,
             None,
             crate::protocol::ResolvedUploadCompletion::KnownContent,
-            &aged,
+            &inside,
         )
         .await;
         store.release();
@@ -798,6 +800,7 @@ async fn gc_abort_wins_before_completion_and_completion_reports_not_found() {
         .await
         .expect("bootstrap");
     let (upload_id, content_ref) = stage_upload(&store, &namespace_id, &setup).await;
+    let inside = context(setup.now_ms + UPLOAD_SESSION_LEASE_MS - 1);
     let aged = context(setup.now_ms + UPLOAD_SESSION_LEASE_MS + GRACE_MS + 1);
     let content_key = loonfs_objectstore::keys::content_blob(
         &content_ref.owner_namespace_id,
@@ -810,7 +813,7 @@ async fn gc_abort_wins_before_completion_and_completion_reports_not_found() {
         &upload_id,
         None,
         crate::protocol::ResolvedUploadCompletion::KnownContent,
-        &aged,
+        &inside,
     );
     let abort = async {
         store.wait_until_blocked().await;
@@ -846,10 +849,16 @@ async fn complete_upload_for_gc<S: ObjectStore + ?Sized>(
     let begin = crate::protocol::begin_service_proxied_upload(store, namespace_id, None, context)
         .await
         .expect("begin upload");
-    let staged =
-        crate::protocol::upload_content(store, namespace_id, &begin.upload_id, None, bytes)
-            .await
-            .expect("stage upload");
+    let staged = crate::protocol::upload_content(
+        store,
+        namespace_id,
+        &begin.upload_id,
+        None,
+        bytes,
+        context.now_ms,
+    )
+    .await
+    .expect("stage upload");
     let completed = crate::protocol::complete_upload(
         store,
         namespace_id,

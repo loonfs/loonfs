@@ -963,6 +963,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             upload_id,
             subject,
             requested,
+            self.now_ms()?,
         )
         .await
     }
@@ -976,8 +977,15 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         subject: Option<&Subject>,
         bytes: &[u8],
     ) -> Result<UploadSession> {
-        crate::protocol::upload_content(&self.store, &self.namespace_id, upload_id, subject, bytes)
-            .await
+        crate::protocol::upload_content(
+            &self.store,
+            &self.namespace_id,
+            upload_id,
+            subject,
+            bytes,
+            self.now_ms()?,
+        )
+        .await
     }
 
     /// Uploads content that arrives as a stream into an upload session,
@@ -994,6 +1002,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             upload_id,
             subject,
             body,
+            self.now_ms()?,
         )
         .await
     }

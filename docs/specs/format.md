@@ -428,9 +428,11 @@ An upload session contains `namespace_id`, `upload_id`, `content_id`, optional `
 
 | Status | Stored fields | Meaning |
 | --- | --- | --- |
-| `open` | `expires_at_ms` | Upload work is still permitted under the session lease. |
+| `open` | `expires_at_ms` | Upload work is permitted while the clock reads before `expires_at_ms`. |
 | `completed` | `completed_at_ms`, `content_ref` | The object was verified and its reference is available for admission. |
 | `aborted` | `aborted_at_ms` | The upload cannot complete or reopen. |
+
+At or after `expires_at_ms`, staging, part signing, and completion refuse an open session as they refuse an aborted one. The session never selects content, and collection aborts it (section 11.6). Status reads and aborts do not check the expiry.
 
 A session starts open and makes at most one terminal transition. Completion and abort race on the same CAS-protected record. Completion verifies content before recording `completed`; abort records `aborted` before cleaning up the object or provider transfer.
 

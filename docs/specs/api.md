@@ -285,7 +285,7 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | `path_not_found` | 404 | No visible entry at the path. In an ACL namespace, a checked entry on which the subject holds no right also answers this code. |
 | `inode_not_found` | 404 | The requested visible or retained inode does not exist. In an ACL namespace, a checked inode on which the subject holds no right also answers this code. |
 | `revision_not_found` | 404 | The file has no such revision. |
-| `upload_not_found` | 404 | No upload session with this id, or one that was aborted: an aborted session will never select content, so it reports the absence that its deletion will. |
+| `upload_not_found` | 404 | No upload session with this id. An aborted session answers this code, and so does an open session asked to stage, sign parts, or complete at or after its `expires_at_ms`. Neither will ever select content, so each reports the absence that its deletion will. |
 | `namespace_exists` | 409 | The create or fork target already exists: another namespace holds the id. |
 | `snapshot_quota_exceeded` | 409 | Creating the snapshot would pass the namespace's live-snapshot limit. Delete a snapshot or wait for a snapshot to expire. |
 | `content_not_prepared` | 409 | A path put or explicit create/replace operation references external content without a matching admission, or carries a rejected relevant token. Prepare the content and retry with its proof. |
@@ -2520,9 +2520,15 @@ final ([format: upload sessions](format.md#51-upload-sessions)). What that means
   stands, including the original stored `aborted_at_ms`. A completed session
   is refused with `upload_already_completed`, because its content may already
   be published.
-- An aborted session reports `upload_not_found` from `PUT /content` and from
-  `complete` — the same stable surface as the physical absence that follows
-  it. This is also what a completion sees when server-side cleanup aborted
+- An open session accepts `PUT /content`, part signing, and `complete` while
+  the server clock reads before its `expires_at_ms`. At that instant and
+  after, each of them answers `upload_not_found`, as for an aborted session,
+  and upload collection later aborts the session. `GET` still reports the
+  session `open`, and `abort` still ends it.
+- An aborted session reports `upload_not_found` from `PUT /content`, from part
+  signing, and from `complete`. That is the same stable surface as the
+  physical absence that follows it. It is also what a completion sees when
+  server-side cleanup aborted
   the session first; if the completion lands first instead, the cleanup's
   conditional write fails and the completed session is retained.
 
