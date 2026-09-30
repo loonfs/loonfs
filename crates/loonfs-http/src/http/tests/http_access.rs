@@ -18,7 +18,7 @@ async fn subject_headers_are_parsed_and_rejected_with_the_header_named() {
     .await
     .expect("build app");
     state
-        .writer
+        .runtime
         .create_namespace(
             &namespace_id("demo"),
             loonfs::CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
@@ -336,7 +336,7 @@ async fn read_handlers_accept_the_subject_headers() {
     .await
     .expect("app");
     state
-        .writer
+        .runtime
         .create_namespace(
             &namespace_id("demo"),
             loonfs::CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
@@ -499,7 +499,7 @@ async fn a_repeated_grant_principal_is_invalid_and_does_not_commit() {
     )
     .await
     .expect("app");
-    let namespace_reader = state.writer.reader().namespace(&namespace_id("demo"));
+    let namespace_reader = state.runtime.namespace(&namespace_id("demo"));
     let response = router
         .clone()
         .oneshot(request(
@@ -530,7 +530,7 @@ async fn a_repeated_grant_principal_is_invalid_and_does_not_commit() {
     let error: ApiError = serde_json::from_value(json_body(response).await).expect("error");
     assert_eq!(error.code, ErrorCode::InvalidRequest.as_str());
 
-    let namespace = namespace_reader.get_namespace().await.expect("namespace");
+    let namespace = namespace_reader.metadata().await.expect("namespace");
     assert_eq!(namespace.head_seq, loonfs_api::ChangeSeq(0));
 }
 
@@ -617,9 +617,9 @@ async fn a_former_server_observes_revocation_on_its_first_read_after_publication
         json_body(response).await["code"],
         ErrorCode::PathNotFound.as_str()
     );
-    peer_state.writer.shutdown().await.expect("peer shutdown");
+    peer_state.runtime.shutdown().await.expect("peer shutdown");
     old_state
-        .writer
+        .runtime
         .shutdown()
         .await
         .expect("old server shutdown");

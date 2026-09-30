@@ -12,7 +12,7 @@ use crate::pin::{classify_live_snapshot, create_pin};
 use crate::time::{Deadline, MonotonicTimer};
 use loonfs_api::wire::control::{ForkBasis, NamespaceStatus, PinOwner, PinPayload};
 use loonfs_api::wire::manifest::NamespaceManifestPayload;
-use loonfs_api::{ManifestNo, Namespace, NamespaceId, PinId, WriterEpoch};
+use loonfs_api::{ManifestNo, NamespaceId, NamespaceMetadata, PinId, WriterEpoch};
 use loonfs_objectstore::ObjectStore;
 use std::sync::Arc;
 
@@ -24,7 +24,7 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
     snapshot_id: Option<&PinId>,
     context: &MutationContext,
     timer: Arc<dyn MonotonicTimer>,
-) -> Result<Namespace> {
+) -> Result<NamespaceMetadata> {
     let deadline = Deadline::start(timer);
     let target = super::control::load_current_manifest_if_present(store, new_namespace_id).await?;
     if let Some(target) = target {

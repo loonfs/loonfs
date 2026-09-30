@@ -6,7 +6,7 @@
 use crate::common::{default_page_limit, is_content_object, page_limit, GrepHost};
 use loonfs::publish::{CommitRequest, FilesystemOperation};
 use loonfs::{
-    ChangeSeq, CommitId, CreateNamespaceOptions, DestinationBehavior, ErrorCode, FsWriter,
+    ChangeSeq, CommitId, CreateNamespaceOptions, DestinationBehavior, ErrorCode, LoonFs,
     NamespaceId, PutFileOptions, SharedObjectStore,
 };
 use loonfs_api::v0::GrepIndexLifecycle;
@@ -90,7 +90,7 @@ async fn grep_worker_builds_the_gram_index_once_enabled() {
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("grams-runtime").expect("namespace id");
 
-    let writer = FsWriter::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone())
         .writer_id("grams-writer")
         .min_publish_interval_ms(0)
         .build()
@@ -105,10 +105,10 @@ async fn grep_worker_builds_the_gram_index_once_enabled() {
         )
         .await
         .expect("create namespace");
-    let namespace_writer = writer
+    let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
-    namespace_writer
+    namespace
         .put_file_bytes(
             "/alpha.txt",
             b"a needle in alpha\n",
@@ -116,7 +116,7 @@ async fn grep_worker_builds_the_gram_index_once_enabled() {
         )
         .await
         .expect("write alpha");
-    namespace_writer
+    namespace
         .put_file_bytes(
             "/bravo.txt",
             b"nothing here\n",
@@ -154,7 +154,7 @@ async fn grep_worker_builds_the_gram_index_once_enabled() {
 
     // New commits are visible immediately through the exhaustive tail, and
     // a later step absorbs them into the index.
-    namespace_writer
+    namespace
         .put_file_bytes(
             "/charlie.txt",
             b"another needle\n",
@@ -197,7 +197,7 @@ async fn a_publish_below_the_wal_threshold_does_not_schedule_grep_work() {
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("grams-auto-step").expect("namespace id");
 
-    let writer = FsWriter::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone())
         .writer_id("grams-auto-writer")
         .min_publish_interval_ms(0)
         .build()
@@ -212,7 +212,7 @@ async fn a_publish_below_the_wal_threshold_does_not_schedule_grep_work() {
         )
         .await
         .expect("create namespace");
-    let namespace_writer = writer
+    let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
     // Worker-level enable publishes the backfilling manifest without driving
@@ -223,7 +223,7 @@ async fn a_publish_below_the_wal_threshold_does_not_schedule_grep_work() {
         outcome => panic!("expected fresh enable, got {outcome:?}"),
     }
 
-    namespace_writer
+    namespace
         .put_file_bytes(
             "/delta.txt",
             b"a needle in delta\n",
@@ -277,7 +277,7 @@ async fn a_worker_policy_bounds_each_build_step() {
     let store: SharedObjectStore = raw_store.clone();
     let namespace_id = NamespaceId::parse("grams-config-policy").expect("namespace id");
 
-    let writer = FsWriter::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone())
         .writer_id("grams-config-writer")
         .min_publish_interval_ms(0)
         .build()
@@ -296,7 +296,7 @@ async fn a_worker_policy_bounds_each_build_step() {
         )
         .await
         .expect("create namespace");
-    let namespace_writer = writer
+    let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
     host.enable_grep_index(&namespace_id).await.expect("enable");
@@ -306,7 +306,7 @@ async fn a_worker_policy_bounds_each_build_step() {
 
     let mut put_seqs = Vec::new();
     for index in 0..5u32 {
-        let result = namespace_writer
+        let result = namespace
             .put_file_bytes(
                 &format!("/notes/needle-{index}.txt"),
                 format!("a needle numbered {index}\n").as_bytes(),
@@ -364,7 +364,7 @@ async fn a_thousand_file_commit_is_byte_bounded_query_complete_and_crash_resumab
     ));
     let store: loonfs::SharedObjectStore = raw_store.clone();
     let namespace_id = NamespaceId::parse("grams-thousand-atomic").expect("namespace id");
-    let writer = FsWriter::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone())
         .writer_id("grams-thousand-writer")
         .inline_content(loonfs::InlineContentOptions {
             inline_content_threshold_bytes: None,
@@ -384,7 +384,7 @@ async fn a_thousand_file_commit_is_byte_bounded_query_complete_and_crash_resumab
         )
         .await
         .expect("create namespace");
-    let namespace_writer = writer
+    let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
     host.enable_grep_index(&namespace_id).await.expect("enable");
@@ -407,7 +407,7 @@ async fn a_thousand_file_commit_is_byte_bounded_query_complete_and_crash_resumab
     for index in 0..FILES {
         let bytes = format!("bounded needle file {index:04}\n");
         assert_eq!(bytes.len(), content_bytes);
-        let content = namespace_writer
+        let content = namespace
             .prepare_file_bytes(bytes.as_bytes())
             .await
             .expect("prepare atomic-commit content");
@@ -422,7 +422,7 @@ async fn a_thousand_file_commit_is_byte_bounded_query_complete_and_crash_resumab
         });
         prepared.push(content);
     }
-    let commit = namespace_writer
+    let commit = namespace
         .commit_prepared(
             CommitRequest {
                 preconditions: Vec::new(),
@@ -618,7 +618,7 @@ async fn grep_answers_identically_across_tiered_reorganizations() {
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("grams-tiered").expect("namespace id");
 
-    let writer = FsWriter::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone())
         .writer_id("grams-tiered-writer")
         .min_publish_interval_ms(0)
         .build()
@@ -633,7 +633,7 @@ async fn grep_answers_identically_across_tiered_reorganizations() {
         )
         .await
         .expect("create namespace");
-    let namespace_writer = writer
+    let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
     host.enable_grep_index(&namespace_id).await.expect("enable");
@@ -641,7 +641,7 @@ async fn grep_answers_identically_across_tiered_reorganizations() {
     let mut expected_paths = Vec::new();
     for round in 0..10u32 {
         let path = format!("/notes/needle-{round:02}.txt");
-        namespace_writer
+        namespace
             .put_file_bytes(
                 &path,
                 format!("a needle numbered {round}\n").as_bytes(),
@@ -705,7 +705,7 @@ async fn repeated_grep_serves_posting_blocks_from_the_grep_cache() {
     let store: loonfs::SharedObjectStore = raw_store.clone();
     let namespace_id = NamespaceId::parse("grams-cache").expect("namespace id");
 
-    let writer = FsWriter::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone())
         .writer_id("grams-cache-writer")
         .min_publish_interval_ms(0)
         .build()
@@ -720,10 +720,10 @@ async fn repeated_grep_serves_posting_blocks_from_the_grep_cache() {
         )
         .await
         .expect("create namespace");
-    let namespace_writer = writer
+    let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
-    namespace_writer
+    namespace
         .put_file_bytes(
             "/alpha.txt",
             b"a needle in alpha\n",
@@ -731,7 +731,7 @@ async fn repeated_grep_serves_posting_blocks_from_the_grep_cache() {
         )
         .await
         .expect("write alpha");
-    namespace_writer
+    namespace
         .put_file_bytes(
             "/bravo.txt",
             b"nothing here\n",
@@ -780,7 +780,7 @@ async fn a_failed_candidate_read_surfaces_in_traversal_order() {
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("grams-read-fault").expect("namespace id");
 
-    let writer = FsWriter::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone())
         .writer_id("grams-fault-writer")
         .inline_content(loonfs::InlineContentOptions {
             inline_content_threshold_bytes: None,
@@ -799,12 +799,12 @@ async fn a_failed_candidate_read_surfaces_in_traversal_order() {
         )
         .await
         .expect("create namespace");
-    let namespace_writer = writer
+    let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
     // Two matches in alpha, so a one-match page fills before the walk
     // reaches bravo.
-    namespace_writer
+    namespace
         .put_file_bytes(
             "/alpha.txt",
             b"needle one\nneedle two\n",
@@ -813,7 +813,7 @@ async fn a_failed_candidate_read_surfaces_in_traversal_order() {
         .await
         .expect("write alpha");
     let blobs_before_bravo = content_blob_keys(&store).await;
-    namespace_writer
+    namespace
         .put_file_bytes(
             "/bravo.txt",
             b"needle three\n",
@@ -898,7 +898,7 @@ async fn an_oversized_tail_candidate_is_skipped_without_a_content_read() {
     let store: loonfs::SharedObjectStore = raw_store.clone();
     let namespace_id = NamespaceId::parse("grams-oversized-tail").expect("namespace id");
 
-    let writer = FsWriter::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone())
         .writer_id("grams-oversized-writer")
         .min_publish_interval_ms(0)
         .build()
@@ -913,10 +913,10 @@ async fn an_oversized_tail_candidate_is_skipped_without_a_content_read() {
         )
         .await
         .expect("create namespace");
-    let namespace_writer = writer
+    let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
-    namespace_writer
+    namespace
         .put_file_bytes(
             "/alpha.txt",
             b"a needle in alpha\n",
@@ -934,7 +934,7 @@ async fn an_oversized_tail_candidate_is_skipped_without_a_content_read() {
     let oversized_bytes = b"needle\n".repeat(INDEX_GRAMS_MAX_FILE_BYTES as usize / 7 + 1);
     assert!(oversized_bytes.len() as u64 > INDEX_GRAMS_MAX_FILE_BYTES);
     let blobs_before_bravo = content_blob_keys(&store).await;
-    namespace_writer
+    namespace
         .put_file_bytes(
             "/bravo.big",
             &oversized_bytes,
@@ -950,7 +950,7 @@ async fn an_oversized_tail_candidate_is_skipped_without_a_content_read() {
     let [oversized_content_key] = new_blobs.as_slice() else {
         panic!("the oversized write must add exactly one content blob, got {new_blobs:?}");
     };
-    namespace_writer
+    namespace
         .put_file_bytes(
             "/charlie.txt",
             b"a needle in charlie\n",
@@ -1023,7 +1023,7 @@ async fn reorganization_does_not_warm_the_query_cache() {
     let store: loonfs::SharedObjectStore = raw_store.clone();
     let namespace_id = NamespaceId::parse("grams-shared-cache").expect("namespace id");
 
-    let writer = FsWriter::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone())
         .writer_id("grams-shared-cache-writer")
         .min_publish_interval_ms(0)
         .build()
@@ -1038,13 +1038,13 @@ async fn reorganization_does_not_warm_the_query_cache() {
         )
         .await
         .expect("create namespace");
-    let namespace_writer = writer
+    let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
     host.enable_grep_index(&namespace_id).await.expect("enable");
 
     for round in 1..=8u32 {
-        namespace_writer
+        namespace
             .put_file_bytes(
                 &format!("/notes/needle-{round:02}.txt"),
                 format!("a needle numbered {round}\n").as_bytes(),
@@ -1113,7 +1113,7 @@ async fn a_cold_reorganization_fans_out_its_segment_opens_within_the_io_cap() {
     let store: loonfs::SharedObjectStore = raw_store.clone();
     let namespace_id = NamespaceId::parse("grams-reorganization-fan-out").expect("namespace id");
 
-    let writer = FsWriter::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone())
         .writer_id("grams-fan-out-writer")
         .min_publish_interval_ms(0)
         .build()
@@ -1128,7 +1128,7 @@ async fn a_cold_reorganization_fans_out_its_segment_opens_within_the_io_cap() {
         )
         .await
         .expect("create namespace");
-    let namespace_writer = writer
+    let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
     host.enable_grep_index(&namespace_id).await.expect("enable");
@@ -1142,7 +1142,7 @@ async fn a_cold_reorganization_fans_out_its_segment_opens_within_the_io_cap() {
             rounds <= 24,
             "the delta threshold must trigger reorganization within a bounded number of rounds"
         );
-        namespace_writer
+        namespace
             .put_file_bytes(
                 &format!("/notes/needle-{rounds:02}.txt"),
                 format!("a needle numbered {rounds}\n").as_bytes(),

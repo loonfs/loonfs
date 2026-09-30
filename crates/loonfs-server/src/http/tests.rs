@@ -11,10 +11,9 @@ use crate::{ServerConfig, StoreConfig};
 use async_trait::async_trait;
 use axum::http::StatusCode;
 use loonfs::{
-    CreateNamespaceOptions, FsMaintenance, FsReader, FsWriter, MaintenanceCancellation,
-    MaintenanceConclusion, MaintenanceJob, MaintenanceJobId, MaintenanceProbe,
-    MaintenanceRunReport, PutFileOptions, SharedObjectStore, StoredMetadataBlockCache, TraceMode,
-    TraceStoreKind,
+    CreateNamespaceOptions, LoonFs, MaintenanceCancellation, MaintenanceConclusion, MaintenanceJob,
+    MaintenanceJobId, MaintenanceProbe, MaintenanceRunReport, PutFileOptions, SharedObjectStore,
+    StoredMetadataBlockCache, TraceMode, TraceStoreKind, Writable,
 };
 use loonfs_api::{
     CapabilityDocument, ChangeSeq, GrepRequest, NamespaceId, PaginationPolicy,
@@ -44,7 +43,7 @@ async fn build_handles_installs_jsonl_object_store_metrics_recorder() {
     let metrics_path = metrics_dir.path().join("object-store.ndjson");
 
     {
-        let (writer, _reader, _maintenance) = build_handles(
+        let (runtime, _maintenance) = build_handles(
             &config,
             store,
             &HttpMetrics::new(),
@@ -54,7 +53,7 @@ async fn build_handles_installs_jsonl_object_store_metrics_recorder() {
         )
         .await
         .expect("build handles");
-        writer
+        runtime
             .create_namespace(
                 &namespace_id("metrics"),
                 CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
@@ -192,7 +191,7 @@ async fn graceful_shutdown_closes_the_local_cache() {
     let server = tokio::spawn(super::serve::serve_and_settle(
         listener,
         router,
-        state.writer.clone(),
+        state.runtime.clone(),
         state.runner.clone(),
         state.local_cache.clone(),
         shutdown_deadline_ms,
@@ -391,7 +390,7 @@ async fn embedded_runner_shutdown_drains_an_active_grep_step() {
         .await
         .expect("join shutdown")
         .expect("drain grep step");
-    state.writer.shutdown().await.expect("shutdown writer");
+    state.runtime.shutdown().await.expect("shutdown writer");
 }
 
 /// A job that does nothing but count the steps the runner admitted for it.
@@ -444,15 +443,15 @@ async fn shutdown_closes_maintenance_admission_before_draining_publications() {
     .await
     .expect("build app");
     state
-        .writer
+        .runtime
         .create_namespace(
             &namespace_id,
             CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("create namespace");
-    let namespace_writer = state
-        .writer
+    let namespace = state
+        .runtime
         .open_namespace(&namespace_id)
         .expect("open namespace");
 
@@ -482,9 +481,9 @@ async fn shutdown_closes_maintenance_admission_before_draining_publications() {
     // otherwise keep admitting into.
     blocking.block_next();
     let put = tokio::spawn({
-        let namespace_writer = namespace_writer.clone();
+        let namespace = namespace.clone();
         async move {
-            namespace_writer
+            namespace
                 .put_file_bytes(
                     "/parked.txt",
                     b"body",
@@ -495,9 +494,9 @@ async fn shutdown_closes_maintenance_admission_before_draining_publications() {
     });
     blocking.wait_until_blocked().await;
 
-    state.writer.close_admission_for_shutdown();
+    state.runtime.close_admission_for_shutdown();
     runner.close_admission();
-    let mut shutdown = Box::pin(state.writer.shutdown());
+    let mut shutdown = Box::pin(state.runtime.shutdown());
     assert!(
         futures::poll!(shutdown.as_mut()).is_pending(),
         "the parked publication must keep the shutdown pending"
@@ -541,15 +540,15 @@ async fn a_namespace_advance_nudges_the_enabled_namespaces_index() {
         .expect("build app");
     let namespace_id = namespace_id("grep-observer");
     state
-        .writer
+        .runtime
         .create_namespace(
             &namespace_id,
             CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("create namespace");
-    let namespace_writer = state
-        .writer
+    let namespace = state
+        .runtime
         .open_namespace(&namespace_id)
         .expect("open namespace");
     state
@@ -580,7 +579,7 @@ async fn a_namespace_advance_nudges_the_enabled_namespaces_index() {
     );
 
     // The publish is the only trigger from here on: nothing below nudges.
-    namespace_writer
+    namespace
         .put_file_bytes(
             "/note.txt",
             b"observer-driven needle\n",
@@ -613,8 +612,8 @@ async fn a_namespace_advance_nudges_the_enabled_namespaces_index() {
         .grep_service
         .as_ref()
         .expect("a query-serving app carries a grep service");
-    let store = state.writer.object_store();
-    let reads = NamespaceReads::new(&state.binding.reader, &namespace_id);
+    let store = state.runtime.object_store();
+    let reads = NamespaceReads::new(state.binding.runtime.namespace(&namespace_id));
     let response = service
         .query(
             &request,
@@ -627,13 +626,13 @@ async fn a_namespace_advance_nudges_the_enabled_namespaces_index() {
         .await
         .expect("grep caught-up index");
     assert_eq!(response.matches.len(), 1);
-    state.writer.shutdown().await.expect("drain the writer");
+    state.runtime.shutdown().await.expect("drain the writer");
 }
 
 /// What the index's steps published, read where an operator reads it.
 async fn built_through_seq(state: &AppState, namespace_id: &NamespaceId) -> ChangeSeq {
     load_current_grep_manifest(
-        &*state.writer.object_store(),
+        &*state.runtime.object_store(),
         namespace_id,
         loonfs::Observation::now(Arc::new(
             loonfs_objectstore::timing::StdMonotonicTimer::default(),
@@ -816,7 +815,7 @@ async fn hidden_maintenance_surface_keeps_filesystem_and_query_routes_served() {
 
     let namespace_id = namespace_id("hidden");
     state
-        .writer
+        .runtime
         .create_namespace(
             &namespace_id,
             CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
@@ -902,7 +901,7 @@ async fn shutdown_keeps_readiness_reachable_until_an_active_request_finishes() {
     let server = tokio::spawn(super::serve::serve_and_settle(
         listener,
         router,
-        state.writer.clone(),
+        state.runtime.clone(),
         state.runner.clone(),
         None,
         shutdown_deadline_ms,
@@ -919,7 +918,7 @@ async fn shutdown_keeps_readiness_reachable_until_an_active_request_finishes() {
     let shutdown_started = tokio::time::Instant::now();
     shutdown_tx.send(()).expect("trigger shutdown");
     tokio::time::timeout(std::time::Duration::from_secs(1), async {
-        while !state.writer.is_shutting_down() {
+        while !state.runtime.is_shutting_down() {
             tokio::task::yield_now().await;
         }
     })
@@ -1038,8 +1037,8 @@ fn test_config(root: &Path, writer_id: &str) -> ServerConfig {
     }
 }
 
-async fn test_runtime(store: SharedObjectStore, writer_id: &str) -> FsWriter {
-    FsWriter::builder_with_store(store)
+async fn test_runtime(store: SharedObjectStore, writer_id: &str) -> LoonFs<Writable> {
+    LoonFs::builder_with_store(store)
         .writer_id(writer_id)
         .trace_mode(TraceMode::Remote)
         .trace_store_kind(TraceStoreKind::LocalFs)
@@ -1052,14 +1051,15 @@ async fn test_runtime(store: SharedObjectStore, writer_id: &str) -> FsWriter {
 /// on the given store, its filesystem reads and checkpoints on handles over
 /// the same store.
 async fn grep_worker(store: &SharedObjectStore, actor: &str) -> GrepWorker<SharedObjectStore> {
-    let reader = FsReader::builder_with_store(store.clone())
+    let reader = LoonFs::reader_with_store(store.clone())
         .build()
         .await
         .expect("build reader");
-    let maintenance = FsMaintenance::builder_with_store(store.clone())
-        .actor_id(actor)
+    let maintenance = LoonFs::builder_with_store(store.clone())
+        .writer_id(actor)
         .build()
         .await
-        .expect("build maintenance");
+        .expect("build maintenance")
+        .maintenance(loonfs_test_support::ids::writer_id(actor));
     GrepWorker::new(store.clone(), reader, maintenance)
 }

@@ -56,7 +56,7 @@ impl HttpMetrics {
         })
     }
 
-    /// The recorder the runtime handles report through.
+    /// The recorder the runtime reports through.
     pub fn recorder(&self) -> Arc<dyn MetricsRecorder> {
         Arc::clone(&self.recorder) as Arc<dyn MetricsRecorder>
     }

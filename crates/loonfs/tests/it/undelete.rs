@@ -215,7 +215,7 @@ fn undelete_recovers_a_deleted_subtree_and_rejects_covered_children() {
         CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
     )
     .expect("create namespace");
-    let namespace_writer = fs
+    let namespace = fs
         .writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
@@ -255,7 +255,7 @@ fn undelete_recovers_a_deleted_subtree_and_rejects_covered_children() {
 
     // A child is covered by the subtree root's tombstone, not its own:
     // recovery targets the root.
-    let error = block_on(namespace_writer.undelete(
+    let error = block_on(namespace.undelete(
         child_inode,
         deletion,
         Some("/docs/a-alone.txt"),
@@ -267,7 +267,7 @@ fn undelete_recovers_a_deleted_subtree_and_rejects_covered_children() {
         RuntimeError::Core(error) if error.code() == ErrorCode::NotDeleted
     ));
 
-    block_on(namespace_writer.undelete(
+    block_on(namespace.undelete(
         directory_inode,
         deletion,
         Some("/docs/notes"),
@@ -292,7 +292,7 @@ fn undelete_of_an_ancestor_keeps_independently_deleted_children_hidden() {
         CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
     )
     .expect("create namespace");
-    let namespace_writer = fs
+    let namespace = fs
         .writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
@@ -342,7 +342,7 @@ fn undelete_of_an_ancestor_keeps_independently_deleted_children_hidden() {
 
     // Recovering the ancestor revokes exactly its own deletion: the
     // independently deleted child stays hidden behind its own tombstone.
-    block_on(namespace_writer.undelete(
+    block_on(namespace.undelete(
         directory_inode,
         ancestor_deletion,
         Some("/docs/notes"),
@@ -377,7 +377,7 @@ fn undelete_survives_checkpoints_and_reopen_in_both_orders() {
             CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
         )
         .expect("create namespace");
-        let namespace_writer = fs
+        let namespace = fs
             .writer
             .open_namespace(&namespace_id)
             .expect("open namespace");
@@ -400,7 +400,7 @@ fn undelete_survives_checkpoints_and_reopen_in_both_orders() {
             )
             .expect("delete")
             .committed_seq;
-        block_on(namespace_writer.undelete(
+        block_on(namespace.undelete(
             inode_id,
             deletion,
             Some("/docs/report.txt"),
@@ -456,11 +456,11 @@ fn undelete_survives_checkpoints_and_reopen_in_both_orders() {
             step.wal_flush
         );
         let fs = open_runtime(object_store.clone(), "undelete-persist-c");
-        let namespace_writer = fs
+        let namespace = fs
             .writer
             .open_namespace(&namespace_id)
             .expect("open namespace");
-        block_on(namespace_writer.undelete(
+        block_on(namespace.undelete(
             inode_id,
             second_deletion,
             Some("/docs/report.txt"),

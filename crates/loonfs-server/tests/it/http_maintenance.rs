@@ -480,7 +480,7 @@ async fn http_metadata_run_folds_an_idle_tail_unless_the_server_turns_the_idle_r
             .into_shared();
         // The server reads commit age on its own clock, so a commit stamped
         // by a writer whose clock is long past is idle on arrival.
-        let writer = loonfs::FsWriter::builder_with_store(store)
+        let writer = loonfs::LoonFs::builder_with_store(store)
             .writer_id("departed-writer")
             .wall_clock(std::sync::Arc::new(FixedWallClock(1_750_000_000_000)))
             .build()

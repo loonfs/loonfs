@@ -1,24 +1,24 @@
-//! Bounded metadata maintenance over the runtime maintenance handle.
+//! Bounded metadata maintenance over a runtime's [`Maintenance`].
 
 use super::{
     MaintenanceCancellation, MaintenanceConclusion, MaintenanceJob, MaintenanceJobId,
     MaintenanceProbe, MaintenanceRunReport, NamespacePublication,
 };
 use crate::{
-    ErrorCode, FsMaintenance, MetadataMaintenanceOptions, MetadataMaintenanceResponse, NamespaceId,
+    ErrorCode, Maintenance, MetadataMaintenanceOptions, MetadataMaintenanceResponse, NamespaceId,
     ReorganizeStepOutcome, Result, RuntimeError, WalFlushStepOutcome,
 };
 use async_trait::async_trait;
 
 /// Folds the WAL tail and runs bounded metadata compaction.
 pub struct MetadataMaintenanceJob {
-    maintenance: FsMaintenance,
+    maintenance: Maintenance,
     options: MetadataMaintenanceOptions,
 }
 
 impl MetadataMaintenanceJob {
     /// Creates a job with default metadata options.
-    pub fn new(maintenance: FsMaintenance) -> Self {
+    pub fn new(maintenance: Maintenance) -> Self {
         Self {
             maintenance,
             options: MetadataMaintenanceOptions::default(),

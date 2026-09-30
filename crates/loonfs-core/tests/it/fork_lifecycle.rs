@@ -36,7 +36,7 @@ async fn fork_namespace<S: ObjectStore + ?Sized>(
     source_namespace_id: &NamespaceId,
     new_namespace_id: &NamespaceId,
     context: &MutationContext,
-) -> Result<loonfs_api::Namespace, CoreError> {
+) -> Result<loonfs_api::NamespaceMetadata, CoreError> {
     namespace_engine(store, source_namespace_id, context)
         .fork_namespace(new_namespace_id, &loonfs_test_support::test_actor(), None)
         .await

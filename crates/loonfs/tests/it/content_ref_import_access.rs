@@ -1,8 +1,8 @@
 //! Authorization for embedded content reference reads and imports.
 
 use loonfs::{
-    CreateNamespaceOptions, DeleteNamespaceOptions, ForkNamespaceOptions, FsWriter, PutFileOptions,
-    RuntimeError, SharedObjectStore, UpdateAccessOptions,
+    CreateNamespaceOptions, DeleteNamespaceOptions, ForkNamespaceOptions, LoonFs, PutFileOptions,
+    RuntimeError, SharedObjectStore, UpdateAccessOptions, Writable,
 };
 use loonfs_api::{
     AccessGrants, AccessRight, AccessRights, ContentRef, ErrorCode, NamespaceAccess, NamespaceId,
@@ -62,7 +62,7 @@ async fn collect_aged_segments(store: &RecordingStore<LocalFsStore>, namespace_i
 async fn open_writer() -> (
     tempfile::TempDir,
     Arc<RecordingStore<LocalFsStore>>,
-    FsWriter,
+    LoonFs<Writable>,
 ) {
     let directory = tempfile::tempdir().expect("directory");
     let recording = Arc::new(RecordingStore::new(
@@ -70,7 +70,7 @@ async fn open_writer() -> (
         KeyPredicate::any(),
     ));
     let store: SharedObjectStore = recording.clone();
-    let writer = FsWriter::builder_with_store(store)
+    let writer = LoonFs::builder_with_store(store)
         .writer_id("content-ref-import-access")
         .min_publish_interval_ms(0)
         .build()
@@ -79,7 +79,11 @@ async fn open_writer() -> (
     (directory, recording, writer)
 }
 
-async fn create_namespace(writer: &FsWriter, namespace_id: &NamespaceId, access: NamespaceAccess) {
+async fn create_namespace(
+    writer: &LoonFs<Writable>,
+    namespace_id: &NamespaceId,
+    access: NamespaceAccess,
+) {
     writer
         .create_namespace(
             namespace_id,
@@ -92,9 +96,9 @@ async fn create_namespace(writer: &FsWriter, namespace_id: &NamespaceId, access:
         .expect("namespace");
 }
 
-async fn publish_inline(writer: &FsWriter, namespace_id: &NamespaceId) -> ContentRef {
+async fn publish_inline(writer: &LoonFs<Writable>, namespace_id: &NamespaceId) -> ContentRef {
     let namespace = writer
-        .reader()
+        .read_only()
         .as_subject(subject("administrator"))
         .namespace(namespace_id);
     let namespace_writer = writer.open_namespace(namespace_id).expect("open namespace");
@@ -126,15 +130,18 @@ async fn by_reference_reads_require_publication_in_the_reading_view() {
     create_namespace(&writer, &source, acl("administrator")).await;
     create_namespace(&writer, &destination, NamespaceAccess::unrestricted()).await;
     let private_ref = publish_inline(&writer, &source).await;
-    loonfs::FsMaintenance::builder_with_store(recording.clone())
-        .actor_id(loonfs_test_support::test_actor().as_str())
+    loonfs::LoonFs::builder_with_store(recording.clone())
+        .writer_id(loonfs_test_support::test_actor().as_str())
         .build()
         .await
         .expect("maintenance")
+        .maintenance(loonfs_test_support::ids::writer_id(
+            loonfs_test_support::test_actor().as_str(),
+        ))
         .fold_wal(&source)
         .await
         .expect("materialize private content");
-    let reader = writer.reader().as_subject(subject("stranger"));
+    let reader = writer.read_only().as_subject(subject("stranger"));
     let destination_namespace = reader.namespace(&destination);
     let source_namespace = reader.namespace(&source);
     assert_eq!(
@@ -189,13 +196,13 @@ async fn subject_without_source_rights_cannot_prepare_or_publish_an_inline_tail_
     let (_directory, recording, writer) = open_writer().await;
     let source = namespace_id("source");
     let destination = namespace_id("destination");
-    let destination_namespace = writer.reader().namespace(&destination);
+    let destination_namespace = writer.namespace(&destination);
     create_namespace(&writer, &source, acl("administrator")).await;
     create_namespace(&writer, &destination, NamespaceAccess::unrestricted()).await;
     let content_ref = publish_inline(&writer, &source).await;
     let scoped = writer.as_subject(subject("stranger"));
-    let source_namespace = scoped.reader().namespace(&source);
-    let namespace_writer = scoped.open_namespace(&destination).expect("open namespace");
+    let source_namespace = scoped.namespace(&source);
+    let namespace = scoped.open_namespace(&destination).expect("open namespace");
 
     assert_eq!(
         source_namespace
@@ -207,14 +214,14 @@ async fn subject_without_source_rights_cannot_prepare_or_publish_an_inline_tail_
     );
 
     recording.reset();
-    let error = namespace_writer
+    let error = namespace
         .prepare_content_ref(content_ref.clone())
         .await
         .expect_err("prepare requires source administrator");
     assert_forbidden_without_writes(recording.as_ref(), error);
 
     recording.reset();
-    let error = namespace_writer
+    let error = namespace
         .put_file_content_ref(
             "/imported",
             content_ref,
@@ -238,13 +245,13 @@ async fn same_namespace_inline_tail_import_requires_its_administrator() {
     let (_directory, recording, writer) = open_writer().await;
     let namespace_id = namespace_id("same-namespace");
     create_namespace(&writer, &namespace_id, acl("administrator")).await;
-    let namespace_writer = writer
+    let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
     let content_ref = publish_inline(&writer, &namespace_id).await;
 
     recording.reset();
-    let error = namespace_writer
+    let error = namespace
         .as_subject(subject("stranger"))
         .put_file_content_ref(
             "/imported",
@@ -255,7 +262,7 @@ async fn same_namespace_inline_tail_import_requires_its_administrator() {
         .expect_err("same-namespace import requires administrator");
     assert_forbidden_without_writes(recording.as_ref(), error);
 
-    let prepared = namespace_writer
+    let prepared = namespace
         .as_subject(subject("administrator"))
         .prepare_content_ref(content_ref.clone())
         .await
@@ -286,10 +293,10 @@ async fn bare_reference_import_accepts_service_administrator_and_unrestricted_au
         (writer.as_subject(subject("administrator")), acl_ref.clone()),
         (writer.as_subject(subject("stranger")), unrestricted_ref),
     ] {
-        let namespace_writer = authority
+        let namespace = authority
             .open_namespace(&destination)
             .expect("open namespace");
-        let prepared = namespace_writer
+        let prepared = namespace
             .prepare_content_ref(content_ref.clone())
             .await
             .expect("authorized import");
@@ -348,7 +355,7 @@ async fn deleted_owner_import_uses_updated_access_state_in_the_surviving_head() 
     let source = namespace_id("source");
     let fork = namespace_id("fork");
     let namespace = writer
-        .reader()
+        .read_only()
         .as_subject(subject("administrator"))
         .namespace(&fork);
     let destination = namespace_id("destination");
@@ -393,7 +400,7 @@ async fn deleted_owner_import_uses_updated_access_state_in_the_surviving_head() 
     // the age gate must leave them, and a cold runtime must find them.
     collect_aged_segments(recording.as_ref(), &source).await;
     let store: SharedObjectStore = recording.clone();
-    let importer = FsWriter::builder_with_store(store)
+    let importer = LoonFs::builder_with_store(store)
         .writer_id("content-ref-import-access-cold")
         .min_publish_interval_ms(0)
         .build()

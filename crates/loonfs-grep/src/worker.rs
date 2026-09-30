@@ -21,7 +21,7 @@ use crate::{GrepError, Result};
 use futures::future::try_join_all;
 use loonfs::{
     next_run_no_after, refill_iterators, select_next_iterator, write_segments_in_waves,
-    CheckpointFilesPageCursor, CoreError, CreateCheckpointOptions, FsMaintenance, FsReader,
+    CheckpointFilesPageCursor, CoreError, CreateCheckpointOptions, LoonFs, Maintenance, ReadOnly,
     RuntimeError, SegmentBlockLoader, SegmentRowIterator, StoreFailureClass,
 };
 use loonfs::{Deadline, Observation};
@@ -157,19 +157,20 @@ pub enum GrepReorganizeOutcome {
 
 /// Bounded writer for grep-owned durable state.
 ///
-/// The worker writes only grep keys. It reads namespace state through
-/// `FsReader` and creates or deletes backfill checkpoints through `FsMaintenance`,
-/// preserving the maintenance handle's actor identity. Scheduling is external to
-/// this type.
+/// The worker writes only grep keys. It reads namespace state through a
+/// read-only `LoonFs` and creates or deletes backfill checkpoints through
+/// `Maintenance`, preserving the writer id maintenance acts as. Scheduling is
+/// external to this type.
 #[derive(Clone)]
 pub struct GrepWorker<S> {
     store: S,
-    reader: FsReader,
-    pub(crate) maintenance: FsMaintenance,
+    reader: LoonFs<ReadOnly>,
+    pub(crate) maintenance: Maintenance,
 }
 
-/// The runtime handles carry no debug representation — they are clones of a
-/// shared runtime, not state — so a worker prints what identifies its work.
+/// The runtime and its maintenance carry no debug representation — they are
+/// clones of a shared runtime, not state — so a worker prints what identifies
+/// its work.
 impl<S: std::fmt::Debug> std::fmt::Debug for GrepWorker<S> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -182,7 +183,7 @@ impl<S: std::fmt::Debug> std::fmt::Debug for GrepWorker<S> {
 impl<S: ObjectStore + Clone> GrepWorker<S> {
     /// Creates a worker over one grep-keyspace store handle and the runtime
     /// handles it reads and checkpoints through.
-    pub fn new(store: S, reader: FsReader, maintenance: FsMaintenance) -> Self {
+    pub fn new(store: S, reader: LoonFs<ReadOnly>, maintenance: Maintenance) -> Self {
         Self {
             store,
             reader,
@@ -191,8 +192,8 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
     }
 
     /// This worker's filesystem reads for one namespace.
-    pub(crate) fn reads<'a>(&'a self, namespace_id: &'a NamespaceId) -> NamespaceReads<'a> {
-        NamespaceReads::new(&self.reader, namespace_id)
+    pub(crate) fn reads(&self, namespace_id: &NamespaceId) -> NamespaceReads {
+        NamespaceReads::new(self.reader.namespace(namespace_id))
     }
 
     /// The grep-owned keyspace this worker publishes through.
@@ -710,7 +711,7 @@ enum CollectedProgress {
 /// `max_content_bytes_per_step` is reached (the file that crosses it is
 /// still included, exactly as the row walk did).
 async fn collect_backfill_unit(
-    reads: &NamespaceReads<'_>,
+    reads: &NamespaceReads,
     checkpoint_id: &PinId,
     captured_seq: ChangeSeq,
     cursor: Option<InodeId>,
@@ -786,7 +787,7 @@ async fn collect_backfill_unit(
 ///
 /// `Ok(None)` means the index is already at the namespace head.
 async fn collect_incremental_unit(
-    reads: &NamespaceReads<'_>,
+    reads: &NamespaceReads,
     resume: ChangeFeedResume,
     policy: GramIndexBuildPolicy,
 ) -> Result<IncrementalWork> {
@@ -871,7 +872,7 @@ struct PendingRevisionContent {
 }
 
 async fn load_and_fold_revision_contents(
-    reads: &NamespaceReads<'_>,
+    reads: &NamespaceReads,
     pending: &[PendingRevisionContent],
     postings: &mut BTreeMap<Gram, Vec<GramPosting>>,
     stats: &mut IndexingStats,

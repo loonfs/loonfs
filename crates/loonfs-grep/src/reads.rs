@@ -1,19 +1,19 @@
 //! Filesystem reads used by grep indexing and query verification.
 //!
-//! Grep reads filesystem state through [`FsReader`] and reads its own index
-//! objects directly from the extension keyspace.
+//! Grep reads filesystem state through a read-only [`Namespace`] handle and
+//! reads its own index objects directly from the extension keyspace.
 
 use crate::{GrepError, Result};
 use loonfs::{
     CheckpointFilesPage, CheckpointFilesPageCursor, CoreError, CurrentFileState, FsReadSnapshot,
-    FsReader, ListChangesOptions, ListCheckpointFilesOptions, StatPathOptions,
-    MAX_RESOLVE_CURRENT_FILES,
+    ListChangesOptions, ListCheckpointFilesOptions, Namespace, NamespaceMetadata, ReadOnly,
+    StatPathOptions, MAX_RESOLVE_CURRENT_FILES,
 };
 use loonfs_api::v0::{FilesystemChange, ListChangesResponse};
 use loonfs_api::{
     decode_cursor, AbsolutePath, ChangeSeq, ContentRef, DirectoryPageCursor, EffectiveLimit,
-    InodeId, LimitError, Namespace, NamespaceId, Page, PageRequest, PaginationPolicy, PathEntry,
-    PinId, RevisionNo, Subject,
+    InodeId, LimitError, NamespaceId, Page, PageRequest, PaginationPolicy, PathEntry, PinId,
+    RevisionNo, Subject,
 };
 
 /// Filesystem reads for one namespace.
@@ -21,49 +21,45 @@ use loonfs_api::{
 /// Each call uses an internally consistent snapshot, but consecutive calls
 /// may observe different heads. Query execution pins one view so every
 /// metadata phase in one response uses the same head.
-pub struct NamespaceReads<'a> {
-    reader: &'a FsReader,
-    subject_reader: Option<FsReader>,
-    namespace_id: &'a NamespaceId,
+pub struct NamespaceReads {
+    namespace: Namespace<ReadOnly>,
+    subject_namespace: Option<Namespace<ReadOnly>>,
 }
 
-impl<'a> NamespaceReads<'a> {
-    /// Borrows a reader for one namespace. Performs no I/O.
-    pub fn new(reader: &'a FsReader, namespace_id: &'a NamespaceId) -> Self {
+impl NamespaceReads {
+    /// Reads through a read-only handle on one namespace. Performs no I/O.
+    pub fn new(namespace: Namespace<ReadOnly>) -> Self {
         Self {
-            reader,
-            subject_reader: None,
-            namespace_id,
+            namespace,
+            subject_namespace: None,
         }
     }
 
     /// Verifies candidates and reads their content as `subject`. The index
     /// and the change feed still read as the service.
     pub fn as_subject(mut self, subject: Subject) -> Self {
-        self.subject_reader = Some(self.reader.as_subject(subject));
+        self.subject_namespace = Some(self.namespace.as_subject(subject));
         self
     }
 
-    /// Returns the namespace used by this reader.
+    /// Returns the namespace these reads act on.
     pub fn namespace_id(&self) -> &NamespaceId {
-        self.namespace_id
+        self.namespace.namespace_id()
     }
 
     /// Pins one metadata view for a query.
-    pub(crate) async fn pin(&self) -> Result<PinnedNamespaceReads<'a>> {
-        let reader = self.subject_reader.as_ref().unwrap_or(self.reader);
-        let namespace = reader.namespace(self.namespace_id);
+    pub(crate) async fn pin(&self) -> Result<PinnedNamespaceReads<'_>> {
+        let namespace = self.subject_namespace.as_ref().unwrap_or(&self.namespace);
         let snapshot = namespace.pin_namespace().await?;
         snapshot.require_subject()?;
         Ok(PinnedNamespaceReads {
-            reader: self.reader,
+            namespace: &self.namespace,
             snapshot,
         })
     }
 
-    pub async fn head(&self) -> Result<Namespace> {
-        let namespace = self.reader.namespace(self.namespace_id);
-        Ok(namespace.get_namespace().await?)
+    pub async fn head(&self) -> Result<NamespaceMetadata> {
+        Ok(self.namespace.metadata().await?)
     }
 
     /// Reads one page of the files a checkpoint pins, in ascending inode-id
@@ -79,8 +75,8 @@ impl<'a> NamespaceReads<'a> {
         cursor: Option<CheckpointFilesPageCursor>,
         limit: usize,
     ) -> Result<CheckpointFilesPage> {
-        let namespace = self.reader.namespace(self.namespace_id);
-        Ok(namespace
+        Ok(self
+            .namespace
             .list_checkpoint_files_page(
                 checkpoint_id,
                 PageRequest {
@@ -103,8 +99,8 @@ impl<'a> NamespaceReads<'a> {
         after_seq: ChangeSeq,
         limit: usize,
     ) -> Result<ListChangesResponse> {
-        let namespace = self.reader.namespace(self.namespace_id);
-        Ok(namespace
+        Ok(self
+            .namespace
             .list_changes_page(
                 after_seq,
                 ListChangesOptions {
@@ -121,14 +117,16 @@ impl<'a> NamespaceReads<'a> {
         content_ref: &ContentRef,
         max_bytes: u64,
     ) -> Result<Vec<u8>> {
-        let namespace = self.reader.namespace(self.namespace_id);
-        Ok(namespace.read_content_ref(content_ref, max_bytes).await?)
+        Ok(self
+            .namespace
+            .read_content_ref(content_ref, max_bytes)
+            .await?)
     }
 }
 
 /// Filesystem reads held to one namespace head for a single grep query.
 pub(crate) struct PinnedNamespaceReads<'a> {
-    reader: &'a FsReader,
+    namespace: &'a Namespace<ReadOnly>,
     snapshot: FsReadSnapshot,
 }
 
@@ -152,7 +150,6 @@ impl PinnedNamespaceReads<'_> {
         after_seq: ChangeSeq,
         limit: usize,
     ) -> Result<ListChangesResponse> {
-        let namespace = self.reader.namespace(self.namespace_id());
         let head_seq = self.head_seq();
         if after_seq > head_seq {
             return Err(CoreError::InvalidCursor(format!(
@@ -169,7 +166,8 @@ impl PinnedNamespaceReads<'_> {
                 changes: Vec::new(),
             });
         }
-        let mut page = namespace
+        let mut page = self
+            .namespace
             .list_changes_page(
                 after_seq,
                 ListChangesOptions {

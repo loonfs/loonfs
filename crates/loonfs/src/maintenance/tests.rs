@@ -995,7 +995,7 @@ async fn retired_fork_collection_schedules_the_source_namespace() {
         LocalFsStore::new(directory.path()).expect("store"),
         loonfs_test_support::stores::KeyPredicate::prefix("namespaces/source/"),
     ));
-    let writer = crate::FsWriter::builder_with_store(store.clone())
+    let writer = crate::LoonFs::builder_with_store(store.clone())
         .writer_id("gc-follow-up")
         .build()
         .await
@@ -1017,16 +1017,17 @@ async fn retired_fork_collection_schedules_the_source_namespace() {
         )
         .await
         .expect("fork");
-    let namespace_writer = writer.open_namespace(&target).expect("open namespace");
-    namespace_writer
+    let namespace = writer.open_namespace(&target).expect("open namespace");
+    namespace
         .delete_namespace(Default::default())
         .await
         .expect("delete target");
-    let maintenance = crate::FsMaintenance::builder_with_store(store.clone())
-        .actor_id("gc-follow-up")
+    let maintenance = crate::LoonFs::builder_with_store(store.clone())
+        .writer_id("gc-follow-up")
         .build()
         .await
-        .expect("maintenance");
+        .expect("maintenance")
+        .maintenance(loonfs_test_support::ids::writer_id("gc-follow-up"));
     let registry = MaintenanceRegistry::new();
     registry
         .register(Arc::new(GarbageCollectionJob::new(maintenance)))
@@ -1042,9 +1043,13 @@ async fn retired_fork_collection_schedules_the_source_namespace() {
     writer.shutdown().await.expect("shutdown writer");
 }
 
-async fn write_file(writer: &crate::FsWriter, namespace_id: &NamespaceId, path: &str) {
-    let namespace_writer = writer.open_namespace(namespace_id).expect("open namespace");
-    namespace_writer
+async fn write_file(
+    writer: &crate::LoonFs<crate::Writable>,
+    namespace_id: &NamespaceId,
+    path: &str,
+) {
+    let namespace = writer.open_namespace(namespace_id).expect("open namespace");
+    namespace
         .put_file_bytes(
             path,
             b"body",
@@ -1068,14 +1073,14 @@ async fn an_idle_tail_folds_once_and_again_only_after_a_write() {
         KeyPredicate::any(),
     ));
     let (observer, receiver) = maintenance_hint_relay(nonzero_usize(64));
-    let writer = crate::FsWriter::builder_with_store(store.clone())
+    let writer = crate::LoonFs::builder_with_store(store.clone())
         .writer_id("idle-fold")
         .wall_clock(clock.clone())
         .maintenance_hint_observer(move |hint| observer(hint))
         .build()
         .await
         .expect("writer");
-    let maintenance = writer.maintenance_handle("idle-fold").expect("maintenance");
+    let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id("idle-fold"));
     let registry = MaintenanceRegistry::new();
     registry
         .register(Arc::new(MetadataMaintenanceJob::new(maintenance.clone())))
@@ -1154,8 +1159,8 @@ struct IdleFoldHarness {
     _directory: tempfile::TempDir,
     clock: Arc<ManualClock>,
     forward_hints: Arc<AtomicBool>,
-    writer: crate::FsWriter,
-    maintenance: crate::FsMaintenance,
+    writer: crate::LoonFs<crate::Writable>,
+    maintenance: crate::Maintenance,
     runner: MaintenanceRunner,
     namespace_id: NamespaceId,
 }
@@ -1170,7 +1175,7 @@ impl IdleFoldHarness {
         let forward_hints = Arc::new(AtomicBool::new(true));
         let forward = Arc::clone(&forward_hints);
         let (observer, receiver) = maintenance_hint_relay(nonzero_usize(64));
-        let writer = crate::FsWriter::builder_with_store(store)
+        let writer = crate::LoonFs::builder_with_store(store)
             .writer_id("idle-fold")
             .wall_clock(clock.clone())
             .maintenance_hint_observer(move |hint| {
@@ -1181,7 +1186,7 @@ impl IdleFoldHarness {
             .build()
             .await
             .expect("writer");
-        let maintenance = writer.maintenance_handle("idle-fold").expect("maintenance");
+        let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id("idle-fold"));
         let registry = MaintenanceRegistry::new();
         registry
             .register(Arc::new(MetadataMaintenanceJob::new(maintenance.clone())))

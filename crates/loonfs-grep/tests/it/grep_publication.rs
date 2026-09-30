@@ -1,7 +1,7 @@
 //! Publication recovery must not clean up resources a manifest may name.
 
 use crate::common::{control, default_page_limit, GrepHost};
-use loonfs::{CreateNamespaceOptions, FsWriter, PutFileOptions, SharedObjectStore};
+use loonfs::{CreateNamespaceOptions, LoonFs, PutFileOptions, SharedObjectStore};
 use loonfs_api::{ErrorCode, ManifestNo, PageRequest};
 use loonfs_grep::keyspace::manifest_key;
 use loonfs_grep::manifest::{load_current_grep_manifest, GrepIndexStatus};
@@ -19,7 +19,7 @@ async fn a_collected_publication_does_not_abandon_a_successors_backfill_checkpoi
     let directory = tempfile::tempdir().expect("directory");
     let base: SharedObjectStore = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
     let namespace_id = namespace_id("publication-recovery");
-    let writer = FsWriter::builder_with_store(base.clone())
+    let writer = LoonFs::builder_with_store(base.clone())
         .writer_id("publication-recovery")
         .min_publish_interval_ms(0)
         .build()
@@ -32,11 +32,11 @@ async fn a_collected_publication_does_not_abandon_a_successors_backfill_checkpoi
         )
         .await
         .expect("namespace");
-    let namespace_writer = writer
+    let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
     for path in ["/first", "/second"] {
-        namespace_writer
+        namespace
             .put_file_bytes(
                 path,
                 b"needle\n",
@@ -122,7 +122,7 @@ async fn an_enable_whose_put_reads_back_absent_fails_and_keeps_its_checkpoint() 
     let directory = tempfile::tempdir().expect("directory");
     let base: SharedObjectStore = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
     let namespace_id = namespace_id("unknown-enable");
-    let writer = FsWriter::builder_with_store(base.clone())
+    let writer = LoonFs::builder_with_store(base.clone())
         .writer_id("unknown-enable")
         .build()
         .await

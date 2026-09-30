@@ -7,7 +7,7 @@ use crate::metadata::{AccessRevisionRecord, InodeRecord, MetadataState};
 use crate::time::{Deadline, StdMonotonicTimer};
 use loonfs_api::wire::manifest::{NamespaceAccess, NamespaceManifestPayload};
 use loonfs_api::{
-    AccessRevisionNo, ActorId, ChangeSeq, InodeKind, Namespace, NamespaceId, ROOT_INODE_ID,
+    AccessRevisionNo, ActorId, ChangeSeq, InodeKind, NamespaceId, NamespaceMetadata, ROOT_INODE_ID,
 };
 use loonfs_objectstore::ObjectStore;
 use std::sync::Arc;
@@ -19,7 +19,7 @@ pub(crate) async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
     actor_id: &loonfs_api::ActorId,
     access: &NamespaceAccess,
     allow_existing: bool,
-) -> Result<Namespace> {
+) -> Result<NamespaceMetadata> {
     let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
     let start = NamespaceManifestPayload::initial(
         namespace_id.clone(),

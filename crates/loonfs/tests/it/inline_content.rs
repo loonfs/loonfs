@@ -2,8 +2,8 @@
 
 use bytes::Bytes;
 use loonfs::{
-    CreateNamespaceOptions, DeleteNamespaceOptions, ForkNamespaceOptions, FsReader, FsWriter,
-    PutFileOptions, SharedObjectStore,
+    CreateNamespaceOptions, DeleteNamespaceOptions, ForkNamespaceOptions, LoonFs, PutFileOptions,
+    SharedObjectStore,
 };
 use loonfs_api::{
     AbsolutePath, AccessGrants, AccessRight, AccessRights, CommitId, ContentId, ContentRef,
@@ -81,7 +81,7 @@ async fn reader_downloads_materialize_tail_content_by_path_and_inode() {
         KeyPredicate::content_blob(),
     ));
     let store: SharedObjectStore = recording.clone();
-    let writer = FsWriter::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone())
         .writer_id("runtime-writer")
         .runtime_cache(loonfs::RuntimeCacheConfig {
             max_cached_namespaces: 0,
@@ -90,7 +90,7 @@ async fn reader_downloads_materialize_tail_content_by_path_and_inode() {
         .build()
         .await
         .expect("writer");
-    let reader = FsReader::builder_with_store(store.clone())
+    let reader = LoonFs::reader_with_store(store.clone())
         .build()
         .await
         .expect("reader");
@@ -151,7 +151,7 @@ async fn imports_read_the_owners_tail_before_folding_and_object_after_folding() 
         KeyPredicate::content_blob(),
     ));
     let store: SharedObjectStore = recording.clone();
-    let writer = FsWriter::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone())
         .writer_id("runtime-writer")
         .runtime_cache(loonfs::RuntimeCacheConfig {
             max_cached_namespaces: 0,
@@ -162,7 +162,7 @@ async fn imports_read_the_owners_tail_before_folding_and_object_after_folding() 
         .expect("writer");
     let source = NamespaceId::parse("source").expect("source");
     let destination = NamespaceId::parse("destination").expect("destination");
-    let namespace = writer.reader().namespace(&destination);
+    let namespace = writer.namespace(&destination);
     let principal = PrincipalId::parse("owner").expect("principal");
     let subject = Subject {
         principal_scope: PrincipalScope::parse("scope").expect("scope"),
@@ -268,13 +268,13 @@ async fn same_namespace_imports_read_inline_bytes_without_a_content_request() {
         KeyPredicate::content_blob(),
     ));
     let store: SharedObjectStore = recording.clone();
-    let writer = FsWriter::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone())
         .writer_id("runtime-writer")
         .build()
         .await
         .expect("writer");
     let namespace_id = NamespaceId::parse("same-namespace").expect("namespace");
-    let namespace = writer.reader().namespace(&namespace_id);
+    let namespace = writer.namespace(&namespace_id);
     writer
         .create_namespace(
             &namespace_id,
@@ -320,7 +320,7 @@ async fn imports_of_fork_content_read_the_deleted_owners_key() {
             KeyPredicate::content_blob(),
         ));
         let store: SharedObjectStore = recording.clone();
-        let writer = FsWriter::builder_with_store(store.clone())
+        let writer = LoonFs::builder_with_store(store.clone())
             .writer_id("runtime-writer")
             .build()
             .await
@@ -328,9 +328,9 @@ async fn imports_of_fork_content_read_the_deleted_owners_key() {
         let source = NamespaceId::parse("source").expect("source");
         let source_writer = writer.open_namespace(&source).expect("open namespace");
         let fork = NamespaceId::parse("fork").expect("fork");
-        let fork_namespace = writer.reader().namespace(&fork);
+        let fork_namespace = writer.namespace(&fork);
         let destination = NamespaceId::parse("destination").expect("destination");
-        let destination_namespace = writer.reader().namespace(&destination);
+        let destination_namespace = writer.namespace(&destination);
         for namespace_id in [&source, &destination] {
             writer
                 .create_namespace(

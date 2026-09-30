@@ -1,6 +1,6 @@
 //! Store requests made by writer acquisition and the first publish after a fold.
 
-use loonfs::{CreateDirectoryOptions, CreateNamespaceOptions, FsReader, FsWriter, NamespaceId};
+use loonfs::{CreateDirectoryOptions, CreateNamespaceOptions, LoonFs, NamespaceId};
 use loonfs_objectstore::keys::{
     hint, metadata_manifest_object, metadata_manifest_prefix, wal_segment_prefix,
 };
@@ -19,7 +19,7 @@ async fn acquisition_shares_discovery_and_an_own_fold_needs_none() {
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::any(),
     ));
-    let creator = FsWriter::builder_with_store(store.clone())
+    let creator = LoonFs::builder_with_store(store.clone())
         .writer_id("discovery-test")
         .build()
         .await
@@ -29,17 +29,17 @@ async fn acquisition_shares_discovery_and_an_own_fold_needs_none() {
         .await
         .expect("namespace");
     creator.shutdown().await.expect("shutdown creator");
-    let writer = FsWriter::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone())
         .writer_id("discovery-test")
         .min_publish_interval_ms(0)
         .build()
         .await
         .expect("fresh writer");
-    let namespace_writer = writer
+    let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
     store.reset();
-    namespace_writer
+    namespace
         .create_directory("/first", CreateDirectoryOptions::new(test_actor()))
         .await
         .expect("first publish");
@@ -70,7 +70,7 @@ async fn acquisition_shares_discovery_and_an_own_fold_needs_none() {
     );
 
     for number in 1..31 {
-        namespace_writer
+        namespace
             .create_directory(
                 &format!("/entry-{number}"),
                 CreateDirectoryOptions::new(test_actor()),
@@ -78,9 +78,9 @@ async fn acquisition_shares_discovery_and_an_own_fold_needs_none() {
             .await
             .expect("reach fold threshold");
     }
-    namespace_writer.wait_for_fold().await.expect("fold");
+    namespace.wait_for_fold().await.expect("fold");
     store.reset();
-    namespace_writer
+    namespace
         .create_directory("/after-fold", CreateDirectoryOptions::new(test_actor()))
         .await
         .expect("publish after fold");
@@ -126,7 +126,7 @@ async fn a_directory_created_during_a_fold_is_seen_after_the_projection_is_dropp
         ),
         KeyPredicate::any(),
     ));
-    let writer = FsWriter::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone())
         .writer_id("discovery-test")
         .min_publish_interval_ms(0)
         .build()
@@ -242,7 +242,7 @@ async fn a_directory_created_during_a_fold_is_seen_after_the_projection_is_dropp
             .all(|number| number >= during_wal_no),
         "{requests:?}"
     );
-    let reader = FsReader::builder_with_store(store.clone())
+    let reader = LoonFs::reader_with_store(store.clone())
         .build()
         .await
         .expect("fresh reader");

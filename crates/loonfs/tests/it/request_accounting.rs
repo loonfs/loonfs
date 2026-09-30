@@ -8,9 +8,8 @@
 //!   cargo test -p loonfs --test it request_accounting -- --ignored --nocapture
 
 use loonfs::{
-    CreateNamespaceOptions, FsMaintenance, FsReader, FsWriter, MetadataMaintenanceOptions,
-    Namespace, NamespaceId, PageRequest, PaginationPolicy, PutFileOptions, SharedObjectStore,
-    Writable,
+    CreateNamespaceOptions, LoonFs, MetadataMaintenanceOptions, Namespace, NamespaceId,
+    PageRequest, PaginationPolicy, PutFileOptions, SharedObjectStore, Writable,
 };
 use loonfs_api::AbsolutePath;
 
@@ -106,12 +105,12 @@ fn report(phase: &str, gets: &[RecordedGet], segments: &SegmentMap) {
 /// service. Every candidate is admitted before the publisher's worker can
 /// take any of them, so they coalesce into one publication.
 async fn publish_candidates(
-    namespace_writer: &Namespace<Writable>,
+    namespace: &Namespace<Writable>,
     candidates: Vec<loonfs::publish::CommitCandidate>,
 ) {
     let submissions = candidates
         .into_iter()
-        .map(|candidate| namespace_writer.commit_candidate(candidate));
+        .map(|candidate| namespace.commit_candidate(candidate));
     for outcome in futures::future::join_all(submissions).await {
         outcome.expect("publish batch member");
     }
@@ -132,17 +131,18 @@ async fn warm_phase_request_accounting() {
     // Build phase: bench-like shape — one wide hot directory, maintenance
     // steps a few times so the manifest ends with a seed base plus a few delta
     // runs and a WAL tail, like the 10k benchmark build.
-    let writer = FsWriter::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone())
         .writer_id("acct-writer")
         .min_publish_interval_ms(0)
         .build()
         .await
         .expect("build writer");
-    let maintenance = FsMaintenance::builder_with_store(store.clone())
-        .actor_id("acct-maintenance")
+    let maintenance = LoonFs::builder_with_store(store.clone())
+        .writer_id("acct-maintenance")
         .build()
         .await
-        .expect("build maintenance");
+        .expect("build maintenance")
+        .maintenance(loonfs_test_support::ids::writer_id("acct-maintenance"));
     writer
         .create_namespace(
             &namespace_id,
@@ -226,7 +226,7 @@ async fn warm_phase_request_accounting() {
 
     // Warm phases, each on the same fresh handle like the bench: a full
     // paged list, then stat, read, write.
-    let reader = FsReader::builder_with_store(store.clone())
+    let reader = LoonFs::reader_with_store(store.clone())
         .build()
         .await
         .expect("build reader");
@@ -264,7 +264,7 @@ async fn warm_phase_request_accounting() {
         .expect("read");
     report("warm read", &log.take_gets(), &segments);
 
-    let writer = FsWriter::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone())
         .writer_id("acct-writer-2")
         .min_publish_interval_ms(0)
         .build()

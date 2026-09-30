@@ -41,8 +41,8 @@ use loonfs_api::EffectiveLimit;
 use loonfs_api::{
     AdvanceRetentionResponse, ChangeSeq, Checkpoint, ChecksumAlgorithm, CommitId, ContentRef,
     DeleteCheckpointResponse, DeleteNamespaceResponse, DeleteSnapshotResponse, DirectoryPageCursor,
-    FileBytes, FileRevision, FileRevisionsPageCursor, FlushWalResponse, InodeId, Namespace,
-    NamespaceAccess, NamespaceId, Page, PageRequest, PathEntry, PinId, RevisionNo, Subject,
+    FileBytes, FileRevision, FileRevisionsPageCursor, FlushWalResponse, InodeId, NamespaceAccess,
+    NamespaceId, NamespaceMetadata, Page, PageRequest, PathEntry, PinId, RevisionNo, Subject,
     TrashEntry, TrashPageCursor, UploadId, WriterId, ROOT_INODE_ID,
 };
 use loonfs_objectstore::{ByteStream, ObjectStore};
@@ -55,7 +55,7 @@ use tracing::Instrument;
 /// namespace snapshot.
 ///
 /// This type supports the `loonfs` runtime. Applications should use the
-/// higher-level `loonfs` reader handles instead.
+/// higher-level `loonfs` runtime and namespace handles instead.
 #[derive(Debug, Clone)]
 pub struct RuntimeReadContext {
     pub head: NamespaceReadState,
@@ -446,7 +446,10 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     ///
     /// Use this before normal reads and writes for a new namespace. Returns
     /// the namespace's status after manifest 1 is installed.
-    pub async fn bootstrap_namespace(&self, options: CreateNamespaceOptions) -> Result<Namespace> {
+    pub async fn bootstrap_namespace(
+        &self,
+        options: CreateNamespaceOptions,
+    ) -> Result<NamespaceMetadata> {
         bootstrap::bootstrap_namespace(
             &self.store,
             &self.namespace_id,
@@ -467,7 +470,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         target: &NamespaceId,
         actor_id: &loonfs_api::ActorId,
         snapshot_id: Option<&PinId>,
-    ) -> Result<Namespace> {
+    ) -> Result<NamespaceMetadata> {
         fork::fork_namespace(
             &self.store,
             &self.namespace_id,

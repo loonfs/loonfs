@@ -3,14 +3,13 @@
 //! The shipped segment target is 8 MiB of decoded rows, so a compacted run
 //! only splits into many segments at a scale no test can write in seconds.
 //! These tests narrow the rows per compacted segment through
-//! [`FsMaintenance::narrow_segment_row_budget`]. Everything else — folds,
+//! [`Maintenance::narrow_segment_row_budget`]. Everything else — folds,
 //! compaction planning, and the page read — is the shipped path.
 
 use crate::publish::{CommitCandidate, CommitRequest, FilesystemOperation, InlineContent};
 use crate::{
-    CreateDirectoryOptions, CreateNamespaceOptions, DestinationBehavior, FsMaintenance, FsReader,
-    FsWriter, NamespaceId, PageRequest, RunMaintenanceRequest, RunMaintenanceResponse,
-    SharedObjectStore,
+    CreateDirectoryOptions, CreateNamespaceOptions, DestinationBehavior, LoonFs, NamespaceId,
+    PageRequest, RunMaintenanceRequest, RunMaintenanceResponse, SharedObjectStore,
 };
 use loonfs_api::wire::manifest::MetadataRowFamily;
 use loonfs_api::{
@@ -85,17 +84,20 @@ async fn create_compacted_directory(
             .collect(),
     )
     .expect("grants");
-    let writer = FsWriter::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone())
         .writer_id("compacted-page-writer")
         .min_publish_interval_ms(0)
         .build()
         .await
         .expect("writer");
-    let maintenance = FsMaintenance::builder_with_store(store.clone())
-        .actor_id("compacted-page-maintenance")
+    let maintenance = LoonFs::builder_with_store(store.clone())
+        .writer_id("compacted-page-maintenance")
         .build()
         .await
         .expect("maintenance")
+        .maintenance(loonfs_test_support::ids::writer_id(
+            "compacted-page-maintenance",
+        ))
         .narrow_segment_row_budget(NonZeroUsize::new(ROWS_PER_SEGMENT).expect("nonzero"));
     writer
         .create_namespace(
@@ -117,8 +119,8 @@ async fn create_compacted_directory(
         Some(subject) => writer.as_subject(subject.clone()),
         None => writer,
     };
-    let namespace_writer = writer.open_namespace(namespace_id).expect("open namespace");
-    namespace_writer
+    let namespace = writer.open_namespace(namespace_id).expect("open namespace");
+    namespace
         .create_directory("/directory", CreateDirectoryOptions::new(actor.clone()))
         .await
         .expect("directory");
@@ -155,7 +157,7 @@ async fn create_compacted_directory(
                 std::iter::once(put).chain(access)
             })
             .collect();
-        namespace_writer
+        namespace
             .commit_candidate(CommitCandidate::with_inline_content(
                 CommitRequest {
                     commit_id: CommitId::generate(),
@@ -240,7 +242,7 @@ async fn compacted_directory_page_overlaps_segment_reads(
     let delayed = Arc::new(LatencyStore::new(store, keys.clone(), latency));
     let reads = Arc::new(ConcurrencyWatchStore::new(delayed.clone(), keys.clone()));
     let recording = Arc::new(RecordingStore::new(reads.clone(), keys));
-    let reader = FsReader::builder_with_store(recording.clone())
+    let reader = LoonFs::reader_with_store(recording.clone())
         .build()
         .await
         .expect("reader");

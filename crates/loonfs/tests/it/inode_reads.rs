@@ -2,7 +2,7 @@
 
 use crate::common::{open_runtime_async, store};
 use loonfs::{
-    CreateDirectoryOptions, CreateNamespaceOptions, DeleteOptions, ErrorCode, FsReader, InodeId,
+    CreateDirectoryOptions, CreateNamespaceOptions, DeleteOptions, ErrorCode, InodeId, LoonFs,
     MoveOptions, PageRequest, PaginationPolicy, PutFileOptions, RevisionNo, StatPathOptions,
 };
 use loonfs_test_support::ids::namespace_id;
@@ -233,7 +233,7 @@ async fn stat_inode_and_stat_path_have_the_same_point_lookup_request_count() {
     drop(fs);
     let _ = recorded.take_gets();
 
-    let path_reader = FsReader::builder_with_store(shared.clone())
+    let path_reader = LoonFs::reader_with_store(shared.clone())
         .build()
         .await
         .expect("build path reader");
@@ -245,7 +245,7 @@ async fn stat_inode_and_stat_path_have_the_same_point_lookup_request_count() {
     let path_gets = recorded.take_gets();
     drop(path_reader);
 
-    let inode_reader = FsReader::builder_with_store(shared)
+    let inode_reader = LoonFs::reader_with_store(shared)
         .build()
         .await
         .expect("build inode reader");

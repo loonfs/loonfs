@@ -237,7 +237,7 @@ async fn runtime_publish_reuses_wal_tail_projection_while_a_fold_runs() {
     );
     let recording = Arc::new(RecordingStore::new(blocking, KeyPredicate::any()));
     let tail_segments = Arc::new(AtomicU64::new(0));
-    let writer = loonfs::FsWriter::builder_with_store(recording.clone())
+    let writer = loonfs::LoonFs::builder_with_store(recording.clone())
         .writer_id("fold-projection")
         .maintenance_hint_observer({
             let tail_segments = Arc::clone(&tail_segments);
@@ -257,13 +257,13 @@ async fn runtime_publish_reuses_wal_tail_projection_while_a_fold_runs() {
         )
         .await
         .expect("namespace");
-    let namespace_writer = writer
+    let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
     recording.inner().block_next();
     for number in 0..FOLD_AT_WAL_SEGMENTS + 3 {
         recording.reset();
-        namespace_writer
+        namespace
             .create_directory(
                 &format!("/directory-{number}"),
                 CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
@@ -292,7 +292,7 @@ async fn runtime_publish_reuses_wal_tail_projection_while_a_fold_runs() {
         assert_eq!(tail_segments.load(Ordering::SeqCst), number + 2);
     }
     recording.inner().release();
-    namespace_writer.wait_for_fold().await.expect("fold");
+    namespace.wait_for_fold().await.expect("fold");
     writer.publisher().drain().await.expect("finish hints");
     let manifest =
         loonfs_core::control::load_namespace_current_manifest(recording.as_ref(), &namespace_id)
@@ -303,7 +303,7 @@ async fn runtime_publish_reuses_wal_tail_projection_while_a_fold_runs() {
         &manifest.state.manifest().manifest_no,
     );
     recording.reset();
-    namespace_writer
+    namespace
         .create_directory(
             "/after-fold",
             CreateDirectoryOptions::new(loonfs_test_support::test_actor()),

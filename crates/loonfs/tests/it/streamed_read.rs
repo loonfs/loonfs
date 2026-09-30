@@ -9,8 +9,8 @@
 
 use crate::common::{open_runtime_async, store, TestRuntime};
 use loonfs::{
-    CreateNamespaceOptions, DestinationBehavior, ErrorCode, FsReader, NamespaceId, PutFileOptions,
-    ReadFileStreamOptions, SharedObjectStore,
+    CreateNamespaceOptions, DestinationBehavior, ErrorCode, LoonFs, NamespaceId, PutFileOptions,
+    ReadFileStreamOptions, ReadOnly, SharedObjectStore,
 };
 use loonfs_objectstore::keys::content_blob;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -56,7 +56,11 @@ async fn namespace(runtime: &TestRuntime) -> NamespaceId {
 async fn written_file(
     root: &Path,
     bytes: &[u8],
-) -> (NamespaceId, Arc<BufferWatchStore<LocalFsStore>>, FsReader) {
+) -> (
+    NamespaceId,
+    Arc<BufferWatchStore<LocalFsStore>>,
+    LoonFs<ReadOnly>,
+) {
     let runtime = open_runtime_async(store(root), "writer-a").await;
     let namespace_id = namespace(&runtime).await;
     let namespace_writer = runtime
@@ -79,7 +83,7 @@ async fn written_file(
         LocalFsStore::new(root).expect("create local-fs store"),
     ));
     let store: SharedObjectStore = watched.clone();
-    let reader = FsReader::builder_with_store(store)
+    let reader = LoonFs::reader_with_store(store)
         .build()
         .await
         .expect("build reader");

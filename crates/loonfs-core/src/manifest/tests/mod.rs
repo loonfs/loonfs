@@ -214,7 +214,7 @@ pub(crate) async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     context: &MutationContext,
-) -> Result<loonfs_api::Namespace, crate::error::CoreError> {
+) -> Result<loonfs_api::NamespaceMetadata, crate::error::CoreError> {
     let summary = create(store, namespace_id, context).await?;
     acquire_writer_epoch(store, namespace_id, context)
         .await

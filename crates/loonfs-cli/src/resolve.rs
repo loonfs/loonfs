@@ -9,9 +9,9 @@ use crate::config::{
 use crate::error::CliError;
 use crate::profiles::default_namespace;
 use loonfs::{
-    maintenance_hint_relay, DecodedBlockCacheConfig, FsWriter, GarbageCollectionJob,
+    maintenance_hint_relay, DecodedBlockCacheConfig, GarbageCollectionJob, LoonFs,
     MaintenanceRegistry, MaintenanceRunner, MetadataCompactionJob, MetadataMaintenanceJob,
-    SharedObjectStore, TraceStoreKind,
+    SharedObjectStore, TraceStoreKind, WriterId,
 };
 use loonfs_api::{
     ActorId, NamespaceId, PrincipalId, PrincipalScope, PrincipalSet, SecretString, Subject,
@@ -283,8 +283,8 @@ impl ResolvedTarget {
         writer_id: Option<&str>,
         no_retry: bool,
     ) -> Result<Self, CliError> {
-        // One command drives all three handles from one runtime, so they
-        // deliberately share one provider client.
+        // One command drives the runtime, its maintenance, and grep from one
+        // Tokio runtime, so they deliberately share one provider client.
         let store: SharedObjectStore = store_config
             .configured_object_store()
             .map_err(|err| CliError::invalid_config(err.public_message().into_owned()))?
@@ -305,7 +305,7 @@ impl ResolvedTarget {
         Ok(target)
     }
 
-    /// Opens the runtime handles over a store the caller already holds.
+    /// Opens the runtime over a store the caller already holds.
     ///
     /// [`Self::embedded`] opens the profile's configured store and passes it here.
     /// Callers that need to observe store operations may provide a wrapped
@@ -323,7 +323,7 @@ impl ResolvedTarget {
         let (observer, receiver) = maintenance_hint_relay(
             std::num::NonZeroUsize::new(1024).expect("relay capacity is nonzero"),
         );
-        let writer = FsWriter::builder_with_store(store.clone())
+        let runtime = LoonFs::builder_with_store(store.clone())
             .writer_id(writer_id.clone())
             .inline_content(inline_content.clone())
             .maintenance_hint_observer(move |hint| observer(hint))
@@ -334,15 +334,18 @@ impl ResolvedTarget {
             .build()
             .await
             .map_err(CliError::from)?;
-        let reader = writer.reader();
-        let maintenance = writer
-            .maintenance_handle(format!("{writer_id}-maintenance"))
-            .map_err(CliError::from)?;
+        let maintenance = runtime.maintenance(
+            WriterId::parse(format!("{writer_id}-maintenance"))
+                .map_err(|error| CliError::invalid_config(error.to_string()))?,
+        );
         let grep_block_cache = Arc::new(GrepBlockCache::new(
             DecodedBlockCacheConfig::with_max_decoded_bytes(DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES),
         ));
-        let grep_worker =
-            GrepWorker::new(writer.object_store(), reader.clone(), maintenance.clone());
+        let grep_worker = GrepWorker::new(
+            runtime.object_store(),
+            runtime.read_only(),
+            maintenance.clone(),
+        );
         let jobs = MaintenanceRegistry::new();
         jobs.register(Arc::new(MetadataMaintenanceJob::new(maintenance.clone())))
             .map_err(CliError::from)?;
@@ -362,7 +365,7 @@ impl ResolvedTarget {
             .map_err(CliError::from)?;
         runner.attach_hints(receiver);
         let maintenance = MaintenanceHost {
-            writer,
+            runtime,
             maintenance,
             jobs,
             runner,

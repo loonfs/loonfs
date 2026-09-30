@@ -46,7 +46,7 @@ impl Harness {
             .expect("app");
         let namespace = namespace_id("hosted-inline");
         state
-            .writer
+            .runtime
             .create_namespace(
                 &namespace,
                 CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
@@ -251,7 +251,7 @@ async fn default_inline_commits_write_only_wal_and_replay_by_bytes() {
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(conflict["code"], ErrorCode::CommitIdReuseConflict.as_str());
     assert_eq!(harness.store.count(OperationClass::Put), 0);
-    harness.state.writer.shutdown().await.expect("shutdown");
+    harness.state.runtime.shutdown().await.expect("shutdown");
 }
 
 #[tokio::test]
@@ -314,7 +314,7 @@ async fn inline_sources_and_capabilities_follow_the_policy_before_any_write() {
             }
         }
         assert_eq!(harness.store.count(OperationClass::Put), 0);
-        harness.state.writer.shutdown().await.expect("shutdown");
+        harness.state.runtime.shutdown().await.expect("shutdown");
     }
 }
 
@@ -364,7 +364,7 @@ async fn inode_inline_operations_and_segment_fallback_keep_retry_identity() {
     let (status, replay) = harness.commit(revision).await;
     assert_eq!(status, StatusCode::OK, "{replay}");
     assert_eq!(first, replay);
-    harness.state.writer.shutdown().await.expect("shutdown");
+    harness.state.runtime.shutdown().await.expect("shutdown");
 }
 
 #[tokio::test]
@@ -415,7 +415,7 @@ async fn rust_client_small_puts_use_one_request_only_when_inline_is_advertised()
                 matches!(retry, Err(ClientError::Api { code, .. }) if code == ErrorCode::CommitIdReuseConflict.as_str())
             );
         }
-        harness.state.writer.shutdown().await.expect("shutdown");
+        harness.state.runtime.shutdown().await.expect("shutdown");
         server.abort();
     }
 }

@@ -5,8 +5,7 @@
 use axum::body::{to_bytes, Body};
 use axum::http::{Method, Request, StatusCode};
 use axum::Router;
-use loonfs::{CreateNamespaceOptions, FsWriter, PutFileOptions};
-use loonfs::{FsMaintenance, FsReader};
+use loonfs::{CreateNamespaceOptions, LoonFs, PutFileOptions, Writable};
 use loonfs_api::v0::{GrepIndex, GrepIndexLifecycle};
 use loonfs_api::{
     ApiError, CapabilityDocument, ChangeSeq, GrepResponse, NamespaceId, RunMaintenanceResponse,
@@ -87,7 +86,7 @@ async fn disabled_mode_returns_not_supported_and_omits_grep_capabilities() {
     )
     .await;
     server
-        .writer
+        .runtime
         .shutdown()
         .await
         .expect("settle the server writer");
@@ -109,7 +108,7 @@ async fn grep_gc_requires_grep_maintenance() {
         )
         .await;
         server
-            .writer
+            .runtime
             .shutdown()
             .await
             .expect("settle the server writer");
@@ -185,7 +184,7 @@ async fn grep_get_query_parameters_use_the_list_route_grammar() {
     assert!(error.message.contains("maximum is 1024 bytes"));
 
     server
-        .writer
+        .runtime
         .shutdown()
         .await
         .expect("settle the server writer");
@@ -195,7 +194,7 @@ async fn grep_get_query_parameters_use_the_list_route_grammar() {
 async fn serving_and_maintaining_enables_queries_nudges_and_disables_per_namespace() {
     let temp_dir = tempdir().expect("store tempdir");
     let (store, writer, namespace_id) = seed_namespace(temp_dir.path(), "both").await;
-    let namespace_writer = writer
+    let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
     let (router, server) = app(
@@ -266,7 +265,7 @@ async fn serving_and_maintaining_enables_queries_nudges_and_disables_per_namespa
     // The file lands through a writer of its own, so nothing in this server
     // observed the publish: the index stays where it was until a request
     // touches the namespace again.
-    namespace_writer
+    namespace
         .put_file_bytes(
             "/note.txt",
             b"automatic needle\n",
@@ -360,7 +359,7 @@ async fn serving_and_maintaining_enables_queries_nudges_and_disables_per_namespa
     let reenabled = grep(&router, &namespace_id, "automatic needle").await;
     assert_eq!(reenabled.matches.len(), 1);
     server
-        .writer
+        .runtime
         .shutdown()
         .await
         .expect("settle the server writer");
@@ -370,7 +369,7 @@ async fn serving_and_maintaining_enables_queries_nudges_and_disables_per_namespa
 async fn first_query_after_restart_resumes_stale_and_mid_backfill_namespaces() {
     let temp_dir = tempdir().expect("store tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
-    let writer = FsWriter::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone())
         .writer_id("restart-seed")
         .min_publish_interval_ms(0)
         .build()
@@ -480,7 +479,7 @@ async fn first_query_after_restart_resumes_stale_and_mid_backfill_namespaces() {
     let resumed = grep(&router, &backfill, "mid-backfill needle").await;
     assert_eq!(resumed.matches.len(), 3);
     server
-        .writer
+        .runtime
         .shutdown()
         .await
         .expect("settle the server writer");
@@ -490,7 +489,7 @@ async fn first_query_after_restart_resumes_stale_and_mid_backfill_namespaces() {
 async fn serve_only_answers_searches_over_an_index_it_refuses_to_maintain() {
     let temp_dir = tempdir().expect("store tempdir");
     let (store, writer, namespace_id) = seed_namespace(temp_dir.path(), "serve-only").await;
-    let namespace_writer = writer
+    let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
     let (router, server) = app(
@@ -552,7 +551,7 @@ async fn serve_only_answers_searches_over_an_index_it_refuses_to_maintain() {
 
     let worker = grep_worker(&store, "external-grep-worker").await;
     worker.enable(&namespace_id).await.expect("enable grep");
-    namespace_writer
+    namespace
         .put_file_bytes(
             "/note.txt",
             b"external needle\n",
@@ -572,7 +571,7 @@ async fn serve_only_answers_searches_over_an_index_it_refuses_to_maintain() {
     assert_eq!(response.matches.len(), 1);
     assert_eq!(response.built_through_seq, ChangeSeq(1));
     server
-        .writer
+        .runtime
         .shutdown()
         .await
         .expect("settle the server writer");
@@ -582,7 +581,7 @@ async fn serve_only_answers_searches_over_an_index_it_refuses_to_maintain() {
 async fn maintain_only_keeps_the_index_built_without_serving_searches() {
     let temp_dir = tempdir().expect("store tempdir");
     let (store, writer, namespace_id) = seed_namespace(temp_dir.path(), "maintain-only").await;
-    let namespace_writer = writer
+    let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
     let (router, server) = app(
@@ -629,7 +628,7 @@ async fn maintain_only_keeps_the_index_built_without_serving_searches() {
 
     // The index itself is this deployment's job: enabling it here admits the
     // backfill, and the runner carries it to the namespace's head.
-    namespace_writer
+    namespace
         .put_file_bytes(
             "/note.txt",
             b"unserved needle\n",
@@ -653,7 +652,7 @@ async fn maintain_only_keeps_the_index_built_without_serving_searches() {
         "the index this deployment maintains holds real segments"
     );
     server
-        .writer
+        .runtime
         .shutdown()
         .await
         .expect("settle the server writer");
@@ -663,7 +662,7 @@ async fn maintain_only_keeps_the_index_built_without_serving_searches() {
 async fn serve_only_maintenance_registers_the_index_job_without_scheduling_it() {
     let temp_dir = tempdir().expect("store tempdir");
     let (store, writer, namespace_id) = seed_namespace(temp_dir.path(), "manual-maintenance").await;
-    let namespace_writer = writer
+    let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
     let (router, server) = app(
@@ -681,7 +680,7 @@ async fn serve_only_maintenance_registers_the_index_job_without_scheduling_it() 
     );
     assert!(server.runner.is_none(), "serve-only mode builds no runner");
 
-    namespace_writer
+    namespace
         .put_file_bytes(
             "/note.txt",
             b"unscheduled needle\n",
@@ -718,15 +717,18 @@ async fn serve_only_maintenance_registers_the_index_job_without_scheduling_it() 
         1
     );
     server
-        .writer
+        .runtime
         .shutdown()
         .await
         .expect("settle the server writer");
 }
 
-async fn seed_namespace(root: &Path, name: &str) -> (SharedObjectStore, FsWriter, NamespaceId) {
+async fn seed_namespace(
+    root: &Path,
+    name: &str,
+) -> (SharedObjectStore, LoonFs<Writable>, NamespaceId) {
     let store = Arc::new(LocalFsStore::new(root).expect("store")) as SharedObjectStore;
-    let writer = FsWriter::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone())
         .writer_id(format!("grep-mode-seed-{name}"))
         .min_publish_interval_ms(0)
         .build()
@@ -975,15 +977,16 @@ const API_SPEC_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/spe
 
 /// A grep worker over the same handles the server composes.
 async fn grep_worker(store: &SharedObjectStore, actor: &str) -> GrepWorker<SharedObjectStore> {
-    let reader = FsReader::builder_with_store(store.clone())
+    let reader = LoonFs::reader_with_store(store.clone())
         .build()
         .await
         .expect("build reader");
-    let maintenance = FsMaintenance::builder_with_store(store.clone())
-        .actor_id(actor)
+    let maintenance = LoonFs::builder_with_store(store.clone())
+        .writer_id(actor)
         .build()
         .await
-        .expect("build maintenance");
+        .expect("build maintenance")
+        .maintenance(loonfs_test_support::ids::writer_id(actor));
     GrepWorker::new(store.clone(), reader, maintenance)
 }
 

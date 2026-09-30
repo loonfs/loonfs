@@ -1,11 +1,11 @@
-//! Garbage-collection scheduling over the runtime maintenance handle.
+//! Garbage-collection scheduling over a runtime's [`Maintenance`].
 
 use super::{
     MaintenanceCancellation, MaintenanceConclusion, MaintenanceJob, MaintenanceJobId,
     MaintenanceProbe, MaintenanceRunReport,
 };
 use crate::{
-    ErrorCode, FsMaintenance, GcConfig, GcResponse, NamespaceId, Result, RunMaintenanceRequest,
+    ErrorCode, GcConfig, GcResponse, Maintenance, NamespaceId, Result, RunMaintenanceRequest,
     RunMaintenanceResponse, RuntimeError,
 };
 use async_trait::async_trait;
@@ -40,12 +40,12 @@ pub(crate) fn namespace_reclaim_at_ms(deleted_at_ms: u64) -> u64 {
 
 /// Runs one complete garbage-collection pass.
 pub struct GarbageCollectionJob {
-    maintenance: FsMaintenance,
+    maintenance: Maintenance,
 }
 
 impl GarbageCollectionJob {
-    /// Creates a garbage-collection job over a maintenance handle.
-    pub fn new(maintenance: FsMaintenance) -> Self {
+    /// Creates a garbage-collection job over a runtime's maintenance.
+    pub fn new(maintenance: Maintenance) -> Self {
         Self { maintenance }
     }
 }
@@ -150,7 +150,7 @@ mod tests {
             KeyPredicate::prefix("namespaces/retired/content/"),
         ));
         let namespace_id = NamespaceId::parse("retired").expect("namespace");
-        let writer = crate::FsWriter::builder_with_store(store.clone())
+        let writer = crate::LoonFs::builder_with_store(store.clone())
             .writer_id("retirement-test")
             .build()
             .await

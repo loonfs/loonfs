@@ -52,7 +52,7 @@ async fn delete_routes_require_the_owner_and_delete_each_pin_once() {
         .expect("app");
     let namespace_id = namespace_id("pins");
     state
-        .writer
+        .runtime
         .create_namespace(
             &namespace_id,
             CreateNamespaceOptions::new(loonfs_test_support::test_actor()),

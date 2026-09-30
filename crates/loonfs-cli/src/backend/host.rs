@@ -1,4 +1,4 @@
-//! Hosts the HTTP binding over the CLI's runtime handles without a listener.
+//! Hosts the HTTP binding over the CLI's runtime without a listener.
 
 use super::MaintenanceHost;
 use crate::error::CliError;
@@ -9,7 +9,7 @@ use loonfs_api::SecretString;
 use loonfs_client::{Body, Client, ClientConfig, TransportError};
 use loonfs_grep::GrepService;
 use loonfs_http::{
-    AuthPolicy, BindingOptions, BindingState, HttpMetrics, NamespaceWriters,
+    AuthPolicy, BindingOptions, BindingState, HttpMetrics, Namespaces,
     DEFAULT_MAX_CONCURRENT_DOWNLOADS, DEFAULT_MAX_CONCURRENT_UPLOADS, DEFAULT_REQUEST_DEADLINE_MS,
 };
 use loonfs_objectstore::ConfiguredObjectStoreKind;
@@ -48,11 +48,10 @@ pub(crate) fn client(
         upload_permits: Arc::new(Semaphore::new(options.max_concurrent_uploads)),
         download_permits: Arc::new(Semaphore::new(options.max_concurrent_downloads)),
         options,
-        writer: host.writer.clone(),
-        namespaces: Arc::new(NamespaceWriters::new(host.writer.clone())),
-        reader: host.writer.reader(),
+        runtime: host.runtime.clone(),
+        namespaces: Arc::new(Namespaces::new(host.runtime.clone())),
         maintenance: host.maintenance.clone(),
-        probe_store: host.writer.object_store(),
+        probe_store: host.runtime.object_store(),
         direct_transfers: None,
         grep_worker: Some(host.grep_worker.clone()),
         grep_service: Some(Arc::new(grep_service)),

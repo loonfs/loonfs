@@ -347,7 +347,7 @@ codebase.
 
 Generated clients accept a default actor at construction and a per-request header override.
 
-Generated SDKs use schema names as public type names. A resource body uses the resource name, such as `Checkpoint` or `UploadSession`. A response envelope uses `<Verb><Noun>Response`, such as `ListCheckpointsResponse`. The request and response schemas of an operation share its verb, as in `CreateDownloadRequest` for `create_download`. Namespace-owned resources include `namespace_id`.
+Generated SDKs use schema names as public type names. A resource body uses the resource name, such as `Checkpoint` or `UploadSession`. The namespace body is `NamespaceMetadata`, because `Namespace` names the embedded handle. A response envelope uses `<Verb><Noun>Response`, such as `ListCheckpointsResponse`. The request and response schemas of an operation share its verb, as in `CreateDownloadRequest` for `create_download`. Namespace-owned resources include `namespace_id`.
 
 Revision numbers, change sequences, attribute revisions, manifest numbers,
 writer epochs, and grep run numbers are JSON integers from 0 through
@@ -372,17 +372,19 @@ An inode ID is only unique within its namespace. Use `namespace_id` and
 `inode_id` together when identifying an inode. Clients MUST treat the ID as an
 opaque value and MUST NOT create IDs or infer ordering from the numeric suffix.
 
-- The embedded handles and the remote client (`loonfs_client::Client`)
-  expose the same operations under the same names. `loonfs::FsReader` and
-  `loonfs::FsWriter` are runtimes. A `loonfs::Namespace` handle acts on one
-  namespace, and its methods take no namespace ID. `FsReader::namespace`
-  returns a `Namespace<ReadOnly>`, which carries that namespace's reads.
-  `FsWriter::open_namespace` returns a `Namespace<Writable>`, which carries
-  the same reads and the namespace's writes. `FsWriter` also creates and forks
-  namespaces. `FsWriter`, `FsReader`, and the client share the
-  `get_capabilities()` accessor that returns the capability document of
-  section 2.1. For the remote client the document is fetched from
-  `GET /v0/capabilities` and cached; for the embedded handles it is a
+- The embedded runtime and the remote client (`loonfs_client::Client`)
+  expose the same operations under the same names. `loonfs::LoonFs` is the
+  runtime, in a `ReadOnly` or a `Writable` mode. A `loonfs::Namespace` handle
+  acts on one namespace, and its methods take no namespace ID.
+  `LoonFs::namespace` returns a `Namespace<ReadOnly>`, which carries that
+  namespace's reads. On a writable runtime, `LoonFs::open_namespace` returns a
+  `Namespace<Writable>`, which carries the same reads and the namespace's
+  writes. A writable runtime also creates and forks namespaces, and
+  `LoonFs::maintenance` returns its maintenance operations. The namespace
+  handle's `metadata` is the client's `get_namespace`. The runtime and the
+  client share the `get_capabilities()` accessor that returns the capability
+  document of section 2.1. For the remote client the document is fetched
+  from `GET /v0/capabilities` and cached; for the embedded runtime it is a
   constant.
 - The two surfaces stay aligned by sharing one definition of every option
   struct they both take (`PutFileOptions`, `CreateDirectoryOptions`,
@@ -1623,7 +1625,7 @@ namespace returns `410` with `namespace_deleted`.
 }
 ```
 
-The `Namespace` object has exactly these fields:
+The `NamespaceMetadata` object has exactly these fields:
 
 | Field | Meaning |
 | --- | --- |

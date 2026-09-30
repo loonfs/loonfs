@@ -9,11 +9,11 @@ use loonfs::uploads::ResolvedUploadCompletion;
 use loonfs::{
     AdvanceRetentionResponse, ChangeSeq, Checkpoint, ChecksumAlgorithm, Commit, ContentRef,
     CopyOptions, CreateCheckpointOptions, CreateDirectoryOptions, CreateNamespaceOptions,
-    DeleteOptions, DirectoryPageCursor, ErrorCode, FileBytes, FsMaintenance, FsReader, FsWriter,
-    FsWriterBuilder, ListChangesOptions, ListChangesResponse, MetadataMaintenanceResponse,
+    DeleteOptions, DirectoryPageCursor, ErrorCode, FileBytes, ListChangesOptions,
+    ListChangesResponse, LoonFs, LoonFsBuilder, Maintenance, MetadataMaintenanceResponse,
     MoveOptions, Namespace, NamespaceDiagnostics, NamespaceId, PageRequest, PaginationPolicy,
-    PathEntry, PutFileOptions, RunMaintenanceRequest, RunMaintenanceResponse, RuntimeError,
-    SharedObjectStore, UploadId, UploadSession, Writable,
+    PathEntry, PutFileOptions, ReadOnly, RunMaintenanceRequest, RunMaintenanceResponse,
+    RuntimeError, SharedObjectStore, UploadId, UploadSession, Writable,
 };
 use loonfs_api::MetadataMaintenanceRequest;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -105,8 +105,8 @@ pub(crate) fn store(root: &Path) -> SharedObjectStore {
     Arc::new(LocalFsStore::new(root).expect("create local-fs store"))
 }
 
-pub(crate) async fn writer(store: SharedObjectStore, writer_id: &str) -> FsWriter {
-    FsWriter::builder_with_store(store)
+pub(crate) async fn writer(store: SharedObjectStore, writer_id: &str) -> LoonFs<Writable> {
+    LoonFs::builder_with_store(store)
         .writer_id(writer_id)
         .min_publish_interval_ms(0)
         .build()
@@ -132,7 +132,7 @@ pub(crate) fn expect_code<T: std::fmt::Debug>(result: loonfs::Result<T>, code: E
 }
 
 pub(crate) async fn collect_path_entries(
-    reader: &FsReader,
+    reader: &LoonFs<ReadOnly>,
     namespace_id: &NamespaceId,
     absolute_path: &str,
 ) -> loonfs::Result<loonfs::ListPathEntriesResponse> {
@@ -155,7 +155,7 @@ pub(crate) async fn collect_path_entries(
 }
 
 pub(crate) async fn collect_checkpoints(
-    maintenance: &FsMaintenance,
+    maintenance: &Maintenance,
     namespace_id: &NamespaceId,
 ) -> loonfs::Result<loonfs::ListCheckpointsResponse> {
     let request = PageRequest {
@@ -193,12 +193,12 @@ pub(crate) fn metadata_request(max_wal_tail_segments: u64) -> RunMaintenanceRequ
 /// maintenance handle sharing the same store, exercised through the blocking
 /// helpers below.
 pub(crate) struct TestRuntime {
-    pub(crate) writer: FsWriter,
-    pub(crate) reader: FsReader,
-    pub(crate) maintenance: FsMaintenance,
+    pub(crate) writer: LoonFs<Writable>,
+    pub(crate) reader: LoonFs<ReadOnly>,
+    pub(crate) maintenance: Maintenance,
     /// The fixture holds one handle per namespace it writes, as a host
     /// would, so its helpers keep publishing through one session.
-    namespace_writers: Mutex<HashMap<NamespaceId, Namespace<Writable>>>,
+    namespaces: Mutex<HashMap<NamespaceId, Namespace<Writable>>>,
 }
 
 pub(crate) fn runtime(root: &Path, writer_id: &str) -> TestRuntime {
@@ -212,7 +212,7 @@ pub(crate) fn open_runtime(store: SharedObjectStore, writer_id: &str) -> TestRun
 pub(crate) fn open_runtime_with(
     store: SharedObjectStore,
     writer_id: &str,
-    configure: impl FnOnce(FsWriterBuilder) -> FsWriterBuilder,
+    configure: impl FnOnce(LoonFsBuilder<Writable>) -> LoonFsBuilder<Writable>,
 ) -> TestRuntime {
     block_on(open_runtime_with_async(store, writer_id, configure))
 }
@@ -225,23 +225,24 @@ pub(crate) async fn open_runtime_async(store: SharedObjectStore, writer_id: &str
 pub(crate) async fn open_runtime_with_async(
     store: SharedObjectStore,
     writer_id: &str,
-    configure: impl FnOnce(FsWriterBuilder) -> FsWriterBuilder,
+    configure: impl FnOnce(LoonFsBuilder<Writable>) -> LoonFsBuilder<Writable>,
 ) -> TestRuntime {
-    let writer = configure(FsWriter::builder_with_store(store.clone()).writer_id(writer_id))
+    let writer = configure(LoonFs::builder_with_store(store.clone()).writer_id(writer_id))
         .build()
         .await
         .expect("build writer");
-    let reader = writer.reader();
-    let maintenance = FsMaintenance::builder_with_store(store)
-        .actor_id(writer_id)
+    let reader = writer.read_only();
+    let maintenance = LoonFs::builder_with_store(store)
+        .writer_id(writer_id)
         .build()
         .await
-        .expect("build maintenance");
+        .expect("build maintenance")
+        .maintenance(loonfs_test_support::ids::writer_id(writer_id));
     TestRuntime {
         writer,
         reader,
         maintenance,
-        namespace_writers: Mutex::default(),
+        namespaces: Mutex::default(),
     }
 }
 
@@ -254,23 +255,20 @@ impl TestRuntime {
         &self,
         namespace_id: &NamespaceId,
     ) -> loonfs::Result<Namespace<Writable>> {
-        let mut held = self
-            .namespace_writers
-            .lock()
-            .expect("namespace writer map lock");
-        if let Some(namespace_writer) = held.get(namespace_id) {
-            return Ok(namespace_writer.clone());
+        let mut held = self.namespaces.lock().expect("namespace writer map lock");
+        if let Some(namespace) = held.get(namespace_id) {
+            return Ok(namespace.clone());
         }
-        let namespace_writer = self.writer.open_namespace(namespace_id)?;
-        held.insert(namespace_id.clone(), namespace_writer.clone());
-        Ok(namespace_writer)
+        let namespace = self.writer.open_namespace(namespace_id)?;
+        held.insert(namespace_id.clone(), namespace.clone());
+        Ok(namespace)
     }
 
     pub(crate) async fn create_namespace(
         &self,
         namespace_id: &NamespaceId,
         options: CreateNamespaceOptions,
-    ) -> loonfs::Result<loonfs_api::Namespace> {
+    ) -> loonfs::Result<loonfs_api::NamespaceMetadata> {
         self.writer.create_namespace(namespace_id, options).await
     }
 
@@ -281,8 +279,8 @@ impl TestRuntime {
         bytes: &[u8],
         options: PutFileOptions,
     ) -> loonfs::Result<Commit> {
-        let namespace_writer = self.namespace_writer(namespace_id)?;
-        namespace_writer
+        let namespace = self.namespace_writer(namespace_id)?;
+        namespace
             .put_file_bytes(absolute_path, bytes, options)
             .await
     }
@@ -294,8 +292,8 @@ impl TestRuntime {
         content_ref: ContentRef,
         options: PutFileOptions,
     ) -> loonfs::Result<Commit> {
-        let namespace_writer = self.namespace_writer(namespace_id)?;
-        namespace_writer
+        let namespace = self.namespace_writer(namespace_id)?;
+        namespace
             .put_file_content_ref(absolute_path, content_ref, options)
             .await
     }
@@ -387,8 +385,8 @@ impl TestRuntime {
         namespace_id: &NamespaceId,
         checksum_algorithm: ChecksumAlgorithm,
     ) -> loonfs::Result<loonfs::uploads::BeginDirectPutUploadTargetResponse> {
-        let namespace_writer = self.namespace_writer(namespace_id)?;
-        namespace_writer
+        let namespace = self.namespace_writer(namespace_id)?;
+        namespace
             .create_direct_put_upload_target(checksum_algorithm)
             .await
     }
@@ -399,8 +397,8 @@ impl TestRuntime {
         upload_id: &UploadId,
         content: loonfs::UploadContentClaim,
     ) -> loonfs::Result<UploadSession> {
-        let namespace_writer = self.namespace_writer(namespace_id)?;
-        namespace_writer
+        let namespace = self.namespace_writer(namespace_id)?;
+        namespace
             .complete_upload_for_mode(upload_id, |_| {
                 Ok(loonfs::uploads::ResolvedUploadCompletion::DirectPut { content })
             })
@@ -426,12 +424,12 @@ pub(crate) trait RuntimeTestExt {
         &self,
         namespace_id: &NamespaceId,
         options: CreateNamespaceOptions,
-    ) -> loonfs::Result<loonfs_api::Namespace>;
+    ) -> loonfs::Result<loonfs_api::NamespaceMetadata>;
     fn fork_namespace_blocking(
         &self,
         source: &NamespaceId,
         target: &NamespaceId,
-    ) -> loonfs::Result<loonfs_api::Namespace>;
+    ) -> loonfs::Result<loonfs_api::NamespaceMetadata>;
     fn namespace_diagnostics_blocking(
         &self,
         namespace_id: &NamespaceId,
@@ -532,7 +530,7 @@ impl RuntimeTestExt for TestRuntime {
         &self,
         namespace_id: &NamespaceId,
         options: CreateNamespaceOptions,
-    ) -> loonfs::Result<loonfs_api::Namespace> {
+    ) -> loonfs::Result<loonfs_api::NamespaceMetadata> {
         block_on(self.writer.create_namespace(namespace_id, options))
     }
 
@@ -540,7 +538,7 @@ impl RuntimeTestExt for TestRuntime {
         &self,
         source: &NamespaceId,
         target: &NamespaceId,
-    ) -> loonfs::Result<loonfs_api::Namespace> {
+    ) -> loonfs::Result<loonfs_api::NamespaceMetadata> {
         block_on(self.writer.fork_namespace(
             source,
             target,
@@ -608,8 +606,8 @@ impl RuntimeTestExt for TestRuntime {
         bytes: &[u8],
         options: PutFileOptions,
     ) -> loonfs::Result<Commit> {
-        let namespace_writer = self.namespace_writer(namespace_id)?;
-        block_on(namespace_writer.put_file_bytes(absolute_path, bytes, options))
+        let namespace = self.namespace_writer(namespace_id)?;
+        block_on(namespace.put_file_bytes(absolute_path, bytes, options))
     }
 
     fn create_directory_blocking(
@@ -618,8 +616,8 @@ impl RuntimeTestExt for TestRuntime {
         absolute_path: &str,
         options: CreateDirectoryOptions,
     ) -> loonfs::Result<Commit> {
-        let namespace_writer = self.namespace_writer(namespace_id)?;
-        block_on(namespace_writer.create_directory(absolute_path, options))
+        let namespace = self.namespace_writer(namespace_id)?;
+        block_on(namespace.create_directory(absolute_path, options))
     }
 
     fn delete_path_blocking(
@@ -628,8 +626,8 @@ impl RuntimeTestExt for TestRuntime {
         absolute_path: &str,
         options: DeleteOptions,
     ) -> loonfs::Result<Commit> {
-        let namespace_writer = self.namespace_writer(namespace_id)?;
-        block_on(namespace_writer.delete_path(absolute_path, options))
+        let namespace = self.namespace_writer(namespace_id)?;
+        block_on(namespace.delete_path(absolute_path, options))
     }
 
     fn move_path_blocking(
@@ -639,8 +637,8 @@ impl RuntimeTestExt for TestRuntime {
         destination_path: &str,
         options: MoveOptions,
     ) -> loonfs::Result<Commit> {
-        let namespace_writer = self.namespace_writer(namespace_id)?;
-        block_on(namespace_writer.move_path(source_path, destination_path, options))
+        let namespace = self.namespace_writer(namespace_id)?;
+        block_on(namespace.move_path(source_path, destination_path, options))
     }
 
     fn copy_path_blocking(
@@ -650,13 +648,13 @@ impl RuntimeTestExt for TestRuntime {
         destination_path: &str,
         options: CopyOptions,
     ) -> loonfs::Result<Commit> {
-        let namespace_writer = self.namespace_writer(namespace_id)?;
-        block_on(namespace_writer.copy_path(source_path, destination_path, options))
+        let namespace = self.namespace_writer(namespace_id)?;
+        block_on(namespace.copy_path(source_path, destination_path, options))
     }
 
     fn begin_upload_blocking(&self, namespace_id: &NamespaceId) -> loonfs::Result<UploadSession> {
-        let namespace_writer = self.namespace_writer(namespace_id)?;
-        block_on(namespace_writer.create_upload())
+        let namespace = self.namespace_writer(namespace_id)?;
+        block_on(namespace.create_upload())
     }
 
     fn upload_content_blocking(
@@ -665,8 +663,8 @@ impl RuntimeTestExt for TestRuntime {
         upload_id: &UploadId,
         bytes: &[u8],
     ) -> loonfs::Result<UploadSession> {
-        let namespace_writer = self.namespace_writer(namespace_id)?;
-        block_on(namespace_writer.put_upload_content(upload_id, bytes))
+        let namespace = self.namespace_writer(namespace_id)?;
+        block_on(namespace.put_upload_content(upload_id, bytes))
     }
 
     fn complete_upload_blocking(
@@ -674,11 +672,9 @@ impl RuntimeTestExt for TestRuntime {
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
     ) -> loonfs::Result<UploadSession> {
-        let namespace_writer = self.namespace_writer(namespace_id)?;
-        block_on(
-            namespace_writer.complete_upload(upload_id, ResolvedUploadCompletion::KnownContent),
-        )
-        .map(|completed| completed.response)
+        let namespace = self.namespace_writer(namespace_id)?;
+        block_on(namespace.complete_upload(upload_id, ResolvedUploadCompletion::KnownContent))
+            .map(|completed| completed.response)
     }
 
     fn mutate_blocking(
@@ -686,8 +682,8 @@ impl RuntimeTestExt for TestRuntime {
         namespace_id: &NamespaceId,
         request: CommitRequest,
     ) -> loonfs::Result<Commit> {
-        let namespace_writer = self.namespace_writer(namespace_id)?;
-        block_on(namespace_writer.create_commit(request))
+        let namespace = self.namespace_writer(namespace_id)?;
+        block_on(namespace.create_commit(request))
     }
 
     fn mutate_batch_blocking(
@@ -695,8 +691,8 @@ impl RuntimeTestExt for TestRuntime {
         namespace_id: &NamespaceId,
         requests: Vec<CommitRequest>,
     ) -> Vec<loonfs::Result<Commit>> {
-        let namespace_writer = match self.namespace_writer(namespace_id) {
-            Ok(namespace_writer) => namespace_writer,
+        let namespace = match self.namespace_writer(namespace_id) {
+            Ok(namespace) => namespace,
             Err(error) => return requests.iter().map(|_| Err(error.clone())).collect(),
         };
         block_on(async move {
@@ -704,7 +700,7 @@ impl RuntimeTestExt for TestRuntime {
             // any of them, so the requests coalesce into one publication.
             let submissions = requests
                 .into_iter()
-                .map(|request| namespace_writer.commit_candidate(CommitCandidate::new(request)));
+                .map(|request| namespace.commit_candidate(CommitCandidate::new(request)));
             futures::future::join_all(submissions).await
         })
     }

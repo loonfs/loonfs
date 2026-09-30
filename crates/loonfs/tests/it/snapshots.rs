@@ -6,8 +6,8 @@
 use crate::common::*;
 use loonfs::{
     CheckpointOwnerSummary, CreateCheckpointOptions, CreateNamespaceOptions, CreateSnapshotOptions,
-    DeleteNamespaceOptions, ErrorCode, FsMaintenance, FsReader, FsWriter, ListSnapshotsResponse,
-    NamespaceId, PageRequest, PaginationPolicy, PutFileOptions, SharedObjectStore, SnapshotPolicy,
+    DeleteNamespaceOptions, ErrorCode, ListSnapshotsResponse, LoonFs, NamespaceId, PageRequest,
+    PaginationPolicy, PutFileOptions, ReadOnly, SharedObjectStore, SnapshotPolicy,
 };
 use loonfs_objectstore::keys::pin_prefix;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -22,7 +22,7 @@ use std::time::Duration;
 use tempfile::tempdir;
 
 async fn list_snapshots(
-    reader: &FsReader,
+    reader: &LoonFs<ReadOnly>,
     namespace_id: &NamespaceId,
 ) -> loonfs::Result<ListSnapshotsResponse> {
     let namespace = reader.namespace(namespace_id);
@@ -53,7 +53,7 @@ fn a_created_snapshot_is_listed_with_its_snapshot_owner() {
         CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
     )
     .expect("create namespace");
-    let namespace_writer = fs
+    let namespace = fs
         .writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
@@ -66,7 +66,7 @@ fn a_created_snapshot_is_listed_with_its_snapshot_owner() {
     .expect("put file");
 
     let expires_at_ms = 4_102_444_800_000;
-    let snapshot = block_on(namespace_writer.create_snapshot(
+    let snapshot = block_on(namespace.create_snapshot(
         CreateSnapshotOptions {
             name: "report-run".to_owned(),
             expires_at_ms,
@@ -113,13 +113,13 @@ async fn snapshot_create_recovers_an_ambiguously_landed_record_write() {
     )
     .await
     .expect("create namespace");
-    let namespace_writer = fs
+    let namespace = fs
         .writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
     store.fail_next(1);
 
-    let snapshot = namespace_writer
+    let snapshot = namespace
         .create_snapshot(
             CreateSnapshotOptions {
                 name: "report-run".to_owned(),
@@ -163,11 +163,11 @@ async fn snapshot_extension_recovers_an_ambiguously_landed_record_write() {
     )
     .await
     .expect("create namespace");
-    let namespace_writer = fs
+    let namespace = fs
         .writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
-    let snapshot = namespace_writer
+    let snapshot = namespace
         .create_snapshot(
             CreateSnapshotOptions {
                 name: "report-run".to_owned(),
@@ -179,7 +179,7 @@ async fn snapshot_extension_recovers_an_ambiguously_landed_record_write() {
         .expect("create snapshot");
     store.fail_next(1);
 
-    let extended = namespace_writer
+    let extended = namespace
         .extend_snapshot(&snapshot.checkpoint_id, u64::MAX, u64::MAX)
         .await
         .expect("reconcile the durable snapshot extension");
@@ -209,11 +209,11 @@ async fn snapshot_delete_reports_an_uncertain_delete_without_recreating_the_pin(
     )
     .await
     .expect("create namespace");
-    let namespace_writer = fs
+    let namespace = fs
         .writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
-    let snapshot = namespace_writer
+    let snapshot = namespace
         .create_snapshot(
             CreateSnapshotOptions {
                 name: "report-run".to_owned(),
@@ -226,15 +226,11 @@ async fn snapshot_delete_reports_an_uncertain_delete_without_recreating_the_pin(
     store.fail_next(1);
 
     assert_core_error_kind(
-        namespace_writer
-            .delete_snapshot(&snapshot.checkpoint_id)
-            .await,
+        namespace.delete_snapshot(&snapshot.checkpoint_id).await,
         ErrorCode::ServerError,
     );
     assert_core_error_kind(
-        namespace_writer
-            .delete_snapshot(&snapshot.checkpoint_id)
-            .await,
+        namespace.delete_snapshot(&snapshot.checkpoint_id).await,
         ErrorCode::SnapshotNotFound,
     );
 
@@ -261,7 +257,7 @@ async fn a_namespace_at_its_snapshot_limit_refuses_a_create_without_writing() {
     )
     .await
     .expect("create namespace");
-    let namespace_writer = fs
+    let namespace = fs
         .writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
@@ -269,7 +265,7 @@ async fn a_namespace_at_its_snapshot_limit_refuses_a_create_without_writing() {
         name: name.to_owned(),
         expires_at_ms: u64::MAX,
     };
-    namespace_writer
+    namespace
         .create_snapshot(options("kept"), 1)
         .await
         .expect("create the snapshot that fills the limit");
@@ -290,9 +286,7 @@ async fn a_namespace_at_its_snapshot_limit_refuses_a_create_without_writing() {
     store.reset();
 
     assert_core_error_kind(
-        namespace_writer
-            .create_snapshot(options("refused"), 1)
-            .await,
+        namespace.create_snapshot(options("refused"), 1).await,
         ErrorCode::SnapshotQuotaExceeded,
     );
 
@@ -368,14 +362,14 @@ async fn concurrent_snapshot_creates_cannot_both_claim_the_last_quota_slot() {
     )
     .await
     .expect("create namespace");
-    let namespace_writer = fs
+    let namespace = fs
         .writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
 
     checkpoint_write_gate.arm();
     checkpoint_delete_gate.arm();
-    let first_writer = namespace_writer.clone();
+    let first_writer = namespace.clone();
     let first = tokio::spawn(async move {
         first_writer
             .create_snapshot(
@@ -387,7 +381,7 @@ async fn concurrent_snapshot_creates_cannot_both_claim_the_last_quota_slot() {
             )
             .await
     });
-    let second_writer = namespace_writer.clone();
+    let second_writer = namespace.clone();
     let second = tokio::spawn(async move {
         second_writer
             .create_snapshot(
@@ -472,21 +466,24 @@ fn tombstoned_namespace_keeps_checkpoint_inventory_and_user_delete_available() {
         .clone();
 
     let deleter = block_on(
-        FsWriter::builder_with_store(store.clone())
+        LoonFs::builder_with_store(store.clone())
             .writer_id("checkpoint-tombstone-deleter")
             .build(),
     )
     .expect("build deleting writer");
-    let namespace_writer = deleter.open_namespace(&source).expect("open namespace");
-    block_on(namespace_writer.delete_namespace(DeleteNamespaceOptions::default()))
+    let namespace = deleter.open_namespace(&source).expect("open namespace");
+    block_on(namespace.delete_namespace(DeleteNamespaceOptions::default()))
         .expect("delete source namespace");
 
     let maintenance = block_on(
-        FsMaintenance::builder_with_store(store)
-            .actor_id("checkpoint-tombstone-observer")
+        LoonFs::builder_with_store(store)
+            .writer_id("checkpoint-tombstone-observer")
             .build(),
     )
-    .expect("build post-delete maintenance");
+    .expect("build post-delete maintenance")
+    .maintenance(loonfs_test_support::ids::writer_id(
+        "checkpoint-tombstone-observer",
+    ));
     let listed = block_on(collect_checkpoints(&maintenance, &source))
         .expect("list checkpoints on deleted namespace");
     assert_eq!(listed.checkpoints.len(), 2);
@@ -525,7 +522,7 @@ fn tombstoned_namespace_keeps_checkpoint_inventory_and_user_delete_available() {
 #[tokio::test]
 async fn shared_read_options_select_the_snapshot_for_paths_and_inodes() {
     let directory = tempdir().expect("directory");
-    let writer = FsWriter::builder_with_store(Arc::new(
+    let writer = LoonFs::builder_with_store(Arc::new(
         LocalFsStore::new(directory.path()).expect("store"),
     ))
     .writer_id("snapshot-options")
@@ -549,7 +546,7 @@ async fn shared_read_options_select_the_snapshot_for_paths_and_inodes() {
         )
         .await
         .expect("file");
-    let reader = writer.reader();
+    let reader = writer.read_only();
     let namespace_reader = reader.namespace(&namespace);
     let root = namespace_reader
         .get_path_entry("/", Default::default())

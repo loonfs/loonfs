@@ -7,7 +7,7 @@
 use crate::common::http_split_support::*;
 use crate::common::start_server;
 use loonfs::publish::CommitRequest as CoreCommitRequest;
-use loonfs::{CreateNamespaceOptions, FsWriter, ListChangesOptions, StoreConfig};
+use loonfs::{CreateNamespaceOptions, ListChangesOptions, LoonFs, StoreConfig};
 use loonfs_api::v0::{
     AdvanceRetentionRequest, CreateCheckpointRequest, RunMaintenanceRequest, RunMaintenanceResponse,
 };
@@ -158,7 +158,7 @@ async fn a_batch_commits_once_and_matches_the_same_batch_embedded() {
 
     // The same batch, submitted embedded against the same store.
     let embedded_ns = namespace_id("embedded");
-    let writer = FsWriter::builder(StoreConfig::LocalFs {
+    let writer = LoonFs::builder(StoreConfig::LocalFs {
         root: store_root.display().to_string(),
         key_prefix: Some("http-commits".to_owned()),
     })
@@ -166,7 +166,7 @@ async fn a_batch_commits_once_and_matches_the_same_batch_embedded() {
     .build()
     .await
     .expect("embedded writer");
-    let namespace = writer.reader().namespace(&embedded_ns);
+    let namespace = writer.namespace(&embedded_ns);
     writer
         .create_namespace(
             &embedded_ns,
@@ -1010,7 +1010,7 @@ async fn a_commit_id_used_embedded_replays_over_http() {
     // Committed embedded first, then the writer goes away: the served
     // writer acquires its own epoch afterward and finds the receipt.
     let embedded_receipt = {
-        let writer = FsWriter::builder(StoreConfig::LocalFs {
+        let writer = LoonFs::builder(StoreConfig::LocalFs {
             root: store_root.display().to_string(),
             key_prefix: Some("http-cross-transport".to_owned()),
         })

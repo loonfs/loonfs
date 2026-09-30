@@ -7,7 +7,9 @@
 
 #![allow(dead_code)]
 
-use loonfs::{FsMaintenance, FsReader, MaintenanceConclusion, MaintenanceJob, SharedObjectStore};
+use loonfs::{
+    LoonFs, Maintenance, MaintenanceConclusion, MaintenanceJob, ReadOnly, SharedObjectStore,
+};
 use loonfs_api::v0::{GrepIndex, GrepIndexLifecycle};
 use loonfs_api::{
     ChangeSeq, EffectiveLimit, GrepRequest, GrepResponse, NamespaceId, PaginationPolicy, RunNo,
@@ -22,8 +24,8 @@ use std::sync::Arc;
 
 pub(crate) struct GrepHost {
     pub(crate) store: SharedObjectStore,
-    pub(crate) reader: FsReader,
-    pub(crate) maintenance: FsMaintenance,
+    pub(crate) reader: LoonFs<ReadOnly>,
+    pub(crate) maintenance: Maintenance,
     pub(crate) service: GrepService,
     pub(crate) worker: GrepWorker<SharedObjectStore>,
     pub(crate) block_cache: Arc<GrepBlockCache>,
@@ -39,16 +41,17 @@ impl GrepHost {
         actor: &str,
         runtime_cache: loonfs::RuntimeCacheConfig,
     ) -> Self {
-        let reader = FsReader::builder_with_store(store.clone())
+        let reader = LoonFs::reader_with_store(store.clone())
             .runtime_cache(runtime_cache)
             .build()
             .await
             .expect("build reader");
-        let maintenance = FsMaintenance::builder_with_store(store.clone())
-            .actor_id(actor)
+        let maintenance = LoonFs::builder_with_store(store.clone())
+            .writer_id(actor)
             .build()
             .await
-            .expect("build maintenance");
+            .expect("build maintenance")
+            .maintenance(loonfs_test_support::ids::writer_id(actor));
         let block_cache = Arc::new(GrepBlockCache::new(
             loonfs::DecodedBlockCacheConfig::with_max_decoded_bytes(
                 DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
@@ -107,7 +110,7 @@ impl GrepHost {
             GrepIndexStatus::Disabled {} => None,
             GrepIndexStatus::Backfilling { captured_seq, .. } => Some(*captured_seq),
             GrepIndexStatus::Active { .. } => Some(
-                NamespaceReads::new(&self.reader, namespace_id)
+                NamespaceReads::new(self.reader.namespace(namespace_id))
                     .head()
                     .await?
                     .head_seq,
@@ -240,13 +243,13 @@ pub(crate) mod control {
 /// service or a reader other than a host's own.
 pub(crate) async fn grep_with(
     service: &GrepService,
-    reader: &FsReader,
+    reader: &LoonFs<ReadOnly>,
     store: &SharedObjectStore,
     namespace_id: &NamespaceId,
     request: &GrepRequest,
     limit: EffectiveLimit,
 ) -> Result<GrepResponse, GrepError> {
-    let reads = NamespaceReads::new(reader, namespace_id);
+    let reads = NamespaceReads::new(reader.namespace(namespace_id));
     service.query(request, limit, &reads, store).await
 }
 

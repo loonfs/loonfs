@@ -163,7 +163,7 @@ fn attributes_root_forks_and_trash_report_their_row_attribution() {
         CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
     )
     .expect("create namespace");
-    let namespace_writer = fs
+    let namespace = fs
         .writer
         .open_namespace(&source_id)
         .expect("open namespace");
@@ -182,7 +182,7 @@ fn attributes_root_forks_and_trash_report_their_row_attribution() {
     )
     .expect("create report");
     let updater = actor("metadata-editor");
-    block_on(namespace_writer.update_attributes(
+    block_on(namespace.update_attributes(
         "/report.txt",
         UpdateAttributesOptions {
             set: BTreeMap::from([(attribute_key("owner"), attribute_text("platform"))]),
@@ -199,7 +199,7 @@ fn attributes_root_forks_and_trash_report_their_row_attribution() {
     assert!(projected.attributes_updated_at_ms.is_some());
 
     let later_updater = actor("metadata-reviewer");
-    block_on(namespace_writer.update_attributes(
+    block_on(namespace.update_attributes(
         "/report.txt",
         UpdateAttributesOptions {
             set: BTreeMap::from([(attribute_key("stage"), attribute_text("reviewed"))]),

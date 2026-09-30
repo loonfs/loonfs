@@ -193,7 +193,7 @@ pub struct ForkNamespaceRequest {
 /// Current state for one namespace.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct Namespace {
+pub struct NamespaceMetadata {
     /// The namespace's access mode.
     pub access: NamespaceAccessMode,
     /// Namespace ID.
@@ -1660,7 +1660,7 @@ mod tests {
 
     #[test]
     fn namespace_wire_shape_has_only_core_state() {
-        let namespace = Namespace {
+        let namespace = NamespaceMetadata {
             access: NamespaceAccessMode::Unrestricted {},
             namespace_id: NamespaceId::parse("demo").expect("namespace id"),
             created_at_ms: 1_000,

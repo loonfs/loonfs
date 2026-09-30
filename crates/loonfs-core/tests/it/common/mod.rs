@@ -86,7 +86,7 @@ pub(crate) mod commit_split_support {
         store: &S,
         namespace_id: &NamespaceId,
         context: &MutationContext,
-    ) -> Result<loonfs_api::Namespace, CoreError> {
+    ) -> Result<loonfs_api::NamespaceMetadata, CoreError> {
         namespace_engine(store, namespace_id, context)
             .bootstrap_namespace(CreateNamespaceOptions {
                 actor_id: loonfs_test_support::test_actor(),
@@ -100,7 +100,7 @@ pub(crate) mod commit_split_support {
         store: &S,
         namespace_id: &NamespaceId,
         context: &MutationContext,
-    ) -> Result<loonfs_api::Namespace, CoreError> {
+    ) -> Result<loonfs_api::NamespaceMetadata, CoreError> {
         namespace_engine(store, namespace_id, context)
             .bootstrap_namespace(CreateNamespaceOptions {
                 actor_id: loonfs_test_support::test_actor(),

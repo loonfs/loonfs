@@ -6,8 +6,8 @@
 use futures::future::BoxFuture;
 use loonfs::publish::{parse_mutation_path, CommitCandidate, CommitRequest, FilesystemOperation};
 use loonfs::{
-    Commit, CommitId, CreateNamespaceOptions, DestinationBehavior, FsWriter, NamespaceId,
-    PutFileOptions, SharedObjectStore,
+    Commit, CommitId, CreateNamespaceOptions, DestinationBehavior, LoonFs, NamespaceId,
+    PutFileOptions, SharedObjectStore, Writable,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::stores::BlockingStore;
@@ -18,7 +18,7 @@ use tokio::time::{timeout, Duration};
 
 struct ParkedPuts {
     store: Arc<BlockingStore<LocalFsStore>>,
-    writer: Arc<FsWriter>,
+    writer: Arc<LoonFs<Writable>>,
     namespace_id: NamespaceId,
     first: tokio::task::JoinHandle<loonfs::Result<Commit>>,
     /// A caller future whose publication is already admitted, batched
@@ -47,7 +47,7 @@ async fn park_two_puts(temp_dir: &Path) -> ParkedPuts {
     ));
     let store: SharedObjectStore = store_impl.clone();
     let writer = Arc::new(
-        FsWriter::builder_with_store(store.clone())
+        LoonFs::builder_with_store(store.clone())
             .writer_id("parked-writer")
             .min_publish_interval_ms(0)
             .build()
@@ -61,18 +61,15 @@ async fn park_two_puts(temp_dir: &Path) -> ParkedPuts {
         )
         .await
         .expect("create namespace");
-    let namespace_writer = writer
+    let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
 
     // Stage the second put's content while the store is unblocked: once
     // callers start being cancelled, the only work still in flight is
     // publication, the thing under test.
-    let upload = namespace_writer
-        .create_upload()
-        .await
-        .expect("begin upload");
-    let staged = namespace_writer
+    let upload = namespace.create_upload().await.expect("begin upload");
+    let staged = namespace
         .put_upload_content(&upload.upload_id, b"b")
         .await
         .expect("stage second put content");
@@ -90,9 +87,9 @@ async fn park_two_puts(temp_dir: &Path) -> ParkedPuts {
 
     store_impl.arm();
     let first = {
-        let namespace_writer = namespace_writer.clone();
+        let namespace = namespace.clone();
         tokio::spawn(async move {
-            namespace_writer
+            namespace
                 .put_file_bytes(
                     "/a.txt",
                     b"a",
@@ -107,7 +104,7 @@ async fn park_two_puts(temp_dir: &Path) -> ParkedPuts {
     // already taken, so this submission deterministically opens the next
     // batch behind it.
     let mut second: BoxFuture<'static, loonfs::Result<Commit>> = {
-        let namespace_writer = namespace_writer.clone();
+        let namespace = namespace.clone();
         let request = CommitRequest::single(
             CommitId::parse("parked-second").expect("valid commit id"),
             loonfs_test_support::test_actor(),
@@ -122,7 +119,7 @@ async fn park_two_puts(temp_dir: &Path) -> ParkedPuts {
             },
         );
         Box::pin(async move {
-            namespace_writer
+            namespace
                 .commit_candidate(CommitCandidate::prepared(request, vec![prepared]))
                 .await
         })
@@ -156,7 +153,7 @@ async fn cancelled_caller_does_not_cancel_admitted_publication() {
         .expect("queued put publishes normally");
     assert_eq!(second.namespace_id, parked.namespace_id);
 
-    let reader = parked.writer.reader();
+    let reader = parked.writer.read_only();
     let namespace = reader.namespace(&parked.namespace_id);
     namespace
         .get_file_bytes("/a.txt")
@@ -184,7 +181,7 @@ async fn all_callers_cancelled_publication_still_lands() {
         .expect("drain must settle")
         .expect("drain surfaces no panics");
 
-    let reader = parked.writer.reader();
+    let reader = parked.writer.read_only();
     let namespace = reader.namespace(&parked.namespace_id);
     namespace
         .get_file_bytes("/a.txt")

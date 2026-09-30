@@ -82,7 +82,7 @@ pub(super) async fn get_capabilities(
     State(state): State<BindingState>,
     AppQuery(_): AppQuery<NoQuery>,
 ) -> Result<Json<loonfs_api::CapabilityDocument>, ApiResponseError> {
-    let mut capabilities = state.reader.get_capabilities();
+    let mut capabilities = state.runtime.get_capabilities();
     if let Some(threshold) = state.options.inline_content.inline_content_threshold_bytes {
         set_feature(&mut capabilities, FEATURE_COMMIT_INLINE_CONTENT, true);
         capabilities.limits.insert(
@@ -215,7 +215,7 @@ pub(super) async fn get_capabilities(
         description = "Creates a new empty namespace.",
         request_body = CreateNamespaceRequest,
         responses(
-            (status = 200, description = "Namespace created", body = loonfs_api::Namespace),
+            (status = 200, description = "Namespace created", body = loonfs_api::NamespaceMetadata),
             (status = 400, description = "Invalid namespace id", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 409, description = "Namespace already exists", body = ApiError),
@@ -230,7 +230,7 @@ pub(super) async fn create_namespace(
     ActorHeader(actor_id): ActorHeader,
     AppQuery(_): AppQuery<NoQuery>,
     AppJson(request): AppJson<CreateNamespaceRequest>,
-) -> Result<Json<loonfs_api::Namespace>, ApiResponseError> {
+) -> Result<Json<loonfs_api::NamespaceMetadata>, ApiResponseError> {
     if let NamespaceAccess::Acl { root_grants, .. } = &request.access {
         if !root_grants
             .iter()
@@ -244,7 +244,7 @@ pub(super) async fn create_namespace(
         }
     }
     let namespace = state
-        .writer
+        .runtime
         .create_namespace(
             &request.namespace_id,
             CreateNamespaceOptions {
@@ -269,7 +269,7 @@ pub(super) async fn create_namespace(
         description = "Returns the current head and retention state for a namespace.",
         params(("namespace_id" = String, Path, description = "Namespace id")),
         responses(
-            (status = 200, description = "Namespace", body = loonfs_api::Namespace),
+            (status = 200, description = "Namespace", body = loonfs_api::NamespaceMetadata),
             (status = 400, description = "Invalid namespace id", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace not found", body = ApiError),
@@ -282,10 +282,10 @@ pub(super) async fn get_namespace(
     State(state): State<BindingState>,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(_): AppQuery<NoQuery>,
-) -> Result<Json<loonfs_api::Namespace>, ApiResponseError> {
-    let namespace = state.reader.namespace(&namespace_id);
+) -> Result<Json<loonfs_api::NamespaceMetadata>, ApiResponseError> {
+    let namespace = state.runtime.namespace(&namespace_id);
     let response = namespace
-        .get_namespace()
+        .metadata()
         .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
     Ok(Json(response))
@@ -366,13 +366,13 @@ pub(super) async fn delete_namespace(
             .map(parse_expected_head_seq)
             .transpose()?,
     };
-    let namespace_writer = state
+    let namespace = state
         .namespaces
         .open(&namespace_id)
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
-    let scoped_writer = subject.map(|subject| namespace_writer.as_subject(subject));
-    let namespace_writer = scoped_writer.as_ref().unwrap_or(&namespace_writer);
-    let response = namespace_writer.delete_namespace(options).await.map_err(
+    let scoped_namespace = subject.map(|subject| namespace.as_subject(subject));
+    let namespace = scoped_namespace.as_ref().unwrap_or(&namespace);
+    let response = namespace.delete_namespace(options).await.map_err(
         ApiResponseError::for_namespace_writer(&state.namespaces, &namespace_id),
     )?;
     state.namespaces.forget(&namespace_id);
@@ -400,7 +400,7 @@ fn parse_expected_head_seq(value: &str) -> Result<ChangeSeq, ApiResponseError> {
         params(("namespace_id" = String, Path, description = "Source namespace id")),
         request_body = ForkNamespaceRequest,
         responses(
-            (status = 200, description = "Namespace forked", body = loonfs_api::Namespace),
+            (status = 200, description = "Namespace forked", body = loonfs_api::NamespaceMetadata),
             (status = 400, description = "Invalid namespace id", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Source namespace or snapshot not found", body = ApiError),
@@ -418,10 +418,10 @@ pub(super) async fn fork_namespace(
     NamespaceIdPath(source_namespace_id): NamespaceIdPath,
     AppQuery(_): AppQuery<NoQuery>,
     AppJson(request): AppJson<ForkNamespaceRequest>,
-) -> Result<Json<loonfs_api::Namespace>, ApiResponseError> {
-    let scoped_writer = subject.map(|subject| state.writer.as_subject(subject));
-    let writer = scoped_writer.as_ref().unwrap_or(&state.writer);
-    let namespace = writer
+) -> Result<Json<loonfs_api::NamespaceMetadata>, ApiResponseError> {
+    let scoped_runtime = subject.map(|subject| state.runtime.as_subject(subject));
+    let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);
+    let namespace = runtime
         .fork_namespace(
             &source_namespace_id,
             &request.new_namespace_id,
@@ -469,15 +469,15 @@ pub(super) async fn create_snapshot(
     AppQuery(_): AppQuery<NoQuery>,
     AppJson(request): AppJson<CreateSnapshotRequest>,
 ) -> Result<Json<SnapshotSummary>, ApiResponseError> {
-    let now_ms = state.writer.now_ms().map_err(ApiResponseError::runtime)?;
+    let now_ms = state.runtime.now_ms().map_err(ApiResponseError::runtime)?;
     let expires_at_ms = snapshot_expiry_from_ttl(&state, now_ms, request.ttl_ms)?;
-    let namespace_writer = state
+    let namespace = state
         .namespaces
         .open(&namespace_id)
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
-    let scoped_writer = subject.map(|subject| namespace_writer.as_subject(subject));
-    let namespace_writer = scoped_writer.as_ref().unwrap_or(&namespace_writer);
-    let checkpoint = namespace_writer
+    let scoped_namespace = subject.map(|subject| namespace.as_subject(subject));
+    let namespace = scoped_namespace.as_ref().unwrap_or(&namespace);
+    let checkpoint = namespace
         .create_snapshot(
             CreateSnapshotOptions {
                 name: request.name,
@@ -532,9 +532,9 @@ pub(super) async fn list_snapshots(
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(query): AppQuery<CheckpointPageQuery>,
 ) -> Result<Json<ListSnapshotsResponse>, ApiResponseError> {
-    let scoped_reader = subject.map(|subject| state.reader.as_subject(subject));
-    let reader = scoped_reader.as_ref().unwrap_or(&state.reader);
-    let namespace = reader.namespace(&namespace_id);
+    let scoped_runtime = subject.map(|subject| state.runtime.as_subject(subject));
+    let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);
+    let namespace = runtime.namespace(&namespace_id);
     let cursor = decode_checkpoint_cursor(query.cursor.as_deref())?;
     let response = namespace
         .list_snapshots_page(PageRequest {
@@ -582,15 +582,15 @@ pub(super) async fn extend_snapshot(
     AppJson(request): AppJson<ExtendSnapshotRequest>,
 ) -> Result<Json<SnapshotSummary>, ApiResponseError> {
     let snapshot_id = super::query_params::parse_snapshot_id(&snapshot_id)?;
-    let now_ms = state.writer.now_ms().map_err(ApiResponseError::runtime)?;
+    let now_ms = state.runtime.now_ms().map_err(ApiResponseError::runtime)?;
     let requested_expires_at_ms = snapshot_expiry_from_ttl(&state, now_ms, request.ttl_ms)?;
-    let namespace_writer = state
+    let namespace = state
         .namespaces
         .open(&namespace_id)
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
-    let scoped_writer = subject.map(|subject| namespace_writer.as_subject(subject));
-    let namespace_writer = scoped_writer.as_ref().unwrap_or(&namespace_writer);
-    let response = namespace_writer
+    let scoped_namespace = subject.map(|subject| namespace.as_subject(subject));
+    let namespace = scoped_namespace.as_ref().unwrap_or(&namespace);
+    let response = namespace
         .extend_snapshot(
             &snapshot_id,
             requested_expires_at_ms,
@@ -638,19 +638,15 @@ pub(super) async fn delete_snapshot(
     AppQuery(_): AppQuery<NoQuery>,
 ) -> Result<Json<DeleteSnapshotResponse>, ApiResponseError> {
     let snapshot_id = super::query_params::parse_snapshot_id(&snapshot_id)?;
-    let namespace_writer = state
+    let namespace = state
         .namespaces
         .open(&namespace_id)
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
-    let scoped_writer = subject.map(|subject| namespace_writer.as_subject(subject));
-    let namespace_writer = scoped_writer.as_ref().unwrap_or(&namespace_writer);
-    let response = namespace_writer
-        .delete_snapshot(&snapshot_id)
-        .await
-        .map_err(ApiResponseError::for_namespace_writer(
-            &state.namespaces,
-            &namespace_id,
-        ))?;
+    let scoped_namespace = subject.map(|subject| namespace.as_subject(subject));
+    let namespace = scoped_namespace.as_ref().unwrap_or(&namespace);
+    let response = namespace.delete_snapshot(&snapshot_id).await.map_err(
+        ApiResponseError::for_namespace_writer(&state.namespaces, &namespace_id),
+    )?;
     Ok(Json(response))
 }
 
@@ -879,11 +875,11 @@ pub(super) async fn run_maintenance(
     }
     if let RunMaintenanceRequest::RecoverAdministrator(request) = request {
         let actor_id = actor_id.ok_or_else(missing_actor)?;
-        let namespace_writer = state
+        let namespace = state
             .namespaces
             .open(&namespace_id)
             .map_err(ApiResponseError::for_namespace(&namespace_id))?;
-        let recovered = namespace_writer
+        let recovered = namespace
             .recover_administrator(&request.principal_id, actor_id)
             .await
             .map_err(ApiResponseError::for_namespace_writer(

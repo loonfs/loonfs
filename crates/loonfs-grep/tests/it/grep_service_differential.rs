@@ -7,8 +7,8 @@ use crate::common::{control, default_page_limit, grep_with, page_limit, GrepHost
 use loonfs::publish::{CommitCandidate, CommitRequest, FilesystemOperation};
 use loonfs::{
     CommitId, CoreError, CreateDirectoryOptions, CreateNamespaceOptions, DeleteOptions,
-    DestinationBehavior, FsMaintenance, FsReader, FsWriter, MetadataMaintenanceOptions,
-    MoveOptions, NamespaceId, PutFileOptions, SharedObjectStore,
+    DestinationBehavior, LoonFs, Maintenance, MetadataMaintenanceOptions, MoveOptions, NamespaceId,
+    PutFileOptions, ReadOnly, SharedObjectStore, Writable,
 };
 use loonfs_api::{AbsolutePath, EffectiveLimit, GrepRequest, GrepResponse};
 use loonfs_grep::manifest::load_current_grep_manifest;
@@ -36,13 +36,13 @@ fn request(pattern: &str) -> GrepRequest {
 struct ServiceHarness {
     store: SharedObjectStore,
     namespace_id: NamespaceId,
-    reader: FsReader,
+    reader: LoonFs<ReadOnly>,
     service: GrepService,
 }
 
 impl ServiceHarness {
     async fn new(store: SharedObjectStore, namespace_id: NamespaceId) -> Self {
-        let reader = FsReader::builder_with_store(store.clone())
+        let reader = LoonFs::reader_with_store(store.clone())
             .build()
             .await
             .expect("build query reader");
@@ -95,14 +95,14 @@ impl ServiceHarness {
 }
 
 async fn publish_same_content_files(
-    writer: &FsWriter,
+    writer: &LoonFs<Writable>,
     namespace_id: &NamespaceId,
     prefix: &str,
     count: usize,
     content: &[u8],
 ) {
-    let namespace_writer = writer.open_namespace(namespace_id).expect("open namespace");
-    let prepared = namespace_writer
+    let namespace = writer.open_namespace(namespace_id).expect("open namespace");
+    let prepared = namespace
         .prepare_file_bytes(content)
         .await
         .expect("prepare shared content");
@@ -132,7 +132,7 @@ async fn publish_same_content_files(
     // any of them, so they coalesce into one publication.
     let submissions = candidates
         .into_iter()
-        .map(|candidate| namespace_writer.commit_candidate(candidate));
+        .map(|candidate| namespace.commit_candidate(candidate));
     for result in futures::future::join_all(submissions).await {
         result.expect("publish batch file");
     }
@@ -184,8 +184,8 @@ struct PlanlessBoundaryFixture {
     _temp_dir: TempDir,
     store: SharedObjectStore,
     namespace_id: NamespaceId,
-    writer: FsWriter,
-    maintenance: FsMaintenance,
+    writer: LoonFs<Writable>,
+    maintenance: Maintenance,
 }
 
 async fn planless_boundary_fixture(namespace: &str) -> PlanlessBoundaryFixture {
@@ -193,17 +193,20 @@ async fn planless_boundary_fixture(namespace: &str) -> PlanlessBoundaryFixture {
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse(namespace).expect("namespace id");
-    let writer = FsWriter::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone())
         .writer_id("planless-boundary-writer")
         .min_publish_interval_ms(0)
         .build()
         .await
         .expect("build writer");
-    let maintenance = FsMaintenance::builder_with_store(store.clone())
-        .actor_id("planless-boundary-maintenance")
+    let maintenance = LoonFs::builder_with_store(store.clone())
+        .writer_id("planless-boundary-maintenance")
         .build()
         .await
-        .expect("build maintenance");
+        .expect("build maintenance")
+        .maintenance(loonfs_test_support::ids::writer_id(
+            "planless-boundary-maintenance",
+        ));
     writer
         .create_namespace(
             &namespace_id,
@@ -241,11 +244,11 @@ async fn gram_segment_levels(
 #[tokio::test]
 async fn planless_scan_returns_exact_materialized_and_wal_boundary_revisions_once_each() {
     let fixture = planless_boundary_fixture("grep-planless-boundary").await;
-    let namespace_writer = fixture
+    let namespace = fixture
         .writer
         .open_namespace(&fixture.namespace_id)
         .expect("open namespace");
-    namespace_writer
+    namespace
         .put_file_bytes(
             "/materialized.txt",
             b"x materialized\n",
@@ -272,7 +275,7 @@ async fn planless_scan_returns_exact_materialized_and_wal_boundary_revisions_onc
         materialized_head.seq
     );
 
-    namespace_writer
+    namespace
         .put_file_bytes(
             "/wal-only.txt",
             b"x wal\n",
@@ -322,11 +325,11 @@ async fn planless_scan_returns_exact_materialized_and_wal_boundary_revisions_onc
 #[tokio::test]
 async fn planless_scan_deduplicates_an_inode_revised_across_materialization() {
     let fixture = planless_boundary_fixture("grep-planless-dedup").await;
-    let namespace_writer = fixture
+    let namespace = fixture
         .writer
         .open_namespace(&fixture.namespace_id)
         .expect("open namespace");
-    namespace_writer
+    namespace
         .put_file_bytes(
             "/overlap.txt",
             b"x materialized revision\n",
@@ -345,7 +348,7 @@ async fn planless_scan_deduplicates_an_inode_revised_across_materialization() {
         )
         .await
         .expect("fold materialized revision");
-    namespace_writer
+    namespace
         .put_file_bytes(
             "/overlap.txt",
             b"x WAL revision\n",
@@ -377,7 +380,7 @@ async fn grep_service_pins_query_semantics_response_shapes_and_budgets() {
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("grep-service-differential").expect("namespace id");
-    let writer = FsWriter::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone())
         .writer_id("grep-service-writer")
         .min_publish_interval_ms(0)
         .build()
@@ -397,7 +400,7 @@ async fn grep_service_pins_query_semantics_response_shapes_and_budgets() {
         )
         .await
         .expect("create namespace");
-    let namespace_writer = writer
+    let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
     worker.enable(&namespace_id).await.expect("enable grep");
@@ -416,7 +419,7 @@ async fn grep_service_pins_query_semantics_response_shapes_and_budgets() {
         ("/reorganize/filler-09.txt", b"reorganize filler nine\n"),
     ];
     for (path, content) in reorganized_corpus {
-        namespace_writer
+        namespace
             .put_file_bytes(
                 path,
                 content,
@@ -429,7 +432,7 @@ async fn grep_service_pins_query_semantics_response_shapes_and_budgets() {
 
     // Add a new mid-level run, then leave the large batch below at the delta level.
     for round in 10..12u32 {
-        namespace_writer
+        namespace
             .put_file_bytes(
                 &format!("/reorganize/filler-{round:02}.txt"),
                 format!("reorganize filler {round}\n").as_bytes(),
@@ -458,7 +461,7 @@ async fn grep_service_pins_query_semantics_response_shapes_and_budgets() {
         "the service snapshot must exercise delta, mid, and base segments"
     );
 
-    namespace_writer
+    namespace
         .put_file_bytes(
             "/tail/tail-hit.txt",
             b"ab tail-only-token\n",
@@ -466,21 +469,21 @@ async fn grep_service_pins_query_semantics_response_shapes_and_budgets() {
         )
         .await
         .expect("write unindexed tail hit");
-    namespace_writer
+    namespace
         .delete_path(
             "/docs/deleted.txt",
             DeleteOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("delete indexed file");
-    namespace_writer
+    namespace
         .create_directory(
             "/archive",
             CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("create move destination");
-    namespace_writer
+    namespace
         .move_path(
             "/docs/moved-source.txt",
             "/archive/moved.txt",

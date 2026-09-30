@@ -7,7 +7,7 @@ mod attribution;
 mod hosted_content_ref_access;
 mod http_access;
 mod inline_commits;
-mod namespace_writers;
+mod namespaces;
 mod pin_deletion;
 mod surface;
 
@@ -22,8 +22,8 @@ use axum::http::StatusCode;
 use fixtures::{test_app, test_options, TestAppOptions, TestOptions};
 use futures::stream::StreamExt;
 use loonfs::{
-    CreateNamespaceOptions, DeleteOptions, FsMaintenance, FsReader, FsWriter, PutFileOptions,
-    TraceMode, TraceStoreKind,
+    CreateNamespaceOptions, DeleteOptions, LoonFs, PutFileOptions, TraceMode, TraceStoreKind,
+    Writable,
 };
 use loonfs_api::{
     AttributesRevisionNo, ErrorCode, ErrorDetails, InodeId, WriterEpoch, ALL_LIMIT_KEYS,
@@ -637,18 +637,18 @@ async fn maintenance_namespace_diagnostics_route_answers_storage_fields() {
     .expect("build app");
     let namespace_id = namespace_id("diagnostics");
     state
-        .writer
+        .runtime
         .create_namespace(
             &namespace_id,
             CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
         )
         .await
         .expect("create namespace");
-    let namespace_writer = state
-        .writer
+    let namespace = state
+        .runtime
         .open_namespace(&namespace_id)
         .expect("open namespace");
-    namespace_writer
+    namespace
         .put_file_bytes(
             "/note.txt",
             b"diagnostic tail",
@@ -684,7 +684,7 @@ async fn maintenance_namespace_diagnostics_route_answers_storage_fields() {
     assert_eq!(diagnostics.live_snapshots, 0);
     assert_eq!(diagnostics.live_checkpoints, 0);
 
-    state.writer.shutdown().await.expect("shutdown writer");
+    state.runtime.shutdown().await.expect("shutdown writer");
 }
 
 #[tokio::test]
@@ -1031,8 +1031,8 @@ async fn runtime_created_state_is_readable_through_http() {
     )
     .await
     .expect("create namespace through runtime");
-    let namespace_writer = fs.open_namespace(&namespace_id).expect("open namespace");
-    namespace_writer
+    let namespace = fs.open_namespace(&namespace_id).expect("open namespace");
+    namespace
         .put_file_bytes(
             "/notes/hello.txt",
             b"hello from runtime",
@@ -1075,9 +1075,7 @@ async fn http_created_state_is_readable_through_runtime() {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     let fs = test_runtime(store.clone(), "runtime-reader").await;
-    let namespace = fs
-        .reader()
-        .namespace(&NamespaceId::parse("demo").expect("valid namespace id"));
+    let namespace = fs.namespace(&NamespaceId::parse("demo").expect("valid namespace id"));
     let harness = start_server(store.clone(), temp_dir.path(), "server-writer").await;
 
     harness
@@ -1906,7 +1904,7 @@ async fn http_namespace_json_body_over_the_limit_answers_content_too_large() {
         .expect("response body");
     let error: loonfs_api::ApiError = serde_json::from_slice(&body).expect("API error");
     assert_eq!(error.code, ErrorCode::ContentTooLarge.as_str());
-    state.writer.shutdown().await.expect("writer shutdown");
+    state.runtime.shutdown().await.expect("writer shutdown");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2321,7 +2319,7 @@ async fn http_content_reads_answer_server_busy_at_the_concurrency_cap() {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     let seed_writer = bootstrap_namespace(&store, "runtime-writer", &namespace_id("demo")).await;
-    let namespace = seed_writer.reader().namespace(&namespace_id("demo"));
+    let namespace = seed_writer.namespace(&namespace_id("demo"));
     write_file_bytes(
         &seed_writer,
         &namespace_id("demo"),
@@ -2504,7 +2502,7 @@ async fn http_content_read_over_the_download_limit_answers_content_too_large() {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     let seed_writer = bootstrap_namespace(&store, "runtime-writer", &namespace_id("demo")).await;
-    let namespace = seed_writer.reader().namespace(&namespace_id("demo"));
+    let namespace = seed_writer.namespace(&namespace_id("demo"));
     write_file_bytes(
         &seed_writer,
         &namespace_id("demo"),
@@ -2604,13 +2602,13 @@ async fn http_content_read_over_the_download_limit_answers_content_too_large() {
 async fn seed_grep_error_namespace(
     store: &SharedObjectStore,
     namespace_id: &NamespaceId,
-) -> FsWriter {
+) -> LoonFs<Writable> {
     let writer = test_runtime(store.clone(), "grep-error-seed").await;
     seed_grep_error_namespace_on(&writer, namespace_id).await;
     writer
 }
 
-async fn seed_grep_error_namespace_on(writer: &FsWriter, namespace_id: &NamespaceId) {
+async fn seed_grep_error_namespace_on(writer: &LoonFs<Writable>, namespace_id: &NamespaceId) {
     writer
         .create_namespace(
             namespace_id,
@@ -2618,8 +2616,8 @@ async fn seed_grep_error_namespace_on(writer: &FsWriter, namespace_id: &Namespac
         )
         .await
         .expect("create grep-error namespace");
-    let namespace_writer = writer.open_namespace(namespace_id).expect("open namespace");
-    namespace_writer
+    let namespace = writer.open_namespace(namespace_id).expect("open namespace");
+    namespace
         .put_file_bytes(
             "/core.txt",
             b"core remains readable",
@@ -2637,15 +2635,16 @@ async fn grep_error_worker(store: &SharedObjectStore) -> GrepWorker<SharedObject
 /// on the given store, its filesystem reads and checkpoints on handles over
 /// the same store.
 async fn grep_worker(store: &SharedObjectStore, actor: &str) -> GrepWorker<SharedObjectStore> {
-    let reader = FsReader::builder_with_store(store.clone())
+    let reader = LoonFs::reader_with_store(store.clone())
         .build()
         .await
         .expect("build reader");
-    let maintenance = FsMaintenance::builder_with_store(store.clone())
-        .actor_id(actor)
+    let maintenance = LoonFs::builder_with_store(store.clone())
+        .writer_id(actor)
         .build()
         .await
-        .expect("build maintenance");
+        .expect("build maintenance")
+        .maintenance(loonfs_test_support::ids::writer_id(actor));
     GrepWorker::new(store.clone(), reader, maintenance)
 }
 
@@ -2778,8 +2777,8 @@ async fn start_server_with_config(store: SharedObjectStore, config: TestOptions)
     }
 }
 
-async fn test_runtime(store: SharedObjectStore, writer_id: &str) -> FsWriter {
-    FsWriter::builder_with_store(store)
+async fn test_runtime(store: SharedObjectStore, writer_id: &str) -> LoonFs<Writable> {
+    LoonFs::builder_with_store(store)
         .writer_id(writer_id)
         .trace_mode(TraceMode::Remote)
         .trace_store_kind(TraceStoreKind::LocalFs)
@@ -2795,7 +2794,7 @@ async fn bootstrap_namespace(
     store: &SharedObjectStore,
     writer_id: &str,
     namespace_id: &NamespaceId,
-) -> FsWriter {
+) -> LoonFs<Writable> {
     let writer = test_runtime(store.clone(), writer_id).await;
     writer
         .create_namespace(
@@ -2808,14 +2807,14 @@ async fn bootstrap_namespace(
 }
 
 async fn write_file_bytes(
-    fs: &FsWriter,
+    fs: &LoonFs<Writable>,
     namespace_id: &NamespaceId,
     absolute_path: &str,
     bytes: &[u8],
     commit_id: &str,
 ) {
-    let namespace_writer = fs.open_namespace(namespace_id).expect("open namespace");
-    namespace_writer
+    let namespace = fs.open_namespace(namespace_id).expect("open namespace");
+    namespace
         .put_file_bytes(
             absolute_path,
             bytes,
@@ -2836,13 +2835,13 @@ async fn write_file_bytes(
 }
 
 async fn delete_path_recursive(
-    fs: &FsWriter,
+    fs: &LoonFs<Writable>,
     namespace_id: &NamespaceId,
     absolute_path: &str,
     commit_id: &str,
 ) {
-    let namespace_writer = fs.open_namespace(namespace_id).expect("open namespace");
-    namespace_writer
+    let namespace = fs.open_namespace(namespace_id).expect("open namespace");
+    namespace
         .delete_path(
             absolute_path,
             DeleteOptions {
@@ -2964,7 +2963,7 @@ mod direct_download {
         )
         .await
         .expect("app");
-        let namespace_reader = state.reader.namespace(&namespace);
+        let namespace_reader = state.runtime.namespace(&namespace);
         for (index, (path, value)) in values.iter().enumerate() {
             let entry = namespace_reader
                 .get_path_entry(path, Default::default())
@@ -3933,7 +3932,7 @@ async fn download_body_streams_one_chunk_and_aborts_on_late_corruption() {
         assert!(first.len() as u64 <= loonfs::CONTENT_READ_CHUNK_BYTES);
         drop(first);
         if corrupt {
-            let reader = loonfs::FsReader::builder_with_store(plain.clone())
+            let reader = loonfs::LoonFs::reader_with_store(plain.clone())
                 .build()
                 .await
                 .expect("reader");
@@ -3983,7 +3982,7 @@ async fn stale_commit_precondition_returns_409_with_its_index() {
     .await
     .expect("app");
     state
-        .writer
+        .runtime
         .create_namespace(
             &NamespaceId::parse("demo").expect("namespace"),
             CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
@@ -4021,7 +4020,7 @@ async fn stale_commit_precondition_returns_409_with_its_index() {
     assert_eq!(details.expected_head_seq, Some(ChangeSeq(1)));
     assert_eq!(details.actual_head_seq, Some(ChangeSeq(0)));
     assert_eq!(details.operation_index, None);
-    state.writer.shutdown().await.expect("shutdown");
+    state.runtime.shutdown().await.expect("shutdown");
 }
 
 #[tokio::test]
@@ -4036,7 +4035,7 @@ async fn scoped_commit_precondition_returns_409_with_its_index() {
     .await
     .expect("app");
     state
-        .writer
+        .runtime
         .create_namespace(
             &NamespaceId::parse("demo").expect("namespace"),
             CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
@@ -4078,5 +4077,5 @@ async fn scoped_commit_precondition_returns_409_with_its_index() {
     );
     assert_eq!(details.actual_revision_no, None);
     assert_eq!(details.operation_index, None);
-    state.writer.shutdown().await.expect("shutdown");
+    state.runtime.shutdown().await.expect("shutdown");
 }

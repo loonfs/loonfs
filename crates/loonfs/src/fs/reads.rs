@@ -498,7 +498,8 @@ impl<M> Namespace<M> {
         Ok(self.read_snapshot(engine, context, ReadPin::Snapshot(snapshot_id.clone())))
     }
 
-    /// Returns this namespace's current state.
+    /// Returns this namespace's metadata: its access mode, creation, fork
+    /// basis, current head, and retention floor.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.get_namespace",
@@ -511,7 +512,7 @@ impl<M> Namespace<M> {
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn get_namespace(&self) -> Result<loonfs_api::Namespace> {
+    pub async fn metadata(&self) -> Result<crate::NamespaceMetadata> {
         self.core.record_trace_context(&tracing::Span::current());
         Ok(loonfs_core::cache::load_namespace(self.core.store(), &self.namespace_id).await?)
     }

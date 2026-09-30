@@ -168,7 +168,7 @@ impl GrepService {
     async fn plan_query<'a, S: ObjectStore>(
         &self,
         request: &GrepRequest,
-        namespace_reads: &NamespaceReads<'a>,
+        namespace_reads: &'a NamespaceReads,
         store: &S,
     ) -> Result<QueryPlan<'a>> {
         const MAX_GREP_PATTERN_BYTES: usize = 1024;
@@ -291,7 +291,7 @@ impl GrepService {
         &self,
         request: &GrepRequest,
         limit: EffectiveLimit,
-        reads: &NamespaceReads<'_>,
+        reads: &NamespaceReads,
         store: &S,
     ) -> Result<GrepResponse> {
         let plan = self.plan_query(request, reads, store).await?;

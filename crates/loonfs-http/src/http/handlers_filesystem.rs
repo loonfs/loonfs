@@ -22,7 +22,7 @@ use axum::response::Response;
 use axum::Json;
 use loonfs::publish::{CommitCandidate, CommitRequest, ContentPreparationError};
 use loonfs::{
-    payload_class, ErrorCode, FsReadSnapshot, FsReader, InodeId, ListChangesOptions,
+    payload_class, ErrorCode, FsReadSnapshot, InodeId, ListChangesOptions,
     ListInodeChildrenOptions, ListPathEntriesOptions, Namespace, PinId, ReadOnly, StatPathOptions,
     TraceMode, TraceStoreKind,
 };
@@ -226,8 +226,8 @@ pub(super) async fn list_path_entries(
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(query): AppQuery<ListPathPageQuery>,
 ) -> Result<Response, ApiResponseError> {
-    let scoped_reader = subject.map(|subject| state.reader.as_subject(subject));
-    let reader = scoped_reader.as_ref().unwrap_or(&state.reader);
+    let scoped_runtime = subject.map(|subject| state.runtime.as_subject(subject));
+    let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);
     let path = required_query_param(query.path, "path")?;
     // An absent parameter leaves the option type's own default in place, so
     // the HTTP surface and the in-process one cannot answer differently.
@@ -240,7 +240,7 @@ pub(super) async fn list_path_entries(
         cursor: decode_optional_cursor(query.cursor)?,
     };
     let snapshot_id = parse_optional_snapshot_id(query.snapshot_id)?;
-    let target = pin_requested_snapshot(reader, &namespace_id, snapshot_id).await?;
+    let target = pin_requested_snapshot(runtime.namespace(&namespace_id), snapshot_id).await?;
     let listing = target
         .list_path_entries_page(&path, request, options)
         .await
@@ -283,15 +283,15 @@ pub(super) async fn get_path_entry(
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(query): AppQuery<PathQuery>,
 ) -> Result<Json<loonfs_api::PathEntry>, ApiResponseError> {
-    let scoped_reader = subject.map(|subject| state.reader.as_subject(subject));
-    let reader = scoped_reader.as_ref().unwrap_or(&state.reader);
+    let scoped_runtime = subject.map(|subject| state.runtime.as_subject(subject));
+    let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);
     let path = required_query_param(query.path, "path")?;
     let mut options = StatPathOptions::default();
     if let Some(value) = query.include_attributes.as_deref() {
         options.include_attributes = parse_include_attributes(value)?;
     }
     let snapshot_id = parse_optional_snapshot_id(query.snapshot_id)?;
-    let target = pin_requested_snapshot(reader, &namespace_id, snapshot_id).await?;
+    let target = pin_requested_snapshot(runtime.namespace(&namespace_id), snapshot_id).await?;
     let entry = target
         .get_path_entry(&path, options)
         .await
@@ -335,8 +335,8 @@ pub(super) async fn get_file_bytes(
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(query): AppQuery<ContentQuery>,
 ) -> Result<Response, ApiResponseError> {
-    let scoped_reader = subject.map(|subject| state.reader.as_subject(subject));
-    let reader = scoped_reader.as_ref().unwrap_or(&state.reader);
+    let scoped_runtime = subject.map(|subject| state.runtime.as_subject(subject));
+    let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);
     let path = required_query_param(query.path, "path")?;
     let revision_no = query
         .revision_no
@@ -345,7 +345,7 @@ pub(super) async fn get_file_bytes(
         .transpose()?;
     let snapshot_id = parse_optional_snapshot_id(query.snapshot_id)?;
     reject_snapshot_with_revision(snapshot_id.as_ref(), revision_no)?;
-    let target = pin_requested_snapshot(reader, &namespace_id, snapshot_id).await?;
+    let target = pin_requested_snapshot(runtime.namespace(&namespace_id), snapshot_id).await?;
     let permit = acquire_download_permit(&state)?;
     let stream = target
         .read_file_stream(&path, revision_no)
@@ -400,9 +400,9 @@ pub(super) async fn list_trash(
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(query): AppQuery<PageQuery>,
 ) -> Result<Json<ListTrashResponse>, ApiResponseError> {
-    let scoped_reader = subject.map(|subject| state.reader.as_subject(subject));
-    let reader = scoped_reader.as_ref().unwrap_or(&state.reader);
-    let namespace = reader.namespace(&namespace_id);
+    let scoped_runtime = subject.map(|subject| state.runtime.as_subject(subject));
+    let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);
+    let namespace = runtime.namespace(&namespace_id);
     let response = namespace
         .list_trash_page(PageRequest {
             limit: resolve_page_limit(query.limit)?,
@@ -452,9 +452,9 @@ pub(super) async fn list_file_revisions(
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(query): AppQuery<PathPageQuery>,
 ) -> Result<Json<ListFileRevisionsResponse>, ApiResponseError> {
-    let scoped_reader = subject.map(|subject| state.reader.as_subject(subject));
-    let reader = scoped_reader.as_ref().unwrap_or(&state.reader);
-    let namespace = reader.namespace(&namespace_id);
+    let scoped_runtime = subject.map(|subject| state.runtime.as_subject(subject));
+    let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);
+    let namespace = runtime.namespace(&namespace_id);
     let path = required_query_param(query.path, "path")?;
     let response = namespace
         .list_file_revisions_page(
@@ -522,7 +522,7 @@ pub(super) async fn create_commit(
     // Failed and uncertain outcomes echo the idempotency key the caller can
     // resubmit under (API spec, "Commit responses and safe retry").
     let commit_id_for_errors = commit_id.clone();
-    let namespace_writer = state.namespaces.open(&namespace_id).map_err(|error| {
+    let namespace = state.namespaces.open(&namespace_id).map_err(|error| {
         ApiResponseError::runtime_for_namespace(&namespace_id, error).with_commit_id(&commit_id)
     })?;
     // Every put in the request shares one preparation pass: a proof belongs
@@ -544,12 +544,12 @@ pub(super) async fn create_commit(
             payload_class(usize::try_from(put_bytes).unwrap_or(usize::MAX)),
             content_preparation_for_puts(
                 &state.namespaces,
-                &namespace_writer,
+                &namespace,
                 ContentTokenVerifier::new(state.options.content_token_secret.expose()),
                 &namespace_id,
                 &put_content_refs,
                 &content_tokens,
-                state.writer.now_ms().map_err(ApiResponseError::runtime)?,
+                state.runtime.now_ms().map_err(ApiResponseError::runtime)?,
             )
             .await?,
         ))
@@ -585,12 +585,12 @@ pub(super) async fn create_commit(
                         ))
                 }
             };
-            namespace_writer.commit_candidate(candidate).await
+            namespace.commit_candidate(candidate).await
         }
         .instrument(span)
         .await
     } else {
-        namespace_writer.create_commit(request).await
+        namespace.create_commit(request).await
     };
     let response = response_result.map_err(|error| {
         ApiResponseError::runtime_for_namespace_writer(&state.namespaces, &namespace_id, error)
@@ -632,12 +632,12 @@ pub(super) async fn list_changes(
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(query): AppQuery<ChangesQuery>,
 ) -> Result<Json<ListChangesResponse>, ApiResponseError> {
-    let scoped_reader = subject.map(|subject| state.reader.as_subject(subject));
-    let reader = scoped_reader.as_ref().unwrap_or(&state.reader);
+    let scoped_runtime = subject.map(|subject| state.runtime.as_subject(subject));
+    let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);
     let after_seq = parse_after_seq(&required_query_param(query.after_seq, "after_seq")?)?;
     let limit = resolve_page_limit(query.limit)?;
     let snapshot_id = parse_optional_snapshot_id(query.snapshot_id)?;
-    let target = pin_requested_snapshot(reader, &namespace_id, snapshot_id).await?;
+    let target = pin_requested_snapshot(runtime.namespace(&namespace_id), snapshot_id).await?;
     let options = ListChangesOptions { limit: Some(limit) };
     let response = match target {
         ReadTarget::Snapshot(snapshot) => snapshot
@@ -653,11 +653,9 @@ pub(super) async fn list_changes(
 }
 
 pub(super) async fn pin_requested_snapshot(
-    reader: &FsReader,
-    namespace_id: &loonfs_api::NamespaceId,
+    namespace: Namespace<ReadOnly>,
     snapshot_id: Option<PinId>,
 ) -> Result<ReadTarget, ApiResponseError> {
-    let namespace = reader.namespace(namespace_id);
     let Some(snapshot_id) = snapshot_id else {
         return Ok(ReadTarget::Live(namespace));
     };
@@ -666,7 +664,7 @@ pub(super) async fn pin_requested_snapshot(
         .await
         .map(|snapshot| ReadTarget::Snapshot(Box::new(snapshot)))
         .map_err(|error| {
-            ApiResponseError::runtime_for_namespace(namespace_id, error)
+            ApiResponseError::runtime_for_namespace(namespace.namespace_id(), error)
                 .with_invalid_request_param("snapshot_id")
         })
 }

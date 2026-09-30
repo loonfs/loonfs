@@ -1,7 +1,7 @@
 //! Runtime handles and options for binding tests.
 
-use crate::{AuthPolicy, BindingOptions, BindingState, HttpMetrics, NamespaceWriters};
-use loonfs::{FsWriter, SharedObjectStore, SnapshotPolicy, TraceMode, TraceStoreKind};
+use crate::{AuthPolicy, BindingOptions, BindingState, HttpMetrics, Namespaces};
+use loonfs::{LoonFs, SharedObjectStore, SnapshotPolicy, TraceMode, TraceStoreKind};
 use loonfs_api::WriterId;
 use loonfs_grep::{
     new_grep_block_cache, GrepService, GrepWorker, DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
@@ -59,7 +59,7 @@ pub(super) async fn test_app(
 ) -> loonfs::Result<(axum::Router, BindingState)> {
     let options = Arc::new(config.binding);
     let metrics = HttpMetrics::new();
-    let writer = FsWriter::builder_with_store(inputs.store.unwrap_or(config.store))
+    let runtime = LoonFs::builder_with_store(inputs.store.unwrap_or(config.store))
         .writer_id(config.writer_id.as_str())
         .min_publish_interval_ms(0)
         .inline_content(options.inline_content.clone())
@@ -69,10 +69,17 @@ pub(super) async fn test_app(
         .metrics_recorder(metrics.recorder())
         .build()
         .await?;
-    let reader = writer.reader();
-    let maintenance = writer.maintenance_handle(format!("{}-maintenance", config.writer_id))?;
-    let grep_worker = (options.serves_grep || options.maintains_grep_index)
-        .then(|| GrepWorker::new(writer.object_store(), reader.clone(), maintenance.clone()));
+    let maintenance = runtime.maintenance(
+        WriterId::parse(format!("{}-maintenance", config.writer_id))
+            .expect("a suffixed writer id should stay valid"),
+    );
+    let grep_worker = (options.serves_grep || options.maintains_grep_index).then(|| {
+        GrepWorker::new(
+            runtime.object_store(),
+            runtime.read_only(),
+            maintenance.clone(),
+        )
+    });
     let grep_service = options.serves_grep.then(|| {
         let cache = Arc::new(new_grep_block_cache(
             DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
@@ -84,10 +91,9 @@ pub(super) async fn test_app(
         upload_permits: Arc::new(Semaphore::new(options.max_concurrent_uploads)),
         download_permits: Arc::new(Semaphore::new(options.max_concurrent_downloads)),
         options,
-        probe_store: writer.object_store(),
-        namespaces: Arc::new(NamespaceWriters::new(writer.clone())),
-        writer,
-        reader,
+        probe_store: runtime.object_store(),
+        namespaces: Arc::new(Namespaces::new(runtime.clone())),
+        runtime,
         maintenance,
         direct_transfers: inputs.direct_transfers,
         grep_worker,

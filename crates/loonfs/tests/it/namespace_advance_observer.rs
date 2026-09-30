@@ -4,7 +4,7 @@
 // The panicking observer under test is written as a `panic!` closure.
 
 use loonfs::{
-    maintenance_hint_relay, CreateNamespaceOptions, FsWriter, MaintenanceCancellation,
+    maintenance_hint_relay, CreateNamespaceOptions, LoonFs, MaintenanceCancellation,
     MaintenanceConclusion, MaintenanceJob, MaintenanceJobId, MaintenanceProbe, MaintenanceRegistry,
     MaintenanceRunReport, MaintenanceRunner, NamespaceAdvanceHint, NamespacePublication,
     PutFileOptions, Result, SharedObjectStore,
@@ -21,7 +21,7 @@ async fn registered_observer_sees_one_hint_per_publication() {
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     let observed = Arc::new(Mutex::new(Vec::new()));
     let observer_hints = observed.clone();
-    let writer = FsWriter::builder_with_store(store)
+    let writer = LoonFs::builder_with_store(store)
         .writer_id("observer-writer")
         .min_publish_interval_ms(0)
         .namespace_advance_observer(move |hint| {
@@ -41,7 +41,7 @@ async fn registered_observer_sees_one_hint_per_publication() {
         )
         .await
         .expect("create namespace");
-    let namespace_writer = writer
+    let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
     assert!(
@@ -52,7 +52,7 @@ async fn registered_observer_sees_one_hint_per_publication() {
         "namespace bootstrap is not a committed mutation publication"
     );
 
-    let response = namespace_writer
+    let response = namespace
         .put_file_bytes(
             "/note.txt",
             b"observer needle\n",
@@ -117,7 +117,7 @@ async fn an_observer_panic_leaves_the_commit_the_publisher_and_maintenance_intac
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     let (observer, receiver) =
         maintenance_hint_relay(NonZeroUsize::new(16).expect("relay capacity is nonzero"));
-    let writer = FsWriter::builder_with_store(store)
+    let writer = LoonFs::builder_with_store(store)
         .writer_id("observer-panic-writer")
         .min_publish_interval_ms(0)
         .maintenance_hint_observer(move |hint| observer(hint))
@@ -135,7 +135,7 @@ async fn an_observer_panic_leaves_the_commit_the_publisher_and_maintenance_intac
         .expect("runner");
     runner.attach_hints(receiver);
     let namespace_id = NamespaceId::parse("observer-panic").expect("namespace id");
-    let namespace = writer.reader().namespace(&namespace_id);
+    let namespace = writer.namespace(&namespace_id);
     writer
         .create_namespace(
             &namespace_id,

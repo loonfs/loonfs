@@ -15,8 +15,8 @@
 //! installed, and the assertion is deterministic.
 
 use loonfs::{
-    CreateNamespaceOptions, FsWriter, MaintenanceJobId, MaintenanceRegistry, MaintenanceRunner,
-    MetadataMaintenanceJob, MetadataMaintenanceOptions, NamespaceId, StoreConfig,
+    CreateNamespaceOptions, LoonFs, MaintenanceJobId, MaintenanceRegistry, MaintenanceRunner,
+    MetadataMaintenanceJob, MetadataMaintenanceOptions, NamespaceId, StoreConfig, Writable,
 };
 use loonfs_core::test_support::append_wal_segments;
 use loonfs_core::MutationContext;
@@ -45,8 +45,8 @@ fn writes_past_wal_tail_threshold() -> u32 {
     .expect("WAL tail threshold plus one should fit in u32")
 }
 
-async fn writer(root: &Path) -> FsWriter {
-    FsWriter::builder(store_config(root))
+async fn writer(root: &Path) -> LoonFs<Writable> {
+    LoonFs::builder(store_config(root))
         .writer_id("tracing-capture-writer")
         .build()
         .await
@@ -109,9 +109,9 @@ fn background_step_conclusions_emit_debug_events() {
             .await
             .expect("create namespace");
         fill_wal_tail_past_threshold(temp_dir.path(), &namespace_id).await;
-        let maintenance = writer
-            .maintenance_handle("tracing-capture-maintenance")
-            .expect("maintenance handle");
+        let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id(
+            "tracing-capture-maintenance",
+        ));
         let registry = MaintenanceRegistry::new();
         registry
             .register(Arc::new(MetadataMaintenanceJob::new(maintenance)))

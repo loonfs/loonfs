@@ -14,7 +14,7 @@
 #![allow(clippy::panic)]
 // Spec parsing panics with precise messages when a section is missing.
 
-use loonfs::{CapabilityDocument, FsReader, SharedObjectStore};
+use loonfs::{CapabilityDocument, LoonFs, SharedObjectStore};
 use loonfs_api::API_GROUP_QUERY_V0;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::block_on::block_on;
@@ -27,7 +27,7 @@ const API_SPEC_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/spe
 fn embedded_capabilities() -> CapabilityDocument {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
-    let reader = block_on(FsReader::builder_with_store(store).build()).expect("build reader");
+    let reader = block_on(LoonFs::reader_with_store(store).build()).expect("build reader");
     reader.get_capabilities()
 }
 

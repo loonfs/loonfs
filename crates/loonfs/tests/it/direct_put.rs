@@ -276,7 +276,7 @@ fn direct_put_completion_reports_a_failed_read_back_as_a_store_failure() {
         CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
     )
     .expect("create namespace");
-    let namespace_writer = fs
+    let namespace = fs
         .writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
@@ -303,7 +303,7 @@ fn direct_put_completion_reports_a_failed_read_back_as_a_store_failure() {
     );
     let loonfs::uploads::UploadSessionView {
         session: status, ..
-    } = block_on(namespace_writer.get_upload(&begin.session.upload_id)).expect("get upload status");
+    } = block_on(namespace.get_upload(&begin.session.upload_id)).expect("get upload status");
     assert!(
         matches!(status.status, UploadSessionStatus::Open { .. }),
         "a store failure must not end the session"
@@ -443,7 +443,7 @@ fn path_mutations_return_the_commit_id_they_committed_under() {
         )
         .await
         .expect("create namespace");
-        let namespace_writer = fs
+        let namespace = fs
             .writer
             .open_namespace(&namespace_id)
             .expect("open namespace");
@@ -471,7 +471,7 @@ fn path_mutations_return_the_commit_id_they_committed_under() {
 
         // Without a caller-supplied id, the generated one is still returned,
         // so every caller holds a reconciliation handle.
-        let generated = namespace_writer
+        let generated = namespace
             .create_directory(
                 "/docs/sub",
                 CreateDirectoryOptions::new(loonfs_test_support::test_actor()),

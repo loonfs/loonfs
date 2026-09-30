@@ -144,6 +144,6 @@ async fn compositions_preserve_operational_routes_capabilities_and_filesystem_be
         if let Some(runner) = &state.runner {
             runner.shutdown().await.expect("maintenance shutdown");
         }
-        state.writer.shutdown().await.expect("writer shutdown");
+        state.runtime.shutdown().await.expect("writer shutdown");
     }
 }

@@ -11,10 +11,9 @@ use loonfs::publish::{
     parse_mutation_path, CommitCandidate, CommitRequest, FilesystemOperation, InlineContent,
 };
 use loonfs::{
-    ActorId, CommitId, ContentId, CreateNamespaceOptions, DestinationBehavior, FsMaintenance,
-    FsReader, FsWriter, ListPathEntriesOptions, MetadataMaintenanceOptions,
-    MetadataSegmentCacheConfig, NamespaceId, PageRequest, RuntimeCacheConfig, SharedObjectStore,
-    StatPathOptions,
+    ActorId, CommitId, ContentId, CreateNamespaceOptions, DestinationBehavior,
+    ListPathEntriesOptions, LoonFs, MetadataMaintenanceOptions, MetadataSegmentCacheConfig,
+    NamespaceId, PageRequest, ReadOnly, RuntimeCacheConfig, SharedObjectStore, StatPathOptions,
 };
 use loonfs_api::{
     AccessGrants, AccessRight, AccessRights, AttributeKey, AttributeValue, NamespaceAccess,
@@ -141,7 +140,7 @@ impl Shape {
 
     /// Reads a namespace with access control as a subject whose `read`
     /// comes from the grants, so every read walks the access rows.
-    fn reader(&self, reader: FsReader) -> FsReader {
+    fn reader(&self, reader: LoonFs<ReadOnly>) -> LoonFs<ReadOnly> {
         match self.rows {
             Rows::Dense => reader.as_subject(subject(1)),
             Rows::Directories | Rows::Large => reader,
@@ -280,17 +279,18 @@ fn full_attributes() -> BTreeMap<AttributeKey, AttributeValue> {
 }
 
 async fn seed(store: &SharedObjectStore, shape: &Shape) {
-    let writer = FsWriter::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone())
         .writer_id("seed-writer")
         .min_publish_interval_ms(0)
         .build()
         .await
         .expect("writer");
-    let maintenance = FsMaintenance::builder_with_store(store.clone())
-        .actor_id("seed-maintenance")
+    let maintenance = LoonFs::builder_with_store(store.clone())
+        .writer_id("seed-maintenance")
         .build()
         .await
-        .expect("maintenance");
+        .expect("maintenance")
+        .maintenance(loonfs_test_support::ids::writer_id("seed-maintenance"));
     let fold = MetadataMaintenanceOptions {
         max_wal_tail_segments: std::num::NonZeroU64::MIN,
         ..Default::default()
@@ -308,10 +308,10 @@ async fn seed(store: &SharedObjectStore, shape: &Shape) {
             .create_namespace(&namespace_id, options)
             .await
             .expect("create namespace");
-        let namespace_writer = writer
+        let namespace = writer
             .open_namespace(&namespace_id)
             .expect("open namespace");
-        namespace_writer
+        namespace
             .commit_candidate(shape.candidate(
                 &namespace_id,
                 "seed",
@@ -328,7 +328,7 @@ async fn seed(store: &SharedObjectStore, shape: &Shape) {
         let mut next = shape.folded_entries;
         for commit in 0..shape.tail_commits {
             let end = next + shape.tail_entries_per_commit;
-            namespace_writer
+            namespace
                 .commit_candidate(shape.candidate(
                     &namespace_id,
                     &format!("tail-{commit}"),
@@ -345,13 +345,17 @@ async fn seed(store: &SharedObjectStore, shape: &Shape) {
 
 /// Live heap the reader holds after `read` finishes, measured from just
 /// after the reader is built.
-async fn retained_heap<F, Fut>(root: &Path, cache: RuntimeCacheConfig, read: F) -> (usize, FsReader)
+async fn retained_heap<F, Fut>(
+    root: &Path,
+    cache: RuntimeCacheConfig,
+    read: F,
+) -> (usize, LoonFs<ReadOnly>)
 where
-    F: FnOnce(FsReader) -> Fut,
+    F: FnOnce(LoonFs<ReadOnly>) -> Fut,
     Fut: std::future::Future<Output = ()>,
 {
     let store: SharedObjectStore = Arc::new(LocalFsStore::new(root).expect("local store"));
-    let reader = FsReader::builder_with_store(store)
+    let reader = LoonFs::reader_with_store(store)
         .runtime_cache(cache)
         .build()
         .await
@@ -361,7 +365,7 @@ where
     (LIVE.load(Ordering::SeqCst).saturating_sub(baseline), reader)
 }
 
-async fn list_every_directory(shape: &Shape, reader: FsReader) {
+async fn list_every_directory(shape: &Shape, reader: LoonFs<ReadOnly>) {
     let reader = shape.reader(reader);
     for index in 0..shape.namespaces {
         let namespace_id = shape.namespace(index);
@@ -382,7 +386,7 @@ async fn list_every_directory(shape: &Shape, reader: FsReader) {
     }
 }
 
-async fn stat_one_path_per_namespace(shape: &Shape, reader: FsReader) {
+async fn stat_one_path_per_namespace(shape: &Shape, reader: LoonFs<ReadOnly>) {
     let reader = shape.reader(reader);
     for index in 0..shape.namespaces {
         let namespace = reader.namespace(&shape.namespace(index));

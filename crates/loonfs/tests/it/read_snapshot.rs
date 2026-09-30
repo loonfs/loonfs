@@ -2,8 +2,8 @@
 
 use crate::common::{assert_core_error_kind, open_runtime_async, store, SettableWallClock};
 use loonfs::{
-    CreateNamespaceOptions, CreateSnapshotOptions, DestinationBehavior, ErrorCode, FsReader,
-    FsWriter, NamespaceId, PageRequest, PaginationPolicy, PutFileOptions, SnapshotPolicy,
+    CreateNamespaceOptions, CreateSnapshotOptions, DestinationBehavior, ErrorCode, LoonFs,
+    NamespaceId, PageRequest, PaginationPolicy, PutFileOptions, SnapshotPolicy,
 };
 use tempfile::tempdir;
 
@@ -94,7 +94,7 @@ async fn read_during_compaction_and_collection(
     } else {
         None
     };
-    let reader = loonfs::FsReader::builder_with_store(store.clone())
+    let reader = loonfs::LoonFs::reader_with_store(store.clone())
         .build()
         .await
         .expect("cold reader");
@@ -189,7 +189,7 @@ async fn read_during_compaction_and_collection(
         store.release();
     };
     let (result, ()) = tokio::join!(read, maintenance);
-    let fresh = loonfs::FsReader::builder_with_store(store)
+    let fresh = loonfs::LoonFs::reader_with_store(store)
         .build()
         .await
         .expect("fresh reader");
@@ -281,7 +281,7 @@ async fn durable_pinned_reads_keep_missing_segments_corrupt_after_manifest_advan
         .create_checkpoint(&namespace_id)
         .await
         .expect("checkpoint");
-    let reader = loonfs::FsReader::builder_with_store(store.clone())
+    let reader = loonfs::LoonFs::reader_with_store(store.clone())
         .build()
         .await
         .expect("cold reader");
@@ -379,7 +379,7 @@ async fn pinned_reads_report_their_deleted_pin_when_a_segment_is_missing() {
         .create_checkpoint(&namespace_id)
         .await
         .expect("checkpoint");
-    let reader = loonfs::FsReader::builder_with_store(store.clone())
+    let reader = loonfs::LoonFs::reader_with_store(store.clone())
         .build()
         .await
         .expect("cold reader");
@@ -1052,13 +1052,13 @@ async fn a_reader_judges_snapshot_expiry_on_its_own_wall_clock() {
     const EXPIRES_AT_MS: u64 = 1_750_000_060_000;
     let temp_dir = tempdir().expect("tempdir");
     let clock = Arc::new(SettableWallClock(AtomicU64::new(1_750_000_000_000)));
-    let writer = FsWriter::builder_with_store(store(temp_dir.path()))
+    let writer = LoonFs::builder_with_store(store(temp_dir.path()))
         .writer_id("snapshot-clock-writer")
         .wall_clock(clock.clone())
         .build()
         .await
         .expect("build writer");
-    let reader = FsReader::builder_with_store(store(temp_dir.path()))
+    let reader = LoonFs::reader_with_store(store(temp_dir.path()))
         .wall_clock(clock.clone())
         .build()
         .await
@@ -1086,7 +1086,7 @@ async fn a_reader_judges_snapshot_expiry_on_its_own_wall_clock() {
         .expect("create snapshot");
 
     clock.0.store(EXPIRES_AT_MS - 1, Ordering::SeqCst);
-    for reader in [&reader, &writer.reader()] {
+    for reader in [&reader, &writer.read_only()] {
         let namespace = reader.namespace(&namespace_id);
         let pinned = namespace
             .pin_namespace_at_snapshot(&snapshot.checkpoint_id)
@@ -1095,7 +1095,7 @@ async fn a_reader_judges_snapshot_expiry_on_its_own_wall_clock() {
         assert_eq!(pinned.head_seq(), snapshot.captured_seq);
     }
     clock.0.store(EXPIRES_AT_MS, Ordering::SeqCst);
-    for reader in [&reader, &writer.reader()] {
+    for reader in [&reader, &writer.read_only()] {
         let namespace = reader.namespace(&namespace_id);
         assert_core_error_kind(
             namespace
@@ -1266,7 +1266,7 @@ async fn a_missing_current_segment_stays_corrupt_and_manifest_read_failures_prop
         .fold_wal(&namespace_id)
         .await
         .expect("fold");
-    let reader = loonfs::FsReader::builder_with_store(store.clone())
+    let reader = loonfs::LoonFs::reader_with_store(store.clone())
         .build()
         .await
         .expect("reader");

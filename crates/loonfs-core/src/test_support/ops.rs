@@ -16,7 +16,7 @@ pub(crate) async fn create<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     context: &MutationContext,
-) -> Result<loonfs_api::Namespace> {
+) -> Result<loonfs_api::NamespaceMetadata> {
     crate::namespace::bootstrap::bootstrap_namespace(
         store,
         namespace_id,

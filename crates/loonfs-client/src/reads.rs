@@ -131,10 +131,10 @@ impl Client {
         namespace_id: &NamespaceId,
         actor_id: &loonfs_api::ActorId,
         access: loonfs_api::NamespaceAccess,
-    ) -> Result<Namespace> {
+    ) -> Result<NamespaceMetadata> {
         let url = format!("{}/v0/namespaces", self.base_url);
         // Namespace creation has no durable request identity to reconcile an ambiguous success.
-        self.request_json::<_, Namespace>(
+        self.request_json::<_, NamespaceMetadata>(
             self.post(&url).header("Loonfs-Actor", actor_id.as_str()),
             Some(&CreateNamespaceRequest {
                 access,
@@ -146,11 +146,11 @@ impl Client {
     }
 
     /// Returns the namespace's current state.
-    pub async fn get_namespace(&self, namespace_id: &NamespaceId) -> Result<Namespace> {
+    pub async fn get_namespace(&self, namespace_id: &NamespaceId) -> Result<NamespaceMetadata> {
         // Validated namespace ids are URL-safe by construction, like the
         // other parsed id segments interpolated into paths here and below.
         let url = format!("{}/v0/namespaces/{namespace_id}", self.base_url);
-        self.request_json::<(), Namespace>(self.get(&url), None, SendPolicy::Retry)
+        self.request_json::<(), NamespaceMetadata>(self.get(&url), None, SendPolicy::Retry)
             .await
     }
 
@@ -181,13 +181,13 @@ impl Client {
         source_namespace_id: &NamespaceId,
         new_namespace_id: &NamespaceId,
         options: &ForkNamespaceOptions,
-    ) -> Result<Namespace> {
+    ) -> Result<NamespaceMetadata> {
         let url = format!(
             "{}/v0/namespaces/{source_namespace_id}/forks",
             self.base_url
         );
         // Namespace forks have no durable request identity to replay after an ambiguous success.
-        self.request_json::<_, Namespace>(
+        self.request_json::<_, NamespaceMetadata>(
             self.post(&url)
                 .header("Loonfs-Actor", options.actor_id.as_str()),
             Some(&ForkNamespaceRequest {

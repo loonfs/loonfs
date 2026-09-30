@@ -66,14 +66,14 @@ async fn hosted_subject_cannot_import_a_foreign_bare_content_reference() {
     .expect("app");
     let source = namespace_id("source");
     let source_namespace = state
-        .writer
-        .reader()
+        .runtime
+        .read_only()
         .as_subject(subject("administrator"))
         .namespace(&source);
     let destination = namespace_id("destination");
-    let destination_namespace = state.writer.reader().namespace(&destination);
+    let destination_namespace = state.runtime.namespace(&destination);
     state
-        .writer
+        .runtime
         .create_namespace(
             &source,
             CreateNamespaceOptions {
@@ -83,12 +83,12 @@ async fn hosted_subject_cannot_import_a_foreign_bare_content_reference() {
         )
         .await
         .expect("source namespace");
-    let namespace_writer = state
-        .writer
+    let namespace = state
+        .runtime
         .open_namespace(&source)
         .expect("open namespace");
     state
-        .writer
+        .runtime
         .create_namespace(
             &destination,
             CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
@@ -96,7 +96,7 @@ async fn hosted_subject_cannot_import_a_foreign_bare_content_reference() {
         .await
         .expect("destination namespace");
     let options = PutFileOptions::new(loonfs_test_support::test_actor());
-    namespace_writer
+    namespace
         .as_subject(subject("administrator"))
         .put_file_bytes("/private", b"private bytes", options)
         .await
@@ -157,5 +157,5 @@ async fn hosted_subject_cannot_import_a_foreign_bare_content_reference() {
         ErrorCode::PathNotFound
     );
 
-    state.writer.shutdown().await.expect("shutdown");
+    state.runtime.shutdown().await.expect("shutdown");
 }

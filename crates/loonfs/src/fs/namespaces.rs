@@ -6,10 +6,10 @@ use crate::{
     CreateNamespaceOptions, DeleteNamespaceOptions, DeleteNamespaceResponse, ForkNamespaceOptions,
     NamespaceId,
 };
-use crate::{ErrorCode, FsWriter, MaintenanceHint, MaintenanceJobId, Namespace, Writable};
+use crate::{ErrorCode, LoonFs, MaintenanceHint, MaintenanceJobId, Namespace, Writable};
 use crate::{Result, RuntimeError};
 
-impl FsWriter {
+impl LoonFs<Writable> {
     /// Fork, delete, and snapshot management belong to the token holder and
     /// to administrators of an ACL namespace.
     pub(super) async fn require_administrator(&self, namespace_id: &NamespaceId) -> Result<()> {
@@ -40,7 +40,7 @@ impl FsWriter {
         &self,
         namespace_id: &NamespaceId,
         options: CreateNamespaceOptions,
-    ) -> Result<loonfs_api::Namespace> {
+    ) -> Result<crate::NamespaceMetadata> {
         self.core.record_trace_context(&tracing::Span::current());
         let result = self
             .engine(namespace_id)
@@ -68,7 +68,7 @@ impl FsWriter {
         source_namespace_id: &NamespaceId,
         new_namespace_id: &NamespaceId,
         options: ForkNamespaceOptions,
-    ) -> Result<loonfs_api::Namespace> {
+    ) -> Result<crate::NamespaceMetadata> {
         self.require_administrator(source_namespace_id).await?;
         self.core.record_trace_context(&tracing::Span::current());
         let result = self
@@ -125,7 +125,7 @@ impl Namespace<Writable> {
     ) -> Result<DeleteNamespaceResponse> {
         self.require_administrator().await?;
         self.core.record_trace_context(&tracing::Span::current());
-        self.mode.session.submit_delete(options).await
+        self.session().submit_delete(options).await
     }
 }
 

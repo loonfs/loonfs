@@ -6,7 +6,9 @@ use crate::error::Result;
 use crate::namespace::read_anchor::load_read_anchor;
 use crate::namespace::state::NamespaceReadState;
 use loonfs_api::wire::control::ForkBasis;
-use loonfs_api::{ActorId, ChangeSeq, ManifestNo, Namespace, NamespaceForkBasis, NamespaceId};
+use loonfs_api::{
+    ActorId, ChangeSeq, ManifestNo, NamespaceForkBasis, NamespaceId, NamespaceMetadata,
+};
 use loonfs_objectstore::ObjectStore;
 
 /// Whether a namespace carries visible commits its basis manifest does not
@@ -96,12 +98,12 @@ fn fork_basis(basis: Option<ForkBasis>) -> Option<NamespaceForkBasis> {
 pub async fn load_namespace<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace_id: &NamespaceId,
-) -> Result<Namespace> {
+) -> Result<NamespaceMetadata> {
     let anchor = load_read_anchor(store, expected_namespace_id).await?;
     let retention_floor_seq = anchor.retention_floor_seq();
     let head = anchor.read_state;
     super::control::ensure_namespace_live(&head)?;
-    Ok(Namespace {
+    Ok(NamespaceMetadata {
         access: (&head.access).into(),
         created_at_ms: head.created_at_ms,
         created_by: head.created_by,

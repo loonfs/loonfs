@@ -1,4 +1,4 @@
-//! [`FsMaintenance`]'s explicit maintenance: steps, GC, checkpoints, WAL
+//! [`Maintenance`]'s explicit maintenance: steps, GC, checkpoints, WAL
 //! folds, and retention.
 //!
 //! Derived indexes are not here and not in this crate: `loonfs-grep`
@@ -6,7 +6,7 @@
 //! checkpoint calls, and its hosts drive it.
 
 use crate::trace::phase_span;
-use crate::FsMaintenance;
+use crate::Maintenance;
 use crate::NamespaceDiagnostics;
 use crate::{
     AdvanceRetentionResponse, Checkpoint, CreateCheckpointOptions, DeleteCheckpointResponse,
@@ -74,7 +74,7 @@ fn metadata_compaction_response(
     }
 }
 
-impl FsMaintenance {
+impl Maintenance {
     /// A mutating engine under this handle's actor identity.
     fn engine(
         &self,
@@ -284,12 +284,13 @@ impl FsMaintenance {
         options: MetadataMaintenanceOptions,
     ) -> Result<(MetadataMaintenanceResponse, Option<u64>)> {
         let status = self.load_maintenance_status(namespace_id).await?;
-        let inline_bytes = match &self.publisher {
-            Some(publisher) if status.wal_tail_segments > 0 => publisher
+        let inline_bytes = if status.wal_tail_segments > 0 {
+            self.publisher
                 .wal_tail_inline_bytes(namespace_id)
                 .await
-                .unwrap_or(0),
-            _ => 0,
+                .unwrap_or(0)
+        } else {
+            0
         };
         let now_ms = self.core.now_ms()?;
         let idle_fold_due_in_ms =
@@ -871,8 +872,8 @@ impl FsMaintenance {
                 .fold_wal()
                 .await
                 .map_err(RuntimeError::from);
-            if let (Ok(_), Some(publisher)) = (&result, &self.publisher) {
-                publisher.record_fold_outcome(namespace_id).await;
+            if result.is_ok() {
+                self.publisher.record_fold_outcome(namespace_id).await;
             }
             self.finish_namespace_mutation(namespace_id, result)
                 .inspect_err(|error| tracing::debug!(%error))

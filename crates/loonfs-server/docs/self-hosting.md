@@ -485,7 +485,7 @@ These are the defaults; every value must be positive. The byte estimate counts
 request data, prepared proofs, and queue bookkeeping. It excludes allocator
 slack, HTTP request buffers, and the metadata/working copies a publication
 loads. Size process memory for those costs and the separate fold/cache limits
-too. Embedded hosts set the same limits with `FsWriterBuilder::publication_limits`.
+too. Embedded hosts set the same limits with `LoonFsBuilder::publication_limits`.
 
 Hosted servers use the `[inline_content]` table with the settings below. Inline
 writes are enabled by default at a 64 KiB threshold. Set
@@ -493,7 +493,7 @@ writes are enabled by default at a 64 KiB threshold. Set
 advertises `filesystem.commits.inline_content` and `commit.max_inline_content_bytes_per_operation`
 by default and omits both when disabled.
 
-Embedded hosts configure inline writes with `FsWriterBuilder::inline_content`
+Embedded hosts configure inline writes with `LoonFsBuilder::inline_content`
 and `InlineContentOptions`. These settings do not change reader format limits.
 
 | Setting | Default | Meaning |

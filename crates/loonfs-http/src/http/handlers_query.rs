@@ -84,9 +84,9 @@ pub(super) async fn grep(
     let service = state.grep_service();
     // Grep's own segments come off the instrumented store every LoonFS
     // request in this process is measured on; its filesystem reads go
-    // through the same reader handle the core API groups serve from.
-    let store = state.writer.object_store();
-    let reads = NamespaceReads::new(&state.reader, &namespace_id);
+    // through the same runtime the core API groups serve from.
+    let store = state.runtime.object_store();
+    let reads = NamespaceReads::new(state.runtime.namespace(&namespace_id));
     let reads = match subject {
         Some(subject) => reads.as_subject(subject),
         None => reads,

@@ -332,7 +332,7 @@ async fn embedded_health_check(
         .maintenance
         .as_ref()
         .expect("embedded target should carry maintenance handles")
-        .writer
+        .runtime
         .object_store();
     match store
         .list_prefix_stream(&format!("{PROBE_RUN_PREFIX}/"))

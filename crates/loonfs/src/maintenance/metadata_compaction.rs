@@ -5,7 +5,7 @@ use super::{
     MaintenanceCancellation, MaintenanceConclusion, MaintenanceJob, MaintenanceJobId,
     MaintenanceProbe, MaintenanceRunReport,
 };
-use crate::{FsMaintenance, MetadataCompactionOutcome, NamespaceId, Result};
+use crate::{Maintenance, MetadataCompactionOutcome, NamespaceId, Result};
 use async_trait::async_trait;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -13,13 +13,13 @@ use tokio::sync::Semaphore;
 
 /// Runs streaming metadata compaction under a process-local permit limit.
 pub struct MetadataCompactionJob {
-    maintenance: FsMaintenance,
+    maintenance: Maintenance,
     permits: Arc<Semaphore>,
 }
 
 impl MetadataCompactionJob {
-    /// Creates a compaction job over a maintenance handle.
-    pub fn new(maintenance: FsMaintenance) -> Self {
+    /// Creates a compaction job over a runtime's maintenance.
+    pub fn new(maintenance: Maintenance) -> Self {
         Self {
             maintenance,
             permits: Arc::new(Semaphore::new(
