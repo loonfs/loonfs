@@ -1,7 +1,4 @@
-//! Deletes user-owned checkpoints.
-//!
-//! Forks and snapshots have separate lifecycle rules and cannot be deleted
-//! through this operation.
+//! Deletes user checkpoints and snapshots; fork pins cannot be deleted here.
 
 use super::record::{delete_checkpoint_record, load_owned_checkpoint_record, CheckpointOwnerKind};
 use crate::error::Result;

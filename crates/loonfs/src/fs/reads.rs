@@ -21,6 +21,8 @@ use loonfs_core::{NamespaceReaderEngine, RuntimeReadContext};
 #[cfg(test)]
 mod tests;
 
+/// Rejects a directory cursor that another read minted. A pin implies its
+/// head, so the head test does work only for a read pinned at the live head.
 fn validate_pinned_directory_cursor(
     cursor: Option<&DirectoryPageCursor>,
     pinned_head_seq: ChangeSeq,

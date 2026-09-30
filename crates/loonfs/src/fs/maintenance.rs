@@ -14,7 +14,7 @@ use crate::{
     MaintenanceProbe, MetadataCompactionOutcome, MetadataCompactionResponse,
     MetadataMaintenanceOptions, MetadataMaintenanceResponse, NamespaceId, PinId,
     ReorganizeStepOutcome, RunMaintenanceRequest, RunMaintenanceResponse, SharedObjectStore,
-    WalFlushStepOutcome,
+    SnapshotSummary, WalFlushStepOutcome,
 };
 use crate::{ChangeSeq, Result, RuntimeError};
 use loonfs_api::CompactorEpoch;
@@ -153,19 +153,12 @@ impl FsMaintenance {
                 .await
                 .map_err(RuntimeError::from)?;
             for checkpoint in page.items {
-                match checkpoint.owner {
-                    loonfs_api::CheckpointOwnerSummary::User { .. } => {
-                        live_checkpoints = live_checkpoints.saturating_add(1);
-                    }
-                    loonfs_api::CheckpointOwnerSummary::Snapshot { .. }
-                        if checkpoint
-                            .expires_at_ms
-                            .is_some_and(|expiry| expiry > now_ms) =>
-                    {
-                        live_snapshots = live_snapshots.saturating_add(1);
-                    }
-                    loonfs_api::CheckpointOwnerSummary::Fork { .. }
-                    | loonfs_api::CheckpointOwnerSummary::Snapshot { .. } => {}
+                if let loonfs_api::CheckpointOwnerSummary::User { .. } = checkpoint.owner {
+                    live_checkpoints = live_checkpoints.saturating_add(1);
+                } else if SnapshotSummary::from_checkpoint(checkpoint)
+                    .is_some_and(|snapshot| snapshot.is_live(now_ms))
+                {
+                    live_snapshots = live_snapshots.saturating_add(1);
                 }
             }
             let Some(next_cursor) = page.next_cursor else {

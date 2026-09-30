@@ -1040,6 +1040,11 @@ impl SnapshotSummary {
             expires_at_ms: checkpoint.expires_at_ms?,
         })
     }
+
+    /// Reports whether the snapshot is still live at `now_ms`.
+    pub fn is_live(&self, now_ms: u64) -> bool {
+        self.expires_at_ms > now_ms
+    }
 }
 
 /// One page of existing checkpoint records, including expired records that

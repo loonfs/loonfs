@@ -98,7 +98,6 @@ pub async fn project_anchor_tail<S: ObjectStore + ?Sized>(
     let loaded_basis = metadata_basis_from_manifest(store, segment_cache, &anchor.manifest);
     let replayed = replay_discovered_tail(
         &loaded_basis.replay_head(&anchor.read_state),
-        &anchor.read_state,
         &loaded_basis.base_state,
         &anchor.tail,
     )

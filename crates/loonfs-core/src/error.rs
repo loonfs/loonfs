@@ -10,7 +10,6 @@ use crate::commit::{CommitValidationError, WalPublishError};
 use crate::commit_engine::ContentPreparationError;
 use crate::control_object::ControlObjectLoadError;
 use crate::metadata::VisiblePathError;
-use crate::namespace::state::NamespaceReadState;
 use crate::storage::content::DurableContentValidationError;
 use crate::wal::{WalSegmentError, WalTailLoadError};
 use loonfs_api::{
@@ -301,13 +300,6 @@ pub enum MetadataProjectionLoadError {
     ManifestLoad(#[from] ManifestLoadError),
     #[error("WAL replay failed: {0}")]
     WalReplay(#[from] WalSegmentError),
-    #[error(
-        "metadata projection head mismatch: expected current head `{expected:?}`, replayed `{actual:?}`"
-    )]
-    ReplayedHeadMismatch {
-        expected: Box<NamespaceReadState>,
-        actual: Box<NamespaceReadState>,
-    },
 }
 
 impl MetadataProjectionLoadError {
@@ -316,7 +308,7 @@ impl MetadataProjectionLoadError {
             Self::NamespaceDeleted { .. } => ErrorCode::NamespaceDeleted,
             Self::LoadHead(error) => error.code(),
             Self::WalTailLoad(error) => error.code(),
-            Self::WalReplay(_) | Self::ReplayedHeadMismatch { .. } => ErrorCode::NamespaceCorrupt,
+            Self::WalReplay(_) => ErrorCode::NamespaceCorrupt,
             Self::ManifestLoad(error) => match error.failure_class() {
                 crate::checkpoint::ManifestLoadFailureClass::Corrupt => ErrorCode::NamespaceCorrupt,
                 crate::checkpoint::ManifestLoadFailureClass::Store => ErrorCode::ServerError,
@@ -433,7 +425,7 @@ impl CoreError {
             CoreError::WriterCapacityExceeded { .. } => ErrorCode::WriterCapacityExceeded,
             CoreError::ShuttingDown => ErrorCode::ShuttingDown,
             CoreError::ContentNotMaterialized { .. } => ErrorCode::ContentNotMaterialized,
-            // An over-budget publication aborts pre-CAS and is retryable
+            // An over-budget publication stops before its next write and is retryable
             // after maintenance, exactly the checkpoint_unavailable contract.
             CoreError::CheckpointUnavailable(_)
             | CoreError::MetadataPublicationBudgetExceeded { .. } => {
@@ -715,21 +707,6 @@ impl std::fmt::Display for WriterFence {
             (Some(writer), None) => write!(f, " (writer `{writer}`)"),
             (None, Some(acquired_at_ms)) => write!(f, " (acquired at {acquired_at_ms} ms)"),
             (None, None) => Ok(()),
-        }
-    }
-}
-
-impl From<crate::control_update::ControlUpdateError> for CoreError {
-    fn from(value: crate::control_update::ControlUpdateError) -> Self {
-        use crate::control_update::ControlUpdateError;
-        match value {
-            ControlUpdateError::OutcomeUnknown {
-                object_key,
-                message,
-            } => CoreError::OutcomeUnknown {
-                object_key,
-                message,
-            },
         }
     }
 }

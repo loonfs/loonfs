@@ -232,7 +232,7 @@ fn load_publish_tail_projection<S: ObjectStore + ?Sized>(
     tail: &ValidatedWalTail,
 ) -> Result<PublishTailProjection> {
     let manifest_head = loaded_basis.replay_head(head);
-    let replayed = replay_discovered_tail(&manifest_head, head, &loaded_basis.base_state, tail)
+    let replayed = replay_discovered_tail(&manifest_head, &loaded_basis.base_state, tail)
         .map_err(CoreError::MetadataProjection)?;
     let wal_tail_segments = head.unfolded_wal_segments();
     let projection = PublishTailProjection {

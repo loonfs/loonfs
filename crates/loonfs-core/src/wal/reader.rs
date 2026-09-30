@@ -3,9 +3,7 @@
 #![allow(clippy::disallowed_methods)]
 
 use super::frame::ReplayedWalTail;
-use super::replay::{
-    ensure_replayed_head_matches, project_validated_wal_tail, validate_wal_segment_for_replay,
-};
+use super::replay::{project_validated_wal_tail, validate_wal_segment_for_replay};
 use super::{
     ValidatedWalSegment, ValidatedWalTail, WalSegmentError, WalTailLoadError, WalTailLoadRequest,
 };
@@ -187,24 +185,18 @@ pub(crate) async fn load_replayed_wal_tail<S: ObjectStore + ?Sized>(
         },
     )
     .await?;
-    replay_discovered_tail(base_head, current_head, base_metadata_state, &tail)
+    replay_discovered_tail(base_head, base_metadata_state, &tail)
 }
 
 pub(crate) fn replay_discovered_tail(
     base_head: &NamespaceReadState,
-    current_head: &NamespaceReadState,
     base_metadata_state: &MetadataState,
     tail: &ValidatedWalTail,
 ) -> Result<ReplayedWalTail, MetadataProjectionLoadError> {
-    let replayed = {
-        let _span =
-            tracing::debug_span!("loonfs.phase", phase = "project_metadata_state").entered();
-        project_validated_wal_tail(
-            base_head,
-            &super::ProjectedWalTail::from_rows(base_metadata_state.clone()),
-            tail,
-        )?
-    };
-    ensure_replayed_head_matches(current_head, &replayed.resulting_head)?;
-    Ok(replayed)
+    let _span = tracing::debug_span!("loonfs.phase", phase = "project_metadata_state").entered();
+    Ok(project_validated_wal_tail(
+        base_head,
+        &super::ProjectedWalTail::from_rows(base_metadata_state.clone()),
+        tail,
+    )?)
 }

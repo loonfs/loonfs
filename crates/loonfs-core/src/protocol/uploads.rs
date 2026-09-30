@@ -803,9 +803,8 @@ pub(crate) async fn upload_proxied_content<S: ObjectStore + ?Sized>(
 /// compare-and-swap.
 ///
 /// `already_present` means the create-only object write found an existing
-/// object. The session's claim prevents concurrent writers, so that object
-/// can only come from an earlier attempt that did not record its result.
-/// Matching content is an idempotent retry; different content is a conflict.
+/// object. The claim stays after any write that may still land, so no earlier
+/// attempt on this session wrote that object. It is a conflict.
 async fn record_staged_content<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -824,26 +823,15 @@ async fn record_staged_content<S: ObjectStore + ?Sized>(
                     "staged content recorded for a direct upload session".to_owned(),
                 ));
             };
-            if already_present && !matches!(staging, ProxiedStaging::Staged(_)) {
+            if already_present || matches!(staging, ProxiedStaging::Staged(_)) {
                 return Err(CoreError::UploadContentConflict { upload_id });
             }
-            match staging {
-                ProxiedStaging::Staged(existing) => {
-                    if existing == &content_ref {
-                        Ok(UploadSessionUpdate::Noop(session_response(&state)))
-                    } else {
-                        Err(CoreError::UploadContentConflict { upload_id })
-                    }
-                }
-                ProxiedStaging::Idle | ProxiedStaging::Claimed => {
-                    *staging = ProxiedStaging::Staged(content_ref);
-                    let response = session_response(&state);
-                    Ok(UploadSessionUpdate::Replace {
-                        next: Box::new(state),
-                        outcome: response,
-                    })
-                }
-            }
+            *staging = ProxiedStaging::Staged(content_ref);
+            let response = session_response(&state);
+            Ok(UploadSessionUpdate::Replace {
+                next: Box::new(state),
+                outcome: response,
+            })
         }
     })
     .await

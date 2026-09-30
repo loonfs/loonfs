@@ -135,7 +135,7 @@ impl FsReader {
                 .map_err(RuntimeError::from)?;
             snapshots.extend(page.items.into_iter().filter_map(|checkpoint| {
                 SnapshotSummary::from_checkpoint(checkpoint)
-                    .filter(|snapshot| snapshot.expires_at_ms > now_ms)
+                    .filter(|snapshot| snapshot.is_live(now_ms))
             }));
             match page.next_cursor {
                 Some(next_cursor) if snapshots.len() < requested => cursor = Some(next_cursor),
@@ -229,7 +229,7 @@ impl FsWriter {
                 .items
                 .into_iter()
                 .filter_map(SnapshotSummary::from_checkpoint)
-                .filter(|snapshot| snapshot.expires_at_ms > now_ms)
+                .filter(|snapshot| snapshot.is_live(now_ms))
                 .count();
             if live > max_live {
                 return Err(RuntimeError::Core(
