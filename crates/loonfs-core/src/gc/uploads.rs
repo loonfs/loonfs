@@ -163,8 +163,9 @@ fn retain_undated() -> UploadSessionSweep {
 /// Aborts a session after its lease and grace period expire, then cleans up
 /// its unpublished content.
 ///
-/// The CAS provides safety. The additional grace period only reduces races
-/// with completions that arrive shortly after lease expiry.
+/// The CAS provides safety. A completion that arrives after the lease is
+/// refused, so the grace only covers a completing host whose clock runs
+/// behind the collector's.
 async fn abort_expired_session<S: ObjectStore + ?Sized>(
     sweep: &Sweep<'_, '_, S>,
     state: &UploadSessionPayload,

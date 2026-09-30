@@ -4166,7 +4166,7 @@
         "x-loonfs-retry": "idempotent"
       },
       "post": {
-        "description": "Creates a snapshot of the current namespace state. Every call creates a new snapshot.",
+        "description": "Creates a snapshot of the current namespace state. Every accepted call creates a new snapshot.",
         "operationId": "create_snapshot",
         "parameters": [
           {

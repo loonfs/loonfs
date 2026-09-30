@@ -60,11 +60,11 @@ A direct download returns a presigned URL for the content object. Inline content
 
 ## Flushing
 
-A flush writes every inline value in its range as a content object before it writes segments or publishes the manifest. The writes run with bounded concurrency inside the flush's publication budget.
+A flush writes every inline value in its range as a content object before it writes segments or publishes the manifest. The writes run with bounded concurrency after the flush's publication budget starts, and the flush checks the budget when they return.
 
 In a live namespace, materialized content is never garbage: each object belongs to a committed revision, and revisions are retained. A flush that crashes, exceeds its budget, or loses the manifest race leaves objects that the next flush finds already present. There is no orphan to discover and no cleanup state to persist. An object already at the key must hold the same bytes, and the verified write checks this. A mismatch stops the flush without publishing.
 
-A flush can pause between reading a tail and writing its content while the namespace is deleted and swept. Every flush attempt starts from a fresh manifest observation, and materialization runs inside the flush's publication budget, which the retirement grace exceeds. A write that still lands late is found the way a late upload is: the retired-owner sweep lists the content prefix again on every later pass ([format section 11.8](../specs/format.md#118-sweeping-a-retired-owners-content)).
+A flush can pause between reading a tail and writing its content while the namespace is deleted and swept. A flush call reads a fresh manifest, but a writer's own fold starts from its retained view. Neither checks its publication budget until its content writes return. A content write can therefore land after a sweep. It is found the way a late upload is: the retired-owner sweep lists the content prefix again on every later pass ([format section 11.8](../specs/format.md#118-sweeping-a-retired-owners-content)).
 
 A flush becomes due when the unfolded tail reaches 32 WAL objects, or when its inline bytes reach the fold threshold. The second trigger bounds what a cold reader downloads to replay a tail.
 

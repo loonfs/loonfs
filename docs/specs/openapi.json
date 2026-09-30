@@ -3100,7 +3100,7 @@
             "description": "Current visible namespace sequence."
           },
           "live_checkpoints": {
-            "description": "Number of active user checkpoints, including expired records awaiting collection.",
+            "description": "Number of user checkpoints, including expired records awaiting collection.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
@@ -7819,7 +7819,7 @@
         "x-loonfs-retry": "idempotent"
       },
       "post": {
-        "description": "Creates a snapshot of the current namespace state. Every call creates a new snapshot.",
+        "description": "Creates a snapshot of the current namespace state. Every accepted call creates a new snapshot.",
         "operationId": "create_snapshot",
         "parameters": [
           {
