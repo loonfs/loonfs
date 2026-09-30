@@ -2,7 +2,7 @@
 
 #![allow(clippy::panic)]
 
-use crate::common::{directory_options, expect_code, writer};
+use crate::common::{directory_options, expect_code, writer, writer_epoch};
 use loonfs::metrics::{DefaultMetricsRecorder, MetricValue};
 use loonfs::{
     CreateNamespaceOptions, ErrorCode, FsWriter, NamespaceId, NamespaceSessionPolicy,
@@ -22,14 +22,6 @@ async fn create_namespace(writer: &FsWriter, namespace_id: &NamespaceId) {
         )
         .await
         .expect("create namespace");
-}
-
-async fn writer_epoch(store: &SharedObjectStore, namespace_id: &NamespaceId) -> u64 {
-    loonfs::control::load_namespace_read_state(store, namespace_id)
-        .await
-        .expect("load namespace head")
-        .writer_epoch
-        .0
 }
 
 #[tokio::test]

@@ -1,0 +1,218 @@
+//! The per-namespace writer handle: opening, sharing, closing, and epochs.
+
+#![allow(clippy::panic)]
+
+use crate::common::{data_wal_put_for, directory_options, expect_code, writer, writer_epoch};
+use loonfs::{
+    CreateNamespaceOptions, ErrorCode, FsWriter, NamespaceId, NamespaceSessionState,
+    SharedObjectStore,
+};
+use loonfs_objectstore::local_fs_store::LocalFsStore;
+use loonfs_test_support::stores::{BlockingStore, KeyPredicate, RecordingStore};
+use std::sync::{Arc, Barrier};
+use tempfile::tempdir;
+
+async fn create_namespace(writer: &FsWriter, namespace_id: &NamespaceId) {
+    writer
+        .create_namespace(
+            namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("create namespace");
+}
+
+#[tokio::test]
+async fn opening_does_no_store_io_and_the_first_publish_acquires_the_epoch() {
+    let temp_dir = tempdir().expect("tempdir");
+    let recording = Arc::new(RecordingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("create store"),
+        KeyPredicate::any(),
+    ));
+    let store: SharedObjectStore = recording.clone();
+    let writer = writer(store.clone(), "cheap-open").await;
+    let namespace_id = NamespaceId::parse("cheap-open").expect("namespace id");
+    create_namespace(&writer, &namespace_id).await;
+    let created = writer_epoch(&store, &namespace_id).await;
+
+    recording.reset();
+    let namespace_writer = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
+    let operations = recording.take();
+    assert!(operations.is_empty(), "opening touched {operations:?}");
+    assert_eq!(writer_epoch(&store, &namespace_id).await, created);
+
+    namespace_writer
+        .create_directory("/first", directory_options())
+        .await
+        .expect("first publish");
+    assert_eq!(writer_epoch(&store, &namespace_id).await, created + 1);
+}
+
+#[tokio::test]
+async fn concurrent_opens_share_one_session_and_one_epoch() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store: SharedObjectStore =
+        Arc::new(LocalFsStore::new(temp_dir.path()).expect("create store"));
+    let writer = writer(store.clone(), "shared-open").await;
+    let namespace_id = NamespaceId::parse("shared-open").expect("namespace id");
+    create_namespace(&writer, &namespace_id).await;
+    let created = writer_epoch(&store, &namespace_id).await;
+    let barrier = Arc::new(Barrier::new(8));
+
+    let namespace_writers = std::thread::scope(|scope| {
+        let openers = (0..8)
+            .map(|_| {
+                let writer = writer.clone();
+                let namespace_id = namespace_id.clone();
+                let barrier = Arc::clone(&barrier);
+                scope.spawn(move || {
+                    barrier.wait();
+                    writer
+                        .open_namespace(&namespace_id)
+                        .expect("open namespace")
+                })
+            })
+            .collect::<Vec<_>>();
+        openers
+            .into_iter()
+            .map(|opener| opener.join().expect("join opener"))
+            .collect::<Vec<_>>()
+    });
+
+    for (index, namespace_writer) in namespace_writers.iter().enumerate() {
+        namespace_writer
+            .create_directory(&format!("/from-{index}"), directory_options())
+            .await
+            .expect("every handle publishes through the shared session");
+    }
+    assert_eq!(writer_epoch(&store, &namespace_id).await, created + 1);
+}
+
+#[tokio::test]
+async fn close_drains_admitted_commits_and_refuses_later_work_from_every_clone() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("close-drain").expect("namespace id");
+    let blocking = Arc::new(BlockingStore::matching(
+        LocalFsStore::new(temp_dir.path()).expect("create store"),
+        data_wal_put_for(&namespace_id),
+    ));
+    let writer = writer(blocking.clone(), "close-drain").await;
+    create_namespace(&writer, &namespace_id).await;
+    let namespace_writer = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
+    let clone = namespace_writer.clone();
+
+    blocking.block_next();
+    let first = tokio::spawn({
+        let namespace_writer = namespace_writer.clone();
+        async move {
+            namespace_writer
+                .create_directory("/first", directory_options())
+                .await
+        }
+    });
+    blocking.wait_until_blocked().await;
+    let mut second = Box::pin(clone.create_directory("/second", directory_options()));
+    assert!(futures::poll!(second.as_mut()).is_pending());
+
+    let mut close = Box::pin(namespace_writer.close());
+    assert!(futures::poll!(close.as_mut()).is_pending());
+    expect_code(
+        clone.create_directory("/third", directory_options()).await,
+        ErrorCode::WriterSessionClosed,
+    );
+
+    blocking.release();
+    first
+        .await
+        .expect("join first mutation")
+        .expect("first mutation lands");
+    second.await.expect("second mutation lands");
+    let report = close.await.expect("close namespace session");
+    assert!(report.was_open);
+    assert_eq!(report.drained_commits, 2);
+    assert!(!report.fenced);
+}
+
+#[tokio::test]
+async fn reopening_after_close_starts_a_new_epoch() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store: SharedObjectStore =
+        Arc::new(LocalFsStore::new(temp_dir.path()).expect("create store"));
+    let writer = writer(store.clone(), "reopen").await;
+    let namespace_id = NamespaceId::parse("reopen").expect("namespace id");
+    create_namespace(&writer, &namespace_id).await;
+
+    let namespace_writer = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
+    namespace_writer
+        .create_directory("/before", directory_options())
+        .await
+        .expect("first session publishes");
+    let first_epoch = writer_epoch(&store, &namespace_id).await;
+    namespace_writer.close().await.expect("close first session");
+
+    let reopened = writer
+        .open_namespace(&namespace_id)
+        .expect("reopen namespace");
+    reopened
+        .create_directory("/after", directory_options())
+        .await
+        .expect("second session publishes");
+    assert_eq!(writer_epoch(&store, &namespace_id).await, first_epoch + 1);
+}
+
+#[tokio::test]
+async fn fencing_lasts_until_close_and_a_reopened_handle_takes_a_new_epoch() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store: SharedObjectStore =
+        Arc::new(LocalFsStore::new(temp_dir.path()).expect("create store"));
+    let namespace_id = NamespaceId::parse("sticky-fence").expect("namespace id");
+    let writer_a = writer(store.clone(), "writer-a").await;
+    let writer_b = writer(store.clone(), "writer-b").await;
+    create_namespace(&writer_a, &namespace_id).await;
+    let handle_a = writer_a
+        .open_namespace(&namespace_id)
+        .expect("open writer A");
+    let handle_b = writer_b
+        .open_namespace(&namespace_id)
+        .expect("open writer B");
+    handle_a
+        .create_directory("/a-one", directory_options())
+        .await
+        .expect("writer A acquires the epoch");
+    handle_b
+        .create_directory("/b-one", directory_options())
+        .await
+        .expect("writer B takes over");
+    let taken_over = writer_epoch(&store, &namespace_id).await;
+
+    for path in ["/a-two", "/a-three"] {
+        expect_code(
+            handle_a.create_directory(path, directory_options()).await,
+            ErrorCode::WriterFenced,
+        );
+    }
+    assert_eq!(
+        handle_a.session_state(),
+        NamespaceSessionState::Open {
+            fenced: true,
+            queued_commits: 0,
+        }
+    );
+    let report = handle_a.close().await.expect("close fenced session");
+    assert!(report.fenced);
+
+    let reopened_a = writer_a
+        .open_namespace(&namespace_id)
+        .expect("reopen writer A");
+    reopened_a
+        .create_directory("/a-four", directory_options())
+        .await
+        .expect("the reopened session acquires a new epoch");
+    assert_eq!(writer_epoch(&store, &namespace_id).await, taken_over + 1);
+}

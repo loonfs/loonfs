@@ -6,7 +6,7 @@ use crate::{
     CreateNamespaceOptions, DeleteNamespaceOptions, DeleteNamespaceResponse, ForkNamespaceOptions,
     Namespace, NamespaceId,
 };
-use crate::{ErrorCode, FsWriter, MaintenanceHint, MaintenanceJobId};
+use crate::{ErrorCode, FsWriter, MaintenanceHint, MaintenanceJobId, NamespaceWriter};
 use crate::{Result, RuntimeError};
 
 impl FsWriter {
@@ -88,6 +88,18 @@ impl FsWriter {
         }
         result
     }
+}
+
+impl NamespaceWriter {
+    /// Delete and snapshot management belong to the token holder and to
+    /// administrators of an ACL namespace.
+    pub(super) async fn require_administrator(&self) -> Result<()> {
+        if self.core.subject.is_none() {
+            return Ok(());
+        }
+        let (engine, context) = self.core.pinned_metadata_read(&self.namespace_id).await?;
+        Ok(engine.require_administrator(&context).await?)
+    }
 
     /// Ends the namespace after folding its final WAL tail.
     /// See [namespace deletion](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#94-deleting-a-namespace).
@@ -102,20 +114,19 @@ impl FsWriter {
         skip_all,
         fields(
             operation = "delete_namespace",
-            namespace_id = %namespace_id,
+            namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )
     )]
     pub async fn delete_namespace(
         &self,
-        namespace_id: &NamespaceId,
         options: DeleteNamespaceOptions,
     ) -> Result<DeleteNamespaceResponse> {
-        self.require_administrator(namespace_id).await?;
+        self.require_administrator().await?;
         self.core.record_trace_context(&tracing::Span::current());
         self.publisher
-            .submit_delete(namespace_id.clone(), options)
+            .submit_delete(self.namespace_id.clone(), options)
             .await
     }
 }
@@ -124,7 +135,7 @@ impl FsWriter {
 /// admits it, through the publisher's own commit engine: the session
 /// epoch and fencing that govern this namespace's publications govern
 /// its tombstone swap too. Only the service calls this; everything else
-/// must go through [`FsWriter::delete_namespace`] so the barrier holds.
+/// must go through [`NamespaceWriter::delete_namespace`] so the barrier holds.
 pub(crate) async fn delete_namespace_with_engine(
     core: &ReadCore,
     writer: &WriterBits,

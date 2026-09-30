@@ -892,19 +892,18 @@ impl FsMaintenance {
     }
 }
 
-impl crate::FsWriter {
+impl crate::NamespaceWriter {
     /// Grants `admin` on the root row to `principal_id`, keeping every other
     /// root grant, through a commit no subject check applies to.
     pub async fn recover_administrator(
         &self,
-        namespace_id: &NamespaceId,
         principal_id: &loonfs_api::PrincipalId,
         actor_id: loonfs_api::ActorId,
     ) -> Result<loonfs_api::RecoverAdministratorResponse> {
         use loonfs_api::v0::FilesystemChange;
         use loonfs_api::{AccessGrants, AccessRight, AccessRights};
 
-        let (engine, context) = self.core.pinned_metadata_read(namespace_id).await?;
+        let (engine, context) = self.core.pinned_metadata_read(&self.namespace_id).await?;
         let (boundary, grants, current) = engine.root_access(&context).await?;
         let mut entries: std::collections::BTreeMap<_, _> = grants
             .iter()
@@ -934,10 +933,7 @@ impl crate::FsWriter {
             },
         );
         let commit = self
-            .commit_candidate_inner(
-                namespace_id,
-                crate::publish::CommitCandidate::maintenance(request),
-            )
+            .commit_candidate_inner(crate::publish::CommitCandidate::maintenance(request))
             .await?;
         let access_revision_no = commit
             .events

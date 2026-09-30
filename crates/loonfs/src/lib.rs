@@ -127,7 +127,7 @@ pub mod publish {
 /// Content-preparation proof types used by server integrations.
 ///
 /// A server mints a short-lived token after durable upload completion.
-/// [`FsWriter::prepare_content_token`] verifies the token against the
+/// [`NamespaceWriter::prepare_content_token`] verifies the token against the
 /// namespace catalog and returns process-local proof that keeps the token's
 /// publication deadline.
 /// Most embedded applications do not need this module.
@@ -186,7 +186,7 @@ pub use fs::{
 };
 pub use handle::{
     FsMaintenance, FsMaintenanceBuilder, FsReader, FsReaderBuilder, FsWriter, FsWriterBuilder,
-    NamespaceSessionPolicy,
+    NamespaceSessionPolicy, NamespaceWriter,
 };
 pub use maintenance::{
     maintenance_hint_relay, GarbageCollectionJob, MaintenanceAssignment, MaintenanceCancellation,

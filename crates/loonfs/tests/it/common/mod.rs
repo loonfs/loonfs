@@ -113,6 +113,14 @@ pub(crate) async fn writer(store: SharedObjectStore, writer_id: &str) -> FsWrite
         .expect("build writer")
 }
 
+pub(crate) async fn writer_epoch(store: &SharedObjectStore, namespace_id: &NamespaceId) -> u64 {
+    loonfs::control::load_namespace_read_state(store, namespace_id)
+        .await
+        .expect("load namespace head")
+        .writer_epoch
+        .0
+}
+
 pub(crate) fn directory_options() -> CreateDirectoryOptions {
     CreateDirectoryOptions::new(loonfs_test_support::test_actor())
 }

@@ -128,6 +128,8 @@ opt-level = 3
 # The clock_gettime boundary in loonfs-api needs one local unsafe allowance.
 unsafe_code = "deny"
 unreachable_pub = "warn"
+# Callers still use the `FsWriter` methods that `NamespaceWriter` replaces.
+deprecated = "allow"
 
 [workspace.lints.clippy]
 missing_errors_doc = "allow"
