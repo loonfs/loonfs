@@ -631,9 +631,13 @@ async fn ensure_parent_dir(key: &str, path: &Path) -> Result<bool> {
 async fn sync_parent_dir(key: &str, path: &Path) -> Result<()> {
     #[cfg(unix)]
     {
+        // The entry is already in place; a failed sync leaves its durability
+        // unknown, so the error is ambiguous rather than a refusal.
         if let Some(parent) = path.parent() {
-            let dir = File::open(parent).await.map_err(|err| io_error(key, err))?;
-            dir.sync_all().await.map_err(|err| io_error(key, err))?;
+            let dir = File::open(parent)
+                .await
+                .map_err(|err| ambiguous(key, err))?;
+            dir.sync_all().await.map_err(|err| ambiguous(key, err))?;
         }
     }
     #[cfg(not(unix))]
@@ -651,8 +655,8 @@ async fn sync_dir_chain(key: &str, path: &Path, root: &Path) -> Result<()> {
     {
         let mut current = path.parent();
         while let Some(dir) = current {
-            let handle = File::open(dir).await.map_err(|err| io_error(key, err))?;
-            handle.sync_all().await.map_err(|err| io_error(key, err))?;
+            let handle = File::open(dir).await.map_err(|err| ambiguous(key, err))?;
+            handle.sync_all().await.map_err(|err| ambiguous(key, err))?;
             if dir == root {
                 break;
             }
@@ -814,6 +818,10 @@ fn map_create_error(key: &str, err: std::io::Error) -> ObjectStoreError {
     } else {
         io_error(key, err)
     }
+}
+
+fn ambiguous(key: &str, err: std::io::Error) -> ObjectStoreError {
+    ObjectStoreError::transport(key, err.to_string())
 }
 
 fn io_error(key: &str, err: std::io::Error) -> ObjectStoreError {

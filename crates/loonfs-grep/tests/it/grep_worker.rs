@@ -311,7 +311,7 @@ async fn grep_worker_lifecycle_uses_and_releases_checkpointed_backfill() {
         again,
         loonfs_grep::GrepEnableOutcome::AlreadyEnabled { .. }
     ));
-    let manifest = load_current_grep_manifest(&*store, &namespace_id)
+    let manifest = load_current_grep_manifest(&*store, &namespace_id, crate::common::observation())
         .await
         .expect("load manifest")
         .expect("manifest exists");
@@ -348,10 +348,11 @@ async fn grep_worker_lifecycle_uses_and_releases_checkpointed_backfill() {
         .await
         .expect("materialized query");
     assert_eq!(response.matches.len(), 3);
-    let materialized_manifest = load_current_grep_manifest(&*store, &namespace_id)
-        .await
-        .expect("load materialized manifest")
-        .expect("manifest exists");
+    let materialized_manifest =
+        load_current_grep_manifest(&*store, &namespace_id, crate::common::observation())
+            .await
+            .expect("load materialized manifest")
+            .expect("manifest exists");
     let materialized_segment = segment_key(
         &namespace_id,
         &materialized_manifest.manifest_state().segments()[0].segment_id,
@@ -373,10 +374,11 @@ async fn grep_worker_lifecycle_uses_and_releases_checkpointed_backfill() {
             .is_none(),
         "disable must leave segments for grep-owned GC"
     );
-    let disabled_manifest = load_current_grep_manifest(&*store, &namespace_id)
-        .await
-        .expect("load disabled manifest")
-        .expect("disabled manifest remains");
+    let disabled_manifest =
+        load_current_grep_manifest(&*store, &namespace_id, crate::common::observation())
+            .await
+            .expect("load disabled manifest")
+            .expect("disabled manifest remains");
     assert!(matches!(
         disabled_manifest.manifest_state().status(),
         GrepIndexStatus::Disabled {}
@@ -393,7 +395,7 @@ async fn grep_worker_lifecycle_uses_and_releases_checkpointed_backfill() {
         reenabled,
         loonfs_grep::GrepEnableOutcome::Enabled { .. }
     ));
-    let manifest = load_current_grep_manifest(&*store, &namespace_id)
+    let manifest = load_current_grep_manifest(&*store, &namespace_id, crate::common::observation())
         .await
         .expect("load re-enabled manifest")
         .expect("manifest exists");
@@ -438,7 +440,7 @@ async fn exhausted_run_numbers_fail_as_server_errors_without_writing_the_manifes
     worker.enable(&namespace_id).await.expect("enable grep");
     drive_worker_to_current(&worker, &namespace_id, GramIndexBuildPolicy::default()).await;
 
-    let current = load_current_grep_manifest(&*store, &namespace_id)
+    let current = load_current_grep_manifest(&*store, &namespace_id, crate::common::observation())
         .await
         .expect("load current manifest")
         .expect("current manifest");
@@ -508,7 +510,7 @@ async fn exhausted_run_numbers_fail_as_server_errors_without_writing_the_manifes
         ));
     }
 
-    let after = load_current_grep_manifest(&*store, &namespace_id)
+    let after = load_current_grep_manifest(&*store, &namespace_id, crate::common::observation())
         .await
         .expect("load manifest after failures")
         .expect("manifest remains");
@@ -1032,7 +1034,7 @@ async fn assert_fresh_backfill_attempt(
     store: &SharedObjectStore,
     namespace_id: &NamespaceId,
 ) -> loonfs_api::PinId {
-    let manifest = load_current_grep_manifest(&**store, namespace_id)
+    let manifest = load_current_grep_manifest(&**store, namespace_id, crate::common::observation())
         .await
         .expect("load grep manifest")
         .expect("grep manifest exists");
@@ -1069,7 +1071,7 @@ async fn grep_segment_ids(
     store: &SharedObjectStore,
     namespace_id: &NamespaceId,
 ) -> BTreeSet<IndexSegmentId> {
-    load_current_grep_manifest(&**store, namespace_id)
+    load_current_grep_manifest(&**store, namespace_id, crate::common::observation())
         .await
         .expect("load grep manifest")
         .expect("grep manifest exists")
@@ -1084,7 +1086,7 @@ async fn grep_built_through_seq(
     store: &SharedObjectStore,
     namespace_id: &NamespaceId,
 ) -> ChangeSeq {
-    load_current_grep_manifest(&**store, namespace_id)
+    load_current_grep_manifest(&**store, namespace_id, crate::common::observation())
         .await
         .expect("load grep manifest")
         .expect("grep manifest exists")
@@ -1623,7 +1625,7 @@ async fn a_backfill_checkpoint_mismatch_is_corruption_without_writes() {
         .expect("create");
     let worker = worker(&store).await;
     worker.enable(&namespace_id).await.expect("enable");
-    let current = load_current_grep_manifest(&*store, &namespace_id)
+    let current = load_current_grep_manifest(&*store, &namespace_id, crate::common::observation())
         .await
         .expect("load")
         .expect("manifest");
@@ -1682,7 +1684,7 @@ async fn backfilling_manifest_without_checkpoint_id_is_index_corrupt() {
         .expect("create namespace");
     let worker = worker(&store).await;
     worker.enable(&namespace_id).await.expect("enable grep");
-    let manifest = load_current_grep_manifest(&*store, &namespace_id)
+    let manifest = load_current_grep_manifest(&*store, &namespace_id, crate::common::observation())
         .await
         .expect("load backfilling manifest")
         .expect("backfilling manifest exists");
@@ -1797,10 +1799,14 @@ async fn planless_scan_covers_wal_revisions_at_or_below_index_watermark() {
         metadata_manifest.manifest().head_seq < head.seq,
         "the WAL-only revision must sit past metadata materialization"
     );
-    let grep_manifest = loonfs_grep::manifest::load_current_grep_manifest(&*store, &namespace_id)
-        .await
-        .expect("load grep manifest")
-        .expect("grep manifest exists");
+    let grep_manifest = loonfs_grep::manifest::load_current_grep_manifest(
+        &*store,
+        &namespace_id,
+        crate::common::observation(),
+    )
+    .await
+    .expect("load grep manifest")
+    .expect("grep manifest exists");
     assert_eq!(
         grep_manifest
             .manifest_state()
@@ -1929,7 +1935,7 @@ async fn grep_worker_pins_reorganized_tail_and_pagination_results() {
         .await
         .expect("write tail file");
 
-    let manifest = load_current_grep_manifest(&*store, &namespace_id)
+    let manifest = load_current_grep_manifest(&*store, &namespace_id, crate::common::observation())
         .await
         .expect("load manifest")
         .expect("manifest exists");
@@ -2041,12 +2047,13 @@ async fn fork_of_grep_enabled_namespace_starts_unmaterialized_without_manifest_s
     let worker = worker(&store).await;
     worker.enable(&source).await.expect("enable source");
     drive_worker_to_current(&worker, &source, GramIndexBuildPolicy::default()).await;
-    let source_manifest_before = load_current_grep_manifest(&*store, &source)
-        .await
-        .expect("load source manifest")
-        .expect("source manifest exists")
-        .manifest_state()
-        .clone();
+    let source_manifest_before =
+        load_current_grep_manifest(&*store, &source, crate::common::observation())
+            .await
+            .expect("load source manifest")
+            .expect("source manifest exists")
+            .manifest_state()
+            .clone();
 
     let mut stored_bytes = 0_u64;
     for segment in source_manifest_before.segments() {
@@ -2076,7 +2083,7 @@ async fn fork_of_grep_enabled_namespace_starts_unmaterialized_without_manifest_s
         .expect("fork source");
 
     assert!(
-        load_current_grep_manifest(&*store, &target)
+        load_current_grep_manifest(&*store, &target, crate::common::observation())
             .await
             .expect("load target manifest")
             .is_none(),
@@ -2087,12 +2094,13 @@ async fn fork_of_grep_enabled_namespace_starts_unmaterialized_without_manifest_s
         new_query(&store, &target, &request("needle")).await,
     );
 
-    let source_manifest_after = load_current_grep_manifest(&*store, &source)
-        .await
-        .expect("reload source manifest")
-        .expect("source manifest still exists")
-        .manifest_state()
-        .clone();
+    let source_manifest_after =
+        load_current_grep_manifest(&*store, &source, crate::common::observation())
+            .await
+            .expect("reload source manifest")
+            .expect("source manifest still exists")
+            .manifest_state()
+            .clone();
     assert_eq!(source_manifest_after, source_manifest_before);
     let source_response = new_query(&store, &source, &request("fork needle"))
         .await
@@ -2348,7 +2356,7 @@ async fn enable_disable_and_cached_queries_use_numbered_publication() {
     );
     host.worker.disable(&namespace_id).await.expect("disable");
     assert_eq!(
-        load_current_grep_manifest(&*store, &namespace_id)
+        load_current_grep_manifest(&*store, &namespace_id, crate::common::observation())
             .await
             .expect("discover")
             .expect("manifest")

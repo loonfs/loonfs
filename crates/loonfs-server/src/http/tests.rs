@@ -628,15 +628,21 @@ async fn a_namespace_advance_nudges_the_enabled_namespaces_index() {
 
 /// What the index's steps published, read where an operator reads it.
 async fn built_through_seq(state: &AppState, namespace_id: &NamespaceId) -> ChangeSeq {
-    load_current_grep_manifest(&*state.writer.object_store(), namespace_id)
-        .await
-        .expect("load grep manifest")
-        .expect("an enabled namespace has a grep manifest")
-        .manifest_state()
-        .status()
-        .active_watermark()
-        .expect("an active grep manifest has a watermark")
-        .built_through_seq()
+    load_current_grep_manifest(
+        &*state.writer.object_store(),
+        namespace_id,
+        loonfs::Observation::now(Arc::new(
+            loonfs_objectstore::timing::StdMonotonicTimer::default(),
+        )),
+    )
+    .await
+    .expect("load grep manifest")
+    .expect("an enabled namespace has a grep manifest")
+    .manifest_state()
+    .status()
+    .active_watermark()
+    .expect("an active grep manifest has a watermark")
+    .built_through_seq()
 }
 
 #[tokio::test]

@@ -538,6 +538,40 @@ async fn manifest_publication_recovers_an_ambiguous_put_and_tolerates_a_failed_h
 }
 
 #[tokio::test]
+async fn a_manifest_update_returns_the_hint_it_raised() {
+    let directory = tempdir().expect("directory");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace");
+    let store = LocalFsStore::new(directory.path()).expect("store");
+    create(&store, &namespace_id, &test_context())
+        .await
+        .expect("bootstrap");
+    let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
+    let ((), published, hint) = crate::checkpoint::publish::update_manifest(
+        &store,
+        &namespace_id,
+        &deadline,
+        |payload| async move {
+            Ok(crate::checkpoint::publish::ManifestChange::Next(
+                Box::new(payload),
+                (),
+            ))
+        },
+    )
+    .await
+    .expect("publish");
+    assert_eq!(
+        hint.state.manifest_no,
+        published.state.manifest().manifest_no
+    );
+    assert_eq!(
+        hint,
+        crate::namespace::control::load_hint(&store, &namespace_id)
+            .await
+            .expect("stored hint")
+    );
+}
+
+#[tokio::test]
 async fn a_flush_whose_manifest_put_lands_without_an_answer_reports_published() {
     let directory = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("demo").expect("namespace");

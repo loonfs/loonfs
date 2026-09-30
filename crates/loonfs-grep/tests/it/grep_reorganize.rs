@@ -216,7 +216,7 @@ async fn reorganize_with_cache(warm_cache: bool) -> usize {
         );
     }
 
-    let current = load_current_grep_manifest(&store, &namespace_id)
+    let current = load_current_grep_manifest(&store, &namespace_id, crate::common::observation())
         .await
         .expect("load output manifest")
         .expect("output manifest");

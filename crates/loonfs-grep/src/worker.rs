@@ -19,12 +19,12 @@ use crate::reads::{published_revision, NamespaceReads};
 use crate::service::is_indexable_text_content;
 use crate::{GrepError, Result};
 use futures::future::try_join_all;
-use loonfs::Deadline;
 use loonfs::{
     next_run_no_after, refill_iterators, select_next_iterator, write_segments_in_waves,
     CheckpointFilesPageCursor, CoreError, CreateCheckpointOptions, FsMaintenance, FsReader,
     RuntimeError, SegmentBlockLoader, SegmentRowIterator, StoreFailureClass,
 };
+use loonfs::{Deadline, Observation};
 use loonfs_api::v0::{GrepIndex, GrepIndexLifecycle};
 use loonfs_api::wire::sst_blocks::{
     DecodedDataBlock, SegmentBlocksBuilder, SegmentIndexEntry, SstBlockCodecError,
@@ -205,7 +205,8 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
     pub async fn enable(&self, namespace_id: &NamespaceId) -> Result<GrepEnableOutcome> {
         self.reads(namespace_id).head().await?;
         let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
-        let current = load_current_grep_manifest(&self.store, namespace_id).await?;
+        let current =
+            load_current_grep_manifest(&self.store, namespace_id, deadline.observe()).await?;
         if let Some(current) = &current {
             if !matches!(
                 current.manifest_state().status(),
@@ -258,7 +259,9 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
     pub async fn disable(&self, namespace_id: &NamespaceId) -> Result<GrepDisableOutcome> {
         self.reads(namespace_id).head().await?;
         let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
-        let Some(current) = load_current_grep_manifest(&self.store, namespace_id).await? else {
+        let Some(current) =
+            load_current_grep_manifest(&self.store, namespace_id, deadline.observe()).await?
+        else {
             return Ok(GrepDisableOutcome::NotEnabled);
         };
         if matches!(
@@ -302,7 +305,9 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         policy: GramIndexBuildPolicy,
     ) -> Result<GrepBuildOutcome> {
         let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
-        let Some(current) = load_current_grep_manifest(&self.store, namespace_id).await? else {
+        let Some(current) =
+            load_current_grep_manifest(&self.store, namespace_id, deadline.observe()).await?
+        else {
             return Ok(GrepBuildOutcome::NotEnabled);
         };
         if matches!(
@@ -375,9 +380,13 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<Option<GrepManifestState>> {
-        Ok(load_current_grep_manifest(&self.store, namespace_id)
-            .await?
-            .map(|manifest| manifest.manifest_state().clone()))
+        Ok(load_current_grep_manifest(
+            &self.store,
+            namespace_id,
+            Observation::now(Arc::new(StdMonotonicTimer::default())),
+        )
+        .await?
+        .map(|manifest| manifest.manifest_state().clone()))
     }
 
     /// Returns the grep index's state and maintenance progress.
@@ -981,7 +990,9 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         policy: GramIndexBuildPolicy,
     ) -> Result<GrepReorganizeOutcome> {
         let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
-        let Some(current) = load_current_grep_manifest(&self.store, namespace_id).await? else {
+        let Some(current) =
+            load_current_grep_manifest(&self.store, namespace_id, deadline.observe()).await?
+        else {
             return Ok(GrepReorganizeOutcome::NotEnabled);
         };
         if matches!(

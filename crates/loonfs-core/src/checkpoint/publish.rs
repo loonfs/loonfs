@@ -68,16 +68,16 @@ where
         payload.manifest_no = super::flush::next_manifest_no_after(predecessor)?;
         let manifest = encode_manifest(payload)?;
         let manifest_bytes = manifest.as_bytes().len() as u64;
-        if let ManifestPublicationOutcome::Published(state) =
+        let (outcome, raised) =
             publish_manifest_from(store, manifest, deadline, Some(current), Some(hint.clone()))
-                .await?
-        {
+                .await?;
+        if let ManifestPublicationOutcome::Published(state) = outcome {
             let loaded = LoadedManifest {
                 object_key: metadata_manifest_object(namespace_id, &state.manifest().manifest_no),
                 manifest_bytes,
                 state,
             };
-            return Ok((result, loaded, hint));
+            return Ok((result, loaded, raised.unwrap_or(hint)));
         }
     }
 }
@@ -96,7 +96,11 @@ pub(crate) async fn publish_manifest<S: ObjectStore + ?Sized>(
 ) -> Result<ManifestPublicationOutcome> {
     let namespace_id = &manifest.envelope().payload().namespace_id;
     let current = load_current_manifest_if_present(store, namespace_id).await?;
-    publish_manifest_from(store, manifest, deadline, current, None).await
+    Ok(
+        publish_manifest_from(store, manifest, deadline, current, None)
+            .await?
+            .0,
+    )
 }
 
 async fn publish_manifest_from<S: ObjectStore + ?Sized>(
@@ -104,8 +108,8 @@ async fn publish_manifest_from<S: ObjectStore + ?Sized>(
     manifest: EncodedEnvelope<NamespaceManifestPayload>,
     deadline: &Deadline,
     current: Option<LoadedManifest>,
-    hint: Option<LoadedHint>,
-) -> Result<ManifestPublicationOutcome> {
+    mut hint: Option<LoadedHint>,
+) -> Result<(ManifestPublicationOutcome, Option<LoadedHint>)> {
     let namespace_id = manifest.envelope().payload().namespace_id.clone();
     let namespace_id = &namespace_id;
     let expected_predecessor = manifest
@@ -149,13 +153,14 @@ async fn publish_manifest_from<S: ObjectStore + ?Sized>(
         if manifest.envelope().payload().writer_epoch
             < current.state.envelope.payload().writer_epoch
         {
-            return Ok(ManifestPublicationOutcome::PredecessorChanged(
-                current.state.clone(),
+            return Ok((
+                ManifestPublicationOutcome::PredecessorChanged(current.state.clone()),
+                hint,
             ));
         }
         match classify_current(&current.state, &candidate, expected_predecessor, false) {
             ManifestClassification::Installable => {}
-            ManifestClassification::Settled(outcome) => return Ok(outcome),
+            ManifestClassification::Settled(outcome) => return Ok((outcome, hint)),
         }
     }
     let payload = manifest.envelope().payload();
@@ -244,19 +249,22 @@ async fn publish_manifest_from<S: ObjectStore + ?Sized>(
     };
     if matches!(outcome, ManifestPublicationOutcome::Published(_)) {
         // Publication is already durable; a failed hint update cannot undo it.
-        if let Err(error) = raise_hint(
+        match raise_hint(
             store,
             namespace_id,
             candidate.manifest().manifest_no,
-            hint,
+            hint.clone(),
             deadline,
         )
         .await
         {
-            tracing::warn!(namespace_id = namespace_id.as_str(), error = %error, "manifest discovery hint update failed");
+            Ok(raised) => hint = Some(raised),
+            Err(error) => {
+                tracing::warn!(namespace_id = namespace_id.as_str(), error = %error, "manifest discovery hint update failed");
+            }
         }
     }
-    Ok(outcome)
+    Ok((outcome, hint))
 }
 
 fn ensure_publication_in_budget(object_key: &str, deadline: &Deadline) -> Result<()> {

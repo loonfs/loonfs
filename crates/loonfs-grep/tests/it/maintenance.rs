@@ -360,9 +360,10 @@ async fn wait_for_watermark<S: ObjectStore + 'static>(
     // that durable state under a bounded timeout.
     tokio::time::timeout(WAIT, async {
         loop {
-            if let Some(manifest) = load_current_grep_manifest(&**store, namespace_id)
-                .await
-                .expect("load grep manifest")
+            if let Some(manifest) =
+                load_current_grep_manifest(&**store, namespace_id, crate::common::observation())
+                    .await
+                    .expect("load grep manifest")
             {
                 if manifest
                     .manifest_state()

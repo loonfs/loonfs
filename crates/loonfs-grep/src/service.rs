@@ -125,7 +125,7 @@ impl GrepService {
         let state = match confirmed {
             Some(state) => state,
             None => {
-                let current = load_current_grep_manifest(store, namespace_id)
+                let current = load_current_grep_manifest(store, namespace_id, observed.clone())
                     .await?
                     .ok_or(GrepError::NotEnabled)?;
                 let state = Arc::new(current.manifest_state().clone());
