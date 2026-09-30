@@ -186,6 +186,7 @@ async fn open_direct_upload_outlives_retirement_and_still_gets_provider_cleanup(
             part_number: 1,
             checksum: loonfs_api::Checksum::crc64nvme(b"part"),
         }],
+        clock.now_ms(),
     )
     .await
     .expect("prepare capability");
