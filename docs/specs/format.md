@@ -476,7 +476,7 @@ Content is admitted only with evidence that the named bytes were verified in a c
 
 An inline reference must be owned by the committing namespace. Admission evidence must match the complete reference.
 
-The evidence expires. A completed session can produce evidence only during `COMPLETED_UPLOAD_RECEIPT_WINDOW_MS` after its original completion time. A status read or cached response does not restart that window, and nothing is issued at or after its end. A signed token lasts `CONTENT_RECEIPT_TTL_MS` from issuance. Evidence prepared in process without a token expires no later than the last token its session could have issued.
+The evidence expires. It is valid while the clock reads before its expiry, and it has expired at its expiry instant. A completed session can produce evidence only during `COMPLETED_UPLOAD_RECEIPT_WINDOW_MS` after its original completion time. A status read or cached response does not restart that window, and nothing is issued at or after its end. A signed token lasts `CONTENT_RECEIPT_TTL_MS` from issuance. Evidence prepared in process without a token expires at the end of the admission window, `COMPLETED_UPLOAD_ADMISSION_WINDOW_MS` after the completion (Appendix C.2). No token outlasts that window.
 
 The reference HTTP server mints signed content tokens as its representation of this evidence. An embedded implementation need not mint tokens. Token encoding, signing, and HTTP responses are defined in the [API specification][api-spec].
 
@@ -1000,7 +1000,7 @@ CONTENT_RECLAMATION_GRACE_MS
       + GC_MIN_GRACE_WINDOW_MS
 ```
 
-Every token mint checks the original completion time. A retained receipt cannot extend its issuance window. In-process proofs expire no later than the final token could, and publication checks proof expiry immediately before the numbered WAL put. After the full grace, an unpublished upload cannot acquire a new valid first publication. Previously published content remains protected by its durable publication row.
+Every token mint checks the original completion time. A retained receipt cannot extend its issuance window. In-process proofs expire at the end of the admission window, and publication checks proof expiry immediately before the numbered WAL put. After the full grace, an unpublished upload cannot acquire a new valid first publication. Previously published content remains protected by its durable publication row.
 
 ### 11.7 Pin cleanup
 

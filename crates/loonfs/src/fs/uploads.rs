@@ -34,7 +34,7 @@ impl FsWriter {
         if self.bits.maintenance_hint_observer.is_none() {
             return;
         }
-        let Ok(now_ms) = loonfs_core::time::current_time_ms() else {
+        let Ok(now_ms) = self.now_ms() else {
             return;
         };
         self.bits.send_maintenance_hint(
@@ -55,7 +55,7 @@ impl FsWriter {
         if self.bits.maintenance_hint_observer.is_none() {
             return;
         }
-        let Ok(now_ms) = loonfs_core::time::current_time_ms() else {
+        let Ok(now_ms) = self.now_ms() else {
             return;
         };
         self.bits.send_maintenance_hint(

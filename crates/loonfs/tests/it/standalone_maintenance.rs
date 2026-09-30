@@ -1,5 +1,6 @@
 //! Standalone execution of every core maintenance job through a registry.
 
+use crate::common::SettableWallClock;
 use loonfs::{
     CreateCheckpointOptions, CreateDirectoryOptions, CreateNamespaceOptions, FsMaintenance,
     FsWriter, GarbageCollectionJob, MaintenanceAssignment, MaintenanceCancellation,
@@ -20,15 +21,6 @@ struct FixedWallClock(u64);
 impl WallClock for FixedWallClock {
     fn now_ms(&self) -> Result<u64, loonfs::CoreError> {
         Ok(self.0)
-    }
-}
-
-#[derive(Debug)]
-struct SettableWallClock(AtomicU64);
-
-impl WallClock for SettableWallClock {
-    fn now_ms(&self) -> Result<u64, loonfs::CoreError> {
-        Ok(self.0.load(Ordering::SeqCst))
     }
 }
 

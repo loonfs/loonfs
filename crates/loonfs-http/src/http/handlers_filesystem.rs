@@ -572,8 +572,7 @@ pub(super) async fn create_commit(
                 &namespace_id,
                 &put_content_refs,
                 &content_tokens,
-                loonfs::current_time_ms()
-                    .map_err(|error| ApiResponseError::runtime(error.into()))?,
+                state.writer.now_ms().map_err(ApiResponseError::runtime)?,
             )
             .await?,
         ))

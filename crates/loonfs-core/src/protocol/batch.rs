@@ -379,7 +379,7 @@ mod tests {
             load_publish_metadata_view(&store, None, &namespace_id, acquired, None, None)
                 .await
                 .expect("publish view");
-        let candidates = [("expired", 1_000), ("valid", 2_000)].map(|(name, expires_at_ms)| {
+        let candidates = [("expired", 1_001), ("valid", 2_000)].map(|(name, expires_at_ms)| {
             let content_ref = PreparedContent::inline(
                 namespace_id.clone(),
                 bytes::Bytes::from_static(b"content"),

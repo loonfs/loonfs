@@ -580,7 +580,7 @@ pub(super) async fn complete_upload(
         completed.response,
         ContentTokenVerifier::new(state.options.content_token_secret.expose()),
         completed.receipt.as_ref(),
-        loonfs::current_time_ms().map_err(|error| ApiResponseError::runtime(error.into()))?,
+        writer.now_ms().map_err(ApiResponseError::runtime)?,
     )?))
 }
 
@@ -664,7 +664,7 @@ pub(super) async fn get_upload(
         view.session,
         ContentTokenVerifier::new(state.options.content_token_secret.expose()),
         view.receipt.as_ref(),
-        loonfs::current_time_ms().map_err(|error| ApiResponseError::runtime(error.into()))?,
+        writer.now_ms().map_err(ApiResponseError::runtime)?,
     )?))
 }
 

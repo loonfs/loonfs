@@ -165,7 +165,7 @@ pub enum GrepReorganizeOutcome {
 pub struct GrepWorker<S> {
     store: S,
     reader: FsReader,
-    maintenance: FsMaintenance,
+    pub(crate) maintenance: FsMaintenance,
 }
 
 /// The runtime handles carry no debug representation — they are clones of a

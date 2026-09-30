@@ -21,7 +21,18 @@ use loonfs_test_support::stores::{
     FailStore, InjectedError, KeyPredicate, OperationClass, RecordingStore,
 };
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+
+/// A wall clock a test moves by storing a new time.
+#[derive(Debug)]
+pub(crate) struct SettableWallClock(pub(crate) AtomicU64);
+
+impl loonfs::WallClock for SettableWallClock {
+    fn now_ms(&self) -> Result<u64, loonfs::CoreError> {
+        Ok(self.0.load(Ordering::SeqCst))
+    }
+}
 
 /// The GET of a WAL number that finds nothing.
 pub(crate) fn wal_probe(

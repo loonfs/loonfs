@@ -1,9 +1,9 @@
 //! Multi-call namespace read snapshots.
 
-use crate::common::{assert_core_error_kind, open_runtime_async, store};
+use crate::common::{assert_core_error_kind, open_runtime_async, store, SettableWallClock};
 use loonfs::{
-    CreateNamespaceOptions, CreateSnapshotOptions, DestinationBehavior, ErrorCode, NamespaceId,
-    PageRequest, PaginationPolicy, PutFileOptions,
+    CreateNamespaceOptions, CreateSnapshotOptions, DestinationBehavior, ErrorCode, FsReader,
+    FsWriter, NamespaceId, PageRequest, PaginationPolicy, PutFileOptions,
 };
 use tempfile::tempdir;
 
@@ -959,6 +959,63 @@ async fn snapshot_pins_serve_captured_state_and_enforce_release() {
             .await,
         ErrorCode::SnapshotNotFound,
     );
+}
+
+#[tokio::test]
+async fn a_reader_judges_snapshot_expiry_on_its_own_wall_clock() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+
+    const EXPIRES_AT_MS: u64 = 1_750_000_060_000;
+    let temp_dir = tempdir().expect("tempdir");
+    let clock = Arc::new(SettableWallClock(AtomicU64::new(1_750_000_000_000)));
+    let writer = FsWriter::builder_with_store(store(temp_dir.path()))
+        .writer_id("snapshot-clock-writer")
+        .wall_clock(clock.clone())
+        .build()
+        .await
+        .expect("build writer");
+    let reader = FsReader::builder_with_store(store(temp_dir.path()))
+        .wall_clock(clock.clone())
+        .build()
+        .await
+        .expect("build reader");
+    let namespace_id = NamespaceId::parse("snapshot-clock").expect("namespace id");
+    writer
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("create namespace");
+    let snapshot = writer
+        .create_snapshot(
+            &namespace_id,
+            CreateSnapshotOptions {
+                name: "clock".to_owned(),
+                expires_at_ms: EXPIRES_AT_MS,
+            },
+        )
+        .await
+        .expect("create snapshot");
+
+    clock.0.store(EXPIRES_AT_MS - 1, Ordering::SeqCst);
+    for reader in [&reader, &writer.reader()] {
+        let pinned = reader
+            .pin_namespace_at_snapshot(&namespace_id, &snapshot.checkpoint_id)
+            .await
+            .expect("the snapshot is live one millisecond before its expiry");
+        assert_eq!(pinned.head_seq(), snapshot.captured_seq);
+    }
+    clock.0.store(EXPIRES_AT_MS, Ordering::SeqCst);
+    for reader in [&reader, &writer.reader()] {
+        assert_core_error_kind(
+            reader
+                .pin_namespace_at_snapshot(&namespace_id, &snapshot.checkpoint_id)
+                .await,
+            ErrorCode::SnapshotGone,
+        );
+    }
 }
 
 #[tokio::test]

@@ -70,9 +70,8 @@ async fn publish_after_retry_delay(remaining_ms: u64, apply_then_fail: bool) -> 
         .expect("proof valid at admission");
     clock.set(started);
     retry_time.store(started + 10, AtomicOrdering::SeqCst);
-    Arc::get_mut(&mut runtime.bits)
-        .expect("unshared writer bits")
-        .identity
+    Arc::get_mut(&mut runtime.core.inner)
+        .expect("unshared read core")
         .wall_clock = clock.clone();
     let mut publisher = standalone_publisher(&namespace_id, &runtime);
     publisher.timer = clock;

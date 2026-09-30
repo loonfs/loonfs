@@ -39,6 +39,7 @@ pub(crate) struct ReadCoreInner {
     pub(crate) store: SharedObjectStore,
     pub(crate) config: ReadConfig,
     pub(crate) timer: Arc<dyn loonfs_api::MonotonicTimer>,
+    pub(crate) wall_clock: Arc<dyn crate::WallClock>,
     pub(crate) control_cache: Mutex<RuntimeControlCache>,
     pub(crate) metadata_segment_cache: Arc<MetadataSegmentCache>,
     pub(crate) wal_tail_projection_cache: Arc<WalTailProjectionCache>,
@@ -51,7 +52,6 @@ pub(crate) struct ReadCoreInner {
 #[derive(Clone)]
 pub(crate) struct WriterIdentity {
     pub(crate) writer_id: WriterId,
-    pub(crate) wall_clock: Arc<dyn crate::WallClock>,
 }
 
 /// Writer state shared weakly with the publisher worker.
@@ -124,20 +124,10 @@ impl WriterBits {
 
 impl WriterIdentity {
     /// Mints an identity, rejecting a blank writer id.
-    pub(crate) fn new(writer_id: String, wall_clock: Arc<dyn crate::WallClock>) -> Result<Self> {
+    pub(crate) fn new(writer_id: String) -> Result<Self> {
         let writer_id =
             WriterId::parse(writer_id).map_err(|error| RuntimeError::Config(error.to_string()))?;
-        Ok(Self {
-            writer_id,
-            wall_clock,
-        })
-    }
-
-    pub(crate) fn mutation_context(&self) -> Result<MutationContext> {
-        Ok(MutationContext {
-            writer_id: self.writer_id.clone(),
-            now_ms: self.wall_clock.now_ms()?,
-        })
+        Ok(Self { writer_id })
     }
 }
 
@@ -177,6 +167,7 @@ impl ReadCore {
         stored_metadata_block_cache: Option<Arc<dyn StoredMetadataBlockCache>>,
         instruments: Arc<RuntimeInstruments>,
         timer: Arc<dyn loonfs_api::MonotonicTimer>,
+        wall_clock: Arc<dyn crate::WallClock>,
     ) -> Self {
         let metadata_segment_cache = shared_metadata_segment_cache.unwrap_or_else(|| {
             Arc::new(MetadataSegmentCache::with_stored_block_cache_and_observer(
@@ -201,6 +192,7 @@ impl ReadCore {
                 store,
                 config,
                 timer,
+                wall_clock,
                 control_cache: Mutex::new(RuntimeControlCache::new(Arc::clone(&instruments))),
                 metadata_segment_cache,
                 wal_tail_projection_cache,
@@ -208,6 +200,19 @@ impl ReadCore {
                 instruments,
             }),
         }
+    }
+
+    /// Reads the handle's wall clock as unix milliseconds.
+    pub(crate) fn now_ms(&self) -> Result<u64> {
+        Ok(self.inner.wall_clock.now_ms()?)
+    }
+
+    /// Stamps a mutation by `actor` with the handle's wall clock.
+    pub(crate) fn mutation_context(&self, actor: &WriterIdentity) -> Result<MutationContext> {
+        Ok(MutationContext {
+            writer_id: actor.writer_id.clone(),
+            now_ms: self.now_ms()?,
+        })
     }
 
     /// This runtime's instrument set, for the publication, maintenance, and
@@ -337,7 +342,7 @@ impl ReadCore {
             namespace_id.clone(),
             actor.writer_id.clone(),
         )
-        .with_wall_clock(actor.wall_clock.clone())
+        .with_wall_clock(self.inner.wall_clock.clone())
         .with_metadata_lsm_policy(self.inner.config.metadata_lsm_policy)
     }
 }

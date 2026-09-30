@@ -50,7 +50,9 @@ impl MaintenanceJob for MetadataCompactionJob {
             return Ok(MaintenanceRunReport {
                 conclusion: MaintenanceConclusion::Blocked,
                 not_before_ms: Some(
-                    loonfs_core::time::current_time_ms()?.saturating_add(RECONCILE_INTERVAL_MS),
+                    self.maintenance
+                        .now_ms()?
+                        .saturating_add(RECONCILE_INTERVAL_MS),
                 ),
                 follow_up: None,
             });

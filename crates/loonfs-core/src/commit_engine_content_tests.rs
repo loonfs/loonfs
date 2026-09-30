@@ -527,7 +527,7 @@ async fn swap_accepts_any_valid_matching_proof_and_expired_receipt_replays_witho
         directory_request("metadata", "metadata"),
         proofs[1..].to_vec(),
     );
-    let publication = context(setup.now_ms + COMPLETED_UPLOAD_ADMISSION_WINDOW_MS);
+    let publication = context(setup.now_ms + COMPLETED_UPLOAD_ADMISSION_WINDOW_MS - 1);
     let timer = Arc::new(PublicationTimer::default());
     let mut engine =
         NamespaceCommitEngine::new(namespace_id.clone()).monotonic_timer(timer.clone());
@@ -544,7 +544,7 @@ async fn swap_accepts_any_valid_matching_proof_and_expired_receipt_replays_witho
         .await;
     let original = result.results[0]
         .as_ref()
-        .expect("proof is valid at its exact deadline")
+        .expect("proof is valid one millisecond before its deadline")
         .clone();
     result.results[1]
         .as_ref()
