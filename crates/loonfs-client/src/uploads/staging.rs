@@ -458,7 +458,7 @@ impl Client {
 
     /// Opens a `direct_put` session, writes its object, and completes it.
     ///
-    /// Aborts the session if the transfer fails.
+    /// Aborts the session on any failure after it opens.
     async fn direct_put_transfer(
         &self,
         namespace_id: &NamespaceId,
@@ -467,53 +467,53 @@ impl Client {
         let begin = self
             .create_direct_put_upload(namespace_id, body.size_hint())
             .await?;
-        if begin.mode != UploadMode::DirectPut {
-            return Err(negotiated_a_different_upload_mode());
-        }
-        let UploadSessionStatus::Open {
-            checksum_algorithm: Some(checksum_algorithm),
-            access: Some(access),
-            ..
-        } = begin.status
-        else {
-            return Err(ClientError::Protocol(
-                "direct_put session is not open or lacks `checksum_algorithm` or `access`"
-                    .to_owned(),
-            ));
-        };
-        let upload_id = begin.upload_id;
-        let (written, content) = match body {
-            DirectPutBody::Held(bytes) => {
-                let content = UploadContentClaim {
-                    size_bytes: bytes.len() as u64,
-                    checksum: Checksum::compute(checksum_algorithm, bytes),
-                };
-                (self.upload_via_presigned_url(&access, bytes).await, content)
+        let staged = async {
+            if begin.mode != UploadMode::DirectPut {
+                return Err(negotiated_a_different_upload_mode());
             }
-            DirectPutBody::Streamed(source) => {
-                let (source, observation) = observed_direct_put_source(source, checksum_algorithm);
-                let written = self
-                    .upload_streamed_via_presigned_url(&access, source)
-                    .await;
-                let content = observation
-                    .lock()
-                    .expect("direct PUT observation lock")
-                    .finish();
-                (written, content)
-            }
-        };
-        if let Err(error) = written {
-            let _ = self.abort_upload(namespace_id, &upload_id).await;
-            return Err(error);
+            let UploadSessionStatus::Open {
+                checksum_algorithm: Some(checksum_algorithm),
+                access: Some(access),
+                ..
+            } = begin.status
+            else {
+                return Err(ClientError::Protocol(
+                    "direct_put session is not open or lacks `checksum_algorithm` or `access`"
+                        .to_owned(),
+                ));
+            };
+            let content = match body {
+                DirectPutBody::Held(bytes) => {
+                    self.upload_via_presigned_url(&access, bytes).await?;
+                    UploadContentClaim {
+                        size_bytes: bytes.len() as u64,
+                        checksum: Checksum::compute(checksum_algorithm, bytes),
+                    }
+                }
+                DirectPutBody::Streamed(source) => {
+                    let (source, observation) =
+                        observed_direct_put_source(source, checksum_algorithm);
+                    self.upload_streamed_via_presigned_url(&access, source)
+                        .await?;
+                    let content = observation
+                        .lock()
+                        .expect("direct PUT observation lock")
+                        .finish();
+                    content
+                }
+            };
+            let response = self
+                .complete_upload(
+                    namespace_id,
+                    &begin.upload_id,
+                    &CompleteUploadBody::DirectPut { content },
+                )
+                .await?;
+            Self::staged_from_completion(response)
         }
-        let response = self
-            .complete_upload(
-                namespace_id,
-                &upload_id,
-                &CompleteUploadBody::DirectPut { content },
-            )
-            .await?;
-        Self::staged_from_completion(response)
+        .await;
+        self.abort_if_failed(namespace_id, &begin.upload_id, staged)
+            .await
     }
 
     /// Uploads one object directly in bounded batches of parts.
@@ -521,8 +521,9 @@ impl Client {
     /// One pass computes part checksums and the final object checksum while
     /// reading the payload. The total size does not need to be known first.
     ///
-    /// Errors leave the session open so the caller can resume or explicitly
-    /// abort it. Session expiry reclaims uploads the caller abandons.
+    /// A journaled upload leaves its session open on failure so the caller
+    /// can resume it. Any other upload aborts its session when the transfer
+    /// or completion fails.
     async fn stage_via_multipart(
         &self,
         namespace_id: &NamespaceId,
@@ -566,37 +567,43 @@ impl Client {
                 (upload_id, part_size_bytes, checksum_algorithm)
             }
         };
-        let uploaded = self
-            .upload_every_part(
-                namespace_id,
-                &upload_id,
-                payload,
-                part_size_bytes,
-                checksum_algorithm,
-                continuity,
-            )
-            .await?;
-        if uploaded.parts.is_empty() {
-            // Providers cannot assemble zero parts, so use the proxied empty
-            // upload path instead.
-            let _ = self.abort_upload(namespace_id, &upload_id).await;
-            return self.stage_bytes_via_server(namespace_id, &[]).await;
-        }
-
-        let response = self
-            .complete_upload(
-                namespace_id,
-                &upload_id,
-                &CompleteUploadBody::DirectMultipart {
-                    content: UploadContentClaim {
-                        size_bytes: uploaded.size_bytes,
-                        checksum: uploaded.checksum,
+        let staged = async {
+            let uploaded = self
+                .upload_every_part(
+                    namespace_id,
+                    &upload_id,
+                    payload,
+                    part_size_bytes,
+                    checksum_algorithm,
+                    continuity,
+                )
+                .await?;
+            if uploaded.parts.is_empty() {
+                // Providers cannot assemble zero parts, so use the proxied empty
+                // upload path instead.
+                let _ = self.abort_upload(namespace_id, &upload_id).await;
+                return self.stage_bytes_via_server(namespace_id, &[]).await;
+            }
+            let response = self
+                .complete_upload(
+                    namespace_id,
+                    &upload_id,
+                    &CompleteUploadBody::DirectMultipart {
+                        content: UploadContentClaim {
+                            size_bytes: uploaded.size_bytes,
+                            checksum: uploaded.checksum,
+                        },
+                        parts: uploaded.parts,
                     },
-                    parts: uploaded.parts,
-                },
-            )
-            .await?;
-        Self::staged_from_completion(response)
+                )
+                .await?;
+            Self::staged_from_completion(response)
+        }
+        .await;
+        if continuity.journal.is_some() {
+            return staged;
+        }
+        self.abort_if_failed(namespace_id, &upload_id, staged).await
     }
 
     /// Cuts the payload into parts and uploads them, holding at most
@@ -769,16 +776,20 @@ impl Client {
         let upload = self
             .create_upload(namespace_id, &CreateUploadBody::ServiceProxied {})
             .await?;
-        self.put_upload_content(namespace_id, &upload.upload_id, bytes)
-            .await?;
-        self.complete_staged(namespace_id, &upload.upload_id).await
+        let staged = async {
+            self.put_upload_content(namespace_id, &upload.upload_id, bytes)
+                .await?;
+            self.complete_staged(namespace_id, &upload.upload_id).await
+        }
+        .await;
+        self.abort_if_failed(namespace_id, &upload.upload_id, staged)
+            .await
     }
 
     /// Stages a streamed payload through the server, which hashes it as it
     /// forwards it on.
     ///
-    /// The session is aborted if the transfer fails, for the same reason a
-    /// multipart session is: it owns an object nothing will finish writing.
+    /// Aborts the session on any failure after it opens.
     async fn stage_source_via_server(
         &self,
         namespace_id: &NamespaceId,
@@ -787,14 +798,29 @@ impl Client {
         let upload = self
             .create_upload(namespace_id, &CreateUploadBody::ServiceProxied {})
             .await?;
-        let staged = self
-            .put_upload_content_stream(namespace_id, &upload.upload_id, source)
-            .await;
-        if let Err(error) = staged {
-            let _ = self.abort_upload(namespace_id, &upload.upload_id).await;
-            return Err(error);
+        let staged = async {
+            self.put_upload_content_stream(namespace_id, &upload.upload_id, source)
+                .await?;
+            self.complete_staged(namespace_id, &upload.upload_id).await
         }
-        self.complete_staged(namespace_id, &upload.upload_id).await
+        .await;
+        self.abort_if_failed(namespace_id, &upload.upload_id, staged)
+            .await
+    }
+
+    /// Aborts a one-shot upload session when its staging failed.
+    ///
+    /// The abort is best effort. The caller gets the error that failed the upload.
+    async fn abort_if_failed(
+        &self,
+        namespace_id: &NamespaceId,
+        upload_id: &UploadId,
+        staged: Result<PreparedContent>,
+    ) -> Result<PreparedContent> {
+        if staged.is_err() {
+            let _ = self.abort_upload(namespace_id, upload_id).await;
+        }
+        staged
     }
 
     pub(crate) async fn complete_staged(
