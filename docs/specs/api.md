@@ -1103,6 +1103,13 @@ never moves the expiry past `snapshot.max_lifetime_ms` from the record's
 `created_at_ms`. A namespace may hold at most
 `snapshot.max_live_per_namespace` live snapshots.
 
+The server counts live, unexpired snapshots before it creates one and again
+after it writes the new pin. A request that passes the limit at either count
+returns `snapshot_quota_exceeded`. Two requests that race at the limit can
+both be refused. A request refused at the first count writes nothing. A
+request refused at the second count deletes the pin it wrote. If that delete
+fails, the pin stays until it expires and counts toward the limit until then.
+
 Snapshot listing returns only snapshot-owned pins whose lifetimes have not
 expired. The maintenance checkpoint listing keeps expired records visible until
 collection deletes them. Snapshot deletion removes the pin. A second delete returns

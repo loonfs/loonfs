@@ -11,7 +11,7 @@ use loonfs::{
     maintenance_hint_relay, CreateCheckpointOptions, CreateNamespaceOptions, CreateSnapshotOptions,
     FsReader, GarbageCollectionJob, MaintenanceConclusion, MaintenanceJobId, MaintenanceRegistry,
     MaintenanceRunner, MetadataCompactionJob, MetadataMaintenanceJob, MetadataMaintenanceOptions,
-    PutFileOptions, RuntimeCacheConfig,
+    PutFileOptions, RuntimeCacheConfig, SnapshotPolicy,
 };
 use loonfs_test_support::block_on::block_on;
 use loonfs_test_support::ids::namespace_id;
@@ -282,6 +282,7 @@ fn snapshot_pins_report_the_snapshot_view_counter() {
                     name: "reader".to_owned(),
                     expires_at_ms: u64::MAX,
                 },
+                SnapshotPolicy::default().max_live_per_namespace,
             )
             .await
             .expect("create snapshot");

@@ -3,7 +3,7 @@
 use crate::common::{assert_core_error_kind, open_runtime_async, store, SettableWallClock};
 use loonfs::{
     CreateNamespaceOptions, CreateSnapshotOptions, DestinationBehavior, ErrorCode, FsReader,
-    FsWriter, NamespaceId, PageRequest, PaginationPolicy, PutFileOptions,
+    FsWriter, NamespaceId, PageRequest, PaginationPolicy, PutFileOptions, SnapshotPolicy,
 };
 use tempfile::tempdir;
 
@@ -86,6 +86,7 @@ async fn read_during_compaction_and_collection(
                         name: "durable".to_owned(),
                         expires_at_ms: loonfs::current_time_ms().expect("time") + 60_000,
                     },
+                    SnapshotPolicy::default().max_live_per_namespace,
                 )
                 .await
                 .expect("snapshot"),
@@ -269,6 +270,7 @@ async fn durable_pinned_reads_keep_missing_segments_corrupt_after_manifest_advan
                 name: "durable".to_owned(),
                 expires_at_ms: loonfs::current_time_ms().expect("time") + 60_000,
             },
+            SnapshotPolicy::default().max_live_per_namespace,
         )
         .await
         .expect("snapshot");
@@ -363,6 +365,7 @@ async fn pinned_reads_report_their_deleted_pin_when_a_segment_is_missing() {
                 name: "deleted".to_owned(),
                 expires_at_ms: loonfs::current_time_ms().expect("time") + 60_000,
             },
+            SnapshotPolicy::default().max_live_per_namespace,
         )
         .await
         .expect("snapshot");
@@ -457,6 +460,7 @@ async fn snapshot_directory_cursor_resumes_only_at_its_snapshot() {
                 name: "first".to_owned(),
                 expires_at_ms: now_ms + 60_000,
             },
+            SnapshotPolicy::default().max_live_per_namespace,
         )
         .await
         .expect("create first snapshot");
@@ -505,6 +509,7 @@ async fn snapshot_directory_cursor_resumes_only_at_its_snapshot() {
                 name: "second".to_owned(),
                 expires_at_ms: now_ms + 60_000,
             },
+            SnapshotPolicy::default().max_live_per_namespace,
         )
         .await
         .expect("create second snapshot");
@@ -885,6 +890,7 @@ async fn snapshot_pins_serve_captured_state_and_enforce_release() {
                 name: "reader".to_owned(),
                 expires_at_ms: now_ms + 60_000,
             },
+            SnapshotPolicy::default().max_live_per_namespace,
         )
         .await
         .expect("create snapshot");
@@ -995,6 +1001,7 @@ async fn a_reader_judges_snapshot_expiry_on_its_own_wall_clock() {
                 name: "clock".to_owned(),
                 expires_at_ms: EXPIRES_AT_MS,
             },
+            SnapshotPolicy::default().max_live_per_namespace,
         )
         .await
         .expect("create snapshot");
@@ -1051,6 +1058,7 @@ async fn a_pinned_reader_rejects_options_naming_another_snapshot() {
                         name: name.to_owned(),
                         expires_at_ms: now_ms + 60_000,
                     },
+                    SnapshotPolicy::default().max_live_per_namespace,
                 )
                 .await
                 .expect("create snapshot"),

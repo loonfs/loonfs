@@ -8,7 +8,7 @@ use loonfs::metrics::{DefaultMetricsRecorder, MetricValue};
 use loonfs::{
     CreateNamespaceOptions, CreateSnapshotOptions, DeleteNamespaceOptions, FsMaintenance, FsReader,
     FsWriter, NamespaceId, PutFileOptions, RuntimeCacheConfig, RuntimeError, SharedObjectStore,
-    WriterFence, READ_REVALIDATION_BOUND_MS,
+    SnapshotPolicy, WriterFence, READ_REVALIDATION_BOUND_MS,
 };
 use loonfs_api::wire::control::NamespaceStatus;
 use loonfs_core::control::NamespaceReadState;
@@ -993,6 +993,7 @@ async fn read_after_write_only_probes_the_next_wal_number_without_replay() {
                 name: "pinned".to_owned(),
                 expires_at_ms: u64::MAX,
             },
+            SnapshotPolicy::default().max_live_per_namespace,
         )
         .await
         .expect("create snapshot");
