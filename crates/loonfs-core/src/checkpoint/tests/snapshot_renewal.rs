@@ -72,7 +72,7 @@ async fn snapshot_expiry_after_the_renewal_cas_starts_preserves_success() {
             Some(1_002)
         );
         assert_eq!(
-            classify_live_snapshot(stored, &pin.pin_id, clock.now_ms())
+            classify_live_snapshot(stored.expect("pin"), clock.now_ms())
                 .expect_err("subsequent reads see expiry")
                 .code(),
             ErrorCode::SnapshotGone
@@ -123,8 +123,8 @@ async fn snapshot_expiring_during_renewal_load_cannot_be_extended_or_reported_li
             let error = classify_live_snapshot(
                 load_checkpoint_record(&inner, &namespace_id, &pin.pin_id)
                     .await
+                    .expect("load")
                     .expect("pin"),
-                &pin.pin_id,
                 clock.now_ms(),
             )
             .expect_err("an independent reader observes expiry");

@@ -84,8 +84,12 @@ pub(crate) async fn create_checkpoint_at_basis<S: ObjectStore + ?Sized>(
         created_at_ms: context.now_ms,
         owner,
     };
-    write_checkpoint_record(store, &record).await?;
-    let error = match verify_checkpoint_basis(store, &record).await {
+    let verification = async {
+        write_checkpoint_record(store, &record).await?;
+        verify_checkpoint_basis(store, &record).await
+    }
+    .await;
+    let error = match verification {
         Ok(CheckpointBasisVerification::Verified) => return Ok(record),
         Ok(CheckpointBasisVerification::Invalid) => {
             CoreError::CheckpointUnavailable("checkpoint publication retry exhausted".to_owned())

@@ -61,18 +61,20 @@ async fn delete_routes_require_the_owner_and_delete_each_pin_once() {
         .expect("namespace");
     let checkpoints = format!("/v0/maintenance/namespaces/{namespace_id}/checkpoints");
     let snapshots = format!("/v0/namespaces/{namespace_id}/snapshots");
-    for (collection, other_collection, id_field, missing_code) in [
+    for (collection, other_collection, id_field, missing_code, other_missing_code) in [
         (
             &checkpoints,
             &snapshots,
             "checkpoint_id",
             ErrorCode::CheckpointNotFound,
+            ErrorCode::SnapshotNotFound,
         ),
         (
             &snapshots,
             &checkpoints,
             "snapshot_id",
             ErrorCode::SnapshotNotFound,
+            ErrorCode::CheckpointNotFound,
         ),
     ] {
         let (status, created) = request(
@@ -90,8 +92,8 @@ async fn delete_routes_require_the_owner_and_delete_each_pin_once() {
             (
                 Method::DELETE,
                 format!("{other_collection}/{checkpoint_id}"),
-                StatusCode::BAD_REQUEST,
-                Some(ErrorCode::InvalidRequest),
+                StatusCode::NOT_FOUND,
+                Some(other_missing_code),
             ),
             (
                 Method::POST,

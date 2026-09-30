@@ -55,8 +55,9 @@ pub struct CheckpointFilesPage {
 /// Lists files visible in the state pinned by `checkpoint_id`, or every file
 /// it retains with `include_deleted`.
 ///
-/// Later WAL entries are not replayed. Directories are omitted. Missing or
-/// deleted checkpoints return `checkpoint_unavailable`.
+/// Later WAL entries are not replayed. Directories are omitted. An id that
+/// names no user pin returns `checkpoint_not_found`, and a pin whose manifest
+/// is gone returns `checkpoint_unavailable`.
 pub(crate) async fn list_checkpoint_files_page<S: ObjectStore + ?Sized>(
     store: &S,
     segment_cache: Option<&MetadataSegmentCache>,

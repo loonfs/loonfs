@@ -273,9 +273,8 @@ async fn snapshot_deletion_during_fork_deletes_the_attempt_without_installing_a_
         store.inner().release();
     };
     let (result, ()) = tokio::join!(forking, deleting);
-    let error = result.expect_err("snapshot gone");
-    assert_eq!(error.code(), ErrorCode::SnapshotGone);
-    assert!(matches!(error, CoreError::SnapshotGone { reason, .. } if reason == "deleted"));
+    let error = result.expect_err("snapshot deleted");
+    assert_eq!(error.code(), ErrorCode::SnapshotNotFound);
     assert!(namespace_keys(&store, &target).await.is_empty());
     let records = store
         .list_prefix(&format!("namespaces/{source}/pins/"))

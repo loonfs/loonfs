@@ -8,7 +8,7 @@ use crate::control_update::create_control_object_under_generated_id;
 use crate::error::{CoreError, Result};
 use crate::namespace::control::load_current_manifest;
 use bytes::Bytes;
-use loonfs_api::wire::control::{encode_control_state, ControlObjectKind, PinPayload};
+use loonfs_api::wire::control::{encode_control_state, ControlObjectKind, PinOwner, PinPayload};
 use loonfs_api::{NamespaceId, PinId};
 use loonfs_objectstore::keys::checkpoint_record;
 use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
@@ -113,6 +113,41 @@ pub(crate) async fn load_checkpoint_record<S: ObjectStore + ?Sized>(
     }
 }
 
+/// The owner kind an operation serves: checkpoint operations serve user pins.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CheckpointOwnerKind {
+    User,
+    Snapshot,
+}
+
+/// Loads the pin `checkpoint_id` if `owner_kind` owns it. Otherwise returns
+/// the not-found error of that kind, so an id of another kind does not reveal
+/// its pin.
+pub(crate) async fn load_owned_checkpoint_record<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    checkpoint_id: &PinId,
+    owner_kind: CheckpointOwnerKind,
+) -> Result<LoadedCheckpointRecord> {
+    load_checkpoint_record(store, namespace_id, checkpoint_id)
+        .await?
+        .filter(|loaded| {
+            matches!(
+                (owner_kind, &loaded.state.owner),
+                (CheckpointOwnerKind::User, PinOwner::User { .. })
+                    | (CheckpointOwnerKind::Snapshot, PinOwner::Snapshot { .. })
+            )
+        })
+        .ok_or_else(|| match owner_kind {
+            CheckpointOwnerKind::User => CoreError::CheckpointNotFound {
+                checkpoint_id: checkpoint_id.clone(),
+            },
+            CheckpointOwnerKind::Snapshot => CoreError::SnapshotNotFound {
+                snapshot_id: checkpoint_id.clone(),
+            },
+        })
+}
+
 pub(crate) async fn delete_checkpoint_record<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -172,7 +207,6 @@ pub(crate) async fn verify_checkpoint_basis<S: ObjectStore + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use loonfs_api::wire::control::PinOwner;
     use loonfs_api::ChangeSeq;
     use loonfs_objectstore::keys::hint;
     use loonfs_objectstore::local_fs_store::LocalFsStore;

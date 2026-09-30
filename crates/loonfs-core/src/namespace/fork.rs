@@ -3,10 +3,11 @@
 
 use super::control::load_current_manifest_if_present;
 use super::create::publish_namespace;
-use crate::checkpoint::record::{delete_failed_pin, write_checkpoint_record};
+use crate::checkpoint::record::{
+    delete_failed_pin, load_owned_checkpoint_record, write_checkpoint_record, CheckpointOwnerKind,
+};
 use crate::checkpoint::{
-    classify_live_snapshot, create_checkpoint, load_checkpoint_record,
-    load_namespace_manifest_envelope,
+    classify_live_snapshot, create_checkpoint, load_namespace_manifest_envelope,
 };
 use crate::context::MutationContext;
 use crate::error::MetadataProjectionLoadError;
@@ -122,50 +123,48 @@ async fn create_snapshot_fork_checkpoint<S: ObjectStore + ?Sized>(
     context: &MutationContext,
     deadline: &Deadline,
 ) -> Result<PinPayload> {
-    let source_head =
-        crate::namespace::control::load_namespace_read_state(store, source_namespace_id)
-            .await
-            .map_err(CoreError::ControlObjectLoad)?;
-    crate::namespace::control::ensure_namespace_live(&source_head)?;
-    let snapshot = classify_live_snapshot(
-        load_checkpoint_record(store, source_namespace_id, snapshot_id)
-            .await?
-            .filter(|record| matches!(record.state.owner, PinOwner::Snapshot { .. })),
-        snapshot_id,
-        context.now_at(deadline),
-    )?
-    .state;
+    let snapshot =
+        load_snapshot_fork_basis(store, source_namespace_id, snapshot_id, context, deadline)
+            .await?;
     let record = PinPayload {
         pin_id: PinId::generate(snapshot.pin_id.manifest_no()),
         created_at_ms: context.now_ms,
         owner,
         ..snapshot
     };
-    write_checkpoint_record(store, &record).await?;
-    if let Err(error) =
-        verify_snapshot_fork_basis(store, source_namespace_id, snapshot_id, context, deadline).await
-    {
+    let verification = async {
+        write_checkpoint_record(store, &record).await?;
+        load_snapshot_fork_basis(store, source_namespace_id, snapshot_id, context, deadline).await
+    }
+    .await;
+    if let Err(error) = verification {
         delete_failed_pin(store, source_namespace_id, &record.pin_id, &error).await;
         return Err(error);
     }
     Ok(record)
 }
 
-async fn verify_snapshot_fork_basis<S: ObjectStore + ?Sized>(
+/// Loads a live snapshot of a live source namespace.
+async fn load_snapshot_fork_basis<S: ObjectStore + ?Sized>(
     store: &S,
     source_namespace_id: &NamespaceId,
     snapshot_id: &PinId,
     context: &MutationContext,
     deadline: &Deadline,
-) -> Result<()> {
-    let snapshot = load_checkpoint_record(store, source_namespace_id, snapshot_id)
-        .await?
-        .ok_or_else(|| CoreError::SnapshotGone {
-            snapshot_id: snapshot_id.clone(),
-            reason: "deleted".to_owned(),
-        })?;
-    classify_live_snapshot(Some(snapshot), snapshot_id, context.now_at(deadline))?;
-    Ok(())
+) -> Result<PinPayload> {
+    let source_head =
+        crate::namespace::control::load_namespace_read_state(store, source_namespace_id)
+            .await
+            .map_err(CoreError::ControlObjectLoad)?;
+    crate::namespace::control::ensure_namespace_live(&source_head)?;
+    let snapshot = load_owned_checkpoint_record(
+        store,
+        source_namespace_id,
+        snapshot_id,
+        CheckpointOwnerKind::Snapshot,
+    )
+    .await?;
+    Ok(classify_live_snapshot(snapshot, context.now_at(deadline))?.state)
 }
 
 pub(crate) async fn target_retains_checkpoint<S: ObjectStore + ?Sized>(

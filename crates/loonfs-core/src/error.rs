@@ -163,11 +163,8 @@ pub enum CoreError {
     CheckpointNotFound { checkpoint_id: loonfs_api::PinId },
     #[error("snapshot `{snapshot_id}` was not found")]
     SnapshotNotFound { snapshot_id: loonfs_api::PinId },
-    #[error("snapshot `{snapshot_id}` is gone: {reason}")]
-    SnapshotGone {
-        snapshot_id: loonfs_api::PinId,
-        reason: String,
-    },
+    #[error("snapshot `{snapshot_id}` has expired")]
+    SnapshotGone { snapshot_id: loonfs_api::PinId },
     #[error(
         "namespace `{namespace_id}` already has its limit of {max_live} live snapshots; \
          delete one or wait for a snapshot to expire"

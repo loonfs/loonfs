@@ -718,19 +718,23 @@ For a pin created from the current head:
 3. Load the current manifest again.
 4. Require the same manifest number and payload checksum, an active namespace, and a retention floor no later than the pinned head sequence.
 
-If another manifest became current, delete the candidate pin and retry from a fresh basis. A deletion, a store failure, or exhausted contention retries prevents acknowledgement. The creator deletes a pin that fails verification. That deletion is best effort: if it fails, the creator still returns the error that failed verification, and collection decides the pin under section 11.7. Verification has no time limit of its own. The number and checksum checks apply even when the new manifest has the same logical sequence.
+If another manifest became current, delete the candidate pin and retry from a fresh basis. A deletion, a store failure, or exhausted contention retries prevents acknowledgement. The creator deletes a pin whose write or verification fails. That deletion is best effort: if it fails, the creator still returns the error that failed creation, and collection decides the pin under section 11.7. Verification has no time limit of its own. The number and checksum checks apply even when the new manifest has the same logical sequence.
+
+Section 3.1 allows a put whose outcome is unknown to land after its creator stopped waiting, including after the creator's delete. Such a pin was never returned to a caller. It appears in the pin listing and is collected under section 11.7 like any other pin, so a user pin without an expiry stays until it is deleted.
 
 This order matters when collection races with pin creation. A collector either captured the pinned manifest as current, or captured a successor after the pin was durable and includes the pin in its complete listing. Once acknowledged, the pin retains its files even if the retention floor later passes its sequence.
 
-A fork of a snapshot uses a different protecting root. It first writes a fork pin for the snapshot's historical manifest, then rereads the snapshot pin and requires it still to exist and be unexpired. It does not require that historical manifest to remain current. Both expiry checks use the request clock plus elapsed monotonic time since the fork call began. Failure deletes the new fork pin, under the same best-effort rule, and returns `snapshot_gone` when the snapshot was lost. Verification has no time limit of its own. Pins are never recreated, so a snapshot pin that still exists after the fork pin write existed throughout, and every collection pass that listed pins before that write also listed the snapshot pin and rooted the same manifest.
+A fork of a snapshot uses a different protecting root. It makes one check before and again after it writes a fork pin for the snapshot's historical manifest: the source namespace is active, and the snapshot pin exists and is unexpired. It does not require that historical manifest to remain current. Both expiry checks use the request clock plus elapsed monotonic time since the fork call began. A snapshot that no longer exists answers `snapshot_not_found`, an expired one `snapshot_gone`, and a deleted source `namespace_deleted`. If the fork pin write or the second check fails, the fork deletes the new fork pin under the same best-effort rule. Verification has no time limit of its own. Pins are never recreated, so a snapshot pin that still exists after the fork pin write existed throughout, and every collection pass that listed pins before that write also listed the snapshot pin and rooted the same manifest.
 
 ### 8.3 Reads, deletion, and expiry
 
-A read through a pin derives the manifest number from the ID, confirms the pin's existence and owner, and verifies its manifest reference. Reads use that manifest directly, without replaying later namespace history.
+An operation that names a pin ID looks the pin up for the owner it serves. An ID with no pin, or with a pin of another owner, answers `checkpoint_not_found` from a checkpoint operation and `snapshot_not_found` from a snapshot operation, so an ID does not reveal a pin of another owner.
+
+A read through a pin derives the manifest number from the ID, confirms that the pin exists and has the owner the read serves, and verifies its manifest reference. Reads use that manifest directly, without replaying later namespace history.
 
 Reads follow the owner rules in section 8.1. Snapshot extensions also require an unexpired snapshot owner.
 
-Explicit deletion checks the owner and deletes the pin. Deleting it again returns not-found. Callers cannot delete fork-owned pins through the user checkpoint API. Collection roots follow section 11.2; retirement eligibility follows section 9.5.
+Explicit deletion looks the pin up the same way and deletes it. Deleting it again returns not-found. Fork-owned pins have no explicit deletion. Collection roots follow section 11.2; retirement eligibility follows section 9.5.
 
 ### 8.4 Extending a snapshot
 

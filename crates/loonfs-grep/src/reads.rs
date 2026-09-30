@@ -68,9 +68,9 @@ impl<'a> NamespaceReads<'a> {
     /// order. Deleted files are included so an undelete needs no new
     /// postings; queries decide visibility.
     ///
-    /// Returns `checkpoint_unavailable` if the checkpoint was deleted,
-    /// expired, or removed. The caller must then restart the backfill from a
-    /// new checkpoint.
+    /// Returns `checkpoint_not_found` if the checkpoint was deleted or
+    /// collected, and `checkpoint_unavailable` if its manifest is gone. The
+    /// caller must then restart the backfill from a new checkpoint.
     pub async fn list_checkpoint_files_page(
         &self,
         checkpoint_id: &PinId,

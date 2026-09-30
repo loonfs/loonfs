@@ -1,8 +1,11 @@
 //! Snapshot-owned checkpoint reads, expiry, and pin deletion.
 
-use super::delete::{delete_owned_checkpoint, ensure_owner_is, CheckpointOwnerKind};
+use super::delete::delete_owned_checkpoint;
 use super::read_basis::{load_checkpoint_read_basis_from_record, CheckpointReadBasis};
-use super::record::{encode_checkpoint_record, load_checkpoint_record, LoadedCheckpointRecord};
+use super::record::{
+    encode_checkpoint_record, load_owned_checkpoint_record, CheckpointOwnerKind,
+    LoadedCheckpointRecord,
+};
 use super::MetadataSegmentCache;
 use crate::context::MutationContext;
 use crate::control_update::{retry_while_contended, CasAttempt, WriteEvidence};
@@ -23,11 +26,14 @@ pub async fn load_snapshot_read_basis<S: ObjectStore + ?Sized>(
     snapshot_id: &PinId,
     now_ms: u64,
 ) -> Result<CheckpointReadBasis> {
-    let loaded = classify_live_snapshot(
-        load_checkpoint_record(store, &live_head.namespace_id, snapshot_id).await?,
+    let loaded = load_owned_checkpoint_record(
+        store,
+        &live_head.namespace_id,
         snapshot_id,
-        now_ms,
-    )?;
+        CheckpointOwnerKind::Snapshot,
+    )
+    .await?;
+    let loaded = classify_live_snapshot(loaded, now_ms)?;
     load_checkpoint_read_basis_from_record(store, segment_cache, live_head, loaded.state).await
 }
 
@@ -44,8 +50,14 @@ pub(crate) async fn extend_snapshot_expiry<S: ObjectStore + ?Sized>(
     let object_key = checkpoint_record(namespace_id, checkpoint_id);
     retry_while_contended(
         || async {
-            let loaded = load_checkpoint_record(store, namespace_id, checkpoint_id).await?;
-            let loaded = classify_live_snapshot(loaded, checkpoint_id, context.now_at(&deadline))?;
+            let loaded = load_owned_checkpoint_record(
+                store,
+                namespace_id,
+                checkpoint_id,
+                CheckpointOwnerKind::Snapshot,
+            )
+            .await?;
+            let loaded = classify_live_snapshot(loaded, context.now_at(&deadline))?;
             let mut next = loaded.state.clone();
             let lifetime_ceiling = next.created_at_ms.saturating_add(max_lifetime_ms);
             let expires_at_ms = snapshot_expiry_mut(&mut next.owner)
@@ -77,11 +89,14 @@ pub(crate) async fn extend_snapshot_expiry<S: ObjectStore + ?Sized>(
             async move {
                 // This read proves an earlier CAS landed; it does not start a
                 // new extension. Expiry after that CAS must not erase success.
-                let current = classify_live_snapshot(
-                    load_checkpoint_record(store, namespace_id, checkpoint_id).await?,
+                let current = load_owned_checkpoint_record(
+                    store,
+                    namespace_id,
                     checkpoint_id,
-                    context.now_ms,
-                )?;
+                    CheckpointOwnerKind::Snapshot,
+                )
+                .await?;
+                let current = classify_live_snapshot(current, context.now_ms)?;
                 let expires_at_ms = current
                     .state
                     .owner
@@ -121,27 +136,18 @@ pub(crate) async fn delete_snapshot<S: ObjectStore + ?Sized>(
 }
 
 pub(crate) fn classify_live_snapshot(
-    loaded: Option<LoadedCheckpointRecord>,
-    checkpoint_id: &PinId,
+    loaded: LoadedCheckpointRecord,
     now_ms: u64,
 ) -> Result<LoadedCheckpointRecord> {
-    let Some(loaded) = loaded else {
-        return Err(CoreError::SnapshotNotFound {
-            snapshot_id: checkpoint_id.clone(),
-        });
-    };
-    ensure_owner_is(
-        checkpoint_id,
-        &loaded.state.owner,
-        CheckpointOwnerKind::Snapshot,
-    )?;
     let expires_at_ms = loaded
         .state
         .owner
         .expires_at_ms()
         .expect("a snapshot owner should carry an expiry");
     if expires_at_ms <= now_ms {
-        return Err(snapshot_gone(checkpoint_id, "expired"));
+        return Err(CoreError::SnapshotGone {
+            snapshot_id: loaded.state.pin_id,
+        });
     }
     Ok(loaded)
 }
@@ -150,12 +156,5 @@ fn snapshot_expiry_mut(owner: &mut PinOwner) -> Option<&mut u64> {
     match owner {
         PinOwner::Snapshot { expires_at_ms, .. } => Some(expires_at_ms),
         PinOwner::User { .. } | PinOwner::Fork { .. } => None,
-    }
-}
-
-fn snapshot_gone(checkpoint_id: &PinId, reason: &str) -> CoreError {
-    CoreError::SnapshotGone {
-        snapshot_id: checkpoint_id.clone(),
-        reason: reason.to_owned(),
     }
 }

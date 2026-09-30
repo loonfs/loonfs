@@ -2,7 +2,8 @@
 
 use super::block_fetch::segment_object_len;
 use super::publish::manifest_ref_for;
-use super::read_basis::load_pinned_checkpoint_basis;
+use super::read_basis::load_pinned_checkpoint_basis_from_record;
+use super::record::load_checkpoint_record;
 use super::runs::CHECKPOINT_ROW_FAMILIES;
 use crate::error::{CoreError, Result};
 use crate::namespace::control::{load_current_manifest, LoadedManifest};
@@ -57,14 +58,19 @@ pub async fn load_namespace_statistics<S: ObjectStore + ?Sized>(
         .statistics()
 }
 
-/// Reads the exact manifest referenced by an active checkpoint, including an
-/// older snapshot. Later namespace activity is excluded.
+/// Reads the exact manifest a pin of any owner references. Later namespace
+/// activity is excluded. A missing pin returns `checkpoint_not_found`.
 pub async fn load_checkpoint_statistics<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     checkpoint_id: &PinId,
 ) -> Result<NamespaceStatistics> {
-    let pinned = load_pinned_checkpoint_basis(store, None, namespace_id, checkpoint_id).await?;
+    let Some(loaded) = load_checkpoint_record(store, namespace_id, checkpoint_id).await? else {
+        return Err(CoreError::CheckpointNotFound {
+            checkpoint_id: checkpoint_id.clone(),
+        });
+    };
+    let pinned = load_pinned_checkpoint_basis_from_record(store, None, loaded.state).await?;
     manifest_statistics(pinned.segments.manifest(), pinned.segments.manifest_bytes)
 }
 

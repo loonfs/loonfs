@@ -431,7 +431,7 @@ impl FsReader {
 
     /// Pins the namespace state captured by a checkpoint.
     ///
-    /// Missing or deleted checkpoints return `checkpoint_unavailable`.
+    /// An id that names no user checkpoint returns `checkpoint_not_found`.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.pin_namespace",
@@ -924,9 +924,9 @@ impl FsReader {
     /// The pinned manifest is read without replaying later WAL entries.
     /// Directories are omitted. With
     /// [`ListCheckpointFilesOptions::include_deleted`], the page also lists
-    /// deleted files and files under a deleted directory. An unavailable
-    /// checkpoint returns `checkpoint_unavailable` rather than falling back to
-    /// current state.
+    /// deleted files and files under a deleted directory. An id that names no
+    /// user checkpoint returns `checkpoint_not_found` rather than falling back
+    /// to current state.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.list_checkpoint_files_page",

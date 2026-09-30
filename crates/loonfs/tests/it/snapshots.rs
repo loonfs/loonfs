@@ -428,7 +428,7 @@ fn tombstoned_namespace_keeps_checkpoint_inventory_and_user_delete_available() {
     assert_eq!(deleted.checkpoint_id, user_checkpoint.checkpoint_id);
     assert_core_error_kind(
         block_on(maintenance.delete_checkpoint(&source, &fork_checkpoint)),
-        ErrorCode::InvalidRequest,
+        ErrorCode::CheckpointNotFound,
     );
     assert_core_error_kind(
         block_on(maintenance.get_namespace_diagnostics(&source)),

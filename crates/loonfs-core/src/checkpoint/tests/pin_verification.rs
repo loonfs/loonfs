@@ -280,57 +280,35 @@ async fn pin_verification_checks_manifest_identity_with_only_the_current_manifes
 }
 
 #[tokio::test]
-async fn fork_owned_checkpoints_reject_user_release() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let source = NamespaceId::parse("source").expect("namespace id");
-    let clone = NamespaceId::parse("clone").expect("namespace id");
-    let setup = mutation_context("gc-test", 1_000);
-    create(&store, &source, &setup).await.expect("bootstrap");
-    write_test_file(&store, &source, "/docs/one.txt", "gc-one", &setup).await;
-    crate::namespace::fork::fork_namespace(
-        &store,
-        &source,
-        &clone,
-        &loonfs_test_support::test_actor(),
-        None,
-        &setup,
-        Arc::new(StdMonotonicTimer::default()),
+async fn a_pin_write_that_lands_and_fails_its_read_back_leaves_no_pin() {
+    let directory = tempdir().expect("directory");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace");
+    let store = FailStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::prefix(checkpoint_prefix(&namespace_id)),
+        OperationClass::Any,
+        InjectedError::Transport("lost pin acknowledgement".to_owned()),
     )
-    .await
-    .expect("fork");
-
-    let keys = store
-        .list_prefix(&checkpoint_prefix(&source))
+    .apply_then_fail();
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context)
         .await
-        .expect("list checkpoints");
-    assert_eq!(keys.len(), 1);
-    let bytes = store
-        .get(&keys[0], None)
+        .expect("bootstrap");
+    store.fail_next(2);
+    let error = create_checkpoint(&store, &namespace_id, &context)
         .await
-        .expect("get record")
-        .expect("record exists");
-    let fork_record = loonfs_api::wire::control::decode_control_object::<
-        loonfs_api::wire::control::PinPayload,
-    >(&bytes, loonfs_api::wire::control::ControlObjectKind::Pin)
-    .expect("decode record")
-    .into_payload();
-
-    let error = crate::checkpoint::delete_checkpoint(&store, &source, &fork_record.pin_id)
+        .expect_err("an unconfirmed pin write fails creation");
+    assert!(matches!(error, CoreError::Store { .. }), "{error:?}");
+    assert_eq!(store.attempts(), 3, "put, read-back, and cleanup delete");
+    assert!(store
+        .list_prefix(&checkpoint_prefix(&namespace_id))
         .await
-        .expect_err("fork-owned release must fail");
-    assert!(
-        matches!(
-            &error,
-            CoreError::InvalidCheckpointRequest(message)
-                if message.contains("owned by fork target")
-        ),
-        "expected invalid checkpoint request, got {error:?}"
-    );
+        .expect("pins")
+        .is_empty());
 }
 
 #[tokio::test]
-async fn snapshot_owned_checkpoints_reject_user_release() {
+async fn a_pin_id_answers_only_operations_of_its_owner_kind() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
@@ -339,37 +317,82 @@ async fn snapshot_owned_checkpoints_reject_user_release() {
         .await
         .expect("bootstrap");
     write_test_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
-    let snapshot = crate::checkpoint::create_checkpoint(
-        &store,
-        &namespace_id,
+    let mut pins = Vec::new();
+    for owner in [
+        PinOwner::User {
+            name: "user".to_owned(),
+            expires_at_ms: None,
+        },
         PinOwner::Snapshot {
-            name: "report-run".to_owned(),
+            name: "snapshot".to_owned(),
             expires_at_ms: u64::MAX,
         },
-        &setup,
-    )
-    .await
-    .map(crate::checkpoint::checkpoint_summary)
-    .expect("snapshot checkpoint");
-
-    let error =
-        crate::checkpoint::delete_checkpoint(&store, &namespace_id, &snapshot.checkpoint_id)
+        PinOwner::Fork {
+            target_namespace_id: NamespaceId::parse("clone").expect("namespace id"),
+        },
+    ] {
+        let pin = crate::checkpoint::create_checkpoint(&store, &namespace_id, owner, &setup)
             .await
-            .expect_err("snapshot-owned release must fail");
-    assert!(
-        matches!(
-            &error,
-            CoreError::InvalidCheckpointRequest(message)
-                if message.contains("is a snapshot")
+            .expect("pin");
+        pins.push(pin.pin_id);
+    }
+    let [user, snapshot, fork] = &pins[..] else {
+        panic!("expected three pins, got {pins:?}");
+    };
+    let head = load_namespace_read_state(&store, &namespace_id)
+        .await
+        .expect("head");
+    let checkpoint_read =
+        |id| crate::checkpoint::load_checkpoint_read_basis(&store, None, &head, id);
+    let snapshot_read =
+        |id| crate::checkpoint::load_snapshot_read_basis(&store, None, &head, id, setup.now_ms);
+    let cases = [
+        (
+            "checkpoint read of a snapshot",
+            checkpoint_read(snapshot).await.map(drop),
+            ErrorCode::CheckpointNotFound,
         ),
-        "expected invalid checkpoint request, got {error:?}"
+        (
+            "checkpoint read of a fork pin",
+            checkpoint_read(fork).await.map(drop),
+            ErrorCode::CheckpointNotFound,
+        ),
+        (
+            "checkpoint delete of a snapshot",
+            crate::checkpoint::delete_checkpoint(&store, &namespace_id, snapshot)
+                .await
+                .map(drop),
+            ErrorCode::CheckpointNotFound,
+        ),
+        (
+            "checkpoint delete of a fork pin",
+            crate::checkpoint::delete_checkpoint(&store, &namespace_id, fork)
+                .await
+                .map(drop),
+            ErrorCode::CheckpointNotFound,
+        ),
+        (
+            "snapshot read of a user pin",
+            snapshot_read(user).await.map(drop),
+            ErrorCode::SnapshotNotFound,
+        ),
+        (
+            "snapshot delete of a user pin",
+            crate::checkpoint::delete_snapshot(&store, &namespace_id, user)
+                .await
+                .map(drop),
+            ErrorCode::SnapshotNotFound,
+        ),
+    ];
+    for (label, result, expected) in cases {
+        assert_eq!(result.expect_err(label).code(), expected, "{label}");
+    }
+    assert_eq!(
+        store
+            .list_prefix(&checkpoint_prefix(&namespace_id))
+            .await
+            .expect("pins")
+            .len(),
+        3
     );
-    assert!(crate::checkpoint::load_checkpoint_record(
-        &store,
-        &namespace_id,
-        &snapshot.checkpoint_id
-    )
-    .await
-    .expect("read pin")
-    .is_some());
 }

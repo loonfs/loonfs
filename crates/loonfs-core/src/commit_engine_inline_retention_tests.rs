@@ -3,9 +3,8 @@
 use super::*;
 use crate::authorize::{Authorizer, ReadAccess};
 use crate::checkpoint::{
-    advance_retention_floor, create_checkpoint, load_checkpoint_read_basis,
-    reorganize_metadata_step, MetadataCompactionPolicy, MetadataLsmPolicy,
-    MetadataReorganizeOutcome,
+    advance_retention_floor, create_checkpoint, load_snapshot_read_basis, reorganize_metadata_step,
+    MetadataCompactionPolicy, MetadataLsmPolicy, MetadataReorganizeOutcome,
 };
 use crate::gc::{gc_namespace, GcConfig};
 use crate::path::read::{load_metadata_view, ReadLoadContext};
@@ -247,9 +246,15 @@ async fn inline_receipt_retention_keeps_the_boundary_and_reuses_only_pruned_ids(
     let current = load_current_metadata_view(&store, &namespace_id)
         .await
         .expect("fresh current view");
-    let pinned = load_checkpoint_read_basis(&store, None, current.head(), &snapshot.pin_id)
-        .await
-        .expect("snapshot still pins original history");
+    let pinned = load_snapshot_read_basis(
+        &store,
+        None,
+        current.head(),
+        &snapshot.pin_id,
+        context.now_ms,
+    )
+    .await
+    .expect("snapshot still pins original history");
     let old = load_metadata_view(
         &store,
         &namespace_id,
