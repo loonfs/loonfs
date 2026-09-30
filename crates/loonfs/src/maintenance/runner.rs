@@ -98,6 +98,7 @@ pub(crate) fn split_mix_64(counter: u64) -> u64 {
 #[derive(Clone)]
 pub struct MaintenanceHandle {
     inner: Weak<RunnerInner>,
+    clock: Arc<dyn MaintenanceClock>,
 }
 
 impl fmt::Debug for MaintenanceHandle {
@@ -107,16 +108,20 @@ impl fmt::Debug for MaintenanceHandle {
 }
 
 impl MaintenanceHandle {
+    fn of(inner: &Arc<RunnerInner>) -> Self {
+        Self {
+            inner: Arc::downgrade(inner),
+            clock: Arc::clone(&inner.clock),
+        }
+    }
+
     /// The wall clock this runner schedules against.
     ///
     /// A caller that has just created a durable deadline reads it here and
     /// derives the not-before time from that reading, so the schedule and
     /// the runner agree on what "now" is.
     pub fn now_ms(&self) -> u64 {
-        match self.inner.upgrade() {
-            Some(inner) => inner.clock.now_ms(),
-            None => loonfs_core::time::current_time_ms().unwrap_or(0),
-        }
+        self.clock.now_ms()
     }
 
     /// Schedules `job` for `namespace_id` when a permit is available.
@@ -306,9 +311,7 @@ impl MaintenanceRunner {
 
     /// Returns a cloneable scheduling handle that cannot shut down admission.
     pub fn handle(&self) -> MaintenanceHandle {
-        MaintenanceHandle {
-            inner: Arc::downgrade(&self.inner),
-        }
+        MaintenanceHandle::of(&self.inner)
     }
 
     /// Returns the registry this runner schedules.
@@ -424,7 +427,7 @@ impl MaintenanceRunner {
                     hint = receiver.receiver.recv() => {
                         let Some(hint) = hint else { break };
                         let Some(inner) = weak.upgrade() else { break };
-                        MaintenanceHandle { inner: Arc::downgrade(&inner) }.hint(hint);
+                        MaintenanceHandle::of(&inner).hint(hint);
                         inner.instruments.hints_dropped(
                             dropped_hints().saturating_sub(receiver.dropped_at_creation),
                         );
@@ -433,7 +436,7 @@ impl MaintenanceRunner {
                         let Some(settled) = command else { break };
                         while let Ok(hint) = receiver.receiver.try_recv() {
                             let Some(inner) = weak.upgrade() else { break };
-                            MaintenanceHandle { inner: Arc::downgrade(&inner) }.hint(hint);
+                            MaintenanceHandle::of(&inner).hint(hint);
                         }
                         let _ = settled.send(());
                     }

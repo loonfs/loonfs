@@ -466,8 +466,7 @@ pub(super) async fn create_snapshot(
 ) -> Result<Json<SnapshotSummary>, ApiResponseError> {
     let scoped_writer = subject.map(|subject| state.writer.as_subject(subject));
     let writer = scoped_writer.as_ref().unwrap_or(&state.writer);
-    let now_ms =
-        loonfs::current_time_ms().map_err(|error| ApiResponseError::runtime(error.into()))?;
+    let now_ms = writer.now_ms().map_err(ApiResponseError::runtime)?;
     let expires_at_ms = snapshot_expiry_from_ttl(&state, now_ms, request.ttl_ms)?;
     let checkpoint = writer
         .create_snapshot_with_quota(
@@ -580,8 +579,7 @@ pub(super) async fn extend_snapshot(
     let scoped_writer = subject.map(|subject| state.writer.as_subject(subject));
     let writer = scoped_writer.as_ref().unwrap_or(&state.writer);
     let snapshot_id = super::query_params::parse_snapshot_id(&snapshot_id)?;
-    let now_ms =
-        loonfs::current_time_ms().map_err(|error| ApiResponseError::runtime(error.into()))?;
+    let now_ms = writer.now_ms().map_err(ApiResponseError::runtime)?;
     let requested_expires_at_ms = snapshot_expiry_from_ttl(&state, now_ms, request.ttl_ms)?;
     let response = writer
         .extend_snapshot(
@@ -852,7 +850,10 @@ pub(super) async fn run_maintenance(
         return loonfs_grep::run_grep_gc(
             state.grep_worker(),
             &namespace_id,
-            loonfs::current_time_ms().map_err(|error| ApiResponseError::runtime(error.into()))?,
+            state
+                .maintenance
+                .now_ms()
+                .map_err(ApiResponseError::runtime)?,
         )
         .await
         .map(Json)

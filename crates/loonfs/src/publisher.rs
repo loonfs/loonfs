@@ -1547,7 +1547,7 @@ impl NamespacePublisher {
         );
         let (results, retry_count) = async {
             let context = match self.writer.upgrade() {
-                Some(writer) => writer.identity.mutation_context(),
+                Some(writer) => self.read_core.mutation_context(&writer.identity),
                 None => Err(CoreError::ShuttingDown.into()),
             };
             let context = match context {
@@ -1748,7 +1748,7 @@ impl NamespacePublisher {
                 .as_mut()
                 .and_then(NamespaceCommitEngine::begin_wal_fold)
         };
-        match writer.identity.mutation_context() {
+        match self.read_core.now_ms() {
             Ok(_) => {}
             Err(error) => {
                 phase_event!(

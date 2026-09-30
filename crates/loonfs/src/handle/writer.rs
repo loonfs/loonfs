@@ -225,18 +225,18 @@ impl FsWriter {
         self.core.runtime_cache_stats()
     }
 
+    /// Reads this writer's wall clock as unix milliseconds.
+    pub fn now_ms(&self) -> Result<u64> {
+        self.core.now_ms()
+    }
+
     // Namespace lifecycle lives in `fs/namespaces.rs`; mutation, commit,
     // and upload operations in `fs/writes.rs` and `fs/uploads.rs`.
 
     /// Builds a maintenance handle over this writer's read core and caches.
     /// Uses the publisher's last observed inline byte count for flush decisions.
     pub fn maintenance_handle(&self, actor_id: impl Into<String>) -> Result<FsMaintenance> {
-        FsMaintenance::from_read_core(
-            self.core.clone(),
-            self.publisher.clone(),
-            actor_id.into(),
-            self.bits.identity.wall_clock.clone(),
-        )
+        FsMaintenance::from_read_core(self.core.clone(), self.publisher.clone(), actor_id.into())
     }
 
     /// Stops publication and drains accepted work.
@@ -263,7 +263,6 @@ impl FsWriter {
 pub struct FsWriterBuilder {
     core: HandleBuilderCore,
     writer_id: Option<String>,
-    wall_clock: Arc<dyn crate::WallClock>,
     min_publish_interval_ms: u64,
     namespace_session_policy: NamespaceSessionPolicy,
     max_writer_sessions: NonZeroUsize,
@@ -279,7 +278,6 @@ impl FsWriterBuilder {
         Self {
             core,
             writer_id: None,
-            wall_clock: Arc::new(loonfs_core::time::SystemWallClock),
             min_publish_interval_ms: crate::config::DEFAULT_MIN_PUBLISH_INTERVAL_MS,
             namespace_session_policy: NamespaceSessionPolicy::OpenOnFirstWrite,
             max_writer_sessions: NonZeroUsize::new(crate::config::DEFAULT_MAX_WRITER_SESSIONS)
@@ -385,8 +383,9 @@ impl FsWriterBuilder {
     }
 
     /// Supplies wall time for durable timestamps and expiration decisions.
+    /// Readers and maintenance handles derived from this writer read the same clock.
     pub fn wall_clock(mut self, clock: Arc<dyn crate::WallClock>) -> Self {
-        self.wall_clock = clock;
+        self.core.wall_clock = clock;
         self
     }
 
@@ -495,7 +494,7 @@ impl FsWriterBuilder {
                 Semaphore::MAX_PERMITS
             )));
         }
-        let identity = WriterIdentity::new(writer_id, self.wall_clock)?;
+        let identity = WriterIdentity::new(writer_id)?;
         let runtime = owning_runtime()?;
         let core = self.core.open_read_core()?;
         let bits = Arc::new(WriterBits {

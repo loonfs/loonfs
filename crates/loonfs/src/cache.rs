@@ -465,7 +465,6 @@ impl ReadCore {
         &self,
         namespace_id: &NamespaceId,
         snapshot_id: &PinId,
-        now_ms: u64,
     ) -> Result<(
         loonfs_core::NamespaceReaderEngine<crate::SharedObjectStore>,
         RuntimeReadContext,
@@ -476,7 +475,7 @@ impl ReadCore {
             Some(self.inner.metadata_segment_cache.as_ref()),
             &live.head,
             snapshot_id,
-            now_ms,
+            self.now_ms()?,
         )
         .await
         .map_err(RuntimeError::from)?;

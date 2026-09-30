@@ -212,17 +212,14 @@ fn test_read_core(store: SharedStore) -> ReadCore {
         None,
         RuntimeInstruments::new(None),
         Arc::new(loonfs_api::StdMonotonicTimer::default()),
+        Arc::new(loonfs_core::time::SystemWallClock),
     )
 }
 
 fn test_writer_bits() -> Arc<WriterBits> {
     Arc::new(WriterBits {
         inline_content: crate::InlineContentOptions::default(),
-        identity: WriterIdentity::new(
-            "writer-a".to_owned(),
-            Arc::new(loonfs_core::time::SystemWallClock),
-        )
-        .expect("valid writer identity"),
+        identity: WriterIdentity::new("writer-a".to_owned()).expect("valid writer identity"),
         wal_fold_permits: tokio::sync::Semaphore::new(crate::config::DEFAULT_MAX_CONCURRENT_FOLDS),
         wal_folds_waiting: AtomicUsize::new(0),
         maintenance_hint_observer: None,

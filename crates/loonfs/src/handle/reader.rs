@@ -83,6 +83,12 @@ impl FsReaderBuilder {
         self
     }
 
+    /// Supplies wall time for snapshot expiration decisions.
+    pub fn wall_clock(mut self, clock: Arc<dyn crate::WallClock>) -> Self {
+        self.core.wall_clock = clock;
+        self
+    }
+
     /// Sets runtime cache behavior.
     pub fn runtime_cache(mut self, runtime_cache: RuntimeCacheConfig) -> Self {
         self.core.runtime_cache = runtime_cache;

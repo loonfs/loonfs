@@ -71,10 +71,9 @@ fn reject_snapshot_bound_directory_cursor(cursor: Option<&DirectoryPageCursor>) 
 #[must_use]
 pub struct FsReadSnapshot {
     engine: NamespaceReaderEngine<SharedObjectStore>,
-    store: SharedObjectStore,
+    core: super::ReadCore,
     context: RuntimeReadContext,
     pin: ReadPin,
-    max_read_content_bytes: Option<u64>,
 }
 
 pub(super) enum ReadPin {
@@ -85,7 +84,7 @@ pub(super) enum ReadPin {
 
 impl FsReadSnapshot {
     async fn read<T>(&self, read: impl std::future::Future<Output = Result<T>>) -> Result<T> {
-        super::read_result::classify_read_result(&self.store, &self.context, &self.pin, read.await)
+        super::read_result::classify_read_result(&self.core, &self.context, &self.pin, read.await)
             .await
     }
 
@@ -313,7 +312,11 @@ impl FsReadSnapshot {
         self.read(async {
             Ok(self
                 .engine
-                .get_file(absolute_path, &self.context, self.max_read_content_bytes)
+                .get_file(
+                    absolute_path,
+                    &self.context,
+                    self.core.inner.config.max_read_content_bytes,
+                )
                 .await?)
         })
         .await
@@ -395,10 +398,9 @@ impl FsReader {
     ) -> FsReadSnapshot {
         FsReadSnapshot {
             engine,
-            store: self.core.inner.store.clone(),
+            core: self.core.clone(),
             context,
             pin,
-            max_read_content_bytes: self.core.inner.config.max_read_content_bytes,
         }
     }
 
@@ -478,10 +480,9 @@ impl FsReader {
         snapshot_id: &PinId,
     ) -> Result<FsReadSnapshot> {
         self.core.record_trace_context(&tracing::Span::current());
-        let now_ms = loonfs_core::time::current_time_ms()?;
         let (engine, context) = self
             .core
-            .pinned_read_at_snapshot(namespace_id, snapshot_id, now_ms)
+            .pinned_read_at_snapshot(namespace_id, snapshot_id)
             .await?;
         self.core.inner.cache_stats.record_snapshot_view_read();
         Ok(self.read_snapshot(engine, context, ReadPin::Snapshot(snapshot_id.clone())))

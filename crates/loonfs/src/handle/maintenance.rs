@@ -52,12 +52,11 @@ impl FsMaintenance {
         core: ReadCore,
         publisher: crate::publisher::PublisherRegistry,
         actor_id: String,
-        wall_clock: Arc<dyn crate::WallClock>,
     ) -> Result<Self> {
         Ok(Self {
             core,
             publisher: Some(publisher),
-            actor: WriterIdentity::new(actor_id, wall_clock)?,
+            actor: WriterIdentity::new(actor_id)?,
             compactor_epochs: Arc::default(),
             #[cfg(test)]
             reorganization_row_budget: None,
@@ -104,6 +103,11 @@ impl FsMaintenance {
         self.core.runtime_cache_stats()
     }
 
+    /// Reads this handle's wall clock as unix milliseconds.
+    pub fn now_ms(&self) -> Result<u64> {
+        self.core.now_ms()
+    }
+
     // Maintenance operations live in `fs/maintenance.rs`.
 }
 
@@ -112,7 +116,6 @@ impl FsMaintenance {
 pub struct FsMaintenanceBuilder {
     core: HandleBuilderCore,
     actor_id: Option<String>,
-    wall_clock: Arc<dyn crate::WallClock>,
 }
 
 impl FsMaintenanceBuilder {
@@ -120,7 +123,6 @@ impl FsMaintenanceBuilder {
         Self {
             core,
             actor_id: None,
-            wall_clock: Arc::new(loonfs_core::time::SystemWallClock),
         }
     }
 
@@ -139,7 +141,7 @@ impl FsMaintenanceBuilder {
 
     /// Supplies wall time for maintenance timestamps and collection decisions.
     pub fn wall_clock(mut self, clock: Arc<dyn crate::WallClock>) -> Self {
-        self.wall_clock = clock;
+        self.core.wall_clock = clock;
         self
     }
 
@@ -200,7 +202,7 @@ impl FsMaintenanceBuilder {
         let actor_id = self
             .actor_id
             .ok_or_else(|| RuntimeError::Config("actor_id is required".to_owned()))?;
-        let actor = WriterIdentity::new(actor_id, self.wall_clock)?;
+        let actor = WriterIdentity::new(actor_id)?;
         Ok(FsMaintenance {
             core: self.core.open_read_core()?,
             publisher: None,

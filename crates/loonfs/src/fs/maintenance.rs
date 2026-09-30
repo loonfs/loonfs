@@ -138,7 +138,7 @@ impl FsMaintenance {
     }
 
     async fn count_live_checkpoints(&self, namespace_id: &NamespaceId) -> Result<(u64, u64)> {
-        let now_ms = self.actor.mutation_context()?.now_ms;
+        let now_ms = self.core.now_ms()?;
         let page_limit = loonfs_api::PaginationPolicy::default().max_limit();
         let mut cursor = None;
         let mut live_checkpoints = 0_u64;
@@ -298,7 +298,7 @@ impl FsMaintenance {
                 .unwrap_or(0),
             _ => 0,
         };
-        let now_ms = self.actor.wall_clock.now_ms()?;
+        let now_ms = self.core.now_ms()?;
         let idle_flush_due_in_ms =
             options.idle_flush_due_in_ms(status.wal_tail_newest_commit_at_ms, now_ms);
         let flush = options.flush_is_due(status.wal_tail_segments, inline_bytes)
@@ -334,7 +334,7 @@ impl FsMaintenance {
         namespace_id: &NamespaceId,
         options: &MetadataMaintenanceOptions,
     ) -> Result<MaintenanceProbe> {
-        let now_ms = self.actor.wall_clock.now_ms()?;
+        let now_ms = self.core.now_ms()?;
         let cache = self.core.metadata_segment_cache();
         loonfs_core::cache::metadata_maintenance_due(
             self.core.store(),
@@ -658,7 +658,7 @@ impl FsMaintenance {
             self.core.store(),
             namespace_id,
             config,
-            &self.actor.mutation_context()?,
+            &self.core.mutation_context(&self.actor)?,
         )
         .await
         .map_err(RuntimeError::Core)?;

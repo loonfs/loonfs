@@ -113,7 +113,7 @@ impl FsReader {
                 .await?;
         }
         self.core.record_trace_context(&tracing::Span::current());
-        let now_ms = loonfs_core::time::current_time_ms()?;
+        let now_ms = self.core.now_ms()?;
         let requested = request.limit.as_usize();
         let mut cursor = request.cursor;
         let mut snapshots = Vec::with_capacity(requested);

@@ -8,9 +8,9 @@
 use crate::manifest::{load_current_grep_manifest, GrepIndexStatus};
 use crate::{GramIndexBuildPolicy, GrepBuildOutcome, GrepError, GrepReorganizeOutcome, GrepWorker};
 use loonfs::{
-    current_time_ms, MaintenanceCancellation, MaintenanceConclusion, MaintenanceJob,
-    MaintenanceJobId, MaintenanceProbe, MaintenanceRunReport, NamespaceId, NamespacePublication,
-    Result, RuntimeError,
+    MaintenanceCancellation, MaintenanceConclusion, MaintenanceJob, MaintenanceJobId,
+    MaintenanceProbe, MaintenanceRunReport, NamespaceId, NamespacePublication, Result,
+    RuntimeError,
 };
 use loonfs_api::{ErrorCode, RunMaintenanceResponse};
 use loonfs_objectstore::ObjectStore;
@@ -156,7 +156,7 @@ impl<S: ObjectStore + Clone + Send + Sync + 'static> MaintenanceJob for GrepGcJo
         _cancellation: &MaintenanceCancellation,
     ) -> Result<MaintenanceRunReport> {
         self.worker
-            .garbage_collect_namespace(namespace_id, current_time_ms()?)
+            .garbage_collect_namespace(namespace_id, self.worker.maintenance.now_ms()?)
             .await
             .map_err(|error| step_failure(namespace_id, "grep_gc", error))?;
         Ok(MaintenanceRunReport::concluded(MaintenanceConclusion::Idle))

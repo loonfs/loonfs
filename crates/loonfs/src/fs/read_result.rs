@@ -15,7 +15,7 @@ use tracing::Instrument;
 /// would. A checkpoint or snapshot that still admits roots the segment, so
 /// the original error stands as corruption.
 pub(super) async fn classify_read_result<T>(
-    store: &dyn loonfs_objectstore::ObjectStore,
+    core: &ReadCore,
     context: &RuntimeReadContext,
     pin: &ReadPin,
     result: Result<T>,
@@ -28,6 +28,7 @@ pub(super) async fn classify_read_result<T>(
     ) {
         return result;
     }
+    let store = core.store();
     match pin {
         ReadPin::Head => {
             let current = load_namespace_current_manifest(store, &context.head.namespace_id)
@@ -46,7 +47,7 @@ pub(super) async fn classify_read_result<T>(
             load_checkpoint_read_basis(store, None, &context.head, checkpoint_id).await?;
         }
         ReadPin::Snapshot(snapshot_id) => {
-            let now_ms = loonfs_core::time::current_time_ms()?;
+            let now_ms = core.now_ms()?;
             load_snapshot_read_basis(store, None, &context.head, snapshot_id, now_ms).await?;
         }
     }
@@ -66,7 +67,7 @@ impl ReadCore {
             )
             .await?;
         let result = classify_read_result(
-            self.store(),
+            self,
             &context,
             &ReadPin::Head,
             read(engine, context.clone()).await,
@@ -83,7 +84,7 @@ impl ReadCore {
             )
             .await?;
         classify_read_result(
-            self.store(),
+            self,
             &context,
             &ReadPin::Head,
             read(engine, context.clone()).await,

@@ -147,7 +147,7 @@ impl PreparedContent {
             } => {
                 &expected_content_ref.owner_namespace_id == namespace_id
                     && expected_content_ref == content_ref
-                    && now_ms <= *expires_at_ms
+                    && now_ms < *expires_at_ms
             }
         }
     }
@@ -260,7 +260,7 @@ pub fn verify_content_token(
     if payload.content_ref != token.content_ref {
         return Err(ContentTokenError::ContentRefMismatch);
     }
-    if payload.expires_at_ms < now_ms {
+    if now_ms >= payload.expires_at_ms {
         return Err(ContentTokenError::Expired);
     }
 
@@ -368,30 +368,22 @@ mod tests {
     }
 
     #[test]
-    fn verified_token_admission_expires_with_the_token() {
+    fn tokens_and_proofs_are_valid_before_their_expiry_and_expired_at_it() {
         let namespace = NamespaceId::parse("demo").expect("namespace");
         let content = ContentRef::blob_v1(namespace.clone(), ContentId::generate(), b"hello");
         let issued_at_ms = 1_000;
+        let expires_at_ms = issued_at_ms + CONTENT_RECEIPT_TTL_MS;
         let token = mint_content_token("secret", &receipt(&content), issued_at_ms).expect("mint");
         let catalog = catalog_entry(namespace);
-        let prepared = verify_content_token(
-            "secret",
-            &catalog,
-            &token,
-            issued_at_ms + CONTENT_RECEIPT_TTL_MS,
-        )
-        .expect("verify token before expiry");
 
-        assert!(prepared.admits(
-            catalog.namespace_id(),
-            &content,
-            issued_at_ms + CONTENT_RECEIPT_TTL_MS,
-        ));
-        assert!(!prepared.admits(
-            catalog.namespace_id(),
-            &content,
-            issued_at_ms + CONTENT_RECEIPT_TTL_MS + 1,
-        ));
+        let prepared = verify_content_token("secret", &catalog, &token, expires_at_ms - 1)
+            .expect("the token is valid one millisecond before its expiry");
+        assert!(prepared.admits(catalog.namespace_id(), &content, expires_at_ms - 1));
+        assert!(!prepared.admits(catalog.namespace_id(), &content, expires_at_ms));
+        assert_eq!(
+            verify_content_token("secret", &catalog, &token, expires_at_ms),
+            Err(ContentTokenError::Expired)
+        );
     }
 
     #[test]

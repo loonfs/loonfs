@@ -449,9 +449,11 @@ content token in the commit request.
 When preparation requires an upload, the upload session is recorded before the
 content object is written and completed afterward. Prepared uploads have a
 deadline no later than the expiry of the last token the completed session could
-issue. The deadline is checked when the commit enters a batch and again just
-before the numbered WAL write. Both checks use the request clock plus the time
-elapsed since the publication attempt began. This matches the lifetime of
+issue. A prepared upload or token is valid while the clock reads before its
+deadline, and it has expired at the deadline. The deadline is checked when the
+commit enters a batch and again just before the numbered WAL write. Both checks
+use the request clock plus the time elapsed since the publication attempt
+began. This matches the lifetime of
 remote upload tokens ([upload transport](#69-upload-transport); [upload cleanup](format.md#116-upload-session-cleanup))
 and prevents publication from referring to content that may have been reclaimed.
 Prepared inline bytes have no expiry.
