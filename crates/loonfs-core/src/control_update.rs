@@ -75,10 +75,13 @@ where
     )))
 }
 
-/// Creates a control object and reports a generated-ID collision as an internal error.
+/// Creates a control object under a freshly generated id.
 ///
-/// A precondition failure is read back like a transport failure: an earlier
-/// attempt's put can land after its own read-back found nothing.
+/// The id is the object's identity: an object under it is this creation's
+/// own put, whatever its bytes hold now, because another caller can change
+/// the record as soon as it lands. A precondition failure is read back like
+/// a transport failure: an earlier attempt's put can land after its own
+/// read-back found nothing.
 pub(crate) async fn create_control_object_under_generated_id<S: ObjectStore + ?Sized>(
     store: &S,
     object_key: &str,
@@ -97,15 +100,9 @@ pub(crate) async fn create_control_object_under_generated_id<S: ObjectStore + ?S
         },
         |error, ()| {
             let failed = CoreError::store(object_key, error);
-            let encoded = &encoded;
             async move {
                 match store.get_with_metadata(object_key).await {
-                    Ok(Some(stored)) if stored.bytes == *encoded => {
-                        Ok(WriteEvidence::Landed(stored.metadata))
-                    }
-                    Ok(Some(_)) => Err(CoreError::Internal(format!(
-                        "a generated id collided with the existing control object `{object_key}`"
-                    ))),
+                    Ok(Some(stored)) => Ok(WriteEvidence::Landed(stored.metadata)),
                     Ok(None) => Ok(WriteEvidence::Lost(failed)),
                     Err(error) => Err(CoreError::store(object_key, &error)),
                 }
@@ -365,27 +362,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn generated_id_create_reports_other_bytes_as_a_collision() {
+    async fn generated_id_create_adopts_its_record_after_another_caller_changed_it() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let object_key = "namespaces/demo/pins/pin_00000000000000000001-0000000000000001.json";
+        // The first put landed and lost its answer; a renewal changed the
+        // record before this attempt reads it back.
+        let renewed = Bytes::from_static(b"the record with its expiry extended");
         store
-            .put_if_absent(object_key, Bytes::from_static(b"another control record"))
+            .put_if_absent(object_key, renewed.clone())
             .await
-            .expect("seed colliding record");
+            .expect("the landed record, as another caller changed it");
 
-        let error = create_control_object_under_generated_id(
+        create_control_object_under_generated_id(
             &store,
             object_key,
-            Bytes::from_static(b"generated control record"),
+            Bytes::from_static(b"the record as written"),
         )
         .await
-        .expect_err("other bytes under the generated id are a collision");
+        .expect("the record under the generated id is this creation's own");
 
-        assert!(matches!(
-            error,
-            CoreError::Internal(message) if message.contains("generated id collided")
-        ));
+        assert_eq!(
+            store.get(object_key, None).await.expect("read record"),
+            Some(renewed)
+        );
     }
 
     #[tokio::test]

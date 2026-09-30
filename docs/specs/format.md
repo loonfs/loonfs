@@ -305,7 +305,7 @@ Readers determine committed state from verified manifests and numbered WAL objec
 
 ### 3.2 Immutable writes and retries
 
-An immutable object must not be replaced with different bytes. A collision at a newly generated content or segment key is an error; contention at the next manifest or WAL number follows its publication protocol. Where an operation retries the same object identity, it may reconcile an ambiguous write only using evidence that establishes the expected immutable contents.
+An immutable object must not be replaced with different bytes. A collision at a newly generated content or segment key is an error; contention at the next manifest or WAL number follows its publication protocol. Where an operation retries the same object identity, it may reconcile an ambiguous write only using evidence that establishes the expected immutable contents. A mutable record created under a generated id (a pin or an upload session) is identified by the id alone: after a put with an unknown outcome, a record under that id is the creator's own, whatever its bytes now hold, because another caller can change the record as soon as it lands.
 
 Small control objects use conditional single-object writes. Multipart upload is an optimization for larger immutable payloads, not a substitute for atomic control-object CAS.
 
