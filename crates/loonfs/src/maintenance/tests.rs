@@ -5,7 +5,6 @@
 #![allow(clippy::panic)]
 // The drain test injects a step panic to assert it is surfaced.
 
-use super::runner::{MaintenanceClock, SystemMaintenanceClock};
 use super::*;
 use crate::maintenance::hints::dropped_hints;
 use crate::{ChangeSeq, NamespaceId, Result, RuntimeError};
@@ -22,12 +21,12 @@ const WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// A clock a test moves by hand.
 #[derive(Debug)]
-struct ManualClock {
+pub(super) struct ManualClock {
     now_ms: AtomicU64,
 }
 
 impl ManualClock {
-    fn at(now_ms: u64) -> Arc<Self> {
+    pub(super) fn at(now_ms: u64) -> Arc<Self> {
         Arc::new(Self {
             now_ms: AtomicU64::new(now_ms),
         })
@@ -35,18 +34,6 @@ impl ManualClock {
 
     fn advance_to(&self, now_ms: u64) {
         self.now_ms.store(now_ms, Ordering::SeqCst);
-    }
-}
-
-impl MaintenanceClock for ManualClock {
-    fn now_ms(&self) -> u64 {
-        self.now_ms.load(Ordering::SeqCst)
-    }
-
-    fn jitter_below_ms(&self, span_ms: u64) -> u64 {
-        // The whole window, deterministically: these tests assert on when a
-        // key comes back, and admission's own tests cover the draw.
-        span_ms.saturating_sub(1)
     }
 }
 
@@ -275,14 +262,14 @@ impl MaintenanceJob for SubscribingJob {
 }
 
 fn runner_with(
-    clock: Arc<dyn MaintenanceClock>,
+    clock: Arc<dyn crate::WallClock>,
     job: Arc<dyn MaintenanceJob>,
 ) -> MaintenanceRunner {
     let registry = MaintenanceRegistry::new();
     registry.register(job).expect("register the test job");
     let runner = MaintenanceRunner::builder(registry)
         .max_concurrent(nonzero_usize(1))
-        .clock(clock)
+        .wall_clock(clock)
         .build()
         .expect("build the runner");
     assert!(runner.is_registered(TEST_JOB));
@@ -290,7 +277,7 @@ fn runner_with(
 }
 
 fn enabled_runner(job: Arc<dyn MaintenanceJob>) -> MaintenanceRunner {
-    runner_with(Arc::new(SystemMaintenanceClock::default()), job)
+    runner_with(Arc::new(loonfs_core::time::SystemWallClock), job)
 }
 
 async fn wait_for(condition: impl Fn() -> bool, what: &str) {
@@ -680,7 +667,7 @@ async fn the_runner_reports_its_queue_and_its_reconciliation_sweeps() {
         .expect("register the test job");
     let runner = MaintenanceRunner::builder(registry)
         .max_concurrent(nonzero_usize(1))
-        .clock(clock.clone())
+        .wall_clock(clock.clone())
         .metrics_recorder(recorder.clone())
         .build()
         .expect("build the runner");
@@ -1093,7 +1080,7 @@ async fn an_idle_tail_folds_once_and_again_only_after_a_write() {
         .register(Arc::new(MetadataMaintenanceJob::new(maintenance.clone())))
         .expect("metadata job");
     let runner = MaintenanceRunner::builder(registry)
-        .clock(clock.clone())
+        .wall_clock(clock.clone())
         .build()
         .expect("runner");
     runner.attach_hints(receiver);
@@ -1199,7 +1186,7 @@ impl IdleFoldHarness {
             .register(Arc::new(MetadataMaintenanceJob::new(maintenance.clone())))
             .expect("metadata job");
         let runner = MaintenanceRunner::builder(registry)
-            .clock(clock.clone())
+            .wall_clock(clock.clone())
             .build()
             .expect("runner");
         runner.attach_hints(receiver);
