@@ -162,6 +162,7 @@ async fn recently_superseded_manifests_keep_old_segments_and_lazy_views_until_th
                 &namespace_id,
                 current.state.manifest().manifest_no,
                 None,
+                &Deadline::start(Arc::new(StdMonotonicTimer::default())),
             )
             .await
             .expect("advance hint");

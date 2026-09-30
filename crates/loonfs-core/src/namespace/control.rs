@@ -4,7 +4,9 @@ use crate::control_object::{
     expect_namespace, load_control_object, ControlObjectLoadError, LoadedControl,
 };
 use crate::error::CoreError;
+use crate::limits::METADATA_PUBLICATION_BUDGET_MS;
 use crate::namespace::state::NamespaceReadState;
+use crate::time::Deadline;
 use loonfs_api::wire::control::{ControlObjectKind, HintPayload, ManifestRef};
 use loonfs_api::CompactorEpoch;
 use loonfs_api::NamespaceId;
@@ -80,25 +82,27 @@ pub(crate) async fn load_hint<S: ObjectStore + ?Sized>(
 /// Raises the hint to at least the given manifest number and returns the hint as
 /// written. `known` is the hint as the caller last saw it; a raise from a
 /// current token needs no read. The number only ever increases, so a
-/// stale actor cannot regress what a newer one wrote.
+/// stale actor cannot regress what a newer one wrote. The raise ends with its
+/// publication's budget and then returns the hint as last seen.
 pub(crate) async fn raise_hint<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     manifest_no: loonfs_api::ManifestNo,
     known: Option<LoadedHint>,
+    deadline: &Deadline,
 ) -> crate::error::Result<LoadedHint> {
     let object_key = hint(namespace_id);
     let mut current = match known {
         Some(known) => known,
         None => load_namespace_hint(store, namespace_id).await?,
     };
-    loop {
+    while deadline.elapsed_ms() <= METADATA_PUBLICATION_BUDGET_MS {
         let raised = HintPayload {
             namespace_id: namespace_id.clone(),
             manifest_no: current.state.manifest_no.max(manifest_no),
         };
         if raised.manifest_no == current.state.manifest_no {
-            return Ok(current);
+            break;
         }
         let bytes =
             loonfs_api::wire::control::encode_control_state(ControlObjectKind::Hint, &raised)
@@ -124,6 +128,7 @@ pub(crate) async fn raise_hint<S: ObjectStore + ?Sized>(
             Err(error) => return Err(CoreError::store(&object_key, &error)),
         }
     }
+    Ok(current)
 }
 
 pub(crate) async fn load_current_manifest<S: ObjectStore + ?Sized>(
@@ -279,17 +284,17 @@ pub async fn load_namespace_current_manifest<S: ObjectStore + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::time::StdMonotonicTimer;
     use loonfs_api::ManifestNo;
+    use loonfs_objectstore::local_fs_store::LocalFsStore;
+    use loonfs_test_support::clock::ManualClock;
     use loonfs_test_support::stores::{
-        KeyPredicate, MetadataMapStore, RecordedOperation, RecordingStore,
+        FailStore, InjectedError, KeyPredicate, MetadataMapStore, OperationClass,
+        RecordedOperation, RecordingStore,
     };
+    use std::sync::Arc;
 
-    #[tokio::test]
-    async fn a_hint_raise_requires_the_returned_etag() {
-        let directory = tempfile::tempdir().expect("directory");
-        let store =
-            loonfs_objectstore::local_fs_store::LocalFsStore::new(directory.path()).expect("store");
-        let namespace_id = loonfs_test_support::ids::namespace_id("etag");
+    async fn seed_hint(store: &LocalFsStore, namespace_id: &NamespaceId) -> LoadedHint {
         let state = HintPayload {
             namespace_id: namespace_id.clone(),
             manifest_no: ManifestNo(1),
@@ -298,15 +303,24 @@ mod tests {
             loonfs_api::wire::control::encode_control_state(ControlObjectKind::Hint, &state)
                 .expect("hint");
         store
-            .put_if_absent(&hint(&namespace_id), bytes.into())
+            .put_if_absent(&hint(namespace_id), bytes.into())
             .await
             .expect("create hint");
-        let known = load_hint(&store, &namespace_id).await.expect("hint");
+        load_hint(store, namespace_id).await.expect("hint")
+    }
+
+    #[tokio::test]
+    async fn a_hint_raise_requires_the_returned_etag() {
+        let directory = tempfile::tempdir().expect("directory");
+        let store = LocalFsStore::new(directory.path()).expect("store");
+        let namespace_id = loonfs_test_support::ids::namespace_id("etag");
+        let known = seed_hint(&store, &namespace_id).await;
         let store = RecordingStore::new(
             MetadataMapStore::without_etag(store, KeyPredicate::any()),
             KeyPredicate::any(),
         );
-        let error = raise_hint(&store, &namespace_id, ManifestNo(2), Some(known))
+        let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
+        let error = raise_hint(&store, &namespace_id, ManifestNo(2), Some(known), &deadline)
             .await
             .expect_err("etag required");
         assert!(matches!(error, CoreError::Store { .. }));
@@ -318,5 +332,36 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn a_hint_raise_that_keeps_losing_ends_with_its_budget_and_returns_the_hint_it_saw() {
+        let directory = tempfile::tempdir().expect("directory");
+        let store = LocalFsStore::new(directory.path()).expect("store");
+        let namespace_id = loonfs_test_support::ids::namespace_id("contended");
+        let known = seed_hint(&store, &namespace_id).await;
+        let clock = Arc::new(ManualClock::new(0));
+        let reload = Arc::clone(&clock);
+        let store = FailStore::new(
+            MetadataMapStore::new(store, KeyPredicate::hint(&namespace_id), move |metadata| {
+                reload.advance_ms(METADATA_PUBLICATION_BUDGET_MS / 2 + 1);
+                metadata
+            }),
+            KeyPredicate::hint(&namespace_id),
+            OperationClass::CompareAndSwap,
+            InjectedError::PreconditionFailed,
+        );
+        store.fail_all();
+        let raised = raise_hint(
+            &store,
+            &namespace_id,
+            ManifestNo(2),
+            Some(known.clone()),
+            &Deadline::start(clock),
+        )
+        .await
+        .expect("an unraised hint leaves the publication standing");
+        assert_eq!(raised, known);
+        assert_eq!(store.attempts(), 2);
     }
 }

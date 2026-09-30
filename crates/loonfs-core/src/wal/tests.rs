@@ -21,8 +21,8 @@ use loonfs_objectstore::keys::{hint, metadata_manifest_object, wal_segment, wal_
 use loonfs_objectstore::{local_fs_store::LocalFsStore, ObjectStore};
 use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::stores::{
-    BlockingStore, ConcurrencyWatchStore, KeyPredicate, MetadataMapStore, OperationClass,
-    RecordingStore,
+    BlockingStore, ConcurrencyWatchStore, FailStore, InjectedError, KeyPredicate, MetadataMapStore,
+    OperationClass, RecordingStore,
 };
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -279,6 +279,43 @@ async fn an_acquisition_held_past_the_revalidation_bound_reloads_before_fencing(
         .await
         .expect("head")
         .is_none());
+}
+
+#[tokio::test]
+async fn fence_retries_whose_anchor_loads_outlast_the_wal_budget_end_with_the_acquisition_budget() {
+    let directory = tempdir().expect("directory");
+    let namespace_id = NamespaceId::parse("slow-anchor").expect("namespace");
+    let timer = Arc::new(ManualClock::new(0));
+    let slow_hint = Arc::clone(&timer);
+    let store = FailStore::new(
+        MetadataMapStore::new(
+            LocalFsStore::new(directory.path()).expect("store"),
+            KeyPredicate::hint(&namespace_id),
+            move |metadata| {
+                slow_hint.advance_ms(crate::limits::WAL_PUBLISH_BUDGET_MS + 1);
+                metadata
+            },
+        ),
+        KeyPredicate::prefix(wal_segment_prefix(&namespace_id)),
+        OperationClass::PutCreateIfAbsent,
+        InjectedError::PreconditionFailed,
+    );
+    let setup = context(1_000);
+    create(&store, &namespace_id, &setup).await.expect("create");
+    store.fail_next(1);
+    let error = acquire_writer(&store, &namespace_id, &setup, timer)
+        .await
+        .expect_err("the acquisition runs out of budget");
+    assert!(matches!(
+        error,
+        crate::error::CoreError::MetadataPublicationBudgetExceeded { .. }
+    ));
+    assert_eq!(store.attempts(), 1);
+    assert!(store
+        .list_prefix(&wal_segment_prefix(&namespace_id))
+        .await
+        .expect("WAL")
+        .is_empty());
 }
 
 fn directory(name: &str) -> CommitCandidate {

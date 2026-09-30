@@ -25,7 +25,9 @@ use loonfs_api::v0::Commit;
 use loonfs_api::wire::wal::{MAX_WAL_SEGMENT_BYTES, WAL_SEGMENT_OVERHEAD_BYTES};
 use loonfs_api::{ChangeSeq, CommitId, NamespaceId};
 use loonfs_core::cache::Recency;
-use loonfs_core::commit::{CommitFingerprint, WalPublishError};
+use loonfs_core::commit::{
+    is_retryable_wal_publish, settle_publish_attempt, CommitFingerprint, WalPublishError,
+};
 use loonfs_core::limits::{CONTENTION_RETRY_LIMIT, FOLD_AT_WAL_SEGMENTS};
 use loonfs_core::publish::{
     NamespaceCommitEngine, PublishTailWeight, SharedWriterSessionState, WriterSessionState,
@@ -1582,18 +1584,14 @@ impl NamespacePublisher {
                     }
                     None => candidates
                         .iter()
-                        .map(|_| Err(CoreError::ShuttingDown.into()))
+                        .map(|_| Err(CoreError::ShuttingDown))
                         .collect(),
                 };
-                for ((index, candidate), result) in
-                    indices.into_iter().zip(candidates).zip(observed)
-                {
-                    let retry = is_retryable_wal_publish(&result);
-                    results[index] = Some(reconcile_publish_attempt(results[index].take(), result));
-                    if retry {
-                        pending.push((index, candidate));
-                    }
-                }
+                pending = settle_publish_attempt(
+                    &mut results,
+                    indices.into_iter().zip(candidates),
+                    observed,
+                );
                 if pending.is_empty() || attempt + 1 == CONTENTION_RETRY_LIMIT {
                     break;
                 }
@@ -1602,7 +1600,11 @@ impl NamespacePublisher {
             }
             let results = results
                 .into_iter()
-                .map(|result| result.expect("each candidate received a publication result"))
+                .map(|result| {
+                    result
+                        .expect("each candidate received a publication result")
+                        .map_err(RuntimeError::Core)
+                })
                 .collect::<Vec<_>>();
             (results, retry_count)
         }
@@ -1624,7 +1626,7 @@ impl NamespacePublisher {
         permits: &[Arc<AdmissionPermit>],
         context: &loonfs_core::MutationContext,
         batch: &Deadline,
-    ) -> Vec<CommitResult> {
+    ) -> Vec<Result<Commit, CoreError>> {
         let mut slot = self.engine.lock().await;
         let engine = self.engine_for(&mut slot);
         let publish = crate::fs::publish_batch_with_engine(
@@ -2139,48 +2141,10 @@ fn take_queued_waiters(state: &mut NamespacePublisherState) -> QueuedWaiters {
     waiters
 }
 
-/// Returns whether publication should retry the batch.
-///
-/// Retrying with the same commit IDs is safe because committed candidates
-/// replay their durable receipts. Stale-head, expired-budget, and
-/// unknown-outcome errors are retried to obtain a definite result.
-fn is_retryable_wal_publish(result: &CommitResult) -> bool {
+fn is_maintenance_required(result: &Result<Commit, CoreError>) -> bool {
     matches!(
         result,
-        Err(RuntimeError::Core(CoreError::WalPublish(
-            WalPublishError::StaleHead
-                | WalPublishError::PublishBudgetExceeded { .. }
-                | WalPublishError::OutcomeUnknown(_)
-        )))
-    )
-}
-
-/// A failed recovery attempt does not prove that an earlier WAL put failed.
-/// Only a successful publication or receipt replay resolves that uncertainty.
-fn reconcile_publish_attempt(
-    previous: Option<CommitResult>,
-    current: CommitResult,
-) -> CommitResult {
-    match (previous, current) {
-        (Some(previous), Err(_))
-            if matches!(
-                &previous,
-                Err(RuntimeError::Core(CoreError::WalPublish(
-                    WalPublishError::OutcomeUnknown(_)
-                )))
-            ) =>
-        {
-            previous
-        }
-        (_, current) => current,
-    }
-}
-
-fn is_maintenance_required(result: &CommitResult) -> bool {
-    matches!(
-        result,
-        Err(RuntimeError::Core(error))
-            if error.code() == loonfs_core::ErrorCode::MaintenanceRequired
+        Err(error) if error.code() == loonfs_core::ErrorCode::MaintenanceRequired
     )
 }
 

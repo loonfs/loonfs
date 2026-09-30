@@ -4,7 +4,7 @@
 
 use crate::authorize::CommitAuthority;
 use crate::checkpoint::MetadataSegmentCache;
-use crate::commit::{CommitFingerprint, WalPublishError};
+use crate::commit::{settle_publish_attempt, CommitFingerprint, WalPublishError};
 use crate::context::MutationContext;
 use crate::error::{CoreError, Result, WriterFence};
 use crate::namespace::basis::MetadataBasis;
@@ -968,26 +968,24 @@ pub(crate) async fn publish_namespace_commits_batch<S: ObjectStore + ?Sized>(
     let mut engine = NamespaceCommitEngine::new(namespace_id.clone());
     let batch = Deadline::start(Arc::clone(&engine.timer));
     let options = PublishTailOptions::default();
-    let mut result = engine
-        .publish_batch(store, &candidates, context, &options, &batch)
-        .await;
-    for _ in 1..crate::limits::CONTENTION_RETRY_LIMIT {
-        if !result.results.iter().any(|result| {
-            matches!(
-                result,
-                Err(CoreError::WalPublish(
-                    crate::commit::WalPublishError::StaleHead
-                        | crate::commit::WalPublishError::PublishBudgetExceeded { .. }
-                ))
-            )
-        }) {
+    let mut results = vec![None; candidates.len()];
+    let mut pending: Vec<_> = candidates.into_iter().enumerate().collect();
+    for _ in 0..crate::limits::CONTENTION_RETRY_LIMIT {
+        let (indices, attempted): (Vec<_>, Vec<_>) = pending.into_iter().unzip();
+        let observed = engine
+            .publish_batch(store, &attempted, context, &options, &batch)
+            .await
+            .results;
+        pending =
+            settle_publish_attempt(&mut results, indices.into_iter().zip(attempted), observed);
+        if pending.is_empty() {
             break;
         }
-        result = engine
-            .publish_batch(store, &candidates, context, &options, &batch)
-            .await;
     }
-    result.results
+    results
+        .into_iter()
+        .map(|result| result.expect("each candidate should receive a publication result"))
+        .collect()
 }
 
 /// Deletes a namespace through a fresh, uncached commit engine: a one-shot

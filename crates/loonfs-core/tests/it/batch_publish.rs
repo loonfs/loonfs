@@ -62,6 +62,17 @@ fn commit_request(commit_id: &str, operation: FilesystemOperation) -> CommitRequ
     )
 }
 
+fn is_data_wal_put(operation: &OperationContext<'_>, wal_prefix: &str) -> bool {
+    match operation.kind() {
+        OperationKind::Put {
+            bytes,
+            mode: PutMode::CreateIfAbsent,
+        } if operation.key().starts_with(wal_prefix) => decode_wal_segment_envelope_zstd(bytes)
+            .is_ok_and(|envelope| !envelope.payload().records.is_empty()),
+        _ => false,
+    }
+}
+
 fn ack_lost_wal_put_store(
     root: impl AsRef<Path>,
     namespace_id: &NamespaceId,
@@ -69,20 +80,7 @@ fn ack_lost_wal_put_store(
     let wal_prefix = loonfs_objectstore::keys::wal_segment_prefix(namespace_id);
     let store = FailStore::matching(
         LocalFsStore::new(root.as_ref()).expect("store"),
-        move |operation: &OperationContext<'_>| {
-            if !operation.key().starts_with(&wal_prefix) {
-                return false;
-            }
-            let bytes = match operation.kind() {
-                OperationKind::Put {
-                    bytes,
-                    mode: PutMode::CreateIfAbsent,
-                } => bytes,
-                _ => return false,
-            };
-            decode_wal_segment_envelope_zstd(bytes)
-                .is_ok_and(|envelope| !envelope.payload().records.is_empty())
-        },
+        move |operation: &OperationContext<'_>| is_data_wal_put(operation, &wal_prefix),
         InjectedError::Transport("response lost after WAL put".to_owned()),
     )
     .apply_then_fail();
@@ -117,16 +115,7 @@ async fn data_wal_keys<S: ObjectStore + ?Sized>(store: &S) -> Vec<String> {
 fn failed_data_put_store(inner: LocalFsStore) -> FailStore<LocalFsStore> {
     let store = FailStore::matching(
         inner,
-        |operation: &OperationContext<'_>| match operation.kind() {
-            OperationKind::Put {
-                bytes,
-                mode: PutMode::CreateIfAbsent,
-            } if operation.key().starts_with("namespaces/demo/wal/") => {
-                decode_wal_segment_envelope_zstd(bytes)
-                    .is_ok_and(|envelope| !envelope.payload().records.is_empty())
-            }
-            _ => false,
-        },
+        |operation: &OperationContext<'_>| is_data_wal_put(operation, "namespaces/demo/wal/"),
         InjectedError::PermissionDenied("WAL put refused".to_owned()),
     );
     store.fail_next(1);
@@ -343,7 +332,7 @@ async fn change_feed_does_not_read_folded_wal_before_current_manifest() {
 }
 
 #[tokio::test]
-async fn ack_lost_wal_put_reports_unknown_outcome_and_replays_idempotently() {
+async fn an_ack_lost_wal_put_commits_once_and_the_one_shot_publish_returns_the_commit() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
@@ -354,7 +343,9 @@ async fn ack_lost_wal_put_reports_unknown_outcome_and_replays_idempotently() {
     let content = store_bytes_as_content(&store, &namespace_id, b"ack lost")
         .await
         .expect("stage content");
-    let put = || {
+    let put = prepared_candidate(
+        &store,
+        &namespace_id,
         commit_request(
             "ack-lost-put",
             FilesystemOperation::PutFile {
@@ -365,28 +356,88 @@ async fn ack_lost_wal_put_reports_unknown_outcome_and_replays_idempotently() {
                 expected_inode_id: None,
                 expected_revision_no: None,
             },
-        )
-    };
+        ),
+    )
+    .await;
 
-    // The WAL put landed but its acknowledgment was lost: this must surface as
-    // an unknown outcome, never as definite failure.
-    let error = submit_commit(&store, &namespace_id, put(), &context)
+    let committed = namespace_engine(&store, &namespace_id, &context)
+        .publish_namespace_commits_batch(vec![put])
         .await
-        .expect_err("ack-lost WAL put is not definite failure");
-    assert_eq!(error.code(), ErrorCode::CommitOutcomeUnknown);
+        .expect("publish")
+        .pop()
+        .expect("one result")
+        .expect("the retry replays the landed commit from its receipt");
+    assert_eq!(committed.committed_seq, ChangeSeq(1));
     assert!(store.injected_ack_loss());
+    assert_eq!(data_wal_keys(&store).await.len(), 1);
+}
 
-    // The documented remedy: retry with the same commit id. The commit is
-    // already visible, so the retry replays it instead of double-committing.
-    let result = submit_commit(&store, &namespace_id, put(), &context)
+#[tokio::test]
+async fn a_failed_retry_keeps_the_result_a_batch_already_settled() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = mutation_context();
+    let inner = LocalFsStore::new(temp_dir.path()).expect("store");
+    bootstrap_namespace(&inner, &namespace_id, &context)
         .await
-        .expect("same-commit-id retry replays the committed mutation");
-    assert_eq!(result.committed_seq, ChangeSeq(1));
+        .expect("bootstrap");
+    let settled = || {
+        CommitCandidate::new(commit_request(
+            "settled",
+            FilesystemOperation::CreateDirectory {
+                path: AbsolutePath::parse("/settled").expect("path"),
+                parents: false,
+            },
+        ))
+    };
+    let first = namespace_engine(&inner, &namespace_id, &context)
+        .publish_namespace_commits_batch(vec![settled()])
+        .await
+        .expect("publish")
+        .pop()
+        .expect("one result")
+        .expect("the first commit lands");
 
-    let head = load_namespace_read_state(&store, &namespace_id)
+    // After the data put loses its answer, the retry cannot load its view.
+    let answer_lost = std::sync::atomic::AtomicBool::new(false);
+    let hint = loonfs_objectstore::keys::hint(&namespace_id);
+    let wal_prefix = loonfs_objectstore::keys::wal_segment_prefix(&namespace_id);
+    let store = FailStore::matching(
+        ack_lost_wal_put_store(temp_dir.path(), &namespace_id),
+        move |operation: &OperationContext<'_>| {
+            if is_data_wal_put(operation, &wal_prefix) {
+                answer_lost.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            operation.key() == hint && answer_lost.load(std::sync::atomic::Ordering::SeqCst)
+        },
+        InjectedError::PermissionDenied("hint read refused".to_owned()),
+    );
+    store.fail_all();
+
+    let unresolved = CommitCandidate::new(commit_request(
+        "unresolved",
+        FilesystemOperation::CreateDirectory {
+            path: AbsolutePath::parse("/unresolved").expect("path"),
+            parents: false,
+        },
+    ));
+    let mut results = namespace_engine(&store, &namespace_id, &context)
+        .publish_namespace_commits_batch(vec![settled(), unresolved])
         .await
-        .expect("load head");
-    assert_eq!(head.seq, ChangeSeq(1));
+        .expect("publish");
+
+    let unresolved = results.pop().expect("second result");
+    assert_eq!(
+        unresolved
+            .expect_err("the lost answer stays unknown")
+            .code(),
+        ErrorCode::CommitOutcomeUnknown
+    );
+    let replayed = results
+        .pop()
+        .expect("first result")
+        .expect("a settled replay is not replaced by the failed retry");
+    assert_eq!(replayed.committed_seq, first.committed_seq);
 }
 
 #[tokio::test]

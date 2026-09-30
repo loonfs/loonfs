@@ -5,7 +5,7 @@ use crate::commit_engine::NamespaceCommitEngine;
 use crate::context::MutationContext;
 use crate::path::read::load_current_metadata_view;
 use crate::test_support::ops::create;
-use crate::time::StdMonotonicTimer;
+use crate::time::{Deadline, StdMonotonicTimer};
 use crate::wal::tests::publish;
 use loonfs_api::{AttributeInclusion, ErrorCode, ManifestNo, NamespaceId, WriterId};
 use loonfs_objectstore::{
@@ -270,11 +270,12 @@ async fn a_pending_hint_cannot_name_a_manifest_collected_after_its_replacement()
     let known = super::control::load_hint(&store, &namespace_id)
         .await
         .expect("initial hint");
+    let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
     let mut engine = NamespaceCommitEngine::new(namespace_id.clone());
     publish(&mut engine, &store, "seed").await.expect("seed");
     store.block_next();
     let (hint_result, ()) = futures::join!(
-        super::control::raise_hint(&store, &namespace_id, ManifestNo(2), Some(known)),
+        super::control::raise_hint(&store, &namespace_id, ManifestNo(2), Some(known), &deadline),
         async {
             store.wait_until_blocked().await;
             crate::checkpoint::flush_wal(store.inner(), &namespace_id)
@@ -301,7 +302,7 @@ async fn a_pending_hint_cannot_name_a_manifest_collected_after_its_replacement()
     load_current_metadata_view(&store, &namespace_id)
         .await
         .expect("read committed state");
-    super::control::raise_hint(&store, &namespace_id, ManifestNo(1), None)
+    super::control::raise_hint(&store, &namespace_id, ManifestNo(1), None, &deadline)
         .await
         .expect("refresh hint");
     let aged = MutationContext {

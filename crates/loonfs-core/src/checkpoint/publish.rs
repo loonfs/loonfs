@@ -242,12 +242,16 @@ async fn publish_manifest_from<S: ObjectStore + ?Sized>(
         }
         Err(error) => return Err(CoreError::store(&object_key, &error)),
     };
-    if matches!(outcome, ManifestPublicationOutcome::Published(_))
-        && deadline.elapsed_ms() <= crate::limits::METADATA_PUBLICATION_BUDGET_MS
-    {
+    if matches!(outcome, ManifestPublicationOutcome::Published(_)) {
         // Publication is already durable; a failed hint update cannot undo it.
-        if let Err(error) =
-            raise_hint(store, namespace_id, candidate.manifest().manifest_no, hint).await
+        if let Err(error) = raise_hint(
+            store,
+            namespace_id,
+            candidate.manifest().manifest_no,
+            hint,
+            deadline,
+        )
+        .await
         {
             tracing::warn!(namespace_id = namespace_id.as_str(), error = %error, "manifest discovery hint update failed");
         }
