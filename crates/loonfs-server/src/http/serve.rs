@@ -14,8 +14,8 @@ use loonfs::metrics::{JsonlObjectStoreMetricsRecorder, ObjectStoreMetricsRecorde
 use loonfs::{
     maintenance_hint_relay, FsMaintenance, FsReader, FsWriter, GarbageCollectionJob,
     MaintenanceHintObserver, MaintenanceRegistry, MaintenanceRunner, MetadataCompactionJob,
-    MetadataMaintenanceJob, SharedObjectStore, StoredMetadataBlockCache,
-    StoredMetadataBlockCacheCloseError, TraceMode, TraceStoreKind,
+    MetadataMaintenanceJob, MetadataMaintenanceOptions, SharedObjectStore,
+    StoredMetadataBlockCache, StoredMetadataBlockCacheCloseError, TraceMode, TraceStoreKind,
 };
 use loonfs_grep::{
     new_grep_block_cache, GrepGcJob, GrepMaintenanceJob, GrepService, GrepWorker,
@@ -214,8 +214,13 @@ pub async fn app(
         Arc::new(GrepService::new(grep_block_cache))
     });
     let jobs = MaintenanceRegistry::new();
-    jobs.register(Arc::new(MetadataMaintenanceJob::new(maintenance.clone())))
-        .map_err(maintenance_config_error)?;
+    jobs.register(Arc::new(
+        MetadataMaintenanceJob::new(maintenance.clone()).options(MetadataMaintenanceOptions {
+            idle_fold_after_ms: config.idle_fold_after_ms,
+            ..MetadataMaintenanceOptions::default()
+        }),
+    ))
+    .map_err(maintenance_config_error)?;
     jobs.register(Arc::new(MetadataCompactionJob::new(maintenance.clone())))
         .map_err(maintenance_config_error)?;
     jobs.register(Arc::new(GarbageCollectionJob::new(maintenance.clone())))
@@ -276,6 +281,7 @@ pub async fn app(
         inline_content: config.inline_content.resolve(),
         content_token_secret: config.content_token_secret.clone(),
         request_deadline_ms: config.request_deadline_ms,
+        idle_fold_after_ms: config.idle_fold_after_ms,
         store_kind: config.store.kind(),
         auth_policy: config
             .auth_token

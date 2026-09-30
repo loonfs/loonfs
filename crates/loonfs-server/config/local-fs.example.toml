@@ -75,6 +75,12 @@ writer_id = "loonfs-server-local"
 # at most this much at once. Defaults to 64 MiB.
 #max_merge_input_bytes = 67108864
 
+# How old a namespace's newest commit must be before maintenance folds a WAL
+# tail that is below the fold thresholds, in milliseconds. Scheduled
+# maintenance and explicit `metadata` requests use the same period. Zero turns
+# the rule off. Defaults to 900000 (15 minutes).
+#idle_fold_after_ms = 900000
+
 # Direct-put needs no configuration. It is offered only where the adapter can
 # presign a create-only PUT and report a durable checksum, and the endpoint is
 # a first-party AWS S3 or Cloudflare R2 domain, so it is unavailable on this

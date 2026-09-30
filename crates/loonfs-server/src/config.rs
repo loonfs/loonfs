@@ -246,6 +246,12 @@ pub struct ServerConfig {
     /// compaction that holds at most this much at once. Defaults to 64 MiB.
     #[serde(default = "default_max_merge_input_bytes")]
     pub max_merge_input_bytes: usize,
+    /// How old a WAL tail's newest commit must be before maintenance folds
+    /// a tail that is below the fold thresholds, in milliseconds. Scheduled
+    /// maintenance and explicit `metadata` requests use the same period.
+    /// Zero turns the rule off. Defaults to 15 minutes.
+    #[serde(default = "default_idle_fold_after_ms")]
+    pub idle_fold_after_ms: u64,
     /// Allows serving on a non-loopback address with `auth_token` unset.
     /// Off by default: exposing every endpoint unauthenticated is almost
     /// always a misconfiguration, so validation rejects it unless this is
@@ -339,6 +345,10 @@ fn default_max_concurrent_maintenance() -> usize {
 
 fn default_max_merge_input_bytes() -> usize {
     loonfs_api::wire::sst_blocks::DEFAULT_MAX_REORGANIZATION_INPUT_BYTES
+}
+
+fn default_idle_fold_after_ms() -> u64 {
+    loonfs::MetadataMaintenanceOptions::default().idle_fold_after_ms
 }
 
 /// The server's `[local_cache]` table: where the node-local cache of encoded
@@ -1514,6 +1524,30 @@ root = "/tmp/loonfs-server"
         );
         let error = load_server_config(&path).expect_err("zero grep bound must be rejected");
         assert_invalid_field(error, "grep");
+    }
+
+    #[test]
+    fn idle_fold_period_defaults_to_fifteen_minutes_and_accepts_zero() {
+        for (setting, expected) in [
+            ("", 900_000),
+            ("idle_fold_after_ms = 60000", 60_000),
+            ("idle_fold_after_ms = 0", 0),
+        ] {
+            let path = write_config(&format!(
+                r#"
+bind = "127.0.0.1:9400"
+auth_token = "dev-token"
+writer_id = "loonfs-server"
+{setting}
+
+[store]
+kind = "local-fs"
+root = "/tmp/loonfs-server"
+"#
+            ));
+            let config = load_server_config(&path).expect("valid config");
+            assert_eq!(config.idle_fold_after_ms, expected, "{setting:?}");
+        }
     }
 
     #[test]

@@ -10,6 +10,7 @@ use axum::extract::State;
 use axum::Json;
 use loonfs::{
     CheckpointPageCursor, CreateNamespaceOptions, CreateSnapshotOptions, DeleteNamespaceOptions,
+    MetadataMaintenanceOptions,
 };
 #[cfg(feature = "openapi")]
 use loonfs_api::ApiError;
@@ -868,6 +869,19 @@ pub(super) async fn run_maintenance(
         return Ok(Json(RunMaintenanceResponse::RecoverAdministrator(
             recovered,
         )));
+    }
+    if let RunMaintenanceRequest::Metadata(request) = request {
+        let options = MetadataMaintenanceOptions {
+            idle_fold_after_ms: state.options.idle_fold_after_ms,
+            ..MetadataMaintenanceOptions::from_request(request)
+                .map_err(ApiResponseError::for_namespace(&namespace_id))?
+        };
+        return state
+            .maintenance
+            .maintain_metadata(&namespace_id, options)
+            .await
+            .map(|metadata| Json(RunMaintenanceResponse::Metadata(metadata)))
+            .map_err(ApiResponseError::for_namespace(&namespace_id));
     }
     let result = state
         .maintenance
