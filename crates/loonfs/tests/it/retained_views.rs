@@ -2,11 +2,11 @@
 
 use crate::common::*;
 use loonfs::{
-    current_time_ms, CreateDirectoryOptions, CreateNamespaceOptions, DeleteOptions,
-    DestinationBehavior, ForkNamespaceOptions, GcConfig, InlineContentOptions, LoonFs,
-    MetadataCompactionPolicy, MetadataMaintenanceOptions, MoveOptions, PutFileOptions,
-    ReorganizeStepOutcome, UndeleteOptions, UpdateAccessOptions, UpdateAttributesOptions,
-    WalFlushStepOutcome, GC_DEFAULT_GRACE_WINDOW_MS, UNREFERENCED_SEGMENT_MIN_AGE_MS,
+    current_time_ms, CompactionStepOutcome, CreateDirectoryOptions, CreateNamespaceOptions,
+    DeleteOptions, DestinationBehavior, ForkNamespaceOptions, GcConfig, InlineContentOptions,
+    LoonFs, MetadataCompactionPolicy, MetadataMaintenanceOptions, MoveOptions, PutFileOptions,
+    UndeleteOptions, UpdateAccessOptions, UpdateAttributesOptions, WalFoldStepOutcome,
+    GC_DEFAULT_GRACE_WINDOW_MS, UNREFERENCED_SEGMENT_MIN_AGE_MS,
 };
 use loonfs_api::wire::manifest::{MetadataRow, MetadataRowFamily, RunTier};
 use loonfs_api::wire::sst_blocks::{decode_data_block, decode_index_block};
@@ -211,8 +211,8 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
                     .await
                     .expect("fold WAL");
                 assert_eq!(
-                    upkeep(&step).wal_flush,
-                    WalFlushStepOutcome::Flushed {
+                    upkeep(&step).wal_fold,
+                    WalFoldStepOutcome::Folded {
                         manifest_head_seq: head_seq,
                     }
                 );
@@ -267,11 +267,11 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
                         )
                         .await
                         .expect("rebuild metadata after retention");
-                    if step.reorganize == (ReorganizeStepOutcome::NotNeeded {}) {
+                    if step.compaction == (CompactionStepOutcome::NotNeeded {}) {
                         finished = true;
                         break;
                     }
-                    assert_eq!(step.reorganize, ReorganizeStepOutcome::UnitPublished {});
+                    assert_eq!(step.compaction, CompactionStepOutcome::UnitPublished {});
                     rebuilt = true;
                 }
                 assert!(rebuilt && finished, "metadata must rebuild and finish");
@@ -315,7 +315,7 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
                 )
                 .await
                 .expect("collect aged objects");
-                assert!(collected.deleted.wal_segments > 0, "{collected:?}");
+                assert!(collected.deleted.wal_objects > 0, "{collected:?}");
                 assert!(collected.deleted.metadata_segments > 0, "{collected:?}");
                 assert!(collected.deleted.manifests > 0, "{collected:?}");
             }

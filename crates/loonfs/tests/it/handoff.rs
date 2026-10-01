@@ -201,7 +201,7 @@ async fn a_cold_node_reconstructs_current_state_during_active_writes() {
         .expect("open namespace");
     let fold_threshold = usize::try_from(
         MetadataMaintenanceOptions::default()
-            .max_wal_tail_segments
+            .max_wal_tail_objects
             .get(),
     )
     .expect("fold threshold fits usize");

@@ -5,9 +5,9 @@ use loonfs_api::v0::{
     StoreProbeResponse,
 };
 use loonfs_api::{
-    ChangeSeq, Checkpoint, DeleteCheckpointResponse, DeleteNamespaceResponse,
-    ListCheckpointsResponse, MetadataCompactionOutcome, NamespaceId, NamespaceMetadata,
-    ReorganizeStepOutcome, RunMaintenanceResponse,
+    ChangeSeq, Checkpoint, CompactionStepOutcome, DeleteCheckpointResponse,
+    DeleteNamespaceResponse, ListCheckpointsResponse, MetadataCompactionOutcome, NamespaceId,
+    NamespaceMetadata, RunMaintenanceResponse,
 };
 
 pub(super) fn human_default_namespace(profile: &str, namespace: &str) -> String {
@@ -151,16 +151,16 @@ pub(super) fn human_maintenance_ran(ran: &MaintenanceRan) -> String {
         RunMaintenanceResponse::Metadata(metadata) => format!(
             "metadata maintenance for {}: {}; {}",
             metadata.namespace_id,
-            wal_flush_summary(&metadata.wal_flush),
-            match metadata.reorganize {
-                ReorganizeStepOutcome::NotNeeded {} => "reorganize not needed",
-                ReorganizeStepOutcome::UnitPublished {} => "reorganized one family group",
-                ReorganizeStepOutcome::CompactionRequired {} => {
+            wal_fold_summary(&metadata.wal_fold),
+            match metadata.compaction {
+                CompactionStepOutcome::NotNeeded {} => "compaction not needed",
+                CompactionStepOutcome::UnitPublished {} => "compacted one family group",
+                CompactionStepOutcome::MetadataCompactionRequired {} => {
                     "one family group needs the metadata_compaction job"
                 }
-                ReorganizeStepOutcome::Fenced {} => "reorganize fenced by a newer runtime",
-                ReorganizeStepOutcome::ManifestAdvanced {} => {
-                    "another publisher advanced the manifest number, so reorganization published nothing"
+                CompactionStepOutcome::Fenced {} => "compaction fenced by a newer runtime",
+                CompactionStepOutcome::ManifestAdvanced {} => {
+                    "another publisher advanced the manifest number, so compaction published nothing"
                 }
             }
         ),

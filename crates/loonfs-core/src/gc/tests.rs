@@ -214,7 +214,7 @@ async fn gc_reaps_below_floor_wal_objects_after_the_grace_window() {
         .await
         .expect("gc pass");
 
-    assert_eq!(report.deleted.wal_segments, 4);
+    assert_eq!(report.deleted.wal_objects, 4);
     stat_root(&store, &namespace_id).await;
 }
 
@@ -326,7 +326,7 @@ async fn deleted_namespace_keeps_its_tombstone_and_segments() {
     let report = gc_namespace(&store, &namespace_id, &config(), &aged)
         .await
         .expect("gc pass");
-    assert!(report.deleted.wal_segments >= 1);
+    assert!(report.deleted.wal_objects >= 1);
     assert_eq!(report.deleted.metadata_segments, 0);
     assert!(report.deleted.manifests > 0);
     assert_eq!(report.deleted_checkpoints_by_owner.user, 1);
@@ -412,7 +412,7 @@ async fn deleted_namespace_keeps_its_tombstone_and_segments() {
     let report = gc_namespace(&store, &namespace_id, &config(), &again)
         .await
         .expect("second gc pass");
-    assert_eq!(report.deleted.wal_segments, 0);
+    assert_eq!(report.deleted.wal_objects, 0);
     assert_eq!(report.deleted.manifests, 0);
     assert_eq!(report.deleted.metadata_segments, 0);
     assert_eq!(report.deleted.content_objects, 0);
@@ -464,7 +464,7 @@ async fn fork_protected_bases_survive_source_deletion_until_the_target_dies() {
         store.head(&basis_key).await.expect("head basis").is_some(),
         "fork basis must survive while the clone lives"
     );
-    assert!(report.deleted.wal_segments > 0);
+    assert!(report.deleted.wal_objects > 0);
     let clone_view = load_current_metadata_view(&store, &clone)
         .await
         .expect("load clone view");
@@ -1153,7 +1153,7 @@ async fn gc_retains_everything_inside_the_grace_window() {
         .await
         .expect("gc pass");
 
-    assert_eq!(report.deleted.wal_segments, 0);
+    assert_eq!(report.deleted.wal_objects, 0);
     assert_eq!(report.deleted.metadata_segments, 0);
     assert_eq!(report.deleted.manifests, 0);
     assert!(report.retained.total() > 0);
@@ -1344,7 +1344,7 @@ async fn gc_never_deletes_the_live_replay_tail() {
         .await
         .expect("gc pass");
 
-    assert_eq!(report.deleted.wal_segments, 4);
+    assert_eq!(report.deleted.wal_objects, 4);
     // Latest reads replay the retained tail over the manifest basis.
     let view = load_current_metadata_view(&store, &namespace_id)
         .await
@@ -2124,7 +2124,7 @@ async fn gc_retains_everything_without_provider_timestamps() {
         .await
         .expect("gc pass");
 
-    assert_eq!(report.deleted.wal_segments, 0);
+    assert_eq!(report.deleted.wal_objects, 0);
     assert_eq!(report.deleted.metadata_segments, 0);
     assert_eq!(report.deleted.manifests, 0);
     assert_eq!(

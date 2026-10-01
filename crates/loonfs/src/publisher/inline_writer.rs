@@ -191,10 +191,10 @@ async fn check_terminal_reload_failure(include_replay: bool) {
 }
 
 #[tokio::test]
-async fn a_new_session_keeps_one_segment_budget_inline_until_it_observes_the_tail() {
+async fn a_new_session_keeps_one_wal_object_budget_inline_until_it_observes_the_tail() {
     let (_directory, store, writer, namespace, namespace_writer) =
         writer_with_policy(InlineContentOptions {
-            inline_content_segment_budget_bytes: 4,
+            inline_content_wal_object_budget_bytes: 4,
             inline_content_fold_at_bytes: 8,
             inline_content_tail_limit_bytes: 8,
             ..policy()
@@ -658,7 +658,7 @@ async fn retained_receipts_answer_retries_before_fallback_when_content_writes_fa
             .writer_id("inline-writer")
             .inline_content(InlineContentOptions {
                 inline_content_threshold_bytes: Some(8),
-                inline_content_segment_budget_bytes: 4,
+                inline_content_wal_object_budget_bytes: 4,
                 inline_content_fold_at_bytes: 5,
                 inline_content_tail_limit_bytes: 5,
             })
@@ -711,10 +711,10 @@ async fn retained_receipts_answer_retries_before_fallback_when_content_writes_fa
 }
 
 #[tokio::test]
-async fn full_queue_refuses_segment_fallback_without_store_writes() {
+async fn full_queue_refuses_overflow_staging_without_store_writes() {
     let (_directory, store, writer, namespace, namespace_writer) =
         writer_with_policy(InlineContentOptions {
-            inline_content_segment_budget_bytes: 4,
+            inline_content_wal_object_budget_bytes: 4,
             inline_content_threshold_bytes: Some(8),
             ..policy()
         })
@@ -740,14 +740,14 @@ async fn full_queue_refuses_segment_fallback_without_store_writes() {
 }
 
 #[tokio::test]
-async fn segment_fallback_keeps_bulk_commit_order_and_one_atomic_commit() {
+async fn overflow_staging_keeps_bulk_commit_order_and_one_atomic_commit() {
     const VALUES: usize = 128;
     const VALUE_BYTES: usize = 16 * 1024;
     const ADMISSION_BYTES: usize = 256 * 1024;
     let (_directory, store, writer, namespace, namespace_writer) =
         writer_with_policy_and_byte_limit(
             InlineContentOptions {
-                inline_content_segment_budget_bytes: VALUE_BYTES,
+                inline_content_wal_object_budget_bytes: VALUE_BYTES,
                 inline_content_threshold_bytes: Some(VALUE_BYTES),
                 ..policy()
             },
@@ -838,10 +838,10 @@ async fn segment_fallback_keeps_bulk_commit_order_and_one_atomic_commit() {
 }
 
 #[tokio::test]
-async fn queued_writes_share_tail_reservations_and_split_at_the_segment_budget() {
+async fn queued_writes_share_tail_reservations_and_split_at_the_wal_object_budget() {
     for limited_tail in [false, true] {
         let mut options = InlineContentOptions {
-            inline_content_segment_budget_bytes: 4,
+            inline_content_wal_object_budget_bytes: 4,
             ..policy()
         };
         if limited_tail {
@@ -1086,7 +1086,7 @@ async fn inline_bytes_make_automatic_and_explicit_folds_due_before_wal_object_co
             .await
             .expect("usage");
         assert_eq!(usage.wal_tail_inline_bytes, 4);
-        assert!(usage.wal_tail_segments < FOLD_AT_WAL_OBJECTS);
+        assert!(usage.wal_tail_objects < FOLD_AT_WAL_OBJECTS);
         let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id("maintenance"));
         let options = MetadataMaintenanceOptions {
             inline_content_fold_at_bytes: NonZeroUsize::new(4).expect("threshold"),
@@ -1116,7 +1116,7 @@ async fn inline_bytes_make_automatic_and_explicit_folds_due_before_wal_object_co
             .maintain_metadata(&namespace, options.clone())
             .await
             .expect("maintenance without a writer");
-        assert_eq!(step.wal_flush, crate::WalFlushStepOutcome::NotNeeded);
+        assert_eq!(step.wal_fold, crate::WalFoldStepOutcome::NotNeeded);
         assert_eq!(
             family_requests(&store, DurableObjectFamily::WalObject),
             14,
@@ -1128,8 +1128,8 @@ async fn inline_bytes_make_automatic_and_explicit_folds_due_before_wal_object_co
                 .await
                 .expect("explicit fold");
             assert!(matches!(
-                step.wal_flush,
-                crate::WalFlushStepOutcome::Flushed { .. }
+                step.wal_fold,
+                crate::WalFoldStepOutcome::Folded { .. }
             ));
             // The fold does not lower the writer's count; with nothing left
             // unfolded, the next pass does not consult it.
@@ -1137,7 +1137,7 @@ async fn inline_bytes_make_automatic_and_explicit_folds_due_before_wal_object_co
                 .maintain_metadata(&namespace, options)
                 .await
                 .expect("pass after the fold");
-            assert_eq!(again.wal_flush, crate::WalFlushStepOutcome::NotNeeded);
+            assert_eq!(again.wal_fold, crate::WalFoldStepOutcome::NotNeeded);
         } else if mode == "scheduled" {
             let jobs = crate::MaintenanceRegistry::new();
             jobs.register(Arc::new(
@@ -1151,7 +1151,7 @@ async fn inline_bytes_make_automatic_and_explicit_folds_due_before_wal_object_co
                 crate::NamespacePublication {
                     namespace_id: namespace.clone(),
                     committed_through_seq: Some(usage.head_seq),
-                    wal_tail_segments: usage.wal_tail_segments,
+                    wal_tail_objects: usage.wal_tail_objects,
                     wal_tail_inline_bytes: usage.wal_tail_inline_bytes,
                 },
             ));
@@ -1163,7 +1163,7 @@ async fn inline_bytes_make_automatic_and_explicit_folds_due_before_wal_object_co
                 loonfs_core::cache::load_namespace_wal_tail_usage(store.as_ref(), &namespace)
                     .await
                     .expect("usage after scheduled fold");
-            assert_eq!(usage.wal_tail_segments, 0);
+            assert_eq!(usage.wal_tail_objects, 0);
             assert_eq!(usage.wal_tail_inline_bytes, 0);
             runner.shutdown().await.expect("runner shutdown");
         }
@@ -1175,7 +1175,7 @@ async fn inline_bytes_make_automatic_and_explicit_folds_due_before_wal_object_co
         let usage = loonfs_core::cache::load_namespace_wal_tail_usage(store.as_ref(), &namespace)
             .await
             .expect("usage after fold");
-        assert_eq!(usage.wal_tail_segments, 0);
+        assert_eq!(usage.wal_tail_objects, 0);
         assert_eq!(usage.wal_tail_inline_bytes, 0);
         assert_eq!(
             namespace_reader
@@ -1205,7 +1205,7 @@ async fn invalid_inline_policy_is_rejected_before_store_access() {
             ..policy()
         },
         InlineContentOptions {
-            inline_content_segment_budget_bytes: MAX_WAL_OBJECT_INLINE_CONTENT_BYTES + 1,
+            inline_content_wal_object_budget_bytes: MAX_WAL_OBJECT_INLINE_CONTENT_BYTES + 1,
             ..policy()
         },
         InlineContentOptions {
@@ -1213,7 +1213,7 @@ async fn invalid_inline_policy_is_rejected_before_store_access() {
             ..policy()
         },
         InlineContentOptions {
-            inline_content_segment_budget_bytes: 0,
+            inline_content_wal_object_budget_bytes: 0,
             ..policy()
         },
         InlineContentOptions {

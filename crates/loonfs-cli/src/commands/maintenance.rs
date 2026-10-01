@@ -47,7 +47,7 @@ pub(crate) async fn run_maintenance_command(
         MaintenanceCommand::Metadata(args) => {
             run_maintenance_metadata(kind, config_path, args).await
         }
-        MaintenanceCommand::Flush(args) => run_maintenance_flush(kind, config_path, args).await,
+        MaintenanceCommand::Fold(args) => run_maintenance_fold(kind, config_path, args).await,
         MaintenanceCommand::Compact(args) => run_maintenance_compact(kind, config_path, args).await,
         MaintenanceCommand::Checkpoint { command } => match command {
             MaintenanceCheckpointCommand::Create(args) => {
@@ -119,7 +119,7 @@ async fn run_maintenance_metadata(
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, config_path, &args.target).await?;
     let request = RunMaintenanceRequest::Metadata(MetadataMaintenanceRequest {
-        max_wal_tail_segments: args.max_wal_tail_segments,
+        max_wal_tail_objects: args.max_wal_tail_objects,
     });
     let response = context
         .target
@@ -233,10 +233,10 @@ async fn run_maintenance_checkpoint_delete(
 
 /// One metadata-upkeep pass at a threshold of one WAL object.
 ///
-/// The fold an operator asks for explicitly runs whatever the tail length,
-/// and the reorganization unit rides along: upkeep is one action, and the
-/// output reports both halves.
-async fn run_maintenance_flush(
+/// The fold an operator asks for explicitly runs whatever the tail length.
+/// The bounded compaction step runs in the same pass, and the output reports
+/// both.
+async fn run_maintenance_fold(
     kind: CommandKind,
     config_path: &Path,
     args: MaintenanceNamespaceArgs,
@@ -248,7 +248,7 @@ async fn run_maintenance_flush(
         .run_maintenance(
             context.namespace(),
             &RunMaintenanceRequest::Metadata(MetadataMaintenanceRequest {
-                max_wal_tail_segments: Some(1),
+                max_wal_tail_objects: Some(1),
             }),
             context.actor_id.as_ref(),
         )

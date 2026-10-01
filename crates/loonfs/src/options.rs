@@ -4,7 +4,7 @@
 //! [`loonfs_api::options`]. Runtime-only options remain in this module.
 //!
 //! Results are the `loonfs-api` wire shapes themselves, the same way handles
-//! already return `Commit` and `FlushWalResponse`.
+//! already return `Commit` and `FoldWalResponse`.
 
 use crate::{EffectiveLimit, GcConfig, MetadataCompactionPolicy, Result, RuntimeError};
 use loonfs_api::{CreateCheckpointRequest, GcRequest, MetadataMaintenanceRequest};
@@ -22,7 +22,7 @@ pub use loonfs_api::options::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataMaintenanceOptions {
     /// Fold the visible WAL tail once it reaches this many WAL objects.
-    pub max_wal_tail_segments: NonZeroU64,
+    pub max_wal_tail_objects: NonZeroU64,
     /// Fold once unfolded inline bytes reach this size; defaults to 2 MiB.
     /// Applies only when the runtime's publisher knows the count.
     pub inline_content_fold_at_bytes: NonZeroUsize,
@@ -37,7 +37,7 @@ pub struct MetadataMaintenanceOptions {
 impl Default for MetadataMaintenanceOptions {
     fn default() -> Self {
         Self {
-            max_wal_tail_segments: const { NonZeroU64::new(FOLD_AT_WAL_OBJECTS).unwrap() },
+            max_wal_tail_objects: const { NonZeroU64::new(FOLD_AT_WAL_OBJECTS).unwrap() },
             inline_content_fold_at_bytes: NonZeroUsize::new(
                 crate::InlineContentOptions::default().inline_content_fold_at_bytes,
             )
@@ -51,34 +51,34 @@ impl Default for MetadataMaintenanceOptions {
 impl MetadataMaintenanceOptions {
     /// Resolves a wire-level metadata maintenance request.
     pub fn from_request(request: MetadataMaintenanceRequest) -> Result<Self> {
-        let Some(threshold) = request.max_wal_tail_segments else {
+        let Some(threshold) = request.max_wal_tail_objects else {
             return Ok(Self::default());
         };
-        let Some(max_wal_tail_segments) = NonZeroU64::new(threshold) else {
+        let Some(max_wal_tail_objects) = NonZeroU64::new(threshold) else {
             return Err(RuntimeError::InvalidRequest {
-                message: "max_wal_tail_segments must be greater than zero".to_owned(),
-                param: "/max_wal_tail_segments",
+                message: "max_wal_tail_objects must be greater than zero".to_owned(),
+                param: "/max_wal_tail_objects",
             });
         };
         let reject_writes_at_wal_objects = MAX_UNFOLDED_WAL_OBJECTS;
-        if max_wal_tail_segments.get() > reject_writes_at_wal_objects {
+        if max_wal_tail_objects.get() > reject_writes_at_wal_objects {
             return Err(RuntimeError::InvalidRequest {
                 message: format!(
-                    "max_wal_tail_segments may not exceed the write-rejection threshold \
+                    "max_wal_tail_objects may not exceed the write-rejection threshold \
                  ({reject_writes_at_wal_objects})"
                 ),
-                param: "/max_wal_tail_segments",
+                param: "/max_wal_tail_objects",
             });
         }
         Ok(Self {
-            max_wal_tail_segments,
+            max_wal_tail_objects,
             ..Self::default()
         })
     }
 
     /// Returns whether the WAL tail has reached the fold threshold.
-    pub fn fold_is_due(&self, wal_tail_segments: u64, wal_tail_inline_bytes: usize) -> bool {
-        wal_tail_segments >= self.max_wal_tail_segments.get()
+    pub fn fold_is_due(&self, wal_tail_objects: u64, wal_tail_inline_bytes: usize) -> bool {
+        wal_tail_objects >= self.max_wal_tail_objects.get()
             || wal_tail_inline_bytes >= self.inline_content_fold_at_bytes.get()
     }
 
@@ -210,7 +210,7 @@ mod tests {
     fn a_useless_fold_threshold_is_rejected() {
         for threshold in [0, MAX_UNFOLDED_WAL_OBJECTS + 1] {
             let error = MetadataMaintenanceOptions::from_request(MetadataMaintenanceRequest {
-                max_wal_tail_segments: Some(threshold),
+                max_wal_tail_objects: Some(threshold),
             })
             .expect_err("the threshold is out of range");
             assert_eq!(error.code(), crate::ErrorCode::InvalidRequest);

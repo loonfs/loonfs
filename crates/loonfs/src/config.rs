@@ -75,14 +75,14 @@ pub struct InlineContentOptions {
     /// Maximum size prepared inline; defaults to 64 KiB. `None` disables inline preparation.
     pub inline_content_threshold_bytes: Option<usize>,
     /// Maximum inline bytes in one WAL object; defaults to 1 MiB.
-    pub inline_content_segment_budget_bytes: usize,
+    pub inline_content_wal_object_budget_bytes: usize,
     /// Unfolded inline bytes that make a fold due; defaults to 2 MiB.
     pub inline_content_fold_at_bytes: usize,
     /// Limit on unfolded and admitted inline bytes; defaults to 32 MiB.
     /// Projection invalidation keeps the last count this session observed, and
     /// that count includes a put whose outcome is unknown. A session that has
-    /// not observed the tail admits at most the segment budget. The tail can
-    /// exceed the limit by at most the segment budget: for a new session's
+    /// not observed the tail admits at most the WAL object budget. The tail can
+    /// exceed the limit by at most the WAL object budget: for a new session's
     /// first inline commit, and after a put whose outcome is unknown.
     /// `MAX_UNFOLDED_WAL_OBJECTS` stops new commits regardless of this limit.
     pub inline_content_tail_limit_bytes: usize,
@@ -92,7 +92,7 @@ impl Default for InlineContentOptions {
     fn default() -> Self {
         Self {
             inline_content_threshold_bytes: Some(64 * 1024),
-            inline_content_segment_budget_bytes: 1024 * 1024,
+            inline_content_wal_object_budget_bytes: 1024 * 1024,
             inline_content_fold_at_bytes: 2 * 1024 * 1024,
             inline_content_tail_limit_bytes: 32 * 1024 * 1024,
         }
@@ -112,11 +112,11 @@ impl InlineContentOptions {
                 "`inline_content_threshold_bytes` must not exceed {MAX_WAL_INLINE_CONTENT_BYTES}"
             )));
         }
-        if self.inline_content_segment_budget_bytes == 0
-            || self.inline_content_segment_budget_bytes > MAX_WAL_OBJECT_INLINE_CONTENT_BYTES
+        if self.inline_content_wal_object_budget_bytes == 0
+            || self.inline_content_wal_object_budget_bytes > MAX_WAL_OBJECT_INLINE_CONTENT_BYTES
         {
             return Err(crate::RuntimeError::Config(format!(
-                "`inline_content_segment_budget_bytes` must be between 1 and {MAX_WAL_OBJECT_INLINE_CONTENT_BYTES}"
+                "`inline_content_wal_object_budget_bytes` must be between 1 and {MAX_WAL_OBJECT_INLINE_CONTENT_BYTES}"
             )));
         }
         if self.inline_content_fold_at_bytes == 0 || self.inline_content_tail_limit_bytes == 0 {

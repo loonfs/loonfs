@@ -199,7 +199,7 @@ async fn a_fold_puts_segments_in_a_bounded_wave_before_publishing_in_builder_ord
         )
         .expect("fold");
         assert!(
-            matches!(result, TryFoldWal::Settled(basis) if basis.outcome == FlushWalOutcome::Published)
+            matches!(result, TryFoldWal::Settled(basis) if basis.outcome == FoldWalOutcome::Published)
         );
         let published = load_current_manifest(&store, &namespace_id)
             .await

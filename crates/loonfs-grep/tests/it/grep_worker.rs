@@ -117,7 +117,7 @@ async fn fold_wal_and_advance_retention(
         .maintain_metadata(
             namespace_id,
             MetadataMaintenanceOptions {
-                max_wal_tail_segments: std::num::NonZeroU64::MIN,
+                max_wal_tail_objects: std::num::NonZeroU64::MIN,
                 ..Default::default()
             },
         )

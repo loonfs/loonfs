@@ -356,7 +356,7 @@ async fn http_maintenance_gc_is_explicit_and_retains_young_namespaces() {
 
     // Objects inside the grace window remain readable.
     let report = post_gc(&server_url, namespace.as_str()).expect("gc pass");
-    assert_eq!(report.deleted.wal_segments, 0);
+    assert_eq!(report.deleted.wal_objects, 0);
     assert_eq!(report.deleted.metadata_segments, 0);
     assert_eq!(report.deleted.manifests, 0);
     assert_eq!(
@@ -406,29 +406,29 @@ async fn http_metadata_run_reports_outcomes_not_errors() {
 
     let idle = post_metadata_run(&server_url, namespace.as_str()).expect("idle step");
     assert_eq!(
-        upkeep(&idle).wal_flush,
-        loonfs_api::WalFlushStepOutcome::NotNeeded
+        upkeep(&idle).wal_fold,
+        loonfs_api::WalFoldStepOutcome::NotNeeded
     );
 
     let forced = client
         .run_maintenance(
             &namespace,
             &loonfs_api::RunMaintenanceRequest::Metadata(loonfs_api::MetadataMaintenanceRequest {
-                max_wal_tail_segments: Some(1),
+                max_wal_tail_objects: Some(1),
             }),
             None,
         )
         .await
         .expect("forced step");
     assert_eq!(
-        upkeep(&forced).wal_flush,
-        loonfs_api::WalFlushStepOutcome::Flushed {
+        upkeep(&forced).wal_fold,
+        loonfs_api::WalFoldStepOutcome::Folded {
             manifest_head_seq: ChangeSeq(1),
         }
     );
     assert_eq!(
-        upkeep(&forced).reorganize,
-        loonfs_api::ReorganizeStepOutcome::NotNeeded {}
+        upkeep(&forced).compaction,
+        loonfs_api::CompactionStepOutcome::NotNeeded {}
     );
     let retention = client
         .run_maintenance(
@@ -440,7 +440,7 @@ async fn http_metadata_run_reports_outcomes_not_errors() {
         .expect("advance retention");
     assert_eq!(retention_floor(retention), ChangeSeq(1));
     let gc = post_gc(&server_url, namespace.as_str()).expect("GC run");
-    assert_eq!(gc.deleted.wal_segments, 0);
+    assert_eq!(gc.deleted.wal_objects, 0);
 
     let bytes = client
         .get_file_bytes(&target, &Default::default())
@@ -464,10 +464,10 @@ impl loonfs::WallClock for FixedWallClock {
 async fn http_metadata_run_folds_an_idle_tail_unless_the_server_turns_the_idle_rule_off() {
     let default_idle_ms = loonfs::MetadataMaintenanceOptions::default().idle_fold_after_ms;
     for (idle_fold_after_ms, expected) in [
-        (0, loonfs_api::WalFlushStepOutcome::NotNeeded),
+        (0, loonfs_api::WalFoldStepOutcome::NotNeeded),
         (
             default_idle_ms,
-            loonfs_api::WalFlushStepOutcome::Flushed {
+            loonfs_api::WalFoldStepOutcome::Folded {
                 manifest_head_seq: ChangeSeq(1),
             },
         ),
@@ -523,7 +523,7 @@ async fn http_metadata_run_folds_an_idle_tail_unless_the_server_turns_the_idle_r
             .await
             .expect("metadata run");
         assert_eq!(
-            upkeep(&response).wal_flush,
+            upkeep(&response).wal_fold,
             expected,
             "idle_fold_after_ms = {idle_fold_after_ms}"
         );

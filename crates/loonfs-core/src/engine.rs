@@ -41,7 +41,7 @@ use loonfs_api::EffectiveLimit;
 use loonfs_api::{
     AdvanceRetentionResponse, ChangeSeq, Checkpoint, ChecksumAlgorithm, CommitId, ContentRef,
     DeleteCheckpointResponse, DeleteNamespaceResponse, DeleteSnapshotResponse, DirectoryPageCursor,
-    FileBytes, FileRevision, FileRevisionsPageCursor, FlushWalResponse, InodeId, NamespaceAccess,
+    FileBytes, FileRevision, FileRevisionsPageCursor, FoldWalResponse, InodeId, NamespaceAccess,
     NamespaceId, NamespaceMetadata, Page, PageRequest, PathEntry, PinId, RevisionNo, Subject,
     TrashEntry, TrashPageCursor, UploadId, WriterId, ROOT_INODE_ID,
 };
@@ -1288,7 +1288,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// WAL tail into a new manifest, creating no
     /// pin. Superseded manifests become garbage-collection
     /// candidates once nothing pins them.
-    pub async fn fold_wal(&self) -> Result<FlushWalResponse> {
+    pub async fn fold_wal(&self) -> Result<FoldWalResponse> {
         self.mutation_context()?;
         crate::manifest::fold_wal_with_deadline(
             &self.store,

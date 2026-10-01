@@ -48,7 +48,7 @@ fn namespace_id(value: &str) -> NamespaceId {
 
 fn checkpoint_threshold() -> u64 {
     MetadataMaintenanceOptions::default()
-        .max_wal_tail_segments
+        .max_wal_tail_objects
         .get()
 }
 
@@ -166,9 +166,9 @@ async fn a_drain_settles_every_assigned_key_and_does_the_work_it_finds() {
             .await
             .expect("diagnostics after the drain");
         assert!(
-            status.wal_tail_segments < checkpoint_threshold(),
+            status.wal_tail_objects < checkpoint_threshold(),
             "`{namespace_id}` kept a WAL tail of {} objects past the checkpoint threshold",
-            status.wal_tail_segments
+            status.wal_tail_objects
         );
         assert!(status.current_manifest_no.is_some(), "{namespace_id}");
     }
@@ -283,9 +283,9 @@ async fn hosting_an_assignment_maintains_a_cold_namespace_until_the_signal() {
         .await
         .expect("diagnostics after hosting");
     assert!(
-        status.wal_tail_segments < checkpoint_threshold(),
+        status.wal_tail_objects < checkpoint_threshold(),
         "the hosted runner left a WAL tail of {} objects",
-        status.wal_tail_segments
+        status.wal_tail_objects
     );
 }
 

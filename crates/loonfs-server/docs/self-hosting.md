@@ -305,7 +305,7 @@ namespace.
 | `loonfs.maintenance.reconcile_probes` | Counter | A sweep probes a key, at most 64 per sweep. |
 | `loonfs.maintenance.reconcile_re_admitted` | Counter | A probe finds work and queues its key. |
 | `loonfs.maintenance.step_failures` | Counter, `job` label | A step fails and schedules one backoff retry. |
-| `loonfs.object_store.operations` | Counter, `operation`, `result`, and `key_class` labels | A store call finishes. `key_class` is `content`, `wal_segment`, `namespace_manifest` (manifests and the hint), `metadata_segment`, `gc_control` (pins), `metadata` (upload sessions), or `unknown`. |
+| `loonfs.object_store.operations` | Counter, `operation`, `result`, and `key_class` labels | A store call finishes. `key_class` is `content`, `wal_object`, `namespace_manifest` (manifests and the hint), `metadata_segment`, `gc_control` (pins), `metadata` (upload sessions), or `unknown`. |
 
 ## Logs
 
@@ -499,15 +499,15 @@ and `InlineContentOptions`. These settings do not change reader format limits.
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `inline_content_threshold_bytes` | 64 KiB | Prepares content at or under this size inline; `None` in embedded options or `false` in server TOML disables inline writes. |
-| `inline_content_segment_budget_bytes` | 1 MiB | Limits inline bytes in one WAL object and stages overflow in operation order. |
+| `inline_content_wal_object_budget_bytes` | 1 MiB | Limits inline bytes in one WAL object and stages overflow in operation order. |
 | `inline_content_fold_at_bytes` | 2 MiB | Makes an automatic fold due when unfolded inline bytes reach this size. |
 | `inline_content_tail_limit_bytes` | 32 MiB | Stages new content when unfolded and admitted inline bytes would exceed this size. |
 
 The tail limit uses the loaded projection, or the last tail size this session
 observed after that projection is invalidated. That size counts a WAL put whose
 outcome is unknown as landed. A session that has not observed the tail admits
-at most the segment budget, and its first publish observes the tail. The tail
-can exceed the limit by at most the segment budget: for a new session's first
+at most the WAL object budget, and its first publish observes the tail. The tail
+can exceed the limit by at most the WAL object budget: for a new session's first
 inline commit, and after a put whose outcome is unknown. Another writer can make
 the remembered size stale until this session's next publish. The
 `MAX_UNFOLDED_WAL_OBJECTS` write stop refuses new commits regardless of the
@@ -518,8 +518,8 @@ result without uploading the file again, as long as the commit receipt is still
 available. This also works after a restart or on another server. Changed bytes
 or a different subject return `commit_id_reuse_conflict`.
 
-The threshold cannot exceed 256 KiB and the segment budget cannot exceed 4 MiB.
-The segment budget, fold trigger, and tail limit must be positive, and the fold
+The threshold cannot exceed 256 KiB and the WAL object budget cannot exceed 4 MiB.
+The WAL object budget, fold trigger, and tail limit must be positive, and the fold
 trigger cannot exceed the tail limit. Inline payloads count toward the existing
 publication byte limits. Explicit metadata maintenance uses
 `MetadataMaintenanceOptions::inline_content_fold_at_bytes`, also 2 MiB by default,
@@ -554,11 +554,10 @@ requests, and finishing shutdown work. The default shutdown deadline is
 600 seconds. Docker and the Helm chart should allow 660 seconds before
 sending `SIGKILL`.
 
-Before an upgrade, fold each namespace with the current version. The `flush`
-command runs the fold:
+Before an upgrade, fold each namespace with the current version:
 
 ```bash
-loonfs maintenance flush --namespace <namespace>
+loonfs maintenance fold --namespace <namespace>
 ```
 
 For Docker, pull the new version and replace the container with the same
@@ -604,7 +603,8 @@ not rule out later writes, so keep these namespaces assigned to the loop.
 See the API spec's [namespace deletion section](../../../docs/specs/api.md#63-delete-v0namespacesns)
 for the blockers.
 
-`compaction_required` asks the registered `metadata_compaction` job to run.
+A `metadata_compaction_required` compaction outcome asks the registered
+`metadata_compaction` job to run.
 The self-hosted server schedules that follow-up automatically.
 
 A namespace that stops writing below the fold thresholds is folded once its
@@ -620,7 +620,7 @@ segment per metadata family, one content object per inline file, the manifest,
 and the hint. The server schedules only namespaces it has written since it
 started. A namespace that was written before a restart and has only been read
 since keeps its tail until its next write, or until
-`loonfs maintenance flush --namespace <id>` folds it. Set
+`loonfs maintenance fold --namespace <id>` folds it. Set
 `idle_fold_after_ms = 0` to turn the rule off. An explicit `metadata`
 maintenance request uses the same period as the scheduled pass.
 `loonfs maintenance loop` does not read the server config and always uses

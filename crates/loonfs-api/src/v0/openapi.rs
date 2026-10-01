@@ -26,11 +26,11 @@ pub fn register(schemas: &mut BTreeMap<String, RefOr<Schema>>) {
     named.tagged::<NamespaceAccess>("kind");
     named.tagged::<NamespaceAccessMode>("kind");
     named.tagged::<ObjectTransferAccess>("kind");
-    named.tagged::<ReorganizeStepOutcome>("outcome");
+    named.tagged::<CompactionStepOutcome>("outcome");
     named.tagged::<RunMaintenanceRequest>("kind");
     named.tagged::<RunMaintenanceResponse>("kind");
     named.tagged::<CompleteUploadBody>("mode");
-    named.tagged::<WalFlushStepOutcome>("outcome");
+    named.tagged::<WalFoldStepOutcome>("outcome");
     named.composite::<PathEntry, PathEntryKind>("inode_kind");
     named.composite::<UploadSession, UploadSessionStatus>("status");
     named.composite::<GrepIndex, GrepIndexLifecycle>("status");

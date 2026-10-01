@@ -1005,7 +1005,7 @@ A maintenance run body names exactly one job with `kind`:
 
 | `kind` | Fields | Result |
 | --- | --- | --- |
-| `metadata` | Optional `max_wal_tail_segments` | `wal_flush` and `reorganize` outcomes |
+| `metadata` | Optional `max_wal_tail_objects` | `wal_fold` and `compaction` outcomes |
 | `metadata_compaction` | None | `compaction`, tagged by `outcome`; a published outcome includes the manifest number and row, byte, and segment counts |
 | `gc` | Optional `grace_window_ms` | The collection result |
 | `grep_gc` | None | `deleted_segments`, `deleted_other_objects`, `namespace_reaped`, and `retained_candidates` |
@@ -1023,31 +1023,34 @@ Races and supersessions are outcomes, not errors.
 
 A deleted namespace accepts only a run with `kind` set to `gc` or `grep_gc`; other jobs return `namespace_deleted`. Retirement follows [format section 9.5](format.md#95-retirement).
 
-`wal_flush.outcome` reports the WAL fold and has four values. `not_needed` means the WAL tail was below the threshold and had not gone idle (see the `metadata` options below). `flushed` means this step published the next current manifest. `already_published` means the current manifest already covered the captured WAL tail, so this step published no manifest. `retries_exhausted` means concurrent updates prevented every attempt from publishing; nothing was folded, and a later step can try again.
+`wal_fold.outcome` reports the WAL fold and has four values. `not_needed` means the WAL tail was below the threshold and had not gone idle (see the `metadata` options below). `folded` means this step published the next current manifest. `already_published` means the current manifest already covered the captured WAL tail, so this step published no manifest. `retries_exhausted` means concurrent updates prevented every attempt from publishing; nothing was folded, and a later step can try again.
 
-`reorganize.outcome` reports the compaction step and has five values.
-`not_needed` means no bounded merge is due. `unit_published` means this run
-published one bounded merge.
-`compaction_required` means a family group needs streaming compaction; run the
-`metadata_compaction` job. `manifest_advanced` means another publisher changed the
-current manifest first. Segments this run wrote remain unreferenced, and a
-later GC pass can delete them. `fenced` means a newer runtime holds the
-compactor epoch.
+In a `metadata` result, `compaction.outcome` reports the bounded compaction
+step and has five values. `not_needed` means no bounded merge is due.
+`unit_published` means this run published one bounded merge.
+`metadata_compaction_required` means a family group's window is too large
+for one bounded merge; run the `metadata_compaction` job, which compacts it
+by streaming. `manifest_advanced` means another publisher changed the current
+manifest first. Segments this run wrote remain unreferenced, and a later GC pass can
+delete them. `fenced` means a newer runtime holds the compactor epoch. This
+bounded step never runs a streaming compaction; only the `metadata_compaction`
+job does.
 
 A `metadata_compaction` run compacts one unit: a bounded merge when the
 selected window fits one step, or otherwise one streaming compaction of a
 family group. Repeat the run while it publishes to compact every eligible
 group.
 
-`compaction.outcome` has six values. `not_needed` means no family group has
-eligible input. `bounded_merge_published` means the planner selected and
-published a bounded merge. `published` reports the manifest number and row,
+In a `metadata_compaction` result, `compaction.outcome` has six values.
+`not_needed` means no family group has eligible input.
+`bounded_merge_published` means the planner selected and published a bounded
+merge. `published` reports the manifest number and row,
 byte, and segment counts. `cancelled` means the caller cancelled the job.
 `abandoned` means an input run changed, the elapsed-time bound was exceeded,
 or all publication attempts lost. `fenced` means another process advanced
 the manifest's compactor epoch. These last three outcomes publish no manifest.
 
-For `metadata`, `max_wal_tail_segments` overrides the fold threshold. Zero and values above the write-rejection threshold return `invalid_request`. A tail below the threshold is still folded once it goes idle: its newest commit is as old as the server's configured idle period, 15 minutes by default, on the server's clock ([format: maintenance policy](format.md#73-recovery-material-and-maintenance-policy)). A server can turn this rule off. Replay history is retained unless the request uses `kind: "retention"`. For `gc`, `grace_window_ms` overrides the grace window. A grace window below the derived safety floor returns `invalid_request`. Upload sessions keep their leases and completed content keeps its derived reclamation grace ([format: upload cleanup](format.md#116-upload-session-cleanup)).
+For `metadata`, `max_wal_tail_objects` overrides the fold threshold. Zero and values above the write-rejection threshold return `invalid_request`. A tail below the threshold is still folded once it goes idle: its newest commit is as old as the server's configured idle period, 15 minutes by default, on the server's clock ([format: maintenance policy](format.md#73-recovery-material-and-maintenance-policy)). A server can turn this rule off. Replay history is retained unless the request uses `kind: "retention"`. For `gc`, `grace_window_ms` overrides the grace window. A grace window below the derived safety floor returns `invalid_request`. Upload sessions keep their leases and completed content keeps its derived reclamation grace ([format: upload cleanup](format.md#116-upload-session-cleanup)).
 
 Responses contain counts for that call. Concurrent calls can overlap deletion
 attempts, so these counts are operational summaries. No collection state is
@@ -1197,7 +1200,7 @@ A GC response includes `next_reclamation_at_ms` when a deleted namespace is insi
 
 Every call reads the current manifest and uses one fixed clock. It keeps its live set in memory and writes no collection progress. Every family lists from the beginning and sweeps to the end. Collection roots follow [format section 11.2](format.md#112-reference-roots). Manifest read failures fail the call before sweeping.
 
-A GC response groups related counts. `deleted` contains `wal_segments`,
+A GC response groups related counts. `deleted` contains `wal_objects`,
 `metadata_segments`, `manifests`, `upload_sessions`, `content_objects`,
 and `retired_content_objects`. `deleted_checkpoints_by_owner` contains `user`, `snapshot`, and `fork` counts for pins deleted in the pass.
 Their sum is the total number of pins deleted. Each deletion
@@ -1671,7 +1674,7 @@ namespace state plus storage details used by maintenance:
 | `head_seq` | Current visible namespace sequence. |
 | `retention_floor_seq` | Oldest position a change feed can resume after. The feed returns changes above it. |
 | `current_manifest_no` | Current manifest number, present from namespace creation. |
-| `wal_tail_segments` | WAL tip minus the current manifest's folded number, including fences. |
+| `wal_tail_objects` | WAL tip minus the current manifest's folded number, including fences. |
 | `live_snapshots` | Number of snapshots that had not expired when diagnostics began. |
 | `live_checkpoints` | Number of user checkpoints, including expired records awaiting collection. |
 
@@ -1683,7 +1686,7 @@ namespace state plus storage details used by maintenance:
   "head_seq": 418,
   "retention_floor_seq": 120,
   "current_manifest_no": 410,
-  "wal_tail_segments": 3,
+  "wal_tail_objects": 3,
   "live_snapshots": 2,
   "live_checkpoints": 4
 }

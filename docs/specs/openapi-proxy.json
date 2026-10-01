@@ -593,7 +593,7 @@
       },
       "ContentRef": {
         "additionalProperties": false,
-        "description": "Identifies one piece of immutable file content.\n\nThe owner namespace and content id name the content object that holds the\nbytes. A reference is not proof that the object exists: content committed\ninline has no object until a flush writes it.",
+        "description": "Identifies one piece of immutable file content.\n\nThe owner namespace and content id name the content object that holds the\nbytes. A reference is not proof that the object exists: content committed\ninline has no object until a fold writes it.",
         "properties": {
           "checksum": {
             "$ref": "#/components/schemas/Checksum",

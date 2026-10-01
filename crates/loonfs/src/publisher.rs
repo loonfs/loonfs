@@ -1092,7 +1092,7 @@ impl NamespacePublisher {
                     && batch
                         .inline_content_bytes
                         .saturating_add(inline_content_bytes)
-                        <= self.inline_content.inline_content_segment_budget_bytes =>
+                        <= self.inline_content.inline_content_wal_object_budget_bytes =>
             {
                 batch.wal_record_bytes_upper_bound += wal_record_bytes_upper_bound;
                 batch.inline_content_bytes += inline_content_bytes;
@@ -1430,7 +1430,7 @@ impl NamespacePublisher {
                 .instruments()
                 .publisher_write_stop_refusal();
         }
-        let fold_start = if publish.wal_tail_segments >= FOLD_AT_WAL_OBJECTS
+        let fold_start = if publish.wal_tail_objects >= FOLD_AT_WAL_OBJECTS
             || publish.wal_tail_inline_bytes >= self.inline_content.inline_content_fold_at_bytes
             || write_stopped
         {
@@ -1519,7 +1519,7 @@ impl NamespacePublisher {
                 .as_ref()
                 .and_then(NamespaceCommitEngine::wal_fold_input);
             if input.as_ref().is_some_and(|input| {
-                input.wal_tail_segments < FOLD_AT_WAL_OBJECTS
+                input.wal_tail_objects < FOLD_AT_WAL_OBJECTS
                     && input.wal_tail_inline_bytes
                         < self.inline_content.inline_content_fold_at_bytes
             }) {

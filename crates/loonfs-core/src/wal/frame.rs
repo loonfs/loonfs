@@ -37,7 +37,7 @@ pub enum WalObjectError {
         actual: WriterEpoch,
     },
     #[error("WAL object summary does not match its records")]
-    SegmentSummaryMismatch,
+    SummaryMismatch,
 }
 
 #[derive(Debug, Clone)]

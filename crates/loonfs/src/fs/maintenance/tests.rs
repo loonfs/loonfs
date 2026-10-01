@@ -9,10 +9,9 @@
 
 use crate::metrics::{DefaultMetricsRecorder, MetricValue, MetricsSnapshot};
 use crate::{
-    CreateCheckpointOptions, CreateNamespaceOptions, LoonFs, Maintenance,
+    CompactionStepOutcome, CreateCheckpointOptions, CreateNamespaceOptions, LoonFs, Maintenance,
     MetadataCompactionOutcome, MetadataCompactionPolicy, MoveOptions, NamespaceId, PutFileOptions,
-    ReorganizeStepOutcome, RunMaintenanceRequest, RunMaintenanceResponse, SharedObjectStore,
-    Writable,
+    RunMaintenanceRequest, RunMaintenanceResponse, SharedObjectStore, Writable,
 };
 use loonfs_api::wire::manifest::{
     decode_namespace_manifest_json, MetadataRowFamily, NamespaceManifestPayload, RunTier,
@@ -86,7 +85,7 @@ fn counter(snapshot: &MetricsSnapshot, name: &str, labels: &[(&str, &str)]) -> u
 
 fn metadata_request() -> RunMaintenanceRequest {
     RunMaintenanceRequest::Metadata(MetadataMaintenanceRequest {
-        max_wal_tail_segments: Some(1),
+        max_wal_tail_objects: Some(1),
     })
 }
 
@@ -134,7 +133,7 @@ async fn a_maintenance_gc_step_records_the_pass_counters_once() {
         "the maintenance pass records its retained count exactly once"
     );
     for (category, reclaimed) in [
-        ("deleted_wal_segments", gc.deleted.wal_segments),
+        ("deleted_wal_objects", gc.deleted.wal_objects),
         ("deleted_metadata_segments", gc.deleted.metadata_segments),
         ("deleted_manifests", gc.deleted.manifests),
         (
@@ -238,7 +237,7 @@ async fn namespace_with_a_frozen_base(
             .fold_wal(namespace_id)
             .await
             .expect("merge a unit");
-        if response.reorganize == (ReorganizeStepOutcome::NotNeeded {}) {
+        if response.compaction == (CompactionStepOutcome::NotNeeded {}) {
             break;
         }
     }
@@ -396,8 +395,8 @@ async fn compaction_planning_survives_restart_and_explicit_work_has_bounded_fan_
     }
     .expect("metadata response");
     assert_eq!(
-        metadata.reorganize,
-        ReorganizeStepOutcome::CompactionRequired {}
+        metadata.compaction,
+        CompactionStepOutcome::MetadataCompactionRequired {}
     );
 
     writer.shutdown().await.expect("shut down the first writer");
@@ -423,8 +422,8 @@ async fn compaction_planning_survives_restart_and_explicit_work_has_bounded_fan_
     }
     .expect("metadata response");
     assert_eq!(
-        metadata.reorganize,
-        ReorganizeStepOutcome::CompactionRequired {},
+        metadata.compaction,
+        CompactionStepOutcome::MetadataCompactionRequired {},
         "the same durable run sizes produce the same plan after restart"
     );
     fresh_writer
@@ -507,7 +506,7 @@ async fn an_immediate_step_reports_the_compaction_the_explicit_call_runs() {
         .maintain_metadata(
             &namespace,
             crate::MetadataMaintenanceOptions {
-                max_wal_tail_segments: std::num::NonZeroU64::MIN,
+                max_wal_tail_objects: std::num::NonZeroU64::MIN,
                 compaction_policy: MetadataCompactionPolicy::CompactImmediately,
                 ..Default::default()
             },
@@ -515,8 +514,8 @@ async fn an_immediate_step_reports_the_compaction_the_explicit_call_runs() {
         .await
         .expect("run an immediate step");
     assert_eq!(
-        response.reorganize,
-        ReorganizeStepOutcome::CompactionRequired {},
+        response.compaction,
+        CompactionStepOutcome::MetadataCompactionRequired {},
         "an immediate step says the namespace needs a compaction job"
     );
 
@@ -713,8 +712,8 @@ async fn explicit_compaction_merges_twenty_deltas_and_reads_the_large_base_once(
                     .await
                     .expect("plan the base rebuild");
                 assert_eq!(
-                    response.reorganize,
-                    ReorganizeStepOutcome::CompactionRequired {}
+                    response.compaction,
+                    CompactionStepOutcome::MetadataCompactionRequired {}
                 );
             }
         }
@@ -778,7 +777,7 @@ async fn maintenance_clones_share_one_claim_and_never_reclaim_after_fencing() {
             .compact_once(&namespace, MetadataCompactionPolicy::SizeTiered)
             .await
             .expect("no work"),
-        super::CompactionStep::Concluded(ReorganizeStepOutcome::NotNeeded {})
+        super::CompactionStep::Concluded(CompactionStepOutcome::NotNeeded {})
     ));
     assert_eq!(store.counts().puts, 0);
     let cloned = maintenance.clone();
@@ -819,7 +818,7 @@ async fn maintenance_clones_share_one_claim_and_never_reclaim_after_fencing() {
             .run_compaction_step(&namespace, MetadataCompactionPolicy::SizeTiered)
             .await
             .expect("fenced compaction"),
-        ReorganizeStepOutcome::Fenced {}
+        CompactionStepOutcome::Fenced {}
     );
     assert_eq!(store.counts().puts, 0);
 }

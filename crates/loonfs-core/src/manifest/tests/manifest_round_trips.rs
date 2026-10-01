@@ -85,7 +85,7 @@ async fn a_publish_projection_fold_writes_the_replayed_tail_rows() {
         head: projection.head.clone(),
         basis: projection.basis().clone(),
         tail_state: Arc::clone(&projection.tail_state),
-        wal_tail_segments: projection.wal_tail_segments,
+        wal_tail_objects: projection.wal_tail_objects,
     };
     let response = fold::fold_wal_tail(
         &store,
@@ -97,7 +97,7 @@ async fn a_publish_projection_fold_writes_the_replayed_tail_rows() {
     .await
     .expect("fold publish projection")
     .response;
-    assert_eq!(response.outcome, loonfs_api::FlushWalOutcome::Published);
+    assert_eq!(response.outcome, loonfs_api::FoldWalOutcome::Published);
     let materialized =
         load_manifest_materialization_for_inspection(&store, &namespace_id, response.manifest_no)
             .await

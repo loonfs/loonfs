@@ -29,7 +29,7 @@ impl<S: ObjectStore + ?Sized> Sweep<'_, '_, S> {
         }
         match family {
             CandidateFamily::WalObjects => {
-                self.process_aged_family(family, key, |counts| &mut counts.wal_segments)
+                self.process_aged_family(family, key, |counts| &mut counts.wal_objects)
                     .await
             }
             CandidateFamily::MetadataSegments => {

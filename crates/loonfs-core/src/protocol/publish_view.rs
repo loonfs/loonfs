@@ -83,7 +83,7 @@ pub struct PublishTailWeight {
 pub(crate) struct PublishTailProjection {
     basis: MetadataBasis,
     pub(crate) head: NamespaceReadState,
-    pub(crate) wal_tail_segments: u64,
+    pub(crate) wal_tail_objects: u64,
     pub(crate) tail_state: Arc<ProjectedWalTail>,
     fold: Option<FoldInProgress>,
 }
@@ -112,7 +112,7 @@ impl PublishTailProjection {
             if basis.0.head_seq == fold.from.seq {
                 self.basis = basis;
                 self.tail_state = fold.since;
-                self.wal_tail_segments = fold.wal_objects_since;
+                self.wal_tail_objects = fold.wal_objects_since;
                 self.head.folded_wal_no = fold.from.wal_no;
                 return true;
             }
@@ -218,8 +218,8 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
             tail_discovered,
             manifest_segments,
             tail_state,
-            write_stop: (projection.wal_tail_segments >= MAX_UNFOLDED_WAL_OBJECTS)
-                .then_some(projection.wal_tail_segments),
+            write_stop: (projection.wal_tail_objects >= MAX_UNFOLDED_WAL_OBJECTS)
+                .then_some(projection.wal_tail_objects),
         },
         projection,
     ))
@@ -234,11 +234,11 @@ fn load_publish_tail_projection<S: ObjectStore + ?Sized>(
     let manifest_head = loaded_basis.replay_head(head);
     let replayed = replay_discovered_tail(&manifest_head, &loaded_basis.base_state, tail)
         .map_err(CoreError::MetadataProjection)?;
-    let wal_tail_segments = head.unfolded_wal_objects();
+    let wal_tail_objects = head.unfolded_wal_objects();
     let projection = PublishTailProjection {
         basis,
         head: head.clone(),
-        wal_tail_segments,
+        wal_tail_objects,
         tail_state: Arc::new(replayed.projected_tail),
         fold: None,
     };

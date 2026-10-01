@@ -112,7 +112,7 @@ async fn gc_keeps_inline_wal_until_fold_publication_then_reads_use_objects() {
     let (folded, ()) = tokio::join!(fold, collect_during_fold);
     assert_eq!(
         folded.expect("fold").response.outcome,
-        FlushWalOutcome::Published
+        FoldWalOutcome::Published
     );
     collect_aged_wal(&store, namespace_id, &context).await;
     assert!(store
@@ -157,7 +157,7 @@ async fn losing_fold_keeps_objects_after_the_winners_wal_is_collected() {
         )
         .await
         .expect("winning fold");
-        assert_eq!(folded.response.outcome, FlushWalOutcome::Published);
+        assert_eq!(folded.response.outcome, FoldWalOutcome::Published);
         collect_aged_wal(&store, namespace_id, &context).await;
         assert!(store
             .list_prefix(&wal_prefix(namespace_id))
@@ -170,7 +170,7 @@ async fn losing_fold_keeps_objects_after_the_winners_wal_is_collected() {
     let (lost, ()) = tokio::join!(loser, winner);
     assert_eq!(
         lost.expect("losing fold").response.outcome,
-        FlushWalOutcome::ManifestAdvanced
+        FoldWalOutcome::ManifestAdvanced
     );
     assert_files_readable(&store, namespace_id, "competing-gc", &values).await;
 }

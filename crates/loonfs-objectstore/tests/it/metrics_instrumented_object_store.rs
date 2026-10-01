@@ -328,7 +328,7 @@ async fn classifies_durable_key_families() {
         .expect("put pin");
 
     let samples = recorder.samples();
-    assert_eq!(samples[0].key_class, KeyClass::WalSegment);
+    assert_eq!(samples[0].key_class, KeyClass::WalObject);
     assert_eq!(samples[1].key_class, KeyClass::NamespaceManifest);
     assert_eq!(samples[2].key_class, KeyClass::MetadataSegment);
     assert_eq!(samples[3].key_class, KeyClass::GcControl);

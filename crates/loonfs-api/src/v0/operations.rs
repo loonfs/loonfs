@@ -273,8 +273,8 @@ pub struct NamespaceDiagnostics {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub current_manifest_no: Option<ManifestNo>,
-    /// Number of visible WAL segments after the current manifest.
-    pub wal_tail_segments: u64,
+    /// Number of visible WAL objects after the current manifest.
+    pub wal_tail_objects: u64,
     /// Number of snapshots that had not expired when diagnostics began.
     pub live_snapshots: u64,
     /// Number of user checkpoints, including expired records awaiting collection.
@@ -1082,11 +1082,11 @@ pub struct DeleteSnapshotResponse {
     pub snapshot_id: PinId,
 }
 
-/// How one WAL flush satisfied its goal.
+/// How one WAL fold satisfied its goal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
-pub enum FlushWalOutcome {
+pub enum FoldWalOutcome {
     /// The current manifest already covered the WAL tail; nothing was published.
     AlreadyCurrent,
     /// This call published the next current manifest.
@@ -1095,20 +1095,20 @@ pub enum FlushWalOutcome {
     ManifestAdvanced,
 }
 
-/// The current manifest state after one WAL flush.
+/// The current manifest state after one WAL fold.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct FlushWalResponse {
-    /// Namespace whose WAL tail was flushed.
+pub struct FoldWalResponse {
+    /// Namespace whose WAL tail was folded.
     pub namespace_id: NamespaceId,
-    /// Head sequence the flush attempted to cover.
+    /// Head sequence the fold attempted to cover.
     pub target_head_seq: ChangeSeq,
     /// Current manifest number after the operation.
     pub manifest_no: ManifestNo,
     /// Sequence covered by that manifest.
     pub manifest_head_seq: ChangeSeq,
     /// Whether this call published the current manifest.
-    pub outcome: FlushWalOutcome,
+    pub outcome: FoldWalOutcome,
 }
 
 /// Optional overrides for one garbage-collection pass.
@@ -1149,8 +1149,8 @@ pub struct RetainedCandidates {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct DeletedObjectCounts {
-    /// Unreferenced WAL segments deleted.
-    pub wal_segments: u64,
+    /// Unreferenced WAL objects deleted.
+    pub wal_objects: u64,
     /// Unreferenced metadata segments deleted.
     pub metadata_segments: u64,
     /// Unreferenced manifests deleted.
@@ -1167,14 +1167,14 @@ impl DeletedObjectCounts {
     /// Adds counts from another pass.
     pub fn add(&mut self, other: &Self) {
         let Self {
-            wal_segments,
+            wal_objects,
             metadata_segments,
             manifests,
             upload_sessions,
             content_objects,
             retired_content_objects,
         } = other;
-        self.wal_segments += wal_segments;
+        self.wal_objects += wal_objects;
         self.metadata_segments += metadata_segments;
         self.manifests += manifests;
         self.upload_sessions += upload_sessions;
@@ -1366,7 +1366,7 @@ pub struct AdvanceRetentionResponse {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RunMaintenanceRequest {
-    /// Runs WAL flushing and one bounded metadata reorganization step.
+    /// Folds the WAL tail and runs one bounded compaction step.
     Metadata(MetadataMaintenanceRequest),
     /// Runs one metadata compaction unit: one bounded merge, or one streaming
     /// compaction of a family group.
@@ -1375,7 +1375,7 @@ pub enum RunMaintenanceRequest {
     Gc(GcRequest),
     /// Collects aged, unreferenced grep index objects.
     GrepGc {},
-    /// Advances the retention floor to the flushed manifest head.
+    /// Advances the retention floor to the folded manifest head.
     Retention(AdvanceRetentionRequest),
     /// Restores a root administrator.
     RecoverAdministrator(RecoverAdministratorRequest),
@@ -1410,10 +1410,11 @@ pub struct RecoverAdministratorResponse {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct MetadataMaintenanceRequest {
-    /// The WAL-tail threshold for flushing. Omit it for the server default.
+    /// The WAL tail length, in WAL objects, that triggers a fold. Omit it for
+    /// the server default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
-    pub max_wal_tail_segments: Option<u64>,
+    pub max_wal_tail_objects: Option<u64>,
 }
 
 /// An option-free request for one metadata compaction unit. Repeat it while
@@ -1423,21 +1424,21 @@ pub struct MetadataMaintenanceRequest {
 #[serde(deny_unknown_fields)]
 pub struct MetadataCompactionRequest {}
 
-/// What the WAL-flush part of a maintenance pass did.
+/// What the WAL fold part of a maintenance pass did.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "outcome", rename_all = "snake_case")]
-pub enum WalFlushStepOutcome {
-    /// The tail was below the threshold, so there was nothing to flush.
+pub enum WalFoldStepOutcome {
+    /// The tail was below the threshold, so there was nothing to fold.
     NotNeeded,
-    /// The step flushed the WAL tail and published the next current manifest.
-    Flushed {
+    /// The step folded the WAL tail and published the next current manifest.
+    Folded {
         /// Sequence covered by the published manifest.
         manifest_head_seq: ChangeSeq,
     },
     /// The current manifest already covered the captured WAL tail; this step published no manifest.
     AlreadyPublished {
-        /// Sequence this step attempted to flush through.
+        /// Sequence this step attempted to fold through.
         attempted_seq: ChangeSeq,
         /// The namespace's current manifest number.
         current_manifest_no: ManifestNo,
@@ -1449,34 +1450,35 @@ pub enum WalFlushStepOutcome {
     },
 }
 
-/// The outcome of the metadata-reorganization part of a maintenance pass.
+/// What the bounded compaction part of a maintenance pass did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "outcome", rename_all = "snake_case")]
-pub enum ReorganizeStepOutcome {
+pub enum CompactionStepOutcome {
     /// No family group had enough delta runs to merge.
-    #[cfg_attr(feature = "openapi", schema(title = "ReorganizeStepOutcomeNotNeeded"))]
+    #[cfg_attr(feature = "openapi", schema(title = "CompactionStepOutcomeNotNeeded"))]
     NotNeeded {},
     /// One family group was merged and a manifest published.
     #[cfg_attr(
         feature = "openapi",
-        schema(title = "ReorganizeStepOutcomeUnitPublished")
+        schema(title = "CompactionStepOutcomeUnitPublished")
     )]
     UnitPublished {},
-    /// A family group needs a streaming compaction. Run the `metadata_compaction` job.
+    /// A family group's window is too large for one bounded merge. Run the
+    /// `metadata_compaction` job, which compacts it by streaming.
     #[cfg_attr(
         feature = "openapi",
-        schema(title = "ReorganizeStepOutcomeCompactionRequired")
+        schema(title = "CompactionStepOutcomeMetadataCompactionRequired")
     )]
-    CompactionRequired {},
+    MetadataCompactionRequired {},
     /// Another publisher changed the current manifest before this step could publish.
     #[cfg_attr(
         feature = "openapi",
-        schema(title = "ReorganizeStepOutcomeManifestAdvanced")
+        schema(title = "CompactionStepOutcomeManifestAdvanced")
     )]
     ManifestAdvanced {},
     /// A newer runtime holds the compactor epoch.
-    #[cfg_attr(feature = "openapi", schema(title = "ReorganizeStepOutcomeFenced"))]
+    #[cfg_attr(feature = "openapi", schema(title = "CompactionStepOutcomeFenced"))]
     Fenced {},
 }
 
@@ -1485,7 +1487,7 @@ pub enum ReorganizeStepOutcome {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RunMaintenanceResponse {
-    /// Result of WAL flushing and one bounded metadata reorganization step.
+    /// Result of the WAL fold and one bounded compaction step.
     Metadata(MetadataMaintenanceResponse),
     /// Result of one metadata compaction unit.
     MetadataCompaction(MetadataCompactionResponse),
@@ -1516,10 +1518,10 @@ pub enum RunMaintenanceResponse {
 pub struct MetadataMaintenanceResponse {
     /// Namespace maintained by this run.
     pub namespace_id: NamespaceId,
-    /// What the WAL flush did.
-    pub wal_flush: WalFlushStepOutcome,
-    /// What the reorganization unit did.
-    pub reorganize: ReorganizeStepOutcome,
+    /// What the WAL fold did.
+    pub wal_fold: WalFoldStepOutcome,
+    /// What the bounded compaction step did.
+    pub compaction: CompactionStepOutcome,
 }
 
 /// What one metadata compaction run did.
@@ -1692,7 +1694,7 @@ mod tests {
             head_seq: ChangeSeq(11),
             retention_floor_seq: ChangeSeq(4),
             current_manifest_no: Some(ManifestNo(8)),
-            wal_tail_segments: 3,
+            wal_tail_objects: 3,
             live_snapshots: 2,
             live_checkpoints: 5,
         };
@@ -1705,7 +1707,7 @@ mod tests {
                 "head_seq": 11,
                 "retention_floor_seq": 4,
                 "current_manifest_no": 8,
-                "wal_tail_segments": 3,
+                "wal_tail_objects": 3,
                 "live_snapshots": 2,
                 "live_checkpoints": 5
             })
@@ -2408,15 +2410,15 @@ mod tests {
     #[test]
     fn maintenance_outcomes_use_the_outcome_tag() {
         assert_eq!(
-            serde_json::to_value(WalFlushStepOutcome::Flushed {
+            serde_json::to_value(WalFoldStepOutcome::Folded {
                 manifest_head_seq: ChangeSeq(9),
             })
-            .expect("serialize WAL flush outcome"),
-            serde_json::json!({"outcome": "flushed", "manifest_head_seq": 9})
+            .expect("serialize WAL fold outcome"),
+            serde_json::json!({"outcome": "folded", "manifest_head_seq": 9})
         );
         assert_eq!(
-            serde_json::to_value(ReorganizeStepOutcome::UnitPublished {})
-                .expect("serialize reorganize outcome"),
+            serde_json::to_value(CompactionStepOutcome::UnitPublished {})
+                .expect("serialize compaction outcome"),
             serde_json::json!({"outcome": "unit_published"})
         );
         assert_eq!(
@@ -2460,10 +2462,10 @@ mod tests {
                 )),
             ),
             (
-                serde_json::json!({"kind": "metadata", "max_wal_tail_segments": 4}),
+                serde_json::json!({"kind": "metadata", "max_wal_tail_objects": 4}),
                 Some(RunMaintenanceRequest::Metadata(
                     MetadataMaintenanceRequest {
-                        max_wal_tail_segments: Some(4),
+                        max_wal_tail_objects: Some(4),
                     },
                 )),
             ),

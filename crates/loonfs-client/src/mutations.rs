@@ -741,7 +741,7 @@ mod tests {
             head_seq: ChangeSeq(3),
             retention_floor_seq: ChangeSeq(1),
             current_manifest_no: None,
-            wal_tail_segments: 2,
+            wal_tail_objects: 2,
             live_snapshots: 3,
             live_checkpoints: 4,
         };

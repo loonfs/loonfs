@@ -38,7 +38,7 @@ fn store_config(root: &Path) -> StoreConfig {
 fn writes_past_wal_tail_threshold() -> u32 {
     u32::try_from(
         MetadataMaintenanceOptions::default()
-            .max_wal_tail_segments
+            .max_wal_tail_objects
             .get()
             + 1,
     )
@@ -132,7 +132,7 @@ fn background_step_conclusions_emit_debug_events() {
     // made of it. Fields are matched with their `=` so a span carrying the
     // same word cannot satisfy the assertion.
     let step = find_event(&log, "metadata maintenance pass concluded");
-    for field in ["wal_flush=", "reorganize=", "wal_tail_segments_before="] {
+    for field in ["wal_fold=", "compaction=", "wal_tail_objects_before="] {
         assert!(step.contains(field), "missing `{field}` in: {step}");
     }
     let admission = find_event(&log, "maintenance pass settled");
@@ -161,7 +161,7 @@ fn background_step_conclusions_emit_debug_events() {
         "missing span evidence `{span_evidence}` in:\n{log}"
     );
     assert!(
-        !log.contains("compaction"),
+        !log.contains("loonfs.compaction"),
         "maintenance still traces as compaction:\n{log}"
     );
 }

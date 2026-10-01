@@ -106,7 +106,7 @@ fn maintenance_gc_reclaims_a_deleted_namespace_instead_of_refusing() {
     fs::write(&payload, b"body").expect("write payload");
     assert_success(&harness.run(&["put", payload.to_str().expect("utf-8 path"), "/doc.txt"]));
     // Materialize derived state so the tombstone has something reclaimable.
-    assert_success(&harness.run(&["maintenance", "flush"]));
+    assert_success(&harness.run(&["maintenance", "fold"]));
     assert_success(&harness.run(&["--json", "namespace", "delete", "demo", "--yes"]));
 
     // GC is the reclamation path for a tombstoned namespace: it must run
@@ -1155,14 +1155,14 @@ fn maintenance_and_changes_commands_report_the_same_shapes_in_both_modes() {
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0]["checkpoint_id"], checkpoint_id.as_str());
 
-        // `maintenance flush` runs metadata maintenance with a flush threshold of one
+        // `maintenance fold` runs metadata maintenance with a fold threshold of one
         // WAL object, so it reports both halves and nothing else.
-        let flush = harness.run(&["--json", "maintenance", "flush", "--profile", profile]);
-        assert_success(&flush);
-        let flush_data = json_data(&flush);
-        assert_eq!(flush_data["kind"], "metadata");
-        assert_eq!(flush_data["reorganize"]["outcome"], "not_needed");
-        assert!(flush_data["wal_flush"].is_object());
+        let fold = harness.run(&["--json", "maintenance", "fold", "--profile", profile]);
+        assert_success(&fold);
+        let fold_data = json_data(&fold);
+        assert_eq!(fold_data["kind"], "metadata");
+        assert_eq!(fold_data["compaction"]["outcome"], "not_needed");
+        assert!(fold_data["wal_fold"].is_object());
 
         let delete = harness.run(&[
             "--json",
@@ -1227,8 +1227,8 @@ fn maintenance_and_changes_commands_report_the_same_shapes_in_both_modes() {
         let metadata_data = json_data(&metadata);
         assert_eq!(metadata_data["kind"], "metadata");
         assert_eq!(metadata_data["namespace_id"], "demo");
-        assert_eq!(metadata_data["wal_flush"]["outcome"], "not_needed");
-        assert_eq!(metadata_data["reorganize"]["outcome"], "not_needed");
+        assert_eq!(metadata_data["wal_fold"]["outcome"], "not_needed");
+        assert_eq!(metadata_data["compaction"]["outcome"], "not_needed");
 
         let metadata_human = harness.run(&["maintenance", "metadata", "--profile", profile]);
         assert_success(&metadata_human);
@@ -1251,7 +1251,7 @@ fn maintenance_and_changes_commands_report_the_same_shapes_in_both_modes() {
         let gc_data = json_data(&gc);
         assert_eq!(gc_data["kind"], "gc");
         assert_eq!(gc_data["namespace_id"], "demo");
-        assert_eq!(gc_data["deleted"]["wal_segments"], 0);
+        assert_eq!(gc_data["deleted"]["wal_objects"], 0);
         assert_eq!(gc_data["deleted"]["manifests"], 0);
         assert!(gc_data.get("next_cursor").is_none());
         let retained = gc_data["retained"].as_object().expect("json object");

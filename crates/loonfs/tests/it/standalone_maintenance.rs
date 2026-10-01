@@ -101,7 +101,7 @@ async fn a_fresh_runtime_folds_a_short_tail_once_its_newest_commit_is_idle() {
         .get_namespace_diagnostics(&namespace_id)
         .await
         .expect("diagnostics");
-    assert_eq!(diagnostics.wal_tail_segments, 0, "{diagnostics:?}");
+    assert_eq!(diagnostics.wal_tail_objects, 0, "{diagnostics:?}");
     assert_eq!(
         job.probe(&namespace_id).await.expect("probe"),
         MaintenanceProbe::Idle
@@ -233,7 +233,7 @@ async fn a_registry_runs_every_core_job_without_a_writer() {
         .open_namespace(&namespace_id)
         .expect("open namespace");
     let threshold = MetadataMaintenanceOptions::default()
-        .max_wal_tail_segments
+        .max_wal_tail_objects
         .get();
     for index in 0..threshold {
         namespace
@@ -282,5 +282,5 @@ async fn a_registry_runs_every_core_job_without_a_writer() {
         .get_namespace_diagnostics(&namespace_id)
         .await
         .expect("diagnostics");
-    assert!(diagnostics.wal_tail_segments < threshold, "{diagnostics:?}");
+    assert!(diagnostics.wal_tail_objects < threshold, "{diagnostics:?}");
 }

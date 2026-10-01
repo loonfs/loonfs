@@ -675,8 +675,9 @@ async fn publisher_splits_batches_at_the_inline_limit_without_failing_commits() 
         create_namespace(&runtime, &namespace_id).await;
         let mut publisher = standalone_publisher(&namespace_id, &runtime);
         publisher.min_publish_interval = Duration::ZERO;
-        publisher.inline_content.inline_content_segment_budget_bytes =
-            MAX_WAL_OBJECT_INLINE_CONTENT_BYTES;
+        publisher
+            .inline_content
+            .inline_content_wal_object_budget_bytes = MAX_WAL_OBJECT_INLINE_CONTENT_BYTES;
         recv_commit(
             admit_commit(
                 &publisher,
@@ -2227,14 +2228,14 @@ async fn a_fold_reloads_the_tail_when_no_projection_is_retained() {
         .await
         .expect("inspect the folded namespace");
     assert!(status.current_manifest_no.is_some(), "{status:?}");
-    assert!(status.wal_tail_segments < FOLD_AT_WAL_OBJECTS, "{status:?}");
+    assert!(status.wal_tail_objects < FOLD_AT_WAL_OBJECTS, "{status:?}");
     {
         let hints = hints.lock().expect("hint log");
         assert!(hints.iter().any(|hint| matches!(
             hint,
             MaintenanceHint::Published(publication)
                 if publication.namespace_id == namespace_id
-                    && publication.wal_tail_segments >= FOLD_AT_WAL_OBJECTS
+                    && publication.wal_tail_objects >= FOLD_AT_WAL_OBJECTS
         )));
         assert!(hints.iter().any(|hint| matches!(
             hint,
@@ -2342,7 +2343,7 @@ async fn a_runtime_fold_materializes_inline_content_and_reanchors_to_an_empty_ta
         .expect("engine")
         .wal_fold_input()
         .expect("reanchored projection");
-    assert_eq!(input.wal_tail_segments, 0);
+    assert_eq!(input.wal_tail_objects, 0);
     assert_eq!(input.tail_state.weight().rows, 0);
     assert_eq!(
         input.tail_state.weight(),
@@ -2450,7 +2451,7 @@ async fn a_failed_fold_notifies_maintenance_and_reloads_the_tail() {
             MaintenanceHint::Published(publication) => Some(publication),
             _ => None,
         });
-        assert!(publication.expect("publication").wal_tail_segments < FOLD_AT_WAL_OBJECTS);
+        assert!(publication.expect("publication").wal_tail_objects < FOLD_AT_WAL_OBJECTS);
     }
     writer.shutdown().await.expect("shut down writer");
 }

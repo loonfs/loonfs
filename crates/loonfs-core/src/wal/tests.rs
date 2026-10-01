@@ -174,7 +174,7 @@ async fn fences_fold_and_are_reclaimed_at_the_folded_boundary() {
     let report = crate::gc::gc_namespace(&store, &namespace_id, &config, &aged)
         .await
         .expect("collect");
-    assert_eq!(report.deleted.wal_segments, 1);
+    assert_eq!(report.deleted.wal_objects, 1);
     assert!(store
         .head(&wal_object(&namespace_id, &WalNo(1)))
         .await
@@ -961,7 +961,7 @@ async fn a_writer_resuming_after_its_fence_was_collected_does_not_acknowledge_it
             )
             .await
             .expect("collect folded fence");
-            assert_eq!(report.deleted.wal_segments, 4);
+            assert_eq!(report.deleted.wal_objects, 4);
             assert!(blocked
                 .inner()
                 .head(&fence_key)

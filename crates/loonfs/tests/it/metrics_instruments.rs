@@ -59,7 +59,7 @@ fn a_writer_with_a_recorder_reports_stores_publications_and_steps() {
     // Enough writes to push the WAL tail past its threshold, so the writer
     // folds it and nudges the metadata job to compact.
     let writes = MetadataMaintenanceOptions::default()
-        .max_wal_tail_segments
+        .max_wal_tail_objects
         .get()
         + 1;
     let snapshot = block_on(async {
@@ -126,7 +126,7 @@ fn a_writer_with_a_recorder_reports_stores_publications_and_steps() {
             &snapshot,
             "loonfs.object_store.operations",
             &[
-                ("key_class", "wal_segment"),
+                ("key_class", "wal_object"),
                 ("operation", "put"),
                 ("result", "ok")
             ],
@@ -237,7 +237,7 @@ fn a_collection_step_reports_what_the_pass_retained() {
         counter(
             &snapshot,
             "loonfs.gc.reclaimed",
-            &[("category", "deleted_wal_segments")],
+            &[("category", "deleted_wal_objects")],
         ),
         0,
         "a fresh namespace has nothing to reclaim yet"

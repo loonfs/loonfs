@@ -121,11 +121,11 @@ pub(super) async fn prepare_candidate_request<S: ObjectStore + ?Sized>(
         Ok(None) => {}
         Err(error) => return CandidateAdmission::independent(Err(error)),
     }
-    if let Some(wal_tail_segments) = view.write_stop() {
+    if let Some(wal_tail_objects) = view.write_stop() {
         return CandidateAdmission::independent(Err(MetadataViewError::MaintenanceRequired {
             namespace_id: namespace_id.clone(),
             reason: format!(
-                "WAL tail has {wal_tail_segments} objects; publishes resume once maintenance brings it back under {MAX_UNFOLDED_WAL_OBJECTS}"
+                "WAL tail has {wal_tail_objects} objects; publishes resume once maintenance brings it back under {MAX_UNFOLDED_WAL_OBJECTS}"
             ),
         }
         .into()));

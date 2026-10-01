@@ -415,9 +415,9 @@ fn undelete_survives_checkpoints_and_reopen_in_both_orders() {
             .expect("checkpoint the revoke into durable segments");
         let step = upkeep(&step);
         assert!(
-            matches!(step.wal_flush, loonfs::WalFlushStepOutcome::Flushed { .. }),
+            matches!(step.wal_fold, loonfs::WalFoldStepOutcome::Folded { .. }),
             "step must materialize the tail, got {:?}",
-            step.wal_flush
+            step.wal_fold
         );
         deletion
     };
@@ -451,9 +451,9 @@ fn undelete_survives_checkpoints_and_reopen_in_both_orders() {
             .expect("checkpoint the deletion");
         let step = upkeep(&step);
         assert!(
-            matches!(step.wal_flush, loonfs::WalFlushStepOutcome::Flushed { .. }),
+            matches!(step.wal_fold, loonfs::WalFoldStepOutcome::Folded { .. }),
             "step must materialize the tail, got {:?}",
-            step.wal_flush
+            step.wal_fold
         );
         let fs = open_runtime(object_store.clone(), "undelete-persist-c");
         let namespace = fs
@@ -472,9 +472,9 @@ fn undelete_survives_checkpoints_and_reopen_in_both_orders() {
             .expect("checkpoint the second revoke");
         let step = upkeep(&step);
         assert!(
-            matches!(step.wal_flush, loonfs::WalFlushStepOutcome::Flushed { .. }),
+            matches!(step.wal_fold, loonfs::WalFoldStepOutcome::Folded { .. }),
             "step must materialize the tail, got {:?}",
-            step.wal_flush
+            step.wal_fold
         );
     }
     let fs = open_runtime(object_store, "undelete-persist-d");

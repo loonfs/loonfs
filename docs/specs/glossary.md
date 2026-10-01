@@ -12,7 +12,7 @@
 | **WAL** | The ordered log of immutable, consecutively numbered WAL objects. |
 | **Fence** | A zero-record WAL object used to establish a writer epoch in WAL order without creating a logical commit. |
 | **Content publication** | Permanent metadata evidence that a content ID was committed; collection uses it to decide completed-upload cleanup. |
-| **Fold** | Materializing committed WAL into metadata segments and publishing a manifest so later readers replay less history. The CLI command `loonfs maintenance flush` runs a fold, and the maintenance response reports it in `wal_flush`. |
+| **Fold** | Materializing committed WAL into metadata segments and publishing a manifest so later readers replay less history. |
 | **Inode** | The identity and creation metadata of a filesystem item. Its ID remains unchanged when the item is renamed or moved within a namespace. |
 | **Directory binding / direntry** | A parent inode, name, and child inode association that places an item in the tree. |
 | **Binding version** | The sequence and delta position of a particular bind. The API represents this pair as an opaque token. |

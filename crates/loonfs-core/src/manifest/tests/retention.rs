@@ -948,7 +948,7 @@ async fn publish_backpressure_rejects_at_the_longest_tail_the_head_describes() {
         &original
     );
     assert_eq!(
-        replay.wal_tail_segments,
+        replay.wal_tail_objects,
         crate::limits::MAX_UNFOLDED_WAL_OBJECTS
     );
     assert_eq!(store.counts().puts, 0);
@@ -1011,7 +1011,7 @@ async fn publish_backpressure_rejects_at_the_longest_tail_the_head_describes() {
         );
     }
     assert_eq!(
-        mixed.wal_tail_segments,
+        mixed.wal_tail_objects,
         crate::limits::MAX_UNFOLDED_WAL_OBJECTS
     );
     assert_eq!(
@@ -1731,7 +1731,7 @@ async fn over_budget_wal_fold_aborts_without_publishing() {
     let advanced = super::fold::fold_wal(&store, &namespace_id)
         .await
         .expect("in-budget retry succeeds");
-    assert_eq!(advanced.outcome, loonfs_api::FlushWalOutcome::Published);
+    assert_eq!(advanced.outcome, loonfs_api::FoldWalOutcome::Published);
     assert!(advanced.manifest_no > manifest_before.manifest().manifest_no);
 }
 

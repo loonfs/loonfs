@@ -533,7 +533,7 @@ async fn a_publication_nudges_only_the_jobs_it_concerns() {
         .hint(MaintenanceHint::Published(NamespacePublication {
             namespace_id: namespace_id.clone(),
             committed_through_seq: None,
-            wal_tail_segments: 4,
+            wal_tail_objects: 4,
             wal_tail_inline_bytes: 0,
         }));
     runner.drain().await.expect("nothing was scheduled");
@@ -547,7 +547,7 @@ async fn a_publication_nudges_only_the_jobs_it_concerns() {
         .hint(MaintenanceHint::Published(NamespacePublication {
             namespace_id: namespace_id.clone(),
             committed_through_seq: Some(ChangeSeq(7)),
-            wal_tail_segments: 5,
+            wal_tail_objects: 5,
             wal_tail_inline_bytes: 0,
         }));
     runner.drain().await.expect("the subscriber's step settles");
@@ -906,7 +906,7 @@ async fn wal_fold_finished_hints_coalesce_and_follow_ups_admit_once() {
         .hint(MaintenanceHint::Published(NamespacePublication {
             namespace_id: namespace_id.clone(),
             committed_through_seq: Some(ChangeSeq(1)),
-            wal_tail_segments: loonfs_core::limits::FOLD_AT_WAL_OBJECTS,
+            wal_tail_objects: loonfs_core::limits::FOLD_AT_WAL_OBJECTS,
             wal_tail_inline_bytes: 0,
         }));
     runner.drain().await.expect("publication schedules nothing");
@@ -963,7 +963,7 @@ async fn reconciliation_recovers_a_hint_dropped_before_attachment() {
     let hint = MaintenanceHint::Published(NamespacePublication {
         namespace_id: namespace_id.clone(),
         committed_through_seq: Some(ChangeSeq(1)),
-        wal_tail_segments: 0,
+        wal_tail_objects: 0,
         wal_tail_inline_bytes: 0,
     });
     let dropped_before = dropped_hints();
@@ -1127,7 +1127,7 @@ async fn an_idle_tail_folds_once_and_again_only_after_a_write() {
         .get_namespace_diagnostics(&namespace_id)
         .await
         .expect("diagnostics");
-    assert_eq!(folded.wal_tail_segments, 0, "the wake folded the idle tail");
+    assert_eq!(folded.wal_tail_objects, 0, "the wake folded the idle tail");
     runner.reconcile_now().await;
     runner.drain().await.expect("the sweep settles");
     assert_eq!(
@@ -1146,7 +1146,7 @@ async fn an_idle_tail_folds_once_and_again_only_after_a_write() {
         .get_namespace_diagnostics(&namespace_id)
         .await
         .expect("diagnostics");
-    assert_eq!(refolded.wal_tail_segments, 0);
+    assert_eq!(refolded.wal_tail_objects, 0);
     assert!(refolded.current_manifest_no > folded.current_manifest_no);
 
     runner.shutdown().await.expect("runner shutdown");
@@ -1232,12 +1232,12 @@ impl IdleFoldHarness {
             .not_before_ms(MaintenanceJobId::METADATA, &self.namespace_id)
     }
 
-    async fn wal_tail_segments(&self) -> u64 {
+    async fn wal_tail_objects(&self) -> u64 {
         self.maintenance
             .get_namespace_diagnostics(&self.namespace_id)
             .await
             .expect("diagnostics")
-            .wal_tail_segments
+            .wal_tail_objects
     }
 
     async fn shutdown(self) {
@@ -1263,7 +1263,7 @@ async fn a_wake_that_runs_after_the_clock_moves_back_waits_for_the_tail_to_go_id
         .await
         .expect("the early step settles");
     assert_ne!(
-        harness.wal_tail_segments().await,
+        harness.wal_tail_objects().await,
         0,
         "a tail that is not idle is not folded"
     );
@@ -1275,7 +1275,7 @@ async fn a_wake_that_runs_after_the_clock_moves_back_waits_for_the_tail_to_go_id
 
     harness.run_due(START_MS + idle_ms).await;
     assert_eq!(
-        harness.wal_tail_segments().await,
+        harness.wal_tail_objects().await,
         0,
         "the tail folds without another write"
     );
@@ -1300,7 +1300,7 @@ async fn a_wake_left_early_by_a_dropped_hint_waits_for_the_newest_commit_to_go_i
 
     harness.run_due(START_MS + idle_ms).await;
     assert_ne!(
-        harness.wal_tail_segments().await,
+        harness.wal_tail_objects().await,
         0,
         "the second commit is not idle yet"
     );
@@ -1311,6 +1311,6 @@ async fn a_wake_left_early_by_a_dropped_hint_waits_for_the_newest_commit_to_go_i
     );
 
     harness.run_due(START_MS + 1_000 + idle_ms).await;
-    assert_eq!(harness.wal_tail_segments().await, 0);
+    assert_eq!(harness.wal_tail_objects().await, 0);
     harness.shutdown().await;
 }
