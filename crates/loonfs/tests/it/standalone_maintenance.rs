@@ -1,11 +1,10 @@
-//! Standalone execution of every core maintenance job through a registry.
+//! Maintenance from a runtime that holds no writer session for the
+//! namespace.
 
 use crate::common::SettableWallClock;
 use loonfs::{
-    CreateCheckpointOptions, GarbageCollectionJob, LoonFs, MaintenanceAssignment,
-    MaintenanceCancellation, MaintenanceConclusion, MaintenanceJob, MaintenanceJobId,
-    MaintenanceProbe, MaintenanceRegistry, MetadataCompactionJob, MetadataMaintenanceJob,
-    MetadataMaintenanceOptions, SharedObjectStore, WallClock,
+    CreateCheckpointOptions, LoonFs, MetadataMaintenanceOptions, SharedObjectStore,
+    WalFoldStepOutcome, WallClock,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
@@ -58,45 +57,54 @@ async fn a_fresh_runtime_folds_a_short_tail_once_its_newest_commit_is_idle() {
         .await
         .expect("maintenance")
         .maintenance(loonfs_test_support::ids::writer_id("fresh-worker"));
-    let job = MetadataMaintenanceJob::new(maintenance.clone());
-    let disabled =
-        MetadataMaintenanceJob::new(maintenance.clone()).options(MetadataMaintenanceOptions {
-            idle_fold_after_ms: 0,
-            ..MetadataMaintenanceOptions::default()
-        });
+    let disabled = MetadataMaintenanceOptions {
+        idle_fold_after_ms: 0,
+        ..MetadataMaintenanceOptions::default()
+    };
     let idle_ms = MetadataMaintenanceOptions::default().idle_fold_after_ms;
 
     clock
         .0
         .store(COMMITTED_AT_MS + idle_ms - 1, Ordering::SeqCst);
     assert_eq!(
-        job.probe(&namespace_id).await.expect("probe"),
-        MaintenanceProbe::Idle,
+        maintenance
+            .maintain_metadata(&namespace_id)
+            .await
+            .expect("young tail")
+            .wal_fold,
+        WalFoldStepOutcome::NotNeeded,
         "a tail younger than the idle period waits"
     );
     clock.0.store(COMMITTED_AT_MS + idle_ms, Ordering::SeqCst);
     assert_eq!(
-        disabled.probe(&namespace_id).await.expect("probe"),
-        MaintenanceProbe::Idle,
+        maintenance
+            .maintain_metadata_with_options(&namespace_id, &disabled)
+            .await
+            .expect("idle rule off")
+            .wal_fold,
+        WalFoldStepOutcome::NotNeeded,
         "zero turns the idle rule off"
     );
-    assert_eq!(
-        job.probe(&namespace_id).await.expect("probe"),
-        MaintenanceProbe::Due
-    );
-    let report = job
-        .run(&namespace_id, &MaintenanceCancellation::new())
-        .await
-        .expect("idle fold");
-    assert_eq!(report.conclusion, MaintenanceConclusion::Progressed);
+    assert!(matches!(
+        maintenance
+            .maintain_metadata(&namespace_id)
+            .await
+            .expect("idle fold")
+            .wal_fold,
+        WalFoldStepOutcome::Folded { .. }
+    ));
     let diagnostics = maintenance
         .diagnostics(&namespace_id)
         .await
         .expect("diagnostics");
     assert_eq!(diagnostics.wal_tail_objects, 0, "{diagnostics:?}");
     assert_eq!(
-        job.probe(&namespace_id).await.expect("probe"),
-        MaintenanceProbe::Idle
+        maintenance
+            .maintain_metadata(&namespace_id)
+            .await
+            .expect("folded tail")
+            .wal_fold,
+        WalFoldStepOutcome::NotNeeded
     );
 }
 
@@ -195,7 +203,7 @@ async fn injected_wall_time_collects_objects_the_system_clock_keeps() {
 }
 
 #[tokio::test]
-async fn a_registry_runs_every_core_job_without_a_writer() {
+async fn every_core_maintenance_operation_runs_without_a_writer() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
@@ -234,30 +242,18 @@ async fn a_registry_runs_every_core_job_without_a_writer() {
         .await
         .expect("maintenance")
         .maintenance(loonfs_test_support::ids::writer_id("standalone-worker"));
-    let registry = MaintenanceRegistry::new();
-    registry
-        .register(Arc::new(MetadataMaintenanceJob::new(maintenance.clone())))
-        .expect("metadata job");
-    registry
-        .register(Arc::new(MetadataCompactionJob::new(maintenance.clone())))
-        .expect("metadata compaction job");
-    registry
-        .register(Arc::new(GarbageCollectionJob::new(maintenance.clone())))
-        .expect("garbage collection job");
-
-    for job in [
-        MaintenanceJobId::METADATA,
-        MaintenanceJobId::METADATA_COMPACTION,
-        MaintenanceJobId::GC,
-    ] {
-        let result = registry
-            .execute(MaintenanceAssignment {
-                namespace_id: namespace_id.clone(),
-                job,
-            })
-            .await;
-        assert!(result.is_ok(), "{job} failed: {:?}", result.err());
-    }
+    maintenance
+        .maintain_metadata(&namespace_id)
+        .await
+        .expect("metadata maintenance");
+    maintenance
+        .compact_metadata(&namespace_id)
+        .await
+        .expect("metadata compaction");
+    maintenance
+        .gc(&namespace_id)
+        .await
+        .expect("garbage collection");
     let diagnostics = maintenance
         .diagnostics(&namespace_id)
         .await

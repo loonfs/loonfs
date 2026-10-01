@@ -9,14 +9,10 @@ use crate::config::{
 use crate::error::CliError;
 use crate::profiles::default_namespace;
 use loonfs::engine::DecodedBlockCacheConfig;
-use loonfs::{
-    GarbageCollectionJob, LoonFs, MaintenanceRegistry, MaintenanceRunner, MetadataCompactionJob,
-    MetadataMaintenanceJob, SharedObjectStore, TraceStoreKind, WriterId,
-};
+use loonfs::{LoonFs, SharedObjectStore, TraceStoreKind, WriterId};
 use loonfs_client::Client;
 use loonfs_grep::{
-    GramIndexBuildPolicy, GrepBlockCache, GrepGcJob, GrepMaintenanceJob, GrepService, GrepWorker,
-    DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
+    GrepBlockCache, GrepService, GrepWorker, DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
 };
 use loonfs_types::{
     ActorId, NamespaceId, PrincipalId, PrincipalScope, PrincipalSet, SecretString, Subject,
@@ -342,28 +338,9 @@ impl ResolvedTarget {
             runtime.read_only(),
             maintenance.clone(),
         );
-        let jobs = MaintenanceRegistry::new();
-        jobs.register(Arc::new(MetadataMaintenanceJob::new(maintenance.clone())))
-            .map_err(CliError::from)?;
-        jobs.register(Arc::new(MetadataCompactionJob::new(maintenance.clone())))
-            .map_err(CliError::from)?;
-        jobs.register(Arc::new(GarbageCollectionJob::new(maintenance.clone())))
-            .map_err(CliError::from)?;
-        jobs.register(Arc::new(GrepMaintenanceJob::new(
-            grep_worker.clone(),
-            GramIndexBuildPolicy::default(),
-        )))
-        .map_err(CliError::from)?;
-        jobs.register(Arc::new(GrepGcJob::new(grep_worker.clone())))
-            .map_err(CliError::from)?;
-        let runner = MaintenanceRunner::builder(jobs.clone())
-            .build()
-            .map_err(CliError::from)?;
         let maintenance = MaintenanceHost {
             runtime,
             maintenance,
-            jobs,
-            runner,
             grep_worker,
         };
         let client = crate::backend::client(

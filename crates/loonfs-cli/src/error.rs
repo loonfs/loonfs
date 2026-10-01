@@ -50,7 +50,6 @@ cli_error_codes! {
     JsonNotSupportedForStreaming => "json_not_supported_for_streaming",
     Cancelled => "cancelled",
     ClientError => "client_error",
-    RuntimeError => "runtime_error",
 }
 
 /// Structured failure surfaced by every CLI command (`--json` renders it verbatim).
@@ -117,10 +116,6 @@ impl CliError {
 
     pub(crate) fn io_error(message: impl Into<String>) -> Self {
         Self::new(CliErrorCode::IoError.as_str(), message)
-    }
-
-    pub(crate) fn runtime_error(message: impl Into<String>) -> Self {
-        Self::new(CliErrorCode::RuntimeError.as_str(), message)
     }
 
     pub(crate) fn with_param(mut self, param: impl Into<String>) -> Self {
@@ -299,9 +294,8 @@ impl From<ClientError> for CliError {
     }
 }
 
-impl From<loonfs::Error> for CliError {
-    fn from(error: loonfs::Error) -> Self {
-        let error = error.to_api_error();
+impl From<loonfs_types::ApiError> for CliError {
+    fn from(error: loonfs_types::ApiError) -> Self {
         Self {
             code: error.code,
             message: error.message,
@@ -310,6 +304,18 @@ impl From<loonfs::Error> for CliError {
             request_id: error.request_id,
             details: error.details,
         }
+    }
+}
+
+impl From<loonfs::Error> for CliError {
+    fn from(error: loonfs::Error) -> Self {
+        error.to_api_error().into()
+    }
+}
+
+impl From<loonfs_grep::GrepError> for CliError {
+    fn from(error: loonfs_grep::GrepError) -> Self {
+        error.to_api_error().into()
     }
 }
 

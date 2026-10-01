@@ -133,8 +133,8 @@ impl Client {
 
     /// Enables the namespace's grep index (maintenance API group).
     ///
-    /// The server asks its maintenance runner to start the backfill; this call
-    /// does not wait for it. Idempotent.
+    /// The server's maintenance builds the index later; this call does not
+    /// wait for it. Idempotent.
     pub async fn enable_grep_index(&self, namespace_id: &NamespaceId) -> Result<GrepIndex> {
         let url = format!(
             "{}/v0/maintenance/namespaces/{namespace_id}/grep/index/enable",

@@ -13,8 +13,7 @@ use crate::fs::WriterIdentity;
 use crate::metrics::{DefaultMetricsRecorder, MetricValue, RuntimeInstruments};
 use crate::publish::{CommitRequest, ContentPreparationError, FilesystemOperation};
 use crate::{
-    ErrorCode, MaintenanceHint, MetadataCache, SharedObjectStore as SharedStore, TraceMode,
-    TraceStoreKind,
+    ErrorCode, MetadataCache, SharedObjectStore as SharedStore, TraceMode, TraceStoreKind,
 };
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -227,8 +226,6 @@ fn test_writer_bits() -> Arc<WriterBits> {
             crate::config::DEFAULT_MAX_CONCURRENT_COMPACTIONS,
         ),
         compactor_epochs: tokio::sync::Mutex::default(),
-        maintenance_hint_observer: None,
-        namespace_advance_observer: None,
     })
 }
 
@@ -2126,7 +2123,6 @@ async fn a_fold_reloads_the_tail_when_no_projection_is_retained() {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
     let namespace_id = NamespaceId::parse("no-projection").expect("valid namespace id");
-    let hints = Arc::new(Mutex::new(Vec::new()));
     let writer = crate::LoonFs::builder_with_store(store.clone())
         .writer_id("writer-a")
         .metadata_cache(
@@ -2135,10 +2131,6 @@ async fn a_fold_reloads_the_tail_when_no_projection_is_retained() {
                 .max_head_state_bytes(0)
                 .build(),
         )
-        .maintenance_hint_observer({
-            let hints = Arc::clone(&hints);
-            move |hint| hints.lock().expect("hint log").push(hint)
-        })
         .build()
         .await
         .expect("build writer");
@@ -2180,19 +2172,6 @@ async fn a_fold_reloads_the_tail_when_no_projection_is_retained() {
         .expect("inspect the folded namespace");
     assert!(status.current_manifest_no.is_some(), "{status:?}");
     assert!(status.wal_tail_objects < FOLD_AT_WAL_OBJECTS, "{status:?}");
-    {
-        let hints = hints.lock().expect("hint log");
-        assert!(hints.iter().any(|hint| matches!(
-            hint,
-            MaintenanceHint::Published(publication)
-                if publication.namespace_id == namespace_id
-                    && publication.wal_tail_objects >= FOLD_AT_WAL_OBJECTS
-        )));
-        assert!(hints.iter().any(|hint| matches!(
-            hint,
-            MaintenanceHint::WalFoldFinished { namespace_id: folded } if folded == &namespace_id
-        )));
-    }
     writer.shutdown().await.expect("shut down writer");
 }
 
@@ -2313,21 +2292,16 @@ async fn a_runtime_fold_materializes_inline_content_and_reanchors_to_an_empty_ta
 }
 
 #[tokio::test]
-async fn a_failed_fold_notifies_maintenance_and_reloads_the_tail() {
+async fn a_failed_fold_reloads_the_tail() {
     let temp_dir = tempdir().expect("tempdir");
     let failing = Arc::new(FailStore::matching(
         LocalFsStore::new(temp_dir.path()).expect("store"),
         is_fold,
         InjectedError::PermissionDenied("injected manifest write failure".to_owned()),
     ));
-    let namespace_id = NamespaceId::parse("failed-fold-hint").expect("valid namespace id");
-    let hints = Arc::new(Mutex::new(Vec::new()));
+    let namespace_id = NamespaceId::parse("failed-fold").expect("valid namespace id");
     let writer = crate::LoonFs::builder_with_store(failing.clone())
         .writer_id("writer-a")
-        .maintenance_hint_observer({
-            let hints = Arc::clone(&hints);
-            move |hint| hints.lock().expect("hint log").push(hint)
-        })
         .build()
         .await
         .expect("build writer");
@@ -2364,13 +2338,6 @@ async fn a_failed_fold_notifies_maintenance_and_reloads_the_tail() {
         .expect("settle the failed fold");
 
     assert_eq!(failing.attempts(), 1);
-    {
-        let hints = hints.lock().expect("hint log");
-        assert!(hints.iter().any(|hint| matches!(
-            hint,
-            MaintenanceHint::WalFoldFinished { namespace_id: folded } if folded == &namespace_id
-        )));
-    }
     loonfs_core::fold_wal_tail(
         failing.inner(),
         None,
@@ -2389,14 +2356,22 @@ async fn a_failed_fold_notifies_maintenance_and_reloads_the_tail() {
         )))
         .await
         .expect("reload the folded tail and publish");
-    {
-        let hints = hints.lock().expect("hint log");
-        let publication = hints.iter().rev().find_map(|hint| match hint {
-            MaintenanceHint::Published(publication) => Some(publication),
-            _ => None,
-        });
-        assert!(publication.expect("publication").wal_tail_objects < FOLD_AT_WAL_OBJECTS);
-    }
+    let publisher = writer
+        .mode
+        .publisher
+        .live_publisher(&namespace_id)
+        .expect("live session");
+    let tail_objects = publisher
+        .engine
+        .lock()
+        .await
+        .engine
+        .as_ref()
+        .and_then(NamespaceCommitEngine::wal_tail_objects);
+    assert!(
+        tail_objects.is_some_and(|objects| objects < FOLD_AT_WAL_OBJECTS),
+        "{tail_objects:?}"
+    );
     writer.shutdown().await.expect("shut down writer");
 }
 

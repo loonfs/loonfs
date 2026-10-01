@@ -112,7 +112,7 @@ pub mod cache {
     pub use crate::recency::Recency;
     pub use crate::wal::ProjectedWalTail;
 
-    pub use crate::manifest::metadata_maintenance_due;
+    pub use crate::manifest::metadata_compaction_due;
     pub use crate::manifest::{
         CacheScope, CachedReadAnchor, HeadStateCache, HeadStateCacheStats, MetadataSegmentCache,
         MetadataSegmentCacheStats, NamespaceValidation, SharedHeadState, SharedSegmentBlocks,

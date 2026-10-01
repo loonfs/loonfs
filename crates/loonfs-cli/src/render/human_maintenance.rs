@@ -1,13 +1,13 @@
 use super::summaries::*;
-use crate::commands::{MaintenanceKeyReport, MaintenanceRan};
+use crate::commands::MaintenanceRan;
 use loonfs_types::api::v0::{
     DeleteSnapshotResponse, GrepIndex, ListChangesResponse, ListSnapshotsResponse, SnapshotSummary,
     StoreProbeResponse,
 };
 use loonfs_types::{
     ChangeSeq, Checkpoint, CompactionStepOutcome, DeleteCheckpointResponse,
-    DeleteNamespaceResponse, ListCheckpointsResponse, MetadataCompactionOutcome, NamespaceId,
-    NamespaceMetadata, RunMaintenanceResponse,
+    DeleteNamespaceResponse, ListCheckpointsResponse, MetadataCompactionOutcome, NamespaceMetadata,
+    RunMaintenanceResponse,
 };
 
 pub(super) fn human_default_namespace(profile: &str, namespace: &str) -> String {
@@ -267,38 +267,6 @@ pub(super) fn human_grep_index_enabled(
             grep_index_state_summary(&response.lifecycle)
         )
     }
-}
-
-pub(super) fn human_maintenance_hosted(namespaces: &[NamespaceId], jobs: &[String]) -> String {
-    format!(
-        "hosted {}; stopped on signal",
-        maintenance_assignment(namespaces, jobs)
-    )
-}
-
-pub(super) fn human_maintenance_drained(
-    namespaces: &[NamespaceId],
-    jobs: &[String],
-    keys: &[MaintenanceKeyReport],
-    steps: u64,
-    budget_exhausted: bool,
-) -> String {
-    let assignment = maintenance_assignment(namespaces, jobs);
-    let settled = keys.iter().filter(|key| key.settled).count();
-    let mut lines: Vec<String> = keys.iter().map(maintenance_key_line).collect();
-    lines.push(if budget_exhausted {
-        format!(
-            "gave up on {assignment}: {settled} of {} keys settled after {}",
-            keys.len(),
-            steps_phrase(steps)
-        )
-    } else {
-        format!(
-            "drained {assignment}: {settled} keys settled after {}",
-            steps_phrase(steps)
-        )
-    });
-    lines.join("\n")
 }
 
 pub(super) fn human_store_probed(response: &StoreProbeResponse) -> String {

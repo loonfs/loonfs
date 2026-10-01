@@ -2367,10 +2367,9 @@ async fn repeated_churn_under_small_budgets_leaves_one_base_run_per_group() {
                 }
                 // The group's bottom no longer fits one step and its delta
                 // runs are merged down to one. The step hands the group to a
-                // streaming compaction, which is what merges it. The runner
-                // runs that job in the background; here it runs inline, so
-                // the steps that follow see what they would have seen once it
-                // landed.
+                // streaming compaction, which is what merges it. It runs
+                // inline here, so the steps that follow see what they would
+                // have seen once it landed.
                 super::CompactionStepOutcome::CompactionPlanned { spec, .. } => {
                     publish_planned_compaction(&store, &namespace_id, &context, policy, &spec)
                         .await;

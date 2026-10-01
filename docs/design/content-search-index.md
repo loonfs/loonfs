@@ -66,7 +66,7 @@ namespaces/{namespace_id}/extensions/grep/
 
 The hint records a manifest number from which discovery starts. A reader loads that manifest and probes consecutive numbers until not-found. The current manifest contains lifecycle, visible segments, the run allocator, and pending reorganization. Core manifests contain none of this state.
 
-Enablement writes the hint naming manifest 1 before creating manifest 1. Later publications write completed segments, then the next manifest with put-if-absent. A publisher that loses the race stops, and its next scheduled step loads the winner and plans again. Successful publication raises the hint by CAS; a failed raise does not undo publication.
+Enablement writes the hint naming manifest 1 before creating manifest 1. Later publications write completed segments, then the next manifest with put-if-absent. A publisher that loses the race stops, and its next step loads the winner and plans again. Successful publication raises the hint by CAS; a failed raise does not undo publication.
 
 Queries check for a successor to their cached manifest on every request. A present successor requires discovery again, and so does an answer that arrives `READ_REVALIDATION_BOUND_MS` or more after the manifest's previous check. The hint can lag and does not replace this freshness check. The [grep format](../specs/format.md#appendix-d-grep-extension-format) defines identity and checksum validation.
 
@@ -116,11 +116,9 @@ A second pass every five seconds builds the index of each writer session the ser
 
 A query-only server builds no index and rejects index mutations. No grep operation enumerates namespaces; the sweep lists them from the store.
 
-Embedded CLI profiles run no index work after a write. `loonfs maintenance index enable` captures a target sequence and performs bounded passes until the index reaches it. Later namespace writes do not extend that target. `--no-wait` returns after enablement. `--max-steps` and `--deadline-ms` bound the wait; when either runs out, the command prints its progress and exits nonzero. Repeating the command brings an index that has fallen behind up to the namespace head.
+Embedded CLI profiles run no index work after a write. `loonfs maintenance index enable` captures a target sequence and runs bounded build steps until the index reaches it. Later namespace writes do not extend that target. `--no-wait` returns after enablement. `--max-steps` and `--deadline-ms` bound the wait; when either runs out, the command prints its progress and exits nonzero. Repeating the command brings an index that has fallen behind up to the namespace head.
 
-For namespaces that may remain inactive, an embedded profile can assign maintenance explicitly with `loonfs maintenance loop --namespaces <id>`. `--jobs grep-index` selects index maintenance, and `--drain` processes the current assignment and exits, subject to its step and deadline limits. A namespace without an enabled index returns `not_enabled` after the grep manifest is read.
-
-Build and reorganization do not collect garbage. Grep garbage collection is its own `grep_gc` job, described below.
+Build and reorganization do not collect garbage. Grep garbage collection is its own call, described below.
 
 ## Reorganization
 
@@ -196,7 +194,7 @@ Index maintenance reduces this gap when it runs. Core WAL-tail backpressure does
 
 ## Grep garbage collection
 
-Grep GC is namespace-scoped. It runs through `loonfs maintenance grep-gc`, `POST /v0/maintenance/namespaces/{ns}/runs` with `kind: "grep_gc"`, or the `grep_gc` maintenance job, which `loonfs maintenance loop` runs when `--jobs` selects `grep-gc` or is omitted. Index building and reorganization do not run it.
+Grep GC is namespace-scoped. It runs through `loonfs maintenance grep-gc`, `POST /v0/maintenance/namespaces/{ns}/runs` with `kind: "grep_gc"`, or the reference server's sweep on each collection pass. Index building and reorganization do not run it.
 
 Each call loads the current manifest, builds its live segment set, and scans the manifest and segment collections from beginning to end. It uses a fixed call clock and stores no progress cursor. Invalid or unreadable roots fail before deletion.
 

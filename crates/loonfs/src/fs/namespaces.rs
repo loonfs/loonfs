@@ -1,13 +1,12 @@
 //! Namespace lifecycle: create, fork, and delete.
 
 use super::core::{should_invalidate_after_result, RuntimeCore, WriterBits};
-use crate::maintenance::namespace_reclaim_at_ms;
 use crate::{
     ActorId, CreateNamespaceOptions, DeleteNamespaceOptions, DeleteNamespaceResponse,
     ForkNamespaceOptions, NamespaceId,
 };
 use crate::{Error, Result};
-use crate::{ErrorCode, LoonFs, MaintenanceHint, MaintenanceJobId, Namespace, Writable};
+use crate::{ErrorCode, LoonFs, Namespace, Writable};
 
 impl LoonFs<Writable> {
     /// Fork, delete, and snapshot management belong to the token holder and
@@ -186,14 +185,6 @@ pub(crate) async fn delete_namespace_with_engine(
         .is_none_or(|error| error.code() == ErrorCode::NamespaceDeleted)
     {
         core.invalidate_namespace_read_cache(namespace_id);
-        writer.send_maintenance_hint(
-            namespace_id,
-            MaintenanceHint::DueAt {
-                namespace_id: namespace_id.clone(),
-                job: MaintenanceJobId::GC,
-                not_before_ms: namespace_reclaim_at_ms(context.now_ms),
-            },
-        );
     }
     result
 }

@@ -5,6 +5,7 @@ use crate::resolve::ResolvedTarget;
 use bytes::Bytes;
 use futures::StreamExt as _;
 use loonfs_client::{NamespacePath, PayloadSource};
+use loonfs_core::limits::FOLD_AT_WAL_OBJECTS;
 use loonfs_types::NamespaceAccess;
 
 #[test]
@@ -54,4 +55,83 @@ fn embedded_requests_need_no_socket_or_token_and_stream_past_the_server_body_lim
         }
         assert_eq!(size_bytes, 257 * 1024 * 1024);
     });
+}
+
+/// Each command here runs on a Tokio runtime of its own that is dropped when
+/// the command returns, the way the process exits after a real one.
+#[test]
+fn an_embedded_command_finishes_the_fold_it_started_before_returning() {
+    let directory = tempfile::tempdir().expect("store directory");
+    let config = StoreConfig::LocalFs {
+        root: directory.path().display().to_string(),
+        key_prefix: None,
+    };
+    let namespace_id = loonfs_types::NamespaceId::parse("demo").expect("namespace id");
+    let actor = loonfs_test_support::test_actor();
+    let open = || async {
+        ResolvedTarget::embedded(&config, None, true)
+            .await
+            .expect("embedded profile")
+    };
+    run_command(async {
+        let target = open().await;
+        target
+            .client
+            .create_namespace(&namespace_id, &actor, NamespaceAccess::unrestricted())
+            .await
+            .expect("namespace");
+        let store = target
+            .maintenance
+            .as_ref()
+            .expect("embedded host")
+            .runtime
+            .object_store();
+        loonfs_core::test_support::append_wal_objects(
+            store.as_ref(),
+            &namespace_id,
+            FOLD_AT_WAL_OBJECTS,
+            &loonfs_core::MutationContext {
+                writer_id: loonfs_types::WriterId::parse("tail-seed").expect("writer id"),
+                now_ms: 1_000,
+            },
+        )
+        .await
+        .expect("seed a tail at the fold threshold");
+    });
+    run_command(async {
+        open()
+            .await
+            .client
+            .put_file(
+                &NamespacePath::parse("demo", "/file").expect("file path"),
+                b"payload",
+                &actor,
+            )
+            .await
+            .expect("a write past the fold threshold");
+    });
+    let tail = run_command(async {
+        open()
+            .await
+            .maintenance
+            .as_ref()
+            .expect("embedded host")
+            .maintenance
+            .diagnostics(&namespace_id)
+            .await
+            .expect("diagnostics")
+            .wal_tail_objects
+    });
+    assert!(
+        tail < FOLD_AT_WAL_OBJECTS,
+        "the fold did not finish: {tail}"
+    );
+}
+
+fn run_command<T>(command: impl std::future::Future<Output = T>) -> T {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .expect("command runtime")
+        .block_on(command)
 }

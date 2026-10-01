@@ -11,9 +11,9 @@ use crate::NamespaceDiagnostics;
 use crate::{
     AdvanceRetentionResponse, Checkpoint, CompactionStepOutcome, CreateCheckpointOptions,
     DeleteCheckpointResponse, ErrorCode, FoldWalOutcome, FoldWalResponse, ListCheckpointsResponse,
-    MaintenanceCancellation, MaintenanceProbe, MetadataCompactionOutcome,
-    MetadataCompactionResponse, MetadataMaintenanceOptions, MetadataMaintenanceResponse,
-    NamespaceId, PinId, SharedObjectStore, SnapshotSummary, WalFoldStepOutcome,
+    MaintenanceCancellation, MetadataCompactionOutcome, MetadataCompactionResponse,
+    MetadataMaintenanceOptions, MetadataMaintenanceResponse, NamespaceId, PinId, SharedObjectStore,
+    SnapshotSummary, WalFoldStepOutcome,
 };
 use crate::{Error, Result};
 use loonfs_core::cache::NamespaceStorageDiagnostics;
@@ -37,8 +37,8 @@ enum CompactionStep {
     Fenced,
     /// The unit is finished, and this is what it did.
     Concluded(CompactionStepOutcome),
-    /// A family group has outgrown a bounded step. The caller starts the job
-    /// as background work, or runs it in its own task.
+    /// A family group has outgrown a bounded step. The caller reports that a
+    /// streaming compaction is required, or runs it.
     CompactionPlanned(loonfs_core::MetadataCompactionSpec),
 }
 
@@ -214,20 +214,6 @@ impl Maintenance {
         namespace_id: &NamespaceId,
         options: &MetadataMaintenanceOptions,
     ) -> Result<MetadataMaintenanceResponse> {
-        self.maintain_metadata_step(namespace_id, options)
-            .await
-            .map(|(response, _)| response)
-    }
-
-    /// Does what [`Self::maintain_metadata`] does, and also returns when a
-    /// tail this step did not fold goes idle on this handle's wall clock.
-    /// That time is after the step's clock reading and at most
-    /// `idle_fold_after_ms` past it.
-    pub(crate) async fn maintain_metadata_step(
-        &self,
-        namespace_id: &NamespaceId,
-        options: &MetadataMaintenanceOptions,
-    ) -> Result<(MetadataMaintenanceResponse, Option<u64>)> {
         let anchor = self.load_live_anchor(namespace_id).await?;
         let status = NamespaceStorageDiagnostics::from(&anchor);
         let inline_bytes = if status.wal_tail_objects > 0 {
@@ -239,13 +225,8 @@ impl Maintenance {
             0
         };
         let now_ms = self.core.now_ms()?;
-        let idle_fold_due_in_ms =
-            options.idle_fold_due_in_ms(status.wal_tail_newest_commit_at_ms, now_ms);
         let fold = options.fold_is_due(status.wal_tail_objects, inline_bytes)
-            || idle_fold_due_in_ms == Some(0);
-        let idle_fold_at_ms = idle_fold_due_in_ms
-            .filter(|_| !fold)
-            .map(|due_in_ms| now_ms.saturating_add(due_in_ms));
+            || options.idle_fold_is_due(status.wal_tail_newest_commit_at_ms, now_ms);
         let response = self
             .fold_then_compact(namespace_id, fold, &anchor, options.compaction_policy)
             .await?;
@@ -255,7 +236,7 @@ impl Maintenance {
             compaction = ?response.compaction,
             "metadata maintenance pass concluded"
         );
-        Ok((response, idle_fold_at_ms))
+        Ok(response)
     }
 
     /// Runs [`Self::maintain_metadata_while_due_with_options`] with the
@@ -335,41 +316,6 @@ impl Maintenance {
             lost_races = if won { 0 } else { lost_races + 1 };
         }
         Ok(())
-    }
-
-    /// Runs [`Self::probe_metadata_with_options`] with the default
-    /// thresholds.
-    pub async fn probe_metadata(&self, namespace_id: &NamespaceId) -> Result<MaintenanceProbe> {
-        self.probe_metadata_with_options(namespace_id, &MetadataMaintenanceOptions::default())
-            .await
-    }
-
-    /// Checks the WAL object threshold, the age of the tail's newest commit,
-    /// and manifest descriptors without replaying the tail.
-    ///
-    /// The age is measured on this handle's wall clock. Inline byte thresholds
-    /// use publication hints instead. Active leases may prevent an eligible
-    /// merge from running until their expiry.
-    pub async fn probe_metadata_with_options(
-        &self,
-        namespace_id: &NamespaceId,
-        options: &MetadataMaintenanceOptions,
-    ) -> Result<MaintenanceProbe> {
-        let now_ms = self.core.now_ms()?;
-        let anchor = self.load_live_anchor(namespace_id).await?;
-        let due = loonfs_core::cache::metadata_maintenance_due(
-            &anchor,
-            |wal_tail_objects, wal_tail_newest_commit_at_ms| {
-                wal_tail_objects >= options.max_wal_tail_objects.get()
-                    || options.idle_fold_is_due(wal_tail_newest_commit_at_ms, now_ms)
-            },
-            options.compaction_policy,
-        );
-        Ok(if due {
-            MaintenanceProbe::Due
-        } else {
-            MaintenanceProbe::Idle
-        })
     }
 
     /// Optionally folds the WAL tail, then runs one compaction step.
@@ -485,7 +431,7 @@ impl Maintenance {
             .get(namespace_id)
             .copied();
         let due = |anchor: &NamespaceReadAnchor| {
-            loonfs_core::cache::metadata_maintenance_due(anchor, |_, _| false, compaction_policy)
+            loonfs_core::cache::metadata_compaction_due(anchor, compaction_policy)
         };
         let step_due = match observed {
             // A claim the manifest no longer carries is a fence the step reports.
@@ -693,10 +639,9 @@ impl Maintenance {
     /// Runs one complete garbage-collection pass for one namespace.
     ///
     /// Every call rebuilds the current live roots and keeps no cursor. A pass
-    /// runs only when asked here or by a writer's collection job, which
-    /// schedules one for each upload deadline it created. A deleted namespace
-    /// is collected, which is how its objects are reclaimed; a namespace that
-    /// does not exist returns `namespace_not_found`.
+    /// runs only when asked. A deleted namespace is collected, which is how
+    /// its objects are reclaimed; a namespace that does not exist returns
+    /// `namespace_not_found`.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.maintenance.gc",

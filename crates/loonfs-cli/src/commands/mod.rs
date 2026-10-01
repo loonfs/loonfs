@@ -21,7 +21,7 @@ pub(crate) use tree_failures::TreeTransferFailures;
 
 pub(crate) use self::output::{
     CommandData, CommandFailure, CommandOutput, DoctorCheck, DoctorStatus, ListingHeadDrift,
-    MaintenanceKeyReport, MaintenanceRan, TrashListing,
+    MaintenanceRan, TrashListing,
 };
 
 use crate::args::{AccessCommand, Cli, Command, CommandKind, CompletionArgs, RuntimeBehavior};

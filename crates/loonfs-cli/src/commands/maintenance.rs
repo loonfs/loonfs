@@ -5,31 +5,23 @@ use super::context::{
     parse_public_ordinal_arg, parse_snapshot_id_arg, resolve_command_context,
     resolve_mutation_context, resolve_profile_context,
 };
-use super::output::{
-    CommandData, CommandFailure, CommandOutput, MaintenanceKeyReport, MaintenanceRan,
-};
+use super::output::{CommandData, CommandFailure, CommandOutput, MaintenanceRan};
 use super::pagination::{collect_or_stream_pages, page_request, PagePlan, PagedListing};
 use crate::args::{
     ChangesArgs, CommandKind, MaintenanceCheckpointArgs, MaintenanceCheckpointCommand,
     MaintenanceCheckpointDeleteArgs, MaintenanceCheckpointListArgs, MaintenanceCommand,
-    MaintenanceGcArgs, MaintenanceIndexCommand, MaintenanceIndexEnableArgs, MaintenanceJobArg,
-    MaintenanceLoopArgs, MaintenanceMetadataArgs, MaintenanceNamespaceArgs,
-    MaintenanceRecoverAdministratorArgs, MaintenanceRetentionCommand, MaintenanceStoreCommand,
-    MaintenanceStoreProbeArgs,
+    MaintenanceGcArgs, MaintenanceIndexCommand, MaintenanceIndexEnableArgs,
+    MaintenanceMetadataArgs, MaintenanceNamespaceArgs, MaintenanceRecoverAdministratorArgs,
+    MaintenanceRetentionCommand, MaintenanceStoreCommand, MaintenanceStoreProbeArgs,
 };
-use crate::backend::{MaintenanceKeyProgress, StepBudget};
+use crate::backend::StepBudget;
 use crate::error::CliError;
-use crate::resolve::parse_namespace_id;
-use clap::ValueEnum;
-use loonfs::{MaintenanceJobId, NamespaceId};
-use loonfs_grep::{GREP_GC_JOB, GREP_INDEX_JOB};
 use loonfs_types::api::v0::GrepIndexLifecycle;
 use loonfs_types::{
     AdvanceRetentionRequest, ChangeSeq, CreateCheckpointRequest, ErrorCode, GcRequest,
     MetadataCompactionRequest, MetadataMaintenanceRequest, PinId, PrincipalId,
     RecoverAdministratorRequest, RunMaintenanceRequest,
 };
-use std::collections::BTreeSet;
 use std::path::Path;
 
 // --- maintenance API group ---
@@ -43,7 +35,6 @@ pub(crate) async fn run_maintenance_command(
         MaintenanceCommand::RecoverAdministrator(args) => {
             run_maintenance_recover_administrator(kind, config_path, args).await
         }
-        MaintenanceCommand::Loop(args) => run_maintenance_loop(kind, config_path, args).await,
         MaintenanceCommand::Metadata(args) => {
             run_maintenance_metadata(kind, config_path, args).await
         }
@@ -317,68 +308,6 @@ async fn run_maintenance_retention_advance(
     ))
 }
 
-/// Runs maintenance for explicitly assigned namespaces. The command runs
-/// until stopped, or completes the current assignments once with `--drain`.
-async fn run_maintenance_loop(
-    kind: CommandKind,
-    config_path: &Path,
-    args: MaintenanceLoopArgs,
-) -> Result<CommandOutput, CommandFailure> {
-    let explicit_profile = args.profile.profile.as_deref();
-    let context = resolve_profile_context(
-        kind,
-        config_path,
-        explicit_profile,
-        args.request.no_retry,
-        None,
-    )
-    .await?;
-    let namespaces = args
-        .namespaces
-        .iter()
-        .map(|namespace| {
-            parse_namespace_id(namespace).map_err(|error| error.with_param("--namespaces"))
-        })
-        .collect::<Result<BTreeSet<_>, _>>()
-        .map_err(|error| context.fail(kind, error))?;
-    // Sort and deduplicate assignments for stable execution and reporting.
-    let namespaces: Vec<NamespaceId> = namespaces.into_iter().collect();
-    let jobs = selected_jobs(&args.jobs);
-    let fail_here = |error| context.fail(kind, error);
-
-    let job_names: Vec<String> = jobs.iter().map(|job| job.as_str().to_owned()).collect();
-    let data = if args.drain {
-        let budget = StepBudget {
-            max_steps: args.max_steps,
-            deadline_ms: args.deadline_ms,
-        };
-        let progress = context
-            .target
-            .drain_maintenance(&namespaces, &jobs, budget)
-            .await
-            .map_err(fail_here)?;
-        CommandData::MaintenanceDrained {
-            namespaces,
-            jobs: job_names,
-            keys: progress.keys.iter().map(key_report).collect(),
-            steps: progress.steps,
-            budget_exhausted: progress.budget_exhausted(),
-        }
-    } else {
-        context
-            .target
-            .host_maintenance(&namespaces, &jobs, args.poll_interval_ms, shutdown_signal())
-            .await
-            .map_err(fail_here)?;
-        CommandData::MaintenanceHosted {
-            namespaces,
-            jobs: job_names,
-        }
-    };
-
-    Ok(context.output(kind, data))
-}
-
 /// Checks that the profile's object store supports the operations LoonFS
 /// requires. This command checks the store, not a namespace.
 async fn run_maintenance_store_probe(
@@ -403,61 +332,6 @@ async fn run_maintenance_store_probe(
         .map_err(|error| context.fail(kind, error))?;
 
     Ok(context.output(kind, CommandData::StoreProbed(response)))
-}
-
-/// Returns the selected jobs in a stable order without duplicates.
-/// An empty selection enables every available job.
-fn selected_jobs(requested: &[MaintenanceJobArg]) -> Vec<MaintenanceJobId> {
-    MaintenanceJobArg::value_variants()
-        .iter()
-        .filter(|job| requested.is_empty() || requested.contains(job))
-        .map(|job| job_id(*job))
-        .collect()
-}
-
-fn job_id(job: MaintenanceJobArg) -> MaintenanceJobId {
-    match job {
-        MaintenanceJobArg::Metadata => MaintenanceJobId::METADATA,
-        MaintenanceJobArg::MetadataCompaction => MaintenanceJobId::METADATA_COMPACTION,
-        MaintenanceJobArg::Gc => MaintenanceJobId::GC,
-        MaintenanceJobArg::GrepIndex => GREP_INDEX_JOB,
-        MaintenanceJobArg::GrepGc => GREP_GC_JOB,
-    }
-}
-
-fn key_report(key: &MaintenanceKeyProgress) -> MaintenanceKeyReport {
-    MaintenanceKeyReport {
-        namespace_id: key.namespace_id.clone(),
-        job: key.job.as_str().to_owned(),
-        steps: key.steps,
-        conclusion: key
-            .conclusion
-            .map(|conclusion| conclusion.as_str().to_owned()),
-        settled: key.settled(),
-    }
-}
-
-/// Resolves on ctrl-c or, on unix, SIGTERM — the stop an orchestrator sends
-/// before a kill. The clean shutdown behind it is the writer's own.
-async fn shutdown_signal() {
-    let ctrl_c = async {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("ctrl-c handler should install");
-    };
-    #[cfg(unix)]
-    let terminate = async {
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("SIGTERM handler should install")
-            .recv()
-            .await;
-    };
-    #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
-    tokio::select! {
-        () = ctrl_c => {}
-        _ = terminate => {}
-    }
 }
 
 pub(crate) async fn run_changes(

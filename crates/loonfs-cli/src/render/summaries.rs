@@ -165,48 +165,6 @@ pub(super) fn grep_index_state_summary(state: &GrepIndexLifecycle) -> String {
     }
 }
 
-/// Formats the final state of one maintenance assignment.
-pub(super) fn maintenance_key_line(key: &MaintenanceKeyReport) -> String {
-    let Some(conclusion) = &key.conclusion else {
-        return format!(
-            "{}/{}: not started; the budget ran out first",
-            key.namespace_id, key.job
-        );
-    };
-    let spent = steps_phrase(key.steps);
-    if key.settled {
-        format!(
-            "{}/{}: {conclusion} after {spent}",
-            key.namespace_id, key.job
-        )
-    } else {
-        format!(
-            "{}/{}: {conclusion} after {spent}, still not settled",
-            key.namespace_id, key.job
-        )
-    }
-}
-
-pub(super) fn steps_phrase(steps: u64) -> String {
-    if steps == 1 {
-        "1 step".to_owned()
-    } else {
-        format!("{steps} steps")
-    }
-}
-
-pub(super) fn maintenance_assignment(namespaces: &[NamespaceId], jobs: &[String]) -> String {
-    format!(
-        "{} for {}",
-        jobs.join(", "),
-        namespaces
-            .iter()
-            .map(NamespaceId::to_string)
-            .collect::<Vec<_>>()
-            .join(", ")
-    )
-}
-
 /// Formats a checkpoint owner for the table view.
 ///
 /// User checkpoints show their label. Fork checkpoints show their target

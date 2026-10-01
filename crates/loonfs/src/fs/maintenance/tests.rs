@@ -1040,3 +1040,86 @@ async fn an_idle_namespace_visit_costs_a_fixed_number_of_requests() {
         "an idle visit runs the step that reports a fence"
     );
 }
+
+#[tokio::test]
+async fn a_repeated_retirement_pass_lists_once_and_deletes_nothing() {
+    use loonfs_core::limits::{GC_SAFETY_MARGIN_MS, NAMESPACE_RETIREMENT_GRACE_MS};
+    use loonfs_test_support::stores::{KeyPredicate, RecordingStore, StoreCounts};
+
+    let directory = tempdir().expect("directory");
+    let store = Arc::new(RecordingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::prefix("namespaces/retired/content/"),
+    ));
+    let namespace_id = namespace_id("retired");
+    let writer = LoonFs::builder_with_store(store.clone())
+        .writer_id("retirement-test")
+        .build()
+        .await
+        .expect("writer");
+    writer
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
+        .await
+        .expect("namespace");
+    for _ in 0..3 {
+        let key = loonfs_objectstore::keys::content_blob(
+            &namespace_id,
+            &loonfs_types::ContentId::generate(),
+        );
+        store
+            .put_if_absent(&key, bytes::Bytes::from_static(b"content"))
+            .await
+            .expect("content");
+    }
+    let mut context = loonfs_core::MutationContext {
+        writer_id: loonfs_types::WriterId::parse("deleter").expect("writer id"),
+        now_ms: 1_000,
+    };
+    loonfs_core::publish::NamespaceCommitEngine::new(namespace_id.clone())
+        .delete_namespace(store.as_ref(), Default::default(), &context)
+        .await
+        .expect("delete");
+    context.now_ms += crate::GcOptions::default()
+        .grace_window_ms
+        .max(NAMESPACE_RETIREMENT_GRACE_MS)
+        + GC_SAFETY_MARGIN_MS;
+    store.reset();
+    let first = loonfs_core::gc_namespace(
+        store.as_ref(),
+        &namespace_id,
+        &crate::GcOptions::default(),
+        &context,
+    )
+    .await
+    .expect("first pass");
+    assert_eq!(first.deleted.retired_content_objects, 3);
+    assert_eq!(
+        store.counts(),
+        StoreCounts {
+            lists: 1,
+            deletes: 3,
+            ..Default::default()
+        }
+    );
+    store.reset();
+    let repeated = loonfs_core::gc_namespace(
+        store.as_ref(),
+        &namespace_id,
+        &crate::GcOptions::default(),
+        &context,
+    )
+    .await
+    .expect("repeat pass");
+    assert_eq!(
+        repeated.deleted,
+        loonfs_types::DeletedObjectCounts::default()
+    );
+    assert_eq!(
+        store.counts(),
+        StoreCounts {
+            lists: 1,
+            ..Default::default()
+        }
+    );
+    writer.shutdown().await.expect("shutdown");
+}

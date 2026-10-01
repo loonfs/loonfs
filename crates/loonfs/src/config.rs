@@ -17,12 +17,6 @@ pub const DEFAULT_MAX_CONCURRENT_FOLDS: usize = 2;
 /// Default maximum metadata merges, bounded or streaming, one writer runs
 /// concurrently.
 pub const DEFAULT_MAX_CONCURRENT_COMPACTIONS: usize = 2;
-/// Default cap on concurrently running maintenance invocations.
-/// Each job already runs at most once per namespace at a time; this bounds how many may run at
-/// once, so a write burst across many namespaces cannot fan out into
-/// unbounded concurrent maintenance. A run that waits for a permit is not
-/// dropped: it takes the next one that frees.
-pub const DEFAULT_MAX_CONCURRENT_MAINTENANCE: usize = 2;
 
 /// Shared limits for queued and active publications owned by one writer.
 ///

@@ -6,9 +6,10 @@ filesystem operations, and namespace maintenance against LoonFS.
 An embedded profile runs the HTTP binding in memory over its runtime handles.
 The CLI sends requests to it through the same client that a remote profile
 uses, so both kinds of profile answer the same API contract. An embedded
-profile opens no listener and needs no bearer token. `loonfs maintenance loop`
-and the bounded index steps of `loonfs maintenance index enable` run directly
-on the local runtime handles instead of through the binding.
+profile opens no listener and needs no bearer token. The bounded index steps
+of `loonfs maintenance index enable` run directly on the local runtime handles
+instead of through the binding. A command returns only after the folds and
+metadata compactions its writes started have finished.
 
 Embedded requests go through the binding's validation, error envelope, and
 JSON body limits, and a failed request reports the binding's request ID and
@@ -357,20 +358,10 @@ Inspection and diagnostics
     a check fails
 
 Maintenance
-  loonfs maintenance loop --namespaces <ns>[,<ns>...] [--namespaces <ns>]... [--jobs <job>[,<job>...]]... [--drain] [--max-steps <n>] [--deadline-ms <ms>] [--poll-interval-ms <ms>]
-    Run maintenance for explicitly named namespaces in embedded mode. The
-    command runs until stopped. With --drain, it finishes the current
-    assignments and exits. --jobs selects metadata, metadata-compaction, gc,
-    grep-index, or grep-gc; these map to the metadata, metadata_compaction,
-    gc, grep_index, and grep_gc job ids. Omitting it selects all five.
-    --namespaces and --jobs accept comma-separated lists or repeated flags.
-    --max-steps and --deadline-ms bound a drain.
-    --poll-interval-ms defaults to 60000, has a minimum of 100, and is ignored by drains.
-
   loonfs maintenance recover-administrator <principal>
 
   loonfs maintenance metadata [--max-wal-tail-objects <n>]
-    Run the metadata job once: fold the WAL tail when it reaches
+    Run one metadata maintenance pass: fold the WAL tail when it reaches
     the threshold, then run one bounded compaction step.
     --max-wal-tail-objects overrides the default fold threshold.
 
@@ -380,8 +371,7 @@ Maintenance
   loonfs maintenance compact
     Run one metadata compaction unit: one bounded merge or one streaming
     compaction of a family group. Repeat the command while it publishes to
-    compact every eligible group, or drain the metadata-compaction job with
-    maintenance loop on an embedded profile.
+    compact every eligible group.
 
   loonfs maintenance retention advance
     Advance the retention floor. This removes change-feed replay history
@@ -714,10 +704,11 @@ Behavior notes
   incremental progress too; small buffered uploads report completion in one
   step. Recursive transfers use those same paths for each file
 
-  Embedded profiles do not run continuous maintenance. Run
-  `loonfs maintenance loop --namespaces <ns>` for ongoing maintenance,
-  with `--jobs metadata,gc` to select jobs. Run `loonfs maintenance metadata`
-  for one pass. Live writers fold their own WAL
-  tails; explicit maintenance handles inactive namespaces and the other jobs.
-  Servers maintain every namespace in their store by default.
+  Embedded profiles do not run maintenance on a schedule. A write folds its
+  namespace's WAL tail at the threshold and compacts metadata after the
+  fold. Everything else is a one-shot command: `loonfs maintenance metadata`
+  folds an idle tail, `loonfs maintenance gc` collects garbage, and
+  `loonfs maintenance index enable` brings the grep index up to the
+  namespace head. Servers maintain every namespace in their store on a
+  cadence by default.
 ```

@@ -1,12 +1,11 @@
 //! Hosts the HTTP binding over the CLI's runtime without a listener.
 
-use super::MaintenanceHost;
 use crate::error::CliError;
 use crate::render::write_stderr_warning;
 use http_body_util::BodyExt as _;
-use loonfs::InlineContentPolicy;
+use loonfs::{InlineContentPolicy, LoonFs, Maintenance, SharedObjectStore, Writable};
 use loonfs_client::{Body, Client, ClientConfig, TransportError};
-use loonfs_grep::GrepService;
+use loonfs_grep::{GrepService, GrepWorker};
 use loonfs_http::{
     AuthPolicy, BindingOptions, BindingState, HttpMetrics, Namespaces,
     DEFAULT_MAX_CONCURRENT_DOWNLOADS, DEFAULT_MAX_CONCURRENT_UPLOADS, DEFAULT_REQUEST_DEADLINE_MS,
@@ -18,6 +17,14 @@ use tokio::sync::Semaphore;
 use tower::ServiceExt as _;
 
 static CONTENT_TOKEN_SECRET: OnceLock<SecretString> = OnceLock::new();
+
+/// The runtime an embedded profile opens, and the maintenance and grep
+/// worker its binding serves.
+pub(crate) struct MaintenanceHost {
+    pub(crate) runtime: LoonFs<Writable>,
+    pub(crate) maintenance: Maintenance,
+    pub(crate) grep_worker: GrepWorker<SharedObjectStore>,
+}
 
 pub(crate) fn client(
     host: &MaintenanceHost,
@@ -58,16 +65,18 @@ pub(crate) fn client(
         metrics: HttpMetrics::new(),
     };
     let router = loonfs_http::router(state);
-    let runner = host.runner.clone();
+    let runtime = host.runtime.clone();
     let service = tower::service_fn(move |request: http::Request<Body>| {
         let router = router.clone();
-        let runner = runner.clone();
+        let runtime = runtime.clone();
         async move {
             let response = router
                 .oneshot(request)
                 .await
                 .map_err(|never| match never {})?;
-            if let Err(error) = runner.drain().await {
+            // The process exits when the command does, which would abandon
+            // a fold or compaction the request started.
+            if let Err(error) = runtime.drain().await {
                 write_stderr_warning(format_args!(
                     "background maintenance did not settle cleanly: {error}"
                 ));

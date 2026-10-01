@@ -3,10 +3,9 @@
 
 use crate::config::ReadConfig;
 use crate::metrics::RuntimeInstruments;
-use crate::publisher::{NamespaceAdvanceHint, NamespaceAdvanceObserver};
 use crate::{
-    ChangeSeq, CoreError, ErrorCode, InodeId, ListFileRevisionsResponse, MaintenanceHint,
-    MaintenanceHintObserver, MetadataCache, NamespaceId, NamespacePublication, ObjectStore,
+    ChangeSeq, CoreError, ErrorCode, InodeId, ListFileRevisionsResponse, MetadataCache,
+    NamespaceId, ObjectStore,
 };
 use crate::{Error, Result, SharedObjectStore};
 use loonfs_core::cache::{HeadStateCache, MetadataSegmentCache, StoredMetadataBlockCache};
@@ -68,10 +67,6 @@ pub(crate) struct WriterBits {
     /// sessions and every `Maintenance` value share it, so they never fence
     /// each other.
     pub(crate) compactor_epochs: tokio::sync::Mutex<BTreeMap<NamespaceId, CompactorEpoch>>,
-    pub(crate) maintenance_hint_observer: Option<MaintenanceHintObserver>,
-    /// Optional synchronous notification after a mutation batch durably
-    /// advances a namespace. Callers promise that it does not block.
-    pub(crate) namespace_advance_observer: Option<NamespaceAdvanceObserver>,
 }
 
 /// A fold counted as waiting for a writer permit.
@@ -117,60 +112,6 @@ impl WriterBits {
             .expect("fold permit semaphore should remain open");
         drop(waiting);
         permit
-    }
-
-    /// Notifies maintenance after every publish attempt and the change observer
-    /// after a successful commit.
-    pub(crate) fn notify_after_publish(
-        &self,
-        namespace_id: &NamespaceId,
-        publication: &NamespacePublication,
-    ) {
-        self.send_maintenance_hint(
-            namespace_id,
-            MaintenanceHint::Published(publication.clone()),
-        );
-
-        let Some(through_seq) = publication.committed_through_seq else {
-            return;
-        };
-        let Some(observer) = &self.namespace_advance_observer else {
-            return;
-        };
-        let hint = NamespaceAdvanceHint {
-            namespace_id: namespace_id.clone(),
-            through_seq,
-        };
-        let observed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| observer(hint)));
-        if observed.is_err() {
-            tracing::error!(
-                namespace_id = %namespace_id,
-                through_seq = through_seq.0,
-                "namespace advance observer panicked; the commit was already durable"
-            );
-        }
-    }
-
-    pub(crate) fn notify_fold_finished(&self, namespace_id: &NamespaceId) {
-        self.send_maintenance_hint(
-            namespace_id,
-            MaintenanceHint::WalFoldFinished {
-                namespace_id: namespace_id.clone(),
-            },
-        );
-    }
-
-    pub(crate) fn send_maintenance_hint(&self, namespace_id: &NamespaceId, hint: MaintenanceHint) {
-        let Some(observer) = &self.maintenance_hint_observer else {
-            return;
-        };
-        let observed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| observer(hint)));
-        if observed.is_err() {
-            tracing::error!(
-                namespace_id = %namespace_id,
-                "maintenance hint observer panicked; the durable state it describes is unaffected"
-            );
-        }
     }
 }
 

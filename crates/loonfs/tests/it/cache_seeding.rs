@@ -17,7 +17,6 @@ use loonfs_objectstore::layout::DurableObjectFamily;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{BlockingStore, KeyPredicate, OperationClass, RecordingStore};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tempfile::tempdir;
 
@@ -135,17 +134,8 @@ async fn runtime_publish_reuses_wal_tail_projection_while_a_fold_runs() {
         folded_manifest_put,
     );
     let recording = Arc::new(RecordingStore::new(blocking, KeyPredicate::any()));
-    let tail_objects = Arc::new(AtomicU64::new(0));
     let writer = loonfs::LoonFs::builder_with_store(recording.clone())
         .writer_id("fold-projection")
-        .maintenance_hint_observer({
-            let tail_objects = Arc::clone(&tail_objects);
-            move |hint| {
-                if let loonfs::MaintenanceHint::Published(publication) = hint {
-                    tail_objects.store(publication.wal_tail_objects, Ordering::SeqCst);
-                }
-            }
-        })
         .build()
         .await
         .expect("writer");
@@ -158,6 +148,8 @@ async fn runtime_publish_reuses_wal_tail_projection_while_a_fold_runs() {
         .expect("open namespace");
     recording.inner().block_next();
     for number in 0..FOLD_AT_WAL_OBJECTS + 3 {
+        // The bootstrap leaves one WAL object, and the fold stays blocked.
+        let tail_objects = number + 2;
         recording.reset();
         namespace
             .create_directory(
@@ -166,7 +158,7 @@ async fn runtime_publish_reuses_wal_tail_projection_while_a_fold_runs() {
             )
             .await
             .expect("publish directory");
-        if tail_objects.load(Ordering::SeqCst) == FOLD_AT_WAL_OBJECTS {
+        if tail_objects == FOLD_AT_WAL_OBJECTS {
             recording.inner().wait_until_blocked().await;
         }
         if number > 0 {
@@ -185,11 +177,15 @@ async fn runtime_publish_reuses_wal_tail_projection_while_a_fold_runs() {
                 loonfs_test_support::stores::RecordedOperation::Put { .. }
             ));
         }
-        assert_eq!(tail_objects.load(Ordering::SeqCst), number + 2);
+        let usage =
+            loonfs_core::cache::load_namespace_wal_tail_usage(recording.as_ref(), &namespace_id)
+                .await
+                .expect("tail usage");
+        assert_eq!(usage.wal_tail_objects, tail_objects);
     }
     recording.inner().release();
     namespace.wait_for_fold().await.expect("fold");
-    writer.drain().await.expect("finish hints");
+    writer.drain().await.expect("drain");
     let manifest =
         loonfs_core::control::load_namespace_current_manifest(recording.as_ref(), &namespace_id)
             .await
@@ -203,7 +199,6 @@ async fn runtime_publish_reuses_wal_tail_projection_while_a_fold_runs() {
         .create_directory("/after-fold", &loonfs_test_support::test_actor())
         .await
         .expect("publish after fold");
-    assert!(tail_objects.load(Ordering::SeqCst) < FOLD_AT_WAL_OBJECTS);
     let operations = recording.take();
     let mut manifest_gets = 0;
     let mut wal_puts = 0;
@@ -229,6 +224,11 @@ async fn runtime_publish_reuses_wal_tail_projection_while_a_fold_runs() {
     }
     assert!(manifest_gets <= 1, "{operations:?}");
     assert_eq!(wal_puts, 1);
+    let usage =
+        loonfs_core::cache::load_namespace_wal_tail_usage(recording.as_ref(), &namespace_id)
+            .await
+            .expect("tail usage after fold");
+    assert!(usage.wal_tail_objects < FOLD_AT_WAL_OBJECTS);
     writer.shutdown().await.expect("shutdown");
 }
 

@@ -486,102 +486,85 @@ fn create_directory_request(commit_id: &str, absolute_path: &str) -> CommitReque
 
 #[tokio::test]
 async fn fenced_compaction_blocks_until_a_new_request_claims_and_publishes() {
-    use loonfs::{
-        MaintenanceCancellation, MaintenanceConclusion, MaintenanceJob, MetadataCompactionJob,
-    };
-
-    for run_job in [false, true] {
-        let temp_dir = tempdir().expect("tempdir");
-        let store = store(temp_dir.path());
-        let first = open_runtime_async(store.clone(), "first").await;
-        let second = open_runtime_async(store.clone(), "second").await;
-        let namespace_id = namespace_id("demo");
+    let temp_dir = tempdir().expect("tempdir");
+    let store = store(temp_dir.path());
+    let first = open_runtime_async(store.clone(), "first").await;
+    let second = open_runtime_async(store.clone(), "second").await;
+    let namespace_id = namespace_id("demo");
+    first
+        .writer
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
+        .await
+        .expect("create namespace");
+    for index in 0..2 {
         first
-            .writer
-            .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
+            .put_file(
+                &namespace_id,
+                &format!("/file-{index}"),
+                b"data",
+                &loonfs_test_support::test_actor(),
+            )
             .await
-            .expect("create namespace");
-        for index in 0..2 {
-            first
-                .put_file(
-                    &namespace_id,
-                    &format!("/file-{index}"),
-                    b"data",
-                    &loonfs_test_support::test_actor(),
-                )
-                .await
-                .expect("put file");
-            first
-                .maintenance
-                .fold_wal(&namespace_id)
-                .await
-                .expect("fold WAL");
-        }
-        for runtime in [&first, &second] {
-            assert_eq!(
-                runtime
-                    .maintenance
-                    .compact_metadata(&namespace_id)
-                    .await
-                    .expect("claim and compact")
-                    .compaction,
-                MetadataCompactionOutcome::BoundedMergePublished
-            );
-        }
-        let before =
-            loonfs_core::control::load_namespace_current_manifest(store.as_ref(), &namespace_id)
-                .await
-                .expect("manifest before fencing");
+            .expect("put file");
+        first
+            .maintenance
+            .fold_wal(&namespace_id)
+            .await
+            .expect("fold WAL");
+    }
+    for runtime in [&first, &second] {
         assert_eq!(
-            before.state.compactor_epoch(),
-            loonfs_types::CompactorEpoch(2)
-        );
-
-        if run_job {
-            let job = MetadataCompactionJob::new(first.maintenance.clone());
-            assert_eq!(
-                job.run(&namespace_id, &MaintenanceCancellation::new())
-                    .await
-                    .expect("fenced job")
-                    .conclusion,
-                MaintenanceConclusion::Blocked
-            );
-        } else {
-            assert_eq!(
-                first
-                    .maintenance
-                    .compact_metadata(&namespace_id)
-                    .await
-                    .expect("fenced step")
-                    .compaction,
-                MetadataCompactionOutcome::Fenced
-            );
-        }
-        let fenced =
-            loonfs_core::control::load_namespace_current_manifest(store.as_ref(), &namespace_id)
-                .await
-                .expect("manifest after fencing");
-        assert_eq!(fenced.state.manifest(), before.state.manifest());
-
-        assert_eq!(
-            first
+            runtime
                 .maintenance
                 .compact_metadata(&namespace_id)
                 .await
-                .expect("claim again and compact")
+                .expect("claim and compact")
                 .compaction,
             MetadataCompactionOutcome::BoundedMergePublished
         );
-        let published =
-            loonfs_core::control::load_namespace_current_manifest(store.as_ref(), &namespace_id)
-                .await
-                .expect("manifest after publication");
-        assert_eq!(
-            published.state.compactor_epoch(),
-            loonfs_types::CompactorEpoch(3)
-        );
-        assert!(published.state.manifest().manifest_no > before.state.manifest().manifest_no);
     }
+    let before =
+        loonfs_core::control::load_namespace_current_manifest(store.as_ref(), &namespace_id)
+            .await
+            .expect("manifest before fencing");
+    assert_eq!(
+        before.state.compactor_epoch(),
+        loonfs_types::CompactorEpoch(2)
+    );
+
+    assert_eq!(
+        first
+            .maintenance
+            .compact_metadata(&namespace_id)
+            .await
+            .expect("fenced step")
+            .compaction,
+        MetadataCompactionOutcome::Fenced
+    );
+    let fenced =
+        loonfs_core::control::load_namespace_current_manifest(store.as_ref(), &namespace_id)
+            .await
+            .expect("manifest after fencing");
+    assert_eq!(fenced.state.manifest(), before.state.manifest());
+
+    assert_eq!(
+        first
+            .maintenance
+            .compact_metadata(&namespace_id)
+            .await
+            .expect("claim again and compact")
+            .compaction,
+        MetadataCompactionOutcome::BoundedMergePublished
+    );
+    let published =
+        loonfs_core::control::load_namespace_current_manifest(store.as_ref(), &namespace_id)
+            .await
+            .expect("manifest after publication");
+    assert_eq!(
+        published.state.compactor_epoch(),
+        loonfs_types::CompactorEpoch(3)
+    );
+    assert!(published.state.manifest().manifest_no > before.state.manifest().manifest_no);
 }
 
 #[tokio::test]
@@ -792,119 +775,4 @@ async fn maintenance_step_treats_manifest_number_collision_as_benign_race() {
         .expect("status after lost race");
     assert_eq!(status.current_manifest_no, Some(ManifestNo(3)));
     assert_eq!(status.wal_tail_objects, 0);
-}
-
-#[tokio::test]
-async fn a_cold_metadata_job_probes_with_its_configured_options() {
-    use loonfs::{
-        MaintenanceCancellation, MaintenanceJob, MaintenanceProbe, MetadataMaintenanceJob,
-    };
-    use loonfs::{MetadataCompactionPolicy, MetadataMaintenanceOptions};
-    use std::num::NonZeroU64;
-
-    let temp_dir = tempdir().expect("tempdir");
-    let runtime = open_runtime_async(store(temp_dir.path()), "writer-a").await;
-    let namespace = namespace_id("probe-options");
-    runtime
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
-        .await
-        .expect("namespace");
-    runtime
-        .put_file(
-            &namespace,
-            "/one.txt",
-            b"one",
-            &loonfs_test_support::test_actor(),
-        )
-        .await
-        .expect("write one WAL object");
-    drop(runtime);
-    let runtime = open_runtime_async(store(temp_dir.path()), "writer-b").await;
-    let defaults = MetadataMaintenanceJob::new(runtime.maintenance.clone());
-    let eager_fold = MetadataMaintenanceJob::new(runtime.maintenance.clone()).options(
-        MetadataMaintenanceOptions {
-            max_wal_tail_objects: NonZeroU64::MIN,
-            ..MetadataMaintenanceOptions::default()
-        },
-    );
-    assert_eq!(
-        defaults.probe(&namespace).await.expect("default probe"),
-        MaintenanceProbe::Idle
-    );
-    assert_eq!(
-        eager_fold.probe(&namespace).await.expect("custom probe"),
-        MaintenanceProbe::Due
-    );
-    runtime
-        .create_checkpoint(&namespace)
-        .await
-        .expect("fold the first run");
-    runtime
-        .put_file(
-            &namespace,
-            "/two.txt",
-            b"two",
-            &loonfs_test_support::test_actor(),
-        )
-        .await
-        .expect("write another WAL object");
-    runtime
-        .create_checkpoint(&namespace)
-        .await
-        .expect("fold a delta below the default trigger");
-    drop(runtime);
-    let runtime = open_runtime_async(store(temp_dir.path()), "writer-c").await;
-    let namespace_reader = runtime.reader.namespace(&namespace);
-    let defaults = MetadataMaintenanceJob::new(runtime.maintenance.clone());
-    let immediate = MetadataMaintenanceJob::new(runtime.maintenance.clone()).options(
-        MetadataMaintenanceOptions {
-            compaction_policy: MetadataCompactionPolicy::CompactImmediately,
-            ..MetadataMaintenanceOptions::default()
-        },
-    );
-    assert_eq!(
-        defaults
-            .probe(&namespace)
-            .await
-            .expect("default merge probe"),
-        MaintenanceProbe::Idle
-    );
-    assert_eq!(
-        immediate
-            .probe(&namespace)
-            .await
-            .expect("immediate merge probe"),
-        MaintenanceProbe::Due
-    );
-    for _ in 0..16 {
-        immediate
-            .run(&namespace, &MaintenanceCancellation::new())
-            .await
-            .expect("run configured maintenance");
-        if immediate
-            .probe(&namespace)
-            .await
-            .expect("probe after progress")
-            == MaintenanceProbe::Idle
-        {
-            assert_eq!(
-                namespace_reader
-                    .read_file("/one.txt")
-                    .await
-                    .expect("first file")
-                    .bytes,
-                b"one"
-            );
-            assert_eq!(
-                namespace_reader
-                    .read_file("/two.txt")
-                    .await
-                    .expect("second file")
-                    .bytes,
-                b"two"
-            );
-            return;
-        }
-    }
-    panic!("configured maintenance must finish its finite work");
 }

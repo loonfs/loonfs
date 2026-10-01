@@ -90,3 +90,36 @@ impl Maintenance {
 
     // Maintenance operations live in `fs/maintenance.rs`.
 }
+
+/// Stops a maintenance call that takes it, such as
+/// [`Maintenance::maintain_metadata_while_due`] or
+/// [`Maintenance::compact_metadata_with_cancellation`]. Clones share one
+/// state.
+#[derive(Debug, Clone, Default)]
+pub struct MaintenanceCancellation(loonfs_core::MetadataCompactionCancellation);
+
+impl MaintenanceCancellation {
+    /// Creates an uncancelled token.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Cancels the token.
+    pub fn cancel(&self) {
+        self.0.cancel();
+    }
+
+    /// Returns whether the token was cancelled.
+    pub fn is_cancelled(&self) -> bool {
+        self.0.is_cancelled()
+    }
+
+    /// Waits until the token is cancelled.
+    pub async fn cancelled(&self) {
+        self.0.cancelled().await;
+    }
+
+    pub(crate) fn metadata_compaction(&self) -> &loonfs_core::MetadataCompactionCancellation {
+        &self.0
+    }
+}

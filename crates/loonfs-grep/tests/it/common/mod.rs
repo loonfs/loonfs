@@ -7,14 +7,11 @@
 
 #![allow(dead_code)]
 
-use loonfs::{
-    LoonFs, Maintenance, MaintenanceConclusion, MaintenanceJob, ReadOnly, SharedObjectStore,
-};
+use loonfs::{LoonFs, Maintenance, ReadOnly, SharedObjectStore};
 use loonfs_grep::manifest::GrepIndexStatus;
 use loonfs_grep::{
-    GramIndexBuildPolicy, GrepBlockCache, GrepDisableOutcome, GrepEnableOutcome, GrepError,
-    GrepMaintenanceJob, GrepService, GrepWorker, NamespaceReads,
-    DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
+    GramIndexBuildPolicy, GrepBlockCache, GrepBuildOutcome, GrepDisableOutcome, GrepEnableOutcome,
+    GrepError, GrepService, GrepWorker, NamespaceReads, DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
 };
 use loonfs_types::api::v0::{GrepIndex, GrepIndexLifecycle};
 use loonfs_types::{
@@ -122,29 +119,31 @@ impl GrepHost {
         self.get_grep_index(namespace_id).await
     }
 
-    /// Runs the index job's bounded steps until the index has built through
+    /// Runs bounded build steps until the index has built through
     /// `captured_seq`, or until a step settles short of it.
     pub(crate) async fn catch_up_grep_index(
         &self,
         namespace_id: &NamespaceId,
         captured_seq: ChangeSeq,
     ) -> Result<GrepIndexStatus, GrepError> {
-        let job = GrepMaintenanceJob::new(self.worker.clone(), GramIndexBuildPolicy::default());
         loop {
             let lifecycle = self.worker.lifecycle(namespace_id).await?;
             if GrepIndexLifecycle::from(&lifecycle).is_built_through(captured_seq) {
                 return Ok(lifecycle);
             }
-            match job
-                .run(namespace_id, &loonfs::MaintenanceCancellation::new())
-                .await
-                .map_err(GrepError::Runtime)?
-                .conclusion
+            match self
+                .worker
+                .build_step(namespace_id, GramIndexBuildPolicy::default())
+                .await?
             {
-                MaintenanceConclusion::Progressed | MaintenanceConclusion::Superseded => {}
+                GrepBuildOutcome::Published { .. }
+                | GrepBuildOutcome::BackfillRestarted { .. }
+                | GrepBuildOutcome::Superseded => {}
                 // Nothing this loop does next would move the index, so the
                 // caller sees where it stopped rather than a spin.
-                _ => return self.worker.lifecycle(namespace_id).await,
+                GrepBuildOutcome::UpToDate { .. } | GrepBuildOutcome::NotEnabled => {
+                    return self.worker.lifecycle(namespace_id).await
+                }
             }
         }
     }

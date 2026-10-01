@@ -69,22 +69,6 @@ pub(crate) struct TrashListing {
     pub recovery_commands: Vec<String>,
 }
 
-/// One assigned `{job, namespace}` key, as a drain left it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub(crate) struct MaintenanceKeyReport {
-    pub namespace_id: NamespaceId,
-    /// The job as the runner names it in its own traces.
-    pub job: String,
-    /// Steps the drain ran for this key.
-    pub steps: u64,
-    /// What its last step concluded. Absent when the budget ran out before
-    /// this key took a step.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub conclusion: Option<String>,
-    /// True when the key reached a conclusion with nothing left to drive.
-    pub settled: bool,
-}
-
 /// Possible results for one `doctor` check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -221,24 +205,6 @@ pub(crate) enum CommandData {
         /// status checks in remote mode.
         steps: u64,
         /// True when a budget stopped the wait before the target.
-        budget_exhausted: bool,
-    },
-    /// Assignment a maintenance host ran until it received a signal.
-    MaintenanceHosted {
-        /// The assignment, sorted and deduplicated.
-        namespaces: Vec<NamespaceId>,
-        jobs: Vec<String>,
-    },
-    /// Measured report from a maintenance host that drained its assignment.
-    MaintenanceDrained {
-        /// The assignment, sorted and deduplicated.
-        namespaces: Vec<NamespaceId>,
-        jobs: Vec<String>,
-        /// Where each key got to.
-        keys: Vec<MaintenanceKeyReport>,
-        /// Steps the drain ran across every key.
-        steps: u64,
-        /// True when a budget stopped the drain before every key settled.
         budget_exhausted: bool,
     },
     /// What one store contract probe found. Failed checks are data, not an
@@ -379,18 +345,15 @@ impl CommandData {
             // the caller asked for a target that was not reached.
             CommandData::GrepIndexEnabled {
                 budget_exhausted, ..
-            }
-            // Same for a drain that ran out of budget: the per-key progress
-            // it prints is real, and the assignment it was asked to catch
-            // up is not caught up.
-            | CommandData::MaintenanceDrained {
-                budget_exhausted, ..
             } => *budget_exhausted,
             // A probe that found a broken store prints every check's verdict
             // and still exits nonzero, because the store it was asked about
             // cannot be trusted.
             CommandData::StoreProbed(response) => {
-                matches!(store_probe_verdict(response), StoreProbeVerdict::Failed { .. })
+                matches!(
+                    store_probe_verdict(response),
+                    StoreProbeVerdict::Failed { .. }
+                )
             }
             _ => false,
         }

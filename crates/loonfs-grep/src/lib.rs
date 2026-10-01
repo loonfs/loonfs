@@ -19,7 +19,6 @@ mod error;
 mod gc;
 mod index_read;
 pub mod keyspace;
-mod maintenance;
 pub mod manifest;
 mod query;
 mod reads;
@@ -33,7 +32,6 @@ pub use cache::{
 pub use config::{GrepWorkerConfig, GrepWorkerConfigError};
 pub use error::GrepError as Error;
 pub use error::{GrepError, Result};
-pub use maintenance::{run_grep_gc, GrepGcJob, GrepMaintenanceJob, GREP_GC_JOB, GREP_INDEX_JOB};
 pub use reads::NamespaceReads;
 pub use service::{GrepService, MAX_GREP_SCAN_FILES, MAX_GREP_TAIL_FILES};
 pub use worker::{
@@ -41,4 +39,4 @@ pub use worker::{
     GrepReorganizeOutcome, GrepWorker,
 };
 
-pub use gc::{GrepGcReport, GREP_GC_GRACE_WINDOW_MS};
+pub use gc::{run_grep_gc, GrepGcReport, GREP_GC_GRACE_WINDOW_MS};

@@ -6,10 +6,10 @@ use crate::fs::{RuntimeCore, WriterBits, WriterIdentity};
 use crate::metrics::{
     fan_out_object_store_recorder, MetricsRecorder, ObjectStoreMetricsRecorder, RuntimeInstruments,
 };
-use crate::publisher::{NamespaceAdvanceHint, NamespaceAdvanceObserver, PublisherRegistry};
+use crate::publisher::PublisherRegistry;
 use crate::{
-    Error, InlineContentPolicy, MaintenanceHint, MaintenanceHintObserver, MetadataCache,
-    PublicationLimits, Result, SharedObjectStore, StoreConfig, TraceMode, TraceStoreKind,
+    Error, InlineContentPolicy, MetadataCache, PublicationLimits, Result, SharedObjectStore,
+    StoreConfig, TraceMode, TraceStoreKind,
 };
 use loonfs_core::cache::StoredMetadataBlockCache;
 use loonfs_core::MetadataLsmPolicy;
@@ -67,8 +67,6 @@ struct WriterSettings {
     inline_content: InlineContentPolicy,
     max_concurrent_folds: NonZeroUsize,
     max_concurrent_compactions: NonZeroUsize,
-    namespace_advance_observer: Option<NamespaceAdvanceObserver>,
-    maintenance_hint_observer: Option<MaintenanceHintObserver>,
 }
 
 impl<M> LoonFsBuilder<M> {
@@ -110,8 +108,6 @@ impl<M> LoonFsBuilder<M> {
                     crate::config::DEFAULT_MAX_CONCURRENT_COMPACTIONS,
                 )
                 .expect("default maximum concurrent compactions should be nonzero"),
-                namespace_advance_observer: None,
-                maintenance_hint_observer: None,
             },
             mode: PhantomData,
         }
@@ -307,43 +303,11 @@ impl LoonFsBuilder<Writable> {
         self
     }
 
-    /// Registers an observer called with a [`NamespaceAdvanceHint`] after
-    /// each publication batch that durably commits at least one mutation.
-    ///
-    /// The call happens after durable visibility. One batch may cover
-    /// several commits, so the hint carries a high-water mark rather than
-    /// one commit, and delivery is best-effort. The observer runs
-    /// synchronously on the publication task, so it must do nothing but a
-    /// non-blocking handoff such as a bounded-channel `try_send`: no
-    /// network, filesystem, object-store, lock-contended, or waiting work.
-    /// Downstream correctness comes from a durable change-feed cursor,
-    /// never from the hints. Runtimes that register no observer publish
-    /// exactly as before.
-    pub fn namespace_advance_observer(
-        mut self,
-        observer: impl Fn(NamespaceAdvanceHint) + Send + Sync + 'static,
-    ) -> Self {
-        self.writer.namespace_advance_observer = Some(Arc::new(observer));
-        self
-    }
-
-    /// Registers a non-blocking observer for best-effort maintenance hints.
-    /// It runs synchronously on publication and upload tasks and must only
-    /// perform a non-blocking handoff.
-    pub fn maintenance_hint_observer(
-        mut self,
-        observer: impl Fn(MaintenanceHint) + Send + Sync + 'static,
-    ) -> Self {
-        self.writer.maintenance_hint_observer = Some(Arc::new(observer));
-        self
-    }
-
     /// Turns this builder into one for a read-only runtime.
     ///
     /// It keeps the settings both modes share, such as the store, the
     /// metadata cache, and the manifest revalidation interval. It drops the
-    /// writer-only ones, such as the writer id, the publication limits, and
-    /// the observers.
+    /// writer-only ones, such as the writer id and the publication limits.
     pub fn read_only(self) -> LoonFsBuilder<ReadOnly> {
         LoonFsBuilder {
             core: self.core,
@@ -381,8 +345,6 @@ impl LoonFsBuilder<Writable> {
             wal_folds_waiting: AtomicUsize::new(0),
             compaction_permits: Semaphore::new(writer.max_concurrent_compactions.get()),
             compactor_epochs: tokio::sync::Mutex::default(),
-            namespace_advance_observer: writer.namespace_advance_observer,
-            maintenance_hint_observer: writer.maintenance_hint_observer,
         });
         let publisher = PublisherRegistry::new(
             core.clone(),

@@ -1,23 +1,20 @@
 #![allow(clippy::panic)]
 // Tracing-capture tests panic in helper assertions for precise diagnostics.
 
-//! Asserts background maintenance conclusions are observable at debug level.
+//! Asserts a metadata maintenance pass is observable at debug level.
 //!
 //! This stays out of the crate's `tests/it` harness and keeps its own test
 //! binary — its own process — on purpose.
 //! Tracing caches per-callsite interest process-globally, and a callsite
 //! first exercised on a thread with no subscriber can race the interest
-//! rebuild that `set_default` performs. Sibling tests that drive background
-//! maintenance on subscriber-less threads hit exactly the callsites this
+//! rebuild that `set_default` performs. Sibling tests that run maintenance
+//! on subscriber-less threads hit exactly the callsites this
 //! capture greps for, so sharing a binary with them made the capture lose
 //! events intermittently under parallel test execution. Alone in its
 //! process, the callsites are first hit with the capture subscriber
 //! installed, and the assertion is deterministic.
 
-use loonfs::{
-    LoonFs, MaintenanceJobId, MaintenanceRegistry, MaintenanceRunner, MetadataMaintenanceJob,
-    MetadataMaintenanceOptions, NamespaceId, StoreConfig, Writable,
-};
+use loonfs::{LoonFs, MetadataMaintenanceOptions, NamespaceId, StoreConfig, Writable};
 use loonfs_core::test_support::append_wal_objects;
 use loonfs_core::MutationContext;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -82,7 +79,7 @@ impl std::io::Write for CaptureWriter {
 }
 
 #[test]
-fn background_step_conclusions_emit_debug_events() {
+fn a_metadata_maintenance_pass_emits_debug_events() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
     let captured: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
@@ -95,8 +92,7 @@ fn background_step_conclusions_emit_debug_events() {
         .with_span_events(FmtSpan::CLOSE)
         .with_writer(move || CaptureWriter(Arc::clone(&sink)))
         .finish();
-    // Thread-local so the capture cannot leak into other tests; the
-    // current-thread runtime keeps spawned background steps on this thread.
+    // Thread-local so the capture cannot leak into other tests.
     let _guard = tracing::subscriber::set_default(subscriber);
 
     block_on(async {
@@ -106,50 +102,23 @@ fn background_step_conclusions_emit_debug_events() {
             .await
             .expect("create namespace");
         fill_wal_tail_past_threshold(temp_dir.path(), &namespace_id).await;
-        let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id(
-            "tracing-capture-maintenance",
-        ));
-        let registry = MaintenanceRegistry::new();
-        registry
-            .register(Arc::new(MetadataMaintenanceJob::new(maintenance)))
-            .expect("metadata job");
-        let runner = MaintenanceRunner::builder(registry)
-            .build()
-            .expect("maintenance runner");
-        runner
-            .handle()
-            .nudge(MaintenanceJobId::METADATA, &namespace_id);
-        runner.drain().await.expect("maintenance quiesces");
-        runner.shutdown().await.expect("runner shutdown");
+        writer
+            .maintenance(loonfs_test_support::ids::writer_id(
+                "tracing-capture-maintenance",
+            ))
+            .maintain_metadata(&namespace_id)
+            .await
+            .expect("metadata maintenance");
+        writer.shutdown().await.expect("shut down writer");
     });
 
     let log = String::from_utf8(captured.lock().expect("capture lock").clone())
         .expect("captured log is utf8");
-    // Two records, one per layer: what the executor did, and what the runner
-    // made of it. Fields are matched with their `=` so a span carrying the
-    // same word cannot satisfy the assertion.
+    // Fields are matched with their `=` so a span carrying the same word
+    // cannot satisfy the assertion.
     let step = find_event(&log, "metadata maintenance pass concluded");
     for field in ["wal_fold=", "compaction=", "wal_tail_objects_before="] {
         assert!(step.contains(field), "missing `{field}` in: {step}");
-    }
-    let admission = find_event(&log, "maintenance pass settled");
-    // What the step cost, in both halves: waiting for a permit, then running.
-    for field in [
-        "job=",
-        "namespace_id=",
-        "conclusion=",
-        "queued_ms=",
-        "elapsed_ms=",
-    ] {
-        assert!(
-            admission.contains(field),
-            "missing `{field}` in: {admission}"
-        );
-    }
-    // What the queue looked like when the runner claimed permits.
-    let dispatch = find_event(&log, "maintenance keys dispatched");
-    for field in ["dispatched=", "ready_queued=", "oldest_queued_ms="] {
-        assert!(dispatch.contains(field), "missing `{field}` in: {dispatch}");
     }
     // Record the WAL fold phase.
     let span_evidence = "loonfs.phase{phase=\"wal_fold\"";
