@@ -162,7 +162,6 @@ async fn buffered_inline_reads_request_no_content_object_on_either_branch() {
     use loonfs_api::{AbsolutePath, CommitId, ContentId, WriterId};
     use loonfs_core::publish::{
         CommitCandidate, CommitRequest, FilesystemOperation, InlineContent, NamespaceCommitEngine,
-        PublishTailOptions,
     };
     use loonfs_core::{CreateNamespaceOptions, MutationContext, NamespaceEngine};
     use loonfs_test_support::stores::KeyPredicate;
@@ -220,7 +219,6 @@ async fn buffered_inline_reads_request_no_content_object_on_either_branch() {
                 writer_id,
                 now_ms: 1_000,
             },
-            &PublishTailOptions::default(),
             &Deadline::start(Arc::new(StdMonotonicTimer::default())),
         )
         .await;

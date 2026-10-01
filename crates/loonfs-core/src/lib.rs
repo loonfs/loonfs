@@ -14,7 +14,6 @@
 //! use loonfs_api::{AbsolutePath, ActorId, CommitId, NamespaceId};
 //! use loonfs_core::publish::{
 //!     FilesystemOperation, CommitRequest, NamespaceCommitEngine, CommitCandidate,
-//!     PublishTailOptions,
 //! };
 //! use loonfs_core::time::Deadline;
 //! use loonfs_objectstore::timing::StdMonotonicTimer;
@@ -51,7 +50,6 @@
 //!         },
 //!     ))],
 //!     &context,
-//!     &PublishTailOptions::default(),
 //!     &Deadline::start(Arc::new(StdMonotonicTimer::default())),
 //! );
 //! ```
@@ -164,7 +162,6 @@ pub mod publish {
         WalFoldInput, WriterSessionState,
     };
     pub use crate::path::write::{CommitRequest, FilesystemOperation};
-    pub use crate::protocol::PublishTailOptions;
     pub use crate::storage::content_admission::PreparedContent;
     pub use crate::storage::inline_content::InlineContent;
 }

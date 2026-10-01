@@ -891,16 +891,10 @@ pub(crate) async fn publish_batch_with_engine(
 ) -> EnginePublishResult {
     let batch_size = u64::try_from(candidates.len()).unwrap_or(u64::MAX);
     let store = core.store();
-    // The per-projection ceiling. The publisher applies the same budget as
-    // an aggregate over every projection it retains.
-    let tail_options = loonfs_core::publish::PublishTailOptions {
-        max_tail_decoded_bytes: core.max_head_state_bytes(),
-    };
     // Boxing erases the engine's deeply nested publish future; without
     // it, callers awaiting a put or commit (CLI, server, embedding
     // crates) exceed rustc's type-recursion depth.
-    let mut publish =
-        Box::pin(engine.publish_batch(&store, candidates, context, &tail_options, batch)).await;
+    let mut publish = Box::pin(engine.publish_batch(&store, candidates, context, batch)).await;
     {
         let _span = phase_span!(core, "batch_update_cache", namespace_id, batch_size).entered();
         if let Some(state) = publish.resulting_read_state.take() {

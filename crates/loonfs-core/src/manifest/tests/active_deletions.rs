@@ -242,7 +242,6 @@ async fn submit_operation_for_test<S: ObjectStore + ?Sized>(
                 Vec::new(),
             )],
             context,
-            &PublishTailOptions::default(),
             &Deadline::start(Arc::new(StdMonotonicTimer::default())),
         )
         .await

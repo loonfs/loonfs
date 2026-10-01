@@ -70,7 +70,7 @@ async fn an_own_fold_replays_only_later_objects_after_projection_invalidation() 
     .await
     .expect("fold");
     engine.record_wal_fold(Some(&folded));
-    assert!(engine.publish_tail_projection.is_none());
+    assert!(engine.publish_tail.is_none());
     store.reset();
     publish(&mut engine, &store, &context, during)
         .await
@@ -134,7 +134,6 @@ async fn an_own_fold_discovers_later_commits_after_the_projection_is_dropped() {
                 &store,
                 [during.clone()],
                 &context,
-                &PublishTailOptions::default(),
                 &Deadline::start(timer.clone()),
             )
             .await
@@ -167,7 +166,6 @@ async fn an_own_fold_discovers_later_commits_after_the_projection_is_dropped() {
                 &store,
                 [candidate],
                 &context,
-                &PublishTailOptions::default(),
                 &Deadline::start(timer.clone()),
             )
             .await
@@ -424,7 +422,7 @@ async fn competing_engines_materialize_identical_objects_and_publish_one_manifes
     publish(&mut first, &store, &context, candidate.clone())
         .await
         .expect("publish");
-    let mut second = NamespaceCommitEngine::new(first.namespace_id.clone());
+    let mut second = NamespaceCommitEngine::with_unshared_head_state(first.namespace_id.clone());
     publish(&mut second, &store, &context, candidate)
         .await
         .expect("replay");
@@ -642,14 +640,17 @@ async fn a_fold_reanchors_with_only_the_commits_published_since_it_began() {
     assert_eq!(folded.response.outcome, FoldWalOutcome::Published);
     let observed = engine.projection_observed.clone();
     engine.record_wal_fold(Some(&folded));
-    let projection = engine
-        .publish_tail_projection
-        .as_ref()
-        .expect("retained projection");
-    assert_eq!(projection.basis(), &folded.basis);
-    assert_eq!(projection.wal_tail_objects, 2);
-    assert_eq!(projection.head.folded_wal_no, input.head.wal_no);
-    assert_eq!(*projection.tail_state, expected);
+    let position = engine.publish_tail.as_ref().expect("retained position");
+    assert_eq!(position.basis(), &folded.basis);
+    assert_eq!(position.wal_tail_objects, 2);
+    assert_eq!(position.head.folded_wal_no, input.head.wal_no);
+    assert_eq!(
+        *engine
+            .wal_fold_input()
+            .expect("the reanchored tail is cached")
+            .tail_state,
+        expected
+    );
     let retained = engine.projection_observed.as_ref().expect("observation");
     let observed = observed.expect("tip observation before the fold");
     assert_eq!(retained.age_at(&observed), 0);

@@ -37,7 +37,7 @@ async fn setup() -> (
     create(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    let mut engine = NamespaceCommitEngine::new(namespace_id);
+    let mut engine = NamespaceCommitEngine::with_unshared_head_state(namespace_id);
     engine
         .session_writer_epoch(&store, &context)
         .await
@@ -91,7 +91,6 @@ async fn publish(
             store,
             [candidate],
             context,
-            &PublishTailOptions::default(),
             &Deadline::start(Arc::new(StdMonotonicTimer::default())),
         )
         .await

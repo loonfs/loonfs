@@ -9,7 +9,6 @@ use crate::limits::READ_REVALIDATION_BOUND_MS;
 use crate::namespace::control::load_current_manifest;
 use crate::namespace::writer_epoch::{acquire_writer, acquire_writer_epoch};
 use crate::path::read::load_current_metadata_view;
-use crate::protocol::PublishTailOptions;
 use crate::test_support::ops::create;
 use crate::time::{Deadline, StdMonotonicTimer};
 use loonfs_api::wire::wal::{decode_wal_object_envelope_zstd, encode_wal_object_envelope_zstd};
@@ -342,7 +341,6 @@ pub(crate) async fn publish<S: ObjectStore>(
             store,
             vec![directory(name)],
             &context(1_000),
-            &PublishTailOptions::default(),
             &Deadline::start(Arc::new(StdMonotonicTimer::default())),
         )
         .await
@@ -414,7 +412,7 @@ async fn a_stale_writer_collides_with_the_fence_and_writes_nothing_else() {
     create(&store, &namespace_id, &context(1_000))
         .await
         .expect("create");
-    let mut stale = NamespaceCommitEngine::new(namespace_id.clone());
+    let mut stale = NamespaceCommitEngine::with_unshared_head_state(namespace_id.clone());
     publish(&mut stale, &store, "old")
         .await
         .expect("old writer");
@@ -875,13 +873,11 @@ async fn a_writer_resuming_after_its_fence_was_collected_does_not_acknowledge_it
         .expect("create");
     let mut writer_a =
         NamespaceCommitEngine::new(namespace_id.clone()).monotonic_timer(timer_a.clone());
-    let options = PublishTailOptions::default();
     writer_a
         .publish_batch(
             &store,
             [directory("before-sleep")],
             &context_a,
-            &options,
             &Deadline::start(timer_a.clone()),
         )
         .await
@@ -896,13 +892,7 @@ async fn a_writer_resuming_after_its_fence_was_collected_does_not_acknowledge_it
     blocked.block_next();
     let batch = Deadline::start(timer_a.clone());
     let (mut resumed, ()) = futures::join!(
-        writer_a.publish_batch(
-            &blocked,
-            [directory("after-sleep")],
-            &context_a,
-            &options,
-            &batch,
-        ),
+        writer_a.publish_batch(&blocked, [directory("after-sleep")], &context_a, &batch,),
         async {
             blocked.wait_until_blocked().await;
             let mut writer_b =
@@ -912,7 +902,6 @@ async fn a_writer_resuming_after_its_fence_was_collected_does_not_acknowledge_it
                     blocked.inner(),
                     [directory("takeover")],
                     &context_b,
-                    &options,
                     &Deadline::start(timer_b.clone()),
                 )
                 .await

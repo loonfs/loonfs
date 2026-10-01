@@ -878,7 +878,6 @@ async fn publish_backpressure_rejects_at_the_longest_tail_the_head_describes() {
         .expect("the write-stop bound fits a WAL object count");
 
     let mut engine = NamespaceCommitEngine::new(namespace_id.clone());
-    let tail_options = PublishTailOptions::default();
     for round in 0..boundary - 2 {
         let request = CommitRequest::single(
             CommitId::generate(),
@@ -894,7 +893,6 @@ async fn publish_backpressure_rejects_at_the_longest_tail_the_head_describes() {
                 &store,
                 vec![CommitCandidate::new(request)],
                 &context,
-                &tail_options,
                 &Deadline::start(Arc::new(StdMonotonicTimer::default())),
             )
             .await
@@ -922,7 +920,6 @@ async fn publish_backpressure_rejects_at_the_longest_tail_the_head_describes() {
             &store,
             vec![CommitCandidate::new(request.clone())],
             &context,
-            &tail_options,
             &Deadline::start(Arc::new(StdMonotonicTimer::default())),
         )
         .await
@@ -938,7 +935,6 @@ async fn publish_backpressure_rejects_at_the_longest_tail_the_head_describes() {
             &store,
             vec![CommitCandidate::new(request.clone())],
             &context,
-            &tail_options,
             &Deadline::start(Arc::new(StdMonotonicTimer::default())),
         )
         .await;
@@ -970,7 +966,6 @@ async fn publish_backpressure_rejects_at_the_longest_tail_the_head_describes() {
                 &store,
                 vec![CommitCandidate::new(candidate)],
                 &context,
-                &tail_options,
                 &Deadline::start(Arc::new(StdMonotonicTimer::default())),
             )
             .await;
@@ -992,7 +987,6 @@ async fn publish_backpressure_rejects_at_the_longest_tail_the_head_describes() {
                 CommitCandidate::new(new_request),
             ],
             &context,
-            &tail_options,
             &Deadline::start(Arc::new(StdMonotonicTimer::default())),
         )
         .await;

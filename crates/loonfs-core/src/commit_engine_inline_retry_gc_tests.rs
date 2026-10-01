@@ -24,7 +24,6 @@ async fn inline_retry_after_lost_ack_and_wal_collection_replays_the_original_com
             &failed,
             [candidate("lost-ack", vec![original.clone()])],
             &context,
-            &PublishTailOptions::default(),
             &Deadline::start(Arc::new(StdMonotonicTimer::default())),
         )
         .await

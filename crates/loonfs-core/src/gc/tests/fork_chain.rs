@@ -2,7 +2,6 @@
 
 use super::*;
 use crate::authorize::{Authorizer, ReadAccess};
-use crate::protocol::PublishTailOptions;
 use crate::storage::inline_content::InlineContent;
 use crate::time::{Deadline, StdMonotonicTimer};
 use loonfs_api::{AbsolutePath, CommitId, ContentId, DestinationBehavior};
@@ -42,7 +41,6 @@ async fn publish_inline(
                 vec![value],
             )],
             setup,
-            &PublishTailOptions::default(),
             &Deadline::start(Arc::new(StdMonotonicTimer::default())),
         )
         .await

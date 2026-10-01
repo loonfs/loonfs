@@ -197,7 +197,6 @@ async fn valid_content_admission_skips_durable_content_validation() {
                 vec![prepared.clone()],
             )],
             &context,
-            &loonfs_core::publish::PublishTailOptions::default(),
             &Deadline::start(Arc::new(StdMonotonicTimer::default())),
         )
         .await
@@ -237,7 +236,6 @@ async fn valid_content_admission_skips_durable_content_validation() {
                 vec![prepared.clone()],
             )],
             &context,
-            &loonfs_core::publish::PublishTailOptions::default(),
             &Deadline::start(Arc::new(StdMonotonicTimer::default())),
         )
         .await

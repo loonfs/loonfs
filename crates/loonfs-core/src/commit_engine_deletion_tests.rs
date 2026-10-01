@@ -69,7 +69,7 @@ async fn a_stale_writer_stays_fenced_after_namespace_deletion() {
     create(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    let mut stale = NamespaceCommitEngine::new(namespace_id.clone());
+    let mut stale = NamespaceCommitEngine::with_unshared_head_state(namespace_id.clone());
     stale
         .publish_batch(
             &store,
@@ -83,7 +83,6 @@ async fn a_stale_writer_stays_fenced_after_namespace_deletion() {
                 },
             ))],
             &context,
-            &PublishTailOptions::default(),
             &Deadline::start(Arc::new(StdMonotonicTimer::default())),
         )
         .await
@@ -110,7 +109,6 @@ async fn a_stale_writer_stays_fenced_after_namespace_deletion() {
                 &store,
                 [candidate.clone()],
                 &context,
-                &PublishTailOptions::default(),
                 &Deadline::start(Arc::new(StdMonotonicTimer::default())),
             )
             .await
@@ -172,7 +170,6 @@ async fn rejected_deletion_writes_nothing_before_folding_inline_content() {
             &store,
             [candidate],
             &context,
-            &PublishTailOptions::default(),
             &Deadline::start(clock.clone()),
         )
         .await

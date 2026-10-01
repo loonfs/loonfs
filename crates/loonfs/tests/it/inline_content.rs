@@ -12,7 +12,6 @@ use loonfs_api::{
 };
 use loonfs_core::publish::{
     CommitCandidate, CommitRequest, FilesystemOperation, InlineContent, NamespaceCommitEngine,
-    PublishTailOptions,
 };
 use loonfs_core::time::Deadline;
 use loonfs_core::{MutationContext, NamespaceEngine};
@@ -62,7 +61,6 @@ async fn publish_inline(
                 writer_id: WriterId::parse("inline-writer").expect("writer"),
                 now_ms: 1_000,
             },
-            &PublishTailOptions::default(),
             &Deadline::start(Arc::new(StdMonotonicTimer::default())),
         )
         .await

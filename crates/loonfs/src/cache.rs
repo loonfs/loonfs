@@ -283,13 +283,13 @@ impl RuntimeCore {
         Ok(VerifiedNamespaceCatalogEntry::from_head(&anchor.head))
     }
 
+    /// Seeds the anchor of a landed publish. The publisher's engine has
+    /// already put the WAL tail it names in the head-state cache.
     pub(crate) fn seed_namespace_read_cache(
         &self,
         namespace_id: &NamespaceId,
         state: loonfs_core::publish::ResultingReadState,
     ) {
-        let head_seq = state.head.seq;
-        let manifest_no = state.basis.manifest_no();
         let (cached_check, validation) = self
             .inner
             .head_state
@@ -320,27 +320,20 @@ impl RuntimeCore {
                 validation,
                 completed_validation_no: 0,
             }));
-        self.inner.head_state.insert_tail(
-            WalTailProjectionCacheKey {
-                namespace_id: namespace_id.clone(),
-                manifest_no,
-                head_seq,
-            },
-            state.tail,
-        );
     }
 
     /// Drops the namespace's head anchor, so its next read revalidates from
     /// the store. A caller that owns a publication service also drops its
-    /// publisher's projection; see `LoonFs::invalidate_namespace`.
+    /// publisher's position; see `LoonFs::invalidate_namespace`.
     ///
-    /// Cached WAL-tail projections stay. A tail is keyed by namespace,
-    /// manifest number, and head sequence, and that key names one immutable
-    /// fact: a namespace id names one lifetime, each manifest and WAL number
-    /// names one object that is never replaced or recreated, a fence adds no
-    /// rows, and a writer seeds only a put it saw land. A tail whose key the
-    /// reloaded anchor no longer uses is never wrong, only unused, and recency
-    /// evicts it.
+    /// Cached WAL-tail projections stay, the tails writers publish from
+    /// included. A tail is keyed by namespace, manifest number, and head
+    /// sequence, and that key names one immutable fact: a namespace id names
+    /// one lifetime, each manifest and WAL number names one object that is
+    /// never replaced or recreated, a fence adds no rows, and a writer inserts
+    /// only a tail it read from the store, a put it saw land, or the commits
+    /// since a fold it published. A tail whose key the reloaded anchor no
+    /// longer uses is never wrong, only unused, and recency evicts it.
     pub(crate) fn invalidate_namespace_read_cache(&self, namespace_id: &NamespaceId) {
         let _span = phase_span!(self, "update_cache", namespace_id).entered();
         self.inner.head_state.invalidate_anchor(namespace_id);

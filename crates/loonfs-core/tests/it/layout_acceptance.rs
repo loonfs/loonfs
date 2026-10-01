@@ -8,7 +8,7 @@ use loonfs_api::AbsolutePath;
 use loonfs_api::{ChangeSeq, NamespaceId};
 use loonfs_core::content::{prepare_existing_content_ref, store_bytes_as_content};
 use loonfs_core::publish::{
-    CommitCandidate, CommitRequest, FilesystemOperation, NamespaceCommitEngine, PublishTailOptions,
+    CommitCandidate, CommitRequest, FilesystemOperation, NamespaceCommitEngine,
 };
 use loonfs_core::time::Deadline;
 use loonfs_core::{gc_namespace, GcConfig};
@@ -58,7 +58,6 @@ async fn put_file<S: ObjectStore + ?Sized>(
                 vec![prepared],
             )],
             context,
-            &PublishTailOptions::default(),
             &Deadline::start(Arc::new(StdMonotonicTimer::default())),
         )
         .await

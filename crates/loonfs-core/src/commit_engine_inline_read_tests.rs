@@ -192,27 +192,26 @@ async fn published_projection_reads_without_replay_and_counts_inline_bytes() {
             &store,
             [candidate("owned", vec![value.clone()])],
             &mutation_context,
-            &PublishTailOptions::default(),
             &Deadline::start(Arc::new(StdMonotonicTimer::default())),
         )
         .await;
     assert!(result.results[0].is_ok());
     let state = result.resulting_read_state.expect("published state");
-    let context = read_context(state.head, state.basis);
-    let tail_bytes = state.tail.decoded_bytes();
-    assert_eq!(state.tail.inline_bytes(), value.bytes().len());
-    assert!(tail_bytes >= state.tail.rows.decoded_bytes() + value.bytes().len());
+    let context = RuntimeReadContext {
+        head_state: Arc::clone(publisher.head_state.as_ref().expect("head state")),
+        ..read_context(state.head, state.basis)
+    };
+    let tail = context
+        .head_state
+        .get_tail(&cache_key(&context))
+        .expect("the publish put its tail in the head-state cache");
+    let tail_bytes = tail.decoded_bytes();
+    assert_eq!(tail.inline_bytes(), value.bytes().len());
+    assert!(tail_bytes >= tail.rows.decoded_bytes() + value.bytes().len());
+    assert_eq!(context.head_state.stats().cached_decoded_bytes, tail_bytes);
+    let cloned = tail.as_ref().clone();
     assert_eq!(
-        publisher
-            .retained_tail_decoded_bytes()
-            .expect("retained tail"),
-        tail_bytes
-    );
-    let cloned = state.tail.as_ref().clone();
-    assert_eq!(
-        state
-            .tail
-            .inline_content(value.content_ref())
+        tail.inline_content(value.content_ref())
             .expect("bytes")
             .as_ptr(),
         cloned
@@ -220,10 +219,6 @@ async fn published_projection_reads_without_replay_and_counts_inline_bytes() {
             .expect("cloned bytes")
             .as_ptr()
     );
-    context
-        .head_state
-        .insert_tail(cache_key(&context), state.tail);
-    assert_eq!(context.head_state.stats().cached_decoded_bytes, tail_bytes);
     let engine = NamespaceEngine::reader(&store, publisher.namespace_id.clone());
     store.reset();
     assert_eq!(

@@ -11,11 +11,10 @@
 //! [`LoonFs::drain`](crate::LoonFs::drain) drains them without closing
 //! admission.
 //!
-//! The registry keeps one table of live sessions, for three reasons: an open
-//! returns the session a handle already holds, the retained projection
-//! budget reaches every publisher, and shutdown drains every session. The
-//! host decides how long a session lives by holding its writable
-//! [`Namespace`](crate::Namespace).
+//! The registry keeps one table of live sessions, for two reasons: an open
+//! returns the session a handle already holds, and shutdown drains every
+//! session. The host decides how long a session lives by holding its
+//! writable [`Namespace`](crate::Namespace).
 
 mod admission;
 mod inline_content;
@@ -30,7 +29,6 @@ use futures::FutureExt;
 use loonfs_api::v0::Commit;
 use loonfs_api::wire::wal::{MAX_WAL_OBJECT_BYTES, WAL_OBJECT_OVERHEAD_BYTES};
 use loonfs_api::{ChangeSeq, CommitId, NamespaceId};
-use loonfs_core::cache::Recency;
 use loonfs_core::commit::{
     is_retryable_wal_publish, settle_publish_attempt, CommitFingerprint, WalPublishError,
 };
@@ -125,7 +123,7 @@ pub(crate) struct PublisherRegistry {
 }
 
 /// State shared by all publishers in this registry: admission status, the
-/// session table, retained projections, and contained panic count.
+/// session table, and contained panic count.
 struct RegistryShared {
     admission: Arc<PublicationAdmission>,
     state: Mutex<RegistryState>,
@@ -138,7 +136,6 @@ struct RegistryShared {
 struct RegistryState {
     closed: bool,
     sessions: HashMap<NamespaceId, LiveSession>,
-    projections: RetainedProjections,
 }
 
 /// One entry in the table of live sessions.
@@ -228,133 +225,6 @@ impl RegistryShared {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
-
-    /// Records the namespace's retained projection and evicts projections until
-    /// the writer is within its shared budget.
-    ///
-    /// Eviction removes only rebuildable WAL-tail projections, starting with the
-    /// least recently published namespace. If a publication or delete currently
-    /// holds an engine, that namespace is skipped and remains counted. The active
-    /// operation reports its projection weight when it finishes.
-    fn settle_projection(
-        &self,
-        namespace_id: &NamespaceId,
-        decoded_bytes: Option<usize>,
-        max_decoded_bytes: usize,
-        instruments: &crate::metrics::RuntimeInstruments,
-    ) -> RetainedProjectionTotals {
-        let mut state = self.lock_state();
-        state.projections.record(namespace_id, decoded_bytes);
-        let attempts = state.projections.len();
-        for _ in 0..attempts {
-            if state.projections.decoded_bytes <= max_decoded_bytes {
-                break;
-            }
-            let Some(victim) = state.projections.oldest() else {
-                break;
-            };
-            if state
-                .sessions
-                .get(&victim)
-                .is_none_or(|live| live.publisher.invalidate_projection())
-            {
-                state.projections.remove_entry(&victim);
-                instruments.publisher_projection_evicted();
-            } else {
-                state.projections.retain(&victim);
-            }
-        }
-        state.projections.totals()
-    }
-}
-
-/// The WAL-tail projections this writer's publishers retain, and what they
-/// weigh together.
-///
-/// The per-projection ceiling a publish already applies bounds one namespace;
-/// this bounds the writer, which is what a process publishing to thousands of
-/// namespaces actually holds.
-#[derive(Debug, Default)]
-struct RetainedProjections {
-    entries: HashMap<NamespaceId, (usize, u64)>,
-    order: Recency<NamespaceId>,
-    decoded_bytes: usize,
-}
-
-/// What the writer retains right now, for the gauges and for tests.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct RetainedProjectionTotals {
-    projections: usize,
-    decoded_bytes: usize,
-}
-
-impl RetainedProjections {
-    /// Records what one namespace retains after a publish; `None` is a
-    /// publish that kept nothing.
-    fn record(&mut self, namespace_id: &NamespaceId, decoded_bytes: Option<usize>) {
-        self.remove_entry(namespace_id);
-        let Some(decoded_bytes) = decoded_bytes else {
-            return;
-        };
-        let last_touch = self.order.touch(namespace_id);
-        self.decoded_bytes = self.decoded_bytes.saturating_add(decoded_bytes);
-        self.entries
-            .insert(namespace_id.clone(), (decoded_bytes, last_touch));
-        self.compact_order();
-    }
-
-    fn forget(&mut self, namespace_id: &NamespaceId) {
-        self.remove_entry(namespace_id);
-    }
-
-    fn retain(&mut self, namespace_id: &NamespaceId) {
-        let last_touch = self.order.touch(namespace_id);
-        if let Some((_, entry_last_touch)) = self.entries.get_mut(namespace_id) {
-            *entry_last_touch = last_touch;
-        }
-        self.compact_order();
-    }
-
-    fn remove_entry(&mut self, namespace_id: &NamespaceId) {
-        let Some((decoded_bytes, _)) = self.entries.remove(namespace_id) else {
-            return;
-        };
-        self.decoded_bytes = self.decoded_bytes.saturating_sub(decoded_bytes);
-    }
-
-    fn oldest(&mut self) -> Option<NamespaceId> {
-        let entries = &self.entries;
-        self.order
-            .pop_oldest(|namespace_id, stamp| projection_is_live(entries, namespace_id, stamp))
-    }
-
-    fn compact_order(&mut self) {
-        let entries = &self.entries;
-        self.order.compact(entries.len(), |namespace_id, stamp| {
-            projection_is_live(entries, namespace_id, stamp)
-        });
-    }
-
-    fn len(&self) -> usize {
-        self.entries.len()
-    }
-
-    fn totals(&self) -> RetainedProjectionTotals {
-        RetainedProjectionTotals {
-            projections: self.entries.len(),
-            decoded_bytes: self.decoded_bytes,
-        }
-    }
-}
-
-fn projection_is_live(
-    entries: &HashMap<NamespaceId, (usize, u64)>,
-    namespace_id: &NamespaceId,
-    stamp: u64,
-) -> bool {
-    entries
-        .get(namespace_id)
-        .is_some_and(|(_, last_touch)| *last_touch == stamp)
 }
 
 impl PublisherRegistry {
@@ -373,7 +243,6 @@ impl PublisherRegistry {
                 state: Mutex::new(RegistryState {
                     closed: false,
                     sessions: HashMap::new(),
-                    projections: RetainedProjections::default(),
                 }),
                 panicked_units: AtomicUsize::new(0),
             }),
@@ -431,27 +300,15 @@ impl PublisherRegistry {
         Ok(session)
     }
 
-    /// Invalidates the namespace's rebuildable WAL-tail projection without
-    /// changing its writer epoch or fencing state.
+    /// Drops the position the namespace's engine keeps for its WAL tail,
+    /// without changing its writer epoch or fencing state.
     ///
-    /// If an operation currently holds the engine, invalidation is skipped. That
-    /// operation validates the live head and reports its retained projection when
-    /// it completes.
+    /// If an operation currently holds the engine, invalidation is skipped.
+    /// That operation validates the live head.
     pub(crate) fn invalidate_projection(&self, namespace_id: &NamespaceId) {
-        let totals = {
-            let mut state = self.shared.lock_state();
-            let Some(live) = state.sessions.get(namespace_id) else {
-                return;
-            };
-            if !live.publisher.invalidate_projection() {
-                return;
-            }
-            state.projections.remove_entry(namespace_id);
-            state.projections.totals()
-        };
-        self.runtime_core
-            .instruments()
-            .publisher_retained_projections(totals.projections, totals.decoded_bytes);
+        if let Some(publisher) = self.live_publisher(namespace_id) {
+            publisher.invalidate_projection();
+        }
     }
 
     fn live_publisher(&self, namespace_id: &NamespaceId) -> Option<NamespacePublisher> {
@@ -563,10 +420,10 @@ struct NamespacePublisher {
 /// The session stores the acquired epoch and terminal fencing state. Those
 /// values describe this process and cannot be reconstructed from object
 /// storage. They therefore live for the publisher's lifetime rather than in
-/// an evictable cache. Only the engine's WAL-tail projection is invalidated.
+/// an evictable cache. The engine's WAL tail lives in the head-state cache.
 struct EngineSlot {
     /// Built on the first unit of work and kept for the publisher's life.
-    /// Invalidation drops only its rebuildable tail projection.
+    /// Invalidation drops only the position of its WAL tail.
     engine: Option<NamespaceCommitEngine>,
     /// Never dropped or rebuilt while the publisher lives.
     session: SharedWriterSessionState,
@@ -579,8 +436,7 @@ impl EngineSlot {
     fn wal_tail_inline_bytes(&self) -> Option<usize> {
         self.engine
             .as_ref()
-            .and_then(NamespaceCommitEngine::wal_fold_input)
-            .map(|input| input.wal_tail_inline_bytes)
+            .and_then(NamespaceCommitEngine::wal_tail_inline_bytes)
             .or(self.last_known_wal_tail_inline_bytes)
     }
 
@@ -884,25 +740,20 @@ impl NamespacePublisher {
         let Some(shared) = self.shared.upgrade() else {
             return;
         };
-        let totals = {
-            let mut registry = shared.lock_state();
-            let held = match registry.sessions.get(&self.namespace_id) {
-                Some(live) if Arc::ptr_eq(&live.publisher.state, &self.state) => {
-                    live.session.strong_count() > 0
-                }
-                _ => return,
-            };
-            if !self.lock_state().has_ended(held) {
-                return;
+        let mut registry = shared.lock_state();
+        let held = match registry.sessions.get(&self.namespace_id) {
+            Some(live) if Arc::ptr_eq(&live.publisher.state, &self.state) => {
+                live.session.strong_count() > 0
             }
-            registry.sessions.remove(&self.namespace_id);
-            registry.projections.forget(&self.namespace_id);
-            self.runtime_core
-                .instruments()
-                .publisher_sessions(registry.sessions.len());
-            registry.projections.totals()
+            _ => return,
         };
-        self.report_retained_projections(totals);
+        if !self.lock_state().has_ended(held) {
+            return;
+        }
+        registry.sessions.remove(&self.namespace_id);
+        self.runtime_core
+            .instruments()
+            .publisher_sessions(registry.sessions.len());
     }
 
     /// Returns the error for the current admission state, or succeeds when open.
@@ -927,42 +778,14 @@ impl NamespacePublisher {
         )
     }
 
-    /// Drops the engine's tail projection, reporting whether it took the
-    /// engine to do so. A `false` return means a publication or delete holds
-    /// the engine, and that unit's own settlement reports what it retains.
-    fn invalidate_projection(&self) -> bool {
-        let Ok(mut slot) = self.engine.try_lock() else {
-            return false;
-        };
-        if let Some(engine) = slot.engine.as_mut() {
-            engine.invalidate_projection();
+    /// Drops the engine's tail position unless a publication or delete holds
+    /// the engine.
+    fn invalidate_projection(&self) {
+        if let Ok(mut slot) = self.engine.try_lock() {
+            if let Some(engine) = slot.engine.as_mut() {
+                engine.invalidate_projection();
+            }
         }
-        true
-    }
-
-    /// Records the projection retained by the completed publish and enforces the
-    /// writer's shared projection budget.
-    ///
-    /// The caller still holds the engine lock, so the recorded weight matches the
-    /// projection in the engine. Eviction only tries engine locks, so it
-    /// does not wait while holding the registry lock.
-    fn settle_retained_projection(&self, decoded_bytes: Option<usize>) {
-        let Some(shared) = self.shared.upgrade() else {
-            return;
-        };
-        let totals = shared.settle_projection(
-            &self.namespace_id,
-            decoded_bytes,
-            self.runtime_core.max_head_state_bytes(),
-            self.runtime_core.instruments(),
-        );
-        self.report_retained_projections(totals);
-    }
-
-    fn report_retained_projections(&self, totals: RetainedProjectionTotals) {
-        self.runtime_core
-            .instruments()
-            .publisher_retained_projections(totals.projections, totals.decoded_bytes);
     }
 
     /// Places the candidate's inline content, then admits it before awaiting
@@ -1254,12 +1077,8 @@ impl NamespacePublisher {
         }
         self.record_panic();
         // A panic can follow the WAL put, so the cached tail may omit committed bytes.
-        {
-            let mut slot = self.engine.lock().await;
-            if let Some(engine) = slot.engine.as_mut() {
-                engine.invalidate_projection();
-            }
-            self.settle_retained_projection(None);
+        if let Some(engine) = self.engine.lock().await.engine.as_mut() {
+            engine.invalidate_projection();
         }
         let orphaned_waiters = {
             let mut state = self.lock_state();
@@ -1420,11 +1239,9 @@ impl NamespacePublisher {
         } else {
             None
         };
-        let retained_tail_decoded_bytes = engine.retained_tail_decoded_bytes();
         if publish.wal_tail_observed {
             slot.last_known_wal_tail_inline_bytes = Some(publish.wal_tail_inline_bytes);
         }
-        self.settle_retained_projection(retained_tail_decoded_bytes);
         drop(slot);
         if let Some(start) = fold_start {
             let _ = start.send(());
@@ -1435,12 +1252,13 @@ impl NamespacePublisher {
     /// Returns the publisher's lazily created commit engine.
     ///
     /// Each publish loads the namespace identity from the head, so construction
-    /// only needs the shared segment cache and writer session.
+    /// only needs the runtime's cache views and the writer session.
     fn engine_for<'slot>(&self, slot: &'slot mut EngineSlot) -> &'slot mut NamespaceCommitEngine {
         slot.engine.get_or_insert_with(|| {
             NamespaceCommitEngine::new(self.namespace_id.clone())
                 .monotonic_timer(Arc::clone(&self.timer))
                 .segment_cache(self.runtime_core.metadata_segment_cache())
+                .head_state(self.runtime_core.head_state())
                 .writer_session(Arc::clone(&slot.session))
         })
     }
@@ -1496,14 +1314,14 @@ impl NamespacePublisher {
         drop(waiting);
         let input = {
             let mut slot = self.engine.lock().await;
-            let input = slot
-                .engine
-                .as_ref()
-                .and_then(NamespaceCommitEngine::wal_fold_input);
-            if input.as_ref().is_some_and(|input| {
-                input.wal_tail_objects < FOLD_AT_WAL_OBJECTS
-                    && input.wal_tail_inline_bytes
-                        < self.inline_content.inline_content_fold_at_bytes
+            let fold_at_bytes = self.inline_content.inline_content_fold_at_bytes;
+            if slot.engine.as_ref().is_some_and(|engine| {
+                engine
+                    .wal_tail_objects()
+                    .is_some_and(|objects| objects < FOLD_AT_WAL_OBJECTS)
+                    && engine
+                        .wal_tail_inline_bytes()
+                        .is_some_and(|bytes| bytes < fold_at_bytes)
             }) {
                 return;
             }

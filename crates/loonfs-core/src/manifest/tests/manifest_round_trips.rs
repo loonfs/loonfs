@@ -82,10 +82,10 @@ async fn a_publish_projection_fold_writes_the_replayed_tail_rows() {
 
     let input = crate::publish::WalFoldInput {
         wal_tail_inline_bytes: 0,
-        head: projection.head.clone(),
-        basis: projection.basis().clone(),
+        head: projection.position.head.clone(),
+        basis: projection.position.basis().clone(),
         tail_state: Arc::clone(&projection.tail_state),
-        wal_tail_objects: projection.wal_tail_objects,
+        wal_tail_objects: projection.position.wal_tail_objects,
     };
     let response = fold::fold_wal_tail(
         &store,
