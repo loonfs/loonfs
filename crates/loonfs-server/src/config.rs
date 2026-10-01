@@ -25,7 +25,7 @@ pub struct InlineContentOverrides {
         deserialize_with = "deserialize_inline_content_threshold"
     )]
     pub inline_content_threshold_bytes: Option<usize>,
-    pub inline_content_segment_budget_bytes: Option<usize>,
+    pub inline_content_wal_object_budget_bytes: Option<usize>,
     pub inline_content_fold_at_bytes: Option<usize>,
     pub inline_content_tail_limit_bytes: Option<usize>,
 }
@@ -35,7 +35,7 @@ impl Default for InlineContentOverrides {
         Self {
             inline_content_threshold_bytes: loonfs::InlineContentOptions::default()
                 .inline_content_threshold_bytes,
-            inline_content_segment_budget_bytes: None,
+            inline_content_wal_object_budget_bytes: None,
             inline_content_fold_at_bytes: None,
             inline_content_tail_limit_bytes: None,
         }
@@ -80,9 +80,9 @@ impl InlineContentOverrides {
         let defaults = loonfs::InlineContentOptions::default();
         loonfs::InlineContentOptions {
             inline_content_threshold_bytes: self.inline_content_threshold_bytes,
-            inline_content_segment_budget_bytes: self
-                .inline_content_segment_budget_bytes
-                .unwrap_or(defaults.inline_content_segment_budget_bytes),
+            inline_content_wal_object_budget_bytes: self
+                .inline_content_wal_object_budget_bytes
+                .unwrap_or(defaults.inline_content_wal_object_budget_bytes),
             inline_content_fold_at_bytes: self
                 .inline_content_fold_at_bytes
                 .unwrap_or(defaults.inline_content_fold_at_bytes),
@@ -334,7 +334,7 @@ fn default_max_concurrent_maintenance() -> usize {
 }
 
 fn default_max_merge_input_bytes() -> usize {
-    loonfs_api::wire::sst_blocks::DEFAULT_MAX_REORGANIZATION_INPUT_BYTES
+    loonfs_api::wire::sst_blocks::DEFAULT_MAX_COMPACTION_INPUT_BYTES
 }
 
 fn default_idle_fold_after_ms() -> u64 {
@@ -1389,7 +1389,7 @@ root = "/tmp/loonfs-server"
         let defaults = loonfs::InlineContentOptions::default();
         assert_eq!(defaults.inline_content_threshold_bytes, Some(64 * 1024));
         assert_eq!(defaults.inline_content_fold_at_bytes, 2 * 1024 * 1024);
-        assert_eq!(defaults.inline_content_segment_budget_bytes, 1024 * 1024);
+        assert_eq!(defaults.inline_content_wal_object_budget_bytes, 1024 * 1024);
         assert_eq!(defaults.inline_content_tail_limit_bytes, 32 * 1024 * 1024);
         assert_eq!(
             loonfs::MetadataMaintenanceOptions::default()
@@ -1401,7 +1401,7 @@ root = "/tmp/loonfs-server"
         for (source, threshold) in [
             ("", Some(64 * 1024)),
             (
-                "inline_content_segment_budget_bytes = 1024",
+                "inline_content_wal_object_budget_bytes = 1024",
                 Some(64 * 1024),
             ),
             ("inline_content_threshold_bytes = 4096", Some(4096)),

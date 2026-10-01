@@ -6,10 +6,10 @@
 use crate::common::*;
 use loonfs::publish::{parse_mutation_path, CommitRequest, FilesystemOperation};
 use loonfs::{
-    ChangeSeq, CommitId, CreateCheckpointOptions, CreateNamespaceOptions, CreateSnapshotOptions,
-    DeleteNamespaceOptions, ErrorCode, ManifestNo, MetadataCompactionOutcome, NamespaceId,
-    PutFileOptions, ReorganizeStepOutcome, RunMaintenanceRequest, RunMaintenanceResponse,
-    SharedObjectStore, SnapshotPolicy, WalFlushStepOutcome,
+    ChangeSeq, CommitId, CompactionStepOutcome, CreateCheckpointOptions, CreateNamespaceOptions,
+    CreateSnapshotOptions, DeleteNamespaceOptions, ErrorCode, ManifestNo,
+    MetadataCompactionOutcome, NamespaceId, PutFileOptions, RunMaintenanceRequest,
+    RunMaintenanceResponse, SharedObjectStore, SnapshotPolicy, WalFoldStepOutcome,
 };
 use loonfs_api::wire::manifest::decode_namespace_manifest_json;
 use loonfs_api::{AdvanceRetentionRequest, GcRequest, MetadataCompactionRequest};
@@ -22,7 +22,7 @@ use std::sync::Arc;
 use tempfile::tempdir;
 
 #[test]
-fn namespace_diagnostics_reports_wal_tail_segments() {
+fn namespace_diagnostics_reports_wal_tail_objects() {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(RecordingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
@@ -42,7 +42,7 @@ fn namespace_diagnostics_reports_wal_tail_segments() {
     assert_eq!(status.namespace_id, namespace_id);
     assert_eq!(status.head_seq, ChangeSeq(0));
     assert_eq!(status.current_manifest_no, Some(ManifestNo(1)));
-    assert_eq!(status.wal_tail_segments, 0);
+    assert_eq!(status.wal_tail_objects, 0);
     assert_eq!(status.retention_floor_seq, ChangeSeq(0));
 
     fs.put_file_bytes_blocking(
@@ -59,7 +59,7 @@ fn namespace_diagnostics_reports_wal_tail_segments() {
         .expect("status after commit");
     assert_eq!(status.head_seq, ChangeSeq(1));
     assert_eq!(status.current_manifest_no, Some(ManifestNo(2)));
-    assert_eq!(status.wal_tail_segments, 2);
+    assert_eq!(status.wal_tail_objects, 2);
     assert_eq!(status.retention_floor_seq, ChangeSeq(0));
     assert_eq!(store.count(OperationClass::List), 1);
 }
@@ -216,7 +216,7 @@ fn maintenance_step_below_threshold_is_not_needed() {
     let response = fs
         .maintenance_run_namespace_blocking(&namespace_id, metadata_request(3))
         .expect("maintenance pass");
-    assert_eq!(upkeep(&response).wal_flush, WalFlushStepOutcome::NotNeeded);
+    assert_eq!(upkeep(&response).wal_fold, WalFoldStepOutcome::NotNeeded);
 }
 
 #[test]
@@ -242,8 +242,8 @@ fn maintenance_step_at_wal_object_threshold_folds_the_wal() {
         .maintenance_run_namespace_blocking(&namespace_id, metadata_request(2))
         .expect("maintenance pass");
     assert_eq!(
-        upkeep(&response).wal_flush,
-        WalFlushStepOutcome::Flushed {
+        upkeep(&response).wal_fold,
+        WalFoldStepOutcome::Folded {
             manifest_head_seq: ChangeSeq(1)
         }
     );
@@ -252,7 +252,7 @@ fn maintenance_step_at_wal_object_threshold_folds_the_wal() {
         .namespace_diagnostics_blocking(&namespace_id)
         .expect("status after wal fold");
     assert_eq!(status.current_manifest_no, Some(ManifestNo(3)));
-    assert_eq!(status.wal_tail_segments, 0);
+    assert_eq!(status.wal_tail_objects, 0);
 
     // Maintenance is record-less: folding the WAL must leave nothing
     // under `checkpoints/`.
@@ -289,8 +289,8 @@ fn metadata_run_does_not_advance_retention() {
         .maintenance_run_namespace_blocking(&namespace_id, metadata_request(1))
         .expect("step without retention");
     assert_eq!(
-        upkeep(&response).wal_flush,
-        WalFlushStepOutcome::Flushed {
+        upkeep(&response).wal_fold,
+        WalFoldStepOutcome::Folded {
             manifest_head_seq: ChangeSeq(1)
         }
     );
@@ -348,8 +348,8 @@ fn the_typed_wrappers_are_single_action_steps() {
     assert_eq!(
         fs.fold_wal_blocking(&namespace_id)
             .expect("fold an empty tail")
-            .wal_flush,
-        WalFlushStepOutcome::NotNeeded,
+            .wal_fold,
+        WalFoldStepOutcome::NotNeeded,
         "the wrapper folds a tail; it does not publish a manifest for a namespace with none"
     );
 
@@ -362,14 +362,14 @@ fn the_typed_wrappers_are_single_action_steps() {
     .expect("put first file");
     let folded = fs.fold_wal_blocking(&namespace_id).expect("fold the tail");
     assert_eq!(
-        folded.wal_flush,
-        WalFlushStepOutcome::Flushed {
+        folded.wal_fold,
+        WalFoldStepOutcome::Folded {
             manifest_head_seq: ChangeSeq(1)
         }
     );
     assert_eq!(
-        folded.reorganize,
-        ReorganizeStepOutcome::NotNeeded {},
+        folded.compaction,
+        CompactionStepOutcome::NotNeeded {},
         "the upkeep pass reports its compaction half rather than hiding it"
     );
 
@@ -384,8 +384,8 @@ fn the_typed_wrappers_are_single_action_steps() {
         .maintenance_run_namespace_blocking(&namespace_id, metadata_request(1))
         .expect("upkeep-only step");
     assert_eq!(
-        upkeep(&metadata).wal_flush,
-        WalFlushStepOutcome::Flushed {
+        upkeep(&metadata).wal_fold,
+        WalFoldStepOutcome::Folded {
             manifest_head_seq: ChangeSeq(2)
         },
         "the metadata request runs only metadata maintenance"
@@ -467,8 +467,8 @@ fn maintenance_step_after_existing_manifest_writes_delta_manifest() {
         .maintenance_run_namespace_blocking(&namespace_id, metadata_request(1))
         .expect("second maintenance pass");
     assert_eq!(
-        upkeep(&step).wal_flush,
-        WalFlushStepOutcome::Flushed {
+        upkeep(&step).wal_fold,
+        WalFoldStepOutcome::Folded {
             manifest_head_seq: ChangeSeq(2)
         }
     );
@@ -477,7 +477,7 @@ fn maintenance_step_after_existing_manifest_writes_delta_manifest() {
         .namespace_diagnostics_blocking(&namespace_id)
         .expect("status after delta wal fold");
     assert_eq!(status.current_manifest_no, Some(ManifestNo(4)));
-    assert_eq!(status.wal_tail_segments, 0);
+    assert_eq!(status.wal_tail_objects, 0);
 
     let raw_store = LocalFsStore::new(temp_dir.path()).expect("store");
     let root = block_on(loonfs_core::control::load_namespace_current_manifest(
@@ -808,12 +808,12 @@ fn maintenance_step_counts_wal_objects_not_commits() {
         .namespace_diagnostics_blocking(&namespace_id)
         .expect("status after first batch");
     assert_eq!(status.head_seq, ChangeSeq(2));
-    assert_eq!(status.wal_tail_segments, 2);
+    assert_eq!(status.wal_tail_objects, 2);
 
     let response = fs
         .maintenance_run_namespace_blocking(&namespace_id, metadata_request(3))
         .expect("maintenance pass");
-    assert_eq!(upkeep(&response).wal_flush, WalFlushStepOutcome::NotNeeded);
+    assert_eq!(upkeep(&response).wal_fold, WalFoldStepOutcome::NotNeeded);
 
     fs.mutate_blocking(&namespace_id, create_directory_request("create-c", "/c"))
         .expect("second WAL object commit");
@@ -822,8 +822,8 @@ fn maintenance_step_counts_wal_objects_not_commits() {
         .maintenance_run_namespace_blocking(&namespace_id, metadata_request(3))
         .expect("maintenance pass at WAL object threshold");
     assert_eq!(
-        upkeep(&response).wal_flush,
-        WalFlushStepOutcome::Flushed {
+        upkeep(&response).wal_fold,
+        WalFoldStepOutcome::Folded {
             manifest_head_seq: ChangeSeq(3)
         }
     );
@@ -874,8 +874,8 @@ async fn maintenance_step_treats_manifest_number_collision_as_benign_race() {
     let step = step.expect("maintenance pass should not fail on metadata root publish race");
 
     assert_eq!(
-        upkeep(&step).wal_flush,
-        WalFlushStepOutcome::AlreadyPublished {
+        upkeep(&step).wal_fold,
+        WalFoldStepOutcome::AlreadyPublished {
             attempted_seq: ChangeSeq(1),
             current_manifest_no: ManifestNo(3),
         }
@@ -886,7 +886,7 @@ async fn maintenance_step_treats_manifest_number_collision_as_benign_race() {
         .await
         .expect("status after lost race");
     assert_eq!(status.current_manifest_no, Some(ManifestNo(3)));
-    assert_eq!(status.wal_tail_segments, 0);
+    assert_eq!(status.wal_tail_objects, 0);
 }
 
 #[tokio::test]
@@ -921,7 +921,7 @@ async fn a_cold_metadata_job_probes_with_its_configured_options() {
     let defaults = MetadataMaintenanceJob::new(runtime.maintenance.clone());
     let eager_fold = MetadataMaintenanceJob::new(runtime.maintenance.clone()).options(
         MetadataMaintenanceOptions {
-            max_wal_tail_segments: NonZeroU64::MIN,
+            max_wal_tail_objects: NonZeroU64::MIN,
             ..MetadataMaintenanceOptions::default()
         },
     );

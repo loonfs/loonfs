@@ -602,6 +602,111 @@
         ],
         "type": "object"
       },
+      "CompactionStepOutcome": {
+        "description": "What the bounded compaction part of a maintenance pass did.",
+        "discriminator": {
+          "mapping": {
+            "fenced": "#/components/schemas/CompactionStepOutcomeFenced",
+            "manifest_advanced": "#/components/schemas/CompactionStepOutcomeManifestAdvanced",
+            "not_needed": "#/components/schemas/CompactionStepOutcomeNotNeeded",
+            "streaming_required": "#/components/schemas/CompactionStepOutcomeStreamingRequired",
+            "unit_published": "#/components/schemas/CompactionStepOutcomeUnitPublished"
+          },
+          "propertyName": "outcome"
+        },
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/CompactionStepOutcomeNotNeeded"
+          },
+          {
+            "$ref": "#/components/schemas/CompactionStepOutcomeUnitPublished"
+          },
+          {
+            "$ref": "#/components/schemas/CompactionStepOutcomeStreamingRequired"
+          },
+          {
+            "$ref": "#/components/schemas/CompactionStepOutcomeManifestAdvanced"
+          },
+          {
+            "$ref": "#/components/schemas/CompactionStepOutcomeFenced"
+          }
+        ]
+      },
+      "CompactionStepOutcomeFenced": {
+        "description": "A newer runtime holds the compactor epoch.",
+        "properties": {
+          "outcome": {
+            "enum": [
+              "fenced"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "outcome"
+        ],
+        "type": "object"
+      },
+      "CompactionStepOutcomeManifestAdvanced": {
+        "description": "Another publisher changed the current manifest before this step could publish.",
+        "properties": {
+          "outcome": {
+            "enum": [
+              "manifest_advanced"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "outcome"
+        ],
+        "type": "object"
+      },
+      "CompactionStepOutcomeNotNeeded": {
+        "description": "No family group had enough delta runs to merge.",
+        "properties": {
+          "outcome": {
+            "enum": [
+              "not_needed"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "outcome"
+        ],
+        "type": "object"
+      },
+      "CompactionStepOutcomeStreamingRequired": {
+        "description": "A family group's window is too large for one bounded merge. Run the\n`metadata_compaction` job, which compacts it by streaming.",
+        "properties": {
+          "outcome": {
+            "enum": [
+              "streaming_required"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "outcome"
+        ],
+        "type": "object"
+      },
+      "CompactionStepOutcomeUnitPublished": {
+        "description": "One family group was merged and a manifest published.",
+        "properties": {
+          "outcome": {
+            "enum": [
+              "unit_published"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "outcome"
+        ],
+        "type": "object"
+      },
       "CompleteUploadBody": {
         "description": "Completes an upload using the mode that started it.",
         "discriminator": {
@@ -721,7 +826,7 @@
       },
       "ContentRef": {
         "additionalProperties": false,
-        "description": "Identifies one piece of immutable file content.\n\nThe owner namespace and content id name the content object that holds the\nbytes. A reference is not proof that the object exists: content committed\ninline has no object until a flush writes it.",
+        "description": "Identifies one piece of immutable file content.\n\nThe owner namespace and content id name the content object that holds the\nbytes. A reference is not proof that the object exists: content committed\ninline has no object until a fold writes it.",
         "properties": {
           "checksum": {
             "$ref": "#/components/schemas/Checksum",
@@ -1131,15 +1236,15 @@
             "minimum": 0,
             "type": "integer"
           },
-          "wal_segments": {
-            "description": "Unreferenced WAL segments deleted.",
+          "wal_objects": {
+            "description": "Unreferenced WAL objects deleted.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
           }
         },
         "required": [
-          "wal_segments",
+          "wal_objects",
           "metadata_segments",
           "manifests",
           "upload_sessions",
@@ -3070,8 +3175,8 @@
             "$ref": "#/components/schemas/ChangeSeq",
             "description": "Oldest position a change feed can resume after. The feed returns\nchanges above it."
           },
-          "wal_tail_segments": {
-            "description": "Number of visible WAL segments after the current manifest.",
+          "wal_tail_objects": {
+            "description": "Number of visible WAL objects after the current manifest.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
@@ -3083,7 +3188,7 @@
           "created_by",
           "head_seq",
           "retention_floor_seq",
-          "wal_tail_segments",
+          "wal_tail_objects",
           "live_snapshots",
           "live_checkpoints"
         ],
@@ -3434,111 +3539,6 @@
         "pattern": "^[\\x21-\\x2B\\x2D-\\x7E]{1,256}$",
         "type": "string"
       },
-      "ReorganizeStepOutcome": {
-        "description": "The outcome of the metadata-reorganization part of a maintenance pass.",
-        "discriminator": {
-          "mapping": {
-            "compaction_required": "#/components/schemas/ReorganizeStepOutcomeCompactionRequired",
-            "fenced": "#/components/schemas/ReorganizeStepOutcomeFenced",
-            "manifest_advanced": "#/components/schemas/ReorganizeStepOutcomeManifestAdvanced",
-            "not_needed": "#/components/schemas/ReorganizeStepOutcomeNotNeeded",
-            "unit_published": "#/components/schemas/ReorganizeStepOutcomeUnitPublished"
-          },
-          "propertyName": "outcome"
-        },
-        "oneOf": [
-          {
-            "$ref": "#/components/schemas/ReorganizeStepOutcomeNotNeeded"
-          },
-          {
-            "$ref": "#/components/schemas/ReorganizeStepOutcomeUnitPublished"
-          },
-          {
-            "$ref": "#/components/schemas/ReorganizeStepOutcomeCompactionRequired"
-          },
-          {
-            "$ref": "#/components/schemas/ReorganizeStepOutcomeManifestAdvanced"
-          },
-          {
-            "$ref": "#/components/schemas/ReorganizeStepOutcomeFenced"
-          }
-        ]
-      },
-      "ReorganizeStepOutcomeCompactionRequired": {
-        "description": "A family group needs a streaming compaction. Run the `metadata_compaction` job.",
-        "properties": {
-          "outcome": {
-            "enum": [
-              "compaction_required"
-            ],
-            "type": "string"
-          }
-        },
-        "required": [
-          "outcome"
-        ],
-        "type": "object"
-      },
-      "ReorganizeStepOutcomeFenced": {
-        "description": "A newer runtime holds the compactor epoch.",
-        "properties": {
-          "outcome": {
-            "enum": [
-              "fenced"
-            ],
-            "type": "string"
-          }
-        },
-        "required": [
-          "outcome"
-        ],
-        "type": "object"
-      },
-      "ReorganizeStepOutcomeManifestAdvanced": {
-        "description": "Another publisher changed the current manifest before this step could publish.",
-        "properties": {
-          "outcome": {
-            "enum": [
-              "manifest_advanced"
-            ],
-            "type": "string"
-          }
-        },
-        "required": [
-          "outcome"
-        ],
-        "type": "object"
-      },
-      "ReorganizeStepOutcomeNotNeeded": {
-        "description": "No family group had enough delta runs to merge.",
-        "properties": {
-          "outcome": {
-            "enum": [
-              "not_needed"
-            ],
-            "type": "string"
-          }
-        },
-        "required": [
-          "outcome"
-        ],
-        "type": "object"
-      },
-      "ReorganizeStepOutcomeUnitPublished": {
-        "description": "One family group was merged and a manifest published.",
-        "properties": {
-          "outcome": {
-            "enum": [
-              "unit_published"
-            ],
-            "type": "string"
-          }
-        },
-        "required": [
-          "outcome"
-        ],
-        "type": "object"
-      },
       "RetainedCandidates": {
         "description": "The candidates inspected but not deleted by one garbage-collection pass.",
         "properties": {
@@ -3674,7 +3674,7 @@
         "type": "object"
       },
       "RunMaintenanceRequestMetadata": {
-        "description": "Runs WAL flushing and one bounded metadata reorganization step.",
+        "description": "Folds the WAL tail and runs one bounded compaction step.",
         "properties": {
           "kind": {
             "enum": [
@@ -3682,8 +3682,8 @@
             ],
             "type": "string"
           },
-          "max_wal_tail_segments": {
-            "description": "The WAL-tail threshold for flushing. Omit it for the server default.",
+          "max_wal_tail_objects": {
+            "description": "The WAL tail length, in WAL objects, that triggers a fold. Omit it for\nthe server default.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
@@ -3730,7 +3730,7 @@
         "type": "object"
       },
       "RunMaintenanceRequestRetention": {
-        "description": "Advances the retention floor to the flushed manifest head.",
+        "description": "Advances the retention floor to the folded manifest head.",
         "properties": {
           "kind": {
             "enum": [
@@ -3872,8 +3872,12 @@
         "type": "object"
       },
       "RunMaintenanceResponseMetadata": {
-        "description": "Result of WAL flushing and one bounded metadata reorganization step.",
+        "description": "Result of the WAL fold and one bounded compaction step.",
         "properties": {
+          "compaction": {
+            "$ref": "#/components/schemas/CompactionStepOutcome",
+            "description": "What the bounded compaction step did."
+          },
           "kind": {
             "enum": [
               "metadata"
@@ -3884,19 +3888,15 @@
             "$ref": "#/components/schemas/NamespaceId",
             "description": "Namespace maintained by this run."
           },
-          "reorganize": {
-            "$ref": "#/components/schemas/ReorganizeStepOutcome",
-            "description": "What the reorganization unit did."
-          },
-          "wal_flush": {
-            "$ref": "#/components/schemas/WalFlushStepOutcome",
-            "description": "What the WAL flush did."
+          "wal_fold": {
+            "$ref": "#/components/schemas/WalFoldStepOutcome",
+            "description": "What the WAL fold did."
           }
         },
         "required": [
           "namespace_id",
-          "wal_flush",
-          "reorganize",
+          "wal_fold",
+          "compaction",
           "kind"
         ],
         "type": "object"
@@ -4415,38 +4415,38 @@
         ],
         "type": "object"
       },
-      "WalFlushStepOutcome": {
-        "description": "What the WAL-flush part of a maintenance pass did.",
+      "WalFoldStepOutcome": {
+        "description": "What the WAL fold part of a maintenance pass did.",
         "discriminator": {
           "mapping": {
-            "already_published": "#/components/schemas/WalFlushStepOutcomeAlreadyPublished",
-            "flushed": "#/components/schemas/WalFlushStepOutcomeFlushed",
-            "not_needed": "#/components/schemas/WalFlushStepOutcomeNotNeeded",
-            "retries_exhausted": "#/components/schemas/WalFlushStepOutcomeRetriesExhausted"
+            "already_published": "#/components/schemas/WalFoldStepOutcomeAlreadyPublished",
+            "folded": "#/components/schemas/WalFoldStepOutcomeFolded",
+            "not_needed": "#/components/schemas/WalFoldStepOutcomeNotNeeded",
+            "retries_exhausted": "#/components/schemas/WalFoldStepOutcomeRetriesExhausted"
           },
           "propertyName": "outcome"
         },
         "oneOf": [
           {
-            "$ref": "#/components/schemas/WalFlushStepOutcomeNotNeeded"
+            "$ref": "#/components/schemas/WalFoldStepOutcomeNotNeeded"
           },
           {
-            "$ref": "#/components/schemas/WalFlushStepOutcomeFlushed"
+            "$ref": "#/components/schemas/WalFoldStepOutcomeFolded"
           },
           {
-            "$ref": "#/components/schemas/WalFlushStepOutcomeAlreadyPublished"
+            "$ref": "#/components/schemas/WalFoldStepOutcomeAlreadyPublished"
           },
           {
-            "$ref": "#/components/schemas/WalFlushStepOutcomeRetriesExhausted"
+            "$ref": "#/components/schemas/WalFoldStepOutcomeRetriesExhausted"
           }
         ]
       },
-      "WalFlushStepOutcomeAlreadyPublished": {
+      "WalFoldStepOutcomeAlreadyPublished": {
         "description": "The current manifest already covered the captured WAL tail; this step published no manifest.",
         "properties": {
           "attempted_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
-            "description": "Sequence this step attempted to flush through."
+            "description": "Sequence this step attempted to fold through."
           },
           "current_manifest_no": {
             "$ref": "#/components/schemas/ManifestNo",
@@ -4466,8 +4466,8 @@
         ],
         "type": "object"
       },
-      "WalFlushStepOutcomeFlushed": {
-        "description": "The step flushed the WAL tail and published the next current manifest.",
+      "WalFoldStepOutcomeFolded": {
+        "description": "The step folded the WAL tail and published the next current manifest.",
         "properties": {
           "manifest_head_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
@@ -4475,7 +4475,7 @@
           },
           "outcome": {
             "enum": [
-              "flushed"
+              "folded"
             ],
             "type": "string"
           }
@@ -4486,8 +4486,8 @@
         ],
         "type": "object"
       },
-      "WalFlushStepOutcomeNotNeeded": {
-        "description": "The tail was below the threshold, so there was nothing to flush.",
+      "WalFoldStepOutcomeNotNeeded": {
+        "description": "The tail was below the threshold, so there was nothing to fold.",
         "properties": {
           "outcome": {
             "enum": [
@@ -4501,7 +4501,7 @@
         ],
         "type": "object"
       },
-      "WalFlushStepOutcomeRetriesExhausted": {
+      "WalFoldStepOutcomeRetriesExhausted": {
         "description": "Concurrent updates prevented every publication attempt.",
         "properties": {
           "observed_head_seq": {
@@ -4799,7 +4799,7 @@
         "x-loonfs-retry": "idempotent"
       },
       "post": {
-        "description": "Creates a user-owned checkpoint record pinning the current namespace view. It first folds any WAL tail after the current manifest. Every call creates a new record under a new id; the name is a label, not a key. The record retains its manifest until it is deleted, either explicitly or by collection after expiry plus grace, so routine maintenance should flush the WAL instead. This is a maintenance operation, not a file mutation.",
+        "description": "Creates a user-owned checkpoint record pinning the current namespace view. It first folds any WAL tail after the current manifest. Every call creates a new record under a new id; the name is a label, not a key. The record retains its manifest until it is deleted, either explicitly or by collection after expiry plus grace, so routine maintenance should fold the WAL instead. This is a maintenance operation, not a file mutation.",
         "operationId": "create_checkpoint",
         "parameters": [
           {

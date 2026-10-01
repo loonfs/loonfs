@@ -183,9 +183,9 @@ pub(crate) fn upkeep(response: &RunMaintenanceResponse) -> &MetadataMaintenanceR
 }
 
 /// A metadata request with an explicit fold threshold.
-pub(crate) fn metadata_request(max_wal_tail_segments: u64) -> RunMaintenanceRequest {
+pub(crate) fn metadata_request(max_wal_tail_objects: u64) -> RunMaintenanceRequest {
     RunMaintenanceRequest::Metadata(MetadataMaintenanceRequest {
-        max_wal_tail_segments: Some(max_wal_tail_segments),
+        max_wal_tail_objects: Some(max_wal_tail_objects),
     })
 }
 

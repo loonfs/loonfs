@@ -115,7 +115,7 @@ fn gc_conclusion(gc: &GcResponse) -> MaintenanceConclusion {
 }
 
 fn reclaimed_anything(gc: &GcResponse) -> bool {
-    gc.deleted.wal_segments > 0
+    gc.deleted.wal_objects > 0
         || gc.deleted.metadata_segments > 0
         || gc.deleted.manifests > 0
         || gc.deleted.content_objects > 0

@@ -177,7 +177,7 @@ Namespace management
   loonfs namespace fork <source> <new-namespace> [--snapshot <id>] [--actor-id <stable-id>]
     Fork a namespace into a new one. The fork shares the source's existing
     content and metadata objects without copying the filesystem. Forking the
-    current head may first flush the source's outstanding WAL tail.
+    current head may first fold the source's outstanding WAL tail.
     Use --snapshot to fork from a live snapshot instead of the current head.
 
   loonfs namespace delete <namespace> [--expected-head-seq <seq>] [--yes]
@@ -369,13 +369,13 @@ Maintenance
 
   loonfs maintenance recover-administrator <principal>
 
-  loonfs maintenance metadata [--max-wal-tail-segments <n>]
-    Run the metadata job once: flush the WAL tail when it reaches
-    the threshold, then merge one reorganization unit.
-    --max-wal-tail-segments overrides the default flush threshold.
+  loonfs maintenance metadata [--max-wal-tail-objects <n>]
+    Run the metadata job once: fold the WAL tail when it reaches
+    the threshold, then run one bounded compaction step.
+    --max-wal-tail-objects overrides the default fold threshold.
 
-  loonfs maintenance flush
-    Flush the current WAL tail regardless of its length.
+  loonfs maintenance fold
+    Fold the current WAL tail regardless of its length.
 
   loonfs maintenance compact
     Run one metadata compaction unit: one bounded merge or one streaming
@@ -385,7 +385,7 @@ Maintenance
 
   loonfs maintenance retention advance
     Advance the retention floor. This removes change-feed replay history
-    below the flushed manifest head but does not remove file revisions.
+    below the folded manifest head but does not remove file revisions.
 
   loonfs maintenance gc [--grace-window-ms <ms>]
     Run one complete pass and print its report. Each call reads the current

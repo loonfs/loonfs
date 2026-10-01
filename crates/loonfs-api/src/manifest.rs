@@ -525,7 +525,7 @@ pub enum TombstoneRowAction {
 ///
 /// `Listed` exposes a deletion in trash; `Removed` hides it after undelete.
 /// Both rows share a key prefix, with `Removed` sorting first, so scans can
-/// suppress restored entries. Reorganization later removes the cancelled
+/// suppress restored entries. Compaction later removes the cancelled
 /// pair.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]

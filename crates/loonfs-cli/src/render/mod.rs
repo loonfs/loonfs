@@ -14,7 +14,7 @@ use crate::config::ConfigSource;
 use crate::error::CliError;
 use loonfs_api::v0::{GrepIndexLifecycle, StoreProbeCheckOutcome, StoreProbeCheckResult};
 use loonfs_api::{
-    AttributeValue, CheckpointOwnerSummary, GcResponse, NamespaceId, WalFlushStepOutcome,
+    AttributeValue, CheckpointOwnerSummary, GcResponse, NamespaceId, WalFoldStepOutcome,
 };
 use serde::Serialize;
 use std::io::{self, Write};
@@ -758,7 +758,7 @@ mod tests {
         use loonfs_api::{GcResponse, RetainedReason};
 
         let mut pass = GcResponse::empty(NamespaceId::parse("demo").expect("namespace id"));
-        pass.deleted.wal_segments = 2;
+        pass.deleted.wal_objects = 2;
         pass.deleted.upload_sessions = 3;
         pass.deleted.content_objects = 1;
         pass.deleted.retired_content_objects = 7;

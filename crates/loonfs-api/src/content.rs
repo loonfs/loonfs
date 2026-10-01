@@ -318,7 +318,7 @@ pub enum ContentRefValidationError {
 ///
 /// The owner namespace and content id name the content object that holds the
 /// bytes. A reference is not proof that the object exists: content committed
-/// inline has no object until a flush writes it.
+/// inline has no object until a fold writes it.
 // Request bodies and durable records share this type, so it rejects unknown
 // fields in every context. After release, new content kinds, not new fields.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]

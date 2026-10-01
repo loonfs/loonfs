@@ -137,7 +137,7 @@ type GcCategory = (&'static str, fn(&GcResponse) -> u64);
 
 /// Counts each deletion once, with pins grouped by owner.
 const GC_CATEGORIES: [GcCategory; 8] = [
-    ("deleted_wal_segments", |gc| gc.deleted.wal_segments),
+    ("deleted_wal_objects", |gc| gc.deleted.wal_objects),
     ("deleted_metadata_segments", |gc| {
         gc.deleted.metadata_segments
     }),
@@ -1527,9 +1527,9 @@ mod tests {
         let bridge = instruments.object_store_recorder().expect("bridge");
 
         for (result, key_class) in [
-            (ObjectStoreResultClass::Ok, KeyClass::WalSegment),
-            (ObjectStoreResultClass::NotFound, KeyClass::WalSegment),
-            (ObjectStoreResultClass::NotFound, KeyClass::WalSegment),
+            (ObjectStoreResultClass::Ok, KeyClass::WalObject),
+            (ObjectStoreResultClass::NotFound, KeyClass::WalObject),
+            (ObjectStoreResultClass::NotFound, KeyClass::WalObject),
             (ObjectStoreResultClass::Ok, KeyClass::NamespaceManifest),
         ] {
             bridge.record(classified_sample(
@@ -1542,8 +1542,8 @@ mod tests {
 
         let snapshot = recorder.snapshot();
         for (result, key_class, count) in [
-            ("ok", "wal_segment", 1),
-            ("not_found", "wal_segment", 2),
+            ("ok", "wal_object", 1),
+            ("not_found", "wal_object", 2),
             ("ok", "namespace_manifest", 1),
         ] {
             assert_eq!(
@@ -1807,7 +1807,7 @@ mod tests {
         let mut gc = GcResponse {
             namespace_id: loonfs_test_support::ids::namespace_id("demo"),
             deleted: loonfs_api::DeletedObjectCounts {
-                wal_segments: 3,
+                wal_objects: 3,
                 content_objects: 5,
                 ..loonfs_api::DeletedObjectCounts::default()
             },
@@ -1825,7 +1825,7 @@ mod tests {
         };
 
         instruments.gc_pass(&gc);
-        gc.deleted.wal_segments = 1;
+        gc.deleted.wal_objects = 1;
         instruments.gc_pass(&gc);
 
         let snapshot = recorder.snapshot();
@@ -1833,7 +1833,7 @@ mod tests {
             counter(
                 &snapshot,
                 "loonfs.gc.reclaimed",
-                &[("category", "deleted_wal_segments")],
+                &[("category", "deleted_wal_objects")],
             ),
             4
         );

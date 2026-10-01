@@ -508,12 +508,12 @@ fn wal_object_document_matches_golden_bytes() {
         .into_bytes();
     // Compare the decompressed document: zstd frames may differ across zstd
     // versions, the document bytes (which the checksum covers) may not.
-    assert_matches_golden("wal_segment.v1.cbor", &unzstd(&encoded));
+    assert_matches_golden("wal_object.v1.cbor", &unzstd(&encoded));
 }
 
 #[test]
 fn wal_object_golden_decodes_to_sample() {
-    let decoded = decode_wal_object_envelope_zstd(&rezstd(&read_golden("wal_segment.v1.cbor")))
+    let decoded = decode_wal_object_envelope_zstd(&rezstd(&read_golden("wal_object.v1.cbor")))
         .expect("decode golden WAL object");
     assert_eq!(decoded.into_payload(), sample_wal_payload());
 }
@@ -523,15 +523,14 @@ fn wal_object_inline_content_document_matches_golden_bytes() {
     let encoded = encode_wal_object_envelope_zstd(sample_wal_inline_content_payload())
         .expect("encode wal with inline content")
         .into_bytes();
-    assert_matches_golden("wal_segment_inline_content.v1.cbor", &unzstd(&encoded));
+    assert_matches_golden("wal_object_inline_content.v1.cbor", &unzstd(&encoded));
 }
 
 #[test]
 fn wal_object_inline_content_golden_decodes_to_sample() {
-    let decoded = decode_wal_object_envelope_zstd(&rezstd(&read_golden(
-        "wal_segment_inline_content.v1.cbor",
-    )))
-    .expect("decode golden WAL object with inline content");
+    let decoded =
+        decode_wal_object_envelope_zstd(&rezstd(&read_golden("wal_object_inline_content.v1.cbor")))
+            .expect("decode golden WAL object with inline content");
     assert_eq!(decoded.into_payload(), sample_wal_inline_content_payload());
 }
 

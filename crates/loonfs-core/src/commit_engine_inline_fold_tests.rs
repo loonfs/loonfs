@@ -100,7 +100,7 @@ async fn an_own_fold_replays_only_later_objects_after_projection_invalidation() 
         engine
             .wal_fold_input()
             .expect("projection")
-            .wal_tail_segments,
+            .wal_tail_objects,
         1
     );
 }
@@ -152,7 +152,7 @@ async fn an_own_fold_discovers_later_commits_after_the_projection_is_dropped() {
         )
         .await
         .expect("fold");
-        assert_eq!(folded.response.outcome, FlushWalOutcome::Published);
+        assert_eq!(folded.response.outcome, FoldWalOutcome::Published);
         engine.record_wal_fold(Some(&folded));
         timer.advance_ms(100);
         store.reset();
@@ -251,7 +251,7 @@ async fn a_takeover_after_an_own_fold_fences_the_writer_without_a_view() {
     )
     .await
     .expect("fold");
-    assert_eq!(folded.response.outcome, FlushWalOutcome::Published);
+    assert_eq!(folded.response.outcome, FoldWalOutcome::Published);
     engine.record_wal_fold(Some(&folded));
     NamespaceCommitEngine::new(engine.namespace_id.clone())
         .session_writer_epoch(
@@ -404,7 +404,7 @@ async fn failed_manifest_and_over_budget_retries_keep_materialized_content() {
     )
     .await
     .expect("retry");
-    assert_eq!(folded.response.outcome, FlushWalOutcome::Published);
+    assert_eq!(folded.response.outcome, FoldWalOutcome::Published);
     assert_content_before_metadata(&store, values.len());
     let mut retry_keys = content_puts(&store);
     retry_keys.sort();
@@ -465,9 +465,9 @@ async fn competing_engines_materialize_identical_objects_and_publish_one_manifes
     let second_result = second_result.expect("second fold");
     assert_eq!(
         first_result.response.outcome,
-        FlushWalOutcome::AlreadyCurrent
+        FoldWalOutcome::AlreadyCurrent
     );
-    assert_eq!(second_result.response.outcome, FlushWalOutcome::Published);
+    assert_eq!(second_result.response.outcome, FoldWalOutcome::Published);
     assert_eq!(
         first_result.response.manifest_no,
         second_result.response.manifest_no
@@ -639,7 +639,7 @@ async fn a_fold_reanchors_with_only_the_commits_published_since_it_began() {
     )
     .await
     .expect("fold");
-    assert_eq!(folded.response.outcome, FlushWalOutcome::Published);
+    assert_eq!(folded.response.outcome, FoldWalOutcome::Published);
     let observed = engine.projection_observed.clone();
     engine.record_wal_fold(Some(&folded));
     let projection = engine
@@ -647,7 +647,7 @@ async fn a_fold_reanchors_with_only_the_commits_published_since_it_began() {
         .as_ref()
         .expect("retained projection");
     assert_eq!(projection.basis(), &folded.basis);
-    assert_eq!(projection.wal_tail_segments, 2);
+    assert_eq!(projection.wal_tail_objects, 2);
     assert_eq!(projection.head.folded_wal_no, input.head.wal_no);
     assert_eq!(*projection.tail_state, expected);
     let retained = engine.projection_observed.as_ref().expect("observation");

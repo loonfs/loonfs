@@ -594,7 +594,7 @@ async fn a_fold_whose_manifest_put_lands_without_an_answer_reports_published() {
     store.fail_next(1);
     let folded = fold::fold_wal(&store, &namespace_id).await.expect("fold");
     assert_eq!(store.remaining(), 0);
-    assert_eq!(folded.outcome, loonfs_api::FlushWalOutcome::Published);
+    assert_eq!(folded.outcome, loonfs_api::FoldWalOutcome::Published);
     assert_eq!(
         folded.manifest_no,
         predecessor.successor().expect("next number")

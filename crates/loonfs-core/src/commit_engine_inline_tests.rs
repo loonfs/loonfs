@@ -12,7 +12,7 @@ use bytes::Bytes;
 use loonfs_api::v0::PathEntryKind;
 use loonfs_api::wire::wal::{decode_wal_object_envelope_zstd, WalDelta};
 use loonfs_api::{
-    AbsolutePath, AttributeInclusion, ContentRef, DestinationBehavior, FlushWalOutcome, WriterId,
+    AbsolutePath, AttributeInclusion, ContentRef, DestinationBehavior, FoldWalOutcome, WriterId,
 };
 use loonfs_objectstore::keys::wal_prefix;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -332,7 +332,7 @@ async fn inline_tail_replay_matches_publication_and_materializes_before_metadata
             .await
             .expect("non-inline fold")
             .outcome,
-        FlushWalOutcome::Published
+        FoldWalOutcome::Published
     );
     engine.invalidate_projection();
     let mut last = None;
@@ -380,7 +380,7 @@ async fn inline_tail_replay_matches_publication_and_materializes_before_metadata
         .await
         .expect("fold inline content");
         if index == 0 {
-            assert_eq!(folded.response.outcome, FlushWalOutcome::Published);
+            assert_eq!(folded.response.outcome, FoldWalOutcome::Published);
             fold_tests::assert_content_before_metadata(&store, values.len());
             for value in &values {
                 let key = crate::storage::content::content_object_key_for_ref(value.content_ref())
@@ -395,14 +395,14 @@ async fn inline_tail_replay_matches_publication_and_materializes_before_metadata
                 );
             }
         } else if index == 1 {
-            assert_eq!(folded.response.outcome, FlushWalOutcome::ManifestAdvanced);
+            assert_eq!(folded.response.outcome, FoldWalOutcome::ManifestAdvanced);
             fold_tests::assert_content_before_metadata(&store, values.len());
             assert!(!store.snapshot().iter().any(|operation| {
                 matches!(operation, RecordedOperation::Put { key, .. }
                     if loonfs_objectstore::layout::manifest_no_of(key).is_some())
             }));
         } else {
-            assert_eq!(folded.response.outcome, FlushWalOutcome::AlreadyCurrent);
+            assert_eq!(folded.response.outcome, FoldWalOutcome::AlreadyCurrent);
             assert_no_writes(&store);
         }
         let manifest =

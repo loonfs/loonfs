@@ -21,10 +21,10 @@ struct Harness {
 }
 
 impl Harness {
-    async fn new(threshold: Option<usize>, segment_budget: usize) -> Self {
+    async fn new(threshold: Option<usize>, wal_object_budget: usize) -> Self {
         Self::with_policy(loonfs::InlineContentOptions {
             inline_content_threshold_bytes: threshold,
-            inline_content_segment_budget_bytes: segment_budget,
+            inline_content_wal_object_budget_bytes: wal_object_budget,
             ..Default::default()
         })
         .await
@@ -319,7 +319,7 @@ async fn inline_sources_and_capabilities_follow_the_policy_before_any_write() {
 }
 
 #[tokio::test]
-async fn inode_inline_operations_and_segment_fallback_keep_retry_identity() {
+async fn inode_inline_operations_and_overflow_staging_keep_retry_identity() {
     let harness = Harness::new(Some(4), 4).await;
     let request = json!({"commit_id": "two-files", "operations": [
         {"kind": "create_file_by_inode", "parent_inode_id": "ino_1", "display_name": "first", "inline_content": "c2FtZQ=="},

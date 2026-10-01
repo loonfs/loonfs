@@ -5,8 +5,8 @@
 
 use crate::common::*;
 use loonfs::{
-    ChangeSeq, CreateDirectoryOptions, CreateNamespaceOptions, ErrorCode, InodeId, InodeKind,
-    NamespaceId, PutFileOptions, ReorganizeStepOutcome, RuntimeCacheConfig, SharedObjectStore,
+    ChangeSeq, CompactionStepOutcome, CreateDirectoryOptions, CreateNamespaceOptions, ErrorCode,
+    InodeId, InodeKind, NamespaceId, PutFileOptions, RuntimeCacheConfig, SharedObjectStore,
     StoredMetadataBlockKind,
 };
 use loonfs_core::limits::FOLD_AT_WAL_OBJECTS;
@@ -236,14 +236,14 @@ async fn runtime_publish_reuses_wal_tail_projection_while_a_fold_runs() {
         folded_manifest_put,
     );
     let recording = Arc::new(RecordingStore::new(blocking, KeyPredicate::any()));
-    let tail_segments = Arc::new(AtomicU64::new(0));
+    let tail_objects = Arc::new(AtomicU64::new(0));
     let writer = loonfs::LoonFs::builder_with_store(recording.clone())
         .writer_id("fold-projection")
         .maintenance_hint_observer({
-            let tail_segments = Arc::clone(&tail_segments);
+            let tail_objects = Arc::clone(&tail_objects);
             move |hint| {
                 if let loonfs::MaintenanceHint::Published(publication) = hint {
-                    tail_segments.store(publication.wal_tail_segments, Ordering::SeqCst);
+                    tail_objects.store(publication.wal_tail_objects, Ordering::SeqCst);
                 }
             }
         })
@@ -270,7 +270,7 @@ async fn runtime_publish_reuses_wal_tail_projection_while_a_fold_runs() {
             )
             .await
             .expect("publish directory");
-        if tail_segments.load(Ordering::SeqCst) == FOLD_AT_WAL_OBJECTS {
+        if tail_objects.load(Ordering::SeqCst) == FOLD_AT_WAL_OBJECTS {
             recording.inner().wait_until_blocked().await;
         }
         if number > 0 {
@@ -289,7 +289,7 @@ async fn runtime_publish_reuses_wal_tail_projection_while_a_fold_runs() {
                 loonfs_test_support::stores::RecordedOperation::Put { .. }
             ));
         }
-        assert_eq!(tail_segments.load(Ordering::SeqCst), number + 2);
+        assert_eq!(tail_objects.load(Ordering::SeqCst), number + 2);
     }
     recording.inner().release();
     namespace.wait_for_fold().await.expect("fold");
@@ -310,7 +310,7 @@ async fn runtime_publish_reuses_wal_tail_projection_while_a_fold_runs() {
         )
         .await
         .expect("publish after fold");
-    assert!(tail_segments.load(Ordering::SeqCst) < FOLD_AT_WAL_OBJECTS);
+    assert!(tail_objects.load(Ordering::SeqCst) < FOLD_AT_WAL_OBJECTS);
     let operations = recording.take();
     let mut manifest_gets = 0;
     let mut wal_puts = 0;
@@ -1128,7 +1128,7 @@ fn metadata_upkeep_offers_nothing_to_the_local_block_cache() {
         );
         fs.stat_path_blocking(&namespace_id, &format!("/docs/file-{index:02}.txt"))
             .expect("read folded file outside the maintenance window");
-        if upkeep(&step).reorganize == (ReorganizeStepOutcome::UnitPublished {}) {
+        if upkeep(&step).compaction == (CompactionStepOutcome::UnitPublished {}) {
             compacted = true;
             break;
         }

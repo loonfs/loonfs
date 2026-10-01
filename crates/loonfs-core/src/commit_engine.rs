@@ -467,7 +467,7 @@ pub struct NamespaceCommitEnginePublishResult {
     pub results: Vec<Result<Commit>>,
     /// WAL tail length observed by this publish, for opportunistic
     /// maintenance scheduling. Zero when no projection was loaded.
-    pub wal_tail_segments: u64,
+    pub wal_tail_objects: u64,
     pub wal_tail_inline_bytes: usize,
     /// Whether this attempt loaded the tail. The inline count then includes
     /// the inline bytes of a put whose outcome is unknown.
@@ -488,7 +488,7 @@ pub struct WalFoldInput {
     pub head: NamespaceReadState,
     pub basis: MetadataBasis,
     pub tail_state: Arc<ProjectedWalTail>,
-    pub wal_tail_segments: u64,
+    pub wal_tail_objects: u64,
     pub wal_tail_inline_bytes: usize,
 }
 
@@ -643,7 +643,7 @@ impl NamespaceCommitEngine {
                 head: projection.head.clone(),
                 basis: projection.basis().clone(),
                 tail_state: Arc::clone(&projection.tail_state),
-                wal_tail_segments: projection.wal_tail_segments,
+                wal_tail_objects: projection.wal_tail_objects,
                 wal_tail_inline_bytes: projection.tail_state.inline_bytes(),
             })
     }
@@ -659,7 +659,7 @@ impl NamespaceCommitEngine {
         let reanchored = match (folded, &mut self.publish_tail_projection) {
             (Some(folded), Some(projection))
                 if fold_observed.is_some()
-                    && folded.response.outcome == loonfs_api::FlushWalOutcome::Published =>
+                    && folded.response.outcome == loonfs_api::FoldWalOutcome::Published =>
             {
                 projection.reanchor_after_fold(folded.basis.clone())
             }
@@ -749,7 +749,7 @@ impl NamespaceCommitEngine {
         if candidates.is_empty() {
             return NamespaceCommitEnginePublishResult {
                 results: Vec::new(),
-                wal_tail_segments: 0,
+                wal_tail_objects: 0,
                 wal_tail_inline_bytes: 0,
                 wal_tail_observed: false,
                 wal_tail_discovered: false,
@@ -763,7 +763,7 @@ impl NamespaceCommitEngine {
             Err(error) => {
                 return NamespaceCommitEnginePublishResult {
                     results: repeated_error(candidate_count, error),
-                    wal_tail_segments: 0,
+                    wal_tail_objects: 0,
                     wal_tail_inline_bytes: 0,
                     wal_tail_observed: false,
                     wal_tail_discovered: false,
@@ -819,7 +819,7 @@ impl NamespaceCommitEngine {
                 }
                 return NamespaceCommitEnginePublishResult {
                     results: repeated_error(candidate_count, error),
-                    wal_tail_segments: 0,
+                    wal_tail_objects: 0,
                     wal_tail_inline_bytes: 0,
                     wal_tail_observed: false,
                     wal_tail_discovered: false,
@@ -865,7 +865,7 @@ impl NamespaceCommitEngine {
             })
             .map(|(candidate, _)| candidate.inline_content_bytes())
             .sum();
-        let (wal_tail_segments, wal_tail_inline_bytes, resulting_read_state) =
+        let (wal_tail_objects, wal_tail_inline_bytes, resulting_read_state) =
             self.update_publish_tail_projection(projection, published.effect, tail_options);
         // A put that landed is itself an observation of the tip it created, made no
         // earlier than this attempt began; the next put's budget runs from it.
@@ -874,7 +874,7 @@ impl NamespaceCommitEngine {
         }
         NamespaceCommitEnginePublishResult {
             results: published.results,
-            wal_tail_segments,
+            wal_tail_objects,
             wal_tail_inline_bytes: wal_tail_inline_bytes + unknown_inline_bytes,
             wal_tail_observed: true,
             wal_tail_discovered,
@@ -895,7 +895,7 @@ impl NamespaceCommitEngine {
             PublishViewEffect::Invalidated => {
                 self.invalidate_projection();
                 return (
-                    projection.wal_tail_segments,
+                    projection.wal_tail_objects,
                     projection.tail_state.inline_bytes(),
                     None,
                 );
@@ -905,7 +905,7 @@ impl NamespaceCommitEngine {
                 inline_content,
                 head,
             } => {
-                projection.wal_tail_segments += 1;
+                projection.wal_tail_objects += 1;
                 let tail_state = Arc::make_mut(&mut projection.tail_state);
                 for value in &inline_content {
                     tail_state
@@ -917,18 +917,14 @@ impl NamespaceCommitEngine {
                         // and folding will report the accounting error.
                         tracing::error!(%error, "could not update the committed WAL projection");
                         self.invalidate_projection();
-                        return (
-                            projection.wal_tail_segments,
-                            tail_state.inline_bytes(),
-                            None,
-                        );
+                        return (projection.wal_tail_objects, tail_state.inline_bytes(), None);
                     }
                 }
                 if let Err(error) = projection.apply_fold_records(&inline_content, &records) {
                     tracing::error!(%error, "could not update the committed WAL projection");
                     self.invalidate_projection();
                     return (
-                        projection.wal_tail_segments,
+                        projection.wal_tail_objects,
                         projection.tail_state.inline_bytes(),
                         None,
                     );
@@ -947,7 +943,7 @@ impl NamespaceCommitEngine {
                     })
             }
         };
-        let count = projection.wal_tail_segments;
+        let count = projection.wal_tail_objects;
         let inline_bytes = projection.tail_state.inline_bytes();
         if projection.within_limits(tail_options) {
             self.publish_tail_projection = Some(projection);

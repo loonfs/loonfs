@@ -110,22 +110,22 @@ fn normalize_probe_message(message: &str) -> String {
     }
 }
 
-/// Formats the result of one WAL flush step.
-pub(super) fn wal_flush_summary(outcome: &WalFlushStepOutcome) -> String {
+/// Formats the result of one WAL fold step.
+pub(super) fn wal_fold_summary(outcome: &WalFoldStepOutcome) -> String {
     match outcome {
-        WalFlushStepOutcome::NotNeeded => "wal flush not needed".to_owned(),
-        WalFlushStepOutcome::Flushed { manifest_head_seq } => {
-            format!("wal flushed @ seq {}", manifest_head_seq.0)
+        WalFoldStepOutcome::NotNeeded => "wal fold not needed".to_owned(),
+        WalFoldStepOutcome::Folded { manifest_head_seq } => {
+            format!("wal folded @ seq {}", manifest_head_seq.0)
         }
-        WalFlushStepOutcome::AlreadyPublished {
+        WalFoldStepOutcome::AlreadyPublished {
             attempted_seq,
             current_manifest_no,
         } => format!(
-            "wal flush @ seq {} already published (current manifest {current_manifest_no})",
+            "wal fold @ seq {} already published (current manifest {current_manifest_no})",
             attempted_seq.0
         ),
-        WalFlushStepOutcome::RetriesExhausted { observed_head_seq } => format!(
-            "wal flush ran out of attempts (head was at seq {})",
+        WalFoldStepOutcome::RetriesExhausted { observed_head_seq } => format!(
+            "wal fold ran out of attempts (head was at seq {})",
             observed_head_seq.0
         ),
     }
@@ -224,7 +224,7 @@ fn gc_deleted_counts(report: &GcResponse) -> [(&'static str, u64); 9] {
     let deleted = &report.deleted;
     let checkpoints = &report.deleted_checkpoints_by_owner;
     [
-        ("wal segments", deleted.wal_segments),
+        ("wal objects", deleted.wal_objects),
         ("metadata segments", deleted.metadata_segments),
         ("manifests", deleted.manifests),
         ("fork checkpoints", checkpoints.fork),

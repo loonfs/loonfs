@@ -35,7 +35,10 @@ pub const MAX_WAL_OBJECT_INLINE_CONTENT_BYTES: usize = 4 * 1024 * 1024;
 
 /// Upper bound for the document and payload fields outside commit records.
 pub const WAL_OBJECT_OVERHEAD_BYTES: usize = cbor_map_bytes(&[
-    ("kind", cbor_string_bytes("wal_segment".len())),
+    (
+        "kind",
+        cbor_string_bytes(WalEnvelopeKind::WalObject.as_str().len()),
+    ),
     ("format_version", 5),
     ("payload_checksum", cbor_string_bytes(64)),
     ("payload", 9),
@@ -70,14 +73,14 @@ const fn cbor_map_bytes(fields: &[(&str, usize)]) -> usize {
 #[serde(rename_all = "snake_case")]
 pub enum WalEnvelopeKind {
     /// Marks an immutable numbered object in one namespace's WAL.
-    WalSegment,
+    WalObject,
 }
 
 impl WalEnvelopeKind {
     /// Returns the frozen envelope discriminator written to durable storage.
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::WalSegment => "wal_segment",
+            Self::WalObject => "wal_object",
         }
     }
 }
@@ -343,7 +346,7 @@ pub fn encode_wal_object_envelope_zstd(
     let payload_bytes = encode_wal_payload_cbor(&payload)?;
     let payload_checksum = sha256_digest(&payload_bytes);
     let document = WalObjectDocument {
-        kind: WalEnvelopeKind::WalSegment.as_str().to_owned(),
+        kind: WalEnvelopeKind::WalObject.as_str().to_owned(),
         format_version: WAL_FORMAT_VERSION,
         payload_checksum: payload_checksum.clone(),
         payload: payload_bytes,
@@ -390,7 +393,7 @@ fn decode_wal_object_envelope_zstd_with_limit(
     }
     let probe: EnvelopeProbe = from_reader(decompressed.as_slice())
         .map_err(|err| EnvelopeCodecError::EnvelopeDecode(err.to_string()))?;
-    let expected_kind = WalEnvelopeKind::WalSegment;
+    let expected_kind = WalEnvelopeKind::WalObject;
     envelope::verify_kind(expected_kind.as_str(), &probe.kind)?;
     envelope::verify_version(&probe.kind, probe.format_version, WAL_FORMAT_VERSION)?;
 
@@ -535,7 +538,7 @@ mod tests {
         let mut payload_bytes = Vec::new();
         into_writer(payload, &mut payload_bytes).expect("encode payload directly");
         let document = WalObjectDocument {
-            kind: WalEnvelopeKind::WalSegment.as_str().to_owned(),
+            kind: WalEnvelopeKind::WalObject.as_str().to_owned(),
             format_version: WAL_FORMAT_VERSION,
             payload_checksum: sha256_digest(&payload_bytes),
             payload: payload_bytes,

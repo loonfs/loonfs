@@ -9,7 +9,7 @@ use loonfs_core::publish::InlineContent;
 pub(super) struct InlineCandidatePlan {
     pub(super) candidate: PreparedCandidate,
     ordered_inline_content: Vec<InlineContent>,
-    segment_inline_values: usize,
+    wal_object_inline_values: usize,
 }
 
 impl NamespacePublisher {
@@ -19,8 +19,8 @@ impl NamespacePublisher {
     ) -> Result<InlineCandidatePlan> {
         let namespace_id = &self.namespace_id;
         let values = candidate.ordered_inline_content(namespace_id)?;
-        let mut remaining = self.inline_content.inline_content_segment_budget_bytes;
-        let segment_inline_values = values
+        let mut remaining = self.inline_content.inline_content_wal_object_budget_bytes;
+        let wal_object_inline_values = values
             .iter()
             .take_while(|value| {
                 let size = value.bytes().len();
@@ -34,13 +34,13 @@ impl NamespacePublisher {
         let candidate = PreparedCandidate::with_inline_placement(
             candidate,
             namespace_id,
-            &values[..segment_inline_values],
-            &values[segment_inline_values..],
+            &values[..wal_object_inline_values],
+            &values[wal_object_inline_values..],
         )?;
         Ok(InlineCandidatePlan {
             candidate,
             ordered_inline_content: values,
-            segment_inline_values,
+            wal_object_inline_values,
         })
     }
 
@@ -54,14 +54,14 @@ impl NamespacePublisher {
         }
         let kept = {
             let slot = self.engine.lock().await;
-            // Until a publish observes the tail, admit at most one segment budget.
+            // Until a publish observes the tail, admit at most one WAL object budget.
             let unfolded_bytes = slot.wal_tail_inline_bytes().unwrap_or(
                 self.inline_content
                     .inline_content_tail_limit_bytes
-                    .saturating_sub(self.inline_content.inline_content_segment_budget_bytes),
+                    .saturating_sub(self.inline_content.inline_content_wal_object_budget_bytes),
             );
             permit.reserve_inline(
-                plan.ordered_inline_content[..plan.segment_inline_values]
+                plan.ordered_inline_content[..plan.wal_object_inline_values]
                     .iter()
                     .map(|value| value.bytes().len()),
                 unfolded_bytes,

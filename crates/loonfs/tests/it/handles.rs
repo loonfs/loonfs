@@ -36,18 +36,18 @@ fn store_config(root: &Path) -> StoreConfig {
     }
 }
 
-fn wal_tail_segment_threshold() -> u64 {
+fn wal_tail_object_threshold() -> u64 {
     MetadataMaintenanceOptions::default()
-        .max_wal_tail_segments
+        .max_wal_tail_objects
         .get()
 }
 
-fn wal_tail_segment_count_past_threshold() -> u64 {
-    wal_tail_segment_threshold() + 1
+fn wal_tail_object_count_past_threshold() -> u64 {
+    wal_tail_object_threshold() + 1
 }
 
 fn writes_past_wal_tail_threshold() -> u32 {
-    u32::try_from(wal_tail_segment_count_past_threshold())
+    u32::try_from(wal_tail_object_count_past_threshold())
         .expect("WAL tail threshold plus one should fit in u32")
 }
 
@@ -182,7 +182,7 @@ fn writer_reader_and_maintenance_share_a_namespace_through_store_config() {
             .await
             .expect("namespace status");
         assert_eq!(status.namespace_id, namespace_id);
-        assert_eq!(status.wal_tail_segments, 2);
+        assert_eq!(status.wal_tail_objects, 2);
 
         writer.shutdown().await.expect("shut down writer");
     });
@@ -288,7 +288,7 @@ fn maintenance_invalidates_the_runtimes_shared_read_caches() {
             "the scheduled step should have published a manifest: {status:?}"
         );
         assert!(
-            status.wal_tail_segments < wal_tail_segment_threshold(),
+            status.wal_tail_objects < wal_tail_object_threshold(),
             "the scheduled step should have bounded the tail: {status:?}"
         );
 
@@ -420,7 +420,7 @@ fn manual_only_writer_folds_without_scheduling_maintenance() {
         let namespace = writer
             .open_namespace(&namespace_id)
             .expect("open namespace");
-        for round in 0..=(wal_tail_segment_threshold() * 2) {
+        for round in 0..=(wal_tail_object_threshold() * 2) {
             namespace
                 .put_file_bytes(
                     &format!("/docs/file-{round}.txt"),
@@ -453,7 +453,7 @@ fn manual_only_writer_folds_without_scheduling_maintenance() {
             "the writer should have folded twice without a maintenance runner: {status:?}"
         );
         assert!(
-            status.wal_tail_segments < wal_tail_segment_threshold(),
+            status.wal_tail_objects < wal_tail_object_threshold(),
             "the writer must keep its own tail below the fold threshold: {status:?}"
         );
     });
@@ -499,7 +499,7 @@ fn a_writer_with_a_runner_maintains_what_it_touches() {
                 Some(ManifestNo(2)),
                 "a publish below the threshold must not step: {status:?}"
             );
-            assert_eq!(status.wal_tail_segments, 2, "{status:?}");
+            assert_eq!(status.wal_tail_objects, 2, "{status:?}");
 
             for round in 0..writes_past_wal_tail_threshold() {
                 namespace
@@ -526,7 +526,7 @@ fn a_writer_with_a_runner_maintains_what_it_touches() {
                 "auto step should have published a manifest: {status:?}"
             );
             assert!(
-                status.wal_tail_segments < wal_tail_segment_threshold(),
+                status.wal_tail_objects < wal_tail_object_threshold(),
                 "auto step should have bounded the tail: {status:?}"
             );
             writer.shutdown().await.expect("shut down writer");
@@ -585,7 +585,7 @@ fn a_runner_retries_a_failed_writer_fold_without_another_write() {
         append_wal_objects(
             failing.as_ref(),
             &namespace_id,
-            wal_tail_segment_threshold() - 1,
+            wal_tail_object_threshold() - 1,
             &MutationContext {
                 writer_id: loonfs_api::WriterId::parse("fold-retry-seed").expect("writer id"),
                 now_ms: 1_000,
@@ -618,7 +618,7 @@ fn a_runner_retries_a_failed_writer_fold_without_another_write() {
             "the maintenance retry should have published a manifest: {status:?}"
         );
         assert!(
-            status.wal_tail_segments < wal_tail_segment_threshold(),
+            status.wal_tail_objects < wal_tail_object_threshold(),
             "the maintenance retry should have bounded the tail: {status:?}"
         );
         assert_eq!(
@@ -724,7 +724,7 @@ fn a_runtime_publish_folds_a_preexisting_write_stopped_tail_and_lands() {
             .get_namespace_diagnostics(&namespace_id)
             .await
             .expect("status after the folding publish");
-        assert_eq!(status.wal_tail_segments, 1, "{status:?}");
+        assert_eq!(status.wal_tail_objects, 1, "{status:?}");
         assert!(status.current_manifest_no.is_some(), "{status:?}");
         writer
             .shutdown()
@@ -763,7 +763,7 @@ fn a_failed_fold_preserves_the_write_stop_until_the_store_recovers() {
         let namespace = writer
             .open_namespace(&namespace_id)
             .expect("open namespace");
-        let seed_wal_objects = wal_tail_segment_threshold() - 1;
+        let seed_wal_objects = wal_tail_object_threshold() - 1;
         append_wal_objects(
             failing.as_ref(),
             &namespace_id,
@@ -823,7 +823,7 @@ fn a_failed_fold_preserves_the_write_stop_until_the_store_recovers() {
             .await
             .expect("status after fold recovery");
         assert!(
-            matches!(status.wal_tail_segments, 1 | 2),
+            matches!(status.wal_tail_objects, 1 | 2),
             "the fold in flight at recovery may have begun one commit early: {status:?}"
         );
     });
@@ -856,7 +856,7 @@ fn a_threshold_crossing_publish_returns_before_its_fold_completes() {
         append_wal_objects(
             blocking.inner(),
             &namespace_id,
-            wal_tail_segment_threshold() - 1,
+            wal_tail_object_threshold() - 1,
             &MutationContext {
                 writer_id: loonfs_api::WriterId::parse("parked-fold-seed").expect("writer id"),
                 now_ms: 1_000,
@@ -947,7 +947,7 @@ fn a_shut_down_writer_refuses_mutations_and_keeps_reading() {
             .get_namespace_diagnostics(&namespace_id)
             .await
             .expect("status before the shutdown")
-            .wal_tail_segments;
+            .wal_tail_objects;
 
         assert!(!writer.is_shutting_down());
         writer.shutdown().await.expect("shut down the writer");
@@ -986,7 +986,7 @@ fn a_shut_down_writer_refuses_mutations_and_keeps_reading() {
             "a shut-down writer must not schedule checkpoints: {status:?}"
         );
         assert_eq!(
-            status.wal_tail_segments, tail_at_shutdown,
+            status.wal_tail_objects, tail_at_shutdown,
             "a refused mutation must leave the tail exactly as it was: {status:?}"
         );
     });

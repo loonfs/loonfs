@@ -91,7 +91,7 @@ pub struct NamespacePublication {
     /// Highest sequence committed by this attempt.
     pub committed_through_seq: Option<ChangeSeq>,
     /// WAL objects visible after the attempt.
-    pub wal_tail_segments: u64,
+    pub wal_tail_objects: u64,
     /// Inline bytes visible in the unfolded tail after the attempt.
     pub wal_tail_inline_bytes: usize,
 }

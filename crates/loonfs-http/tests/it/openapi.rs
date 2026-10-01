@@ -1088,7 +1088,7 @@ fn openapi_publishes_namespace_diagnostics_in_the_maintenance_api_group() {
             "live_snapshots",
             "namespace_id",
             "retention_floor_seq",
-            "wal_tail_segments",
+            "wal_tail_objects",
         ])
     );
 }
@@ -1380,22 +1380,22 @@ fn openapi_names_tagged_one_of_alternatives() {
             ][..],
         ),
         (
-            "ReorganizeStepOutcome",
+            "CompactionStepOutcome",
             &[
-                "ReorganizeStepOutcomeNotNeeded",
-                "ReorganizeStepOutcomeUnitPublished",
-                "ReorganizeStepOutcomeCompactionRequired",
-                "ReorganizeStepOutcomeManifestAdvanced",
-                "ReorganizeStepOutcomeFenced",
+                "CompactionStepOutcomeNotNeeded",
+                "CompactionStepOutcomeUnitPublished",
+                "CompactionStepOutcomeStreamingRequired",
+                "CompactionStepOutcomeManifestAdvanced",
+                "CompactionStepOutcomeFenced",
             ][..],
         ),
         (
-            "WalFlushStepOutcome",
+            "WalFoldStepOutcome",
             &[
-                "WalFlushStepOutcomeNotNeeded",
-                "WalFlushStepOutcomeFlushed",
-                "WalFlushStepOutcomeAlreadyPublished",
-                "WalFlushStepOutcomeRetriesExhausted",
+                "WalFoldStepOutcomeNotNeeded",
+                "WalFoldStepOutcomeFolded",
+                "WalFoldStepOutcomeAlreadyPublished",
+                "WalFoldStepOutcomeRetriesExhausted",
             ][..],
         ),
     ] {

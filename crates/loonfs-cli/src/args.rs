@@ -271,7 +271,7 @@ impl Command {
                     command: MaintenanceCommand::Checkpoint { .. }
                         | MaintenanceCommand::Index { .. }
                         | MaintenanceCommand::Metadata(_)
-                        | MaintenanceCommand::Flush(_)
+                        | MaintenanceCommand::Fold(_)
                         | MaintenanceCommand::Retention { .. }
                         | MaintenanceCommand::Compact(_)
                         | MaintenanceCommand::Gc(_)
@@ -755,7 +755,7 @@ pub(crate) enum NamespaceCommand {
     ///
     /// The fork shares the source's existing content and metadata objects
     /// without copying the filesystem. Forking the current head may first
-    /// flush the source's outstanding WAL tail.
+    /// fold the source's outstanding WAL tail.
     Fork(NamespaceForkArgs),
 }
 
@@ -1285,8 +1285,8 @@ pub(crate) enum MaintenanceCommand {
     Loop(MaintenanceLoopArgs),
     /// Run the metadata job once.
     Metadata(MaintenanceMetadataArgs),
-    /// Flush the WAL tail into a durable segment.
-    Flush(MaintenanceNamespaceArgs),
+    /// Fold the WAL tail into metadata segments, whatever its length.
+    Fold(MaintenanceNamespaceArgs),
     /// Run one metadata compaction unit.
     ///
     /// A unit is one bounded merge or one streaming compaction of a family
@@ -1404,8 +1404,8 @@ pub(crate) struct MaintenanceLoopArgs {
 /// Jobs accepted by `maintenance loop --jobs`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub(crate) enum MaintenanceJobArg {
-    /// Flush the WAL tail past its threshold and fold one reorganization
-    /// unit per step.
+    /// Fold the WAL tail past its threshold and run one bounded compaction
+    /// per step.
     Metadata,
     /// Run one metadata compaction unit per step.
     MetadataCompaction,
@@ -1476,10 +1476,10 @@ pub(crate) struct MaintenanceCheckpointDeleteArgs {
 pub(crate) struct MaintenanceMetadataArgs {
     #[command(flatten)]
     pub target: TargetSelectorArgs,
-    /// Flush the visible WAL tail into metadata segments when it reaches this many
-    /// segments (server default when omitted).
+    /// Fold the visible WAL tail into metadata segments when it reaches this
+    /// many WAL objects (server default when omitted).
     #[arg(long)]
-    pub max_wal_tail_segments: Option<u64>,
+    pub max_wal_tail_objects: Option<u64>,
 }
 
 #[derive(Debug, Args)]
@@ -1601,7 +1601,7 @@ command_kinds! {
     MaintenanceCheckpointCreate => "maintenance_checkpoint_create",
     MaintenanceCheckpointList => "maintenance_checkpoint_list",
     MaintenanceCheckpointDelete => "maintenance_checkpoint_delete",
-    MaintenanceFlush => "maintenance_flush",
+    MaintenanceFold => "maintenance_fold",
     MaintenanceRetentionAdvance => "maintenance_retention_advance",
     MaintenanceLoop => "maintenance_loop",
     MaintenanceMetadata => "maintenance_metadata",
@@ -1677,7 +1677,7 @@ impl Cli {
                 }
                 MaintenanceCommand::Loop(_) => CommandKind::MaintenanceLoop,
                 MaintenanceCommand::Metadata(_) => CommandKind::MaintenanceMetadata,
-                MaintenanceCommand::Flush(_) => CommandKind::MaintenanceFlush,
+                MaintenanceCommand::Fold(_) => CommandKind::MaintenanceFold,
                 MaintenanceCommand::Compact(_) => CommandKind::MaintenanceCompact,
                 MaintenanceCommand::Checkpoint { command } => match command {
                     MaintenanceCheckpointCommand::Create(_) => {
@@ -2045,7 +2045,7 @@ mod tests {
                 "recover-administrator",
                 "loop",
                 "metadata",
-                "flush",
+                "fold",
                 "compact",
                 "checkpoint",
                 "index",

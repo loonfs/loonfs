@@ -47,7 +47,7 @@ async fn inline_retry_after_lost_ack_and_wal_collection_replays_the_original_com
             .await
             .expect("fold landed commit")
             .outcome,
-        FlushWalOutcome::Published
+        FoldWalOutcome::Published
     );
     let config = GcConfig::default();
     let aged = MetadataMapStore::aged(
@@ -65,7 +65,7 @@ async fn inline_retry_after_lost_ack_and_wal_collection_replays_the_original_com
     )
     .await
     .expect("collect folded WAL");
-    assert_eq!(report.deleted.wal_segments, 2);
+    assert_eq!(report.deleted.wal_objects, 2);
     assert!(store
         .list_prefix(&wal_prefix(&namespace_id))
         .await

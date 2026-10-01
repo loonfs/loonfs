@@ -82,7 +82,6 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "committed_by",
     "committed_fingerprint",
     "committed_seq",
-    "compaction_required",
     "complete_upload_prepared",
     "completed_at_ms",
     "content_changed",
@@ -134,7 +133,7 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "maintain_only",
     "manifest_advanced",
     "manifest_no",
-    "max_wal_tail_segments",
+    "max_wal_tail_objects",
     "metadata_compaction",
     "recover_administrator",
     "metadata_segments",
@@ -188,6 +187,7 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "source_head_seq",
     "source_namespace_id",
     "source_parent_inode_id",
+    "streaming_required",
     "target_namespace_id",
     "captured_seq",
     "through_seq",
@@ -203,9 +203,9 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "upload_session_undecided",
     "upload_session_window",
     "upload_sessions",
-    "wal_flush",
-    "wal_segments",
-    "wal_tail_segments",
+    "wal_fold",
+    "wal_objects",
+    "wal_tail_objects",
     "within_grace_window",
 ];
 
@@ -680,7 +680,7 @@ async fn maintenance_namespace_diagnostics_route_answers_storage_fields() {
         diagnostics.current_manifest_no,
         Some(loonfs_api::ManifestNo(2))
     );
-    assert_eq!(diagnostics.wal_tail_segments, 2);
+    assert_eq!(diagnostics.wal_tail_objects, 2);
     assert_eq!(diagnostics.live_snapshots, 0);
     assert_eq!(diagnostics.live_checkpoints, 0);
 

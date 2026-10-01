@@ -27,8 +27,7 @@ use futures::{stream, TryStreamExt};
 use loonfs_api::wire::control::ManifestRef;
 use loonfs_api::wire::manifest::{MetadataRunRef, NamespaceManifestPayload, RunTier};
 use loonfs_api::{
-    ChangeSeq, FlushWalOutcome, FlushWalResponse, ManifestNo, NamespaceId, RunNo,
-    MAX_PUBLIC_INTEGER,
+    ChangeSeq, FoldWalOutcome, FoldWalResponse, ManifestNo, NamespaceId, RunNo, MAX_PUBLIC_INTEGER,
 };
 use loonfs_objectstore::ObjectStore;
 use std::sync::Arc;
@@ -46,7 +45,7 @@ pub(crate) struct FoldedBasis {
     pub(super) current_manifest_no: ManifestNo,
     /// Sequence covered by `current_manifest_no`.
     pub(super) current_manifest_head_seq: ChangeSeq,
-    pub(super) outcome: FlushWalOutcome,
+    pub(super) outcome: FoldWalOutcome,
 }
 
 pub(crate) enum TryFoldWal {
@@ -63,7 +62,7 @@ pub(crate) enum TryFoldWal {
 pub(crate) async fn fold_wal<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-) -> Result<FlushWalResponse> {
+) -> Result<FoldWalResponse> {
     let deadline = Deadline::start(Arc::new(crate::time::StdMonotonicTimer::default()));
     fold_wal_with_deadline(store, namespace_id, &deadline, MetadataLsmPolicy::default()).await
 }
@@ -73,9 +72,9 @@ pub(crate) async fn fold_wal_with_deadline<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     deadline: &Deadline,
     policy: MetadataLsmPolicy,
-) -> Result<FlushWalResponse> {
+) -> Result<FoldWalResponse> {
     let basis = fold_wal_basis_with_deadline(store, namespace_id, deadline, policy).await?;
-    Ok(flush_wal_response(namespace_id, basis))
+    Ok(fold_wal_response(namespace_id, basis))
 }
 
 async fn fold_wal_basis_with_deadline<S: ObjectStore + ?Sized>(
@@ -134,7 +133,7 @@ async fn try_fold_wal_projection<S: ObjectStore + ?Sized>(
             target_head_seq: head_seq,
             current_manifest_no: basis_manifest.manifest_no,
             current_manifest_head_seq: head_seq,
-            outcome: FlushWalOutcome::AlreadyCurrent,
+            outcome: FoldWalOutcome::AlreadyCurrent,
         })));
     }
 
@@ -153,9 +152,9 @@ async fn try_fold_wal_projection<S: ObjectStore + ?Sized>(
     // Written segments may outlive the GC grace if publication exceeds its budget.
     deadline.ensure_metadata_publication_budget(namespace_id)?;
     let (outcome, current) = match publish_manifest(store, manifest, deadline).await? {
-        ManifestPublicationOutcome::Published(current) => (FlushWalOutcome::Published, current),
+        ManifestPublicationOutcome::Published(current) => (FoldWalOutcome::Published, current),
         ManifestPublicationOutcome::CoveredByCurrent(current) => {
-            (FlushWalOutcome::ManifestAdvanced, current)
+            (FoldWalOutcome::ManifestAdvanced, current)
         }
         // A same-sequence compaction can replace the predecessor without
         // covering the newer WAL head. That manifest wins, but it has not
@@ -195,7 +194,7 @@ async fn materialize_inline_content<S: ObjectStore + ?Sized>(
 }
 
 pub struct FoldedWalTail {
-    pub response: FlushWalResponse,
+    pub response: FoldWalResponse,
     /// The manifest that covers the tail after the call: the one it published,
     /// or the current one that already covered it.
     pub basis: MetadataBasis,
@@ -231,12 +230,12 @@ pub async fn fold_wal_tail<S: ObjectStore + ?Sized>(
     };
     Ok(FoldedWalTail {
         basis: MetadataBasis(folded.manifest.clone()),
-        response: flush_wal_response(namespace_id, folded),
+        response: fold_wal_response(namespace_id, folded),
     })
 }
 
-fn flush_wal_response(namespace_id: &NamespaceId, basis: FoldedBasis) -> FlushWalResponse {
-    FlushWalResponse {
+fn fold_wal_response(namespace_id: &NamespaceId, basis: FoldedBasis) -> FoldWalResponse {
+    FoldWalResponse {
         namespace_id: namespace_id.clone(),
         target_head_seq: basis.target_head_seq,
         manifest_no: basis.current_manifest_no,

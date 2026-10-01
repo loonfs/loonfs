@@ -28,18 +28,18 @@ use xxhash_rust::xxh64::xxh64;
 
 /// Target uncompressed size of one data block.
 pub const DEFAULT_TARGET_BLOCK_BYTES: usize = 64 * 1024;
-/// Number of level-zero runs that triggers reorganization.
+/// Number of level-zero runs that triggers compaction.
 pub const DEFAULT_MAX_DELTA_RUNS: usize = 8;
 /// Target number of rows in one immutable segment.
 pub const DEFAULT_MAX_ROWS_PER_SEGMENT: usize = 65_536;
 /// Target decoded data bytes in one metadata segment. A row is never split.
 pub const DEFAULT_TARGET_SEGMENT_BYTES: usize = 8 * 1024 * 1024;
-/// Maximum number of runs read by one reorganization step.
-pub const DEFAULT_MAX_REORGANIZATION_INPUT_RUNS: usize = 8;
-/// Maximum number of decoded rows read by one reorganization step.
-pub const DEFAULT_MAX_REORGANIZATION_INPUT_ROWS: usize = 131_072;
-/// Maximum decoded input size for one build or reorganization step.
-pub const DEFAULT_MAX_REORGANIZATION_INPUT_BYTES: usize = 64 * 1024 * 1024;
+/// Maximum number of runs read by one compaction step.
+pub const DEFAULT_MAX_COMPACTION_INPUT_RUNS: usize = 8;
+/// Maximum number of decoded rows read by one compaction step.
+pub const DEFAULT_MAX_COMPACTION_INPUT_ROWS: usize = 131_072;
+/// Maximum decoded input size for one build or compaction step.
+pub const DEFAULT_MAX_COMPACTION_INPUT_BYTES: usize = 64 * 1024 * 1024;
 /// Maximum stored filter size embedded in a segment descriptor.
 pub const DEFAULT_INLINE_FILTER_MAX_BYTES: u32 = 1024;
 /// Entries between restart points inside a data block.

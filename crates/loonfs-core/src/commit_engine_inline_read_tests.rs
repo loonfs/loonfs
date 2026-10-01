@@ -634,7 +634,7 @@ async fn folded_inline_values_remain_readable_after_all_folded_wal_is_deleted() 
     let folded = fold_wal(&store, &publisher.namespace_id)
         .await
         .expect("fold");
-    assert_eq!(folded.outcome, FlushWalOutcome::Published);
+    assert_eq!(folded.outcome, FoldWalOutcome::Published);
     for delete_wal in [false, true] {
         if delete_wal {
             for object in store

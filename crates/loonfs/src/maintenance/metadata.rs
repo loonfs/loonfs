@@ -5,8 +5,8 @@ use super::{
     MaintenanceProbe, MaintenanceRunReport, NamespacePublication,
 };
 use crate::{
-    ErrorCode, Maintenance, MetadataMaintenanceOptions, MetadataMaintenanceResponse, NamespaceId,
-    ReorganizeStepOutcome, Result, RuntimeError, WalFlushStepOutcome,
+    CompactionStepOutcome, ErrorCode, Maintenance, MetadataMaintenanceOptions,
+    MetadataMaintenanceResponse, NamespaceId, Result, RuntimeError, WalFoldStepOutcome,
 };
 use async_trait::async_trait;
 
@@ -53,7 +53,7 @@ impl MaintenanceJob for MetadataMaintenanceJob {
                 // A publication's wake can arrive before the tail is idle: the
                 // clock moved back, or a later publication's hint was dropped.
                 report.not_before_ms = idle_fold_at_ms;
-                if metadata.reorganize == (ReorganizeStepOutcome::CompactionRequired {}) {
+                if metadata.compaction == (CompactionStepOutcome::StreamingRequired {}) {
                     report.conclusion = MaintenanceConclusion::Blocked;
                     report.follow_up =
                         Some((MaintenanceJobId::METADATA_COMPACTION, namespace_id.clone()));
@@ -81,7 +81,7 @@ impl MaintenanceJob for MetadataMaintenanceJob {
 
     fn should_run_after_publication(&self, publication: &NamespacePublication) -> bool {
         self.options.fold_is_due(
-            publication.wal_tail_segments,
+            publication.wal_tail_objects,
             publication.wal_tail_inline_bytes,
         )
     }
@@ -104,19 +104,19 @@ fn metadata_has_nothing_to_maintain(error: &RuntimeError) -> bool {
 }
 
 fn metadata_conclusion(step: &MetadataMaintenanceResponse) -> MaintenanceConclusion {
-    let fold = match step.wal_flush {
-        WalFlushStepOutcome::Flushed { .. } => Some(MaintenanceConclusion::Progressed),
-        WalFlushStepOutcome::AlreadyPublished { .. }
-        | WalFlushStepOutcome::RetriesExhausted { .. } => Some(MaintenanceConclusion::Superseded),
-        WalFlushStepOutcome::NotNeeded => None,
+    let fold = match step.wal_fold {
+        WalFoldStepOutcome::Folded { .. } => Some(MaintenanceConclusion::Progressed),
+        WalFoldStepOutcome::AlreadyPublished { .. }
+        | WalFoldStepOutcome::RetriesExhausted { .. } => Some(MaintenanceConclusion::Superseded),
+        WalFoldStepOutcome::NotNeeded => None,
     };
-    let compaction = match step.reorganize {
-        ReorganizeStepOutcome::UnitPublished {} => Some(MaintenanceConclusion::Progressed),
-        ReorganizeStepOutcome::ManifestAdvanced {} | ReorganizeStepOutcome::Fenced {} => {
+    let compaction = match step.compaction {
+        CompactionStepOutcome::UnitPublished {} => Some(MaintenanceConclusion::Progressed),
+        CompactionStepOutcome::ManifestAdvanced {} | CompactionStepOutcome::Fenced {} => {
             Some(MaintenanceConclusion::Superseded)
         }
-        ReorganizeStepOutcome::CompactionRequired {} => Some(MaintenanceConclusion::Blocked),
-        ReorganizeStepOutcome::NotNeeded {} => None,
+        CompactionStepOutcome::StreamingRequired {} => Some(MaintenanceConclusion::Blocked),
+        CompactionStepOutcome::NotNeeded {} => None,
     };
     [fold, compaction]
         .into_iter()

@@ -1181,7 +1181,7 @@ async fn gc_preserves_unfolded_data_then_the_current_manifest_tombstone() {
     )
     .await
     .expect("gc a namespace with no root");
-    assert_eq!(report.deleted.wal_segments, 0, "{report:?}");
+    assert_eq!(report.deleted.wal_objects, 0, "{report:?}");
     assert_eq!(
         read_file_bytes(&store, &namespace_id, "/keep.txt")
             .await
@@ -1202,7 +1202,7 @@ async fn gc_preserves_unfolded_data_then_the_current_manifest_tombstone() {
     )
     .await
     .expect("gc the tombstone");
-    assert!(report.deleted.wal_segments >= 1, "{report:?}");
+    assert!(report.deleted.wal_objects >= 1, "{report:?}");
     loonfs_core::gc_namespace(
         &store,
         &namespace_id,

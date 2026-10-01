@@ -12,9 +12,8 @@ use serde::{Deserialize, Serialize};
 use std::num::NonZeroUsize;
 
 pub(super) use loonfs_api::wire::sst_blocks::{
-    DEFAULT_MAX_DELTA_RUNS, DEFAULT_MAX_REORGANIZATION_INPUT_BYTES,
-    DEFAULT_MAX_REORGANIZATION_INPUT_ROWS, DEFAULT_MAX_REORGANIZATION_INPUT_RUNS,
-    DEFAULT_MAX_ROWS_PER_SEGMENT,
+    DEFAULT_MAX_COMPACTION_INPUT_BYTES, DEFAULT_MAX_COMPACTION_INPUT_ROWS,
+    DEFAULT_MAX_COMPACTION_INPUT_RUNS, DEFAULT_MAX_DELTA_RUNS, DEFAULT_MAX_ROWS_PER_SEGMENT,
 };
 pub use loonfs_api::MetadataFamilyGroup;
 
@@ -80,13 +79,13 @@ impl Default for MetadataLsmPolicy {
                     .unwrap()
             },
             max_input_runs_per_step: const {
-                NonZeroUsize::new(DEFAULT_MAX_REORGANIZATION_INPUT_RUNS).unwrap()
+                NonZeroUsize::new(DEFAULT_MAX_COMPACTION_INPUT_RUNS).unwrap()
             },
             max_decoded_input_rows_per_step: const {
-                NonZeroUsize::new(DEFAULT_MAX_REORGANIZATION_INPUT_ROWS).unwrap()
+                NonZeroUsize::new(DEFAULT_MAX_COMPACTION_INPUT_ROWS).unwrap()
             },
             max_decoded_input_bytes_per_step: const {
-                NonZeroUsize::new(DEFAULT_MAX_REORGANIZATION_INPUT_BYTES).unwrap()
+                NonZeroUsize::new(DEFAULT_MAX_COMPACTION_INPUT_BYTES).unwrap()
             },
             max_block_memo_bytes: DEFAULT_BLOCK_MEMO_BYTES,
         }

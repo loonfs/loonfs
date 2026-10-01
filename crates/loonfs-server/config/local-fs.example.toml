@@ -96,7 +96,7 @@ writer_id = "loonfs-server-local"
 #max_cached_wal_tail_projection_decoded_bytes = 67108864
 # Decoded-byte budget for the metadata segment cache. Defaults to 256 MiB.
 #metadata_segment_cache_max_decoded_bytes = 268435456
-# Metadata blocks one read, publication, fold, or WAL flush keeps for itself
+# Metadata blocks one read, publication, or fold keeps for itself
 # on top of that cache. Zero keeps none. Defaults to 64 MiB.
 #max_block_memo_bytes = 67108864
 

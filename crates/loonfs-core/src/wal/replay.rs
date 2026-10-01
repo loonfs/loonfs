@@ -22,7 +22,7 @@ pub(crate) fn project_validated_wal_tail(
         replayed = replay_wal_records(&replayed.resulting_head, &replayed.projected_tail, object)?;
         let payload = object.envelope().payload();
         if replayed.resulting_head.next_inode_id != payload.next_inode_id {
-            return Err(WalObjectError::SegmentSummaryMismatch);
+            return Err(WalObjectError::SummaryMismatch);
         }
         replayed.resulting_head = replayed.resulting_head.after_wal_object(payload);
     }
@@ -74,7 +74,7 @@ pub(crate) fn validate_wal_object_for_replay(
 ) -> Result<(), WalObjectError> {
     if envelope.payload().records.is_empty() {
         if envelope.payload().head_seq != expected_prior_head_seq {
-            return Err(WalObjectError::SegmentSummaryMismatch);
+            return Err(WalObjectError::SummaryMismatch);
         }
         return Ok(());
     }
@@ -95,7 +95,7 @@ pub(crate) fn validate_wal_object_for_replay(
             .map(|record| record.committed_seq)
             != Some(envelope.payload().head_seq)
     {
-        return Err(WalObjectError::SegmentSummaryMismatch);
+        return Err(WalObjectError::SummaryMismatch);
     }
     for (offset, record) in envelope.payload().records.iter().enumerate() {
         let expected = expected_first_seq

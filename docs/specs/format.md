@@ -1105,7 +1105,7 @@ The three control-object kinds are `hint`, `pin`, and `upload_session`.
 
 | Object | Envelope kind | Encoding | Version |
 | --- | --- | --- | --- |
-| WAL object | `wal_segment` | zstd-compressed CBOR envelope with CBOR payload bytes | 1 |
+| WAL object | `wal_object` | zstd-compressed CBOR envelope with CBOR payload bytes | 1 |
 | Namespace manifest | `manifest` | Uncompressed JSON | 1 |
 | Namespace hint | `hint` | Uncompressed JSON | 1 |
 | Metadata segment | No envelope | Block sections described in A.7 | 1, named by the segment descriptor's `encoding` |
