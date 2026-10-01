@@ -2,7 +2,7 @@
 
 use super::error::ApiResponseError;
 use super::extractors::SubjectHeaders;
-use super::handlers_filesystem::{pin_requested_snapshot, reject_snapshot_with_revision};
+use super::handlers_filesystem::{read_target, reject_snapshot_with_revision};
 use super::handlers_inodes::{parse_inode_id, InodeRevisionPathParams};
 use super::handlers_uploads::{presign_issuer_error, presign_time};
 use super::query_params::parse_revision_no;
@@ -61,8 +61,7 @@ pub(super) async fn create_download(
     let scoped_runtime = subject.map(|subject| state.runtime.as_subject(subject));
     let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);
     reject_snapshot_with_revision(request.snapshot_id.as_ref(), request.revision_no)?;
-    let target =
-        pin_requested_snapshot(runtime.namespace(&namespace_id), request.snapshot_id).await?;
+    let target = read_target(runtime.namespace(&namespace_id), request.snapshot_id).await?;
     let issuer = direct_get_issuer(&state)?;
 
     let download = target

@@ -238,11 +238,11 @@ async fn historical_and_snapshot_reads_stream_the_selected_revision() {
         )
         .await
         .expect("historical stream");
-    let pinned = namespace
-        .pin_namespace_at_snapshot(&snapshot.checkpoint_id)
+    let view = namespace
+        .read_view_at_snapshot(&snapshot.checkpoint_id)
         .await
-        .expect("pin snapshot");
-    let snapshot_stream = pinned
+        .expect("view snapshot");
+    let snapshot_stream = view
         .read_file_stream(PATH, chunked())
         .await
         .expect("snapshot stream");
@@ -265,16 +265,15 @@ async fn historical_and_snapshot_reads_stream_the_selected_revision() {
     }
     assert!(watched.peaks().peak_live_bytes <= CHUNK_BYTES);
     assert!(
-        pinned
-            .read_file_stream(
-                PATH,
-                ReadFileStreamOptions {
-                    revision_no: Some(RevisionNo(1)),
-                    ..chunked()
-                }
-            )
-            .await
-            .is_err(),
+        view.read_file_stream(
+            PATH,
+            ReadFileStreamOptions {
+                revision_no: Some(RevisionNo(1)),
+                ..chunked()
+            }
+        )
+        .await
+        .is_err(),
         "snapshot and revision cannot be combined"
     );
 }

@@ -3,7 +3,7 @@
 use super::download_body::streamed_download_response;
 use super::error::ApiResponseError;
 use super::extractors::SubjectHeaders;
-use super::handlers_filesystem::{parse_optional_snapshot_id, pin_requested_snapshot, PageQuery};
+use super::handlers_filesystem::{parse_optional_snapshot_id, read_target, PageQuery};
 use super::query_params::{
     decode_optional_cursor, invalid_path_id_error, parse_include_attributes, parse_revision_no,
     resolve_page_limit,
@@ -85,7 +85,7 @@ pub(super) async fn get_inode(
         options.include_attributes = parse_include_attributes(value)?;
     }
     let snapshot_id = parse_optional_snapshot_id(query.snapshot_id)?;
-    let target = pin_requested_snapshot(runtime.namespace(&namespace_id), snapshot_id).await?;
+    let target = read_target(runtime.namespace(&namespace_id), snapshot_id).await?;
     let entry = target
         .get_inode(inode_id, options)
         .await
@@ -153,7 +153,7 @@ pub(super) async fn list_inode_children(
         options.include_attributes = parse_include_attributes(value)?;
     }
     let snapshot_id = parse_optional_snapshot_id(query.snapshot_id)?;
-    let target = pin_requested_snapshot(runtime.namespace(&namespace_id), snapshot_id).await?;
+    let target = read_target(runtime.namespace(&namespace_id), snapshot_id).await?;
     let listing = target
         .list_inode_children_page(
             inode_id,

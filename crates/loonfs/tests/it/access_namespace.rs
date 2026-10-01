@@ -380,8 +380,8 @@ async fn a_revoked_administrator_cannot_delete_a_snapshot_through_the_former_wri
         .await
         .expect("fresh reader");
     let namespace_reader = reader.namespace(&namespace);
-    let _snapshot = namespace_reader
-        .pin_namespace_at_snapshot(&snapshot_id)
+    let _view = namespace_reader
+        .read_view_at_snapshot(&snapshot_id)
         .await
         .expect("snapshot still exists");
     peer.shutdown().await.expect("peer shutdown");
@@ -513,19 +513,18 @@ async fn snapshot_admin_reads_reject_a_revoked_administrator() {
             .code(),
         ErrorCode::Forbidden
     );
-    let snapshot = namespace_reader
-        .pin_namespace_at_snapshot(&snapshot_id)
+    let view = namespace_reader
+        .read_view_at_snapshot(&snapshot_id)
         .await
         .expect("load historical view");
     assert_eq!(
-        snapshot
-            .get_file_bytes("/file")
+        view.get_file_bytes("/file")
             .await
             .expect_err("ordinary snapshot reads use current authority")
             .code(),
         ErrorCode::PathNotFound
     );
-    let changes = snapshot
+    let changes = view
         .list_changes_page(
             ChangeSeq(0),
             ListChangesOptions {
@@ -535,7 +534,7 @@ async fn snapshot_admin_reads_reject_a_revoked_administrator() {
             },
         )
         .await;
-    let bytes = snapshot.read_content_ref(&content, 100).await;
+    let bytes = view.read_content_ref(&content, 100).await;
     assert!(
         matches!(&changes, Err(error) if error.code() == ErrorCode::Forbidden)
             && matches!(&bytes, Err(error) if error.code() == ErrorCode::Forbidden),
@@ -550,11 +549,11 @@ async fn snapshot_admin_reads_accept_the_current_administrator() {
     let namespace_reader = reader
         .as_subject(subject("new-root", "prn_new_root"))
         .namespace(&namespace);
-    let snapshot = namespace_reader
-        .pin_namespace_at_snapshot(&snapshot_id)
+    let view = namespace_reader
+        .read_view_at_snapshot(&snapshot_id)
         .await
         .expect("load historical view");
-    let changes = snapshot
+    let changes = view
         .list_changes_page(
             ChangeSeq(0),
             ListChangesOptions {
@@ -567,8 +566,7 @@ async fn snapshot_admin_reads_accept_the_current_administrator() {
         .expect("current administrator can read historical changes");
     assert_eq!(changes.changes.len(), 1);
     assert_eq!(
-        snapshot
-            .read_content_ref(&content, 100)
+        view.read_content_ref(&content, 100)
             .await
             .expect("current administrator can read historical content"),
         b"snapshot payload"

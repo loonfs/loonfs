@@ -14,7 +14,7 @@ use crate::manifest::{
     GrepSegmentRef,
 };
 use crate::query::{plan_pattern, GramPlanOutcome, GramQueryPlan};
-use crate::reads::{published_revision, resolve_batch_size, NamespaceReads, PinnedNamespaceReads};
+use crate::reads::{published_revision, resolve_batch_size, NamespaceReadView, NamespaceReads};
 use crate::{GrepError, Result};
 use futures::future::{join_all, try_join_all};
 use loonfs::{CoreError, CurrentFileState, Observation};
@@ -182,12 +182,12 @@ impl GrepService {
             }
             .into());
         }
-        let mut reads = namespace_reads.pin().await?;
+        let mut reads = namespace_reads.read_view().await?;
         let snapshot = self
             .load_index_snapshot(store, reads.namespace_id())
             .await?;
         if snapshot.resume.built_through_seq() > reads.head_seq() {
-            reads = namespace_reads.pin().await?;
+            reads = namespace_reads.read_view().await?;
         }
         let head_seq = reads.head_seq();
         let fingerprint = request.fingerprint();
@@ -279,7 +279,7 @@ impl GrepService {
         })
     }
 
-    /// Content search over one pinned namespace snapshot.
+    /// Content search over one namespace read view.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.phase",
@@ -560,7 +560,7 @@ async fn segment_postings_for_gram<S: ObjectStore + ?Sized>(
 /// that the query either fails as lagging or serves the index's cut, and
 /// neither needs the rest of the feed enumerated.
 async fn tail_revisions(
-    reads: &PinnedNamespaceReads<'_>,
+    reads: &NamespaceReadView<'_>,
     resume: ChangeFeedResume,
 ) -> Result<TailScan> {
     let mut inodes = BTreeSet::new();
@@ -708,7 +708,7 @@ struct GrepContentCandidate {
 
 /// What one candidate's content fetch produced.
 enum CandidateContent {
-    /// The candidate's current path no longer names it at the pinned head:
+    /// The candidate's current path no longer names it at the view's head:
     /// the derived path and the forward resolution disagree. Treated as a
     /// rejection, never as a match.
     Superseded,
@@ -729,7 +729,7 @@ enum CandidateContent {
 /// reaches the same inode. It also supplies the content reference, so the
 /// oversized skip stays a decision on declared size, before any fetch.
 async fn candidate_content(
-    reads: &PinnedNamespaceReads<'_>,
+    reads: &NamespaceReadView<'_>,
     candidate: &GrepContentCandidate,
 ) -> CandidateContent {
     let entry = match reads.resolve_path(&candidate.path).await {
@@ -760,7 +760,7 @@ async fn candidate_content(
 }
 
 struct QueryPlan<'a> {
-    reads: PinnedNamespaceReads<'a>,
+    reads: NamespaceReadView<'a>,
     head_seq: ChangeSeq,
     built_through_seq: ChangeSeq,
     fingerprint: u64,
@@ -974,7 +974,7 @@ impl<'plan, 'reads> PageWalk<'plan, 'reads> {
 /// when no path is given. The directory limit bounds the work and prevents a
 /// binding cycle from running forever.
 async fn scan_candidate_inodes(
-    reads: &PinnedNamespaceReads<'_>,
+    reads: &NamespaceReadView<'_>,
     scope: Option<&PathEntry>,
 ) -> Result<BTreeSet<InodeId>> {
     let mut inodes = BTreeSet::new();

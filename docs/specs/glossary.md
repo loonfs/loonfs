@@ -31,6 +31,7 @@
 | **Hint** | A mutable starting point for forward manifest discovery. Its number can lag publication and is not freshness evidence. |
 | **Metadata basis** | The verified file set in the reading namespace’s current manifest. A fork’s own manifest lists its inherited runs. |
 | **Checkpoint** | A durable pin retaining one numbered manifest for a user, snapshot, or fork dependency. |
+| **Read view** | The namespace state that one read, or a group of related reads in one request, sees. It is held in memory and retains nothing in the store. |
 | **Snapshot** | A retained read view represented by a snapshot-owned pin; reads require an unexpired record. |
 | **Fork** | A new namespace initialized from a retained source view, sharing stored objects with independent subsequent metadata history. |
 | **Tombstone** | A committed deletion event that hides an inode or subtree while preserving the information needed for undelete. It is a row in a namespace's history. The manifest that a namespace deletion publishes is a different object, the namespace tombstone. |

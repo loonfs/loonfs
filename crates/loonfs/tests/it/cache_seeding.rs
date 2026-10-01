@@ -556,7 +556,7 @@ fn runtime_wal_tail_projection_cache_skips_oversized_projection() {
 
     block_on(fs.writer.drain()).expect("finish hints");
     recording.reset();
-    let _snapshot = block_on(namespace.pin_namespace()).expect("pin the seeded namespace");
+    let _view = block_on(namespace.read_view()).expect("view the seeded namespace");
     assert_wal_probe(recording.take(), &namespace_id, loonfs_api::WalNo(3));
     for _ in 0..2 {
         fs.get_file_bytes_blocking(&namespace_id, "/file.txt")
