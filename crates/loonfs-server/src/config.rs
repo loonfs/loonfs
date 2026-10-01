@@ -150,6 +150,12 @@ pub struct ServerConfig {
     /// `loonfs.publisher.wal_folds_waiting` gauge means this cap is too low.
     #[serde(default = "default_max_concurrent_folds")]
     pub max_concurrent_folds: usize,
+    /// Maximum metadata merges this server runs at once, bounded compaction
+    /// steps and streaming compactions alike, whether writer sessions,
+    /// scheduled maintenance, or maintenance requests start them. A merge
+    /// never holds a fold permit.
+    #[serde(default = "default_max_concurrent_compactions")]
+    pub max_concurrent_compactions: usize,
     /// Shared request and concurrency limits for namespace publications.
     #[serde(default)]
     pub publication: PublicationLimitsOverrides,
@@ -334,6 +340,10 @@ fn default_max_concurrent_uploads() -> usize {
 
 fn default_max_concurrent_folds() -> usize {
     loonfs::DEFAULT_MAX_CONCURRENT_FOLDS
+}
+
+fn default_max_concurrent_compactions() -> usize {
+    loonfs::DEFAULT_MAX_CONCURRENT_COMPACTIONS
 }
 
 fn default_max_concurrent_downloads() -> usize {
@@ -616,6 +626,10 @@ impl ServerConfig {
                 self.snapshot_max_live_per_namespace as u64,
             ),
             ("max_concurrent_folds", self.max_concurrent_folds as u64),
+            (
+                "max_concurrent_compactions",
+                self.max_concurrent_compactions as u64,
+            ),
             ("max_concurrent_uploads", self.max_concurrent_uploads as u64),
             (
                 "max_concurrent_downloads",
@@ -1457,6 +1471,10 @@ root = "/tmp/loonfs-server"
             config.max_concurrent_folds,
             loonfs::DEFAULT_MAX_CONCURRENT_FOLDS
         );
+        assert_eq!(
+            config.max_concurrent_compactions,
+            loonfs::DEFAULT_MAX_CONCURRENT_COMPACTIONS
+        );
         assert_eq!(config.max_concurrent_uploads, 8);
         assert_eq!(config.max_concurrent_downloads, 16);
         assert_eq!(
@@ -1467,6 +1485,7 @@ root = "/tmp/loonfs-server"
         for field in [
             "max_download_bytes",
             "max_concurrent_folds",
+            "max_concurrent_compactions",
             "max_concurrent_uploads",
             "max_concurrent_downloads",
             "max_concurrent_maintenance",

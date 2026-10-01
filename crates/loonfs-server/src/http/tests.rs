@@ -979,6 +979,7 @@ fn test_config(root: &Path, writer_id: &str) -> ServerConfig {
         content_token_secret: "test-content-token-secret".into(),
         writer_id: writer_id.to_owned(),
         max_concurrent_folds: loonfs::DEFAULT_MAX_CONCURRENT_FOLDS,
+        max_concurrent_compactions: loonfs::DEFAULT_MAX_CONCURRENT_COMPACTIONS,
         publication: Default::default(),
         inline_content: Default::default(),
         metadata_cache: MetadataCacheOverrides::default(),

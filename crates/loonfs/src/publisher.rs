@@ -23,7 +23,10 @@ use crate::fs::{RuntimeCore, WriterBits};
 use crate::metrics::{PublishOutcome, RESULT_OK};
 use crate::publish::CommitCandidate;
 use crate::trace::{phase_event, phase_span};
-use crate::{CoreError, DeleteNamespaceOptions, DeleteNamespaceResponse, Error};
+use crate::{
+    CoreError, DeleteNamespaceOptions, DeleteNamespaceResponse, Error, FoldWalOutcome,
+    MaintenanceCancellation,
+};
 use admission::{AdmissionPermit, AdmittedWaiter, PublicationAdmission};
 use futures::FutureExt;
 use loonfs_core::commit::{
@@ -187,14 +190,16 @@ impl NamespaceSession {
         self.publisher.wait_for_fold().await
     }
 
-    /// Refuses new work from every handle that shares this session, waits
-    /// for admitted work and the running fold, and forgets the session.
+    /// Refuses new work from every handle that shares this session, cancels
+    /// its compaction, waits for admitted work, the running fold, and the
+    /// compaction, and forgets the session.
     ///
-    /// The worker and the fold task forget the session too when they exit,
-    /// so a cancelled close still leaves the table clean.
+    /// The worker, the fold task, and the compaction task forget the session
+    /// too when they exit, so a cancelled close still leaves the table clean.
     pub(crate) async fn close(&self) -> Result<CloseNamespaceReport, CoreError> {
         let publisher = &self.publisher;
         let drained_commits = publisher.close_session()?;
+        publisher.compaction_cancellation.cancel();
         publisher.forget_if_ended();
         publisher.wait_for_worker().await;
         if let Err(error) = publisher.wait_for_fold().await {
@@ -205,6 +210,16 @@ impl NamespaceSession {
                 tracing::Level::WARN,
                 error = %error.public_message(),
                 "wal fold failed while the namespace session closed"
+            );
+        }
+        if let Err(error) = publisher.wait_for_compaction().await {
+            phase_event!(
+                publisher.runtime_core,
+                "metadata_compaction",
+                publisher.namespace_id,
+                tracing::Level::WARN,
+                error = %error.public_message(),
+                "metadata compaction failed while the namespace session closed"
             );
         }
         publisher.forget_if_ended();
@@ -356,10 +371,12 @@ impl PublisherRegistry {
         }
     }
 
-    /// Waits for all current publisher workers and folds to finish.
+    /// Waits for all current publisher workers, folds, and compactions to
+    /// finish. Folds are waited for before compactions, because a fold starts
+    /// its session's compaction.
     ///
-    /// Returns an error if any publication, deletion, or fold panicked and
-    /// its task contained the panic.
+    /// Returns an error if any publication, deletion, fold, or compaction
+    /// panicked and its task contained the panic.
     pub(crate) async fn drain(&self) -> Result<(), Error> {
         let publishers: Vec<NamespacePublisher> = self
             .shared
@@ -372,8 +389,13 @@ impl PublisherRegistry {
             publisher.wait_for_worker().await;
         }
         let mut task_error = None;
-        for publisher in publishers {
+        for publisher in &publishers {
             if let Err(error) = publisher.wait_for_fold().await {
+                task_error.get_or_insert(error);
+            }
+        }
+        for publisher in &publishers {
+            if let Err(error) = publisher.wait_for_compaction().await {
                 task_error.get_or_insert(error);
             }
         }
@@ -413,6 +435,9 @@ struct NamespacePublisher {
     timer: Arc<dyn MonotonicTimer>,
     min_publish_interval: Duration,
     inline_content: crate::InlineContentPolicy,
+    /// Set once the session stops admitting work. A session never compacts
+    /// again after that.
+    compaction_cancellation: MaintenanceCancellation,
 }
 
 /// Commit engine and writer session retained by one namespace publisher.
@@ -476,8 +501,10 @@ struct NamespacePublisherState {
     /// finds the queue empty. That single flight is what makes the delete
     /// barrier's admission order deterministic.
     worker: Option<WorkerHandle>,
-    fold: Option<FoldHandle>,
-    next_fold_id: u64,
+    fold: Option<SessionTask>,
+    /// One metadata compaction at a time, started when a fold publishes.
+    compaction: Option<SessionTask>,
+    next_task_id: u64,
     /// The last reserved WAL put. `None` is an idle namespace: nothing was
     /// queued when its last batch settled, so the next request publishes
     /// immediately.
@@ -498,11 +525,12 @@ impl NamespacePublisherState {
                 .worker
                 .as_ref()
                 .is_some_and(|worker| !*worker.liveness.borrow());
-        let fold_running = self
-            .fold
+        let fold_running = self.fold.as_ref().is_some_and(SessionTask::is_running);
+        let compaction_running = self
+            .compaction
             .as_ref()
-            .is_some_and(|fold| !*fold.liveness.borrow());
-        over && !worker_running && !fold_running
+            .is_some_and(SessionTask::is_running);
+        over && !worker_running && !fold_running && !compaction_running
     }
 }
 
@@ -511,53 +539,26 @@ struct WorkerHandle {
     liveness: watch::Receiver<bool>,
 }
 
-struct FoldHandle {
-    fold_id: u64,
+/// A fold or a compaction that a session runs beside its queue.
+struct SessionTask {
+    id: u64,
     task: JoinHandle<()>,
     liveness: watch::Receiver<bool>,
 }
 
-struct WorkerExit(watch::Sender<bool>);
+impl SessionTask {
+    fn is_running(&self) -> bool {
+        !*self.liveness.borrow()
+    }
+}
 
-impl Drop for WorkerExit {
+/// Marks a worker or session task as exited when the task ends, even when
+/// it panics.
+struct TaskExit(watch::Sender<bool>);
+
+impl Drop for TaskExit {
     fn drop(&mut self) {
         let _ = self.0.send(true);
-    }
-}
-
-struct FoldExit(watch::Sender<bool>);
-
-impl Drop for FoldExit {
-    fn drop(&mut self) {
-        let _ = self.0.send(true);
-    }
-}
-
-/// A fold counted as waiting for a writer permit.
-struct WaitingFold<'a> {
-    counter: &'a AtomicUsize,
-    instruments: &'a crate::metrics::RuntimeInstruments,
-}
-
-impl<'a> WaitingFold<'a> {
-    fn new(counter: &'a AtomicUsize, instruments: &'a crate::metrics::RuntimeInstruments) -> Self {
-        let waiting_fold = Self {
-            counter,
-            instruments,
-        };
-        let waiting = counter.fetch_add(1, Ordering::SeqCst).saturating_add(1);
-        instruments.publisher_wal_folds_waiting(waiting);
-        waiting_fold
-    }
-}
-
-impl Drop for WaitingFold<'_> {
-    fn drop(&mut self) {
-        let waiting = self
-            .counter
-            .fetch_sub(1, Ordering::SeqCst)
-            .saturating_sub(1);
-        self.instruments.publisher_wal_folds_waiting(waiting);
     }
 }
 
@@ -656,7 +657,8 @@ impl NamespacePublisher {
                 admission: PublisherAdmissionState::Open,
                 worker: None,
                 fold: None,
-                next_fold_id: 0,
+                compaction: None,
+                next_task_id: 0,
                 last_publish: None,
             })),
             engine: Arc::new(AsyncMutex::new(EngineSlot {
@@ -675,6 +677,7 @@ impl NamespacePublisher {
                 .upgrade()
                 .map(|writer| writer.inline_content.clone())
                 .unwrap_or_default(),
+            compaction_cancellation: MaintenanceCancellation::new(),
         }
     }
 
@@ -689,12 +692,13 @@ impl NamespacePublisher {
     }
 
     /// Open becomes closed; a delete that already landed is terminal and
-    /// stays terminal.
+    /// stays terminal. Either way the session's compaction is cancelled.
     fn close_admission(&self) {
         let mut state = self.lock_state();
         if matches!(state.admission, PublisherAdmissionState::Open) {
             state.admission = PublisherAdmissionState::Closed;
         }
+        self.compaction_cancellation.cancel();
     }
 
     /// Closes admission for every handle that shares this session and
@@ -974,7 +978,7 @@ impl NamespacePublisher {
         }
         let publisher = self.clone();
         let (exit, liveness) = watch::channel(false);
-        let exit = WorkerExit(exit);
+        let exit = TaskExit(exit);
         let task = self.runtime.spawn(async move {
             let _exit = exit;
             publisher.run_worker().await;
@@ -1265,7 +1269,8 @@ impl NamespacePublisher {
 
     /// Starts a fold task after its triggering publication releases the engine.
     /// A panicked fold is retried by the next publish over the threshold. The
-    /// drain reports the contained panic.
+    /// drain reports the contained panic. A fold that publishes starts the
+    /// session's compaction after it releases its fold permit.
     fn start_fold(&self) -> Option<oneshot::Sender<()>> {
         let mut state = self.lock_state();
         if state
@@ -1275,43 +1280,127 @@ impl NamespacePublisher {
         {
             return None;
         }
-        let fold_id = state.next_fold_id;
-        state.next_fold_id = state.next_fold_id.wrapping_add(1);
         let (start, started) = oneshot::channel();
-        let (exit, liveness) = watch::channel(false);
         let publisher = self.clone();
-        let task = self.runtime.spawn(async move {
-            let exit = FoldExit(exit);
-            if started.await.is_ok()
-                && AssertUnwindSafe(publisher.run_fold())
-                    .catch_unwind()
-                    .await
-                    .is_err()
-            {
-                publisher.record_panic();
+        let fold = self.spawn_session_task(&mut state, async move {
+            if started.await.is_err() {
+                return;
             }
-            drop(exit);
-            publisher.forget_if_ended();
+            match AssertUnwindSafe(publisher.run_fold()).catch_unwind().await {
+                Ok(true) => publisher.start_compaction(),
+                Ok(false) => {}
+                Err(_) => publisher.record_panic(),
+            }
         });
-        state.fold = Some(FoldHandle {
-            fold_id,
-            task,
-            liveness,
-        });
+        state.fold = Some(fold);
         Some(start)
     }
 
-    async fn run_fold(&self) {
-        let Some(writer) = self.writer.upgrade() else {
+    /// Starts the session's metadata compaction unless one is running or the
+    /// session no longer admits work. A panicked compaction is retried after
+    /// the next fold. The drain reports the contained panic.
+    fn start_compaction(&self) {
+        let mut state = self.lock_state();
+        if !matches!(state.admission, PublisherAdmissionState::Open)
+            || state
+                .compaction
+                .as_ref()
+                .is_some_and(SessionTask::is_running)
+        {
+            return;
+        }
+        let publisher = self.clone();
+        let compaction = self.spawn_session_task(&mut state, async move {
+            if AssertUnwindSafe(publisher.run_compaction())
+                .catch_unwind()
+                .await
+                .is_err()
+            {
+                publisher.record_panic();
+            }
+        });
+        state.compaction = Some(compaction);
+    }
+
+    /// Spawns `work` as a task whose exit the drain and close can wait for,
+    /// and that forgets the session if it was the last thing running.
+    fn spawn_session_task(
+        &self,
+        state: &mut NamespacePublisherState,
+        work: impl std::future::Future<Output = ()> + Send + 'static,
+    ) -> SessionTask {
+        let id = state.next_task_id;
+        state.next_task_id = state.next_task_id.wrapping_add(1);
+        let (exit, liveness) = watch::channel(false);
+        let publisher = self.clone();
+        let task = self.runtime.spawn(async move {
+            let exit = TaskExit(exit);
+            work.await;
+            drop(exit);
+            publisher.forget_if_ended();
+        });
+        SessionTask { id, task, liveness }
+    }
+
+    /// Runs the maintenance loop over this session's namespace with options
+    /// that never fold, so folding stays with [`Self::run_fold`].
+    async fn run_compaction(&self) {
+        let Some(maintenance) = self.maintenance() else {
             return;
         };
-        let waiting = WaitingFold::new(&writer.wal_folds_waiting, self.runtime_core.instruments());
-        let _permit = writer
-            .wal_fold_permits
-            .acquire()
+        let never_fold = crate::MetadataMaintenanceOptions {
+            max_wal_tail_objects: std::num::NonZeroU64::MAX,
+            inline_content_fold_at_bytes: std::num::NonZeroUsize::MAX,
+            idle_fold_after_ms: 0,
+            ..crate::MetadataMaintenanceOptions::default()
+        };
+        if let Err(error) = maintenance
+            .maintain_metadata_while_due_with_options(
+                &self.namespace_id,
+                &self.compaction_cancellation,
+                &never_fold,
+            )
             .await
-            .expect("fold permit semaphore should remain open");
-        drop(waiting);
+        {
+            phase_event!(
+                self.runtime_core,
+                "metadata_compaction",
+                self.namespace_id,
+                tracing::Level::WARN,
+                error = %error.public_message(),
+                "session metadata compaction failed; the next fold starts it again"
+            );
+        }
+    }
+
+    /// The runtime's maintenance, acting as this session's writer. `None`
+    /// once the writer or the session table is gone.
+    fn maintenance(&self) -> Option<crate::Maintenance> {
+        let writer = self.writer.upgrade()?;
+        let registry = PublisherRegistry {
+            shared: self.shared.upgrade()?,
+            runtime_core: self.runtime_core.clone(),
+            writer: self.writer.clone(),
+            runtime: self.runtime.clone(),
+            timer: Arc::clone(&self.timer),
+            min_publish_interval: self.min_publish_interval,
+        };
+        let actor = writer.identity.clone();
+        Some(crate::Maintenance::new(
+            self.runtime_core.clone(),
+            registry,
+            writer,
+            actor,
+        ))
+    }
+
+    /// Folds the tail under a fold permit. Returns whether the fold published
+    /// a manifest.
+    async fn run_fold(&self) -> bool {
+        let Some(writer) = self.writer.upgrade() else {
+            return false;
+        };
+        let _permit = writer.fold_permit(self.runtime_core.instruments()).await;
         let input = {
             let mut slot = self.engine.lock().await;
             let fold_at_bytes = self.inline_content.inline_content_fold_at_bytes;
@@ -1323,7 +1412,7 @@ impl NamespacePublisher {
                         .wal_tail_inline_bytes()
                         .is_some_and(|bytes| bytes < fold_at_bytes)
             }) {
-                return;
+                return false;
             }
             slot.engine
                 .as_mut()
@@ -1340,7 +1429,7 @@ impl NamespacePublisher {
                     error = %error.public_message(),
                     "WAL-tail fold failed"
                 );
-                return;
+                return false;
             }
         };
         let started_ms = self.timer.monotonic_now_ms();
@@ -1365,9 +1454,10 @@ impl NamespacePublisher {
             .lock()
             .await
             .record_fold_outcome(result.as_ref().ok());
-        match result {
-            Ok(_) => {
+        let published = match result {
+            Ok(folded) => {
                 self.runtime_core.instruments().publisher_wal_fold();
+                folded.response.outcome == FoldWalOutcome::Published
             }
             Err(error) => {
                 let error = Error::Core(error);
@@ -1379,9 +1469,11 @@ impl NamespacePublisher {
                     error = %error.public_message(),
                     "WAL-tail fold failed"
                 );
+                false
             }
-        }
+        };
         writer.notify_fold_finished(&self.namespace_id);
+        published
     }
 
     /// Runs the delete barrier. Returns true when the publisher is now
@@ -1412,6 +1504,7 @@ impl NamespacePublisher {
                 state.admission = PublisherAdmissionState::Deleted;
                 take_queued_waiters(&mut state)
             };
+            self.compaction_cancellation.cancel();
             // A deleted session has ended. It leaves the table before the
             // delete's callers hear the outcome, so an open after that
             // starts a fresh session whose publish fails on the durable
@@ -1435,13 +1528,7 @@ impl NamespacePublisher {
         let Some(writer) = self.writer.upgrade() else {
             return Err(CoreError::ShuttingDown.into());
         };
-        let waiting = WaitingFold::new(&writer.wal_folds_waiting, self.runtime_core.instruments());
-        let _permit = writer
-            .wal_fold_permits
-            .acquire()
-            .await
-            .expect("fold permit semaphore should remain open");
-        drop(waiting);
+        let _permit = writer.fold_permit(self.runtime_core.instruments()).await;
         let mut slot = self.engine.lock().await;
         let engine = self.engine_for(&mut slot);
         crate::fs::delete_namespace_with_engine(
@@ -1484,12 +1571,29 @@ impl NamespacePublisher {
     }
 
     async fn wait_for_fold(&self) -> Result<(), Error> {
-        let fold = self
-            .lock_state()
-            .fold
+        self.wait_for_session_task(|state| &mut state.fold)
+            .await
+            .map_err(|error| Error::RuntimeTask(format!("WAL-tail fold task failed: {error}")))
+    }
+
+    async fn wait_for_compaction(&self) -> Result<(), Error> {
+        self.wait_for_session_task(|state| &mut state.compaction)
+            .await
+            .map_err(|error| {
+                Error::RuntimeTask(format!("metadata compaction task failed: {error}"))
+            })
+    }
+
+    /// Waits for the task in `slot`, if any, and reaps it unless a newer
+    /// task has replaced it.
+    async fn wait_for_session_task(
+        &self,
+        slot: fn(&mut NamespacePublisherState) -> &mut Option<SessionTask>,
+    ) -> Result<(), tokio::task::JoinError> {
+        let task = slot(&mut self.lock_state())
             .as_ref()
-            .map(|fold| (fold.fold_id, fold.liveness.clone(), fold.task.is_finished()));
-        let Some((fold_id, mut liveness, finished)) = fold else {
+            .map(|task| (task.id, task.liveness.clone(), task.task.is_finished()));
+        let Some((id, mut liveness, finished)) = task else {
             return Ok(());
         };
         if !finished {
@@ -1501,20 +1605,15 @@ impl NamespacePublisher {
         }
         let task = {
             let mut state = self.lock_state();
-            if state
-                .fold
-                .as_ref()
-                .is_some_and(|fold| fold.fold_id == fold_id)
-            {
-                state.fold.take().map(|fold| fold.task)
+            let slot = slot(&mut state);
+            if slot.as_ref().is_some_and(|task| task.id == id) {
+                slot.take().map(|task| task.task)
             } else {
                 None
             }
         };
         if let Some(task) = task {
-            task.await.map_err(|error| {
-                Error::RuntimeTask(format!("WAL-tail fold task failed: {error}"))
-            })?;
+            task.await?;
         }
         Ok(())
     }

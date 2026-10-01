@@ -348,15 +348,17 @@ counted in any budget and sit on top.
 | Block memo | `max_block_memo_bytes` | 64 MiB | Metadata blocks one read, publication, or fold keeps | Per operation |
 | Merge input | `max_merge_input_bytes` | 64 MiB | Decoded blocks one compaction or maintenance step merges | Per operation |
 | Segment output | None | 32 MiB | Encoded segments one fold, compaction, or maintenance step holds while it writes them | Per operation |
-| WAL folds | `max_concurrent_folds` | 2 | Folds running at once | Concurrency |
+| WAL folds | `max_concurrent_folds` | 2 | Folds running at once, including folds that maintenance requests start | Concurrency |
+| Compactions | `max_concurrent_compactions` | 2 | Metadata merges running at once, bounded steps and streaming compactions alike, whether writer sessions, scheduled maintenance, or maintenance requests start them | Concurrency |
 | Maintenance runs | `max_concurrent_maintenance` | 2 | Scheduled maintenance runs at once, including compactions and grep indexing | Concurrency |
-| Compactions | None | 2 | Scheduled compactions at once, inside the maintenance limit | Concurrency |
+| Scheduled compaction jobs | None | 2 | Streaming compaction jobs the runner admits at once, inside the maintenance limit. Each also waits for a compaction permit | Concurrency |
 | Publications | `publication.max_concurrent_publications` | 8 | Publications running at once | Concurrency |
 
 A fold holds a block memo and its segment output, so it can use up to 96 MiB.
-A maintenance run can fold the WAL tail and then merge, one after the other.
-It holds the larger of its block memo and its merge input, plus its segment
-output, so it can also use up to 96 MiB.
+A merge holds its merge input and its segment output, so it can also use up
+to 96 MiB, and `max_concurrent_compactions` merges can use that much each. A
+maintenance run that folds the WAL tail and then merges takes a fold permit
+for the fold and then a compaction permit for the merge.
 
 A maintenance step merges only the runs that fit in `max_merge_input_bytes`.
 A larger window runs as a streaming compaction, which holds at most that much
@@ -368,7 +370,8 @@ is written alone. A checkpoint, snapshot, or fork that has to fold the WAL
 tail first runs that fold with the default 64 MiB block memo.
 
 Maintenance requests sent to the API run outside
-`max_concurrent_maintenance`.
+`max_concurrent_maintenance`. Their folds and merges take the same fold and
+compaction permits as every other fold and merge.
 
 `max_upload_bytes` and `max_download_bytes` limit the size of one proxied
 transfer. Both default to 256 MiB. They do not reserve memory.
@@ -384,12 +387,13 @@ process-wide limit add up to 960 MiB by default:
 | 8 uploads at 8 MiB | 64 MiB |
 | 16 downloads at 8 MiB | 128 MiB |
 | 2 folds at 96 MiB | 192 MiB |
-| 2 maintenance runs at 96 MiB | 192 MiB |
+| 2 compactions at 96 MiB | 192 MiB |
 | Total | 960 MiB |
 
 The total leaves out writer sessions, the block memos of reads
 and publications, the WAL tails that running reads, publications, and folds
-hold outside the head-state cache, and maintenance requests sent to the API. Eight running
+hold outside the head-state cache, and the work of maintenance requests sent
+to the API other than their folds and merges. Eight running
 publications can hold up to 512 MiB of block memos at the default budget.
 Reads have no concurrency limit, so their block memos have no total.
 
@@ -405,10 +409,11 @@ have no setting.
 
 This config for a 256 MiB container uses a 64 MiB segment cache, a 16 MiB
 head-state budget, 8 MiB block memos, an 8 MiB merge input, two running
-publications, one fold, and one maintenance run:
+publications, one fold, one compaction, and one maintenance run:
 
 ```toml
 max_concurrent_folds = 1
+max_concurrent_compactions = 1
 max_concurrent_maintenance = 1
 max_concurrent_uploads = 2
 max_concurrent_downloads = 2
@@ -433,7 +438,7 @@ max_head_state_bytes = 16777216
 | 2 downloads at 8 MiB | 16 MiB |
 | 2 publications at an 8 MiB block memo | 16 MiB |
 | 1 fold: 8 MiB block memo and 32 MiB segment output | 40 MiB |
-| 1 maintenance run: 8 MiB block memo or merge input, and 32 MiB segment output | 40 MiB |
+| 1 compaction: 8 MiB merge input and 32 MiB segment output | 40 MiB |
 | Total | 216 MiB |
 
 64 + 16 + 8 + 16 + 16 + 16 + 40 + 40 = 216 MiB, which leaves 40 MiB of the

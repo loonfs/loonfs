@@ -20,9 +20,10 @@ use std::sync::Arc;
 /// no coordination with the node that writes.
 ///
 /// A `Namespace<Writable>` comes from [`LoonFs::open_namespace`] and is the
-/// namespace's writer session: one publication queue, one WAL-tail fold, and
-/// the writer epoch that the session's first publish acquires. It shares the
-/// runtime's store client, caches, admission budgets, and shutdown.
+/// namespace's writer session: one publication queue, one WAL-tail fold, one
+/// metadata compaction that each published fold starts, and the writer epoch
+/// that the session's first publish acquires. It shares the runtime's store
+/// client, caches, admission budgets, compactor claim, and shutdown.
 ///
 /// The host that holds a writable handle owns the session. Clones share it,
 /// and the session lives while any clone is held. [`Namespace::close`] ends
@@ -118,11 +119,16 @@ impl Namespace<Writable> {
         self.session().state()
     }
 
-    /// Refuses new work, drains admitted work, and ends the session.
+    /// Refuses new work, cancels the session's metadata compaction, drains
+    /// admitted work, waits for the fold and the compaction, and ends the
+    /// session.
     ///
-    /// From the moment this is called, commits and deletes through every
-    /// clone of this handle fail with `writer_session_closed`, and so does
-    /// [`LoonFs::open_namespace`] for this namespace until the drain
+    /// The compaction stops at once while it waits for a compaction permit
+    /// or runs a bounded step, and at its next block while it runs a
+    /// streaming compaction, so close never waits for another session's
+    /// merge. From the moment this is called, commits and deletes through
+    /// every clone of this handle fail with `writer_session_closed`, and so
+    /// does [`LoonFs::open_namespace`] for this namespace until the drain
     /// finishes. After this returns, the next open starts a new session,
     /// which acquires a new writer epoch. Closing a session that no longer
     /// admits work only waits for its drain, and the report says it was not

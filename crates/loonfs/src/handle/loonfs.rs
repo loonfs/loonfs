@@ -40,8 +40,9 @@ pub struct ReadOnly;
 /// The mode of a runtime or a namespace handle that can also write.
 #[derive(Clone)]
 pub struct Writable {
-    /// Publisher workers hold these weakly, so dropping every runtime and
-    /// namespace handle that holds them stops new publication work.
+    /// Publisher workers hold these weakly, so dropping every runtime,
+    /// namespace handle, and maintenance value that holds them stops new
+    /// publication work.
     pub(crate) bits: Arc<WriterBits>,
     pub(crate) publisher: PublisherRegistry,
 }
@@ -176,18 +177,23 @@ impl LoonFs<Writable> {
     ///
     /// Maintenance shares this runtime's store client, caches, and
     /// publication service, so fold decisions see the inline bytes of the
-    /// sessions this runtime holds. Operations that mutate durable control
-    /// state record `writer_id`. A process that only maintains builds a
-    /// writable runtime and never opens a namespace.
+    /// sessions this runtime holds. It also shares the runtime's compactor
+    /// claim, so it never fences this runtime's sessions or another value
+    /// from this runtime, and its folds take the runtime's fold permits.
+    /// Operations that mutate durable control state record `writer_id`. A
+    /// process that only maintains builds a writable runtime and never opens
+    /// a namespace.
     pub fn maintenance(&self, writer_id: WriterId) -> Maintenance {
         Maintenance::new(
             self.core.clone(),
             self.mode.publisher.clone(),
+            Arc::clone(&self.mode.bits),
             WriterIdentity { writer_id },
         )
     }
 
-    /// Closes publication admission before shutdown drains.
+    /// Closes publication admission before shutdown drains, and cancels the
+    /// metadata compaction every session is running.
     ///
     /// Later mutations fail with `shutting_down`. Calling this more than once
     /// has no additional effect.
@@ -205,14 +211,15 @@ impl LoonFs<Writable> {
         self.mode.publisher.is_admission_closed()
     }
 
-    /// Waits for the publication work this runtime has admitted, and the
-    /// folds that work started, to finish.
+    /// Waits for the publication work this runtime has admitted, the folds
+    /// that work started, and the metadata compactions those folds started,
+    /// to finish.
     ///
     /// Admission stays open. Work admitted during the wait may still be
     /// running when this returns. [`Self::shutdown`] closes admission and
-    /// then drains. Fails if a publication, deletion, or fold on this runtime
-    /// has ever panicked. The runtime contains those panics and keeps
-    /// publishing.
+    /// then drains. Fails if a publication, deletion, fold, or compaction on
+    /// this runtime has ever panicked. The runtime contains those panics and
+    /// keeps publishing.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.drain",
@@ -229,7 +236,8 @@ impl LoonFs<Writable> {
         self.mode.publisher.drain().await
     }
 
-    /// Stops publication and drains accepted work.
+    /// Stops publication, cancels session compactions, and drains accepted
+    /// work.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.shutdown",

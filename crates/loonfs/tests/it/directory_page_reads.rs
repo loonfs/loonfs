@@ -45,14 +45,9 @@ async fn directory_pages_use_bindings_and_load_revision_heads_concurrently() {
         .build()
         .await
         .expect("writer");
-    let maintenance = LoonFs::builder_with_store(store.clone())
-        .writer_id("directory-page-maintenance")
-        .build()
-        .await
-        .expect("maintenance")
-        .maintenance(loonfs_test_support::ids::writer_id(
-            "directory-page-maintenance",
-        ));
+    let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id(
+        "directory-page-maintenance",
+    ));
     writer
         .create_namespace(&namespace_id, &actor)
         .await
@@ -69,8 +64,11 @@ async fn directory_pages_use_bindings_and_load_revision_heads_concurrently() {
         .await
         .expect("fold parents");
     let parent_inode_keys = family_keys(&store, &namespace_id, MetadataRowFamily::Inodes).await;
-    for batch in 0..6 {
-        for index in batch * 50..(batch + 1) * 50 {
+    // The writer's own maintenance folds before the session's fold
+    // threshold, so the session never folds, and so never compacts these
+    // runs into fewer segments.
+    for batch in 0..12 {
+        for index in batch * 25..(batch + 1) * 25 {
             namespace_writer
                 .put_file(
                     &format!("/files/{index:03}.txt"),
@@ -85,7 +83,13 @@ async fn directory_pages_use_bindings_and_load_revision_heads_concurrently() {
             .await
             .expect("fold batch");
     }
-    for index in (0..300).step_by(3) {
+    for (replaced, index) in (0..300).step_by(3).enumerate() {
+        if replaced % 25 == 24 {
+            maintenance
+                .fold_wal(&namespace_id)
+                .await
+                .expect("fold replacements");
+        }
         namespace_writer
             .put_file_with_options(
                 &format!("/files/{index:03}.txt"),

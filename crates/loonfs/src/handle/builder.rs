@@ -66,6 +66,7 @@ struct WriterSettings {
     publication_limits: PublicationLimits,
     inline_content: InlineContentPolicy,
     max_concurrent_folds: NonZeroUsize,
+    max_concurrent_compactions: NonZeroUsize,
     namespace_advance_observer: Option<NamespaceAdvanceObserver>,
     maintenance_hint_observer: Option<MaintenanceHintObserver>,
 }
@@ -105,6 +106,10 @@ impl<M> LoonFsBuilder<M> {
                     crate::config::DEFAULT_MAX_CONCURRENT_FOLDS,
                 )
                 .expect("default maximum concurrent folds should be nonzero"),
+                max_concurrent_compactions: NonZeroUsize::new(
+                    crate::config::DEFAULT_MAX_CONCURRENT_COMPACTIONS,
+                )
+                .expect("default maximum concurrent compactions should be nonzero"),
                 namespace_advance_observer: None,
                 maintenance_hint_observer: None,
             },
@@ -268,6 +273,17 @@ impl LoonFsBuilder<Writable> {
         self
     }
 
+    /// Sets the maximum number of metadata merges this runtime runs at once,
+    /// bounded compaction steps and streaming compactions alike, whether its
+    /// sessions or [`LoonFs::maintenance`] calls start them. Each merge holds
+    /// at most the merge input budget of decoded input. A merge never holds
+    /// a fold permit. The default is
+    /// [`crate::DEFAULT_MAX_CONCURRENT_COMPACTIONS`].
+    pub fn max_concurrent_compactions(mut self, limit: NonZeroUsize) -> Self {
+        self.writer.max_concurrent_compactions = limit;
+        self
+    }
+
     /// Sets the decoded metadata bytes one maintenance step may merge. A step
     /// merges inline only the runs that fit; a larger window runs as a
     /// streaming compaction that holds at most this much at once. Applies to
@@ -363,6 +379,8 @@ impl LoonFsBuilder<Writable> {
             identity,
             wal_fold_permits: Semaphore::new(writer.max_concurrent_folds.get()),
             wal_folds_waiting: AtomicUsize::new(0),
+            compaction_permits: Semaphore::new(writer.max_concurrent_compactions.get()),
+            compactor_epochs: tokio::sync::Mutex::default(),
             namespace_advance_observer: writer.namespace_advance_observer,
             maintenance_hint_observer: writer.maintenance_hint_observer,
         });
