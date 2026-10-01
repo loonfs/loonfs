@@ -353,9 +353,11 @@ async fn open_local_cache(
 /// Builds the process runtime and its maintenance over one store and one
 /// metrics recorder.
 ///
-/// An optional JSONL recorder receives the same object-store samples. The
-/// local block cache is installed once on the runtime, so its reads and its
-/// maintenance use the same decoded cache hierarchy.
+/// The runtime reads through one metadata cache built from the
+/// `[metadata_cache]` table, which reports to the same recorder. An optional
+/// JSONL recorder receives the same object-store samples. The local block
+/// cache is installed once on the runtime, so its reads and its maintenance
+/// use the same cache hierarchy.
 pub(super) async fn build_handles(
     config: &ServerConfig,
     store: SharedObjectStore,
@@ -387,10 +389,16 @@ pub(super) async fn build_handles(
         // Every read the server serves goes through this runtime, so the
         // read cap covers every proxied content read.
         .max_read_content_bytes(config.max_download_bytes)
-        .runtime_cache(config.runtime_cache_config())
+        .metadata_cache(config.metadata_cache.build(metrics.recorder()))
         .trace_mode(TraceMode::Remote)
         .trace_store_kind(trace_store_kind)
         .metrics_recorder(metrics.recorder());
+    if let Some(interval_ms) = config.manifest_revalidation_interval_ms {
+        builder = builder.manifest_revalidation_interval_ms(interval_ms);
+    }
+    if let Some(bytes) = config.max_block_memo_bytes {
+        builder = builder.max_block_memo_bytes(bytes);
+    }
     if let Some(observer) = maintenance_hint_observer {
         builder = builder.maintenance_hint_observer(move |hint| observer(hint));
     }

@@ -71,10 +71,7 @@ async fn bounded_pages_match_full_rows_across_windows_ranges_and_eviction() {
     let expected = rows(0, 1024, 1);
     let descriptor = segment(&store, &expected).await;
     for budget in [1, 8 * 1024 * 1024] {
-        let cache = MetadataSegmentCache::new(MetadataSegmentCacheConfig {
-            max_decoded_bytes: budget,
-            ..MetadataSegmentCacheConfig::default()
-        });
+        let cache = MetadataSegmentCache::unshared(budget);
         for (start, end, limit) in [
             (0, 1024, 0),
             (0, 1024, 1),
@@ -145,10 +142,7 @@ async fn bounded_pages_merge_overlapping_runs_and_binding_versions() {
             }],
         })
         .collect();
-    let cache = MetadataSegmentCache::new(MetadataSegmentCacheConfig {
-        max_decoded_bytes: 1,
-        ..MetadataSegmentCacheConfig::default()
-    });
+    let cache = MetadataSegmentCache::unshared(1);
     // Single-row pages walk a window across the start of the overlap; a full
     // single-row traversal re-reads both indexes for every row.
     for (limit, window) in [
@@ -186,7 +180,7 @@ async fn bounded_pages_preserve_readahead_without_reading_the_entire_range() {
     let store = RecordingStore::metadata_segments(LocalFsStore::new(temp.path()).expect("store"));
     let expected = rows(0, 1024, 1);
     let descriptor = segment(&store, &expected).await;
-    let cache = MetadataSegmentCache::new(MetadataSegmentCacheConfig::default());
+    let cache = MetadataSegmentCache::unshared(usize::MAX);
     let first = load_manifest_segment_rows_in_key_range_with_cache(
         &store,
         Some(&cache),

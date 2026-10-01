@@ -1,14 +1,14 @@
 //! Post-publish cache behavior: a landed publish seeds the read caches
 //! instead of dropping them, and no cache lifecycle event — invalidation,
-//! LRU eviction, or running with caches disabled — erases writer fencing.
+//! LRU eviction, or running with zero cache limits — erases writer fencing.
 
 #![allow(clippy::panic)]
 
 use loonfs::metrics::{DefaultMetricsRecorder, MetricValue};
 use loonfs::{
-    CreateNamespaceOptions, CreateSnapshotOptions, DeleteNamespaceOptions, LoonFs, NamespaceId,
-    PutFileOptions, ReadOnly, RuntimeCacheConfig, RuntimeError, SharedObjectStore, SnapshotPolicy,
-    Writable, WriterFence, READ_REVALIDATION_BOUND_MS,
+    CreateNamespaceOptions, CreateSnapshotOptions, DeleteNamespaceOptions, LoonFs, LoonFsBuilder,
+    MetadataCache, NamespaceId, PutFileOptions, ReadOnly, RuntimeError, SharedObjectStore,
+    SnapshotPolicy, Writable, WriterFence, READ_REVALIDATION_BOUND_MS,
 };
 use loonfs_api::wire::control::NamespaceStatus;
 use loonfs_core::control::NamespaceReadState;
@@ -22,33 +22,35 @@ use std::sync::Arc;
 use tempfile::tempdir;
 
 async fn writer(store: &SharedObjectStore, writer_id: &str) -> LoonFs<Writable> {
-    writer_with_cache(store, writer_id, RuntimeCacheConfig::default()).await
+    writer_with_cache(store, writer_id, |builder| builder).await
 }
 
+/// `cache` sets the writer's metadata cache and read policy.
 async fn writer_with_cache(
     store: &SharedObjectStore,
     writer_id: &str,
-    runtime_cache: RuntimeCacheConfig,
+    cache: impl FnOnce(LoonFsBuilder<Writable>) -> LoonFsBuilder<Writable>,
 ) -> LoonFs<Writable> {
-    LoonFs::builder_with_store(store.clone())
-        .writer_id(writer_id)
-        .min_publish_interval_ms(0)
-        .runtime_cache(runtime_cache)
-        .build()
-        .await
-        .expect("build writer")
+    cache(
+        LoonFs::builder_with_store(store.clone())
+            .writer_id(writer_id)
+            .min_publish_interval_ms(0),
+    )
+    .build()
+    .await
+    .expect("build writer")
 }
 
 async fn writer_with_cache_and_metrics(
     store: &SharedObjectStore,
     writer_id: &str,
-    runtime_cache: RuntimeCacheConfig,
+    metadata_cache: MetadataCache,
     recorder: Arc<DefaultMetricsRecorder>,
 ) -> LoonFs<Writable> {
     LoonFs::builder_with_store(store.clone())
         .writer_id(writer_id)
         .min_publish_interval_ms(0)
-        .runtime_cache(runtime_cache)
+        .metadata_cache(metadata_cache)
         .metrics_recorder(recorder)
         .build()
         .await
@@ -79,7 +81,7 @@ async fn first_projections_decoded_bytes(ns_fence: &NamespaceId, ns_other: &Name
     let writer = writer_with_cache_and_metrics(
         &store,
         "writer-a",
-        RuntimeCacheConfig::default(),
+        MetadataCache::default(),
         recorder.clone(),
     )
     .await;
@@ -323,10 +325,9 @@ async fn fenced_writer_stays_fenced_after_its_tail_projection_is_evicted() {
     // Room for either projection but not both: publishing to either
     // namespace evicts the other's.
     let both_projections = first_projections_decoded_bytes(&ns_fence, &ns_other).await;
-    let single_projection_cache = RuntimeCacheConfig {
-        max_cached_wal_tail_projection_decoded_bytes: both_projections - 1,
-        ..RuntimeCacheConfig::default()
-    };
+    let single_projection_cache = MetadataCache::builder()
+        .max_head_state_bytes(both_projections - 1)
+        .build();
     let recorder = Arc::new(DefaultMetricsRecorder::new());
     let writer_a = writer_with_cache_and_metrics(
         &store,
@@ -452,7 +453,7 @@ async fn fenced_writer_stays_fenced_after_its_tail_projection_is_evicted() {
 }
 
 #[tokio::test]
-async fn fenced_writer_stays_fenced_with_runtime_caches_disabled() {
+async fn fenced_writer_stays_fenced_with_zero_cache_limits() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("nocache").expect("valid namespace id");
     let counting = Arc::new(RecordingStore::new(
@@ -461,7 +462,15 @@ async fn fenced_writer_stays_fenced_with_runtime_caches_disabled() {
     ));
     let store: SharedObjectStore = counting.clone();
 
-    let writer_a = writer_with_cache(&store, "writer-a", RuntimeCacheConfig::disabled()).await;
+    let writer_a = writer_with_cache(&store, "writer-a", |builder| {
+        builder.metadata_cache(
+            MetadataCache::builder()
+                .max_segment_bytes(0)
+                .max_head_state_bytes(0)
+                .build(),
+        )
+    })
+    .await;
     writer_a
         .create_namespace(
             &namespace_id,
@@ -544,10 +553,7 @@ async fn a_cached_view_older_than_the_revalidation_bound_rediscovers() {
     let interval_ms = 1_000;
     let reader = LoonFs::reader_with_store(store.clone())
         .monotonic_timer(timer.clone())
-        .runtime_cache(RuntimeCacheConfig {
-            manifest_revalidation_interval_ms: interval_ms,
-            ..Default::default()
-        })
+        .manifest_revalidation_interval_ms(interval_ms)
         .build()
         .await
         .expect("reader");
@@ -641,10 +647,7 @@ async fn warm_answers_are_measured_against_the_previous_check() {
     let interval_ms = 1_000;
     let reader = LoonFs::reader_with_store(store.clone())
         .monotonic_timer(timer.clone())
-        .runtime_cache(RuntimeCacheConfig {
-            manifest_revalidation_interval_ms: interval_ms,
-            ..Default::default()
-        })
+        .manifest_revalidation_interval_ms(interval_ms)
         .build()
         .await
         .expect("reader");
@@ -729,16 +732,12 @@ async fn writer_with_timer(
     store: &SharedObjectStore,
     writer_id: &str,
     timer: &Arc<ManualClock>,
-    runtime_cache: RuntimeCacheConfig,
+    cache: impl FnOnce(LoonFsBuilder<Writable>) -> LoonFsBuilder<Writable>,
 ) -> LoonFs<Writable> {
-    LoonFs::builder_with_store(store.clone())
-        .writer_id(writer_id)
-        .min_publish_interval_ms(0)
-        .monotonic_timer(timer.clone())
-        .runtime_cache(runtime_cache)
-        .build()
-        .await
-        .expect("build writer")
+    writer_with_cache(store, writer_id, |builder| {
+        cache(builder.monotonic_timer(timer.clone()))
+    })
+    .await
 }
 
 /// Creates `other_id` from a writer of its own and gives it one 16 KiB
@@ -781,9 +780,7 @@ async fn other_head_state_bytes(other_id: &NamespaceId) -> usize {
         .get_path_entry("/", Default::default())
         .await
         .expect("cold read");
-    reader
-        .runtime_cache_stats()
-        .head_state_cache_cached_decoded_bytes
+    reader.metadata_cache().stats().head_state_bytes
 }
 
 #[tokio::test]
@@ -806,16 +803,15 @@ async fn a_seeded_view_carries_the_writers_basis_confirmation() {
     let store: SharedObjectStore = recording.clone();
     let timer = Arc::new(ManualClock::new(0));
     let interval_ms = 1_000;
-    let writer = writer_with_timer(
-        &store,
-        "seeded-check-writer",
-        &timer,
-        RuntimeCacheConfig {
-            manifest_revalidation_interval_ms: interval_ms,
-            max_cached_wal_tail_projection_decoded_bytes: budget,
-            ..Default::default()
-        },
-    )
+    let writer = writer_with_timer(&store, "seeded-check-writer", &timer, |builder| {
+        builder
+            .manifest_revalidation_interval_ms(interval_ms)
+            .metadata_cache(
+                MetadataCache::builder()
+                    .max_head_state_bytes(budget)
+                    .build(),
+            )
+    })
     .await;
     let namespace_writer = writer
         .open_namespace(&namespace_id)
@@ -927,15 +923,9 @@ async fn a_seed_on_another_basis_does_not_keep_the_cached_check() {
     let recording = Arc::new(RecordingStore::new(blocking, KeyPredicate::any()));
     let store: SharedObjectStore = recording.clone();
     let timer = Arc::new(ManualClock::new(0));
-    let writer = writer_with_timer(
-        &store,
-        "reseeded-writer",
-        &timer,
-        RuntimeCacheConfig {
-            manifest_revalidation_interval_ms: 1_000,
-            ..Default::default()
-        },
-    )
+    let writer = writer_with_timer(&store, "reseeded-writer", &timer, |builder| {
+        builder.manifest_revalidation_interval_ms(1_000)
+    })
     .await;
     let reader = writer.read_only();
     let namespace = reader.namespace(&namespace_id);
@@ -1023,14 +1013,9 @@ async fn read_after_write_only_probes_the_next_wal_number_without_replay() {
     let store: SharedObjectStore = recording.clone();
     let namespace_id = NamespaceId::parse("seeded").expect("valid namespace id");
 
-    let writer = writer_with_cache(
-        &store,
-        "seed-writer",
-        RuntimeCacheConfig {
-            manifest_revalidation_interval_ms: u64::MAX,
-            ..Default::default()
-        },
-    )
+    let writer = writer_with_cache(&store, "seed-writer", |builder| {
+        builder.manifest_revalidation_interval_ms(u64::MAX)
+    })
     .await;
     writer
         .create_namespace(
@@ -1089,22 +1074,16 @@ async fn read_after_write_only_probes_the_next_wal_number_without_replay() {
         .successor()
         .expect("next WAL number");
     recording.reset();
-    let before_read = reader.runtime_cache_stats();
+    let before_read = reader.metadata_cache().stats();
 
     namespace
         .get_path_entry("/docs/fresh.txt", Default::default())
         .await
         .expect("read after write");
     crate::common::assert_wal_probe(recording.take(), &namespace_id, next_wal_no);
-    let after_read = reader.runtime_cache_stats();
-    assert_eq!(
-        after_read.wal_tail_projection_cache_misses,
-        before_read.wal_tail_projection_cache_misses
-    );
-    assert_eq!(
-        after_read.wal_tail_projection_cache_hits,
-        before_read.wal_tail_projection_cache_hits + 1
-    );
+    let after_read = reader.metadata_cache().stats();
+    assert_eq!(after_read.wal_tail_misses, before_read.wal_tail_misses);
+    assert_eq!(after_read.wal_tail_hits, before_read.wal_tail_hits + 1);
 }
 
 #[tokio::test]
@@ -1116,14 +1095,9 @@ async fn reads_after_maintenance_are_current_and_reuse_their_tail() {
     ));
     let store: SharedObjectStore = recording.clone();
     let namespace_id = NamespaceId::parse("maintained").expect("valid namespace id");
-    let writer = writer_with_cache(
-        &store,
-        "maintained-writer",
-        RuntimeCacheConfig {
-            manifest_revalidation_interval_ms: u64::MAX,
-            ..Default::default()
-        },
-    )
+    let writer = writer_with_cache(&store, "maintained-writer", |builder| {
+        builder.manifest_revalidation_interval_ms(u64::MAX)
+    })
     .await;
     writer
         .create_namespace(
@@ -1167,19 +1141,13 @@ async fn reads_after_maintenance_are_current_and_reuse_their_tail() {
         .successor()
         .expect("next WAL number");
     recording.reset();
-    let before_read = reader.runtime_cache_stats();
+    let before_read = reader.metadata_cache().stats();
     namespace
         .get_path_entry("/file.txt", Default::default())
         .await
         .expect("next read");
     crate::common::assert_wal_probe(recording.take(), &namespace_id, next_wal_no);
-    let after_read = reader.runtime_cache_stats();
-    assert_eq!(
-        after_read.wal_tail_projection_cache_misses,
-        before_read.wal_tail_projection_cache_misses
-    );
-    assert_eq!(
-        after_read.wal_tail_projection_cache_hits,
-        before_read.wal_tail_projection_cache_hits + 1
-    );
+    let after_read = reader.metadata_cache().stats();
+    assert_eq!(after_read.wal_tail_misses, before_read.wal_tail_misses);
+    assert_eq!(after_read.wal_tail_hits, before_read.wal_tail_hits + 1);
 }

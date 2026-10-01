@@ -1,8 +1,9 @@
 //! Server configuration: strict TOML decoding of the listen address,
-//! store, and runtime cache overrides.
+//! store, metadata cache limits, and runtime overrides.
 
 use crate::local_cache::{DISK_BLOCK_BYTES, MIN_DISK_BYTES};
-use loonfs::RuntimeCacheConfig;
+use loonfs::metrics::MetricsRecorder;
+use loonfs::MetadataCache;
 use loonfs_api::env::{AUTH_TOKEN_ENV, CONTENT_TOKEN_SECRET_ENV};
 use loonfs_api::SecretString;
 use loonfs_grep::GrepWorkerConfig;
@@ -12,6 +13,7 @@ use std::env;
 use std::fs;
 use std::net::SocketAddr;
 use std::path::Path;
+use std::sync::Arc;
 use thiserror::Error;
 
 pub use loonfs_objectstore::StoreConfig;
@@ -154,8 +156,9 @@ pub struct ServerConfig {
     /// Defaults to a 64 KiB threshold; `false` disables inline writes in TOML.
     #[serde(default)]
     pub inline_content: InlineContentOverrides,
+    /// Limits of the one metadata cache the server's runtime reads through.
     #[serde(default)]
-    pub runtime_cache: RuntimeCacheConfigOverrides,
+    pub metadata_cache: MetadataCacheOverrides,
     /// The node-local cache of encoded metadata blocks, if this deployment
     /// keeps one. Absent means no local cache: every metadata block read
     /// that misses the decoded cache goes to object storage, which is the
@@ -240,6 +243,14 @@ pub struct ServerConfig {
     /// compaction that holds at most this much at once. Defaults to 64 MiB.
     #[serde(default = "default_max_merge_input_bytes")]
     pub max_merge_input_bytes: usize,
+    /// Minimum interval between checks for a successor to a cached manifest,
+    /// in milliseconds. Zero checks on every read. Unset keeps the runtime
+    /// default of 1000.
+    pub manifest_revalidation_interval_ms: Option<u64>,
+    /// Metadata block bytes one read, publication, or fold keeps for itself
+    /// on top of the metadata cache. Zero keeps none. Unset keeps the
+    /// runtime default of 64 MiB.
+    pub max_block_memo_bytes: Option<usize>,
     /// How old a WAL tail's newest commit must be before maintenance folds
     /// a tail that is below the fold thresholds, in milliseconds. Scheduled
     /// maintenance and explicit `metadata` requests use the same period.
@@ -372,13 +383,28 @@ pub struct LocalCacheConfig {
     pub disk_bytes: u64,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+/// The server's `[metadata_cache]` table: the limits of the one metadata
+/// cache the server builds at startup. Omitted fields keep the runtime
+/// defaults.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RuntimeCacheConfigOverrides {
-    pub manifest_revalidation_interval_ms: Option<u64>,
-    pub max_cached_wal_tail_projection_decoded_bytes: Option<usize>,
-    pub metadata_segment_cache_max_decoded_bytes: Option<usize>,
-    pub max_block_memo_bytes: Option<usize>,
+pub struct MetadataCacheOverrides {
+    pub max_segment_bytes: Option<usize>,
+    pub max_head_state_bytes: Option<usize>,
+}
+
+impl MetadataCacheOverrides {
+    /// Builds the cache these limits describe, reporting to `recorder`.
+    pub(crate) fn build(&self, recorder: Arc<dyn MetricsRecorder>) -> MetadataCache {
+        let mut builder = MetadataCache::builder().metrics_recorder(recorder);
+        if let Some(bytes) = self.max_segment_bytes {
+            builder = builder.max_segment_bytes(bytes);
+        }
+        if let Some(bytes) = self.max_head_state_bytes {
+            builder = builder.max_head_state_bytes(bytes);
+        }
+        builder.build()
+    }
 }
 
 /// What this server does about maintenance: serve the API group, run the
@@ -505,27 +531,6 @@ impl ServerConfig {
                 self.content_token_secret = SecretString::new(secret);
             }
         }
-    }
-
-    /// Resolves runtime cache settings by applying server overrides to the defaults.
-    pub fn runtime_cache_config(&self) -> RuntimeCacheConfig {
-        let mut config = RuntimeCacheConfig::default();
-        if let Some(value) = self.runtime_cache.manifest_revalidation_interval_ms {
-            config.manifest_revalidation_interval_ms = value;
-        }
-        if let Some(value) = self
-            .runtime_cache
-            .max_cached_wal_tail_projection_decoded_bytes
-        {
-            config.max_cached_wal_tail_projection_decoded_bytes = value;
-        }
-        if let Some(value) = self.runtime_cache.metadata_segment_cache_max_decoded_bytes {
-            config.metadata_segment_cache.max_decoded_bytes = value;
-        }
-        if let Some(value) = self.runtime_cache.max_block_memo_bytes {
-            config.metadata_segment_cache.max_block_memo_bytes = value;
-        }
-        config
     }
 
     /// Builds the object store selected by this server configuration.
@@ -1692,14 +1697,14 @@ root = "/tmp/loonfs-server"
 key_prefiks = "typo"
 "#,
         );
-        let runtime_cache_level = write_config(
+        let metadata_cache_level = write_config(
             r#"
 bind = "127.0.0.1:9400"
 auth_token = "dev-token"
 writer_id = "loonfs-server"
 
-[runtime_cache]
-max_cached_wal_tail_projection_decoded_byte = 2
+[metadata_cache]
+max_head_state_byte = 2
 
 [store]
 kind = "local-fs"
@@ -1725,10 +1730,7 @@ root = "/tmp/loonfs-server"
         for (path, typo) in [
             (top_level, "lease_duration"),
             (store_level, "key_prefiks"),
-            (
-                runtime_cache_level,
-                "max_cached_wal_tail_projection_decoded_byte",
-            ),
+            (metadata_cache_level, "max_head_state_byte"),
             (grep_level, "max_files_per_stepp"),
         ] {
             let error = load_server_config(&path).expect_err("typo'd key must be rejected");
@@ -1778,7 +1780,7 @@ root = "/tmp/loonfs-server"
     }
 
     #[test]
-    fn load_uses_default_runtime_cache_when_omitted() {
+    fn load_uses_default_metadata_cache_when_omitted() {
         let path = write_config(
             r#"
 bind = "127.0.0.1:9400"
@@ -1793,49 +1795,56 @@ root = "/tmp/loonfs-server"
 
         let config = load_server_config(&path).expect("load config");
         assert_eq!(
-            config.runtime_cache_config(),
-            loonfs::RuntimeCacheConfig::default()
+            config.metadata_cache,
+            super::MetadataCacheOverrides::default()
         );
+        assert_eq!(config.manifest_revalidation_interval_ms, None);
+        assert_eq!(config.max_block_memo_bytes, None);
     }
 
     #[test]
-    fn load_applies_runtime_cache_overrides() {
+    fn load_applies_metadata_cache_and_read_settings() {
         let path = write_config(
             r#"
 bind = "127.0.0.1:9400"
 auth_token = "dev-token"
 writer_id = "loonfs-server"
-
-[runtime_cache]
 manifest_revalidation_interval_ms = 250
-max_cached_wal_tail_projection_decoded_bytes = 4096
 max_block_memo_bytes = 8192
 
+[metadata_cache]
+max_segment_bytes = 16384
+max_head_state_bytes = 4096
+
 [store]
 kind = "local-fs"
 root = "/tmp/loonfs-server"
 "#,
         );
 
-        let config = load_server_config(&path)
-            .expect("load config")
-            .runtime_cache_config();
-        assert_eq!(config.manifest_revalidation_interval_ms, 250);
-        assert_eq!(config.max_cached_wal_tail_projection_decoded_bytes, 4096);
-        assert_eq!(config.metadata_segment_cache.max_block_memo_bytes, 8192);
+        let config = load_server_config(&path).expect("load config");
+        assert_eq!(config.manifest_revalidation_interval_ms, Some(250));
+        assert_eq!(config.max_block_memo_bytes, Some(8192));
+        assert_eq!(
+            config.metadata_cache,
+            super::MetadataCacheOverrides {
+                max_segment_bytes: Some(16384),
+                max_head_state_bytes: Some(4096),
+            }
+        );
     }
 
     #[test]
-    fn load_accepts_disabled_runtime_cache_overrides() {
+    fn load_accepts_zero_metadata_cache_limits() {
         let path = write_config(
             r#"
 bind = "127.0.0.1:9400"
 auth_token = "dev-token"
 writer_id = "loonfs-server"
 
-[runtime_cache]
-max_cached_wal_tail_projection_decoded_bytes = 0
-metadata_segment_cache_max_decoded_bytes = 0
+[metadata_cache]
+max_segment_bytes = 0
+max_head_state_bytes = 0
 
 [store]
 kind = "local-fs"
@@ -1843,10 +1852,14 @@ root = "/tmp/loonfs-server"
 "#,
         );
 
-        let config = load_server_config(&path)
-            .expect("load config")
-            .runtime_cache_config();
-        assert_eq!(config, loonfs::RuntimeCacheConfig::disabled());
+        let config = load_server_config(&path).expect("load config");
+        assert_eq!(
+            config.metadata_cache,
+            super::MetadataCacheOverrides {
+                max_segment_bytes: Some(0),
+                max_head_state_bytes: Some(0),
+            }
+        );
     }
 
     #[test]
@@ -2236,15 +2249,15 @@ root = "/tmp/loonfs-server"
     }
 
     #[test]
-    fn load_rejects_negative_runtime_cache_limits_as_decode_error() {
+    fn load_rejects_negative_metadata_cache_limits_as_decode_error() {
         let path = write_config(
             r#"
 bind = "127.0.0.1:9400"
 auth_token = "dev-token"
 writer_id = "loonfs-server"
 
-[runtime_cache]
-max_cached_wal_tail_projection_decoded_bytes = -1
+[metadata_cache]
+max_head_state_bytes = -1
 
 [store]
 kind = "local-fs"

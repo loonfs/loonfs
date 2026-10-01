@@ -894,9 +894,7 @@ pub(crate) async fn publish_batch_with_engine(
     // The per-projection ceiling. The publisher applies the same budget as
     // an aggregate over every projection it retains.
     let tail_options = loonfs_core::publish::PublishTailOptions {
-        max_tail_decoded_bytes: core
-            .runtime_cache_config()
-            .max_cached_wal_tail_projection_decoded_bytes,
+        max_tail_decoded_bytes: core.max_head_state_bytes(),
     };
     // Boxing erases the engine's deeply nested publish future; without
     // it, callers awaiting a put or commit (CLI, server, embedding

@@ -955,8 +955,8 @@ async fn fresh_read_context<S: ObjectStore + ?Sized>(
     RuntimeReadContext {
         basis: loaded.basis(),
         head: loaded.read_state,
-        segment_cache: Arc::new(MetadataSegmentCache::new(Default::default())),
-        head_state: Arc::new(crate::manifest::HeadStateCache::new(usize::MAX)),
+        segment_cache: Arc::new(MetadataSegmentCache::unshared(usize::MAX)),
+        head_state: Arc::new(crate::manifest::HeadStateCache::unshared(usize::MAX)),
     }
 }
 

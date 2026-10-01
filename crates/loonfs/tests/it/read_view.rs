@@ -245,21 +245,18 @@ async fn ordinary_read_returns_current_data_after_compaction_and_collection() {
     let (result, reader) = read_during_compaction_and_collection(false, false).await;
     let entry = result.expect("one current read remains readable");
 
-    let before_read = reader.runtime_cache_stats();
+    let before_read = reader.metadata_cache().stats();
     let again = reader
         .namespace(&entry.namespace_id)
         .get_path_entry("/a", Default::default())
         .await
         .expect("the read after the stale-head retry");
     assert_eq!(again, entry);
-    let after_read = reader.runtime_cache_stats();
+    let after_read = reader.metadata_cache().stats();
+    assert_eq!(after_read.wal_tail_misses, before_read.wal_tail_misses);
     assert_eq!(
-        after_read.wal_tail_projection_cache_misses,
-        before_read.wal_tail_projection_cache_misses
-    );
-    assert_eq!(
-        after_read.wal_tail_projection_cache_hits,
-        before_read.wal_tail_projection_cache_hits + 1,
+        after_read.wal_tail_hits,
+        before_read.wal_tail_hits + 1,
         "the next read reuses the tail the retry loaded"
     );
 }

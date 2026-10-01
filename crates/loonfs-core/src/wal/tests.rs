@@ -765,10 +765,10 @@ async fn a_warm_probe_reports_a_broken_chain_at_its_own_epoch_as_corruption() {
     let mut warm = crate::RuntimeReadContext {
         basis: loaded.basis(),
         head: loaded.read_state,
-        segment_cache: std::sync::Arc::new(crate::cache::MetadataSegmentCache::new(
-            Default::default(),
+        segment_cache: std::sync::Arc::new(crate::cache::MetadataSegmentCache::unshared(
+            usize::MAX,
         )),
-        head_state: std::sync::Arc::new(crate::cache::HeadStateCache::new(usize::MAX)),
+        head_state: std::sync::Arc::new(crate::cache::HeadStateCache::unshared(usize::MAX)),
     };
     let error = super::probe_namespace_wal(&store, &mut warm)
         .await

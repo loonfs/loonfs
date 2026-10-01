@@ -12,7 +12,7 @@ mod trace;
 
 pub use config::{
     load_server_config, parse_server_config, GrepConfig, GrepMode, LocalCacheConfig,
-    MaintenanceMode, PublicationLimitsOverrides, RuntimeCacheConfigOverrides, ServerConfig,
+    MaintenanceMode, MetadataCacheOverrides, PublicationLimitsOverrides, ServerConfig,
     ServerConfigError, StoreConfig, TlsServerConfig,
 };
 pub use http::{

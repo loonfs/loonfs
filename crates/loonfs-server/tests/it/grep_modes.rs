@@ -18,8 +18,8 @@ use loonfs_grep::{GramIndexBuildPolicy, GrepBuildOutcome, GrepWorker, GREP_INDEX
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::SharedObjectStore;
 use loonfs_server::{
-    app, AppOptions, GrepConfig, GrepMode, MaintenanceMode, RuntimeCacheConfigOverrides,
-    ServerConfig, StoreConfig,
+    app, AppOptions, GrepConfig, GrepMode, MaintenanceMode, MetadataCacheOverrides, ServerConfig,
+    StoreConfig,
 };
 use serde::de::DeserializeOwned;
 use std::num::NonZeroUsize;
@@ -754,7 +754,7 @@ fn test_config(store_root: &Path, mode: GrepMode) -> ServerConfig {
         max_concurrent_folds: loonfs::DEFAULT_MAX_CONCURRENT_FOLDS,
         publication: Default::default(),
         inline_content: Default::default(),
-        runtime_cache: RuntimeCacheConfigOverrides::default(),
+        metadata_cache: MetadataCacheOverrides::default(),
         local_cache: None,
         grep: GrepConfig {
             mode,
@@ -773,6 +773,8 @@ fn test_config(store_root: &Path, mode: GrepMode) -> ServerConfig {
         max_concurrent_downloads: 2,
         max_concurrent_maintenance: 2,
         max_merge_input_bytes: loonfs_api::wire::sst_blocks::DEFAULT_MAX_COMPACTION_INPUT_BYTES,
+        manifest_revalidation_interval_ms: None,
+        max_block_memo_bytes: None,
         idle_fold_after_ms: loonfs::MetadataMaintenanceOptions::default().idle_fold_after_ms,
         allow_unauthenticated_remote: false,
         allow_remote_without_tls: false,

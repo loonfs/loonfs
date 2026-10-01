@@ -1,8 +1,9 @@
-//! Runtime instruments and object-store metric reporting.
+//! Runtime, metadata cache, and object-store metric reporting.
 //!
-//! Each handle has one [`RuntimeInstruments`] instance. Instruments with
-//! dynamic labels are cached so each label set is registered once. Reporting
-//! returns immediately when no recorder is configured.
+//! Each runtime has one [`RuntimeInstruments`] instance, and each metadata
+//! cache one [`MetadataCacheInstruments`]. Instruments with dynamic labels
+//! are cached so each label set is registered once. Reporting returns
+//! immediately when no recorder is configured.
 
 use super::{
     CounterHandle, GaugeHandle, HistogramHandle, MetricsRecorder, ObjectStoreMetricSample,
@@ -351,7 +352,7 @@ struct Installed {
     compactions: CompactionInstruments,
     publisher: PublisherInstruments,
     gc: GcInstruments,
-    cache: RuntimeCacheInstruments,
+    views: ViewReadInstruments,
 }
 
 impl RuntimeInstruments {
@@ -363,61 +364,25 @@ impl RuntimeInstruments {
                 compactions: CompactionInstruments::register(recorder.as_ref()),
                 publisher: PublisherInstruments::register(recorder.as_ref()),
                 gc: GcInstruments::register(recorder.as_ref()),
-                cache: RuntimeCacheInstruments::register(recorder.as_ref()),
+                views: ViewReadInstruments::register(recorder.as_ref()),
                 object_store: Mutex::new(HashMap::new()),
                 recorder,
             }),
         })
     }
 
-    /// Records one latest-view read handled by the runtime cache.
+    /// Records one latest-view read.
     pub(crate) fn latest_metadata_view_read(&self) {
         if let Some(installed) = &self.installed {
-            installed.cache.latest_metadata_view_reads.increment(1);
+            installed.views.latest_metadata_view_reads.increment(1);
         }
     }
 
     /// Records one snapshot-backed metadata view.
     pub(crate) fn snapshot_view_read(&self) {
         if let Some(installed) = &self.installed {
-            installed.cache.snapshot_view_reads.increment(1);
+            installed.views.snapshot_view_reads.increment(1);
         }
-    }
-
-    pub(crate) fn namespace_head_cache_hit(&self) {
-        if let Some(installed) = &self.installed {
-            installed.cache.namespace_head.hits.increment(1);
-        }
-    }
-
-    pub(crate) fn namespace_head_cache_miss(&self) {
-        if let Some(installed) = &self.installed {
-            installed.cache.namespace_head.misses.increment(1);
-        }
-    }
-
-    /// Returns the metadata-segment cache metrics observer, if metrics are enabled.
-    pub(crate) fn metadata_segment_cache_observer(
-        &self,
-    ) -> Option<Arc<dyn DecodedBlockCacheObserver>> {
-        let observer = Arc::clone(&self.installed.as_ref()?.cache.metadata_segment);
-        Some(observer)
-    }
-
-    /// Returns the observer for WAL-tail lookups and inserts, if metrics are
-    /// enabled.
-    pub(crate) fn wal_tail_projection_cache_observer(
-        &self,
-    ) -> Option<Arc<dyn DecodedBlockCacheObserver>> {
-        let observer = Arc::clone(&self.installed.as_ref()?.cache.wal_tail_projection);
-        Some(observer)
-    }
-
-    /// Returns the observer for evictions, rejections, and retained bytes
-    /// across head anchors and WAL-tail projections, if metrics are enabled.
-    pub(crate) fn head_state_cache_observer(&self) -> Option<Arc<dyn DecodedBlockCacheObserver>> {
-        let observer = Arc::clone(&self.installed.as_ref()?.cache.head_state);
-        Some(observer)
     }
 
     /// An object-store recorder that bridges samples into these
@@ -813,14 +778,74 @@ impl MaintenanceJobInstruments {
     }
 }
 
-/// Metrics for caches owned by the runtime. All instruments are registered together.
-struct RuntimeCacheInstruments {
+/// The metadata views one runtime reads through.
+struct ViewReadInstruments {
     latest_metadata_view_reads: Arc<dyn CounterHandle>,
     snapshot_view_reads: Arc<dyn CounterHandle>,
+}
+
+/// Every instrument one metadata cache reports, or nothing at all.
+pub(crate) struct MetadataCacheInstruments {
+    installed: Option<InstalledCache>,
+}
+
+struct InstalledCache {
     namespace_head: NamespaceHeadCacheInstruments,
     metadata_segment: Arc<MetadataSegmentCacheInstruments>,
     wal_tail_projection: Arc<WalTailProjectionCacheInstruments>,
     head_state: Arc<HeadStateCacheInstruments>,
+}
+
+impl MetadataCacheInstruments {
+    /// Registers every cache instrument now, or nothing without a recorder.
+    pub(crate) fn new(recorder: Option<&dyn MetricsRecorder>) -> Self {
+        Self {
+            installed: recorder.map(|recorder| InstalledCache {
+                namespace_head: NamespaceHeadCacheInstruments::register(recorder),
+                metadata_segment: Arc::new(MetadataSegmentCacheInstruments::register(recorder)),
+                wal_tail_projection: Arc::new(WalTailProjectionCacheInstruments::register(
+                    recorder,
+                )),
+                head_state: Arc::new(HeadStateCacheInstruments::register(recorder)),
+            }),
+        }
+    }
+
+    pub(crate) fn namespace_head_cache_hit(&self) {
+        if let Some(installed) = &self.installed {
+            installed.namespace_head.hits.increment(1);
+        }
+    }
+
+    pub(crate) fn namespace_head_cache_miss(&self) {
+        if let Some(installed) = &self.installed {
+            installed.namespace_head.misses.increment(1);
+        }
+    }
+
+    /// Returns the metadata-segment cache metrics observer, if metrics are enabled.
+    pub(crate) fn metadata_segment_cache_observer(
+        &self,
+    ) -> Option<Arc<dyn DecodedBlockCacheObserver>> {
+        let observer = Arc::clone(&self.installed.as_ref()?.metadata_segment);
+        Some(observer)
+    }
+
+    /// Returns the observer for WAL-tail lookups and inserts, if metrics are
+    /// enabled.
+    pub(crate) fn wal_tail_projection_cache_observer(
+        &self,
+    ) -> Option<Arc<dyn DecodedBlockCacheObserver>> {
+        let observer = Arc::clone(&self.installed.as_ref()?.wal_tail_projection);
+        Some(observer)
+    }
+
+    /// Returns the observer for evictions, rejections, and retained bytes
+    /// across head anchors and WAL-tail projections, if metrics are enabled.
+    pub(crate) fn head_state_cache_observer(&self) -> Option<Arc<dyn DecodedBlockCacheObserver>> {
+        let observer = Arc::clone(&self.installed.as_ref()?.head_state);
+        Some(observer)
+    }
 }
 
 struct NamespaceHeadCacheInstruments {
@@ -852,7 +877,7 @@ struct HeadStateCacheInstruments {
     retained_decoded_bytes: Arc<dyn GaugeHandle>,
 }
 
-impl RuntimeCacheInstruments {
+impl ViewReadInstruments {
     fn register(recorder: &dyn MetricsRecorder) -> Self {
         Self {
             latest_metadata_view_reads: recorder.register_counter(
@@ -865,10 +890,6 @@ impl RuntimeCacheInstruments {
                 "Snapshot-backed metadata views created by the runtime",
                 &[],
             ),
-            namespace_head: NamespaceHeadCacheInstruments::register(recorder),
-            metadata_segment: Arc::new(MetadataSegmentCacheInstruments::register(recorder)),
-            wal_tail_projection: Arc::new(WalTailProjectionCacheInstruments::register(recorder)),
-            head_state: Arc::new(HeadStateCacheInstruments::register(recorder)),
         }
     }
 }
@@ -1314,13 +1335,14 @@ mod tests {
     }
 
     #[test]
-    fn runtime_cache_events_reach_the_registered_instruments() {
+    fn view_and_cache_events_reach_the_registered_instruments() {
         let recorder = Arc::new(DefaultMetricsRecorder::new());
         let instruments = RuntimeInstruments::new(Some(recorder.clone()));
         instruments.latest_metadata_view_read();
         instruments.snapshot_view_read();
+        let cache = MetadataCacheInstruments::new(Some(recorder.as_ref()));
 
-        let metadata = instruments
+        let metadata = cache
             .metadata_segment_cache_observer()
             .expect("metadata observer");
         metadata.hit();
@@ -1331,14 +1353,14 @@ mod tests {
         metadata.filter_false_positive();
         metadata.retained(170);
 
-        let wal = instruments
+        let wal = cache
             .wal_tail_projection_cache_observer()
             .expect("WAL-tail observer");
         wal.hit();
         wal.miss();
         wal.insert();
 
-        let head_state = instruments
+        let head_state = cache
             .head_state_cache_observer()
             .expect("head-state observer");
         head_state.evict(70);

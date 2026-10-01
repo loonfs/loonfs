@@ -1,8 +1,12 @@
-//! Shared caches for decoded manifest state: SST blocks keyed by owner and
-//! segment id, validated manifests, and the head state reads start from.
+//! Caches for decoded manifest state: SST blocks keyed by owner and segment
+//! id, validated manifests, and the head state reads start from.
 //!
-//! The decoded block cache also carries the handle to the optional
-//! node-local cache of the same blocks in their encoded form; see
+//! One or more runtimes may read through one store. Each reads through its
+//! own view, which adds the runtime's [`CacheScope`] to every key, so no
+//! runtime sees another's entries. Eviction runs across every scope.
+//!
+//! The segment view also carries the handle to the optional node-local
+//! cache of the same blocks in their encoded form; see
 //! [`stored_block_cache`](super::stored_block_cache).
 
 use super::block_load::DEFAULT_BLOCK_MEMO_BYTES;
@@ -20,28 +24,17 @@ use crate::wal::ProjectedWalTail;
 use loonfs_api::wire::manifest::MetadataRow;
 use loonfs_api::wire::manifest::NamespaceManifestEnvelope;
 use loonfs_api::{ChangeSeq, ManifestNo, NamespaceId};
-use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
-/// Default decoded-byte budget for metadata segment blocks. A value of zero
-/// disables the cache.
-pub(crate) const DEFAULT_METADATA_SEGMENT_CACHE_DECODED_BYTES: usize = 256 * 1024 * 1024;
+/// Separates one runtime's entries from every other runtime's in a shared
+/// store. The owner of the store mints one per runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CacheScope(u64);
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MetadataSegmentCacheConfig {
-    pub max_decoded_bytes: usize,
-    /// Data-block bytes one read, publication, or fold keeps in its own block
-    /// memo, on top of this cache. Zero keeps none.
-    pub max_block_memo_bytes: usize,
-}
-
-impl Default for MetadataSegmentCacheConfig {
-    fn default() -> Self {
-        Self {
-            max_decoded_bytes: DEFAULT_METADATA_SEGMENT_CACHE_DECODED_BYTES,
-            max_block_memo_bytes: DEFAULT_BLOCK_MEMO_BYTES,
-        }
+impl CacheScope {
+    pub fn new(value: u64) -> Self {
+        Self(value)
     }
 }
 
@@ -58,6 +51,7 @@ pub struct MetadataSegmentCacheStats {
     /// Approximate: a lookup narrower than the filter key (an exact unbind,
     /// a single revision) can count a true admission here.
     pub filter_false_positives: usize,
+    pub cached_decoded_bytes: usize,
 }
 
 pub(super) type MetadataSegmentBlockKind = SegmentBlockKind;
@@ -77,24 +71,19 @@ pub(super) fn block_memo_bytes(segment_cache: Option<&MetadataSegmentCache>) -> 
     segment_cache.map_or(DEFAULT_BLOCK_MEMO_BYTES, |cache| cache.max_block_memo_bytes)
 }
 
-pub struct MetadataSegmentCache {
-    blocks: DecodedBlockCache<MetadataSegmentCacheKey, DecodedMetadataSegmentBlock>,
-    max_block_memo_bytes: usize,
-    stats: MetadataSegmentFilterStatsInner,
+/// Decoded segment blocks and manifests for every scope, under one byte
+/// budget.
+pub struct SharedSegmentBlocks {
+    blocks: DecodedBlockCache<(CacheScope, MetadataSegmentCacheKey), DecodedMetadataSegmentBlock>,
+    filter_stats: MetadataSegmentFilterStatsInner,
     observer: Option<Arc<dyn DecodedBlockCacheObserver>>,
-    /// Optional node-local cache for encoded blocks. Keeping it with the
-    /// decoded cache ensures callers use both cache tiers or neither tier.
-    stored_block_cache: Option<Arc<dyn StoredMetadataBlockCache>>,
 }
 
-impl std::fmt::Debug for MetadataSegmentCache {
+impl std::fmt::Debug for SharedSegmentBlocks {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
-            .debug_struct("MetadataSegmentCache")
-            .field("blocks", &self.blocks)
-            .field("max_block_memo_bytes", &self.max_block_memo_bytes)
-            .field("stats", &self.stats)
-            .field("stored_block_cache", &self.stored_block_cache)
+            .debug_struct("SharedSegmentBlocks")
+            .field("stats", &self.stats())
             .finish_non_exhaustive()
     }
 }
@@ -105,26 +94,85 @@ struct MetadataSegmentFilterStatsInner {
     filter_false_positives: AtomicUsize,
 }
 
-impl MetadataSegmentCache {
-    pub fn new(config: MetadataSegmentCacheConfig) -> Self {
-        Self::with_stored_block_cache_and_observer(config, None, None)
-    }
-
-    pub fn with_stored_block_cache_and_observer(
-        config: MetadataSegmentCacheConfig,
-        stored_block_cache: Option<Arc<dyn StoredMetadataBlockCache>>,
+impl SharedSegmentBlocks {
+    pub fn new(
+        max_decoded_bytes: usize,
         observer: Option<Arc<dyn DecodedBlockCacheObserver>>,
     ) -> Self {
         Self {
             blocks: DecodedBlockCache::new(DecodedBlockCacheConfig {
-                max_decoded_bytes: config.max_decoded_bytes,
+                max_decoded_bytes,
                 observer: observer.clone(),
             }),
-            max_block_memo_bytes: config.max_block_memo_bytes,
-            stats: MetadataSegmentFilterStatsInner::default(),
+            filter_stats: MetadataSegmentFilterStatsInner::default(),
             observer,
+        }
+    }
+
+    pub fn stats(&self) -> MetadataSegmentCacheStats {
+        let blocks = self.blocks.stats();
+        MetadataSegmentCacheStats {
+            hits: blocks.hits,
+            misses: blocks.misses,
+            inserts: blocks.inserts,
+            evictions: blocks.evictions,
+            filter_skips: self.filter_stats.filter_skips.load(Ordering::SeqCst),
+            filter_false_positives: self
+                .filter_stats
+                .filter_false_positives
+                .load(Ordering::SeqCst),
+            cached_decoded_bytes: blocks.cached_decoded_bytes,
+        }
+    }
+}
+
+/// One runtime's view of shared segment blocks, with the runtime's own block
+/// memo budget and node-local encoded tier.
+pub struct MetadataSegmentCache {
+    blocks: Arc<SharedSegmentBlocks>,
+    scope: CacheScope,
+    max_block_memo_bytes: usize,
+    /// Optional node-local cache for encoded blocks. Keeping it with the
+    /// decoded cache ensures callers use both cache tiers or neither tier.
+    stored_block_cache: Option<Arc<dyn StoredMetadataBlockCache>>,
+}
+
+impl std::fmt::Debug for MetadataSegmentCache {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("MetadataSegmentCache")
+            .field("scope", &self.scope)
+            .field("max_block_memo_bytes", &self.max_block_memo_bytes)
+            .field("stored_block_cache", &self.stored_block_cache)
+            .finish_non_exhaustive()
+    }
+}
+
+impl MetadataSegmentCache {
+    pub fn new(
+        blocks: Arc<SharedSegmentBlocks>,
+        scope: CacheScope,
+        max_block_memo_bytes: usize,
+        stored_block_cache: Option<Arc<dyn StoredMetadataBlockCache>>,
+    ) -> Self {
+        Self {
+            blocks,
+            scope,
+            max_block_memo_bytes,
             stored_block_cache,
         }
+    }
+
+    /// A view over blocks no other view reads, with the default block memo
+    /// budget and no encoded tier.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn unshared(max_decoded_bytes: usize) -> Self {
+        Self::new(
+            Arc::new(SharedSegmentBlocks::new(max_decoded_bytes, None)),
+            CacheScope::new(0),
+            DEFAULT_BLOCK_MEMO_BYTES,
+            None,
+        )
     }
 
     /// Returns the node-local encoded-block cache, if one was configured.
@@ -142,49 +190,45 @@ impl MetadataSegmentCache {
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = Result<DecodedMetadataSegmentBlock, E>>,
     {
-        self.blocks.get_or_load(cache_key, fetch).await
+        self.blocks
+            .blocks
+            .get_or_load(&(self.scope, cache_key.clone()), fetch)
+            .await
     }
 
+    /// Counters for the whole shared store, across every scope.
     pub fn stats(&self) -> MetadataSegmentCacheStats {
-        let blocks = self.blocks.stats();
-        MetadataSegmentCacheStats {
-            hits: blocks.hits,
-            misses: blocks.misses,
-            inserts: blocks.inserts,
-            evictions: blocks.evictions,
-            filter_skips: self.stats.filter_skips.load(Ordering::SeqCst),
-            filter_false_positives: self.stats.filter_false_positives.load(Ordering::SeqCst),
-        }
+        self.blocks.stats()
     }
 
     pub(super) fn record_filter_skip(&self) {
-        self.stats.filter_skips.fetch_add(1, Ordering::SeqCst);
-        if let Some(observer) = &self.observer {
+        self.blocks
+            .filter_stats
+            .filter_skips
+            .fetch_add(1, Ordering::SeqCst);
+        if let Some(observer) = &self.blocks.observer {
             observer.filter_skip();
         }
     }
 
     pub(super) fn record_filter_false_positive(&self) {
-        self.stats
+        self.blocks
+            .filter_stats
             .filter_false_positives
             .fetch_add(1, Ordering::SeqCst);
-        if let Some(observer) = &self.observer {
+        if let Some(observer) = &self.blocks.observer {
             observer.filter_false_positive();
         }
     }
 
     pub(super) fn get(&self, key: &MetadataSegmentCacheKey) -> Option<DecodedMetadataSegmentBlock> {
-        self.blocks.get(key)
+        self.blocks.blocks.get(&(self.scope, key.clone()))
     }
 
     pub(super) fn insert(&self, key: MetadataSegmentCacheKey, block: DecodedMetadataSegmentBlock) {
-        self.blocks.insert(key, block);
+        self.blocks.blocks.insert((self.scope, key), block);
     }
 }
-
-/// Default byte budget for head state, which the publish side also applies
-/// to the projections its sessions retain.
-pub const DEFAULT_WAL_TAIL_PROJECTION_DECODED_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct HeadStateCacheStats {
@@ -270,24 +314,24 @@ impl DecodedBlock for HeadState {
     }
 }
 
-/// Namespace head anchors and WAL-tail projections under one byte budget and
-/// one recency order. An entry heavier than the whole budget is not kept,
-/// because inserting it would evict everything else first.
-pub struct HeadStateCache {
-    entries: DecodedBlockCache<HeadStateKey, HeadState>,
+/// Namespace head anchors and WAL-tail projections for every scope, under
+/// one byte budget and one recency order. An entry heavier than the whole
+/// budget is not kept, because inserting it would evict everything else
+/// first.
+pub struct SharedHeadState {
+    entries: DecodedBlockCache<(CacheScope, HeadStateKey), HeadState>,
     max_decoded_bytes: usize,
     observer: Option<Arc<dyn DecodedBlockCacheObserver>>,
     tail_observer: Option<Arc<dyn DecodedBlockCacheObserver>>,
     counters: HeadStateCounters,
 }
 
-impl std::fmt::Debug for HeadStateCache {
+impl std::fmt::Debug for SharedHeadState {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
-            .debug_struct("HeadStateCache")
-            .field("entries", &self.entries)
+            .debug_struct("SharedHeadState")
             .field("max_decoded_bytes", &self.max_decoded_bytes)
-            .field("counters", &self.counters)
+            .field("stats", &self.stats())
             .finish_non_exhaustive()
     }
 }
@@ -301,14 +345,10 @@ struct HeadStateCounters {
     rejected_decoded_bytes: AtomicUsize,
 }
 
-impl HeadStateCache {
-    pub fn new(max_decoded_bytes: usize) -> Self {
-        Self::with_observers(max_decoded_bytes, None, None)
-    }
-
+impl SharedHeadState {
     /// `observer` sees evictions, rejections, and retained bytes across both
     /// kinds of entry; `tail_observer` sees WAL-tail lookups and inserts.
-    pub fn with_observers(
+    pub fn new(
         max_decoded_bytes: usize,
         observer: Option<Arc<dyn DecodedBlockCacheObserver>>,
         tail_observer: Option<Arc<dyn DecodedBlockCacheObserver>>,
@@ -340,64 +380,7 @@ impl HeadStateCache {
         }
     }
 
-    /// Returns the namespace's anchor and marks it recently used.
-    pub fn get_anchor(&self, namespace_id: &NamespaceId) -> Option<Arc<CachedReadAnchor>> {
-        self.entries
-            .get(&HeadStateKey::Anchor(namespace_id.clone()))
-            .and_then(HeadState::into_anchor)
-    }
-
-    /// Returns the namespace's anchor without marking it used.
-    pub fn peek_anchor(&self, namespace_id: &NamespaceId) -> Option<Arc<CachedReadAnchor>> {
-        self.entries
-            .peek(&HeadStateKey::Anchor(namespace_id.clone()))
-            .and_then(HeadState::into_anchor)
-    }
-
-    pub fn insert_anchor(&self, anchor: Arc<CachedReadAnchor>) {
-        self.insert(
-            HeadStateKey::Anchor(anchor.head.namespace_id.clone()),
-            HeadState::Anchor(anchor),
-        );
-    }
-
-    pub fn invalidate_anchor(&self, namespace_id: &NamespaceId) {
-        self.entries
-            .remove(&HeadStateKey::Anchor(namespace_id.clone()));
-    }
-
-    pub fn get_tail(&self, key: &WalTailProjectionCacheKey) -> Option<Arc<ProjectedWalTail>> {
-        if self.max_decoded_bytes == 0 {
-            return None;
-        }
-        let tail = self
-            .entries
-            .get(&HeadStateKey::Tail(key.clone()))
-            .and_then(HeadState::into_tail);
-        let counter = match &tail {
-            Some(_) => &self.counters.tail_hits,
-            None => &self.counters.tail_misses,
-        };
-        counter.fetch_add(1, Ordering::SeqCst);
-        if let Some(observer) = &self.tail_observer {
-            match &tail {
-                Some(_) => observer.hit(),
-                None => observer.miss(),
-            }
-        }
-        tail
-    }
-
-    pub fn insert_tail(&self, key: WalTailProjectionCacheKey, tail: Arc<ProjectedWalTail>) {
-        if self.insert(HeadStateKey::Tail(key), HeadState::Tail(tail)) {
-            self.counters.tail_inserts.fetch_add(1, Ordering::SeqCst);
-            if let Some(observer) = &self.tail_observer {
-                observer.insert();
-            }
-        }
-    }
-
-    fn insert(&self, key: HeadStateKey, entry: HeadState) -> bool {
+    fn insert(&self, key: (CacheScope, HeadStateKey), entry: HeadState) -> bool {
         if self.max_decoded_bytes == 0 {
             return false;
         }
@@ -417,14 +400,106 @@ impl HeadStateCache {
     }
 }
 
+/// One runtime's view of shared head state.
+#[derive(Debug)]
+pub struct HeadStateCache {
+    shared: Arc<SharedHeadState>,
+    scope: CacheScope,
+}
+
+impl HeadStateCache {
+    pub fn new(shared: Arc<SharedHeadState>, scope: CacheScope) -> Self {
+        Self { shared, scope }
+    }
+
+    /// A view over head state no other view reads.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn unshared(max_decoded_bytes: usize) -> Self {
+        Self::new(
+            Arc::new(SharedHeadState::new(max_decoded_bytes, None, None)),
+            CacheScope::new(0),
+        )
+    }
+
+    /// Counters for the whole shared store, across every scope.
+    pub fn stats(&self) -> HeadStateCacheStats {
+        self.shared.stats()
+    }
+
+    fn anchor_key(&self, namespace_id: &NamespaceId) -> (CacheScope, HeadStateKey) {
+        (self.scope, HeadStateKey::Anchor(namespace_id.clone()))
+    }
+
+    /// Returns the namespace's anchor and marks it recently used.
+    pub fn get_anchor(&self, namespace_id: &NamespaceId) -> Option<Arc<CachedReadAnchor>> {
+        self.shared
+            .entries
+            .get(&self.anchor_key(namespace_id))
+            .and_then(HeadState::into_anchor)
+    }
+
+    /// Returns the namespace's anchor without marking it used.
+    pub fn peek_anchor(&self, namespace_id: &NamespaceId) -> Option<Arc<CachedReadAnchor>> {
+        self.shared
+            .entries
+            .peek(&self.anchor_key(namespace_id))
+            .and_then(HeadState::into_anchor)
+    }
+
+    pub fn insert_anchor(&self, anchor: Arc<CachedReadAnchor>) {
+        self.shared.insert(
+            self.anchor_key(&anchor.head.namespace_id),
+            HeadState::Anchor(anchor),
+        );
+    }
+
+    pub fn invalidate_anchor(&self, namespace_id: &NamespaceId) {
+        self.shared.entries.remove(&self.anchor_key(namespace_id));
+    }
+
+    pub fn get_tail(&self, key: &WalTailProjectionCacheKey) -> Option<Arc<ProjectedWalTail>> {
+        let shared = &self.shared;
+        if shared.max_decoded_bytes == 0 {
+            return None;
+        }
+        let tail = shared
+            .entries
+            .get(&(self.scope, HeadStateKey::Tail(key.clone())))
+            .and_then(HeadState::into_tail);
+        let counter = match &tail {
+            Some(_) => &shared.counters.tail_hits,
+            None => &shared.counters.tail_misses,
+        };
+        counter.fetch_add(1, Ordering::SeqCst);
+        if let Some(observer) = &shared.tail_observer {
+            match &tail {
+                Some(_) => observer.hit(),
+                None => observer.miss(),
+            }
+        }
+        tail
+    }
+
+    pub fn insert_tail(&self, key: WalTailProjectionCacheKey, tail: Arc<ProjectedWalTail>) {
+        let shared = &self.shared;
+        if shared.insert((self.scope, HeadStateKey::Tail(key)), HeadState::Tail(tail)) {
+            shared.counters.tail_inserts.fetch_add(1, Ordering::SeqCst);
+            if let Some(observer) = &shared.tail_observer {
+                observer.insert();
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::panic)]
 mod tests {
     use super::{
-        DecodedMetadataSegmentBlock, HeadStateCache, MetadataSegmentBlockKind,
-        MetadataSegmentCache, MetadataSegmentCacheConfig, MetadataSegmentCacheKey,
+        CacheScope, DecodedMetadataSegmentBlock, HeadStateCache, MetadataSegmentBlockKind,
+        MetadataSegmentCache, MetadataSegmentCacheKey, SharedSegmentBlocks,
         WalTailProjectionCacheKey,
     };
+    use crate::block_cache::DecodedBlock;
     use crate::metadata::{InodeRecord, MetadataState};
     use crate::wal::ProjectedWalTail;
     use loonfs_api::wire::sst_blocks::DecodedDataBlock;
@@ -451,7 +526,7 @@ mod tests {
 
     #[test]
     fn row_attribution_and_timestamps_never_enter_projection_cache_keys() {
-        let cache = HeadStateCache::new(16 * 1024);
+        let cache = HeadStateCache::unshared(16 * 1024);
         let key = WalTailProjectionCacheKey {
             namespace_id: NamespaceId::parse("demo").expect("namespace id"),
             manifest_no: ManifestNo(7),
@@ -501,12 +576,47 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn views_of_one_shared_store_read_only_their_own_blocks() {
+        let shared = Arc::new(SharedSegmentBlocks::new(usize::MAX, None));
+        let view =
+            |scope| MetadataSegmentCache::new(Arc::clone(&shared), CacheScope::new(scope), 0, None);
+        let (first, second) = (view(1), view(2));
+        first.insert(key("a"), block(100));
+        second.insert(key("a"), block(200));
+        for (view, decoded_bytes) in [(&first, 100), (&second, 200)] {
+            let hit = view.get(&key("a")).expect("each view reads its own block");
+            assert_eq!(hit.weight(), decoded_bytes);
+        }
+
+        // Each load waits for the other to start. One in-flight cell shared
+        // across scopes would run a single load, and this would time out.
+        let (started, shared_key) = (tokio::sync::Barrier::new(2), key("b"));
+        let first_load = first.get_or_load(&shared_key, || async {
+            started.wait().await;
+            Ok::<_, String>(block(300))
+        });
+        let second_load = second.get_or_load(&shared_key, || async {
+            started.wait().await;
+            Ok::<_, String>(block(400))
+        });
+        let (from_first, from_second) =
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                tokio::join!(first_load, second_load)
+            })
+            .await
+            .expect("loads in two scopes run side by side");
+        assert_eq!(from_first.expect("first load").weight(), 300);
+        assert_eq!(from_second.expect("second load").weight(), 400);
+        for (view, decoded_bytes) in [(&first, 300), (&second, 400)] {
+            let hit = view.get(&key("b")).expect("each view caches its own load");
+            assert_eq!(hit.weight(), decoded_bytes);
+        }
+    }
+
     #[test]
     fn byte_budget_evicts_the_oldest_block() {
-        let cache = MetadataSegmentCache::new(MetadataSegmentCacheConfig {
-            max_decoded_bytes: 1000,
-            ..MetadataSegmentCacheConfig::default()
-        });
+        let cache = MetadataSegmentCache::unshared(1000);
         cache.insert(key("a"), block(600));
         cache.insert(key("b"), block(600));
         assert!(
@@ -519,10 +629,7 @@ mod tests {
 
     #[test]
     fn replacing_a_block_reaccounts_its_decoded_bytes() {
-        let cache = MetadataSegmentCache::new(MetadataSegmentCacheConfig {
-            max_decoded_bytes: 1000,
-            ..MetadataSegmentCacheConfig::default()
-        });
+        let cache = MetadataSegmentCache::unshared(1000);
         cache.insert(key("a"), block(600));
         cache.insert(key("a"), block(100));
         // 600 was released on replace: another 600 fits without eviction.
@@ -534,7 +641,7 @@ mod tests {
 
     #[test]
     fn cache_hits_share_the_decoded_row_allocation() {
-        let cache = MetadataSegmentCache::new(MetadataSegmentCacheConfig::default());
+        let cache = MetadataSegmentCache::unshared(usize::MAX);
         let inserted = block(64);
         let rows = match &inserted {
             DecodedMetadataSegmentBlock::Data { block: rows, .. } => Arc::clone(rows),
@@ -562,7 +669,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_or_load_retries_a_failed_load_and_then_stops_loading() {
-        let cache = MetadataSegmentCache::new(MetadataSegmentCacheConfig::default());
+        let cache = MetadataSegmentCache::unshared(usize::MAX);
         let failed: Result<_, String> = cache
             .get_or_load(&key("a"), || async { Err("transport".to_owned()) })
             .await;

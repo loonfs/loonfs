@@ -33,16 +33,16 @@ pub(crate) struct GrepHost {
 
 impl GrepHost {
     pub(crate) async fn new(store: &SharedObjectStore, actor: &str) -> Self {
-        Self::with_runtime_cache(store, actor, loonfs::RuntimeCacheConfig::default()).await
+        Self::with_reader(store, actor, |builder| builder).await
     }
 
-    pub(crate) async fn with_runtime_cache(
+    /// `configure` adjusts the reader the service and worker read through.
+    pub(crate) async fn with_reader(
         store: &SharedObjectStore,
         actor: &str,
-        runtime_cache: loonfs::RuntimeCacheConfig,
+        configure: impl FnOnce(loonfs::LoonFsBuilder<ReadOnly>) -> loonfs::LoonFsBuilder<ReadOnly>,
     ) -> Self {
-        let reader = LoonFs::reader_with_store(store.clone())
-            .runtime_cache(runtime_cache)
+        let reader = configure(LoonFs::reader_with_store(store.clone()))
             .build()
             .await
             .expect("build reader");

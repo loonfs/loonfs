@@ -62,7 +62,7 @@ pub struct PublishTailOptions {
 impl Default for PublishTailOptions {
     fn default() -> Self {
         Self {
-            max_tail_decoded_bytes: crate::manifest::DEFAULT_WAL_TAIL_PROJECTION_DECODED_BYTES,
+            max_tail_decoded_bytes: 64 * 1024 * 1024,
         }
     }
 }

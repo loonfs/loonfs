@@ -1822,7 +1822,6 @@ mod tests {
 
     #[tokio::test]
     async fn publish_views_reuse_cached_segment_blocks_across_publishes() {
-        use crate::cache::MetadataSegmentCacheConfig;
         let temp_dir = tempdir().expect("tempdir");
         let store =
             RecordingStore::metadata_segments(LocalFsStore::new(temp_dir.path()).expect("store"));
@@ -1894,9 +1893,7 @@ mod tests {
             "without a cache the next publish re-fetches the same blocks"
         );
 
-        let cache = Arc::new(MetadataSegmentCache::new(
-            MetadataSegmentCacheConfig::default(),
-        ));
+        let cache = Arc::new(MetadataSegmentCache::unshared(usize::MAX));
         let mut cached = NamespaceCommitEngine::new(namespace_id.clone()).segment_cache(cache);
         store.reset();
         cached

@@ -4,9 +4,10 @@
 // Runtime integration tests use panic in helper assertions for precise diagnostics.
 
 use crate::common::*;
+use loonfs::metrics::{DefaultMetricsRecorder, MetricValue};
 use loonfs::{
     ChangeSeq, CompactionStepOutcome, CreateDirectoryOptions, CreateNamespaceOptions, ErrorCode,
-    InodeId, InodeKind, NamespaceId, PutFileOptions, RuntimeCacheConfig, SharedObjectStore,
+    InodeId, InodeKind, MetadataCache, NamespaceId, PutFileOptions, SharedObjectStore,
     StoredMetadataBlockKind,
 };
 use loonfs_core::limits::FOLD_AT_WAL_OBJECTS;
@@ -31,10 +32,7 @@ fn runtime_cache_reuses_wal_tail_projection_for_repeated_reads() {
     ));
     let object_store: SharedObjectStore = recording.clone();
     let fs = open_runtime_with(object_store, "tail-projection-cache-test", |builder| {
-        builder.runtime_cache(RuntimeCacheConfig {
-            manifest_revalidation_interval_ms: u64::MAX,
-            ..Default::default()
-        })
+        builder.manifest_revalidation_interval_ms(u64::MAX)
     });
 
     fs.create_namespace_blocking(
@@ -55,20 +53,18 @@ fn runtime_cache_reuses_wal_tail_projection_for_repeated_reads() {
     fs.get_file_bytes_blocking(&namespace_id, "/docs/file.txt")
         .expect("first read is served from the projection the put seeded");
     assert_wal_probe(recording.take(), &namespace_id, loonfs_api::WalNo(3));
-    let after_first = fs.runtime_cache_stats();
-    assert_eq!(after_first.wal_tail_projection_cache_misses, 0);
-    assert!(after_first.wal_tail_projection_cache_inserts >= 1);
-    assert!(after_first.wal_tail_projection_cache_hits >= 1);
+    let after_first = fs.metadata_cache_stats();
+    assert_eq!(after_first.wal_tail_misses, 0);
+    assert!(after_first.wal_tail_inserts >= 1);
+    assert!(after_first.wal_tail_hits >= 1);
 
     block_on(fs.writer.drain()).expect("finish hints");
     recording.reset();
     fs.get_file_bytes_blocking(&namespace_id, "/docs/file.txt")
         .expect("second read should reuse cached WAL-tail projection");
     assert_wal_probe(recording.take(), &namespace_id, loonfs_api::WalNo(3));
-    let after_second = fs.runtime_cache_stats();
-    assert!(
-        after_second.wal_tail_projection_cache_hits > after_first.wal_tail_projection_cache_hits
-    );
+    let after_second = fs.metadata_cache_stats();
+    assert!(after_second.wal_tail_hits > after_first.wal_tail_hits);
 
     fs.put_file_bytes_blocking(
         &namespace_id,
@@ -82,11 +78,9 @@ fn runtime_cache_reuses_wal_tail_projection_for_repeated_reads() {
     fs.get_file_bytes_blocking(&namespace_id, "/docs/file.txt")
         .expect("read after local mutation reuses the newly seeded projection");
     assert_wal_probe(recording.take(), &namespace_id, loonfs_api::WalNo(4));
-    let after_mutation = fs.runtime_cache_stats();
-    assert_eq!(after_mutation.wal_tail_projection_cache_misses, 0);
-    assert!(
-        after_mutation.wal_tail_projection_cache_hits > after_second.wal_tail_projection_cache_hits
-    );
+    let after_mutation = fs.metadata_cache_stats();
+    assert_eq!(after_mutation.wal_tail_misses, 0);
+    assert!(after_mutation.wal_tail_hits > after_second.wal_tail_hits);
 }
 
 #[test]
@@ -347,13 +341,18 @@ fn runtime_cache_observes_head_advanced_by_another_runtime() {
 }
 
 #[test]
-fn runtime_cache_can_be_disabled() {
+fn a_cache_with_zero_limits_keeps_nothing() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
     let raw_store = Arc::new(RuntimeStoreProbe::new(temp_dir.path(), &namespace_id));
     let object_store = raw_store.store();
     let fs = open_runtime_with(object_store, "tail-cache-disabled-test", |builder| {
-        builder.runtime_cache(RuntimeCacheConfig::disabled())
+        builder.metadata_cache(
+            MetadataCache::builder()
+                .max_segment_bytes(0)
+                .max_head_state_bytes(0)
+                .build(),
+        )
     });
 
     fs.create_namespace_blocking(
@@ -376,9 +375,9 @@ fn runtime_cache_can_be_disabled() {
     fs.get_file_bytes_blocking(&namespace_id, "/docs/file.txt")
         .expect("second read should project WAL tail again");
     assert_eq!(raw_store.wal_get_count(), 10);
-    let stats = fs.runtime_cache_stats();
-    assert_eq!(stats.wal_tail_projection_cache_hits, 0);
-    assert_eq!(stats.wal_tail_projection_cache_misses, 0);
+    let stats = fs.metadata_cache_stats();
+    assert_eq!(stats.wal_tail_hits, 0);
+    assert_eq!(stats.wal_tail_misses, 0);
 }
 
 /// Creates `first` and `other`, each holding one file of five bytes, so the
@@ -416,8 +415,7 @@ fn one_namespace_head_state_bytes() -> usize {
     let fs = open_runtime(shared_store, "head-state-measure");
     fs.get_file_bytes_blocking(&first, "/file.txt")
         .expect("cold read");
-    fs.runtime_cache_stats()
-        .head_state_cache_cached_decoded_bytes
+    fs.metadata_cache_stats().head_state_bytes
 }
 
 #[test]
@@ -431,19 +429,20 @@ fn head_state_evicts_by_bytes_anchors_included() {
     ));
     let (first, other) = two_namespaces_with_one_file(raw_store.store());
     let fs = open_runtime_with(raw_store.store(), "head-state-budget", |builder| {
-        builder.runtime_cache(RuntimeCacheConfig {
-            max_cached_wal_tail_projection_decoded_bytes: budget,
-            ..RuntimeCacheConfig::default()
-        })
+        builder.metadata_cache(
+            MetadataCache::builder()
+                .max_head_state_bytes(budget)
+                .build(),
+        )
     });
 
     fs.get_file_bytes_blocking(&first, "/file.txt")
         .expect("cache the first namespace's head state");
     fs.get_file_bytes_blocking(&other, "/file.txt")
         .expect("cache the other namespace's head state");
-    let after_other = fs.runtime_cache_stats();
-    assert!(after_other.head_state_cache_evictions > 0);
-    assert!(after_other.head_state_cache_cached_decoded_bytes <= budget);
+    let after_other = fs.metadata_cache_stats();
+    assert!(after_other.head_state_evictions > 0);
+    assert!(after_other.head_state_bytes <= budget);
 
     raw_store.reset_control_get_counts();
     let file = fs
@@ -457,20 +456,17 @@ fn head_state_evicts_by_bytes_anchors_included() {
         "the oldest entry, the first namespace's anchor, was evicted"
     );
     assert_eq!(raw_store.wal_get_count(), 3);
-    let after_reload = fs.runtime_cache_stats();
+    let after_reload = fs.metadata_cache_stats();
     assert_eq!(
-        after_reload.wal_tail_projection_cache_inserts,
-        after_other.wal_tail_projection_cache_inserts + 1
+        after_reload.wal_tail_inserts,
+        after_other.wal_tail_inserts + 1
     );
     assert_eq!(
-        after_reload.wal_tail_projection_cache_hits,
-        after_other.wal_tail_projection_cache_hits + 1,
+        after_reload.wal_tail_hits,
+        after_other.wal_tail_hits + 1,
         "the read uses the projection its cold discovery inserted"
     );
-    assert_eq!(
-        after_reload.wal_tail_projection_cache_misses,
-        after_other.wal_tail_projection_cache_misses
-    );
+    assert_eq!(after_reload.wal_tail_misses, after_other.wal_tail_misses);
 }
 
 #[tokio::test]
@@ -518,7 +514,7 @@ async fn every_head_stays_cached_past_sixty_four_namespaces_under_the_default_bu
         0,
         "no namespace's head was dropped and loaded again"
     );
-    assert_eq!(reader.runtime_cache_stats().head_state_cache_evictions, 0);
+    assert_eq!(reader.metadata_cache().stats().head_state_evictions, 0);
 }
 
 #[test]
@@ -534,11 +530,13 @@ fn runtime_wal_tail_projection_cache_skips_oversized_projection() {
     ));
     let object_store: SharedObjectStore = recording.clone();
     let fs = open_runtime_with(object_store, "tail-oversized-test", |builder| {
-        builder.runtime_cache(RuntimeCacheConfig {
-            manifest_revalidation_interval_ms: u64::MAX,
-            max_cached_wal_tail_projection_decoded_bytes: budget,
-            ..RuntimeCacheConfig::default()
-        })
+        builder
+            .manifest_revalidation_interval_ms(u64::MAX)
+            .metadata_cache(
+                MetadataCache::builder()
+                    .max_head_state_bytes(budget)
+                    .build(),
+            )
     });
     let namespace = fs.reader.namespace(&namespace_id);
 
@@ -591,12 +589,12 @@ fn runtime_wal_tail_projection_cache_skips_oversized_projection() {
             [1, 2].map(|wal_no| format!("namespaces/{namespace_id}/wal/{wal_no:020}.wal.zst"))
         );
     }
-    let stats = fs.runtime_cache_stats();
-    assert_eq!(stats.wal_tail_projection_cache_misses, 2);
-    assert_eq!(stats.wal_tail_projection_cache_hits, 0);
-    assert_eq!(stats.head_state_cache_rejections, 3);
-    assert_eq!(stats.head_state_cache_evictions, 0);
-    assert!(stats.head_state_cache_cached_decoded_bytes <= budget);
+    let stats = fs.metadata_cache_stats();
+    assert_eq!(stats.wal_tail_misses, 2);
+    assert_eq!(stats.wal_tail_hits, 0);
+    assert_eq!(stats.head_state_rejections, 3);
+    assert_eq!(stats.head_state_evictions, 0);
+    assert!(stats.head_state_bytes <= budget);
 }
 
 #[test]
@@ -606,10 +604,7 @@ fn wal_publication_conflict_recovers_and_reseeds_caches() {
     let raw_store = Arc::new(RuntimeStoreProbe::new(temp_dir.path(), &namespace_id));
     let recording = Arc::new(RecordingStore::new(raw_store.store(), KeyPredicate::any()));
     let fs = open_runtime_with(recording.clone(), "tail-cache-stale-test", |builder| {
-        builder.runtime_cache(RuntimeCacheConfig {
-            manifest_revalidation_interval_ms: u64::MAX,
-            ..Default::default()
-        })
+        builder.manifest_revalidation_interval_ms(u64::MAX)
     });
 
     fs.create_namespace_blocking(
@@ -646,26 +641,23 @@ fn wal_publication_conflict_recovers_and_reseeds_caches() {
 
     block_on(fs.writer.drain()).expect("finish hints");
     recording.reset();
-    let before_read = fs.runtime_cache_stats();
+    let before_read = fs.metadata_cache_stats();
     fs.stat_path_blocking(&namespace_id, "/after-stale")
         .expect("read after the recovered write");
     assert_wal_probe(recording.take(), &namespace_id, loonfs_api::WalNo(4));
-    let after_read = fs.runtime_cache_stats();
-    assert_eq!(
-        after_read.wal_tail_projection_cache_misses,
-        before_read.wal_tail_projection_cache_misses
-    );
-    assert_eq!(
-        after_read.wal_tail_projection_cache_hits,
-        before_read.wal_tail_projection_cache_hits + 1
-    );
+    let after_read = fs.metadata_cache_stats();
+    assert_eq!(after_read.wal_tail_misses, before_read.wal_tail_misses);
+    assert_eq!(after_read.wal_tail_hits, before_read.wal_tail_hits + 1);
 }
 
 #[test]
 fn stat_and_list_use_initial_manifest_without_checkpoint() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
-    let fs = runtime(temp_dir.path(), "read-fallback-test");
+    let recorder = Arc::new(DefaultMetricsRecorder::new());
+    let fs = open_runtime_with(store(temp_dir.path()), "read-fallback-test", |builder| {
+        builder.metrics_recorder(recorder.clone())
+    });
 
     fs.create_namespace_blocking(
         &namespace_id,
@@ -684,8 +676,19 @@ fn stat_and_list_use_initial_manifest_without_checkpoint() {
     fs.list_path_blocking(&namespace_id, "/")
         .expect("list root");
 
-    let stats = fs.runtime_cache_stats();
-    assert_eq!(stats.latest_metadata_view_reads, 2);
+    assert_eq!(latest_metadata_view_reads(&recorder), 2);
+}
+
+fn latest_metadata_view_reads(recorder: &DefaultMetricsRecorder) -> u64 {
+    let snapshot = recorder.snapshot();
+    let entry = snapshot
+        .by_name("loonfs.runtime_cache.latest_metadata_view_reads")
+        .next()
+        .expect("the runtime registers its view-read counter");
+    match entry.value {
+        MetricValue::Counter(value) => value,
+        ref other => panic!("expected a counter, found {other:?}"),
+    }
 }
 
 #[test]
@@ -697,7 +700,10 @@ fn stat_and_list_use_materialized_segments_after_checkpoint_without_content_read
         KeyPredicate::content_blob(),
     ));
     let object_store: SharedObjectStore = raw_store.clone();
-    let fs = open_runtime(object_store, "read-materialized-test");
+    let recorder = Arc::new(DefaultMetricsRecorder::new());
+    let fs = open_runtime_with(object_store, "read-materialized-test", |builder| {
+        builder.metrics_recorder(recorder.clone())
+    });
 
     fs.create_namespace_blocking(
         &namespace_id,
@@ -720,8 +726,7 @@ fn stat_and_list_use_materialized_segments_after_checkpoint_without_content_read
     fs.list_path_blocking(&namespace_id, "/docs")
         .expect("list materialized docs");
 
-    let stats = fs.runtime_cache_stats();
-    assert_eq!(stats.latest_metadata_view_reads, 2);
+    assert_eq!(latest_metadata_view_reads(&recorder), 2);
     assert_eq!(raw_store.count(OperationClass::Read), 0);
 }
 
@@ -729,7 +734,13 @@ fn stat_and_list_use_materialized_segments_after_checkpoint_without_content_read
 async fn concurrent_materialized_stat_and_list_share_async_store() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
-    let fs = open_runtime_async(store(temp_dir.path()), "concurrent-materialized-read-test").await;
+    let recorder = Arc::new(DefaultMetricsRecorder::new());
+    let fs = open_runtime_with_async(
+        store(temp_dir.path()),
+        "concurrent-materialized-read-test",
+        |builder| builder.metrics_recorder(recorder.clone()),
+    )
+    .await;
 
     fs.create_namespace(
         &namespace_id,
@@ -761,8 +772,7 @@ async fn concurrent_materialized_stat_and_list_share_async_store() {
     assert_eq!(list.len(), 1);
     assert_eq!(list[0].path, "/docs/file.txt");
 
-    let stats = fs.runtime_cache_stats();
-    assert_eq!(stats.latest_metadata_view_reads, 2);
+    assert_eq!(latest_metadata_view_reads(&recorder), 2);
 }
 
 #[test]
@@ -786,17 +796,20 @@ fn repeated_materialized_stat_uses_metadata_segment_cache() {
     fs.create_checkpoint_blocking(&namespace_id)
         .expect("checkpoint");
     block_on(fs.writer.drain()).expect("finish hints");
-    let fs = runtime(temp_dir.path(), "materialized-reader");
+    let recorder = Arc::new(DefaultMetricsRecorder::new());
+    let fs = open_runtime_with(store(temp_dir.path()), "materialized-reader", |builder| {
+        builder.metrics_recorder(recorder.clone())
+    });
     fs.stat_path_blocking(&namespace_id, "/docs/file.txt")
         .expect("first materialized stat");
-    let after_first = fs.runtime_cache_stats();
+    let after_first = fs.metadata_cache_stats();
     fs.stat_path_blocking(&namespace_id, "/docs/file.txt")
         .expect("second materialized stat");
-    let after_second = fs.runtime_cache_stats();
+    let after_second = fs.metadata_cache_stats();
 
-    assert!(after_first.metadata_segment_cache_inserts > 0);
-    assert!(after_second.metadata_segment_cache_hits > after_first.metadata_segment_cache_hits);
-    assert_eq!(after_second.latest_metadata_view_reads, 2);
+    assert!(after_first.segment_inserts > 0);
+    assert!(after_second.segment_hits > after_first.segment_hits);
+    assert_eq!(latest_metadata_view_reads(&recorder), 2);
 }
 
 #[test]
@@ -838,10 +851,7 @@ fn a_cached_head_anchor_probes_the_wal_after_an_external_commit() {
     let raw_store = Arc::new(RuntimeStoreProbe::new(temp_dir.path(), &namespace_id));
     let object_store = raw_store.store();
     let reader = open_runtime_with(object_store.clone(), "control-cache-reader", |builder| {
-        builder.runtime_cache(RuntimeCacheConfig {
-            manifest_revalidation_interval_ms: u64::MAX,
-            ..Default::default()
-        })
+        builder.manifest_revalidation_interval_ms(u64::MAX)
     });
     let writer = open_runtime(object_store, "control-cache-writer");
 
@@ -987,7 +997,7 @@ fn an_installed_stored_block_cache_is_filled_and_then_serves_a_later_runtime() {
     assert_eq!(entries.len(), 2);
 
     assert!(
-        filler.runtime_cache_stats().metadata_segment_cache_inserts > 0,
+        filler.metadata_cache_stats().segment_inserts > 0,
         "the cycle must reach the decoded block cache for this to prove anything"
     );
     let offered: Vec<StoredMetadataBlockKind> = stored_blocks
@@ -1040,10 +1050,7 @@ fn metadata_upkeep_offers_nothing_to_the_local_block_cache() {
     let fs = open_runtime_with(store(temp_dir.path()), "maintenance-cold", |builder| {
         builder
             .stored_metadata_block_cache(stored_blocks.clone())
-            .runtime_cache(RuntimeCacheConfig {
-                manifest_revalidation_interval_ms: 0,
-                ..Default::default()
-            })
+            .manifest_revalidation_interval_ms(0)
     });
 
     fs.create_namespace_blocking(

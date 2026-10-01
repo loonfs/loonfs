@@ -1652,7 +1652,7 @@ read probes the next WAL number like any warm read. If the manifest and WAL
 tip are unchanged and the seeded projection is retained, it replays nothing
 and does not reload the manifest.
 
-`RuntimeCacheConfig::manifest_revalidation_interval_ms` sets the minimum
+`LoonFsBuilder::manifest_revalidation_interval_ms` sets the minimum
 monotonic interval between checks for a successor to the cached manifest.
 It defaults to 1000 milliseconds; `0` checks on every read. A read after the
 interval probes the successor manifest with HEAD as well as the next WAL

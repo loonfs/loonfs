@@ -1,7 +1,7 @@
 //! Inline writer preparation, publication, fallback, and maintenance contracts.
 
 use super::*;
-use crate::{InlineContentOptions, MetadataMaintenanceOptions, PutFileOptions};
+use crate::{InlineContentOptions, MetadataCache, MetadataMaintenanceOptions, PutFileOptions};
 use loonfs_api::wire::wal::decode_wal_object_envelope_zstd;
 use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
 use loonfs_test_support::clock::ManualClock;
@@ -1265,17 +1265,23 @@ async fn invalid_inline_policy_is_rejected_before_store_access() {
 
 #[tokio::test]
 async fn a_delayed_fold_callback_preserves_a_freshly_observed_tail() {
-    check_delayed_fold_callback(RuntimeCacheConfig::default()).await;
+    check_delayed_fold_callback(MetadataCache::default()).await;
 }
 
 #[tokio::test]
 async fn a_delayed_fold_callback_preserves_an_uncached_tail() {
-    check_delayed_fold_callback(RuntimeCacheConfig::disabled()).await;
+    check_delayed_fold_callback(
+        MetadataCache::builder()
+            .max_segment_bytes(0)
+            .max_head_state_bytes(0)
+            .build(),
+    )
+    .await;
 }
 
 /// A publish can observe the folded manifest before the fold's completion
 /// callback runs. The callback must leave that fresh count alone.
-async fn check_delayed_fold_callback(cache: RuntimeCacheConfig) {
+async fn check_delayed_fold_callback(cache: MetadataCache) {
     let directory = tempdir().expect("directory");
     let namespace = NamespaceId::parse("fold-accounting").expect("namespace");
     let store = Arc::new(BlockingStore::new(
@@ -1285,7 +1291,7 @@ async fn check_delayed_fold_callback(cache: RuntimeCacheConfig) {
     ));
     let writer = crate::LoonFs::builder_with_store(store.clone())
         .writer_id("inline-writer")
-        .runtime_cache(cache)
+        .metadata_cache(cache)
         .inline_content(InlineContentOptions {
             inline_content_threshold_bytes: Some(4),
             inline_content_fold_at_bytes: 4,

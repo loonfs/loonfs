@@ -249,7 +249,7 @@ fn snapshot_read_views_report_the_snapshot_view_counter() {
     let temp_dir = tempdir().expect("tempdir");
     let recorder = Arc::new(DefaultMetricsRecorder::new());
     let namespace_id = namespace_id("snapshot-metrics");
-    let (stats, snapshot) = block_on(async {
+    let snapshot = block_on(async {
         let fs = open_runtime_with_async(store(temp_dir.path()), "snapshot-metrics", |builder| {
             builder.metrics_recorder(recorder.clone())
         })
@@ -295,11 +295,17 @@ fn snapshot_read_views_report_the_snapshot_view_counter() {
             .read_view_at_snapshot(&reader_snapshot.checkpoint_id)
             .await
             .expect("view snapshot");
-        (fs.reader.runtime_cache_stats(), recorder.snapshot())
+        recorder.snapshot()
     });
 
-    assert_eq!(stats.latest_metadata_view_reads, 0);
-    assert_eq!(stats.snapshot_view_reads, 1);
+    assert_eq!(
+        counter(
+            &snapshot,
+            "loonfs.runtime_cache.latest_metadata_view_reads",
+            &[]
+        ),
+        0
+    );
     assert_eq!(
         counter(&snapshot, "loonfs.runtime_cache.snapshot_view_reads", &[],),
         1

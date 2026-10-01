@@ -399,8 +399,8 @@ impl TestRuntime {
             .map(|completed| completed.response)
     }
 
-    pub(crate) fn runtime_cache_stats(&self) -> loonfs::RuntimeCacheStats {
-        self.writer.runtime_cache_stats()
+    pub(crate) fn metadata_cache_stats(&self) -> loonfs::MetadataCacheStats {
+        self.writer.metadata_cache().stats()
     }
 }
 

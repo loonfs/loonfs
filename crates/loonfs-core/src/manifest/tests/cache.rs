@@ -35,7 +35,7 @@ async fn a_byte_budgeted_cache_admits_wide_scans_and_holds_to_its_budget() {
     let manifest_number = current_manifest_number(&store, &namespace_id).await;
     // The default cache config carries a decoded-byte budget, so a scan wider
     // than the small-scan limit populates the cache instead of reading through.
-    let cache = super::MetadataSegmentCache::new(Default::default());
+    let cache = super::MetadataSegmentCache::unshared(usize::MAX);
     let segments = super::load_manifest_segments_for_inspection(
         &store,
         Some(&cache),
@@ -125,10 +125,7 @@ async fn a_byte_budgeted_cache_admits_wide_scans_and_holds_to_its_budget() {
         "a warm range scan should be served entirely from the cache"
     );
 
-    let degenerate = MetadataSegmentCache::new(MetadataSegmentCacheConfig {
-        max_decoded_bytes: 1,
-        ..MetadataSegmentCacheConfig::default()
-    });
+    let degenerate = MetadataSegmentCache::unshared(1);
     let degenerate_segments = super::load_manifest_segments_for_inspection(
         &store,
         Some(&degenerate),
@@ -160,7 +157,7 @@ async fn concurrent_scans_share_one_fetch_per_segment() {
     // Concurrent scans over one shared cache must not multiply fetches:
     // single-flight covers blocks racing before the first insert lands, and
     // population covers everything after.
-    let cache = super::MetadataSegmentCache::new(MetadataSegmentCacheConfig::default());
+    let cache = super::MetadataSegmentCache::unshared(usize::MAX);
     // A solo pass over its own cold cache measures the true per-scan
     // fetch count.
     let solo_segments = super::load_manifest_segments_for_inspection(
@@ -182,7 +179,7 @@ async fn concurrent_scans_share_one_fetch_per_segment() {
 
     // Concurrent requests race over a second cold cache, each with its own
     // segments view; single-flight is what keeps the pair at the solo count.
-    let paired_cache = super::MetadataSegmentCache::new(MetadataSegmentCacheConfig::default());
+    let paired_cache = super::MetadataSegmentCache::unshared(usize::MAX);
     let first_segments = super::load_manifest_segments_for_inspection(
         &store,
         Some(&paired_cache),
@@ -245,7 +242,7 @@ async fn cached_manifest_carries_its_scan_order_runs() {
         .expect("create second checkpoint");
     let manifest_number = current_manifest_number(&store, &namespace_id).await;
 
-    let cache = MetadataSegmentCache::new(MetadataSegmentCacheConfig::default());
+    let cache = MetadataSegmentCache::unshared(usize::MAX);
     let first = super::load_manifest_segments_for_inspection(
         &store,
         Some(&cache),
@@ -342,7 +339,7 @@ async fn maintenance_materialization_does_not_populate_metadata_segment_cache() 
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
     let manifest_no = eight_files_one_row_per_segment(&store, &namespace_id, &context).await;
-    let cache = MetadataSegmentCache::new(MetadataSegmentCacheConfig::default());
+    let cache = MetadataSegmentCache::unshared(usize::MAX);
     let before = cache.stats();
 
     let materialized =
@@ -407,7 +404,7 @@ async fn lookup_skips_segments_whose_filter_rules_the_name_out() {
         .expect("second checkpoint");
 
     let manifest_number = current_manifest_number(&store, &namespace_id).await;
-    let cache = MetadataSegmentCache::new(MetadataSegmentCacheConfig::default());
+    let cache = MetadataSegmentCache::unshared(usize::MAX);
     let segments = super::load_manifest_segments_for_inspection(
         &store,
         Some(&cache),
@@ -553,10 +550,12 @@ async fn a_zero_block_memo_refetches_data_blocks_for_reads_and_folds() {
     .await;
     let manifest_number = current_manifest_number(&store, &namespace_id).await;
 
-    let cache = MetadataSegmentCache::new(MetadataSegmentCacheConfig {
-        max_decoded_bytes: 0,
-        max_block_memo_bytes: 0,
-    });
+    let cache = MetadataSegmentCache::new(
+        Arc::new(SharedSegmentBlocks::new(0, None)),
+        CacheScope::new(0),
+        0,
+        None,
+    );
     let read_view = super::load_manifest_segments_for_inspection(
         &store,
         Some(&cache),
@@ -839,10 +838,11 @@ async fn checkpointed_direntry_segment() -> (
 /// built with a local cache hands the read paths. A fresh one stands for a
 /// fresh process: only the local tier carries anything over.
 fn segment_cache_over(blocks: &Arc<RecordingStoredMetadataBlockCache>) -> MetadataSegmentCache {
-    MetadataSegmentCache::with_stored_block_cache_and_observer(
-        MetadataSegmentCacheConfig::default(),
+    MetadataSegmentCache::new(
+        Arc::new(SharedSegmentBlocks::new(usize::MAX, None)),
+        CacheScope::new(0),
+        DEFAULT_BLOCK_MEMO_BYTES,
         Some(Arc::clone(blocks) as Arc<dyn StoredMetadataBlockCache>),
-        None,
     )
 }
 
@@ -1271,7 +1271,7 @@ async fn wide_read(
 #[tokio::test]
 async fn a_warm_span_remembers_shared_hits_in_its_bounded_memo() {
     let (_temp_dir, store, descriptor, index) = multi_block_direntry_segment().await;
-    let cache = MetadataSegmentCache::new(Default::default());
+    let cache = MetadataSegmentCache::unshared(usize::MAX);
     let (expected, _) = wide_read(&store, Some(&cache), &descriptor, &index).await;
     let memo = load::SessionBlockMemo::default();
     store.reset();
@@ -1404,7 +1404,7 @@ async fn a_wide_read_coalesces_the_blocks_the_decoded_cache_did_not_answer() {
     let (expected, _) = wide_read(&store, None, &descriptor, &index).await;
 
     let decoded = [0usize, 4];
-    let cache = MetadataSegmentCache::new(MetadataSegmentCacheConfig::default());
+    let cache = MetadataSegmentCache::unshared(usize::MAX);
     let object = segment_object_bytes(&store, &descriptor).await;
     seed_decoded_blocks(&cache, &object, &descriptor, &index, &decoded);
 

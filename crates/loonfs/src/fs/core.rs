@@ -1,13 +1,12 @@
 //! The runtime core that read-only and writable runtimes share, and the extra
 //! state a writer holds.
 
-use crate::cache::RuntimeCacheStatsInner;
 use crate::config::ReadConfig;
 use crate::metrics::RuntimeInstruments;
 use crate::publisher::{NamespaceAdvanceHint, NamespaceAdvanceObserver};
 use crate::{
     ChangeSeq, CoreError, ErrorCode, InodeId, ListFileRevisionsResponse, MaintenanceHint,
-    MaintenanceHintObserver, NamespaceId, NamespacePublication, ObjectStore, RuntimeCacheStats,
+    MaintenanceHintObserver, MetadataCache, NamespaceId, NamespacePublication, ObjectStore,
 };
 use crate::{Result, RuntimeError, SharedObjectStore};
 use loonfs_api::{
@@ -39,10 +38,12 @@ pub(crate) struct RuntimeCoreInner {
     pub(crate) config: ReadConfig,
     pub(crate) timer: Arc<dyn loonfs_api::MonotonicTimer>,
     pub(crate) wall_clock: Arc<dyn crate::WallClock>,
+    pub(crate) metadata_cache: MetadataCache,
+    /// This core's views of `metadata_cache`, under the scope the cache
+    /// minted for this core.
     pub(crate) metadata_segment_cache: Arc<MetadataSegmentCache>,
     pub(crate) head_state: Arc<HeadStateCache>,
-    pub(crate) cache_stats: RuntimeCacheStatsInner,
-    /// Publication, collection, and completed-compaction metrics.
+    /// Publication, collection, completed-compaction, and view-read metrics.
     pub(crate) instruments: Arc<RuntimeInstruments>,
 }
 
@@ -137,37 +138,22 @@ impl RuntimeCore {
         }
     }
 
-    /// Opens a runtime core. When `shared_metadata_segment_cache` is set, the
-    /// core reuses that decoded-block cache instead of creating one from
-    /// `config.runtime_cache.metadata_segment_cache`. Sharing is safe because
-    /// entries are keyed by immutable payload checksums and manifest keys.
-    ///
-    /// `stored_metadata_block_cache` provides a node-local encoded-block cache
-    /// when this core creates its own decoded cache. A shared decoded cache
-    /// already has its encoded cache configured.
+    /// Opens a runtime core that reads through `metadata_cache` under a
+    /// scope of its own, with `stored_metadata_block_cache` as its node-local
+    /// encoded tier.
     pub(crate) fn open(
         store: SharedObjectStore,
         config: ReadConfig,
-        shared_metadata_segment_cache: Option<Arc<MetadataSegmentCache>>,
+        metadata_cache: MetadataCache,
         stored_metadata_block_cache: Option<Arc<dyn StoredMetadataBlockCache>>,
         instruments: Arc<RuntimeInstruments>,
         timer: Arc<dyn loonfs_api::MonotonicTimer>,
         wall_clock: Arc<dyn crate::WallClock>,
     ) -> Self {
-        let metadata_segment_cache = shared_metadata_segment_cache.unwrap_or_else(|| {
-            Arc::new(MetadataSegmentCache::with_stored_block_cache_and_observer(
-                config.runtime_cache.metadata_segment_cache.clone(),
-                stored_metadata_block_cache,
-                instruments.metadata_segment_cache_observer(),
-            ))
-        });
-        let head_state = Arc::new(HeadStateCache::with_observers(
-            config
-                .runtime_cache
-                .max_cached_wal_tail_projection_decoded_bytes,
-            instruments.head_state_cache_observer(),
-            instruments.wal_tail_projection_cache_observer(),
-        ));
+        let (metadata_segment_cache, head_state) = metadata_cache.bind(
+            config.metadata_lsm_policy.max_block_memo_bytes,
+            stored_metadata_block_cache,
+        );
         Self {
             subject: None,
             inner: Arc::new(RuntimeCoreInner {
@@ -175,9 +161,9 @@ impl RuntimeCore {
                 config,
                 timer,
                 wall_clock,
-                metadata_segment_cache,
-                head_state,
-                cache_stats: RuntimeCacheStatsInner::new(Arc::clone(&instruments)),
+                metadata_cache,
+                metadata_segment_cache: Arc::new(metadata_segment_cache),
+                head_state: Arc::new(head_state),
                 instruments,
             }),
         }
@@ -202,10 +188,16 @@ impl RuntimeCore {
         &self.inner.instruments
     }
 
-    /// This runtime's shared decoded-block cache handle, for builders
-    /// that open another core sharing it.
+    /// This core's view of the decoded segment blocks, for the maintenance
+    /// and publication paths that read through it.
     pub(crate) fn metadata_segment_cache(&self) -> Arc<MetadataSegmentCache> {
         Arc::clone(&self.inner.metadata_segment_cache)
+    }
+
+    /// The head-state limit of this core's cache. The publish side applies it
+    /// to each projection its sessions retain and to their total.
+    pub(crate) fn max_head_state_bytes(&self) -> usize {
+        self.inner.metadata_cache.max_head_state_bytes()
     }
 
     pub(crate) fn trace_mode(&self) -> &'static str {
@@ -279,14 +271,6 @@ impl RuntimeCore {
                 limits
             },
         }
-    }
-
-    /// Snapshots the runtime cache counters.
-    pub(crate) fn runtime_cache_stats(&self) -> RuntimeCacheStats {
-        self.inner.cache_stats.snapshot(
-            self.inner.metadata_segment_cache.stats(),
-            self.inner.head_state.stats(),
-        )
     }
 
     pub(crate) fn store(&self) -> &dyn ObjectStore {

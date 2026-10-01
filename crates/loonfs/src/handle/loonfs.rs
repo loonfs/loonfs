@@ -4,7 +4,7 @@ use super::{LoonFsBuilder, Maintenance, Namespace};
 use crate::fs::{RuntimeCore, WriterBits, WriterIdentity};
 use crate::publisher::PublisherRegistry;
 use crate::{
-    CapabilityDocument, NamespaceId, Result, RuntimeCacheStats, SharedObjectStore, StoreConfig,
+    CapabilityDocument, MetadataCache, NamespaceId, Result, SharedObjectStore, StoreConfig,
 };
 use loonfs_api::{Subject, WriterId};
 #[cfg(test)]
@@ -14,8 +14,9 @@ use std::sync::Arc;
 
 /// The LoonFS runtime. Every mode reads, and only [`Writable`] writes.
 ///
-/// Every mode owns the store client, the caches, and the read budgets, and
-/// returns read-only [`Namespace`] handles from [`Self::namespace`]. A
+/// Every mode owns the store client and the read budgets, reads through a
+/// [`MetadataCache`] it may share with other runtimes, and returns read-only
+/// [`Namespace`] handles from [`Self::namespace`]. A
 /// writable runtime also owns the writer identity, the publication service,
 /// and the admission budgets. It creates and forks namespaces, opens a
 /// writable handle on each namespace it writes, runs maintenance through
@@ -24,8 +25,8 @@ use std::sync::Arc;
 /// Build a runtime inside the Tokio runtime that will use it. Do not share a
 /// provider client across unrelated runtimes; build another runtime from
 /// [`StoreConfig`] instead. Clones are cheap. They share the store client and
-/// the caches, and, in the writable mode, the publication service and the
-/// shutdown state.
+/// the runtime's scope in its metadata cache, and, in the writable mode, the
+/// publication service and the shutdown state.
 #[derive(Clone)]
 pub struct LoonFs<M> {
     pub(crate) core: RuntimeCore,
@@ -98,10 +99,10 @@ impl<M> LoonFs<M> {
         self.core.get_capabilities()
     }
 
-    /// Snapshots the runtime cache counters, including the caches that
-    /// [`Maintenance`] work fills.
-    pub fn runtime_cache_stats(&self) -> RuntimeCacheStats {
-        self.core.runtime_cache_stats()
+    /// Returns the metadata cache this runtime reads through, which
+    /// [`Maintenance`] work fills too.
+    pub fn metadata_cache(&self) -> &MetadataCache {
+        &self.core.inner.metadata_cache
     }
 
     /// Reads this runtime's wall clock as unix milliseconds.
@@ -120,7 +121,7 @@ impl<M> LoonFs<M> {
         self.core.shared_store()
     }
 
-    /// Returns this runtime's shared decoded-block cache.
+    /// Returns this runtime's view of the decoded segment blocks.
     #[cfg(test)]
     pub(crate) fn metadata_segment_cache(&self) -> Arc<MetadataSegmentCache> {
         self.core.metadata_segment_cache()

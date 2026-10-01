@@ -953,9 +953,7 @@ impl NamespacePublisher {
         let totals = shared.settle_projection(
             &self.namespace_id,
             decoded_bytes,
-            self.runtime_core
-                .runtime_cache_config()
-                .max_cached_wal_tail_projection_decoded_bytes,
+            self.runtime_core.max_head_state_bytes(),
             self.runtime_core.instruments(),
         );
         self.report_retained_projections(totals);
