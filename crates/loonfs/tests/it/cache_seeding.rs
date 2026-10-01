@@ -1119,7 +1119,7 @@ fn metadata_upkeep_offers_nothing_to_the_local_block_cache() {
         block_on(fs.writer.drain()).expect("finish hints");
         let calls_before = stored_blocks.call_count();
         let step = fs
-            .maintenance_run_namespace_blocking(&namespace_id, metadata_request(1))
+            .maintain_metadata_blocking(&namespace_id, metadata_options(1))
             .expect("maintenance pass");
         assert_eq!(
             stored_blocks.call_count(),
@@ -1128,7 +1128,7 @@ fn metadata_upkeep_offers_nothing_to_the_local_block_cache() {
         );
         fs.stat_path_blocking(&namespace_id, &format!("/docs/file-{index:02}.txt"))
             .expect("read folded file outside the maintenance window");
-        if upkeep(&step).compaction == (CompactionStepOutcome::UnitPublished {}) {
+        if step.compaction == (CompactionStepOutcome::UnitPublished {}) {
             compacted = true;
             break;
         }

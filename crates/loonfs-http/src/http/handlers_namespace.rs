@@ -10,7 +10,7 @@ use axum::extract::State;
 use axum::Json;
 use loonfs::{
     CheckpointPageCursor, CreateNamespaceOptions, CreateSnapshotOptions, DeleteNamespaceOptions,
-    MetadataMaintenanceOptions,
+    GcConfig, MetadataMaintenanceOptions,
 };
 #[cfg(feature = "openapi")]
 use loonfs_api::ApiError;
@@ -861,57 +861,59 @@ pub(super) async fn run_maintenance(
     AppQuery(_): AppQuery<NoQuery>,
     AppJson(request): AppJson<RunMaintenanceRequest>,
 ) -> Result<Json<RunMaintenanceResponse>, ApiResponseError> {
-    if let RunMaintenanceRequest::GrepGc {} = request {
-        if !state.options.maintains_grep_index {
-            return Err(grep_index_not_maintained().await);
+    let maintenance = &state.maintenance;
+    let response = match request {
+        RunMaintenanceRequest::Metadata(request) => {
+            let options = MetadataMaintenanceOptions {
+                idle_fold_after_ms: state.options.idle_fold_after_ms,
+                ..MetadataMaintenanceOptions::from_request(request)
+                    .map_err(ApiResponseError::for_namespace(&namespace_id))?
+            };
+            maintenance
+                .maintain_metadata(&namespace_id, options)
+                .await
+                .map(RunMaintenanceResponse::Metadata)
         }
-        return loonfs_grep::run_grep_gc(
-            state.grep_worker(),
-            &namespace_id,
-            state
-                .maintenance
-                .now_ms()
-                .map_err(ApiResponseError::runtime)?,
-        )
-        .await
+        RunMaintenanceRequest::MetadataCompaction(_) => maintenance
+            .compact_metadata(&namespace_id)
+            .await
+            .map(RunMaintenanceResponse::MetadataCompaction),
+        RunMaintenanceRequest::Gc(request) => maintenance
+            .gc_namespace(&namespace_id, &GcConfig::from_request(request))
+            .await
+            .map(RunMaintenanceResponse::Gc),
+        RunMaintenanceRequest::Retention(_) => maintenance
+            .advance_retention_floor(&namespace_id)
+            .await
+            .map(RunMaintenanceResponse::Retention),
+        RunMaintenanceRequest::GrepGc {} => {
+            if !state.options.maintains_grep_index {
+                return Err(grep_index_not_maintained().await);
+            }
+            let now_ms = maintenance.now_ms().map_err(ApiResponseError::runtime)?;
+            return loonfs_grep::run_grep_gc(state.grep_worker(), &namespace_id, now_ms)
+                .await
+                .map(Json)
+                .map_err(|error| map_grep_error(&namespace_id, error));
+        }
+        RunMaintenanceRequest::RecoverAdministrator(request) => {
+            let actor_id = actor_id.ok_or_else(missing_actor)?;
+            let namespace = state
+                .namespaces
+                .open(&namespace_id)
+                .await
+                .map_err(ApiResponseError::for_namespace(&namespace_id))?;
+            return namespace
+                .recover_administrator(&request.principal_id, actor_id)
+                .await
+                .map(|recovered| Json(RunMaintenanceResponse::RecoverAdministrator(recovered)))
+                .map_err(ApiResponseError::for_namespace_writer(
+                    &state.namespaces,
+                    &namespace_id,
+                ));
+        }
+    };
+    response
         .map(Json)
-        .map_err(|error| map_grep_error(&namespace_id, error));
-    }
-    if let RunMaintenanceRequest::RecoverAdministrator(request) = request {
-        let actor_id = actor_id.ok_or_else(missing_actor)?;
-        let namespace = state
-            .namespaces
-            .open(&namespace_id)
-            .await
-            .map_err(ApiResponseError::for_namespace(&namespace_id))?;
-        let recovered = namespace
-            .recover_administrator(&request.principal_id, actor_id)
-            .await
-            .map_err(ApiResponseError::for_namespace_writer(
-                &state.namespaces,
-                &namespace_id,
-            ))?;
-        return Ok(Json(RunMaintenanceResponse::RecoverAdministrator(
-            recovered,
-        )));
-    }
-    if let RunMaintenanceRequest::Metadata(request) = request {
-        let options = MetadataMaintenanceOptions {
-            idle_fold_after_ms: state.options.idle_fold_after_ms,
-            ..MetadataMaintenanceOptions::from_request(request)
-                .map_err(ApiResponseError::for_namespace(&namespace_id))?
-        };
-        return state
-            .maintenance
-            .maintain_metadata(&namespace_id, options)
-            .await
-            .map(|metadata| Json(RunMaintenanceResponse::Metadata(metadata)))
-            .map_err(ApiResponseError::for_namespace(&namespace_id));
-    }
-    let result = state
-        .maintenance
-        .run_maintenance(&namespace_id, request)
-        .await
-        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
-    Ok(Json(result))
+        .map_err(ApiResponseError::for_namespace(&namespace_id))
 }

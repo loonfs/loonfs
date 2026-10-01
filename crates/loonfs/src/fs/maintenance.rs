@@ -13,13 +13,12 @@ use crate::{
     DeleteCheckpointResponse, ErrorCode, FoldWalOutcome, FoldWalResponse, ListCheckpointsResponse,
     MaintenanceCancellation, MaintenanceProbe, MetadataCompactionOutcome,
     MetadataCompactionResponse, MetadataMaintenanceOptions, MetadataMaintenanceResponse,
-    NamespaceId, PinId, RunMaintenanceRequest, RunMaintenanceResponse, SharedObjectStore,
-    SnapshotSummary, WalFoldStepOutcome,
+    NamespaceId, PinId, SharedObjectStore, SnapshotSummary, WalFoldStepOutcome,
 };
 use crate::{ChangeSeq, Result, RuntimeError};
 use loonfs_api::CompactorEpoch;
 use loonfs_api::PageRequest;
-use loonfs_core::cache::{load_namespace_fold_basis, NamespaceStorageDiagnostics};
+use loonfs_core::cache::NamespaceStorageDiagnostics;
 use loonfs_core::CheckpointPageCursor;
 use tokio::time::Instant;
 use tracing::Instrument;
@@ -192,72 +191,6 @@ impl Maintenance {
         namespace_id: &NamespaceId,
     ) -> Result<NamespaceStorageDiagnostics> {
         Ok(loonfs_core::cache::load_namespace_diagnostics(self.core.store(), namespace_id).await?)
-    }
-
-    /// Runs one maintenance job for one namespace.
-    #[tracing::instrument(
-        level = "debug",
-        name = "loonfs.maintenance.run",
-        err(level = "debug"),
-        skip_all,
-        fields(
-            operation = "maintenance.run",
-            namespace_id = %namespace_id,
-            kind = tracing::field::Empty,
-            mode = tracing::field::Empty,
-            store_kind = tracing::field::Empty,
-        )
-    )]
-    pub async fn run_maintenance(
-        &self,
-        namespace_id: &NamespaceId,
-        request: RunMaintenanceRequest,
-    ) -> Result<RunMaintenanceResponse> {
-        let span = tracing::Span::current();
-        self.core.record_trace_context(&span);
-        let kind = match &request {
-            RunMaintenanceRequest::Metadata(_) => "metadata",
-            RunMaintenanceRequest::MetadataCompaction(_) => "metadata_compaction",
-            RunMaintenanceRequest::Gc(_) => "gc",
-            RunMaintenanceRequest::GrepGc {} => "grep_gc",
-            RunMaintenanceRequest::Retention(_) => "retention",
-            RunMaintenanceRequest::RecoverAdministrator(_) => "recover_administrator",
-        };
-        span.record("kind", kind);
-        match request {
-            RunMaintenanceRequest::GrepGc {} => Err(RuntimeError::Config(
-                "grep collection requires a grep worker; run it through the grep extension"
-                    .to_owned(),
-            )),
-            RunMaintenanceRequest::RecoverAdministrator(_) => Err(RuntimeError::Config(
-                "administrator recovery publishes a commit; run it through the writer".to_owned(),
-            )),
-            RunMaintenanceRequest::Metadata(request) => {
-                let options = MetadataMaintenanceOptions::from_request(request)?;
-                self.maintain_metadata(namespace_id, options)
-                    .await
-                    .map(RunMaintenanceResponse::Metadata)
-            }
-            RunMaintenanceRequest::MetadataCompaction(_) => self
-                .compact_metadata(namespace_id)
-                .await
-                .map(RunMaintenanceResponse::MetadataCompaction),
-            RunMaintenanceRequest::Gc(request) => {
-                loonfs_core::control::load_namespace_read_state(self.core.store(), namespace_id)
-                    .await
-                    .map_err(crate::CoreError::ControlObjectLoad)?;
-                let config = crate::options::gc_config_from_request(request);
-                self.gc_namespace(namespace_id, &config)
-                    .await
-                    .map(RunMaintenanceResponse::Gc)
-            }
-            RunMaintenanceRequest::Retention(_) => {
-                self.load_maintenance_status(namespace_id).await?;
-                self.run_retention(namespace_id)
-                    .await
-                    .map(RunMaintenanceResponse::Retention)
-            }
-        }
     }
 
     /// Folds the WAL tail at the WAL object threshold, at the inline byte
@@ -626,7 +559,9 @@ impl Maintenance {
     ///
     /// Every call rebuilds the current live roots and keeps no cursor. A pass
     /// runs only when asked here or by a writer's collection job, which
-    /// schedules one for each upload deadline it created.
+    /// schedules one for each upload deadline it created. A deleted namespace
+    /// is collected, which is how its objects are reclaimed; a namespace that
+    /// does not exist returns `namespace_not_found`.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.maintenance.gc_namespace",
@@ -645,6 +580,10 @@ impl Maintenance {
         config: &crate::GcConfig,
     ) -> Result<crate::GcResponse> {
         self.core.record_trace_context(&tracing::Span::current());
+        // Core collection reports an empty pass for a namespace that does not exist.
+        loonfs_core::control::load_namespace_read_state(self.core.store(), namespace_id)
+            .await
+            .map_err(crate::CoreError::ControlObjectLoad)?;
         let report = loonfs_core::gc_namespace(
             self.core.store(),
             namespace_id,
@@ -803,14 +742,12 @@ impl Maintenance {
         self.finish_namespace_mutation(namespace_id, result)
     }
 
-    /// Folds any visible WAL tail, then runs one compaction step.
+    /// Folds the visible WAL tail into a new manifest.
     ///
-    /// This is equivalent to a metadata maintenance pass with a fold threshold of
-    /// one WAL object. It reports both the fold and compaction outcomes.
-    /// An empty WAL tail reports [`WalFoldStepOutcome::NotNeeded`].
-    ///
-    /// This checks only whether a WAL tail exists. It does not require the
-    /// head to contain enough hints to count every WAL object.
+    /// A namespace with no unfolded tail reports
+    /// [`FoldWalOutcome::AlreadyCurrent`] and publishes nothing. This runs no
+    /// compaction; [`Self::maintain_metadata`] folds and then runs one
+    /// compaction step.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.maintenance.wal_fold",
@@ -823,19 +760,9 @@ impl Maintenance {
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn fold_wal(
-        &self,
-        namespace_id: &NamespaceId,
-    ) -> Result<MetadataMaintenanceResponse> {
+    pub async fn fold_wal(&self, namespace_id: &NamespaceId) -> Result<FoldWalResponse> {
         self.core.record_trace_context(&tracing::Span::current());
-        let basis = load_namespace_fold_basis(self.core.store(), namespace_id).await?;
-        self.fold_then_compact(
-            namespace_id,
-            basis.has_unfolded_wal_tail,
-            basis.head_seq,
-            loonfs_core::MetadataCompactionPolicy::CompactImmediately,
-        )
-        .await
+        self.run_wal_fold(namespace_id).await
     }
 
     /// Advances the namespace retention floor when a verified checkpoint
@@ -861,7 +788,12 @@ impl Maintenance {
     ) -> Result<AdvanceRetentionResponse> {
         self.core.record_trace_context(&tracing::Span::current());
         self.load_maintenance_status(namespace_id).await?;
-        self.run_retention(namespace_id).await
+        let result = self
+            .engine(namespace_id)
+            .advance_retention_floor()
+            .await
+            .map_err(RuntimeError::from);
+        self.finish_namespace_mutation(namespace_id, result)
     }
 
     /// Shared implementation for metadata maintenance and [`Self::fold_wal`].
@@ -880,16 +812,6 @@ impl Maintenance {
         }
         .instrument(phase_span!(self.core, "wal_fold", namespace_id))
         .await
-    }
-
-    /// Shared implementation for retention maintenance operations.
-    async fn run_retention(&self, namespace_id: &NamespaceId) -> Result<AdvanceRetentionResponse> {
-        let result = self
-            .engine(namespace_id)
-            .advance_retention_floor()
-            .await
-            .map_err(RuntimeError::from);
-        self.finish_namespace_mutation(namespace_id, result)
     }
 }
 

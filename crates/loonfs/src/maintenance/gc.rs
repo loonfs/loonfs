@@ -4,12 +4,8 @@ use super::{
     MaintenanceCancellation, MaintenanceConclusion, MaintenanceJob, MaintenanceJobId,
     MaintenanceProbe, MaintenanceRunReport,
 };
-use crate::{
-    ErrorCode, GcConfig, GcResponse, Maintenance, NamespaceId, Result, RunMaintenanceRequest,
-    RunMaintenanceResponse, RuntimeError,
-};
+use crate::{ErrorCode, GcConfig, GcResponse, Maintenance, NamespaceId, Result};
 use async_trait::async_trait;
-use loonfs_api::GcRequest;
 use loonfs_core::limits::{
     CONTENT_RECLAMATION_GRACE_MS, GC_SAFETY_MARGIN_MS, NAMESPACE_RETIREMENT_GRACE_MS,
     UPLOAD_SESSION_LEASE_MS,
@@ -61,26 +57,18 @@ impl MaintenanceJob for GarbageCollectionJob {
         namespace_id: &NamespaceId,
         _cancellation: &MaintenanceCancellation,
     ) -> Result<MaintenanceRunReport> {
-        let response = match self
+        let gc = match self
             .maintenance
-            .run_maintenance(
-                namespace_id,
-                RunMaintenanceRequest::Gc(GcRequest::default()),
-            )
+            .gc_namespace(namespace_id, &GcConfig::default())
             .await
         {
-            Ok(response) => response,
+            Ok(gc) => gc,
             Err(error) if error.code() == ErrorCode::NamespaceNotFound => {
                 return Ok(MaintenanceRunReport::concluded(
                     MaintenanceConclusion::NotEnabled,
                 ));
             }
             Err(error) => return Err(error),
-        };
-        let RunMaintenanceResponse::Gc(gc) = response else {
-            return Err(RuntimeError::Core(loonfs_core::Error::Internal(
-                "maintenance GC returned a non-GC response".to_owned(),
-            )));
         };
         let follow_up = if gc.reclaimable_at_ms.is_some() {
             loonfs_core::control::load_namespace_read_state(

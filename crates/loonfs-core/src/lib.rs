@@ -123,8 +123,7 @@ pub mod cache {
         DEFAULT_WAL_TAIL_PROJECTION_DECODED_BYTES, DEFAULT_WAL_TAIL_PROJECTION_ROWS,
     };
     pub use crate::namespace::status::{
-        load_namespace, load_namespace_diagnostics, load_namespace_fold_basis, NamespaceFoldBasis,
-        NamespaceStorageDiagnostics,
+        load_namespace, load_namespace_diagnostics, NamespaceStorageDiagnostics,
     };
     #[cfg(any(test, feature = "test-support"))]
     pub use crate::namespace::status::{load_namespace_wal_tail_usage, NamespaceWalTailUsage};

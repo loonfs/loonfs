@@ -2,6 +2,7 @@
 
 use crate::error::{CoreError, Result};
 use crate::limits::{GC_DEFAULT_GRACE_WINDOW_MS, GC_MIN_GRACE_WINDOW_MS};
+use loonfs_api::GcRequest;
 use serde::{Deserialize, Serialize};
 
 /// The grace window used by namespace collection.
@@ -20,6 +21,16 @@ impl Default for GcConfig {
 }
 
 impl GcConfig {
+    /// Resolves a wire-level collection request. An absent grace window
+    /// takes the default.
+    pub fn from_request(request: GcRequest) -> Self {
+        Self {
+            grace_window_ms: request
+                .grace_window_ms
+                .unwrap_or(GC_DEFAULT_GRACE_WINDOW_MS),
+        }
+    }
+
     pub(super) fn validate(&self) -> Result<()> {
         // The minimum grace window is derived from the publication budgets
         // and provider deadlines in `limits`. Below it, a publish still in

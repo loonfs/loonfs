@@ -6,8 +6,8 @@
 //! Results are the `loonfs-api` wire shapes themselves, the same way handles
 //! already return `Commit` and `FoldWalResponse`.
 
-use crate::{EffectiveLimit, GcConfig, MetadataCompactionPolicy, Result, RuntimeError};
-use loonfs_api::{CreateCheckpointRequest, GcRequest, MetadataMaintenanceRequest};
+use crate::{EffectiveLimit, MetadataCompactionPolicy, Result, RuntimeError};
+use loonfs_api::{CreateCheckpointRequest, MetadataMaintenanceRequest};
 use loonfs_core::limits::{FOLD_AT_WAL_OBJECTS, MAX_UNFOLDED_WAL_OBJECTS};
 use std::num::{NonZeroU64, NonZeroUsize};
 
@@ -106,17 +106,6 @@ impl MetadataMaintenanceOptions {
             self.idle_fold_after_ms
                 .saturating_sub(now_ms.saturating_sub(committed_at_ms)),
         )
-    }
-}
-
-/// Resolves wire-level GC window overrides onto the conservative defaults.
-///
-/// [`GcRequest`] carries optional overrides; [`GcConfig`] carries the values
-/// the pass actually runs with, so the two are deliberately distinct shapes.
-pub(crate) fn gc_config_from_request(request: GcRequest) -> GcConfig {
-    let defaults = GcConfig::default();
-    GcConfig {
-        grace_window_ms: request.grace_window_ms.unwrap_or(defaults.grace_window_ms),
     }
 }
 

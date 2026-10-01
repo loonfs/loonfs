@@ -9,21 +9,20 @@
 
 use crate::metrics::{DefaultMetricsRecorder, MetricValue, MetricsSnapshot};
 use crate::{
-    CompactionStepOutcome, CreateCheckpointOptions, CreateNamespaceOptions, LoonFs, Maintenance,
-    MetadataCompactionOutcome, MetadataCompactionPolicy, MoveOptions, NamespaceId, PutFileOptions,
-    RunMaintenanceRequest, RunMaintenanceResponse, SharedObjectStore, Writable,
+    CompactionStepOutcome, CreateCheckpointOptions, CreateNamespaceOptions, GcConfig, LoonFs,
+    Maintenance, MetadataCompactionOutcome, MetadataCompactionPolicy, MetadataMaintenanceOptions,
+    MoveOptions, NamespaceId, PutFileOptions, SharedObjectStore, Writable,
 };
 use loonfs_api::wire::manifest::{
     decode_namespace_manifest_json, MetadataRowFamily, NamespaceManifestPayload, RunTier,
 };
-use loonfs_api::{GcRequest, MetadataMaintenanceRequest};
 use loonfs_core::MetadataFamilyGroup;
 use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::ids::namespace_id;
 use std::collections::BTreeSet;
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU64, NonZeroUsize};
 use std::sync::Arc;
 use tempfile::tempdir;
 
@@ -83,10 +82,12 @@ fn counter(snapshot: &MetricsSnapshot, name: &str, labels: &[(&str, &str)]) -> u
     value
 }
 
-fn metadata_request() -> RunMaintenanceRequest {
-    RunMaintenanceRequest::Metadata(MetadataMaintenanceRequest {
-        max_wal_tail_objects: Some(1),
-    })
+fn metadata_options(compaction_policy: MetadataCompactionPolicy) -> MetadataMaintenanceOptions {
+    MetadataMaintenanceOptions {
+        max_wal_tail_objects: NonZeroU64::MIN,
+        compaction_policy,
+        ..Default::default()
+    }
 }
 
 #[tokio::test]
@@ -112,15 +113,10 @@ async fn a_maintenance_gc_step_records_the_pass_counters_once() {
         .expect("write a live GC candidate");
 
     assert_eq!(counter(&recorder.snapshot(), "loonfs.gc.retained", &[]), 0);
-    let response = maintenance
-        .run_maintenance(&namespace, RunMaintenanceRequest::Gc(GcRequest::default()))
+    let gc = maintenance
+        .gc_namespace(&namespace, &GcConfig::default())
         .await
         .expect("run the maintenance GC step");
-    let gc = match response {
-        RunMaintenanceResponse::Gc(gc) => Some(gc),
-        _ => None,
-    }
-    .expect("a GC request should return a GC response");
     assert!(
         gc.retained.total() > 0,
         "the live namespace gives the pass candidates to retain"
@@ -234,7 +230,10 @@ async fn namespace_with_a_frozen_base(
     // and with the floor still at the bottom, so the churn lands in the base.
     for _ in 0..64 {
         let response = maintenance
-            .fold_wal(namespace_id)
+            .maintain_metadata(
+                namespace_id,
+                metadata_options(MetadataCompactionPolicy::CompactImmediately),
+            )
             .await
             .expect("merge a unit");
         if response.compaction == (CompactionStepOutcome::NotNeeded {}) {
@@ -261,11 +260,8 @@ async fn namespace_with_a_frozen_base(
 }
 
 /// Keeps writing while the group's base is frozen, so a delta-only merge is
-/// always available above it.
-///
-/// The maintenance here is the starved one, which is what makes these runs pile up:
-/// its steps can no longer merge the group they land in, so each write leaves
-/// one more delta run behind rather than being merged into the base.
+/// always available above it. Each write is folded with no compaction step,
+/// so each leaves one more delta run behind.
 async fn sustained_writes(
     writer: &LoonFs<Writable>,
     maintenance: &Maintenance,
@@ -385,15 +381,13 @@ async fn compaction_planning_survives_restart_and_explicit_work_has_bounded_fan_
     }
 
     // A small group is eligible immediately, even when its rows require a job.
-    let response = scheduled
-        .run_maintenance(&automatic, metadata_request())
+    let metadata = scheduled
+        .maintain_metadata(
+            &automatic,
+            metadata_options(MetadataCompactionPolicy::SizeTiered),
+        )
         .await
         .expect("plan automatic compaction");
-    let metadata = match response {
-        RunMaintenanceResponse::Metadata(metadata) => Some(metadata),
-        _ => None,
-    }
-    .expect("metadata response");
     assert_eq!(
         metadata.compaction,
         CompactionStepOutcome::MetadataCompactionRequired {}
@@ -412,15 +406,13 @@ async fn compaction_planning_survives_restart_and_explicit_work_has_bounded_fan_
             "fresh-scheduled-maintenance",
         ))
         .starve_compaction_row_budget(budget);
-    let response = fresh_scheduled
-        .run_maintenance(&automatic, metadata_request())
+    let metadata = fresh_scheduled
+        .maintain_metadata(
+            &automatic,
+            metadata_options(MetadataCompactionPolicy::SizeTiered),
+        )
         .await
         .expect("replan after restart");
-    let metadata = match response {
-        RunMaintenanceResponse::Metadata(metadata) => Some(metadata),
-        _ => None,
-    }
-    .expect("metadata response");
     assert_eq!(
         metadata.compaction,
         CompactionStepOutcome::MetadataCompactionRequired {},
@@ -538,7 +530,7 @@ async fn explicit_compaction_merges_twenty_deltas_and_reads_the_large_base_once(
         parse_mutation_path, CommitCandidate, CommitRequest, FilesystemOperation,
     };
     use crate::{CommitId, UpdateAttributesOptions};
-    use loonfs_api::{Checksum, MetadataCompactionRequest};
+    use loonfs_api::Checksum;
     use loonfs_objectstore::keys::metadata_segment;
     use loonfs_test_support::ids::{attribute_key, attribute_text};
     use loonfs_test_support::stores::RecordingStore;
@@ -621,10 +613,7 @@ async fn explicit_compaction_merges_twenty_deltas_and_reads_the_large_base_once(
             .update_attributes("/file", options)
             .await
             .expect("write delta");
-        maintenance
-            .run_wal_fold(&namespace)
-            .await
-            .expect("fold delta");
+        maintenance.fold_wal(&namespace).await.expect("fold delta");
     }
 
     let attribute_runs = |manifest: &NamespaceManifestPayload| {
@@ -665,18 +654,11 @@ async fn explicit_compaction_merges_twenty_deltas_and_reads_the_large_base_once(
             .map(|segment| metadata_segment(&segment.owner_namespace_id, &segment.segment_id))
             .collect();
         store.reset();
-        let response = maintenance
-            .run_maintenance(
-                &namespace,
-                RunMaintenanceRequest::MetadataCompaction(MetadataCompactionRequest {}),
-            )
+        let compaction = maintenance
+            .compact_metadata(&namespace)
             .await
-            .expect("compact one unit");
-        let compaction = match response {
-            RunMaintenanceResponse::MetadataCompaction(response) => Some(response.compaction),
-            _ => None,
-        }
-        .expect("compaction response");
+            .expect("compact one unit")
+            .compaction;
         let read_base = store
             .take_get_keys()
             .iter()
