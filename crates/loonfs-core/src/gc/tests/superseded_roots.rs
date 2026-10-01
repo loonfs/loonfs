@@ -125,11 +125,11 @@ async fn recently_superseded_manifests_keep_old_segments_and_lazy_views_until_th
                     metadata
                 },
             );
-            let config = GcConfig { grace_window_ms };
+            let options = GcOptions { grace_window_ms };
             let retained = gc_namespace(
                 &recent,
                 &namespace_id,
-                &config,
+                &options,
                 &context(published_at_ms + grace_window_ms - 1),
             )
             .await
@@ -169,7 +169,7 @@ async fn recently_superseded_manifests_keep_old_segments_and_lazy_views_until_th
             let collected = gc_namespace(
                 &recent,
                 &namespace_id,
-                &config,
+                &options,
                 &context(published_at_ms + grace_window_ms),
             )
             .await
@@ -227,7 +227,7 @@ async fn a_recent_successor_roots_its_predecessor_even_when_it_is_no_longer_curr
             metadata
         },
     );
-    gc_namespace(&recent, &namespace_id, &config(), &context(now_ms))
+    gc_namespace(&recent, &namespace_id, &options(), &context(now_ms))
         .await
         .expect("root an older predecessor");
     assert_objects_exist(&store, &dropped, true).await;
@@ -242,7 +242,7 @@ async fn a_recent_successor_roots_its_predecessor_even_when_it_is_no_longer_curr
         .delete(&successor.object_key)
         .await
         .expect("remove successor");
-    gc_namespace(&recent, &namespace_id, &config(), &context(now_ms))
+    gc_namespace(&recent, &namespace_id, &options(), &context(now_ms))
         .await
         .expect("collect with missing successor");
     assert_objects_exist(&store, &dropped, false).await;
@@ -272,7 +272,7 @@ async fn a_successor_without_a_provider_timestamp_keeps_its_predecessor_and_segm
     let undated =
         MetadataMapStore::without_last_modified(&store, KeyPredicate::exact(&current.object_key));
     let aged = context(UNREFERENCED_SEGMENT_MIN_AGE_MS + GRACE_MS + 1);
-    let retained = gc_namespace(&undated, &namespace_id, &config(), &aged)
+    let retained = gc_namespace(&undated, &namespace_id, &options(), &aged)
         .await
         .expect("collect with undated successor");
     assert_objects_exist(&store, &dropped, true).await;
@@ -284,7 +284,7 @@ async fn a_successor_without_a_provider_timestamp_keeps_its_predecessor_and_segm
     assert_eq!(retained.deleted.metadata_segments, 0);
     assert_eq!(retained.retained.no_provider_timestamp, 0);
 
-    let collected = gc_namespace(&store, &namespace_id, &config(), &aged)
+    let collected = gc_namespace(&store, &namespace_id, &options(), &aged)
         .await
         .expect("collect with aged successor timestamp");
     assert_objects_exist(&store, &dropped, false).await;

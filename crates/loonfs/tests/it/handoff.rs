@@ -20,7 +20,8 @@ fn file_options() -> PutFileOptions {
 }
 
 async fn fresh_reader(store: SharedObjectStore) -> LoonFs<ReadOnly> {
-    LoonFs::reader_with_store(store)
+    LoonFs::builder_with_store(store)
+        .read_only()
         .build()
         .await
         .expect("build fresh reader")
@@ -230,7 +231,7 @@ async fn a_cold_node_reconstructs_current_state_during_active_writes() {
             "cold-handoff-inspection",
         ));
     let diagnostics = maintenance
-        .get_namespace_diagnostics(&namespace_id)
+        .diagnostics(&namespace_id)
         .await
         .expect("read diagnostics after fold");
     assert_eq!(diagnostics.current_manifest_no, Some(ManifestNo(3)));

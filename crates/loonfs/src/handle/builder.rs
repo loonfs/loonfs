@@ -8,9 +8,8 @@ use crate::metrics::{
 };
 use crate::publisher::{NamespaceAdvanceHint, NamespaceAdvanceObserver, PublisherRegistry};
 use crate::{
-    InlineContentOptions, MaintenanceHint, MaintenanceHintObserver, MetadataCache,
-    PublicationLimits, Result, RuntimeError, SharedObjectStore, StoreConfig, TraceMode,
-    TraceStoreKind,
+    Error, InlineContentPolicy, MaintenanceHint, MaintenanceHintObserver, MetadataCache,
+    PublicationLimits, Result, SharedObjectStore, StoreConfig, TraceMode, TraceStoreKind,
 };
 use loonfs_core::cache::StoredMetadataBlockCache;
 use loonfs_core::MetadataLsmPolicy;
@@ -25,7 +24,8 @@ use tokio::sync::Semaphore;
 ///
 /// Settings that every runtime reads are available in both modes. Settings
 /// for the writer identity, publication, and maintenance exist only on the
-/// writable builder.
+/// writable builder. [`Self::read_only`] turns a writable builder into a
+/// read-only one.
 #[must_use]
 pub struct LoonFsBuilder<M> {
     core: CoreSettings,
@@ -64,7 +64,7 @@ struct WriterSettings {
     writer_id: Option<String>,
     min_publish_interval_ms: u64,
     publication_limits: PublicationLimits,
-    inline_content: InlineContentOptions,
+    inline_content: InlineContentPolicy,
     max_concurrent_folds: NonZeroUsize,
     namespace_advance_observer: Option<NamespaceAdvanceObserver>,
     maintenance_hint_observer: Option<MaintenanceHintObserver>,
@@ -100,7 +100,7 @@ impl<M> LoonFsBuilder<M> {
                 writer_id: None,
                 min_publish_interval_ms: crate::config::DEFAULT_MIN_PUBLISH_INTERVAL_MS,
                 publication_limits: PublicationLimits::default(),
-                inline_content: InlineContentOptions::default(),
+                inline_content: InlineContentPolicy::default(),
                 max_concurrent_folds: NonZeroUsize::new(
                     crate::config::DEFAULT_MAX_CONCURRENT_FOLDS,
                 )
@@ -286,8 +286,8 @@ impl LoonFsBuilder<Writable> {
     }
 
     /// Sets inline preparation, segment, fold, and tail limits.
-    pub fn inline_content(mut self, options: InlineContentOptions) -> Self {
-        self.writer.inline_content = options;
+    pub fn inline_content(mut self, policy: InlineContentPolicy) -> Self {
+        self.writer.inline_content = policy;
         self
     }
 
@@ -322,6 +322,20 @@ impl LoonFsBuilder<Writable> {
         self
     }
 
+    /// Turns this builder into one for a read-only runtime.
+    ///
+    /// It keeps the settings both modes share, such as the store, the
+    /// metadata cache, and the manifest revalidation interval. It drops the
+    /// writer-only ones, such as the writer id, the publication limits, and
+    /// the observers.
+    pub fn read_only(self) -> LoonFsBuilder<ReadOnly> {
+        LoonFsBuilder {
+            core: self.core,
+            writer: self.writer,
+            mode: PhantomData,
+        }
+    }
+
     /// Opens the writable runtime inside the Tokio runtime that owns
     /// publication tasks.
     ///
@@ -334,9 +348,9 @@ impl LoonFsBuilder<Writable> {
         writer.inline_content.validate()?;
         let writer_id = writer
             .writer_id
-            .ok_or_else(|| RuntimeError::Config("writer_id is required".to_owned()))?;
+            .ok_or_else(|| Error::Config("writer_id is required".to_owned()))?;
         if writer.publication_limits.max_concurrent_publications.get() > Semaphore::MAX_PERMITS {
-            return Err(RuntimeError::Config(format!(
+            return Err(Error::Config(format!(
                 "max_concurrent_publications must not exceed {}",
                 Semaphore::MAX_PERMITS
             )));
@@ -379,7 +393,7 @@ impl CoreSettings {
                 let kind = TraceStoreKind::from(config.kind());
                 let store = config
                     .configured_object_store()
-                    .map_err(|error| RuntimeError::Config(error.public_message().into_owned()))?;
+                    .map_err(|error| Error::Config(error.public_message().into_owned()))?;
                 (store.into_shared(), kind)
             }
             StoreSource::Shared(store) => (store, TraceStoreKind::Unknown),
@@ -430,7 +444,7 @@ impl CoreSettings {
 /// error, not a panic.
 fn owning_runtime() -> Result<tokio::runtime::Handle> {
     tokio::runtime::Handle::try_current().map_err(|_| {
-        RuntimeError::Config(
+        Error::Config(
             "a writable runtime must be built inside the Tokio runtime that will own it".to_owned(),
         )
     })

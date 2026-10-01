@@ -299,8 +299,8 @@ impl From<ClientError> for CliError {
     }
 }
 
-impl From<loonfs::RuntimeError> for CliError {
-    fn from(error: loonfs::RuntimeError) -> Self {
+impl From<loonfs::Error> for CliError {
+    fn from(error: loonfs::Error) -> Self {
         let error = error.to_api_error();
         Self {
             code: error.code,

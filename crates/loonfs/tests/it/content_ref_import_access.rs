@@ -1,8 +1,8 @@
 //! Authorization for embedded content reference reads and imports.
 
 use loonfs::{
-    CreateNamespaceOptions, DeleteNamespaceOptions, ForkNamespaceOptions, LoonFs, PutFileOptions,
-    RuntimeError, SharedObjectStore, UpdateAccessOptions, Writable,
+    CreateNamespaceOptions, DeleteNamespaceOptions, Error, ForkNamespaceOptions, LoonFs,
+    PutFileOptions, SharedObjectStore, UpdateAccessOptions, Writable,
 };
 use loonfs_api::{
     AccessGrants, AccessRight, AccessRights, ContentRef, ErrorCode, NamespaceAccess, NamespaceId,
@@ -45,11 +45,11 @@ fn administrator_grants(administrator: &str) -> AccessGrants {
 async fn collect_aged_segments(store: &RecordingStore<LocalFsStore>, namespace_id: &NamespaceId) {
     let now_ms = loonfs::current_time_ms().expect("wall clock")
         + 2 * loonfs_core::limits::UNREFERENCED_SEGMENT_MIN_AGE_MS
-        + 2 * loonfs::GcConfig::default().grace_window_ms;
+        + 2 * loonfs::GcOptions::default().grace_window_ms;
     loonfs_core::gc_namespace(
         store,
         namespace_id,
-        &loonfs::GcConfig::default(),
+        &loonfs::GcOptions::default(),
         &loonfs_core::MutationContext {
             writer_id: loonfs_api::WriterId::parse("import-access-gc").expect("writer id"),
             now_ms,
@@ -99,12 +99,12 @@ async fn create_namespace(
 async fn publish_inline(writer: &LoonFs<Writable>, namespace_id: &NamespaceId) -> ContentRef {
     let namespace = writer
         .read_only()
-        .as_subject(subject("administrator"))
+        .with_subject(subject("administrator"))
         .namespace(namespace_id);
     let namespace_writer = writer.open_namespace(namespace_id).expect("open namespace");
     let options = PutFileOptions::new(loonfs_test_support::test_actor());
     namespace_writer
-        .as_subject(subject("administrator"))
+        .with_subject(subject("administrator"))
         .put_file_bytes("/source", b"private inline bytes", options)
         .await
         .expect("publish source");
@@ -117,7 +117,7 @@ async fn publish_inline(writer: &LoonFs<Writable>, namespace_id: &NamespaceId) -
         .clone()
 }
 
-fn assert_forbidden_without_writes(recording: &RecordingStore<LocalFsStore>, error: RuntimeError) {
+fn assert_forbidden_without_writes(recording: &RecordingStore<LocalFsStore>, error: Error) {
     assert_eq!(error.code(), ErrorCode::Forbidden);
     assert_eq!(recording.count(OperationClass::Put), 0);
 }
@@ -141,7 +141,7 @@ async fn by_reference_reads_require_publication_in_the_reading_view() {
         .fold_wal(&source)
         .await
         .expect("materialize private content");
-    let reader = writer.read_only().as_subject(subject("stranger"));
+    let reader = writer.read_only().with_subject(subject("stranger"));
     let destination_namespace = reader.namespace(&destination);
     let source_namespace = reader.namespace(&source);
     assert_eq!(
@@ -199,7 +199,7 @@ async fn subject_without_source_rights_cannot_prepare_or_publish_an_inline_tail_
     create_namespace(&writer, &source, acl("administrator")).await;
     create_namespace(&writer, &destination, NamespaceAccess::unrestricted()).await;
     let content_ref = publish_inline(&writer, &source).await;
-    let scoped = writer.as_subject(subject("stranger"));
+    let scoped = writer.with_subject(subject("stranger"));
     let source_namespace = scoped.namespace(&source);
     let namespace = scoped.open_namespace(&destination).expect("open namespace");
 
@@ -251,7 +251,7 @@ async fn same_namespace_inline_tail_import_requires_its_administrator() {
 
     recording.reset();
     let error = namespace
-        .as_subject(subject("stranger"))
+        .with_subject(subject("stranger"))
         .put_file_content_ref(
             "/imported",
             content_ref.clone(),
@@ -262,7 +262,7 @@ async fn same_namespace_inline_tail_import_requires_its_administrator() {
     assert_forbidden_without_writes(recording.as_ref(), error);
 
     let prepared = namespace
-        .as_subject(subject("administrator"))
+        .with_subject(subject("administrator"))
         .prepare_content_ref(content_ref.clone())
         .await
         .expect("administrator imports same-namespace reference");
@@ -289,8 +289,11 @@ async fn bare_reference_import_accepts_service_administrator_and_unrestricted_au
 
     for (authority, content_ref) in [
         (writer.clone(), acl_ref.clone()),
-        (writer.as_subject(subject("administrator")), acl_ref.clone()),
-        (writer.as_subject(subject("stranger")), unrestricted_ref),
+        (
+            writer.with_subject(subject("administrator")),
+            acl_ref.clone(),
+        ),
+        (writer.with_subject(subject("stranger")), unrestricted_ref),
     ] {
         let namespace = authority
             .open_namespace(&destination)
@@ -315,13 +318,13 @@ async fn reclaimed_deleted_owner_import_reports_the_owner_without_writes() {
     let destination_writer = writer.open_namespace(&destination).expect("open namespace");
     let content_ref = publish_inline(&writer, &source).await;
     source_writer
-        .delete_namespace(DeleteNamespaceOptions::default())
+        .delete(DeleteNamespaceOptions::default())
         .await
         .expect("delete owner");
     let report = loonfs_core::gc_namespace(
         recording.as_ref(),
         &source,
-        &loonfs_core::GcConfig {
+        &loonfs_core::GcOptions {
             grace_window_ms: loonfs_core::limits::GC_MIN_GRACE_WINDOW_MS,
         },
         &loonfs_core::MutationContext {
@@ -337,7 +340,7 @@ async fn reclaimed_deleted_owner_import_reports_the_owner_without_writes() {
 
     recording.reset();
     let error = destination_writer
-        .as_subject(subject("administrator"))
+        .with_subject(subject("administrator"))
         .prepare_content_ref(content_ref)
         .await
         .expect_err("reclaimed owner");
@@ -355,7 +358,7 @@ async fn deleted_owner_import_uses_updated_access_state_in_the_surviving_head() 
     let fork = namespace_id("fork");
     let namespace = writer
         .read_only()
-        .as_subject(subject("administrator"))
+        .with_subject(subject("administrator"))
         .namespace(&fork);
     let destination = namespace_id("destination");
     create_namespace(&writer, &source, acl("administrator")).await;
@@ -377,12 +380,12 @@ async fn deleted_owner_import_uses_updated_access_state_in_the_surviving_head() 
         administrator_grants("replacement"),
     );
     source_writer
-        .as_subject(subject("administrator"))
+        .with_subject(subject("administrator"))
         .update_access("/", access)
         .await
         .expect("replace administrator");
     source_writer
-        .delete_namespace(DeleteNamespaceOptions::default())
+        .delete(DeleteNamespaceOptions::default())
         .await
         .expect("delete source");
     assert_eq!(
@@ -411,14 +414,14 @@ async fn deleted_owner_import_uses_updated_access_state_in_the_surviving_head() 
 
     recording.reset();
     let error = destination_writer
-        .as_subject(subject("administrator"))
+        .with_subject(subject("administrator"))
         .prepare_content_ref(content_ref.clone())
         .await
         .expect_err("former administrator is refused");
     assert_forbidden_without_writes(recording.as_ref(), error);
 
     let prepared = destination_writer
-        .as_subject(subject("replacement"))
+        .with_subject(subject("replacement"))
         .prepare_content_ref(content_ref.clone())
         .await
         .expect("surviving access state authorizes administrator");

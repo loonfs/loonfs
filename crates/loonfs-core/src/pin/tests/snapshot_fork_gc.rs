@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::authorize::{Authorizer, ReadAccess};
-use crate::gc::{gc_namespace, GcConfig};
+use crate::gc::{gc_namespace, GcOptions};
 use loonfs_api::wire::control::{PinOwner, PinPayload};
 use loonfs_api::AttributeInclusion;
 use loonfs_objectstore::keys::{pin, pin_prefix};
@@ -140,7 +140,7 @@ async fn snapshot_fork_survives_snapshot_deletion_during_an_older_gc_pass() {
         gc_namespace(
             &gc_gate,
             &fixture.source,
-            &GcConfig::default(),
+            &GcOptions::default(),
             &fixture.context,
         )
         .await
@@ -172,7 +172,7 @@ async fn snapshot_fork_survives_snapshot_deletion_during_an_older_gc_pass() {
     gc_namespace(
         &fixture.store,
         &fixture.source,
-        &GcConfig::default(),
+        &GcOptions::default(),
         &fixture.context,
     )
     .await
@@ -233,7 +233,7 @@ async fn snapshot_fork_refuses_a_snapshot_deleted_before_post_write_verification
             gc_namespace(
                 &fixture.store,
                 &fixture.source,
-                &GcConfig::default(),
+                &GcOptions::default(),
                 &fixture.context,
             )
             .await
@@ -258,7 +258,7 @@ async fn snapshot_fork_refuses_a_snapshot_deleted_before_post_write_verification
     gc_namespace(
         &fixture.store,
         &fixture.source,
-        &GcConfig::default(),
+        &GcOptions::default(),
         &fixture.context,
     )
     .await

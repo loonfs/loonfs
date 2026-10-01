@@ -27,8 +27,9 @@ const API_SPEC_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/spe
 fn embedded_capabilities() -> CapabilityDocument {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
-    let reader = block_on(LoonFs::reader_with_store(store).build()).expect("build reader");
-    reader.get_capabilities()
+    let reader =
+        block_on(LoonFs::builder_with_store(store).read_only().build()).expect("build reader");
+    reader.capabilities()
 }
 
 fn without_host_capabilities(mut document: CapabilityDocument) -> CapabilityDocument {

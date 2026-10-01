@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::authorize::{Authorizer, ReadAccess};
-use crate::gc::{gc_namespace, GcConfig};
+use crate::gc::{gc_namespace, GcOptions};
 use crate::manifest::{
     advance_retention_floor, compaction_step, CompactionStepOutcome, MetadataCompactionPolicy,
     MetadataLsmPolicy,
@@ -211,7 +211,7 @@ async fn inline_receipt_retention_keeps_the_boundary_and_reuses_only_pruned_ids(
     gc_namespace(
         &aged,
         &namespace_id,
-        &GcConfig::default(),
+        &GcOptions::default(),
         &MutationContext {
             now_ms: crate::limits::UNREFERENCED_SEGMENT_MIN_AGE_MS + 1,
             ..context.clone()

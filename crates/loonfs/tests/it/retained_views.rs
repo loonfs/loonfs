@@ -3,7 +3,7 @@
 use crate::common::*;
 use loonfs::{
     current_time_ms, CompactionStepOutcome, CreateDirectoryOptions, CreateNamespaceOptions,
-    DeleteOptions, DestinationBehavior, ForkNamespaceOptions, GcConfig, InlineContentOptions,
+    DeleteOptions, DestinationBehavior, ForkNamespaceOptions, GcOptions, InlineContentPolicy,
     LoonFs, MetadataCompactionPolicy, MetadataMaintenanceOptions, MoveOptions, PutFileOptions,
     UndeleteOptions, UpdateAccessOptions, UpdateAttributesOptions, WalFoldStepOutcome,
     GC_DEFAULT_GRACE_WINDOW_MS, UNREFERENCED_SEGMENT_MIN_AGE_MS,
@@ -31,7 +31,7 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
     let runtime = open_runtime_with_async(object_store.clone(), "retained-views", |builder| {
         builder
             .min_publish_interval_ms(0)
-            .inline_content(InlineContentOptions {
+            .inline_content(InlineContentPolicy {
                 inline_content_threshold_bytes: Some(64),
                 ..Default::default()
             })
@@ -45,7 +45,7 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
         subject_id: SubjectId::parse("administrator").expect("subject"),
         principals: PrincipalSet::new(BTreeSet::from([principal.clone()])).expect("principals"),
     };
-    let writer = runtime.writer.as_subject(subject.clone());
+    let writer = runtime.writer.with_subject(subject.clone());
     let source_namespace = writer.namespace(&source);
     writer
         .create_namespace(
@@ -304,7 +304,7 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
                 let collected = loonfs_core::gc_namespace(
                     object_store.as_ref(),
                     &source,
-                    &GcConfig {
+                    &GcOptions {
                         grace_window_ms: GC_DEFAULT_GRACE_WINDOW_MS,
                     },
                     &MutationContext {
@@ -322,11 +322,12 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
             _ => {}
         }
 
-        let reader = LoonFs::reader_with_store(object_store.clone())
+        let reader = LoonFs::builder_with_store(object_store.clone())
+            .read_only()
             .build()
             .await
             .expect("fresh reader")
-            .as_subject(subject.clone());
+            .with_subject(subject.clone());
         let source_namespace = reader.namespace(&source);
         let fork_namespace = reader.namespace(&fork);
         for (path, mut expected_paths) in [

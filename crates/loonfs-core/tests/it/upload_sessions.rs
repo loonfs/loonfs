@@ -13,8 +13,7 @@ use loonfs_api::{
 };
 use loonfs_api::{Checksum, ChecksumAlgorithm};
 use loonfs_core::{
-    BeginDirectPutUploadTargetResponse, Error as CoreError, ErrorCode, MutationContext,
-    ResolvedUploadCompletion,
+    DirectPutUploadTarget, Error as CoreError, ErrorCode, MutationContext, ResolvedUploadCompletion,
 };
 use loonfs_objectstore::keys::upload_session;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -41,7 +40,7 @@ async fn begin_direct_put_upload_target<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     checksum_algorithm: ChecksumAlgorithm,
     context: &MutationContext,
-) -> Result<BeginDirectPutUploadTargetResponse, CoreError> {
+) -> Result<DirectPutUploadTarget, CoreError> {
     namespace_engine(store, namespace_id, context)
         .begin_direct_put_upload_target(None, checksum_algorithm)
         .await
@@ -293,15 +292,15 @@ mod streamed_content {
             let UploadSessionStatus::Aborted { aborted_at_ms } = aborted.status else {
                 panic!("expected aborted");
             };
-            let config = loonfs_core::GcConfig::default();
+            let options = loonfs_core::GcOptions::default();
             // Model the body staying open across the post-abort grace interval.
             // No provider operation is suspended; the caller has not supplied its bytes.
             let aged = MutationContext {
-                now_ms: aborted_at_ms + config.grace_window_ms + 1,
+                now_ms: aborted_at_ms + options.grace_window_ms + 1,
                 ..context.clone()
             };
             if forget_before_resume {
-                loonfs_core::gc_namespace(&store, &namespace_id, &config, &aged)
+                loonfs_core::gc_namespace(&store, &namespace_id, &options, &aged)
                     .await
                     .expect("collect aborted session");
                 assert!(store.get(&session_key, None).await.expect("get").is_none());
@@ -318,7 +317,7 @@ mod streamed_content {
         loonfs_core::gc_namespace(
             &store,
             &namespace_id,
-            &loonfs_core::GcConfig::default(),
+            &loonfs_core::GcOptions::default(),
             &aged,
         )
         .await
@@ -387,14 +386,14 @@ mod streamed_content {
                 panic!("expected open");
             };
             let content_key = content_blob(&namespace_id, &session.content_id);
-            let config = loonfs_core::GcConfig::default();
+            let options = loonfs_core::GcOptions::default();
             // Model a source stalled past its lease and both collection graces.
             // GC, not a caller's explicit abort, moves the implicit session terminal.
             let expired = MutationContext {
-                now_ms: expires_at_ms + config.grace_window_ms + 1,
+                now_ms: expires_at_ms + options.grace_window_ms + 1,
                 ..context.clone()
             };
-            loonfs_core::gc_namespace(&store, &namespace_id, &config, &expired)
+            loonfs_core::gc_namespace(&store, &namespace_id, &options, &expired)
                 .await
                 .expect("GC aborts expired implicit session");
             let encoded = store
@@ -414,11 +413,11 @@ mod streamed_content {
                     if aborted_at_ms == expired.now_ms
             ));
             let aged = MutationContext {
-                now_ms: expired.now_ms + config.grace_window_ms + 1,
+                now_ms: expired.now_ms + options.grace_window_ms + 1,
                 ..context.clone()
             };
             if forget_before_resume {
-                loonfs_core::gc_namespace(&store, &namespace_id, &config, &aged)
+                loonfs_core::gc_namespace(&store, &namespace_id, &options, &aged)
                     .await
                     .expect("forget expired implicit owner");
                 assert!(store.get(&session_key, None).await.expect("get").is_none());
@@ -435,7 +434,7 @@ mod streamed_content {
         loonfs_core::gc_namespace(
             &store,
             &namespace_id,
-            &loonfs_core::GcConfig::default(),
+            &loonfs_core::GcOptions::default(),
             &aged,
         )
         .await
@@ -685,7 +684,7 @@ mod direct_multipart {
     use loonfs_api::options::DirectMultipartUploadOptions;
     use loonfs_api::v0::{CompletedUploadPart, UploadContentClaim};
     use loonfs_api::wire::control::{decode_control_object, UploadSessionRecordStatus};
-    use loonfs_core::{gc_namespace, GcConfig};
+    use loonfs_core::{gc_namespace, GcOptions};
     use loonfs_objectstore::keys::content_blob;
     use loonfs_test_support::stores::{FakeMultipartStore, MultipartChecksumEnforcement};
     use std::sync::Arc;
@@ -730,10 +729,10 @@ mod direct_multipart {
         };
         assert_eq!(
             part_size_bytes.get(),
-            begin.target.part_size_bytes,
+            begin.part_size_bytes,
             "the geometry it handed out is the geometry it recorded"
         );
-        assert_eq!(checksum_algorithm, begin.target.checksum_algorithm);
+        assert_eq!(checksum_algorithm, begin.checksum_algorithm);
 
         let object_key = content_blob(&state.namespace_id, &state.content_id);
 
@@ -1242,12 +1241,12 @@ mod direct_multipart {
         else {
             panic!("a fresh session is open");
         };
-        let config = GcConfig::default();
+        let options = GcOptions::default();
         let expired = MutationContext {
             writer_id: context.writer_id.clone(),
-            now_ms: expires_at_ms + config.grace_window_ms + 1,
+            now_ms: expires_at_ms + options.grace_window_ms + 1,
         };
-        gc_namespace(&store, &session.namespace_id, &config, &expired)
+        gc_namespace(&store, &session.namespace_id, &options, &expired)
             .await
             .expect("garbage collection");
 
@@ -1289,7 +1288,7 @@ mod direct_multipart {
             )
             .await
             .expect("a part size inside the bounds is honoured");
-        assert_eq!(chosen.target.part_size_bytes, 16 * 1024 * 1024);
+        assert_eq!(chosen.part_size_bytes, 16 * 1024 * 1024);
 
         for out_of_bounds in [5 * 1024 * 1024 - 1, 5 * 1024 * 1024 * 1024 + 1] {
             let error = namespace_engine(&store, &namespace_id, &context)

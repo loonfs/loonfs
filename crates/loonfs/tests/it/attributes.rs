@@ -208,7 +208,7 @@ fn the_write_convenience_matches_a_hand_built_one_operation_commit() {
         .expect_err("a different update under the same id conflicts");
     assert!(matches!(
         conflict,
-        loonfs::RuntimeError::Core(error) if error.code() == loonfs::ErrorCode::CommitIdReuseConflict
+        loonfs::Error::Core(error) if error.code() == loonfs::ErrorCode::CommitIdReuseConflict
     ));
 }
 

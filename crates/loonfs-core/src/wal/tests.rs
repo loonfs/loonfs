@@ -166,11 +166,11 @@ async fn fences_fold_and_are_reclaimed_at_the_folded_boundary() {
         .expect("manifest");
     assert_eq!(current.state.envelope.payload().head_seq, ChangeSeq(0));
     assert_eq!(current.state.envelope.payload().folded_wal_no, WalNo(1));
-    let config = crate::gc::GcConfig {
+    let options = crate::gc::GcOptions {
         grace_window_ms: crate::limits::GC_MIN_GRACE_WINDOW_MS,
     };
-    let aged = context(config.grace_window_ms + 1);
-    let report = crate::gc::gc_namespace(&store, &namespace_id, &config, &aged)
+    let aged = context(options.grace_window_ms + 1);
+    let report = crate::gc::gc_namespace(&store, &namespace_id, &options, &aged)
         .await
         .expect("collect");
     assert_eq!(report.deleted.wal_objects, 1);
@@ -638,7 +638,7 @@ async fn a_fold_and_collection_during_tip_discovery_cannot_reuse_a_wal_number() 
     let directory = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("tip-gc").expect("namespace");
     let grace = crate::limits::GC_MIN_GRACE_WINDOW_MS;
-    let config = crate::gc::GcConfig {
+    let options = crate::gc::GcOptions {
         grace_window_ms: grace,
     };
     let store = MetadataMapStore::aged(
@@ -680,7 +680,7 @@ async fn a_fold_and_collection_during_tip_discovery_cannot_reuse_a_wal_number() 
             now_ms: grace + 1,
             ..context(1_000)
         };
-        crate::gc::gc_namespace(store.inner(), &namespace_id, &config, &aged)
+        crate::gc::gc_namespace(store.inner(), &namespace_id, &options, &aged)
             .await
             .expect("collect old WAL");
         assert!(store
@@ -928,14 +928,14 @@ async fn a_writer_resuming_after_its_fence_was_collected_does_not_acknowledge_it
             )
             .await
             .expect("fold takeover and commit");
-            let config = crate::gc::GcConfig {
+            let options = crate::gc::GcOptions {
                 grace_window_ms: crate::limits::GC_MIN_GRACE_WINDOW_MS,
             };
-            store_clock.advance_ms(config.grace_window_ms + 1);
+            store_clock.advance_ms(options.grace_window_ms + 1);
             let report = crate::gc::gc_namespace(
                 blocked.inner(),
                 &namespace_id,
-                &config,
+                &options,
                 &MutationContext {
                     now_ms: store_clock.now_ms(),
                     ..context_b.clone()

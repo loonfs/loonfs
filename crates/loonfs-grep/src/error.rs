@@ -1,7 +1,7 @@
 //! Public grep failures and their wire-code classification.
 
 use crate::manifest::GrepManifestError;
-use loonfs::{CoreError, RuntimeError, StoreFailureClass};
+use loonfs::{CoreError, StoreFailureClass};
 use loonfs_api::{ErrorCode, ErrorKind};
 use loonfs_objectstore::ObjectStoreError;
 use thiserror::Error;
@@ -50,7 +50,7 @@ pub enum GrepError {
     /// A genuine runtime failure encountered while grep read or wrote
     /// through the filesystem handles.
     #[error(transparent)]
-    Runtime(#[from] RuntimeError),
+    Runtime(#[from] loonfs::Error),
 }
 
 /// Grep names the runtime's own error vocabulary for the conditions it
@@ -58,7 +58,7 @@ pub enum GrepError {
 /// lost basis — so one code means one thing whoever produced it.
 impl From<CoreError> for GrepError {
     fn from(error: CoreError) -> Self {
-        Self::Runtime(RuntimeError::Core(error))
+        Self::Runtime(loonfs::Error::Core(error))
     }
 }
 

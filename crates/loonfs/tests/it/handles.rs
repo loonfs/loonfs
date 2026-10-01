@@ -9,9 +9,9 @@
 use crate::common::collect_path_entries;
 use loonfs::{
     maintenance_hint_relay, CommitId, CreateCheckpointOptions, CreateDirectoryOptions,
-    CreateNamespaceOptions, ErrorCode, GarbageCollectionJob, LoonFs, Maintenance,
+    CreateNamespaceOptions, Error, ErrorCode, GarbageCollectionJob, LoonFs, Maintenance,
     MaintenanceRegistry, MaintenanceRunner, ManifestNo, MetadataCache, MetadataCompactionJob,
-    MetadataMaintenanceJob, MetadataMaintenanceOptions, NamespaceId, PutFileOptions, RuntimeError,
+    MetadataMaintenanceJob, MetadataMaintenanceOptions, NamespaceId, PutFileOptions,
     SharedObjectStore, StoreConfig, Writable,
 };
 use loonfs_core::test_support::append_wal_objects;
@@ -152,7 +152,8 @@ fn writer_reader_and_maintenance_share_a_namespace_through_store_config() {
 
         // A standalone reader opens its own store client from config and
         // still observes the write.
-        let standalone = LoonFs::reader(store_config(temp_dir.path()))
+        let standalone = LoonFs::builder(store_config(temp_dir.path()))
+            .read_only()
             .build()
             .await
             .expect("build standalone reader");
@@ -178,7 +179,7 @@ fn writer_reader_and_maintenance_share_a_namespace_through_store_config() {
                 "handle-test-maintenance",
             ));
         let status = maintenance
-            .get_namespace_diagnostics(&namespace_id)
+            .diagnostics(&namespace_id)
             .await
             .expect("namespace status");
         assert_eq!(status.namespace_id, namespace_id);
@@ -213,7 +214,8 @@ fn standalone_reader_builds_without_writer_identity() {
             .await
             .expect("put file");
 
-        let reader = LoonFs::reader(store_config(temp_dir.path()))
+        let reader = LoonFs::builder(store_config(temp_dir.path()))
+            .read_only()
             .build()
             .await
             .expect("build standalone reader");
@@ -280,7 +282,7 @@ fn maintenance_invalidates_the_runtimes_shared_read_caches() {
             .expect("writer fold settles");
         runner.drain().await.expect("maintenance quiesces");
         let status = maintenance
-            .get_namespace_diagnostics(&namespace_id)
+            .diagnostics(&namespace_id)
             .await
             .expect("status after the scheduled step");
         assert!(
@@ -444,7 +446,7 @@ fn manual_only_writer_folds_without_scheduling_maintenance() {
                 "handle-test-maintenance",
             ));
         let status = maintenance
-            .get_namespace_diagnostics(&namespace_id)
+            .diagnostics(&namespace_id)
             .await
             .expect("status after writes");
         assert_eq!(
@@ -494,7 +496,7 @@ fn a_writer_with_a_runner_maintains_what_it_touches() {
                 .expect("put file below the threshold");
             runner.drain().await.expect("nothing was due");
             let status = maintenance
-                .get_namespace_diagnostics(&namespace_id)
+                .diagnostics(&namespace_id)
                 .await
                 .expect("status below the threshold");
             assert_eq!(
@@ -521,7 +523,7 @@ fn a_writer_with_a_runner_maintains_what_it_touches() {
             runner.drain().await.expect("maintenance quiesces");
 
             let status = maintenance
-                .get_namespace_diagnostics(&namespace_id)
+                .diagnostics(&namespace_id)
                 .await
                 .expect("status after auto step");
             assert!(
@@ -613,7 +615,7 @@ fn a_runner_retries_a_failed_writer_fold_without_another_write() {
         runner.drain().await.expect("maintenance retry quiesces");
 
         let status = maintenance
-            .get_namespace_diagnostics(&namespace_id)
+            .diagnostics(&namespace_id)
             .await
             .expect("status after maintenance retry");
         assert!(
@@ -724,7 +726,7 @@ fn a_runtime_publish_folds_a_preexisting_write_stopped_tail_and_lands() {
                 "handle-test-maintenance",
             ));
         let status = maintenance
-            .get_namespace_diagnostics(&namespace_id)
+            .diagnostics(&namespace_id)
             .await
             .expect("status after the folding publish");
         assert_eq!(status.wal_tail_objects, 1, "{status:?}");
@@ -749,7 +751,7 @@ fn a_failed_fold_preserves_the_write_stop_until_the_store_recovers() {
         let store: SharedObjectStore = failing.clone();
         let writer = LoonFs::builder_with_store(store)
             .writer_id("fold-failure-writer")
-            .inline_content(loonfs::InlineContentOptions {
+            .inline_content(loonfs::InlineContentPolicy {
                 inline_content_threshold_bytes: None,
                 ..Default::default()
             })
@@ -822,7 +824,7 @@ fn a_failed_fold_preserves_the_write_stop_until_the_store_recovers() {
                 "handle-test-maintenance",
             ));
         let status = maintenance
-            .get_namespace_diagnostics(&namespace_id)
+            .diagnostics(&namespace_id)
             .await
             .expect("status after fold recovery");
         assert!(
@@ -902,7 +904,7 @@ fn a_threshold_crossing_publish_returns_before_its_fold_completes() {
             "parked-fold-inspection",
         ));
         let status = maintenance
-            .get_namespace_diagnostics(&namespace_id)
+            .diagnostics(&namespace_id)
             .await
             .expect("inspect the folded namespace");
         assert!(status.current_manifest_no.is_some(), "{status:?}");
@@ -947,7 +949,7 @@ fn a_shut_down_writer_refuses_mutations_and_keeps_reading() {
             .maintenance(loonfs_test_support::ids::writer_id(
                 "handle-test-maintenance",
             ))
-            .get_namespace_diagnostics(&namespace_id)
+            .diagnostics(&namespace_id)
             .await
             .expect("status before the shutdown")
             .wal_tail_objects;
@@ -980,7 +982,7 @@ fn a_shut_down_writer_refuses_mutations_and_keeps_reading() {
                 "handle-test-maintenance",
             ));
         let status = maintenance
-            .get_namespace_diagnostics(&namespace_id)
+            .diagnostics(&namespace_id)
             .await
             .expect("status after the shutdown");
         assert_eq!(
@@ -999,7 +1001,7 @@ fn a_shut_down_writer_refuses_mutations_and_keeps_reading() {
 fn builders_require_identity_and_a_runtime() {
     let temp_dir = tempdir().expect("tempdir");
     match block_on(LoonFs::builder(store_config(temp_dir.path())).build()) {
-        Err(RuntimeError::Config(_)) => {}
+        Err(Error::Config(_)) => {}
         Err(other) => panic!("expected config error for missing writer_id, got {other:?}"),
         Ok(_) => panic!("writer_id must be required"),
     }
@@ -1008,7 +1010,7 @@ fn builders_require_identity_and_a_runtime() {
             .writer_id("   ")
             .build(),
     ) {
-        Err(RuntimeError::Config(_)) => {}
+        Err(Error::Config(_)) => {}
         Err(other) => panic!("expected config error for a blank writer_id, got {other:?}"),
         Ok(_) => panic!("a whitespace-only writer_id must be rejected"),
     }
@@ -1020,13 +1022,13 @@ fn builders_require_identity_and_a_runtime() {
             .build(),
     );
     match outside_runtime {
-        Err(RuntimeError::Config(_)) => {}
+        Err(Error::Config(_)) => {}
         Err(other) => panic!("expected config error outside a runtime, got {other:?}"),
         Ok(_) => panic!("build must require an owning runtime"),
     }
 
     let outside_runtime = MaintenanceRunner::builder(MaintenanceRegistry::new()).build();
-    assert!(matches!(outside_runtime, Err(RuntimeError::Config(_))));
+    assert!(matches!(outside_runtime, Err(Error::Config(_))));
 }
 
 #[test]
@@ -1141,7 +1143,7 @@ async fn namespace_deletion_drops_cached_reads_and_schedules_gc_even_when_its_an
         if lost_answer {
             store.fail_next(1);
         }
-        let deleted = namespace_writer.delete_namespace(Default::default()).await;
+        let deleted = namespace_writer.delete(Default::default()).await;
         assert_eq!(store.remaining(), 0);
         if let Err(error) = &deleted {
             assert!(lost_answer, "unexpected error: {error:?}");
@@ -1151,7 +1153,7 @@ async fn namespace_deletion_drops_cached_reads_and_schedules_gc_even_when_its_an
             .await
             .expect("tombstone");
         let expected = state.status.deleted_at_ms().expect("deletion stamp")
-            + loonfs::GcConfig::default()
+            + loonfs::GcOptions::default()
                 .grace_window_ms
                 .max(NAMESPACE_RETIREMENT_GRACE_MS)
             + GC_SAFETY_MARGIN_MS;

@@ -487,7 +487,7 @@ async fn shutdown_closes_maintenance_admission_before_draining_publications() {
     });
     blocking.wait_until_blocked().await;
 
-    state.runtime.close_admission_for_shutdown();
+    state.runtime.close_admission();
     runner.close_admission();
     let mut shutdown = Box::pin(state.runtime.shutdown());
     assert!(
@@ -1046,7 +1046,8 @@ async fn test_runtime(store: SharedObjectStore, writer_id: &str) -> LoonFs<Writa
 /// on the given store, its filesystem reads and checkpoints on handles over
 /// the same store.
 async fn grep_worker(store: &SharedObjectStore, actor: &str) -> GrepWorker<SharedObjectStore> {
-    let reader = LoonFs::reader_with_store(store.clone())
+    let reader = LoonFs::builder_with_store(store.clone())
+        .read_only()
         .build()
         .await
         .expect("build reader");

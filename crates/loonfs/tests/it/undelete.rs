@@ -7,7 +7,7 @@ use crate::common::*;
 use loonfs::publish::{parse_mutation_path, CommitRequest, FilesystemOperation};
 use loonfs::{
     ChangeSeq, CommitId, CreateNamespaceOptions, DeleteDirectoryBehavior, DeleteOptions,
-    DestinationBehavior, ErrorCode, InodeId, ListChangesOptions, PutFileOptions, RuntimeError,
+    DestinationBehavior, Error, ErrorCode, InodeId, ListChangesOptions, PutFileOptions,
 };
 use loonfs_test_support::ids::namespace_id;
 use tempfile::tempdir;
@@ -40,7 +40,7 @@ fn delete_options_select_recursive_behavior() {
         .expect_err("non-recursive delete should reject non-empty directory");
     assert!(matches!(
         error,
-        RuntimeError::Core(error) if error.code() == loonfs::ErrorCode::DirectoryNotEmpty
+        Error::Core(error) if error.code() == loonfs::ErrorCode::DirectoryNotEmpty
     ));
 
     fs.delete_path_blocking(
@@ -63,7 +63,7 @@ fn delete_options_select_recursive_behavior() {
         .expect_err("deleted file should not stat");
     assert!(matches!(
         error,
-        RuntimeError::Core(error) if error.code() == loonfs::ErrorCode::PathNotFound
+        Error::Core(error) if error.code() == loonfs::ErrorCode::PathNotFound
     ));
 }
 
@@ -157,7 +157,7 @@ fn undelete_recovers_a_deleted_file_and_positions_stay_scoped() {
     .expect_err("double undelete should conflict");
     assert!(matches!(
         &error,
-        RuntimeError::Core(error) if error.code() == ErrorCode::NotDeleted
+        Error::Core(error) if error.code() == ErrorCode::NotDeleted
     ));
 
     // Delete again: the old position handle must not cancel the new
@@ -178,7 +178,7 @@ fn undelete_recovers_a_deleted_file_and_positions_stay_scoped() {
     ))
     .expect_err("stale position handle must not clear the newer deletion");
     match &error {
-        RuntimeError::Core(error) => {
+        Error::Core(error) => {
             assert_eq!(error.code(), ErrorCode::NotDeleted);
             let details = error.details().expect("position mismatch details");
             assert_eq!(details.expected_deletion_seq, Some(first_deletion));
@@ -264,7 +264,7 @@ fn undelete_recovers_a_deleted_subtree_and_rejects_covered_children() {
     .expect_err("child of a deleted directory is not the deletion root");
     assert!(matches!(
         &error,
-        RuntimeError::Core(error) if error.code() == ErrorCode::NotDeleted
+        Error::Core(error) if error.code() == ErrorCode::NotDeleted
     ));
 
     block_on(namespace.undelete(
@@ -358,7 +358,7 @@ fn undelete_of_an_ancestor_keeps_independently_deleted_children_hidden() {
     let hidden = fs.stat_path_blocking(&namespace_id, "/docs/notes/secret.txt");
     assert!(matches!(
         hidden,
-        Err(RuntimeError::Core(error)) if error.code() == ErrorCode::PathNotFound
+        Err(Error::Core(error)) if error.code() == ErrorCode::PathNotFound
     ));
 }
 
@@ -653,7 +653,7 @@ fn undelete_rejects_deletions_from_the_same_commit() {
         .expect_err("same-commit delete/undelete cycling must be rejected");
     assert!(matches!(
         &error,
-        RuntimeError::Core(error) if error.code() == ErrorCode::NotDeleted
+        Error::Core(error) if error.code() == ErrorCode::NotDeleted
     ));
     // The rejected commit changed nothing.
     assert_eq!(
@@ -706,7 +706,7 @@ fn delete_with_expected_inode_refuses_a_raced_rebinding() {
         .expect_err("a mismatched expectation must fail the delete");
     assert!(matches!(
         &error,
-        RuntimeError::Core(error) if error.code() == ErrorCode::PathConflict
+        Error::Core(error) if error.code() == ErrorCode::PathConflict
     ));
     assert_eq!(
         fs.get_file_bytes_blocking(&namespace_id, "/docs/report.txt")

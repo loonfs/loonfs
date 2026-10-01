@@ -18,7 +18,7 @@ async fn deleted_namespace_uses_its_deletion_clock_without_publishing_a_manifest
     let waiting = gc_namespace(
         &store,
         &namespace_id,
-        &config(),
+        &options(),
         &context(deadline.now_ms - 1),
     )
     .await
@@ -26,7 +26,7 @@ async fn deleted_namespace_uses_its_deletion_clock_without_publishing_a_manifest
     assert_eq!(waiting.reclaimable_at_ms, Some(1_000 + GRACE_MS));
     assert_eq!(waiting.next_reclamation_at_ms, Some(deadline.now_ms));
     assert_eq!(waiting.deleted.retired_content_objects, 0);
-    let reclaimed = gc_namespace(&store, &namespace_id, &config(), &deadline)
+    let reclaimed = gc_namespace(&store, &namespace_id, &options(), &deadline)
         .await
         .expect("at deadline");
     assert_eq!(reclaimed.deleted.retired_content_objects, keys.len() as u64);
@@ -96,7 +96,7 @@ async fn retired_fork_reclaims_without_reading_inherited_segments() {
     let first = gc_namespace(
         &store,
         &target,
-        &config(),
+        &options(),
         &context(setup.now_ms + GRACE_MS),
     )
     .await
@@ -131,7 +131,7 @@ async fn retired_fork_reclaims_without_reading_inherited_segments() {
             .expect("collect source segment");
     }
     let expired_at_ms = setup.now_ms + UPLOAD_SESSION_LEASE_MS + GRACE_MS;
-    let repeated = gc_namespace(&store, &target, &config(), &context(expired_at_ms))
+    let repeated = gc_namespace(&store, &target, &options(), &context(expired_at_ms))
         .await
         .expect("repeat retirement after source collection");
     assert_eq!(repeated.deleted.retired_content_objects, 0);
@@ -139,7 +139,7 @@ async fn retired_fork_reclaims_without_reading_inherited_segments() {
     let finished = gc_namespace(
         &store,
         &target,
-        &config(),
+        &options(),
         &context(expired_at_ms + GRACE_MS),
     )
     .await
@@ -208,24 +208,24 @@ async fn open_direct_upload_outlives_retirement_and_still_gets_provider_cleanup(
         .inner()
         .upload_part(&targets.provider_upload_id, 1, b"part")
         .expect("issued capability still writes after deletion");
-    let config = GcConfig {
+    let options = GcOptions {
         grace_window_ms: GC_MIN_GRACE_WINDOW_MS,
     };
-    let report = gc_namespace(&store, &namespace_id, &config, &context(clock.now_ms()))
+    let report = gc_namespace(&store, &namespace_id, &options, &context(clock.now_ms()))
         .await
         .expect("retire");
     let deadline = report.reclaimable_at_ms.expect("deadline");
     assert_eq!(deadline, clock.now_ms() + NAMESPACE_RETIREMENT_GRACE_MS);
     assert!(deadline > expires_at_ms);
     clock.advance_ms(deadline - clock.now_ms() - 1);
-    let before = gc_namespace(&store, &namespace_id, &config, &context(clock.now_ms()))
+    let before = gc_namespace(&store, &namespace_id, &options, &context(clock.now_ms()))
         .await
         .expect("before deadline");
     assert_eq!(before.next_reclamation_at_ms, Some(deadline));
     assert_eq!(store.counts().lists, 0);
     assert_eq!(store.counts().deletes, 0);
     clock.advance_ms(1);
-    gc_namespace(&store, &namespace_id, &config, &context(clock.now_ms()))
+    gc_namespace(&store, &namespace_id, &options, &context(clock.now_ms()))
         .await
         .expect("owner sweep");
     assert_eq!(store.counts().lists, 1);
@@ -239,15 +239,15 @@ async fn open_direct_upload_outlives_retirement_and_still_gets_provider_cleanup(
         UploadSessionRecordStatus::Open { .. }
     ));
     clock.advance_ms(
-        setup.now_ms + UPLOAD_SESSION_LEASE_MS + config.grace_window_ms - clock.now_ms(),
+        setup.now_ms + UPLOAD_SESSION_LEASE_MS + options.grace_window_ms - clock.now_ms(),
     );
-    gc_namespace(&store, &namespace_id, &config, &context(clock.now_ms()))
+    gc_namespace(&store, &namespace_id, &options, &context(clock.now_ms()))
         .await
         .expect("provider cleanup after retirement");
     assert_eq!(store.inner().aborts(), 1);
     assert_eq!(store.inner().open_uploads(), 0);
-    clock.advance_ms(config.grace_window_ms);
-    let reaped = gc_namespace(&store, &namespace_id, &config, &context(clock.now_ms()))
+    clock.advance_ms(options.grace_window_ms);
+    let reaped = gc_namespace(&store, &namespace_id, &options, &context(clock.now_ms()))
         .await
         .expect("reap session");
     assert_eq!(reaped.deleted.upload_sessions, 1);
@@ -297,7 +297,7 @@ async fn a_fork_basis_naming_its_pin_with_a_different_checksum_is_corrupt() {
     let error = gc_namespace(
         &store,
         &source,
-        &config(),
+        &options(),
         &context(setup.now_ms + GRACE_MS),
     )
     .await

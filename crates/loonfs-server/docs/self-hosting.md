@@ -491,11 +491,11 @@ advertises `filesystem.commits.inline_content` and `commit.max_inline_content_by
 by default and omits both when disabled.
 
 Embedded hosts configure inline writes with `LoonFsBuilder::inline_content`
-and `InlineContentOptions`. These settings do not change reader format limits.
+and `InlineContentPolicy`. These settings do not change reader format limits.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| `inline_content_threshold_bytes` | 64 KiB | Prepares content at or under this size inline; `None` in embedded options or `false` in server TOML disables inline writes. |
+| `inline_content_threshold_bytes` | 64 KiB | Prepares content at or under this size inline; `None` in the embedded policy or `false` in server TOML disables inline writes. |
 | `inline_content_wal_object_budget_bytes` | 1 MiB | Limits inline bytes in one WAL object and stages overflow in operation order. |
 | `inline_content_fold_at_bytes` | 2 MiB | Makes an automatic fold due when unfolded inline bytes reach this size. |
 | `inline_content_tail_limit_bytes` | 32 MiB | Stages new content when unfolded and admitted inline bytes would exceed this size. |

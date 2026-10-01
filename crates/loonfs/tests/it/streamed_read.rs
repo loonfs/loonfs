@@ -83,7 +83,8 @@ async fn written_file(
         LocalFsStore::new(root).expect("create local-fs store"),
     ));
     let store: SharedObjectStore = watched.clone();
-    let reader = LoonFs::reader_with_store(store)
+    let reader = LoonFs::builder_with_store(store)
+        .read_only()
         .build()
         .await
         .expect("build reader");
@@ -212,7 +213,7 @@ async fn historical_and_snapshot_reads_stream_the_selected_revision() {
                 name: "before-replace".to_owned(),
                 expires_at_ms: u64::MAX,
             },
-            SnapshotPolicy::default().max_live_per_namespace,
+            &SnapshotPolicy::default(),
         )
         .await
         .expect("snapshot");

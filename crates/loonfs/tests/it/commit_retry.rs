@@ -653,7 +653,7 @@ async fn a_changed_message_on_a_direct_commit_still_conflicts() {
 async fn a_retention_trimmed_commit_seq_leaves_the_conflict_standing() {
     let temp_dir = tempdir().expect("tempdir");
     let runtime = open_runtime_with_async(store(temp_dir.path()), "writer-a", |builder| {
-        builder.inline_content(loonfs::InlineContentOptions {
+        builder.inline_content(loonfs::InlineContentPolicy {
             inline_content_threshold_bytes: None,
             ..Default::default()
         })
@@ -796,7 +796,7 @@ async fn concurrent_retries_past_the_receipt_horizon_commit_once() {
     assert_eq!(
         runtime
             .maintenance
-            .get_namespace_diagnostics(&namespace_id)
+            .diagnostics(&namespace_id)
             .await
             .expect("namespace diagnostics")
             .head_seq,

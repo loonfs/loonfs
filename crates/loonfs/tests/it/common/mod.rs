@@ -9,11 +9,11 @@ use loonfs::uploads::ResolvedUploadCompletion;
 use loonfs::{
     AdvanceRetentionResponse, ChangeSeq, Checkpoint, ChecksumAlgorithm, Commit, ContentRef,
     CopyOptions, CreateCheckpointOptions, CreateDirectoryOptions, CreateNamespaceOptions,
-    DeleteOptions, DirectoryPageCursor, ErrorCode, FileBytes, FoldWalResponse, ListChangesOptions,
-    ListChangesResponse, LoonFs, LoonFsBuilder, Maintenance, MetadataMaintenanceOptions,
-    MetadataMaintenanceResponse, MoveOptions, Namespace, NamespaceDiagnostics, NamespaceId,
-    PageRequest, PaginationPolicy, PathEntry, PutFileOptions, ReadOnly, RuntimeError,
-    SharedObjectStore, UploadId, UploadSession, Writable,
+    DeleteOptions, DirectoryPageCursor, Error, ErrorCode, FileBytes, FoldWalResponse,
+    ListChangesOptions, ListChangesResponse, LoonFs, LoonFsBuilder, Maintenance,
+    MetadataMaintenanceOptions, MetadataMaintenanceResponse, MoveOptions, Namespace,
+    NamespaceDiagnostics, NamespaceId, PageRequest, PaginationPolicy, PathEntry, PutFileOptions,
+    ReadOnly, SharedObjectStore, UploadId, UploadSession, Writable,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::stores::{
@@ -377,7 +377,7 @@ impl TestRuntime {
         &self,
         namespace_id: &NamespaceId,
         checksum_algorithm: ChecksumAlgorithm,
-    ) -> loonfs::Result<loonfs::uploads::BeginDirectPutUploadTargetResponse> {
+    ) -> loonfs::Result<loonfs::uploads::DirectPutUploadTarget> {
         let namespace = self.namespace_writer(namespace_id)?;
         namespace
             .create_direct_put_upload_target(checksum_algorithm)
@@ -540,7 +540,7 @@ impl RuntimeTestExt for TestRuntime {
         &self,
         namespace_id: &NamespaceId,
     ) -> loonfs::Result<NamespaceDiagnostics> {
-        block_on(self.maintenance.get_namespace_diagnostics(namespace_id))
+        block_on(self.maintenance.diagnostics(namespace_id))
     }
 
     fn maintain_metadata_blocking(
@@ -715,7 +715,7 @@ impl RuntimeTestExt for TestRuntime {
 
 pub(crate) fn assert_core_error_kind<T>(result: loonfs::Result<T>, expected: ErrorCode) {
     match result {
-        Err(RuntimeError::Core(error)) => assert_eq!(error.code(), expected),
+        Err(Error::Core(error)) => assert_eq!(error.code(), expected),
         Err(error) => panic!("expected core error {expected:?}, got {error:?}"),
         Ok(_) => panic!("expected core error {expected:?}"),
     }

@@ -53,8 +53,8 @@ impl<M: fmt::Debug> fmt::Debug for Namespace<M> {
 }
 
 impl<M> Namespace<M> {
-    /// Returns the namespace this handle acts on.
-    pub fn namespace_id(&self) -> &NamespaceId {
+    /// Returns the id of the namespace this handle acts on.
+    pub fn id(&self) -> &NamespaceId {
         &self.namespace_id
     }
 
@@ -66,12 +66,12 @@ impl<M> Namespace<M> {
 
     /// Clones this handle with the subject used for its reads and, on a
     /// writable handle, its commits and uploads.
-    pub fn as_subject(&self, subject: Subject) -> Self
+    pub fn with_subject(&self, subject: Subject) -> Self
     where
         M: Clone,
     {
         Self {
-            core: self.core.as_subject(subject),
+            core: self.core.with_subject(subject),
             ..self.clone()
         }
     }

@@ -56,7 +56,7 @@ async fn runtime_jobs_answer_a_missing_and_a_deleted_namespace_with_fixed_codes(
         .runtime
         .open_namespace(&deleted)
         .expect("open namespace")
-        .delete_namespace(Default::default())
+        .delete(Default::default())
         .await
         .expect("delete namespace");
 

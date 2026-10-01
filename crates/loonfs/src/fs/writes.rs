@@ -524,7 +524,7 @@ impl Namespace<Writable> {
     ///
     /// Deletion is tombstone-first: the commit hides the path without erasing
     /// history. Physical reclamation is explicit garbage collection: nothing
-    /// sweeps unless an operator asks, through `Maintenance::gc_namespace` or a
+    /// sweeps unless an operator asks, through `Maintenance::gc` or a
     /// maintenance pass that opted in.
     #[tracing::instrument(
         level = "debug",

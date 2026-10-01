@@ -1,7 +1,7 @@
 //! Publication deadlines for completed content.
 
 use super::*;
-use crate::gc::{gc_namespace, GcConfig};
+use crate::gc::{gc_namespace, GcOptions};
 use crate::limits::{
     COMPLETED_UPLOAD_ADMISSION_WINDOW_MS, CONTENT_RECLAMATION_GRACE_MS, GC_MIN_GRACE_WINDOW_MS,
 };
@@ -198,7 +198,7 @@ async fn content_reclaimed_during_view_load_cannot_be_published() {
         let report = gc_namespace(
             &store,
             &namespace_id,
-            &GcConfig {
+            &GcOptions {
                 grace_window_ms: GC_MIN_GRACE_WINDOW_MS,
             },
             &reclaimed,

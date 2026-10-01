@@ -42,7 +42,7 @@ impl GrepHost {
         actor: &str,
         configure: impl FnOnce(loonfs::LoonFsBuilder<ReadOnly>) -> loonfs::LoonFsBuilder<ReadOnly>,
     ) -> Self {
-        let reader = configure(LoonFs::reader_with_store(store.clone()))
+        let reader = configure(LoonFs::builder_with_store(store.clone()).read_only())
             .build()
             .await
             .expect("build reader");

@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::authorize::{Authorizer, ReadAccess};
-use crate::gc::{gc_namespace, GcConfig};
+use crate::gc::{gc_namespace, GcOptions};
 use loonfs_api::ErrorCode;
 use loonfs_test_support::stores::{FailStore, InjectedError, MetadataMapStore, OperationClass};
 
@@ -48,7 +48,7 @@ async fn inline_retry_after_lost_ack_and_wal_collection_replays_the_original_com
             .outcome,
         FoldWalOutcome::Published
     );
-    let config = GcConfig::default();
+    let options = GcOptions::default();
     let aged = MetadataMapStore::aged(
         store.clone(),
         KeyPredicate::prefix(wal_prefix(&namespace_id)),
@@ -56,9 +56,9 @@ async fn inline_retry_after_lost_ack_and_wal_collection_replays_the_original_com
     let report = gc_namespace(
         &aged,
         &namespace_id,
-        &config,
+        &options,
         &MutationContext {
-            now_ms: config.grace_window_ms + 1,
+            now_ms: options.grace_window_ms + 1,
             ..context.clone()
         },
     )

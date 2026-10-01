@@ -5,8 +5,8 @@ use super::{
     MaintenanceProbe, MaintenanceRunReport, NamespacePublication,
 };
 use crate::{
-    CompactionStepOutcome, ErrorCode, Maintenance, MetadataMaintenanceOptions,
-    MetadataMaintenanceResponse, NamespaceId, Result, RuntimeError, WalFoldStepOutcome,
+    CompactionStepOutcome, Error, ErrorCode, Maintenance, MetadataMaintenanceOptions,
+    MetadataMaintenanceResponse, NamespaceId, Result, WalFoldStepOutcome,
 };
 use async_trait::async_trait;
 
@@ -70,7 +70,7 @@ impl MaintenanceJob for MetadataMaintenanceJob {
     async fn probe(&self, namespace_id: &NamespaceId) -> Result<MaintenanceProbe> {
         match self
             .maintenance
-            .metadata_probe(namespace_id, &self.options)
+            .probe_metadata(namespace_id, &self.options)
             .await
         {
             Ok(probe) => Ok(probe),
@@ -96,7 +96,7 @@ impl MaintenanceJob for MetadataMaintenanceJob {
     }
 }
 
-fn metadata_has_nothing_to_maintain(error: &RuntimeError) -> bool {
+fn metadata_has_nothing_to_maintain(error: &Error) -> bool {
     matches!(
         error.code(),
         ErrorCode::NamespaceNotFound | ErrorCode::NamespaceDeleted

@@ -10,7 +10,7 @@ use axum::extract::State;
 use axum::Json;
 use loonfs::{
     CheckpointPageCursor, CreateNamespaceOptions, CreateSnapshotOptions, DeleteNamespaceOptions,
-    GcConfig, MetadataMaintenanceOptions,
+    GcOptions, MetadataMaintenanceOptions,
 };
 #[cfg(feature = "openapi")]
 use loonfs_api::ApiError;
@@ -82,7 +82,7 @@ pub(super) async fn get_capabilities(
     State(state): State<BindingState>,
     AppQuery(_): AppQuery<NoQuery>,
 ) -> Result<Json<loonfs_api::CapabilityDocument>, ApiResponseError> {
-    let mut capabilities = state.runtime.get_capabilities();
+    let mut capabilities = state.runtime.capabilities();
     if let Some(threshold) = state.options.inline_content.inline_content_threshold_bytes {
         set_feature(&mut capabilities, FEATURE_COMMIT_INLINE_CONTENT, true);
         capabilities.limits.insert(
@@ -319,7 +319,7 @@ pub(super) async fn get_namespace_diagnostics(
 ) -> Result<Json<loonfs_api::NamespaceDiagnostics>, ApiResponseError> {
     let diagnostics = state
         .maintenance
-        .get_namespace_diagnostics(&namespace_id)
+        .diagnostics(&namespace_id)
         .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
     Ok(Json(diagnostics))
@@ -371,11 +371,16 @@ pub(super) async fn delete_namespace(
         .open(&namespace_id)
         .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
-    let scoped_namespace = subject.map(|subject| namespace.as_subject(subject));
+    let scoped_namespace = subject.map(|subject| namespace.with_subject(subject));
     let namespace = scoped_namespace.as_ref().unwrap_or(&namespace);
-    let response = namespace.delete_namespace(options).await.map_err(
-        ApiResponseError::for_namespace_writer(&state.namespaces, &namespace_id),
-    )?;
+    let response =
+        namespace
+            .delete(options)
+            .await
+            .map_err(ApiResponseError::for_namespace_writer(
+                &state.namespaces,
+                &namespace_id,
+            ))?;
     state.namespaces.forget(&namespace_id);
     Ok(Json(response))
 }
@@ -420,7 +425,7 @@ pub(super) async fn fork_namespace(
     AppQuery(_): AppQuery<NoQuery>,
     AppJson(request): AppJson<ForkNamespaceRequest>,
 ) -> Result<Json<loonfs_api::NamespaceMetadata>, ApiResponseError> {
-    let scoped_runtime = subject.map(|subject| state.runtime.as_subject(subject));
+    let scoped_runtime = subject.map(|subject| state.runtime.with_subject(subject));
     let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);
     let namespace = runtime
         .fork_namespace(
@@ -477,7 +482,7 @@ pub(super) async fn create_snapshot(
         .open(&namespace_id)
         .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
-    let scoped_namespace = subject.map(|subject| namespace.as_subject(subject));
+    let scoped_namespace = subject.map(|subject| namespace.with_subject(subject));
     let namespace = scoped_namespace.as_ref().unwrap_or(&namespace);
     let checkpoint = namespace
         .create_snapshot(
@@ -485,7 +490,7 @@ pub(super) async fn create_snapshot(
                 name: request.name,
                 expires_at_ms,
             },
-            state.options.snapshot_policy.max_live_per_namespace,
+            &state.options.snapshot_policy,
         )
         .await
         .map_err(|error| {
@@ -534,7 +539,7 @@ pub(super) async fn list_snapshots(
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(query): AppQuery<CheckpointPageQuery>,
 ) -> Result<Json<ListSnapshotsResponse>, ApiResponseError> {
-    let scoped_runtime = subject.map(|subject| state.runtime.as_subject(subject));
+    let scoped_runtime = subject.map(|subject| state.runtime.with_subject(subject));
     let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);
     let namespace = runtime.namespace(&namespace_id);
     let cursor = decode_checkpoint_cursor(query.cursor.as_deref())?;
@@ -591,13 +596,13 @@ pub(super) async fn extend_snapshot(
         .open(&namespace_id)
         .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
-    let scoped_namespace = subject.map(|subject| namespace.as_subject(subject));
+    let scoped_namespace = subject.map(|subject| namespace.with_subject(subject));
     let namespace = scoped_namespace.as_ref().unwrap_or(&namespace);
     let response = namespace
         .extend_snapshot(
             &snapshot_id,
             requested_expires_at_ms,
-            state.options.snapshot_policy.max_lifetime_ms,
+            &state.options.snapshot_policy,
         )
         .await
         .map_err(ApiResponseError::for_namespace_writer(
@@ -646,7 +651,7 @@ pub(super) async fn delete_snapshot(
         .open(&namespace_id)
         .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
-    let scoped_namespace = subject.map(|subject| namespace.as_subject(subject));
+    let scoped_namespace = subject.map(|subject| namespace.with_subject(subject));
     let namespace = scoped_namespace.as_ref().unwrap_or(&namespace);
     let response = namespace.delete_snapshot(&snapshot_id).await.map_err(
         ApiResponseError::for_namespace_writer(&state.namespaces, &namespace_id),
@@ -879,7 +884,7 @@ pub(super) async fn run_maintenance(
             .await
             .map(RunMaintenanceResponse::MetadataCompaction),
         RunMaintenanceRequest::Gc(request) => maintenance
-            .gc_namespace(&namespace_id, &GcConfig::from_request(request))
+            .gc(&namespace_id, &GcOptions::from_request(request))
             .await
             .map(RunMaintenanceResponse::Gc),
         RunMaintenanceRequest::Retention(_) => maintenance

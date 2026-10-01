@@ -4,7 +4,7 @@
 use crate::fs::RuntimeCore;
 use crate::trace::phase_span;
 use crate::{CoreError, NamespaceId, PinId};
-use crate::{Result, RuntimeError};
+use crate::{Error, Result};
 use loonfs_core::cache::{CachedReadAnchor, WalTailProjectionCacheKey};
 use loonfs_core::control::{
     load_checkpoint_read_basis, load_read_anchor, load_snapshot_read_basis, manifest_has_successor,
@@ -164,7 +164,7 @@ impl RuntimeCore {
     ) -> Result<Arc<CachedReadAnchor>> {
         self.load_namespace_head_cached(namespace_id)
             .await
-            .map_err(RuntimeError::Core)
+            .map_err(Error::Core)
     }
 
     pub(crate) fn runtime_read_context(&self, anchor: &CachedReadAnchor) -> RuntimeReadContext {
@@ -210,7 +210,7 @@ impl RuntimeCore {
             checkpoint_id,
         )
         .await
-        .map_err(RuntimeError::from)?;
+        .map_err(Error::from)?;
         Ok(self.pinned_read_at_basis(namespace_id, pinned, &live))
     }
 
@@ -232,7 +232,7 @@ impl RuntimeCore {
             self.now_ms()?,
         )
         .await
-        .map_err(RuntimeError::from)?;
+        .map_err(Error::from)?;
         Ok(self.pinned_read_at_basis(namespace_id, pinned, &live))
     }
 

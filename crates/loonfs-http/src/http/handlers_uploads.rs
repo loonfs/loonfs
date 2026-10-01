@@ -75,7 +75,7 @@ impl<'a> ContentTokenVerifier<'a> {
             .await
             .map_err(ApiResponseError::for_namespace_writer(
                 namespaces,
-                namespace.namespace_id(),
+                namespace.id(),
             ))
     }
 
@@ -139,7 +139,7 @@ pub(super) async fn create_upload(
         .open(&namespace_id)
         .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
-    let scoped_namespace = subject.map(|subject| namespace.as_subject(subject));
+    let scoped_namespace = subject.map(|subject| namespace.with_subject(subject));
     let namespace = scoped_namespace.as_ref().unwrap_or(&namespace);
     // Decoding the body settled which transport this is and that it carries
     // that transport's fields and no other's, so there is nothing left here
@@ -322,7 +322,7 @@ pub(super) async fn sign_upload_parts(
         .open(&namespace_id)
         .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
-    let scoped_namespace = subject.map(|subject| namespace.as_subject(subject));
+    let scoped_namespace = subject.map(|subject| namespace.with_subject(subject));
     let namespace = scoped_namespace.as_ref().unwrap_or(&namespace);
     let targets = namespace
         .sign_upload_parts(&upload_id, &request.parts)
@@ -541,7 +541,7 @@ pub(super) async fn put_upload_content(
         .open(&namespace_id)
         .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
-    let scoped_namespace = subject.map(|subject| namespace.as_subject(subject));
+    let scoped_namespace = subject.map(|subject| namespace.with_subject(subject));
     let namespace = scoped_namespace.as_ref().unwrap_or(&namespace);
     let (stream, outcome) = body.into_stream();
     match namespace
@@ -600,7 +600,7 @@ pub(super) async fn complete_upload(
         .open(&namespace_id)
         .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
-    let scoped_namespace = subject.map(|subject| namespace.as_subject(subject));
+    let scoped_namespace = subject.map(|subject| namespace.with_subject(subject));
     let namespace = scoped_namespace.as_ref().unwrap_or(&namespace);
     let completed = namespace
         .complete_upload_for_mode(&upload_id, |mode| decode_completion_body(mode, &body))
@@ -679,7 +679,7 @@ pub(super) async fn get_upload(
         .open(&namespace_id)
         .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
-    let scoped_namespace = subject.map(|subject| namespace.as_subject(subject));
+    let scoped_namespace = subject.map(|subject| namespace.with_subject(subject));
     let namespace = scoped_namespace.as_ref().unwrap_or(&namespace);
     let mut view =
         namespace
@@ -748,7 +748,7 @@ pub(super) async fn abort_upload(
         .open(&namespace_id)
         .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
-    let scoped_namespace = subject.map(|subject| namespace.as_subject(subject));
+    let scoped_namespace = subject.map(|subject| namespace.with_subject(subject));
     let namespace = scoped_namespace.as_ref().unwrap_or(&namespace);
     let response = namespace.abort_upload(&upload_id).await.map_err(
         ApiResponseError::for_namespace_writer(&state.namespaces, &namespace_id),

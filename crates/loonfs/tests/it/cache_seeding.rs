@@ -492,7 +492,8 @@ async fn every_head_stays_cached_past_sixty_four_namespaces_under_the_default_bu
             .await
             .expect("create namespace");
     }
-    let reader = loonfs::LoonFs::reader_with_store(object_store)
+    let reader = loonfs::LoonFs::builder_with_store(object_store)
+        .read_only()
         .build()
         .await
         .expect("reader");

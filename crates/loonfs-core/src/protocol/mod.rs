@@ -24,7 +24,6 @@ pub(crate) use self::uploads::{
     upload_content, upload_streamed_content, AbandonedUpload,
 };
 pub use self::uploads::{
-    BeginDirectMultipartUploadTargetResponse, BeginDirectPutUploadTargetResponse, CompletedUpload,
-    DirectMultipartUploadTarget, MultipartPartTarget, MultipartPartTargets,
-    ResolvedUploadCompletion, UploadSessionView,
+    CompletedUpload, DirectMultipartUploadTarget, DirectPutUploadTarget, MultipartPartTarget,
+    MultipartPartTargets, ResolvedUploadCompletion, UploadSessionView,
 };

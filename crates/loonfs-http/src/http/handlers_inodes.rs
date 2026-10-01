@@ -77,7 +77,7 @@ pub(super) async fn get_inode(
     AppPath(path): AppPath<InodePathParams>,
     AppQuery(query): AppQuery<StatInodeQuery>,
 ) -> Result<Json<loonfs_api::PathEntry>, ApiResponseError> {
-    let scoped_runtime = subject.map(|subject| state.runtime.as_subject(subject));
+    let scoped_runtime = subject.map(|subject| state.runtime.with_subject(subject));
     let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);
     let inode_id = parse_inode_id(&path.inode_id)?;
     let mut options = StatPathOptions::default();
@@ -145,7 +145,7 @@ pub(super) async fn list_inode_children(
     AppPath(path): AppPath<InodePathParams>,
     AppQuery(query): AppQuery<ListInodeChildrenQuery>,
 ) -> Result<Response, ApiResponseError> {
-    let scoped_runtime = subject.map(|subject| state.runtime.as_subject(subject));
+    let scoped_runtime = subject.map(|subject| state.runtime.with_subject(subject));
     let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);
     let inode_id = parse_inode_id(&path.inode_id)?;
     let mut options = ListInodeChildrenOptions::default();
@@ -209,7 +209,7 @@ pub(super) async fn list_file_revisions_by_inode(
     AppPath(path): AppPath<InodePathParams>,
     AppQuery(query): AppQuery<PageQuery>,
 ) -> Result<Json<ListFileRevisionsResponse>, ApiResponseError> {
-    let scoped_runtime = subject.map(|subject| state.runtime.as_subject(subject));
+    let scoped_runtime = subject.map(|subject| state.runtime.with_subject(subject));
     let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);
     let namespace = runtime.namespace(&namespace_id);
     let inode_id = parse_inode_id(&path.inode_id)?;
@@ -260,7 +260,7 @@ pub(super) async fn get_file_revision_bytes_by_inode(
     AppPath(path): AppPath<InodeRevisionPathParams>,
     AppQuery(_): AppQuery<NoQuery>,
 ) -> Result<Response, ApiResponseError> {
-    let scoped_runtime = subject.map(|subject| state.runtime.as_subject(subject));
+    let scoped_runtime = subject.map(|subject| state.runtime.with_subject(subject));
     let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);
     let namespace = runtime.namespace(&namespace_id);
     let inode_id = parse_inode_id(&path.inode_id)?;

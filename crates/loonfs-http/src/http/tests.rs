@@ -2636,7 +2636,8 @@ async fn grep_error_worker(store: &SharedObjectStore) -> GrepWorker<SharedObject
 /// on the given store, its filesystem reads and checkpoints on handles over
 /// the same store.
 async fn grep_worker(store: &SharedObjectStore, actor: &str) -> GrepWorker<SharedObjectStore> {
-    let reader = LoonFs::reader_with_store(store.clone())
+    let reader = LoonFs::builder_with_store(store.clone())
+        .read_only()
         .build()
         .await
         .expect("build reader");
@@ -3933,7 +3934,8 @@ async fn download_body_streams_one_chunk_and_aborts_on_late_corruption() {
         assert!(first.len() as u64 <= loonfs::CONTENT_READ_CHUNK_BYTES);
         drop(first);
         if corrupt {
-            let reader = loonfs::LoonFs::reader_with_store(plain.clone())
+            let reader = loonfs::LoonFs::builder_with_store(plain.clone())
+                .read_only()
                 .build()
                 .await
                 .expect("reader");

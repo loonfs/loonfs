@@ -50,9 +50,10 @@ use loonfs_objectstore::{
 };
 use std::num::NonZeroU64;
 
-/// Internal response for preparing a direct_put session before URL signing.
+/// Internal target for a new direct_put session, used by the server before
+/// signing its URL.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BeginDirectPutUploadTargetResponse {
+pub struct DirectPutUploadTarget {
     pub session: UploadSession,
     pub object_key: String,
 }
@@ -63,19 +64,13 @@ pub struct BeginDirectPutUploadTargetResponse {
 /// the payload size and checksum are supplied at completion.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirectMultipartUploadTarget {
+    pub session: UploadSession,
     pub object_key: String,
     pub part_size_bytes: u64,
     pub checksum_algorithm: ChecksumAlgorithm,
 }
 
 const DIRECT_MULTIPART_CHECKSUM_ALGORITHM: ChecksumAlgorithm = ChecksumAlgorithm::Crc64nvme;
-
-/// Internal response for preparing a direct_multipart session.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BeginDirectMultipartUploadTargetResponse {
-    pub session: UploadSession,
-    pub target: DirectMultipartUploadTarget,
-}
 
 /// Completion data after the request has been decoded for the stored upload
 /// mode.
@@ -140,7 +135,7 @@ pub(crate) async fn begin_direct_put_upload_target<S: ObjectStore + ?Sized>(
     subject: Option<&Subject>,
     checksum_algorithm: ChecksumAlgorithm,
     context: &MutationContext,
-) -> Result<BeginDirectPutUploadTargetResponse> {
+) -> Result<DirectPutUploadTarget> {
     let catalog = ensure_upload_namespace_available(store, namespace_id).await?;
     let recorded = recorded_subject(namespace_id, catalog.access(), subject)?;
     let content_id = ContentId::generate();
@@ -153,7 +148,7 @@ pub(crate) async fn begin_direct_put_upload_target<S: ObjectStore + ?Sized>(
         context,
     )
     .await?;
-    Ok(BeginDirectPutUploadTargetResponse {
+    Ok(DirectPutUploadTarget {
         session,
         object_key,
     })
@@ -171,7 +166,7 @@ pub(crate) async fn begin_direct_multipart_upload_target<S: ObjectStore + ?Sized
     subject: Option<&Subject>,
     options: DirectMultipartUploadOptions,
     context: &MutationContext,
-) -> Result<BeginDirectMultipartUploadTargetResponse> {
+) -> Result<DirectMultipartUploadTarget> {
     let catalog = ensure_upload_namespace_available(store, namespace_id).await?;
     let part_size_bytes = multipart_part_size(options.part_size_bytes)?;
     let recorded = recorded_subject(namespace_id, catalog.access(), subject)?;
@@ -201,13 +196,11 @@ pub(crate) async fn begin_direct_multipart_upload_target<S: ObjectStore + ?Sized
         }
     };
 
-    Ok(BeginDirectMultipartUploadTargetResponse {
+    Ok(DirectMultipartUploadTarget {
         session,
-        target: DirectMultipartUploadTarget {
-            object_key,
-            part_size_bytes: part_size_bytes.get(),
-            checksum_algorithm: DIRECT_MULTIPART_CHECKSUM_ALGORITHM,
-        },
+        object_key,
+        part_size_bytes: part_size_bytes.get(),
+        checksum_algorithm: DIRECT_MULTIPART_CHECKSUM_ALGORITHM,
     })
 }
 

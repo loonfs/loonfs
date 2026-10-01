@@ -2,7 +2,7 @@
 
 use crate::HttpMetrics;
 use loonfs::{
-    CloseNamespaceReport, InlineContentOptions, LoonFs, Maintenance, MaintenanceHandle,
+    CloseNamespaceReport, InlineContentPolicy, LoonFs, Maintenance, MaintenanceHandle,
     MaintenanceJob, MaintenanceProbe, Namespace, SharedObjectStore, SnapshotPolicy, Writable,
 };
 use loonfs_api::{ErrorCode, NamespaceId, SecretString};
@@ -33,7 +33,7 @@ pub struct BindingOptions {
     pub max_upload_bytes: u64,
     pub max_concurrent_uploads: usize,
     pub max_concurrent_downloads: usize,
-    pub inline_content: InlineContentOptions,
+    pub inline_content: InlineContentPolicy,
     pub content_token_secret: SecretString,
     pub request_deadline_ms: u64,
     pub idle_fold_after_ms: u64,

@@ -64,11 +64,12 @@ async fn check_buffered_read_access(content_size: usize) {
         .open_namespace(&namespace_id)
         .expect("open namespace");
     // Keep the reader's cache independent so a write cannot invalidate it.
-    let reader = LoonFs::reader_with_store(store)
+    let reader = LoonFs::builder_with_store(store)
+        .read_only()
         .build()
         .await
         .expect("reader")
-        .as_subject(subject("viewer"));
+        .with_subject(subject("viewer"));
     let namespace = reader.namespace(&namespace_id);
     for operation in [
         FilesystemOperation::CreateDirectory {
@@ -135,7 +136,7 @@ async fn check_buffered_read_access(content_size: usize) {
         }
         assert_eq!(
             namespace
-                .as_subject(subject("stranger"))
+                .with_subject(subject("stranger"))
                 .get_file_bytes("/team/file")
                 .await
                 .expect_err("a shared cache does not grant another subject access")
@@ -233,7 +234,7 @@ async fn check_former_writer_read(warm_before_handoff: bool) {
         .expect("open namespace");
     let options = loonfs::PutFileOptions::new(loonfs_test_support::test_actor());
     old_namespace_writer
-        .as_subject(subject("prn_root"))
+        .with_subject(subject("prn_root"))
         .put_file_bytes("/team/file", b"private payload", options)
         .await
         .expect("publish file");
@@ -256,7 +257,7 @@ async fn check_former_writer_read(warm_before_handoff: bool) {
         )
         .await
         .expect("grant read access");
-    let reader = old_writer.read_only().as_subject(subject("viewer"));
+    let reader = old_writer.read_only().with_subject(subject("viewer"));
     let namespace = reader.namespace(&namespace_id);
     if warm_before_handoff {
         assert_eq!(

@@ -7,7 +7,7 @@ use crate::common::{control, default_page_limit, grep_with, page_limit, GrepHost
 use bytes::Bytes;
 use loonfs::{
     CoreError, CreateNamespaceOptions, DeleteNamespaceOptions, ErrorCode, LoonFs, Maintenance,
-    MetadataMaintenanceOptions, NamespaceId, PutFileOptions, RuntimeError, SharedObjectStore,
+    MetadataMaintenanceOptions, NamespaceId, PutFileOptions, SharedObjectStore,
 };
 use loonfs_api::wire::control::PinOwner;
 use loonfs_api::{
@@ -94,7 +94,8 @@ async fn new_query_page(
     grep_request: &GrepRequest,
     limit: EffectiveLimit,
 ) -> loonfs_grep::Result<GrepResponse> {
-    let reader = LoonFs::reader_with_store(store.clone())
+    let reader = LoonFs::builder_with_store(store.clone())
+        .read_only()
         .build()
         .await
         .expect("new query reader");
@@ -509,7 +510,7 @@ async fn exhausted_run_numbers_fail_as_server_errors_without_writing_the_manifes
         assert_eq!(error.code(), ErrorCode::ServerError);
         assert!(matches!(
             error,
-            GrepError::Runtime(RuntimeError::Core(CoreError::Internal(message)))
+            GrepError::Runtime(loonfs::Error::Core(CoreError::Internal(message)))
                 if message.contains("run number must be an integer")
         ));
     }
@@ -2546,7 +2547,7 @@ async fn gc_preserves_discovery_and_applies_manifest_and_segment_age_rules() {
     ));
     assert_eq!(recording.counts().deletes, 0);
     namespace
-        .delete_namespace(DeleteNamespaceOptions::default())
+        .delete(DeleteNamespaceOptions::default())
         .await
         .expect("tombstone");
     let core_keys: Vec<_> = store
@@ -2810,7 +2811,7 @@ async fn grep_filters_candidates_the_subject_cannot_read() {
         ("prn_root", vec!["/team/file", "/team/secret/file"]),
     ] {
         let reads = NamespaceReads::new(host.reader.namespace(&namespace_id))
-            .as_subject(subject(principal));
+            .with_subject(subject(principal));
         let response = host
             .service
             .query(&request("needle"), default_page_limit(), &reads, &store)
@@ -2829,7 +2830,7 @@ async fn grep_filters_candidates_the_subject_cannot_read() {
     scan.allow_scan = true;
     scan.path_prefix = Some(AbsolutePath::parse("/team").expect("path"));
     let reads =
-        NamespaceReads::new(host.reader.namespace(&namespace_id)).as_subject(subject("viewer"));
+        NamespaceReads::new(host.reader.namespace(&namespace_id)).with_subject(subject("viewer"));
     let scanned = host
         .service
         .query(&scan, default_page_limit(), &reads, &store)

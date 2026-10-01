@@ -9,7 +9,7 @@
 
 use crate::metrics::{DefaultMetricsRecorder, MetricValue, MetricsSnapshot};
 use crate::{
-    CompactionStepOutcome, CreateCheckpointOptions, CreateNamespaceOptions, GcConfig, LoonFs,
+    CompactionStepOutcome, CreateCheckpointOptions, CreateNamespaceOptions, GcOptions, LoonFs,
     Maintenance, MetadataCompactionOutcome, MetadataCompactionPolicy, MetadataMaintenanceOptions,
     MoveOptions, NamespaceId, PutFileOptions, SharedObjectStore, Writable,
 };
@@ -114,7 +114,7 @@ async fn a_maintenance_gc_step_records_the_pass_counters_once() {
 
     assert_eq!(counter(&recorder.snapshot(), "loonfs.gc.retained", &[]), 0);
     let gc = maintenance
-        .gc_namespace(&namespace, &GcConfig::default())
+        .gc(&namespace, &GcOptions::default())
         .await
         .expect("run the maintenance GC step");
     assert!(

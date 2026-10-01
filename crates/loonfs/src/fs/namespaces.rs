@@ -6,8 +6,8 @@ use crate::{
     CreateNamespaceOptions, DeleteNamespaceOptions, DeleteNamespaceResponse, ForkNamespaceOptions,
     NamespaceId,
 };
+use crate::{Error, Result};
 use crate::{ErrorCode, LoonFs, MaintenanceHint, MaintenanceJobId, Namespace, Writable};
-use crate::{Result, RuntimeError};
 
 impl LoonFs<Writable> {
     /// Fork, delete, and snapshot management belong to the token holder and
@@ -46,7 +46,7 @@ impl LoonFs<Writable> {
             .engine(namespace_id)
             .bootstrap_namespace(options)
             .await
-            .map_err(RuntimeError::from);
+            .map_err(Error::from);
         self.finish_namespace_mutation(namespace_id, result)
     }
 
@@ -79,7 +79,7 @@ impl LoonFs<Writable> {
                 options.snapshot_id.as_ref(),
             )
             .await
-            .map_err(RuntimeError::from);
+            .map_err(Error::from);
         if should_invalidate_after_result(&result) {
             self.invalidate_namespace(source_namespace_id);
         }
@@ -119,10 +119,7 @@ impl Namespace<Writable> {
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn delete_namespace(
-        &self,
-        options: DeleteNamespaceOptions,
-    ) -> Result<DeleteNamespaceResponse> {
+    pub async fn delete(&self, options: DeleteNamespaceOptions) -> Result<DeleteNamespaceResponse> {
         self.require_administrator().await?;
         self.core.record_trace_context(&tracing::Span::current());
         self.session().submit_delete(options).await
@@ -133,7 +130,7 @@ impl Namespace<Writable> {
 /// admits it, through the publisher's own commit engine: the session
 /// epoch and fencing that govern this namespace's publications govern
 /// its tombstone swap too. Only the service calls this; everything else
-/// must go through [`Namespace::delete_namespace`] so the barrier holds.
+/// must go through [`Namespace::delete`] so the barrier holds.
 pub(crate) async fn delete_namespace_with_engine(
     core: &RuntimeCore,
     writer: &WriterBits,
@@ -145,7 +142,7 @@ pub(crate) async fn delete_namespace_with_engine(
     let result = engine
         .delete_namespace(core.store(), options, &context)
         .await
-        .map_err(RuntimeError::from);
+        .map_err(Error::from);
     // What follows a deletion depends on the namespace being deleted, not on
     // which call deleted it.
     if result

@@ -5,11 +5,11 @@ use crate::downloads::{DirectDownloadByInodeTarget, DirectDownloadTarget};
 use crate::Result;
 use crate::{
     ChangeSeq, CheckpointFilesPage, CheckpointFilesPageCursor, ContentRef, CoreError,
-    CurrentFileState, FileBytes, FileContentStream, InodeId, ListChangesOptions,
+    CurrentFileState, Error, FileBytes, FileContentStream, InodeId, ListChangesOptions,
     ListChangesResponse, ListCheckpointFilesOptions, ListFileRevisionsResponse,
     ListInodeChildrenOptions, ListInodeChildrenResponse, ListPathEntriesOptions,
     ListPathEntriesResponse, Namespace, NamespaceId, PathEntry, PinId, ReadFileStreamOptions,
-    RevisionNo, RuntimeError, SharedObjectStore, StatPathOptions,
+    RevisionNo, SharedObjectStore, StatPathOptions,
 };
 use loonfs_api::{
     AbsolutePath, DirectoryPageCursor, EffectiveLimit, FileRevisionsPageCursor, PageCursor,
@@ -70,7 +70,7 @@ async fn list_changes(
         .list_changes_after(after_seq, limit, context)
         .await
         .map_err(|error| match error {
-            CoreError::InvalidCursor(message) => RuntimeError::InvalidRequest {
+            CoreError::InvalidCursor(message) => Error::InvalidRequest {
                 message,
                 param: "after_seq",
             },
@@ -151,7 +151,7 @@ impl ReadView {
             return Ok(());
         };
         if Some(requested) != self.snapshot_id() {
-            return Err(RuntimeError::InvalidRequest {
+            return Err(Error::InvalidRequest {
                 message: format!(
                     "snapshot_id `{requested}` names a different snapshot than this read view"
                 ),
@@ -387,15 +387,15 @@ impl ReadView {
 }
 
 /// A pager over directory entries.
-pub type PathEntriesPager = loonfs_api::Pager<ListPathEntriesResponse, RuntimeError>;
+pub type PathEntriesPager = loonfs_api::Pager<ListPathEntriesResponse, Error>;
 /// A pager over directory children addressed by inode.
-pub type InodeChildrenPager = loonfs_api::Pager<ListInodeChildrenResponse, RuntimeError>;
+pub type InodeChildrenPager = loonfs_api::Pager<ListInodeChildrenResponse, Error>;
 /// A pager over retained file revisions.
-pub type FileRevisionsPager = loonfs_api::Pager<ListFileRevisionsResponse, RuntimeError>;
+pub type FileRevisionsPager = loonfs_api::Pager<ListFileRevisionsResponse, Error>;
 /// A pager over recoverable deletions.
-pub type TrashPager = loonfs_api::Pager<loonfs_api::ListTrashResponse, RuntimeError>;
+pub type TrashPager = loonfs_api::Pager<loonfs_api::ListTrashResponse, Error>;
 /// A pager over committed changes.
-pub type ChangesPager = loonfs_api::Pager<ListChangesResponse, RuntimeError>;
+pub type ChangesPager = loonfs_api::Pager<ListChangesResponse, Error>;
 
 fn encoded_pager_cursor<C: PageCursor>(cursor: Option<&C>) -> Option<String> {
     cursor.map(|cursor| loonfs_api::encode_cursor(cursor).expect("typed page cursor should encode"))
@@ -942,7 +942,7 @@ impl<M> Namespace<M> {
         engine
             .list_checkpoint_files_page(checkpoint_id, request, options, &read_context)
             .await
-            .map_err(crate::RuntimeError::from)
+            .map_err(crate::Error::from)
     }
 
     /// Resolves the current state of each inode ID.
@@ -1338,6 +1338,6 @@ fn changes_page_limit(limit: Option<EffectiveLimit>) -> Result<EffectiveLimit> {
         Some(limit) => Ok(limit),
         None => PaginationPolicy::default()
             .resolve_limit(None)
-            .map_err(|error| RuntimeError::Config(error.to_string())),
+            .map_err(|error| Error::Config(error.to_string())),
     }
 }

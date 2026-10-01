@@ -5,7 +5,6 @@ use crate::Namespaces;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use loonfs::RuntimeError;
 use loonfs_api::{
     ApiError, CommitId, ErrorCode, ErrorDetails, ErrorKind, NamespaceId, NamespaceIdValidationError,
 };
@@ -115,11 +114,11 @@ impl ApiResponseError {
         response
     }
 
-    pub(super) fn runtime(error: RuntimeError) -> Self {
+    pub(super) fn runtime(error: loonfs::Error) -> Self {
         Self::from_api_error(error.code(), error.to_api_error())
     }
 
-    pub(super) fn runtime_for_namespace(namespace_id: &NamespaceId, error: RuntimeError) -> Self {
+    pub(super) fn runtime_for_namespace(namespace_id: &NamespaceId, error: loonfs::Error) -> Self {
         if error.code() == ErrorCode::NamespaceNotFound {
             return Self::new(
                 ErrorCode::NamespaceNotFound,
@@ -132,7 +131,7 @@ impl ApiResponseError {
 
     pub(super) fn for_namespace(
         namespace_id: &NamespaceId,
-    ) -> impl FnOnce(RuntimeError) -> Self + '_ {
+    ) -> impl FnOnce(loonfs::Error) -> Self + '_ {
         |error| Self::runtime_for_namespace(namespace_id, error)
     }
 
@@ -141,7 +140,7 @@ impl ApiResponseError {
     pub(super) fn runtime_for_namespace_writer(
         namespaces: &Namespaces,
         namespace_id: &NamespaceId,
-        error: RuntimeError,
+        error: loonfs::Error,
     ) -> Self {
         namespaces.forget_if_gone(namespace_id, error.code());
         Self::runtime_for_namespace(namespace_id, error)
@@ -150,7 +149,7 @@ impl ApiResponseError {
     pub(super) fn for_namespace_writer<'a>(
         namespaces: &'a Namespaces,
         namespace_id: &'a NamespaceId,
-    ) -> impl FnOnce(RuntimeError) -> Self + 'a {
+    ) -> impl FnOnce(loonfs::Error) -> Self + 'a {
         |error| Self::runtime_for_namespace_writer(namespaces, namespace_id, error)
     }
 }

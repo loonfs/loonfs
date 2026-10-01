@@ -98,7 +98,7 @@ async fn a_fresh_runtime_folds_a_short_tail_once_its_newest_commit_is_idle() {
         .expect("idle fold");
     assert_eq!(report.conclusion, MaintenanceConclusion::Progressed);
     let diagnostics = maintenance
-        .get_namespace_diagnostics(&namespace_id)
+        .diagnostics(&namespace_id)
         .await
         .expect("diagnostics");
     assert_eq!(diagnostics.wal_tail_objects, 0, "{diagnostics:?}");
@@ -181,7 +181,7 @@ async fn injected_wall_time_collects_objects_the_system_clock_keeps() {
             .expect("unreferenced segment");
         store.reset();
         let kept = system
-            .gc_namespace(&namespace_id, &Default::default())
+            .gc(&namespace_id, &Default::default())
             .await
             .expect("system collection");
         assert_eq!(kept.deleted.metadata_segments, 0);
@@ -195,7 +195,7 @@ async fn injected_wall_time_collects_objects_the_system_clock_keeps() {
             .expect("segment")
             .is_some());
         let collected = maintenance
-            .gc_namespace(&namespace_id, &Default::default())
+            .gc(&namespace_id, &Default::default())
             .await
             .expect("future collection");
         assert_eq!(collected.deleted.metadata_segments, 1);
@@ -279,7 +279,7 @@ async fn a_registry_runs_every_core_job_without_a_writer() {
         assert!(result.is_ok(), "{job} failed: {:?}", result.err());
     }
     let diagnostics = maintenance
-        .get_namespace_diagnostics(&namespace_id)
+        .diagnostics(&namespace_id)
         .await
         .expect("diagnostics");
     assert!(diagnostics.wal_tail_objects < threshold, "{diagnostics:?}");

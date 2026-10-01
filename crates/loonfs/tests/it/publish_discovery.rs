@@ -238,7 +238,8 @@ async fn a_directory_created_during_a_fold_is_seen_after_the_projection_is_dropp
             .all(|number| number >= during_wal_no),
         "{requests:?}"
     );
-    let reader = LoonFs::reader_with_store(store.clone())
+    let reader = LoonFs::builder_with_store(store.clone())
+        .read_only()
         .build()
         .await
         .expect("fresh reader");

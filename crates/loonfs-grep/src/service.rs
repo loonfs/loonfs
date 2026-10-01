@@ -173,7 +173,7 @@ impl GrepService {
     ) -> Result<QueryPlan<'a>> {
         const MAX_GREP_PATTERN_BYTES: usize = 1024;
         if request.pattern.len() > MAX_GREP_PATTERN_BYTES {
-            return Err(loonfs::RuntimeError::InvalidRequest {
+            return Err(loonfs::Error::InvalidRequest {
                 message: format!(
                     "grep pattern is {} bytes; the maximum is {MAX_GREP_PATTERN_BYTES} bytes",
                     request.pattern.len()

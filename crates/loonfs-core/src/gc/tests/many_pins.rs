@@ -69,9 +69,14 @@ async fn one_pass_deletes_an_aged_upload_and_every_expired_snapshot_among_many_p
         .await
         .expect("write aborted upload");
     store.reset();
-    let report = gc_namespace(&store, &namespace_id, &config(), &context(2_000 + GRACE_MS))
-        .await
-        .expect("complete pass");
+    let report = gc_namespace(
+        &store,
+        &namespace_id,
+        &options(),
+        &context(2_000 + GRACE_MS),
+    )
+    .await
+    .expect("complete pass");
     assert_eq!(report.deleted.upload_sessions, 1);
     assert_eq!(report.deleted_checkpoints_by_owner.snapshot, 1025);
     assert_eq!(report.retained.checkpoint_not_deletable, 1);

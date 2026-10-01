@@ -2,7 +2,7 @@
 
 use super::reads::ReadSource;
 use super::RuntimeCore;
-use crate::{CoreError, NamespaceId, Result, RuntimeError, SharedObjectStore};
+use crate::{CoreError, Error, NamespaceId, Result, SharedObjectStore};
 use loonfs_core::control::{
     load_checkpoint_read_basis, load_namespace_current_manifest, load_snapshot_read_basis,
 };
@@ -22,7 +22,7 @@ pub(super) async fn classify_read_result<T>(
 ) -> Result<T> {
     if !matches!(
         &result,
-        Err(RuntimeError::Core(CoreError::MetadataProjection(
+        Err(Error::Core(CoreError::MetadataProjection(
             MetadataProjectionLoadError::ManifestLoad(ManifestLoadError::MissingSegment { .. })
         )))
     ) {
@@ -37,7 +37,7 @@ pub(super) async fn classify_read_result<T>(
             let expected_manifest_no = context.basis.manifest_no();
             let actual_manifest_no = current.state.envelope.payload().manifest_no;
             if actual_manifest_no > expected_manifest_no {
-                return Err(RuntimeError::StaleHead {
+                return Err(Error::StaleHead {
                     expected_manifest_no,
                     actual_manifest_no,
                 });
@@ -73,7 +73,7 @@ impl RuntimeCore {
             read(engine, context.clone()).await,
         )
         .await;
-        if !matches!(result, Err(RuntimeError::StaleHead { .. })) {
+        if !matches!(result, Err(Error::StaleHead { .. })) {
             return result;
         }
         self.invalidate_namespace_read_cache(namespace_id);

@@ -1,4 +1,4 @@
-//! GC configuration.
+//! Options for one namespace collection.
 
 use crate::error::{CoreError, Result};
 use crate::limits::{GC_DEFAULT_GRACE_WINDOW_MS, GC_MIN_GRACE_WINDOW_MS};
@@ -8,11 +8,11 @@ use serde::{Deserialize, Serialize};
 /// The grace window used by namespace collection.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct GcConfig {
+pub struct GcOptions {
     pub grace_window_ms: u64,
 }
 
-impl Default for GcConfig {
+impl Default for GcOptions {
     fn default() -> Self {
         Self {
             grace_window_ms: GC_DEFAULT_GRACE_WINDOW_MS,
@@ -20,7 +20,7 @@ impl Default for GcConfig {
     }
 }
 
-impl GcConfig {
+impl GcOptions {
     /// Resolves a wire-level collection request. An absent grace window
     /// takes the default.
     pub fn from_request(request: GcRequest) -> Self {
@@ -37,7 +37,7 @@ impl GcConfig {
         // flight could have written objects that already look old enough to
         // delete, so the configuration is rejected outright.
         if self.grace_window_ms < GC_MIN_GRACE_WINDOW_MS {
-            return Err(CoreError::InvalidGcConfig(format!(
+            return Err(CoreError::InvalidGcOptions(format!(
                 "grace_window_ms {} is below the derived safety minimum {}",
                 self.grace_window_ms, GC_MIN_GRACE_WINDOW_MS
             )));

@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::authorize::{Authorizer, ReadAccess};
-use crate::gc::{gc_namespace, GcConfig};
+use crate::gc::{gc_namespace, GcOptions};
 use crate::storage::content::content_object_key_for_ref;
 use loonfs_test_support::stores::{BlockingStore, MetadataMapStore, OperationClass};
 
@@ -11,7 +11,7 @@ async fn collect_aged_wal(
     namespace_id: &NamespaceId,
     context: &MutationContext,
 ) {
-    let config = GcConfig::default();
+    let options = GcOptions::default();
     let aged = MetadataMapStore::aged(
         store.clone(),
         KeyPredicate::prefix(wal_prefix(namespace_id)),
@@ -19,9 +19,9 @@ async fn collect_aged_wal(
     gc_namespace(
         &aged,
         namespace_id,
-        &config,
+        &options,
         &MutationContext {
-            now_ms: config.grace_window_ms + 1,
+            now_ms: options.grace_window_ms + 1,
             ..context.clone()
         },
     )

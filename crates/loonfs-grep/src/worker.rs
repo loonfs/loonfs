@@ -22,7 +22,7 @@ use futures::future::try_join_all;
 use loonfs::{
     next_run_no_after, refill_iterators, select_next_iterator, write_segments_in_waves,
     CheckpointFilesPageCursor, CoreError, CreateCheckpointOptions, LoonFs, Maintenance, ReadOnly,
-    RuntimeError, SegmentBlockLoader, SegmentRowIterator, StoreFailureClass,
+    SegmentBlockLoader, SegmentRowIterator, StoreFailureClass,
 };
 use loonfs::{Deadline, Observation};
 use loonfs_api::v0::{GrepIndex, GrepIndexLifecycle};
@@ -625,7 +625,7 @@ fn backfilling_manifest(
 fn rebootstrap_required(error: &GrepError) -> bool {
     matches!(
         error,
-        GrepError::Runtime(RuntimeError::Core(
+        GrepError::Runtime(loonfs::Error::Core(
             CoreError::RebootstrapRequired { .. }
                 | CoreError::CheckpointNotFound { .. }
                 | CoreError::CheckpointUnavailable(_)

@@ -4,7 +4,7 @@ use super::{
     MaintenanceCancellation, MaintenanceConclusion, MaintenanceJob, MaintenanceJobId,
     MaintenanceProbe, MaintenanceRunReport,
 };
-use crate::{ErrorCode, GcConfig, GcResponse, Maintenance, NamespaceId, Result};
+use crate::{ErrorCode, GcOptions, GcResponse, Maintenance, NamespaceId, Result};
 use async_trait::async_trait;
 use loonfs_core::limits::{
     CONTENT_RECLAMATION_GRACE_MS, GC_SAFETY_MARGIN_MS, NAMESPACE_RETIREMENT_GRACE_MS,
@@ -14,7 +14,7 @@ use loonfs_core::limits::{
 pub(crate) fn upload_session_reclaim_at_ms(session_durable_at_ms: u64) -> u64 {
     session_durable_at_ms
         .saturating_add(UPLOAD_SESSION_LEASE_MS)
-        .saturating_add(GcConfig::default().grace_window_ms)
+        .saturating_add(GcOptions::default().grace_window_ms)
         .saturating_add(GC_SAFETY_MARGIN_MS)
 }
 
@@ -27,7 +27,7 @@ pub(crate) fn completed_upload_reclaim_at_ms(completion_observed_at_ms: u64) -> 
 pub(crate) fn namespace_reclaim_at_ms(deleted_at_ms: u64) -> u64 {
     deleted_at_ms
         .saturating_add(
-            GcConfig::default()
+            GcOptions::default()
                 .grace_window_ms
                 .max(NAMESPACE_RETIREMENT_GRACE_MS),
         )
@@ -59,7 +59,7 @@ impl MaintenanceJob for GarbageCollectionJob {
     ) -> Result<MaintenanceRunReport> {
         let gc = match self
             .maintenance
-            .gc_namespace(namespace_id, &GcConfig::default())
+            .gc(namespace_id, &GcOptions::default())
             .await
         {
             Ok(gc) => gc,
@@ -173,7 +173,7 @@ mod tests {
         let first = loonfs_core::gc_namespace(
             store.as_ref(),
             &namespace_id,
-            &GcConfig::default(),
+            &GcOptions::default(),
             &context,
         )
         .await
@@ -192,7 +192,7 @@ mod tests {
         let repeated = loonfs_core::gc_namespace(
             store.as_ref(),
             &namespace_id,
-            &GcConfig::default(),
+            &GcOptions::default(),
             &context,
         )
         .await

@@ -88,7 +88,7 @@ pub(super) async fn grep(
     let store = state.runtime.object_store();
     let reads = NamespaceReads::new(state.runtime.namespace(&namespace_id));
     let reads = match subject {
-        Some(subject) => reads.as_subject(subject),
+        Some(subject) => reads.with_subject(subject),
         None => reads,
     };
     let response = service

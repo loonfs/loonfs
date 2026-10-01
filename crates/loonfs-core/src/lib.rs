@@ -177,7 +177,7 @@ pub use error::{
     Error, ErrorCode, ErrorKind, MetadataProjectionLoadError, MetadataViewError, StoreFailureClass,
     WriterFence,
 };
-pub use gc::{delete_if_aged, gc_namespace, grace_age, GcConfig, GraceAge};
+pub use gc::{delete_if_aged, gc_namespace, grace_age, GcOptions, GraceAge};
 pub use manifest::{
     fold_wal_tail, next_run_no_after, refill_iterators, select_next_iterator,
     CompactionStepOutcome, FoldedWalTail, MetadataCompactionCancellation,
@@ -194,8 +194,7 @@ pub use pin::{
     ListCheckpointFilesOptions,
 };
 pub use protocol::{
-    BeginDirectMultipartUploadTargetResponse, BeginDirectPutUploadTargetResponse,
-    DirectMultipartUploadTarget, MultipartPartTarget, MultipartPartTargets,
+    DirectMultipartUploadTarget, DirectPutUploadTarget, MultipartPartTarget, MultipartPartTargets,
     ResolvedUploadCompletion, UploadSessionView,
 };
 pub use write_waves::write_segments_in_waves;

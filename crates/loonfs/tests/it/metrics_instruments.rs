@@ -287,7 +287,7 @@ fn snapshot_read_views_report_the_snapshot_view_counter() {
                     name: "reader".to_owned(),
                     expires_at_ms: u64::MAX,
                 },
-                SnapshotPolicy::default().max_live_per_namespace,
+                &SnapshotPolicy::default(),
             )
             .await
             .expect("create snapshot");
@@ -328,7 +328,8 @@ fn reads_report_head_cache_lookups_and_retained_bytes() {
                 .await
                 .expect("create namespace");
         }
-        let reader = LoonFs::reader_with_store(store(temp_dir.path()))
+        let reader = LoonFs::builder_with_store(store(temp_dir.path()))
+            .read_only()
             .metrics_recorder(recorder.clone())
             .build()
             .await

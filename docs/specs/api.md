@@ -381,8 +381,8 @@ opaque value and MUST NOT create IDs or infer ordering from the numeric suffix.
   `Namespace<Writable>`, which carries the same reads and the namespace's
   writes. A writable runtime also creates and forks namespaces, and
   `LoonFs::maintenance` returns its maintenance operations. The namespace
-  handle's `metadata` is the client's `get_namespace`. The runtime and the
-  client share the `get_capabilities()` accessor that returns the capability
+  handle's `metadata` is the client's `get_namespace`. The runtime's
+  `capabilities()` and the client's `get_capabilities()` return the capability
   document of section 2.1. For the remote client the document is fetched
   from `GET /v0/capabilities` and cached; for the embedded runtime it is a
   constant.

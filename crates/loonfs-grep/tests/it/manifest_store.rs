@@ -478,7 +478,7 @@ async fn regressing_successors_fail_on_publication_and_discovery() {
 #[tokio::test]
 async fn a_late_ambiguous_put_cannot_confirm_a_recreated_manifest() {
     use crate::common::GrepHost;
-    use loonfs::{CoreError, CreateNamespaceOptions, LoonFs, RuntimeError, SharedObjectStore};
+    use loonfs::{CoreError, CreateNamespaceOptions, LoonFs, SharedObjectStore};
     use loonfs_test_support::stores::{BlockingStore, MetadataMapStore};
 
     let directory = tempfile::tempdir().expect("directory");
@@ -560,7 +560,7 @@ async fn a_late_ambiguous_put_cannot_confirm_a_recreated_manifest() {
         }
     );
     assert!(
-        matches!(outcome, Err(GrepError::Runtime(RuntimeError::Core(CoreError::OutcomeUnknown {
+        matches!(outcome, Err(GrepError::Runtime(loonfs::Error::Core(CoreError::OutcomeUnknown {
         object_key: actual_key, ..
     }))) if actual_key == object_key)
     );

@@ -42,7 +42,8 @@ struct ServiceHarness {
 
 impl ServiceHarness {
     async fn new(store: SharedObjectStore, namespace_id: NamespaceId) -> Self {
-        let reader = LoonFs::reader_with_store(store.clone())
+        let reader = LoonFs::builder_with_store(store.clone())
+            .read_only()
             .build()
             .await
             .expect("build query reader");

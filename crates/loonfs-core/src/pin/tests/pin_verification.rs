@@ -131,7 +131,7 @@ pub(super) async fn compact_and_collect_replaced_segments<S: ObjectStore>(
         .await
         .expect("pins")
         .is_empty());
-    let config = crate::gc::GcConfig::default();
+    let options = crate::gc::GcOptions::default();
     // A superseded manifest roots its replaced segments until its successor
     // has aged past the collector's grace window.
     let successor_modified_ms = store
@@ -144,10 +144,10 @@ pub(super) async fn compact_and_collect_replaced_segments<S: ObjectStore>(
     let collection = crate::gc::gc_namespace(
         store,
         namespace_id,
-        &config,
+        &options,
         &mutation_context(
             "collector",
-            (successor_modified_ms + config.grace_window_ms + 1)
+            (successor_modified_ms + options.grace_window_ms + 1)
                 .max(crate::limits::UNREFERENCED_SEGMENT_MIN_AGE_MS + 1),
         ),
     )
