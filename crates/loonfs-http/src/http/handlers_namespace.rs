@@ -369,6 +369,7 @@ pub(super) async fn delete_namespace(
     let namespace = state
         .namespaces
         .open(&namespace_id)
+        .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
     let scoped_namespace = subject.map(|subject| namespace.as_subject(subject));
     let namespace = scoped_namespace.as_ref().unwrap_or(&namespace);
@@ -474,6 +475,7 @@ pub(super) async fn create_snapshot(
     let namespace = state
         .namespaces
         .open(&namespace_id)
+        .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
     let scoped_namespace = subject.map(|subject| namespace.as_subject(subject));
     let namespace = scoped_namespace.as_ref().unwrap_or(&namespace);
@@ -587,6 +589,7 @@ pub(super) async fn extend_snapshot(
     let namespace = state
         .namespaces
         .open(&namespace_id)
+        .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
     let scoped_namespace = subject.map(|subject| namespace.as_subject(subject));
     let namespace = scoped_namespace.as_ref().unwrap_or(&namespace);
@@ -641,6 +644,7 @@ pub(super) async fn delete_snapshot(
     let namespace = state
         .namespaces
         .open(&namespace_id)
+        .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
     let scoped_namespace = subject.map(|subject| namespace.as_subject(subject));
     let namespace = scoped_namespace.as_ref().unwrap_or(&namespace);
@@ -878,6 +882,7 @@ pub(super) async fn run_maintenance(
         let namespace = state
             .namespaces
             .open(&namespace_id)
+            .await
             .map_err(ApiResponseError::for_namespace(&namespace_id))?;
         let recovered = namespace
             .recover_administrator(&request.principal_id, actor_id)

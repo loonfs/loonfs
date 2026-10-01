@@ -137,6 +137,7 @@ pub(super) async fn create_upload(
     let namespace = state
         .namespaces
         .open(&namespace_id)
+        .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
     let scoped_namespace = subject.map(|subject| namespace.as_subject(subject));
     let namespace = scoped_namespace.as_ref().unwrap_or(&namespace);
@@ -319,6 +320,7 @@ pub(super) async fn sign_upload_parts(
     let namespace = state
         .namespaces
         .open(&namespace_id)
+        .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
     let scoped_namespace = subject.map(|subject| namespace.as_subject(subject));
     let namespace = scoped_namespace.as_ref().unwrap_or(&namespace);
@@ -537,6 +539,7 @@ pub(super) async fn put_upload_content(
     let namespace = state
         .namespaces
         .open(&namespace_id)
+        .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
     let scoped_namespace = subject.map(|subject| namespace.as_subject(subject));
     let namespace = scoped_namespace.as_ref().unwrap_or(&namespace);
@@ -595,6 +598,7 @@ pub(super) async fn complete_upload(
     let namespace = state
         .namespaces
         .open(&namespace_id)
+        .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
     let scoped_namespace = subject.map(|subject| namespace.as_subject(subject));
     let namespace = scoped_namespace.as_ref().unwrap_or(&namespace);
@@ -673,6 +677,7 @@ pub(super) async fn get_upload(
     let namespace = state
         .namespaces
         .open(&namespace_id)
+        .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
     let scoped_namespace = subject.map(|subject| namespace.as_subject(subject));
     let namespace = scoped_namespace.as_ref().unwrap_or(&namespace);
@@ -741,6 +746,7 @@ pub(super) async fn abort_upload(
     let namespace = state
         .namespaces
         .open(&namespace_id)
+        .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
     let scoped_namespace = subject.map(|subject| namespace.as_subject(subject));
     let namespace = scoped_namespace.as_ref().unwrap_or(&namespace);

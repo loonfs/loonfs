@@ -4,8 +4,13 @@ use super::*;
 use axum::http::Method;
 use tower::ServiceExt;
 
-async fn send(router: &axum::Router, method: Method, uri: &str, body: String) -> StatusCode {
-    router
+async fn send(
+    router: &axum::Router,
+    method: Method,
+    uri: &str,
+    body: String,
+) -> (StatusCode, Bytes) {
+    let response = router
         .clone()
         .oneshot(
             axum::http::Request::builder()
@@ -18,8 +23,12 @@ async fn send(router: &axum::Router, method: Method, uri: &str, body: String) ->
                 .expect("request"),
         )
         .await
-        .expect("response")
-        .status()
+        .expect("response");
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    (status, body)
 }
 
 async fn create_directory(router: &axum::Router, namespace_id: &NamespaceId, path: &str) {
@@ -29,9 +38,20 @@ async fn create_directory(router: &axum::Router, namespace_id: &NamespaceId, pat
     });
     let uri = format!("/v0/namespaces/{namespace_id}/commits");
     assert_eq!(
-        send(router, Method::POST, &uri, body.to_string()).await,
+        send(router, Method::POST, &uri, body.to_string()).await.0,
         StatusCode::OK
     );
+}
+
+async fn create_direct_put_upload(
+    router: &axum::Router,
+    namespace_id: &NamespaceId,
+) -> (StatusCode, String) {
+    let uri = format!("/v0/namespaces/{namespace_id}/uploads");
+    let body = serde_json::json!({"mode": "direct_put", "size_bytes": 5});
+    let (status, body) = send(router, Method::POST, &uri, body.to_string()).await;
+    let error: loonfs_api::ApiError = serde_json::from_slice(&body).expect("error body");
+    (status, error.code)
 }
 
 async fn host(writer_id: &str) -> (tempfile::TempDir, axum::Router, BindingState) {
@@ -89,7 +109,7 @@ async fn a_deleted_namespace_leaves_no_writer_handle_in_the_host() {
 
     let uri = format!("/v0/namespaces/{deleted}");
     assert_eq!(
-        send(&router, Method::DELETE, &uri, String::new()).await,
+        send(&router, Method::DELETE, &uri, String::new()).await.0,
         StatusCode::OK
     );
 
@@ -109,10 +129,46 @@ async fn a_request_for_a_missing_namespace_leaves_no_writer_handle_in_the_host()
     });
     let uri = format!("/v0/namespaces/{missing}/commits");
     assert_eq!(
-        send(&router, Method::POST, &uri, body.to_string()).await,
+        send(&router, Method::POST, &uri, body.to_string()).await.0,
         StatusCode::NOT_FOUND
     );
 
     let closed = state.namespaces.close(&missing).await.expect("close");
     assert!(closed.is_none(), "the host kept a handle: {closed:?}");
+}
+
+#[tokio::test]
+async fn a_rejected_upload_for_a_missing_namespace_answers_not_found_and_leaves_no_writer_handle() {
+    let (_directory, router, state) = host("missing-upload-host").await;
+    let missing = namespace_id("missing");
+
+    assert_eq!(
+        create_direct_put_upload(&router, &missing).await,
+        (
+            StatusCode::NOT_FOUND,
+            ErrorCode::NamespaceNotFound.as_str().to_owned()
+        )
+    );
+
+    let closed = state.namespaces.close(&missing).await.expect("close");
+    assert!(closed.is_none(), "the host kept a handle: {closed:?}");
+}
+
+#[tokio::test]
+async fn a_rejected_upload_for_an_existing_namespace_keeps_its_writer_handle() {
+    let (_directory, router, state) = host("existing-upload-host").await;
+    let existing = namespace_id("existing");
+    create_namespace(&state, &existing).await;
+
+    // The local-storage fixture cannot presign, so it refuses `direct_put`.
+    assert_eq!(
+        create_direct_put_upload(&router, &existing).await,
+        (
+            StatusCode::NOT_IMPLEMENTED,
+            ErrorCode::NotSupported.as_str().to_owned()
+        )
+    );
+
+    let closed = state.namespaces.close(&existing).await.expect("close");
+    assert!(closed.is_some(), "the host holds the existing namespace");
 }
