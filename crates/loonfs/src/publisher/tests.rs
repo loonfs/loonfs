@@ -218,7 +218,7 @@ fn test_runtime_core(store: SharedStore) -> RuntimeCore {
 
 fn test_writer_bits() -> Arc<WriterBits> {
     Arc::new(WriterBits {
-        inline_content: crate::InlineContentOptions::default(),
+        inline_content: crate::InlineContentPolicy::default(),
         identity: WriterIdentity::new("writer-a".to_owned()).expect("valid writer identity"),
         wal_fold_permits: tokio::sync::Semaphore::new(crate::config::DEFAULT_MAX_CONCURRENT_FOLDS),
         wal_folds_waiting: AtomicUsize::new(0),
@@ -756,7 +756,7 @@ async fn publisher_delivery_preserves_bootstrap_namespace_exists_code() {
     let selected_at = publisher.timer.monotonic_now_ms();
     publisher.deliver_batch_results(
         vec![commit_id],
-        vec![Err(RuntimeError::Core(crate::CoreError::NamespaceExists {
+        vec![Err(Error::Core(crate::CoreError::NamespaceExists {
             namespace_id: namespace_id.clone(),
         }))],
         selected_at,
@@ -766,7 +766,7 @@ async fn publisher_delivery_preserves_bootstrap_namespace_exists_code() {
         .await
         .expect("publisher should deliver the result")
         .expect_err("bootstrap failure should remain an error");
-    assert!(matches!(error, RuntimeError::Core(_)));
+    assert!(matches!(error, Error::Core(_)));
     assert_eq!(error.code(), ErrorCode::NamespaceExists);
 }
 
@@ -945,7 +945,7 @@ async fn publisher_contender_waits_for_active_request_receipt() {
     assert_eq!(duplicate_response.committed_seq, ChangeSeq(1));
     assert!(matches!(
         conflict,
-        RuntimeError::Core(CoreError::CommitIdReuseConflict {
+        Error::Core(CoreError::CommitIdReuseConflict {
             commit_id,
             committed_seq: Some(ChangeSeq(1)),
             committed_fingerprint: Some(fingerprint),
@@ -1055,7 +1055,7 @@ async fn publisher_contender_reports_conflict_after_retry_limit() {
         .expect_err("retry limit reports a conflict");
     assert!(matches!(
         error,
-        RuntimeError::Core(CoreError::CommitIdReuseConflict {
+        Error::Core(CoreError::CommitIdReuseConflict {
             commit_id: conflicting_id,
             committed_seq: None,
             committed_fingerprint: None,
@@ -1148,7 +1148,7 @@ async fn publisher_limit_counts_active_duplicate_contended_and_delete_requests()
         .expect_err("different request conflicts after the primary lands");
     assert!(matches!(
         conflict,
-        RuntimeError::Core(CoreError::CommitIdReuseConflict {
+        Error::Core(CoreError::CommitIdReuseConflict {
             commit_id,
             committed_seq: Some(ChangeSeq(2)),
             committed_fingerprint: Some(_),
@@ -2027,7 +2027,7 @@ async fn registry_close_admission_refuses_new_work_while_admitted_work_drains() 
     store.wait_until_blocked().await;
 
     // Admission then closes, and new work is refused.
-    writer.close_admission_for_shutdown();
+    writer.close_admission();
     let refused = namespace
         .commit_candidate(CommitCandidate::new(create_directory_request(
             "refused", "refused",
@@ -2109,7 +2109,7 @@ async fn worker_survives_panic_and_processes_later_queue_items() {
     wait_for_queued_candidates(&publisher, 1).await;
 
     store.release_into_panic();
-    writer.close_admission_for_shutdown();
+    writer.close_admission();
 
     let doomed_error = doomed
         .await
@@ -2194,7 +2194,7 @@ async fn a_fold_reloads_the_tail_when_no_projection_is_retained() {
 
     let status = writer
         .maintenance(loonfs_test_support::ids::writer_id("fold-inspection"))
-        .get_namespace_diagnostics(&namespace_id)
+        .diagnostics(&namespace_id)
         .await
         .expect("inspect the folded namespace");
     assert!(status.current_manifest_no.is_some(), "{status:?}");
@@ -2287,7 +2287,8 @@ async fn a_runtime_fold_materializes_inline_content_and_reanchors_to_an_empty_ta
     );
     assert_eq!(folded.activity.file_revisions.get(), 1);
     assert_eq!(store.count(OperationClass::Put), 1);
-    let reader = crate::LoonFs::reader_with_store(store.clone())
+    let reader = crate::LoonFs::builder_with_store(store.clone())
+        .read_only()
         .build()
         .await
         .expect("fresh reader");
@@ -2569,7 +2570,7 @@ async fn a_late_fold_does_not_republish_an_already_folded_tail() {
             )))
             .await
             .expect("publish across the fold threshold");
-        if namespace.namespace_id() == &namespace_a {
+        if namespace.id() == &namespace_a {
             recording.inner().wait_until_blocked().await;
         } else {
             wait_for_fold_waiters(&writer, 1).await;
@@ -2716,7 +2717,7 @@ async fn close_admission_refuses_without_creating_publishers() {
     let writer = test_writer(store.clone()).await;
     let registry = writer.mode.publisher.clone();
 
-    writer.close_admission_for_shutdown();
+    writer.close_admission();
     let refused = writer
         .open_namespace(&namespace_id)
         .expect_err("closed registry refuses to open a session");
@@ -2763,7 +2764,7 @@ async fn a_delete_admitted_before_close_admission_lands_terminal() {
 
     // Admission closes with the delete already admitted; releasing the gate
     // lets the batch and then the delete publish.
-    writer.close_admission_for_shutdown();
+    writer.close_admission();
     store.release();
 
     let response = active

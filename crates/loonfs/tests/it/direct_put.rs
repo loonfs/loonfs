@@ -335,7 +335,7 @@ fn put_file_bytes_gates_publish_on_its_own_content_write_without_probing() {
         object_store,
         "put-file-content-validation-test",
         |builder| {
-            builder.inline_content(loonfs::InlineContentOptions {
+            builder.inline_content(loonfs::InlineContentPolicy {
                 inline_content_threshold_bytes: None,
                 ..Default::default()
             })
@@ -394,7 +394,7 @@ fn put_file_bytes_retries_a_transient_content_write_failure() {
     let raw_store = Arc::new(fail_content_blob_puts_store(temp_dir.path()));
     let object_store: SharedObjectStore = raw_store.clone();
     let fs = open_runtime_with(object_store, "content-write-failure-test", |builder| {
-        builder.inline_content(loonfs::InlineContentOptions {
+        builder.inline_content(loonfs::InlineContentPolicy {
             inline_content_threshold_bytes: None,
             ..Default::default()
         })
@@ -646,7 +646,7 @@ fn concurrent_puts_both_commit_after_one_transient_content_failure() {
     let object_store: SharedObjectStore = raw_store.clone();
     block_on(async {
         let fs = open_runtime_with_async(object_store, "window-abort-test", |builder| {
-            builder.inline_content(loonfs::InlineContentOptions {
+            builder.inline_content(loonfs::InlineContentPolicy {
                 inline_content_threshold_bytes: None,
                 ..Default::default()
             })

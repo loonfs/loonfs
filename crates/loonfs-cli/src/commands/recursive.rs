@@ -610,7 +610,7 @@ mod tests {
             store,
             Some("put-tree-test"),
             loonfs_objectstore::ConfiguredObjectStoreKind::LocalFs,
-            loonfs::InlineContentOptions {
+            loonfs::InlineContentPolicy {
                 inline_content_threshold_bytes: None,
                 ..Default::default()
             },

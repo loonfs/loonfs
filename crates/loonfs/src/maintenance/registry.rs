@@ -1,7 +1,7 @@
 //! Registration and direct execution for maintenance jobs.
 
 use super::{MaintenanceCancellation, MaintenanceJob, MaintenanceJobId, MaintenanceRunReport};
-use crate::{NamespaceId, Result, RuntimeError};
+use crate::{Error, NamespaceId, Result};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -30,7 +30,7 @@ impl MaintenanceRegistry {
         let id = job.id();
         let mut jobs = self.lock();
         if jobs.contains_key(&id) {
-            return Err(RuntimeError::Config(format!(
+            return Err(Error::Config(format!(
                 "maintenance job `{id}` is already registered"
             )));
         }
@@ -65,9 +65,8 @@ impl MaintenanceRegistry {
     }
 
     fn require(&self, id: MaintenanceJobId) -> Result<Arc<dyn MaintenanceJob>> {
-        self.get(id).ok_or_else(|| {
-            RuntimeError::Config(format!("maintenance job `{id}` is not registered"))
-        })
+        self.get(id)
+            .ok_or_else(|| Error::Config(format!("maintenance job `{id}` is not registered")))
     }
 
     fn lock(&self) -> MutexGuard<'_, BTreeMap<MaintenanceJobId, Arc<dyn MaintenanceJob>>> {

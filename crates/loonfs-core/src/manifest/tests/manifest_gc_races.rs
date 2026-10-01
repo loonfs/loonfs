@@ -61,13 +61,13 @@ async fn discover_during_collection(start: ManifestNo, block_next_manifest: bool
             )
             .await
             .expect("raise discovery hint");
-            let config = crate::gc::GcConfig::default();
+            let options = crate::gc::GcOptions::default();
             let report = crate::gc::gc_namespace(
                 blocked.inner(),
                 &namespace_id,
-                &config,
+                &options,
                 &MutationContext {
-                    now_ms: config.grace_window_ms + 1,
+                    now_ms: options.grace_window_ms + 1,
                     ..context.clone()
                 },
             )
@@ -174,12 +174,12 @@ async fn a_late_ambiguous_put_cannot_confirm_a_recreated_manifest() {
             publish_manifest(&store, encode_manifest(payload).expect("successor"))
                 .await
                 .expect("publish manifest three");
-            let config = crate::gc::GcConfig::default();
-            timer.advance_ms(config.grace_window_ms + 1);
+            let options = crate::gc::GcOptions::default();
+            timer.advance_ms(options.grace_window_ms + 1);
             let report = crate::gc::gc_namespace(
                 &store,
                 &namespace_id,
-                &config,
+                &options,
                 &MutationContext {
                     now_ms: timer.now_ms(),
                     ..context.clone()

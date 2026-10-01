@@ -11,7 +11,7 @@ use loonfs_core::publish::{
     CommitCandidate, CommitRequest, FilesystemOperation, NamespaceCommitEngine,
 };
 use loonfs_core::time::Deadline;
-use loonfs_core::{gc_namespace, GcConfig};
+use loonfs_core::{gc_namespace, GcOptions};
 use loonfs_core::{CreateNamespaceOptions, MutationContext, ResolvedUploadCompletion};
 use loonfs_objectstore::keys::wal_prefix;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -198,7 +198,7 @@ async fn maintenance_preserves_writer_and_logical_head() {
         .advance_retention_floor()
         .await
         .expect("advance floor");
-    gc_namespace(&store, &namespace_id, &GcConfig::default(), &context)
+    gc_namespace(&store, &namespace_id, &GcOptions::default(), &context)
         .await
         .expect("gc pass");
     let staged = engine.begin_upload(None).await.expect("second upload");

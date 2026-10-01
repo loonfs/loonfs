@@ -19,9 +19,9 @@
 //! only maintains builds a writable runtime and never opens a namespace.
 //!
 //! Build each runtime inside the Tokio runtime where it will be used. Prefer
-//! the builders that take a [`StoreConfig`](crate::StoreConfig); use
-//! `builder_with_store` or `reader_with_store` only when the supplied store
-//! is safe to use from that Tokio runtime.
+//! the builder that takes a [`StoreConfig`](crate::StoreConfig); use
+//! `builder_with_store` only when the supplied store is safe to use from
+//! that Tokio runtime.
 
 mod builder;
 mod loonfs;

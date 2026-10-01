@@ -9,9 +9,9 @@ use crate::common::*;
 use loonfs::{
     CheckpointFile, CheckpointFilesPageCursor, ContentRef, CreateCheckpointOptions,
     CreateNamespaceOptions, CurrentFileState, DeleteDirectoryBehavior, DeleteOptions,
-    DestinationBehavior, ErrorCode, InodeId, ListCheckpointFilesOptions, LoonFs, MoveOptions,
-    NamespaceId, PageRequest, PutFileOptions, ReadOnly, RevisionNo, RuntimeError,
-    SharedObjectStore, StoreConfig, UndeleteOptions,
+    DestinationBehavior, Error, ErrorCode, InodeId, ListCheckpointFilesOptions, LoonFs,
+    MoveOptions, NamespaceId, PageRequest, PutFileOptions, ReadOnly, RevisionNo, SharedObjectStore,
+    StoreConfig, UndeleteOptions,
 };
 use loonfs_test_support::ids::{namespace_id, page_limit};
 use loonfs_test_support::stores::{KeyPredicate, OperationClass, RecordingStore};
@@ -867,7 +867,7 @@ async fn read_content_ref_answers_bytes_and_refuses_over_budget_before_fetching(
         KeyPredicate::content_blob(),
     ));
     let fs = open_runtime_with_async(counting.clone(), "read-content-ref-test", |builder| {
-        builder.inline_content(loonfs::InlineContentOptions {
+        builder.inline_content(loonfs::InlineContentPolicy {
             inline_content_threshold_bytes: None,
             ..Default::default()
         })
@@ -927,7 +927,7 @@ async fn read_content_ref_refuses_bytes_that_do_not_match_the_reference() {
     let temp_dir = tempdir().expect("tempdir");
     let store = store(temp_dir.path());
     let fs = open_runtime_with_async(store.clone(), "read-content-ref-digest-test", |builder| {
-        builder.inline_content(loonfs::InlineContentOptions {
+        builder.inline_content(loonfs::InlineContentPolicy {
             inline_content_threshold_bytes: None,
             ..Default::default()
         })
@@ -974,7 +974,7 @@ async fn read_content_ref_refuses_bytes_that_do_not_match_the_reference() {
         .expect_err("bytes that do not hash to the reference are refused");
     assert_eq!(error.code(), ErrorCode::NamespaceCorrupt);
     assert!(
-        matches!(&error, RuntimeError::Core(error) if error.to_string().contains("checksum mismatch")),
+        matches!(&error, Error::Core(error) if error.to_string().contains("checksum mismatch")),
         "unexpected error: {error}"
     );
 }
@@ -1004,7 +1004,8 @@ async fn a_standalone_reader_serves_every_operation() {
 
     // No writer identity anywhere on this path: the reader opens its own
     // store client from configuration.
-    let reader = LoonFs::reader(store_config(temp_dir.path()))
+    let reader = LoonFs::builder(store_config(temp_dir.path()))
+        .read_only()
         .build()
         .await
         .expect("build a standalone reader");

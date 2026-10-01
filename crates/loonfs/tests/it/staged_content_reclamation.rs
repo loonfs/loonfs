@@ -8,7 +8,7 @@
 //! referenced by metadata or reclaimed, and none of them is immortal.
 //!
 //! Garbage collection is driven through `loonfs_core::gc_namespace` rather
-//! than `Maintenance::gc_namespace`, because the maintenance handle stamps its pass
+//! than `Maintenance::gc`, because the maintenance handle stamps its pass
 //! from the wall clock and these deadlines are days out. The store is the
 //! same one the runtime wrote through, so the pass sees exactly what the
 //! puts left behind.
@@ -18,7 +18,7 @@
 
 use crate::common::{open_runtime_with_async, store, TestRuntime};
 use loonfs::{
-    ContentRef, CreateNamespaceOptions, GcConfig, GcResponse, NamespaceId, PutFileOptions,
+    ContentRef, CreateNamespaceOptions, GcOptions, GcResponse, NamespaceId, PutFileOptions,
     SharedObjectStore,
 };
 use loonfs_core::limits::{CONTENT_RECLAMATION_GRACE_MS, UPLOAD_SESSION_LEASE_MS};
@@ -38,7 +38,7 @@ const GRACE_MS: u64 = 60 * 60 * 1000;
 
 async fn open_staged_runtime(store: SharedObjectStore, writer_id: &str) -> TestRuntime {
     open_runtime_with_async(store, writer_id, |builder| {
-        builder.inline_content(loonfs::InlineContentOptions {
+        builder.inline_content(loonfs::InlineContentPolicy {
             inline_content_threshold_bytes: None,
             ..Default::default()
         })
@@ -46,8 +46,8 @@ async fn open_staged_runtime(store: SharedObjectStore, writer_id: &str) -> TestR
     .await
 }
 
-fn config() -> GcConfig {
-    GcConfig {
+fn gc_options() -> GcOptions {
+    GcOptions {
         grace_window_ms: GRACE_MS,
     }
 }
@@ -58,7 +58,7 @@ async fn collect(store: &SharedObjectStore, namespace_id: &NamespaceId, now_ms: 
     loonfs_core::gc_namespace(
         store.as_ref(),
         namespace_id,
-        &config(),
+        &gc_options(),
         &MutationContext {
             writer_id: loonfs_api::WriterId::parse("reclamation-test").expect("writer id"),
             now_ms,

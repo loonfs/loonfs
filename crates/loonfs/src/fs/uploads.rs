@@ -10,8 +10,8 @@
 use crate::content_tokens::CompletedUpload;
 use crate::maintenance::{completed_upload_reclaim_at_ms, upload_session_reclaim_at_ms};
 use crate::uploads::{
-    BeginDirectMultipartUploadTargetResponse, BeginDirectPutUploadTargetResponse,
-    MultipartPartTargets, ResolvedUploadCompletion, UploadSessionView,
+    DirectMultipartUploadTarget, DirectPutUploadTarget, MultipartPartTargets,
+    ResolvedUploadCompletion, UploadSessionView,
 };
 use crate::ByteStream;
 use crate::Result;
@@ -108,7 +108,7 @@ impl Namespace<Writable> {
     pub async fn create_direct_put_upload_target(
         &self,
         checksum_algorithm: ChecksumAlgorithm,
-    ) -> Result<BeginDirectPutUploadTargetResponse> {
+    ) -> Result<DirectPutUploadTarget> {
         self.core.record_trace_context(&tracing::Span::current());
         let response = self
             .engine()
@@ -137,7 +137,7 @@ impl Namespace<Writable> {
     pub async fn create_direct_multipart_upload_target(
         &self,
         options: DirectMultipartUploadOptions,
-    ) -> Result<BeginDirectMultipartUploadTargetResponse> {
+    ) -> Result<DirectMultipartUploadTarget> {
         self.core.record_trace_context(&tracing::Span::current());
         let response = self
             .engine()

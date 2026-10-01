@@ -21,8 +21,8 @@ use crate::pin::{
     ListCheckpointFilesOptions,
 };
 use crate::protocol::{
-    BeginDirectMultipartUploadTargetResponse, BeginDirectPutUploadTargetResponse, CompletedUpload,
-    MultipartPartTargets, ResolvedUploadCompletion, UploadSessionView,
+    CompletedUpload, DirectMultipartUploadTarget, DirectPutUploadTarget, MultipartPartTargets,
+    ResolvedUploadCompletion, UploadSessionView,
 };
 use crate::storage::content::{
     open_content_import_reader, validate_loaded_content_bytes, ContentLocation, FileContentStream,
@@ -917,7 +917,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         &self,
         subject: Option<&Subject>,
         checksum_algorithm: ChecksumAlgorithm,
-    ) -> Result<BeginDirectPutUploadTargetResponse> {
+    ) -> Result<DirectPutUploadTarget> {
         crate::protocol::begin_direct_put_upload_target(
             &self.store,
             &self.namespace_id,
@@ -935,7 +935,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         &self,
         subject: Option<&Subject>,
         options: DirectMultipartUploadOptions,
-    ) -> Result<BeginDirectMultipartUploadTargetResponse> {
+    ) -> Result<DirectMultipartUploadTarget> {
         crate::protocol::begin_direct_multipart_upload_target(
             &self.store,
             &self.namespace_id,

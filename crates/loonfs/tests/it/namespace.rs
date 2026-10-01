@@ -391,7 +391,7 @@ async fn the_runtime_holds_as_many_sessions_as_the_host_opens() {
         })
         .collect::<Vec<_>>();
 
-    let first = namespaces[0].namespace_id().clone();
+    let first = namespaces[0].id().clone();
     create_namespace(&writer, &first).await;
     namespaces[0]
         .create_directory("/written", directory_options())

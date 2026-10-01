@@ -86,7 +86,7 @@ async fn a_tombstoned_namespace_concludes_not_enabled() {
     let worker = worker(store, "deleted-worker").await;
     worker.enable(&namespace_id).await.expect("enable grep");
     namespace_writer
-        .delete_namespace(DeleteNamespaceOptions::default())
+        .delete(DeleteNamespaceOptions::default())
         .await
         .expect("delete namespace");
 
@@ -310,7 +310,8 @@ fn host_runner(max_concurrent_maintenance: usize) -> (MaintenanceRegistry, Maint
 /// the same client, so a fault-injecting store covers both.
 async fn worker<S: ObjectStore + 'static>(store: Arc<S>, actor: &str) -> GrepWorker<Arc<S>> {
     let shared: SharedObjectStore = store.clone();
-    let reader = LoonFs::reader_with_store(shared.clone())
+    let reader = LoonFs::builder_with_store(shared.clone())
+        .read_only()
         .build()
         .await
         .expect("build reader");

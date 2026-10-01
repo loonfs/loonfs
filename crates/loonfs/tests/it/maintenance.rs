@@ -7,9 +7,9 @@ use crate::common::*;
 use loonfs::publish::{parse_mutation_path, CommitRequest, FilesystemOperation};
 use loonfs::{
     ChangeSeq, CommitId, CompactionStepOutcome, CreateCheckpointOptions, CreateNamespaceOptions,
-    CreateSnapshotOptions, DeleteNamespaceOptions, ErrorCode, FoldWalOutcome, GcConfig, ManifestNo,
-    MetadataCompactionOutcome, MetadataCompactionPolicy, MetadataMaintenanceOptions, NamespaceId,
-    PutFileOptions, SharedObjectStore, SnapshotPolicy, WalFoldStepOutcome,
+    CreateSnapshotOptions, DeleteNamespaceOptions, ErrorCode, FoldWalOutcome, GcOptions,
+    ManifestNo, MetadataCompactionOutcome, MetadataCompactionPolicy, MetadataMaintenanceOptions,
+    NamespaceId, PutFileOptions, SharedObjectStore, SnapshotPolicy, WalFoldStepOutcome,
 };
 use loonfs_api::wire::manifest::decode_namespace_manifest_json;
 use loonfs_objectstore::keys::{hint, metadata_manifest_object};
@@ -97,7 +97,7 @@ fn namespace_diagnostics_counts_user_and_live_snapshot_records_only() {
             name: "expired".to_owned(),
             expires_at_ms: 1,
         },
-        SnapshotPolicy::default().max_live_per_namespace,
+        &SnapshotPolicy::default(),
     ))
     .expect("create expired snapshot record");
     block_on(namespace.create_snapshot(
@@ -105,7 +105,7 @@ fn namespace_diagnostics_counts_user_and_live_snapshot_records_only() {
             name: "live".to_owned(),
             expires_at_ms: u64::MAX,
         },
-        SnapshotPolicy::default().max_live_per_namespace,
+        &SnapshotPolicy::default(),
     ))
     .expect("create live snapshot");
     fs.fork_namespace_blocking(&source, &target)
@@ -133,10 +133,7 @@ fn namespace_diagnostics_and_step_reject_missing_namespace() {
         ErrorCode::NamespaceNotFound,
     );
     assert_core_error_kind(
-        block_on(
-            fs.maintenance
-                .gc_namespace(&namespace_id, &GcConfig::default()),
-        ),
+        block_on(fs.maintenance.gc(&namespace_id, &GcOptions::default())),
         ErrorCode::NamespaceNotFound,
     );
 }
@@ -165,10 +162,7 @@ fn namespace_diagnostics_and_step_reject_a_namespace_whose_hint_is_gone() {
         ErrorCode::NamespaceNotFound,
     );
     assert_core_error_kind(
-        block_on(
-            fs.maintenance
-                .gc_namespace(&namespace_id, &GcConfig::default()),
-        ),
+        block_on(fs.maintenance.gc(&namespace_id, &GcOptions::default())),
         ErrorCode::NamespaceNotFound,
     );
 
@@ -182,13 +176,9 @@ fn namespace_diagnostics_and_step_reject_a_namespace_whose_hint_is_gone() {
         .writer
         .open_namespace(&deleted_namespace)
         .expect("open namespace");
-    block_on(namespace.delete_namespace(DeleteNamespaceOptions::default()))
-        .expect("delete namespace");
-    block_on(
-        fs.maintenance
-            .gc_namespace(&deleted_namespace, &GcConfig::default()),
-    )
-    .expect("GC accepts a deleted namespace");
+    block_on(namespace.delete(DeleteNamespaceOptions::default())).expect("delete namespace");
+    block_on(fs.maintenance.gc(&deleted_namespace, &GcOptions::default()))
+        .expect("GC accepts a deleted namespace");
 }
 
 #[test]
@@ -403,11 +393,7 @@ fn the_typed_wrappers_are_single_action_steps() {
         .expect("retention-only step");
     assert_eq!(retention.retention_floor_seq, advanced.retention_floor_seq);
 
-    block_on(
-        fs.maintenance
-            .gc_namespace(&namespace_id, &GcConfig::default()),
-    )
-    .expect("GC run");
+    block_on(fs.maintenance.gc(&namespace_id, &GcOptions::default())).expect("GC run");
     block_on(fs.maintenance.compact_metadata(&namespace_id)).expect("metadata compaction run");
     assert_eq!(
         fs.namespace_diagnostics_blocking(&namespace_id)
@@ -864,7 +850,7 @@ async fn maintenance_step_treats_manifest_number_collision_as_benign_race() {
     );
     let status = fs
         .maintenance
-        .get_namespace_diagnostics(&namespace_id)
+        .diagnostics(&namespace_id)
         .await
         .expect("status after lost race");
     assert_eq!(status.current_manifest_no, Some(ManifestNo(3)));

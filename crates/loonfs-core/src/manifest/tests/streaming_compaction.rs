@@ -3178,7 +3178,7 @@ async fn direct_output_is_published_by_number_and_failed_output_ages_out() {
     assert!(!orphans.is_empty());
     failing.clear();
     let store = MetadataMapStore::aged(failing, KeyPredicate::any());
-    let config = crate::gc::GcConfig {
+    let options = crate::gc::GcOptions {
         grace_window_ms: crate::limits::GC_MIN_GRACE_WINDOW_MS,
     };
     for age_ms in [
@@ -3188,7 +3188,7 @@ async fn direct_output_is_published_by_number_and_failed_output_ages_out() {
         crate::gc::gc_namespace(
             &store,
             &namespace,
-            &config,
+            &options,
             &mutation_context("collector", age_ms),
         )
         .await

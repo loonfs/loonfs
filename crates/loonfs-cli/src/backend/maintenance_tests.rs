@@ -162,7 +162,7 @@ async fn a_drain_settles_every_assigned_key_and_does_the_work_it_finds() {
             .as_ref()
             .expect("embedded host")
             .maintenance
-            .get_namespace_diagnostics(namespace_id)
+            .diagnostics(namespace_id)
             .await
             .expect("diagnostics after the drain");
         assert!(
@@ -279,7 +279,7 @@ async fn hosting_an_assignment_maintains_a_cold_namespace_until_the_signal() {
         .as_ref()
         .expect("embedded host")
         .maintenance
-        .get_namespace_diagnostics(&namespace)
+        .diagnostics(&namespace)
         .await
         .expect("diagnostics after hosting");
     assert!(

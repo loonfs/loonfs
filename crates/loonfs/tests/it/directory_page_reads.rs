@@ -117,7 +117,8 @@ async fn directory_pages_use_bindings_and_load_revision_heads_concurrently() {
         KeyPredicate::new(move |key| revision_keys.contains(key)),
     ));
     let recording = Arc::new(RecordingStore::metadata_segments(revisions.clone()));
-    let reader = LoonFs::reader_with_store(recording.clone())
+    let reader = LoonFs::builder_with_store(recording.clone())
+        .read_only()
         .build()
         .await
         .expect("fresh reader");

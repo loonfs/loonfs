@@ -59,7 +59,7 @@ impl MaintenanceJob for MetadataCompactionJob {
         };
         let response = self
             .maintenance
-            .compact_metadata_with(namespace_id, cancellation)
+            .compact_metadata_with_cancellation(namespace_id, cancellation)
             .await?;
         let (conclusion, follow_up) = match response.compaction {
             MetadataCompactionOutcome::Published { .. }

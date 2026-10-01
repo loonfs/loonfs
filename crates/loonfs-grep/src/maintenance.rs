@@ -10,7 +10,6 @@ use crate::{GramIndexBuildPolicy, GrepBuildOutcome, GrepError, GrepReorganizeOut
 use loonfs::{
     MaintenanceCancellation, MaintenanceConclusion, MaintenanceJob, MaintenanceJobId,
     MaintenanceProbe, MaintenanceRunReport, NamespaceId, NamespacePublication, Observation, Result,
-    RuntimeError,
 };
 use loonfs_api::{ErrorCode, RunMaintenanceResponse};
 use loonfs_objectstore::timing::StdMonotonicTimer;
@@ -210,16 +209,20 @@ fn reorganize_conclusion(outcome: &GrepReorganizeOutcome) -> MaintenanceConclusi
 /// Carries a grep failure to the runner, which logs it and backs the key
 /// off. The runtime's error vocabulary has no grep variants, so the phase
 /// and the namespace ride in the message rather than being dropped.
-fn step_failure(namespace_id: &NamespaceId, phase: &'static str, error: GrepError) -> RuntimeError {
+fn step_failure(
+    namespace_id: &NamespaceId,
+    phase: &'static str,
+    error: GrepError,
+) -> loonfs::Error {
     match error {
         GrepError::Runtime(error) => error,
-        error => RuntimeError::RuntimeTask(format!(
+        error => loonfs::Error::RuntimeTask(format!(
             "{phase} step failed for namespace `{namespace_id}`: {error}"
         )),
     }
 }
 
-fn probe_failure(namespace_id: &NamespaceId, error: GrepError) -> RuntimeError {
+fn probe_failure(namespace_id: &NamespaceId, error: GrepError) -> loonfs::Error {
     step_failure(namespace_id, "grep_probe", error)
 }
 
@@ -312,7 +315,7 @@ mod tests {
         let runtime = step_failure(
             &namespace_id,
             "grep_build",
-            GrepError::Runtime(RuntimeError::Config("bad".to_owned())),
+            GrepError::Runtime(loonfs::Error::Config("bad".to_owned())),
         );
         assert_eq!(
             runtime.code(),

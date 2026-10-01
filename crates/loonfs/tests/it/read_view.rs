@@ -99,7 +99,7 @@ async fn read_during_compaction_and_collection(
                         name: "durable".to_owned(),
                         expires_at_ms: loonfs::current_time_ms().expect("time") + 60_000,
                     },
-                    SnapshotPolicy::default().max_live_per_namespace,
+                    &SnapshotPolicy::default(),
                 )
                 .await
                 .expect("snapshot"),
@@ -107,7 +107,8 @@ async fn read_during_compaction_and_collection(
     } else {
         None
     };
-    let reader = loonfs::LoonFs::reader_with_store(store.clone())
+    let reader = loonfs::LoonFs::builder_with_store(store.clone())
+        .read_only()
         .build()
         .await
         .expect("cold reader");
@@ -192,7 +193,7 @@ async fn read_during_compaction_and_collection(
         assert!(published && converged);
         let gc = runtime
             .maintenance
-            .gc_namespace(&namespace, &Default::default())
+            .gc(&namespace, &Default::default())
             .await
             .expect("GC");
         assert!(
@@ -202,7 +203,8 @@ async fn read_during_compaction_and_collection(
         store.release();
     };
     let (result, ()) = tokio::join!(read, maintenance);
-    let fresh = loonfs::LoonFs::reader_with_store(store)
+    let fresh = loonfs::LoonFs::builder_with_store(store)
+        .read_only()
         .build()
         .await
         .expect("fresh reader");
@@ -302,7 +304,7 @@ async fn checkpoint_and_snapshot_views_keep_missing_segments_corrupt_after_manif
                 name: "durable".to_owned(),
                 expires_at_ms: loonfs::current_time_ms().expect("time") + 60_000,
             },
-            SnapshotPolicy::default().max_live_per_namespace,
+            &SnapshotPolicy::default(),
         )
         .await
         .expect("snapshot");
@@ -310,7 +312,8 @@ async fn checkpoint_and_snapshot_views_keep_missing_segments_corrupt_after_manif
         .create_checkpoint(&namespace_id)
         .await
         .expect("checkpoint");
-    let reader = loonfs::LoonFs::reader_with_store(store.clone())
+    let reader = loonfs::LoonFs::builder_with_store(store.clone())
+        .read_only()
         .build()
         .await
         .expect("cold reader");
@@ -400,7 +403,7 @@ async fn checkpoint_and_snapshot_views_report_their_deleted_pin_when_a_segment_i
                 name: "deleted".to_owned(),
                 expires_at_ms: loonfs::current_time_ms().expect("time") + 60_000,
             },
-            SnapshotPolicy::default().max_live_per_namespace,
+            &SnapshotPolicy::default(),
         )
         .await
         .expect("snapshot");
@@ -408,7 +411,8 @@ async fn checkpoint_and_snapshot_views_report_their_deleted_pin_when_a_segment_i
         .create_checkpoint(&namespace_id)
         .await
         .expect("checkpoint");
-    let reader = loonfs::LoonFs::reader_with_store(store.clone())
+    let reader = loonfs::LoonFs::builder_with_store(store.clone())
+        .read_only()
         .build()
         .await
         .expect("cold reader");
@@ -498,7 +502,7 @@ async fn snapshot_directory_cursor_resumes_only_at_its_snapshot() {
                 name: "first".to_owned(),
                 expires_at_ms: now_ms + 60_000,
             },
-            SnapshotPolicy::default().max_live_per_namespace,
+            &SnapshotPolicy::default(),
         )
         .await
         .expect("create first snapshot");
@@ -541,7 +545,7 @@ async fn snapshot_directory_cursor_resumes_only_at_its_snapshot() {
                 name: "second".to_owned(),
                 expires_at_ms: now_ms + 60_000,
             },
-            SnapshotPolicy::default().max_live_per_namespace,
+            &SnapshotPolicy::default(),
         )
         .await
         .expect("create second snapshot");
@@ -998,7 +1002,7 @@ async fn snapshot_read_views_serve_captured_state_and_enforce_release() {
                 name: "reader".to_owned(),
                 expires_at_ms: now_ms + 60_000,
             },
-            SnapshotPolicy::default().max_live_per_namespace,
+            &SnapshotPolicy::default(),
         )
         .await
         .expect("create snapshot");
@@ -1083,7 +1087,8 @@ async fn a_reader_judges_snapshot_expiry_on_its_own_wall_clock() {
         .build()
         .await
         .expect("build writer");
-    let reader = LoonFs::reader_with_store(store(temp_dir.path()))
+    let reader = LoonFs::builder_with_store(store(temp_dir.path()))
+        .read_only()
         .wall_clock(clock.clone())
         .build()
         .await
@@ -1105,7 +1110,7 @@ async fn a_reader_judges_snapshot_expiry_on_its_own_wall_clock() {
                 name: "clock".to_owned(),
                 expires_at_ms: EXPIRES_AT_MS,
             },
-            SnapshotPolicy::default().max_live_per_namespace,
+            &SnapshotPolicy::default(),
         )
         .await
         .expect("create snapshot");
@@ -1167,7 +1172,7 @@ async fn a_snapshot_read_view_rejects_options_naming_another_snapshot() {
                         name: name.to_owned(),
                         expires_at_ms: now_ms + 60_000,
                     },
-                    SnapshotPolicy::default().max_live_per_namespace,
+                    &SnapshotPolicy::default(),
                 )
                 .await
                 .expect("create snapshot"),
@@ -1287,7 +1292,8 @@ async fn a_missing_current_segment_stays_corrupt_and_manifest_read_failures_prop
         .fold_wal(&namespace_id)
         .await
         .expect("fold");
-    let reader = loonfs::LoonFs::reader_with_store(store.clone())
+    let reader = loonfs::LoonFs::builder_with_store(store.clone())
+        .read_only()
         .build()
         .await
         .expect("reader");

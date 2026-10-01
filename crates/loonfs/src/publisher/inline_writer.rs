@@ -1,14 +1,14 @@
 //! Inline writer preparation, publication, fallback, and maintenance contracts.
 
 use super::*;
-use crate::{InlineContentOptions, MetadataCache, MetadataMaintenanceOptions, PutFileOptions};
+use crate::{InlineContentPolicy, MetadataCache, MetadataMaintenanceOptions, PutFileOptions};
 use loonfs_api::wire::wal::decode_wal_object_envelope_zstd;
 use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
 use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::stores::RecordedOperation;
 
-fn policy() -> InlineContentOptions {
-    InlineContentOptions {
+fn policy() -> InlineContentPolicy {
+    InlineContentPolicy {
         inline_content_threshold_bytes: Some(4),
         ..Default::default()
     }
@@ -68,7 +68,7 @@ async fn check_terminal_reload_failure(include_replay: bool) {
     store.fail_all();
     let writer = crate::LoonFs::builder_with_store(store.clone())
         .writer_id("inline-writer")
-        .inline_content(InlineContentOptions {
+        .inline_content(InlineContentPolicy {
             inline_content_threshold_bytes: Some(4),
             inline_content_fold_at_bytes: 4,
             inline_content_tail_limit_bytes: 4,
@@ -198,7 +198,7 @@ async fn check_terminal_reload_failure(include_replay: bool) {
 #[tokio::test]
 async fn a_new_session_keeps_one_wal_object_budget_inline_until_it_observes_the_tail() {
     let (_directory, store, writer, namespace, namespace_writer) =
-        writer_with_policy(InlineContentOptions {
+        writer_with_policy(InlineContentPolicy {
             inline_content_wal_object_budget_bytes: 4,
             inline_content_fold_at_bytes: 8,
             inline_content_tail_limit_bytes: 8,
@@ -269,7 +269,7 @@ async fn a_new_session_keeps_one_wal_object_budget_inline_until_it_observes_the_
 }
 
 async fn writer_with_policy(
-    policy: InlineContentOptions,
+    policy: InlineContentPolicy,
 ) -> (
     tempfile::TempDir,
     Arc<RecordingStore<LocalFsStore>>,
@@ -281,7 +281,7 @@ async fn writer_with_policy(
 }
 
 async fn writer_with_policy_and_byte_limit(
-    policy: InlineContentOptions,
+    policy: InlineContentPolicy,
     max_estimated_bytes_per_namespace: usize,
 ) -> (
     tempfile::TempDir,
@@ -423,7 +423,7 @@ async fn small_writes_use_one_wal_put_and_retry_by_bytes() {
 #[tokio::test]
 async fn disabled_and_above_threshold_writes_keep_uploaded_object_identity() {
     for options in [
-        InlineContentOptions {
+        InlineContentPolicy {
             inline_content_threshold_bytes: None,
             ..Default::default()
         },
@@ -576,7 +576,7 @@ fn put_operation(path: &str, prepared: &crate::publish::PreparedContent) -> File
 #[tokio::test]
 async fn tail_fallback_keeps_inline_identity_across_retries_and_a_fold() {
     let (_directory, store, writer, namespace, namespace_writer) =
-        writer_with_policy(InlineContentOptions {
+        writer_with_policy(InlineContentPolicy {
             inline_content_fold_at_bytes: 4,
             inline_content_tail_limit_bytes: 4,
             ..policy()
@@ -661,7 +661,7 @@ async fn retained_receipts_answer_retries_before_fallback_when_content_writes_fa
         let store = Arc::new(RecordingStore::new(failing.clone(), KeyPredicate::any()));
         let writer = crate::LoonFs::builder_with_store(store.clone())
             .writer_id("inline-writer")
-            .inline_content(InlineContentOptions {
+            .inline_content(InlineContentPolicy {
                 inline_content_threshold_bytes: Some(8),
                 inline_content_wal_object_budget_bytes: 4,
                 inline_content_fold_at_bytes: 5,
@@ -722,7 +722,7 @@ async fn retained_receipts_answer_retries_before_fallback_when_content_writes_fa
 #[tokio::test]
 async fn full_queue_refuses_overflow_staging_without_store_writes() {
     let (_directory, store, writer, namespace, namespace_writer) =
-        writer_with_policy(InlineContentOptions {
+        writer_with_policy(InlineContentPolicy {
             inline_content_wal_object_budget_bytes: 4,
             inline_content_threshold_bytes: Some(8),
             ..policy()
@@ -755,7 +755,7 @@ async fn overflow_staging_keeps_bulk_commit_order_and_one_atomic_commit() {
     const ADMISSION_BYTES: usize = 256 * 1024;
     let (_directory, store, writer, namespace, namespace_writer) =
         writer_with_policy_and_byte_limit(
-            InlineContentOptions {
+            InlineContentPolicy {
                 inline_content_wal_object_budget_bytes: VALUE_BYTES,
                 inline_content_threshold_bytes: Some(VALUE_BYTES),
                 ..policy()
@@ -849,7 +849,7 @@ async fn overflow_staging_keeps_bulk_commit_order_and_one_atomic_commit() {
 #[tokio::test]
 async fn queued_writes_share_tail_reservations_and_split_at_the_wal_object_budget() {
     for limited_tail in [false, true] {
-        let mut options = InlineContentOptions {
+        let mut options = InlineContentPolicy {
             inline_content_wal_object_budget_bytes: 4,
             ..policy()
         };
@@ -927,7 +927,7 @@ async fn queued_writes_share_tail_reservations_and_split_at_the_wal_object_budge
 #[tokio::test]
 async fn repeated_projection_invalidation_does_not_repeat_the_tail_limit_overshoot() {
     let (_directory, _store, writer, namespace, namespace_writer) =
-        writer_with_policy(InlineContentOptions {
+        writer_with_policy(InlineContentPolicy {
             inline_content_fold_at_bytes: 4,
             inline_content_tail_limit_bytes: 4,
             ..policy()
@@ -967,7 +967,7 @@ async fn fold_completion_reports_only_inline_bytes_published_since_it_began() {
     ));
     let writer = crate::LoonFs::builder_with_store(store.clone())
         .writer_id("inline-writer")
-        .inline_content(InlineContentOptions {
+        .inline_content(InlineContentPolicy {
             inline_content_threshold_bytes: Some(4),
             inline_content_fold_at_bytes: 4,
             inline_content_tail_limit_bytes: 8,
@@ -1082,7 +1082,7 @@ async fn commit_two_values(
 async fn inline_bytes_make_automatic_and_explicit_folds_due_before_wal_object_count() {
     for mode in ["automatic", "explicit", "scheduled"] {
         let (_directory, store, writer, namespace, namespace_writer) =
-            writer_with_policy(InlineContentOptions {
+            writer_with_policy(InlineContentPolicy {
                 inline_content_fold_at_bytes: 4,
                 ..policy()
             })
@@ -1112,7 +1112,7 @@ async fn inline_bytes_make_automatic_and_explicit_folds_due_before_wal_object_co
         store.reset();
         assert_eq!(
             maintenance
-                .metadata_probe(&namespace, &options)
+                .probe_metadata(&namespace, &options)
                 .await
                 .expect("probe"),
             crate::MaintenanceProbe::Idle
@@ -1217,27 +1217,27 @@ async fn invalid_inline_policy_is_rejected_before_store_access() {
         KeyPredicate::any(),
     ));
     for options in [
-        InlineContentOptions {
+        InlineContentPolicy {
             inline_content_threshold_bytes: Some(MAX_WAL_INLINE_CONTENT_BYTES + 1),
             ..policy()
         },
-        InlineContentOptions {
+        InlineContentPolicy {
             inline_content_wal_object_budget_bytes: MAX_WAL_OBJECT_INLINE_CONTENT_BYTES + 1,
             ..policy()
         },
-        InlineContentOptions {
+        InlineContentPolicy {
             inline_content_fold_at_bytes: 33 * 1024 * 1024,
             ..policy()
         },
-        InlineContentOptions {
+        InlineContentPolicy {
             inline_content_wal_object_budget_bytes: 0,
             ..policy()
         },
-        InlineContentOptions {
+        InlineContentPolicy {
             inline_content_fold_at_bytes: 0,
             ..policy()
         },
-        InlineContentOptions {
+        InlineContentPolicy {
             inline_content_tail_limit_bytes: 0,
             ..policy()
         },
@@ -1249,12 +1249,12 @@ async fn invalid_inline_policy_is_rejected_before_store_access() {
             .await
             .err()
             .expect("invalid policy");
-        assert!(matches!(error, RuntimeError::Config(_)));
+        assert!(matches!(error, Error::Config(_)));
         assert!(store.snapshot().is_empty());
     }
     crate::LoonFs::builder_with_store(store)
         .writer_id("writer")
-        .inline_content(InlineContentOptions {
+        .inline_content(InlineContentPolicy {
             inline_content_threshold_bytes: Some(0),
             ..policy()
         })
@@ -1292,7 +1292,7 @@ async fn check_delayed_fold_callback(cache: MetadataCache) {
     let writer = crate::LoonFs::builder_with_store(store.clone())
         .writer_id("inline-writer")
         .metadata_cache(cache)
-        .inline_content(InlineContentOptions {
+        .inline_content(InlineContentPolicy {
             inline_content_threshold_bytes: Some(4),
             inline_content_fold_at_bytes: 4,
             inline_content_tail_limit_bytes: 8,

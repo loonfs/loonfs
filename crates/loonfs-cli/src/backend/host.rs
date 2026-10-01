@@ -4,7 +4,7 @@ use super::MaintenanceHost;
 use crate::error::CliError;
 use crate::render::write_stderr_warning;
 use http_body_util::BodyExt as _;
-use loonfs::InlineContentOptions;
+use loonfs::InlineContentPolicy;
 use loonfs_api::SecretString;
 use loonfs_client::{Body, Client, ClientConfig, TransportError};
 use loonfs_grep::GrepService;
@@ -23,7 +23,7 @@ pub(crate) fn client(
     host: &MaintenanceHost,
     grep_service: GrepService,
     store_kind: ConfiguredObjectStoreKind,
-    inline_content: InlineContentOptions,
+    inline_content: InlineContentPolicy,
     no_retry: bool,
 ) -> Result<Client, CliError> {
     let options = Arc::new(BindingOptions {

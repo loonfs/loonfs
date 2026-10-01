@@ -185,7 +185,7 @@ pub const CONTENT_RECLAMATION_GRACE_MS: u64 =
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gc::GcConfig;
+    use crate::gc::GcOptions;
 
     #[test]
     fn derived_minimum_grace_window_sits_below_the_default() {
@@ -193,7 +193,7 @@ mod tests {
         // + 2 min payload attempt + 3 min margin = 22 min 15 s.
         assert_eq!(GC_MIN_GRACE_WINDOW_MS, 1_335_000);
         assert!(
-            GC_MIN_GRACE_WINDOW_MS < GcConfig::default().grace_window_ms,
+            GC_MIN_GRACE_WINDOW_MS < GcOptions::default().grace_window_ms,
             "the conservative default grace window must satisfy its own floor"
         );
         assert!(

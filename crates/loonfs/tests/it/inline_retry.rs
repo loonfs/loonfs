@@ -3,7 +3,7 @@
 use bytes::Bytes;
 use loonfs::publish::{CommitCandidate, CommitRequest, FilesystemOperation, InlineContent};
 use loonfs::{
-    CreateNamespaceOptions, InlineContentOptions, LoonFs, Namespace, SharedObjectStore, Writable,
+    CreateNamespaceOptions, InlineContentPolicy, LoonFs, Namespace, SharedObjectStore, Writable,
 };
 use loonfs_api::{
     AbsolutePath, AccessGrants, AccessRight, AccessRights, CommitId, ContentId,
@@ -94,7 +94,7 @@ async fn open(store: SharedObjectStore, wal_object_budget: usize) -> LoonFs<Writ
         .writer_id("inline-retry")
         .min_publish_interval_ms(0)
         .monotonic_timer(Arc::new(ManualClock::new(0)))
-        .inline_content(InlineContentOptions {
+        .inline_content(InlineContentPolicy {
             inline_content_wal_object_budget_bytes: wal_object_budget,
             ..Default::default()
         })

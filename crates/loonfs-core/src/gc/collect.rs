@@ -5,7 +5,7 @@ use super::live_set::{LiveSet, RetirementState};
 use super::reclaim::reclaim_namespace;
 use super::sweep::Sweep;
 use super::uploads::PublicationView;
-use super::GcConfig;
+use super::GcOptions;
 use crate::context::MutationContext;
 use crate::control_object::ControlObjectLoadError;
 use crate::error::{CoreError, Result};
@@ -17,10 +17,10 @@ use loonfs_objectstore::ObjectStore;
 pub async fn gc_namespace<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    config: &GcConfig,
+    options: &GcOptions,
     context: &MutationContext,
 ) -> Result<GcResponse> {
-    config.validate()?;
+    options.validate()?;
     let mut report = GcResponse::empty(namespace_id.clone());
     let anchor = match load_read_anchor(store, namespace_id).await {
         Ok(anchor) => anchor,
@@ -31,7 +31,7 @@ pub async fn gc_namespace<S: ObjectStore + ?Sized>(
         store,
         namespace_id,
         &anchor,
-        config.grace_window_ms,
+        options.grace_window_ms,
         context,
     )
     .await?;
@@ -48,7 +48,7 @@ pub async fn gc_namespace<S: ObjectStore + ?Sized>(
     let mut sweep = Sweep {
         store,
         namespace_id,
-        grace_window_ms: config.grace_window_ms,
+        grace_window_ms: options.grace_window_ms,
         mutation: context,
         live: &live,
         view: &view,

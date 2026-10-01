@@ -61,12 +61,12 @@ impl<M> LoonFs<M> {
 
     /// Clones this runtime with the subject used for its reads and, in the
     /// writable mode, its commits and uploads.
-    pub fn as_subject(&self, subject: Subject) -> Self
+    pub fn with_subject(&self, subject: Subject) -> Self
     where
         M: Clone,
     {
         Self {
-            core: self.core.as_subject(subject),
+            core: self.core.with_subject(subject),
             mode: self.mode.clone(),
         }
     }
@@ -76,7 +76,7 @@ impl<M> LoonFs<M> {
     ///
     /// It sees this runtime's cache updates at once, so a host can route its
     /// reads through it. For reads driven by a different Tokio runtime, build
-    /// a separate runtime with [`LoonFs::reader`].
+    /// a separate runtime with [`LoonFsBuilder::read_only`].
     pub fn read_only(&self) -> LoonFs<ReadOnly> {
         LoonFs {
             core: self.core.clone(),
@@ -95,8 +95,8 @@ impl<M> LoonFs<M> {
 
     /// Returns the capability document for this embedded build (API spec,
     /// "Capability discovery").
-    pub fn get_capabilities(&self) -> CapabilityDocument {
-        self.core.get_capabilities()
+    pub fn capabilities(&self) -> CapabilityDocument {
+        self.core.capabilities()
     }
 
     /// Returns the metadata cache this runtime reads through, which
@@ -125,23 +125,6 @@ impl<M> LoonFs<M> {
     #[cfg(test)]
     pub(crate) fn metadata_segment_cache(&self) -> Arc<MetadataSegmentCache> {
         self.core.metadata_segment_cache()
-    }
-}
-
-impl LoonFs<ReadOnly> {
-    /// Starts a read-only runtime builder that constructs its object-store
-    /// client from configuration inside this runtime's ownership domain.
-    pub fn reader(store_config: StoreConfig) -> LoonFsBuilder<ReadOnly> {
-        LoonFsBuilder::from_config(store_config)
-    }
-
-    /// Starts a read-only runtime builder over a caller-supplied store.
-    ///
-    /// For callers who know the store is safe in this runtime's ownership
-    /// domain. Do not use it to share one provider client across unrelated
-    /// runtimes; build another runtime from [`StoreConfig`] instead.
-    pub fn reader_with_store(store: SharedObjectStore) -> LoonFsBuilder<ReadOnly> {
-        LoonFsBuilder::from_store(store)
     }
 }
 
@@ -208,7 +191,7 @@ impl LoonFs<Writable> {
     ///
     /// Later mutations fail with `shutting_down`. Calling this more than once
     /// has no additional effect.
-    pub fn close_admission_for_shutdown(&self) {
+    pub fn close_admission(&self) {
         self.mode.publisher.close_admission();
     }
 
@@ -260,7 +243,7 @@ impl LoonFs<Writable> {
     )]
     pub async fn shutdown(&self) -> Result<()> {
         self.core.record_trace_context(&tracing::Span::current());
-        self.close_admission_for_shutdown();
+        self.close_admission();
         self.mode.publisher.drain().await
     }
 
@@ -269,11 +252,16 @@ impl LoonFs<Writable> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{CreateNamespaceOptions, ErrorCode, LoonFs, NamespaceId, PutFileOptions, Writable};
+    use crate::{
+        CreateNamespaceOptions, ErrorCode, LoonFs, MetadataCache, MetadataCacheStats, NamespaceId,
+        PutFileOptions, Writable,
+    };
     use loonfs_core::test_support::RecordingStoredMetadataBlockCache;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_test_support::ids::namespace_id;
-    use loonfs_test_support::stores::{BlockingStore, KeyPredicate, OperationClass};
+    use loonfs_test_support::stores::{
+        BlockingStore, KeyPredicate, OperationClass, RecordingStore,
+    };
     use std::sync::Arc;
     use tempfile::tempdir;
 
@@ -315,6 +303,63 @@ mod tests {
             &runtime.metadata_segment_cache(),
             &runtime.read_only().metadata_segment_cache()
         ));
+    }
+
+    #[tokio::test]
+    async fn converting_a_builder_to_read_only_keeps_the_shared_settings() {
+        let temp_dir = tempdir().expect("tempdir");
+        let namespace_id = namespace_id("converted");
+        let writer = LoonFs::builder_with_store(Arc::new(
+            LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
+        ))
+        .writer_id("converted-builder-writer")
+        .build()
+        .await
+        .expect("build writer");
+        writer
+            .create_namespace(
+                &namespace_id,
+                CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+            )
+            .await
+            .expect("create namespace");
+        writer
+            .open_namespace(&namespace_id)
+            .expect("open namespace")
+            .put_file_bytes(
+                "/file.txt",
+                b"body",
+                PutFileOptions::new(loonfs_test_support::test_actor()),
+            )
+            .await
+            .expect("put file");
+
+        let cache = MetadataCache::default();
+        let recording = Arc::new(RecordingStore::new(
+            LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
+            KeyPredicate::any(),
+        ));
+        let reader = LoonFs::builder_with_store(recording.clone())
+            .metadata_cache(cache.clone())
+            .manifest_revalidation_interval_ms(0)
+            .read_only()
+            .build()
+            .await
+            .expect("build reader");
+        let namespace = reader.namespace(&namespace_id);
+        namespace.get_file_bytes("/file.txt").await.expect("read");
+        recording.reset();
+        namespace.get_file_bytes("/file.txt").await.expect("reread");
+
+        assert_ne!(
+            cache.stats(),
+            MetadataCacheStats::default(),
+            "the reader reads through the cache given before the conversion"
+        );
+        assert!(
+            recording.count(OperationClass::Head) > 0,
+            "the zero interval given before the conversion probes on every read"
+        );
     }
 
     /// A runtime whose store parks the first WAL put, so a publication can

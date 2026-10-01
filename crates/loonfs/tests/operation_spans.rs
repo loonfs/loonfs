@@ -90,7 +90,7 @@ fn every_handle_emits_an_operation_span_with_its_namespace() {
             .maintenance(loonfs_test_support::ids::writer_id(
                 "operation-span-maintenance",
             ))
-            .get_namespace_diagnostics(&namespace_id)
+            .diagnostics(&namespace_id)
             .await
             .expect("read namespace diagnostics");
     });

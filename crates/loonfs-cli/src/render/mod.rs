@@ -156,8 +156,8 @@ mod tests {
         }
     }
 
-    fn poison_permission_runtime_error() -> loonfs::RuntimeError {
-        loonfs::RuntimeError::Core(loonfs::CoreError::Store {
+    fn poison_permission_error() -> loonfs::Error {
+        loonfs::Error::Core(loonfs::CoreError::Store {
             object_key: "namespaces/customer-a/hint.json".to_owned(),
             message: POISON_PROVIDER_DETAIL.to_owned(),
             class: loonfs::StoreFailureClass::PermissionDenied,
@@ -206,9 +206,7 @@ mod tests {
             kind: CommandKind::ConfigShow,
             profile: Some("embedded".to_owned()),
             mode: Some("embedded".to_owned()),
-            error: Box::new(crate::error::CliError::from(
-                poison_permission_runtime_error(),
-            )),
+            error: Box::new(crate::error::CliError::from(poison_permission_error())),
         };
         let embedded_human = human_error(&embedded_failure.error, embedded_failure.mode.as_deref());
         let embedded_json = json_error(&embedded_failure).expect("embedded JSON error renders");

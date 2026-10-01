@@ -6,7 +6,7 @@
 //! Results are the `loonfs-api` wire shapes themselves, the same way handles
 //! already return `Commit` and `FoldWalResponse`.
 
-use crate::{EffectiveLimit, MetadataCompactionPolicy, Result, RuntimeError};
+use crate::{EffectiveLimit, Error, MetadataCompactionPolicy, Result};
 use loonfs_api::{CreateCheckpointRequest, MetadataMaintenanceRequest};
 use loonfs_core::limits::{FOLD_AT_WAL_OBJECTS, MAX_UNFOLDED_WAL_OBJECTS};
 use std::num::{NonZeroU64, NonZeroUsize};
@@ -39,7 +39,7 @@ impl Default for MetadataMaintenanceOptions {
         Self {
             max_wal_tail_objects: const { NonZeroU64::new(FOLD_AT_WAL_OBJECTS).unwrap() },
             inline_content_fold_at_bytes: NonZeroUsize::new(
-                crate::InlineContentOptions::default().inline_content_fold_at_bytes,
+                crate::InlineContentPolicy::default().inline_content_fold_at_bytes,
             )
             .expect("default inline fold threshold should be nonzero"),
             idle_fold_after_ms: 15 * 60 * 1_000,
@@ -55,14 +55,14 @@ impl MetadataMaintenanceOptions {
             return Ok(Self::default());
         };
         let Some(max_wal_tail_objects) = NonZeroU64::new(threshold) else {
-            return Err(RuntimeError::InvalidRequest {
+            return Err(Error::InvalidRequest {
                 message: "max_wal_tail_objects must be greater than zero".to_owned(),
                 param: "/max_wal_tail_objects",
             });
         };
         let reject_writes_at_wal_objects = MAX_UNFOLDED_WAL_OBJECTS;
         if max_wal_tail_objects.get() > reject_writes_at_wal_objects {
-            return Err(RuntimeError::InvalidRequest {
+            return Err(Error::InvalidRequest {
                 message: format!(
                     "max_wal_tail_objects may not exceed the write-rejection threshold \
                  ({reject_writes_at_wal_objects})"

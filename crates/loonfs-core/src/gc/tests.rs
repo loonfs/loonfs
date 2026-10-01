@@ -3,7 +3,7 @@
 #![allow(clippy::panic)]
 
 use super::collect::gc_namespace;
-use super::config::GcConfig;
+use super::options::GcOptions;
 use crate::commit_engine::{CommitCandidate, NamespaceCommitEngine};
 use crate::context::MutationContext;
 use crate::error::CoreError;
@@ -58,8 +58,8 @@ mod superseded_roots;
 
 const GRACE_MS: u64 = 60 * 60 * 1000;
 
-fn config() -> GcConfig {
-    GcConfig {
+fn options() -> GcOptions {
+    GcOptions {
         grace_window_ms: GRACE_MS,
     }
 }
@@ -173,14 +173,14 @@ async fn gc_rejects_grace_windows_below_the_derived_minimum() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
 
-    let too_small = GcConfig {
+    let too_small = GcOptions {
         grace_window_ms: GC_MIN_GRACE_WINDOW_MS - 1,
     };
     let error = gc_namespace(&store, &namespace_id, &too_small, &context(1_000))
         .await
         .expect_err("sub-minimum grace window must be rejected");
     assert!(
-        matches!(&error, CoreError::InvalidGcConfig(message)
+        matches!(&error, CoreError::InvalidGcOptions(message)
             if message.contains("below the derived safety minimum")),
         "expected invalid gc config, got {error:?}"
     );
@@ -210,7 +210,7 @@ async fn gc_reaps_below_floor_wal_objects_after_the_grace_window() {
         .expect("advance floor");
 
     let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
-    let report = gc_namespace(&store, &namespace_id, &config(), &aged)
+    let report = gc_namespace(&store, &namespace_id, &options(), &aged)
         .await
         .expect("gc pass");
 
@@ -323,7 +323,7 @@ async fn deleted_namespace_keeps_its_tombstone_and_segments() {
         .expect("final statistics")
         .activity;
     let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
-    let report = gc_namespace(&store, &namespace_id, &config(), &aged)
+    let report = gc_namespace(&store, &namespace_id, &options(), &aged)
         .await
         .expect("gc pass");
     assert!(report.deleted.wal_objects >= 1);
@@ -332,7 +332,7 @@ async fn deleted_namespace_keeps_its_tombstone_and_segments() {
     assert_eq!(report.deleted_checkpoints_by_owner.user, 1);
     let reaped = context(aged.now_ms + UNREFERENCED_SEGMENT_MIN_AGE_MS);
     store.reset();
-    let report = gc_namespace(&store, &namespace_id, &config(), &reaped)
+    let report = gc_namespace(&store, &namespace_id, &options(), &reaped)
         .await
         .expect("gc pass after segment grace");
     assert_eq!(
@@ -409,7 +409,7 @@ async fn deleted_namespace_keeps_its_tombstone_and_segments() {
         .expect("hint")
         .is_some());
     let again = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
-    let report = gc_namespace(&store, &namespace_id, &config(), &again)
+    let report = gc_namespace(&store, &namespace_id, &options(), &again)
         .await
         .expect("second gc pass");
     assert_eq!(report.deleted.wal_objects, 0);
@@ -456,7 +456,7 @@ async fn fork_protected_bases_survive_source_deletion_until_the_target_dies() {
     let fork_record = read_fork_record(&store, &source).await;
     let basis_key = metadata_manifest_object(&source, &fork_record.pin_id.manifest_no());
     let aged = context(now_after_newest_object(&store, &source, GRACE_MS + 1).await);
-    let report = gc_namespace(&store, &source, &config(), &aged)
+    let report = gc_namespace(&store, &source, &options(), &aged)
         .await
         .expect("gc pass with live clone");
     assert_eq!(report.deleted_checkpoints_by_owner.fork, 0);
@@ -482,19 +482,19 @@ async fn fork_protected_bases_survive_source_deletion_until_the_target_dies() {
     delete_namespace(&store, &clone, DeleteNamespaceOptions::default(), &setup)
         .await
         .expect("delete clone");
-    let retired = gc_namespace(&store, &clone, &config(), &aged)
+    let retired = gc_namespace(&store, &clone, &options(), &aged)
         .await
         .expect("retire clone");
     let deadline = retired.reclaimable_at_ms.expect("clone retired");
 
     let aged = context(deadline);
-    gc_namespace(&store, &clone, &config(), &aged)
+    gc_namespace(&store, &clone, &options(), &aged)
         .await
         .expect("clone releases source pin");
     assert!(!pin_exists(&store, &source, &fork_record.pin_id).await);
 
     let again = context(now_after_newest_object(&store, &source, GRACE_MS + 1).await);
-    let report = gc_namespace(&store, &source, &config(), &again)
+    let report = gc_namespace(&store, &source, &options(), &again)
         .await
         .expect("idempotent pass");
     assert_eq!(report.deleted_checkpoints_by_owner.fork, 0);
@@ -526,7 +526,7 @@ async fn upload_gc_aborts_an_expired_session_then_reaps_it() {
     // Inside the lease nothing happens, however old the object looks: the
     // session carries its own expiry, so no provider timestamp decides this.
     let inside = context(setup.now_ms + UPLOAD_SESSION_LEASE_MS - 1);
-    let report = gc_namespace(&store, &namespace_id, &config(), &inside)
+    let report = gc_namespace(&store, &namespace_id, &options(), &inside)
         .await
         .expect("gc pass inside the lease");
     assert_eq!(report.deleted.upload_sessions, 0);
@@ -535,7 +535,7 @@ async fn upload_gc_aborts_an_expired_session_then_reaps_it() {
     // Past the lease plus a grace the session is aborted and the object it
     // was writing is deleted — in that order.
     let expired = context(setup.now_ms + UPLOAD_SESSION_LEASE_MS + GRACE_MS + 1);
-    let report = gc_namespace(&store, &namespace_id, &config(), &expired)
+    let report = gc_namespace(&store, &namespace_id, &options(), &expired)
         .await
         .expect("gc pass past the lease");
     assert_eq!(
@@ -556,7 +556,7 @@ async fn upload_gc_aborts_an_expired_session_then_reaps_it() {
 
     // The aborted record is reaped a grace window after its own stamp.
     let reaped = context(expired.now_ms + GRACE_MS + 1);
-    let report = gc_namespace(&store, &namespace_id, &config(), &reaped)
+    let report = gc_namespace(&store, &namespace_id, &options(), &reaped)
         .await
         .expect("gc pass past the abort grace");
     assert_eq!(report.deleted.upload_sessions, 1);
@@ -567,7 +567,7 @@ async fn upload_gc_aborts_an_expired_session_then_reaps_it() {
     assert!(store.head(&session_key).await.expect("head").is_none());
 
     let again = context(reaped.now_ms + GRACE_MS);
-    let report = gc_namespace(&store, &namespace_id, &config(), &again)
+    let report = gc_namespace(&store, &namespace_id, &options(), &again)
         .await
         .expect("gc pass after the sweep");
     assert_eq!(report.deleted.upload_sessions, 0);
@@ -590,13 +590,13 @@ async fn aborted_upload_cleanup_failure_keeps_the_session_for_retry() {
     let (upload_id, _) = stage_upload(&store, &namespace_id, &setup).await;
 
     let expired = context(setup.now_ms + UPLOAD_SESSION_LEASE_MS + GRACE_MS + 1);
-    gc_namespace(&store, &namespace_id, &config(), &expired)
+    gc_namespace(&store, &namespace_id, &options(), &expired)
         .await
         .expect("abort expired upload");
 
     store.fail_next(1);
     let reaped = context(expired.now_ms + GRACE_MS + 1);
-    let report = gc_namespace(&store, &namespace_id, &config(), &reaped)
+    let report = gc_namespace(&store, &namespace_id, &options(), &reaped)
         .await
         .expect("retain after failed cleanup");
     assert_eq!(report.deleted.upload_sessions, 0);
@@ -608,7 +608,7 @@ async fn aborted_upload_cleanup_failure_keeps_the_session_for_retry() {
         UploadSessionRecordStatus::Aborted { .. }
     ));
 
-    let report = gc_namespace(&store, &namespace_id, &config(), &reaped)
+    let report = gc_namespace(&store, &namespace_id, &options(), &reaped)
         .await
         .expect("retry cleanup");
     assert_eq!(report.deleted.upload_sessions, 1);
@@ -632,7 +632,7 @@ async fn a_pass_reports_the_soonest_deadline_it_retained() {
     // One un-expired open session and nothing else: the lease plus the
     // pass's own grace window is the whole answer.
     let inside = context(setup.now_ms + 1);
-    let report = gc_namespace(&store, &namespace_id, &config(), &inside)
+    let report = gc_namespace(&store, &namespace_id, &options(), &inside)
         .await
         .expect("gc pass inside the lease");
     assert_eq!(report.retained.total(), 2);
@@ -646,7 +646,7 @@ async fn a_pass_reports_the_soonest_deadline_it_retained() {
     // is the one the next pass is too early for.
     let completed_at = context(setup.now_ms + 2);
     complete_staged_upload(&store, &namespace_id, &upload_id, &completed_at).await;
-    let report = gc_namespace(&store, &namespace_id, &config(), &completed_at)
+    let report = gc_namespace(&store, &namespace_id, &options(), &completed_at)
         .await
         .expect("gc pass over the completed session");
     assert_eq!(
@@ -671,7 +671,7 @@ async fn an_aborted_session_is_reclaimed_from_the_deadline_the_pass_reported() {
     // The pass that aborts the session is the only thing that knows the
     // record now ages out a grace window from this instant.
     let expired = context(setup.now_ms + UPLOAD_SESSION_LEASE_MS + GRACE_MS + 1);
-    let report = gc_namespace(&store, &namespace_id, &config(), &expired)
+    let report = gc_namespace(&store, &namespace_id, &options(), &expired)
         .await
         .expect("gc pass past the lease");
     assert_eq!(report.deleted.upload_sessions, 0);
@@ -683,7 +683,7 @@ async fn an_aborted_session_is_reclaimed_from_the_deadline_the_pass_reported() {
     // Nothing between the two passes says anything about this namespace:
     // the time the first pass reported is the whole trigger.
     let reclaiming = context(reclaim_at_ms + 1);
-    let report = gc_namespace(&store, &namespace_id, &config(), &reclaiming)
+    let report = gc_namespace(&store, &namespace_id, &options(), &reclaiming)
         .await
         .expect("gc pass at the reported deadline");
     assert_eq!(report.deleted.upload_sessions, 1);
@@ -725,11 +725,11 @@ async fn upload_gc_reaps_a_session_that_never_staged_anything() {
     let session_key = write_upload_session(&store, &namespace_id).await;
 
     let expired = context(1_000 + UPLOAD_SESSION_LEASE_MS + GRACE_MS + 1);
-    gc_namespace(&store, &namespace_id, &config(), &expired)
+    gc_namespace(&store, &namespace_id, &options(), &expired)
         .await
         .expect("gc pass past the lease");
     let reaped = context(expired.now_ms + GRACE_MS + 1);
-    let report = gc_namespace(&store, &namespace_id, &config(), &reaped)
+    let report = gc_namespace(&store, &namespace_id, &options(), &reaped)
         .await
         .expect("gc pass past the abort grace");
 
@@ -754,8 +754,8 @@ async fn upload_completion_wins_before_gc_abort_and_the_session_is_retained() {
         &content_ref.content_id,
     );
     let store = blocking_control_cas_store(store, BlockingControlCasTarget::UploadAborted);
-    let gc_config = config();
-    let gc = gc_namespace(&store, &namespace_id, &gc_config, &aged);
+    let gc_options = options();
+    let gc = gc_namespace(&store, &namespace_id, &gc_options, &aged);
     let complete = async {
         store.wait_until_blocked().await;
         let result = crate::protocol::complete_upload(
@@ -814,7 +814,7 @@ async fn gc_abort_wins_before_completion_and_completion_reports_not_found() {
     );
     let abort = async {
         store.wait_until_blocked().await;
-        let report = gc_namespace(&store, &namespace_id, &config(), &aged).await;
+        let report = gc_namespace(&store, &namespace_id, &options(), &aged).await;
         store.release();
         report
     };
@@ -927,7 +927,7 @@ async fn content_gc_retains_completed_content_inside_its_grace() {
     );
 
     let inside = context(setup.now_ms + CONTENT_RECLAMATION_GRACE_MS - 1);
-    let report = gc_namespace(&store, &namespace_id, &config(), &inside)
+    let report = gc_namespace(&store, &namespace_id, &options(), &inside)
         .await
         .expect("gc pass inside the content grace");
 
@@ -957,7 +957,7 @@ async fn content_gc_reclaims_completed_content_nothing_references() {
     );
 
     let past = context(setup.now_ms + CONTENT_RECLAMATION_GRACE_MS + 1);
-    let report = gc_namespace(&store, &namespace_id, &config(), &past)
+    let report = gc_namespace(&store, &namespace_id, &options(), &past)
         .await
         .expect("gc pass past the content grace");
 
@@ -995,7 +995,7 @@ async fn completed_content_delete_failure_keeps_the_session_for_retry() {
     let past = context(setup.now_ms + CONTENT_RECLAMATION_GRACE_MS + 1);
 
     store.fail_next(1);
-    let report = gc_namespace(&store, &namespace_id, &config(), &past)
+    let report = gc_namespace(&store, &namespace_id, &options(), &past)
         .await
         .expect("retain after failed content delete");
     assert_eq!(report.deleted.upload_sessions, 0);
@@ -1009,7 +1009,7 @@ async fn completed_content_delete_failure_keeps_the_session_for_retry() {
         .await
         .is_some());
 
-    let report = gc_namespace(&store, &namespace_id, &config(), &past)
+    let report = gc_namespace(&store, &namespace_id, &options(), &past)
         .await
         .expect("retry content delete");
     assert_eq!(report.deleted.upload_sessions, 1);
@@ -1087,7 +1087,7 @@ async fn completed_uploads_use_publication_lookups_without_scanning_segments() {
         );
 
         let past = context(setup.now_ms + CONTENT_RECLAMATION_GRACE_MS + 1);
-        let report = gc_namespace(&store, &namespace_id, &config(), &past)
+        let report = gc_namespace(&store, &namespace_id, &options(), &past)
             .await
             .expect("gc pass past the content grace");
 
@@ -1148,7 +1148,7 @@ async fn gc_retains_everything_inside_the_grace_window() {
         .await
         .expect("young orphan");
     let young = context(now_after_newest_object(&store, &namespace_id, 0).await);
-    let report = gc_namespace(&store, &namespace_id, &config(), &young)
+    let report = gc_namespace(&store, &namespace_id, &options(), &young)
         .await
         .expect("gc pass");
 
@@ -1194,7 +1194,7 @@ async fn published_compaction_segments_are_referenced_and_kept() {
     let long_after = context(
         now_after_newest_object(&store, &namespace_id, UNREFERENCED_SEGMENT_MIN_AGE_MS * 4).await,
     );
-    let report = gc_namespace(&store, &namespace_id, &config(), &long_after)
+    let report = gc_namespace(&store, &namespace_id, &options(), &long_after)
         .await
         .expect("gc pass long after the job published");
     assert!(
@@ -1252,9 +1252,9 @@ async fn a_publication_during_a_pass_never_costs_the_job_its_segments() {
         OperationClass::List,
     );
     gated.block_next();
-    let pass_config = config();
+    let pass_options = options();
     let (report, staged) = tokio::join!(
-        gc_namespace(&gated, &namespace_id, &pass_config, &pass_clock),
+        gc_namespace(&gated, &namespace_id, &pass_options, &pass_clock),
         async {
             gated.wait_until_blocked().await;
             crate::manifest::tests::publish_planned_compaction(
@@ -1300,7 +1300,7 @@ async fn a_pass_names_a_pin_it_could_not_advance() {
         .expect("checkpoint");
 
     let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS * 2).await);
-    let report = gc_namespace(&store, &namespace_id, &config(), &aged)
+    let report = gc_namespace(&store, &namespace_id, &options(), &aged)
         .await
         .expect("gc pass");
 
@@ -1339,7 +1339,7 @@ async fn gc_never_deletes_the_live_replay_tail() {
     write_test_file(&store, &namespace_id, "/docs/two.txt", "gc-two", &setup).await;
 
     let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
-    let report = gc_namespace(&store, &namespace_id, &config(), &aged)
+    let report = gc_namespace(&store, &namespace_id, &options(), &aged)
         .await
         .expect("gc pass");
 
@@ -1401,7 +1401,7 @@ async fn gc_retains_unrecognized_manifest_keys() {
     }
 
     let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
-    let report = gc_namespace(&store, &namespace_id, &config(), &aged)
+    let report = gc_namespace(&store, &namespace_id, &options(), &aged)
         .await
         .expect("gc pass");
 
@@ -1450,7 +1450,7 @@ async fn gc_reclaims_manifests_superseded_by_wal_folds() {
     );
 
     let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
-    let report = gc_namespace(&store, &namespace_id, &config(), &aged)
+    let report = gc_namespace(&store, &namespace_id, &options(), &aged)
         .await
         .expect("gc pass");
 
@@ -1490,7 +1490,7 @@ async fn gc_reclaims_manifests_superseded_by_wal_folds() {
     let aged = context(
         now_after_newest_object(&store, &namespace_id, UNREFERENCED_SEGMENT_MIN_AGE_MS + 1).await,
     );
-    let after_merge = gc_namespace(&store, &namespace_id, &config(), &aged)
+    let after_merge = gc_namespace(&store, &namespace_id, &options(), &aged)
         .await
         .expect("gc pass after compaction");
     assert!(
@@ -1558,7 +1558,7 @@ async fn gc_keeps_a_basis_pinned_by_another_owner_after_one_release() {
         .await
         .expect("release one owner");
     let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
-    let first_pass = gc_namespace(&store, &namespace_id, &config(), &aged)
+    let first_pass = gc_namespace(&store, &namespace_id, &options(), &aged)
         .await
         .expect("first gc pass");
     assert_eq!(
@@ -1566,7 +1566,7 @@ async fn gc_keeps_a_basis_pinned_by_another_owner_after_one_release() {
         loonfs_api::DeletedCheckpointsByOwner::default()
     );
 
-    let second_pass = gc_namespace(&store, &namespace_id, &config(), &aged)
+    let second_pass = gc_namespace(&store, &namespace_id, &options(), &aged)
         .await
         .expect("second gc pass");
     assert_eq!(second_pass.deleted.manifests, 0);
@@ -1611,7 +1611,7 @@ async fn gc_retains_active_checkpoint_bases() {
         .expect("second checkpoint");
 
     let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
-    let report = gc_namespace(&store, &namespace_id, &config(), &aged)
+    let report = gc_namespace(&store, &namespace_id, &options(), &aged)
         .await
         .expect("gc pass");
 
@@ -1693,7 +1693,7 @@ async fn retired_targets_release_their_source_pins_and_retry_failed_deletes() {
         .expect("advance manifest past the fork basis");
 
     let before = context(now_after_newest_object(&store, &source, GRACE_MS + 1).await);
-    let report = gc_namespace(&store, &source, &config(), &before)
+    let report = gc_namespace(&store, &source, &options(), &before)
         .await
         .expect("gc with live target");
     assert_eq!(report.deleted_checkpoints_by_owner.fork, 0);
@@ -1703,15 +1703,15 @@ async fn retired_targets_release_their_source_pins_and_retry_failed_deletes() {
         .expect("terminal delete of the fork target");
     let aged = context(setup.now_ms + GRACE_MS - 1);
 
-    let waiting = gc_namespace(&store, &source, &config(), &aged)
+    let waiting = gc_namespace(&store, &source, &options(), &aged)
         .await
         .expect("wait for retirement");
     assert_eq!(waiting.deleted_checkpoints_by_owner.fork, 0);
-    let retired = gc_namespace(&store, &clone, &config(), &aged)
+    let retired = gc_namespace(&store, &clone, &options(), &aged)
         .await
         .expect("retire materialized target");
     let deadline = retired.reclaimable_at_ms.expect("target retired");
-    let waiting = gc_namespace(&store, &source, &config(), &context(deadline - 1))
+    let waiting = gc_namespace(&store, &source, &options(), &context(deadline - 1))
         .await
         .expect("wait for grace");
     assert_eq!(waiting.deleted_checkpoints_by_owner.fork, 0);
@@ -1729,16 +1729,16 @@ async fn retired_targets_release_their_source_pins_and_retry_failed_deletes() {
         KeyPredicate::exact(&pin_key),
     );
     store.inner().fail_next(1);
-    assert!(gc_namespace(&store, &clone, &config(), &aged)
+    assert!(gc_namespace(&store, &clone, &options(), &aged)
         .await
         .is_err());
     assert!(pin_exists(&store, &source, &fork_record.pin_id).await);
-    let released = gc_namespace(&store, &clone, &config(), &aged)
+    let released = gc_namespace(&store, &clone, &options(), &aged)
         .await
         .expect("retry source pin delete");
     assert_eq!(released.deleted_checkpoints_by_owner.fork, 1);
     assert!(!pin_exists(&store, &source, &fork_record.pin_id).await);
-    let repeated = gc_namespace(&store, &clone, &config(), &aged)
+    let repeated = gc_namespace(&store, &clone, &options(), &aged)
         .await
         .expect("repeat source pin delete");
     assert_eq!(repeated.deleted_checkpoints_by_owner.fork, 0);
@@ -1753,7 +1753,7 @@ async fn retired_targets_release_their_source_pins_and_retry_failed_deletes() {
         .is_some());
     let store = store.inner().inner();
     let aged = context(now_after_newest_object(store, &source, GRACE_MS + 1).await);
-    let next_pass = gc_namespace(store, &source, &config(), &aged)
+    let next_pass = gc_namespace(store, &source, &options(), &aged)
         .await
         .expect("collect basis");
     assert_basis_reaped(
@@ -1795,7 +1795,7 @@ async fn a_corrupt_fork_target_manifest_fails_the_pass_and_an_unreadable_hint_re
 
     let aged = context(setup.now_ms + GRACE_MS);
     store.fail_all();
-    let report = gc_namespace(&store, &source, &config(), &aged)
+    let report = gc_namespace(&store, &source, &options(), &aged)
         .await
         .expect("an unreadable target is retained conservatively");
     assert_eq!(report.deleted_checkpoints_by_owner.fork, 0);
@@ -1807,7 +1807,7 @@ async fn a_corrupt_fork_target_manifest_fails_the_pass_and_an_unreadable_hint_re
         .await
         .expect("corrupt target manifest");
     let before = namespace_keys(store.inner(), &source).await;
-    let error = gc_namespace(&store, &source, &config(), &aged)
+    let error = gc_namespace(&store, &source, &options(), &aged)
         .await
         .expect_err("a corrupt target manifest must fail the source pass");
     assert_eq!(error.code(), crate::error::ErrorCode::NamespaceCorrupt);
@@ -1853,7 +1853,7 @@ async fn gc_never_releases_a_fork_record_while_its_target_lives() {
         grace_deadline + GRACE_MS,
         u64::MAX / 2,
     ] {
-        let report = gc_namespace(&store, &source, &config(), &context(now_ms))
+        let report = gc_namespace(&store, &source, &options(), &context(now_ms))
             .await
             .expect("gc pass with a live target");
         assert_eq!(report.deleted_checkpoints_by_owner.fork, 0, "at {now_ms}");
@@ -1926,7 +1926,7 @@ async fn a_fork_retry_keeps_young_pins_and_reclaims_the_abandoned_one_after_grac
     );
 
     let before_creation_grace = context(setup.now_ms + 1);
-    let report = gc_namespace(&store, &source, &config(), &before_creation_grace)
+    let report = gc_namespace(&store, &source, &options(), &before_creation_grace)
         .await
         .expect("gc pass with a target that reads through another record");
     assert_eq!(report.deleted_checkpoints_by_owner.fork, 0);
@@ -1934,7 +1934,7 @@ async fn a_fork_retry_keeps_young_pins_and_reclaims_the_abandoned_one_after_grac
     let report = gc_namespace(
         &store,
         &source,
-        &config(),
+        &options(),
         &context(setup.now_ms + GRACE_MS),
     )
     .await
@@ -1993,7 +1993,7 @@ async fn a_corrupt_pin_and_an_unreadable_one_both_fail_the_pass() {
     let aged = context(setup.now_ms);
 
     store.fail_all();
-    let error = gc_namespace(&store, &namespace_id, &config(), &aged)
+    let error = gc_namespace(&store, &namespace_id, &options(), &aged)
         .await
         .expect_err("a record the store will not read fails the pass");
     assert_eq!(error.code(), crate::error::ErrorCode::ServerError);
@@ -2013,7 +2013,7 @@ async fn a_corrupt_pin_and_an_unreadable_one_both_fail_the_pass() {
         .await
         .expect("corrupt record");
     let aged = context(setup.now_ms);
-    let error = gc_namespace(&store, &namespace_id, &config(), &aged)
+    let error = gc_namespace(&store, &namespace_id, &options(), &aged)
         .await
         .expect_err("a corrupt record fails the pass");
     assert_eq!(error.code(), crate::error::ErrorCode::NamespaceCorrupt);
@@ -2060,7 +2060,7 @@ async fn a_corrupt_or_unreadable_current_manifest_fails_the_pass() {
     let aged = context(now_after_newest_object(store.inner(), &namespace_id, GRACE_MS + 1).await);
 
     store.fail_all();
-    let error = gc_namespace(&store, &namespace_id, &config(), &aged)
+    let error = gc_namespace(&store, &namespace_id, &options(), &aged)
         .await
         .expect_err("discovery read fails closed");
     assert_eq!(error.code(), crate::error::ErrorCode::ServerError);
@@ -2078,7 +2078,7 @@ async fn a_corrupt_or_unreadable_current_manifest_fails_the_pass() {
             .expect("corrupt manifest");
     }
     let aged = context(now_after_newest_object(store.inner(), &namespace_id, GRACE_MS + 1).await);
-    let error = gc_namespace(&store, &namespace_id, &config(), &aged)
+    let error = gc_namespace(&store, &namespace_id, &options(), &aged)
         .await
         .expect_err("a corrupt manifest fails the pass");
     assert_eq!(error.code(), crate::error::ErrorCode::NamespaceCorrupt);
@@ -2119,7 +2119,7 @@ async fn gc_retains_everything_without_provider_timestamps() {
     // Far past any window by wall clock, but no object carries a
     // provider timestamp.
     let aged = context(now_after_newest_object(store.inner(), &namespace_id, GRACE_MS + 1).await);
-    let report = gc_namespace(&store, &namespace_id, &config(), &aged)
+    let report = gc_namespace(&store, &namespace_id, &options(), &aged)
         .await
         .expect("gc pass");
 
@@ -2142,7 +2142,7 @@ async fn gc_of_an_absent_namespace_reads_the_hint_and_sweeps_nothing() {
     let namespace_id = NamespaceId::parse("orphan").expect("namespace id");
     let store = RecordingStore::new(inner, KeyPredicate::any());
 
-    let report = gc_namespace(&store, &namespace_id, &config(), &context(u64::MAX))
+    let report = gc_namespace(&store, &namespace_id, &options(), &context(u64::MAX))
         .await
         .expect("gc absent namespace");
     assert_eq!(report, GcResponse::empty(namespace_id.clone()));
@@ -2213,7 +2213,7 @@ async fn retired_content_namespace<S: ObjectStore>(
     delete_namespace(store, namespace_id, Default::default(), &setup)
         .await
         .expect("delete");
-    let report = gc_namespace(store, namespace_id, &config(), &setup)
+    let report = gc_namespace(store, namespace_id, &options(), &setup)
         .await
         .expect("retire");
     (context(report.reclaimable_at_ms.expect("deadline")), keys)
@@ -2272,7 +2272,7 @@ async fn completed_upload_waits_for_namespace_retirement_then_reclaims() {
         delete_namespace(&store, &namespace_id, Default::default(), &setup)
             .await
             .expect("delete");
-        let report = gc_namespace(&store, &namespace_id, &config(), &context(first_run_ms))
+        let report = gc_namespace(&store, &namespace_id, &options(), &context(first_run_ms))
             .await
             .expect("unretired run");
         assert_eq!(report.deleted.upload_sessions, 0);
@@ -2285,7 +2285,7 @@ async fn completed_upload_waits_for_namespace_retirement_then_reclaims() {
         let report = gc_namespace(
             &store,
             &namespace_id,
-            &config(),
+            &options(),
             &context(report.reclaimable_at_ms.expect("retired")),
         )
         .await
@@ -2350,7 +2350,7 @@ async fn gc_keeps_pinned_and_current_numbers_and_preserves_discovery_from_a_lagg
         .await
         .expect("rewind hint");
     let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
-    let report = gc_namespace(&store, &namespace_id, &config(), &aged)
+    let report = gc_namespace(&store, &namespace_id, &options(), &aged)
         .await
         .expect("collect");
     assert_eq!(report.deleted.manifests, 0);
@@ -2369,7 +2369,7 @@ async fn gc_keeps_pinned_and_current_numbers_and_preserves_discovery_from_a_lagg
         .await
         .expect("current");
     let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
-    let report = gc_namespace(&store, &namespace_id, &config(), &aged)
+    let report = gc_namespace(&store, &namespace_id, &options(), &aged)
         .await
         .expect("collect after publication");
     assert_eq!(report.deleted.manifests, 7);
@@ -2438,12 +2438,12 @@ async fn concurrent_collectors_keep_pinned_and_current_roots_and_young_objects()
     );
     store.block_next();
     let clock = context(UNREFERENCED_SEGMENT_MIN_AGE_MS + 1);
-    let config = config();
+    let gc_options = options();
     let (first, second) = tokio::join!(
-        gc_namespace(&store, &namespace_id, &config, &clock),
+        gc_namespace(&store, &namespace_id, &gc_options, &clock),
         async {
             store.wait_until_blocked().await;
-            let result = gc_namespace(store.inner(), &namespace_id, &config, &clock).await;
+            let result = gc_namespace(store.inner(), &namespace_id, &gc_options, &clock).await;
             store.release();
             result
         }
@@ -2487,7 +2487,7 @@ async fn retired_owner_calls_restart_retry_deletes_and_collect_late_writes() {
     let before = gc_namespace(
         &store,
         &namespace_id,
-        &config(),
+        &options(),
         &context(deadline.now_ms - 1),
     )
     .await
@@ -2497,13 +2497,13 @@ async fn retired_owner_calls_restart_retry_deletes_and_collect_late_writes() {
     gc_namespace(
         &store,
         &namespace_id,
-        &config(),
+        &options(),
         &context(deadline.now_ms - 1),
     )
     .await
     .expect("collect older manifests");
     store.inner().fail_next(1);
-    assert!(gc_namespace(&store, &namespace_id, &config(), &deadline)
+    assert!(gc_namespace(&store, &namespace_id, &options(), &deadline)
         .await
         .is_err());
     assert!(store.head(&keys[0]).await.expect("failed delete").is_some());
@@ -2511,7 +2511,7 @@ async fn retired_owner_calls_restart_retry_deletes_and_collect_late_writes() {
         .list_prefix(&format!("namespaces/{namespace_id}/content/"))
         .await
         .expect("remaining content");
-    let retried = gc_namespace(&store, &namespace_id, &config(), &deadline)
+    let retried = gc_namespace(&store, &namespace_id, &options(), &deadline)
         .await
         .expect("retry owner sweep");
     assert_eq!(
@@ -2522,7 +2522,7 @@ async fn retired_owner_calls_restart_retry_deletes_and_collect_late_writes() {
         .put_if_absent(&keys[0], Bytes::from_static(b"late write"))
         .await
         .expect("late content");
-    let late = gc_namespace(&store, &namespace_id, &config(), &deadline)
+    let late = gc_namespace(&store, &namespace_id, &options(), &deadline)
         .await
         .expect("collect earlier key");
     assert_eq!(late.deleted.retired_content_objects, 1);
@@ -2571,7 +2571,7 @@ async fn expiry_and_creation_grace_delete_pins_without_a_released_state() {
     let before = gc_namespace(
         &store,
         &namespace_id,
-        &config(),
+        &options(),
         &context(1_000 + GRACE_MS - 1),
     )
     .await
@@ -2580,16 +2580,21 @@ async fn expiry_and_creation_grace_delete_pins_without_a_released_state() {
         before.deleted_checkpoints_by_owner,
         loonfs_api::DeletedCheckpointsByOwner::default()
     );
-    let abandoned = gc_namespace(&store, &namespace_id, &config(), &context(1_000 + GRACE_MS))
-        .await
-        .expect("creation grace");
+    let abandoned = gc_namespace(
+        &store,
+        &namespace_id,
+        &options(),
+        &context(1_000 + GRACE_MS),
+    )
+    .await
+    .expect("creation grace");
     assert_eq!(abandoned.deleted_checkpoints_by_owner.fork, 1);
     assert!(!pin_exists(&store, &namespace_id, &pins[3].checkpoint_id).await);
     assert!(namespace_keys(&store, &target).await.is_empty());
     let before_expiry = gc_namespace(
         &store,
         &namespace_id,
-        &config(),
+        &options(),
         &context(2_000 + GRACE_MS - 1),
     )
     .await
@@ -2598,9 +2603,14 @@ async fn expiry_and_creation_grace_delete_pins_without_a_released_state() {
         before_expiry.deleted_checkpoints_by_owner,
         loonfs_api::DeletedCheckpointsByOwner::default()
     );
-    let expired = gc_namespace(&store, &namespace_id, &config(), &context(2_000 + GRACE_MS))
-        .await
-        .expect("expiry grace");
+    let expired = gc_namespace(
+        &store,
+        &namespace_id,
+        &options(),
+        &context(2_000 + GRACE_MS),
+    )
+    .await
+    .expect("expiry grace");
     assert_eq!(expired.deleted_checkpoints_by_owner.user, 1);
     assert_eq!(expired.deleted_checkpoints_by_owner.snapshot, 1);
     assert!(pin_exists(&store, &namespace_id, &pins[0].checkpoint_id).await);
@@ -2618,7 +2628,7 @@ async fn expiry_and_creation_grace_delete_pins_without_a_released_state() {
     )
     .await
     .expect("delete");
-    let retired = gc_namespace(&store, &namespace_id, &config(), &context(deleted_at))
+    let retired = gc_namespace(&store, &namespace_id, &options(), &context(deleted_at))
         .await
         .expect("retire");
     assert_eq!(
@@ -2667,7 +2677,7 @@ async fn a_pin_naming_an_absent_manifest_is_corruption_before_sweeping() {
         .await
         .expect("delete manifest");
     store.reset();
-    let error = gc_namespace(&store, &namespace_id, &config(), &context(GRACE_MS * 3))
+    let error = gc_namespace(&store, &namespace_id, &options(), &context(GRACE_MS * 3))
         .await
         .expect_err("missing pin manifest");
     assert_eq!(error.code(), loonfs_api::ErrorCode::NamespaceCorrupt);
@@ -2715,7 +2725,7 @@ async fn fork_pin_grace_skips_targets_and_aged_pins_read_only_manifest_discovery
     let young = gc_namespace(
         &store,
         &source,
-        &config(),
+        &options(),
         &context(setup.now_ms + GRACE_MS - 1),
     )
     .await
@@ -2725,7 +2735,7 @@ async fn fork_pin_grace_skips_targets_and_aged_pins_read_only_manifest_discovery
     let aged = gc_namespace(
         &store,
         &source,
-        &config(),
+        &options(),
         &context(setup.now_ms + GRACE_MS),
     )
     .await
@@ -2782,7 +2792,7 @@ async fn create_on_a_deleted_id_fails_before_and_after_content_reclamation() {
             assert_eq!(store.head(key).await.expect("content").is_none(), reclaimed);
         }
         if !reclaimed {
-            let report = gc_namespace(&store, &namespace_id, &config(), &deadline)
+            let report = gc_namespace(&store, &namespace_id, &options(), &deadline)
                 .await
                 .expect("reclaim content");
             assert_eq!(report.deleted.retired_content_objects, keys.len() as u64);

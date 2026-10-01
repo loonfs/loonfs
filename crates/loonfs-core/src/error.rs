@@ -176,7 +176,7 @@ pub enum CoreError {
     )]
     MetadataPublicationBudgetExceeded { elapsed_ms: u64, budget_ms: u64 },
     #[error("invalid gc configuration: {0}")]
-    InvalidGcConfig(String),
+    InvalidGcOptions(String),
     #[error("invalid search query: {0}")]
     InvalidQuery(String),
     #[error("the pattern requires no literal bytes and cannot use the index: {0}")]
@@ -390,7 +390,7 @@ impl CoreError {
             | CoreError::InvalidCommitRequest(_)
             | CoreError::InvalidCommitField { .. }
             | CoreError::InvalidCheckpointRequest(_)
-            | CoreError::InvalidGcConfig(_)
+            | CoreError::InvalidGcOptions(_)
             | CoreError::InvalidQuery(_)
             | CoreError::InvalidUploadContent(_)
             | CoreError::InvalidCursor(_)
@@ -517,7 +517,7 @@ impl CoreError {
             | CoreError::SnapshotGone { .. }
             | CoreError::SnapshotQuotaExceeded { .. }
             | CoreError::MetadataPublicationBudgetExceeded { .. }
-            | CoreError::InvalidGcConfig(_)
+            | CoreError::InvalidGcOptions(_)
             | CoreError::InvalidQuery(_)
             | CoreError::QueryUnindexable(_)
             | CoreError::IndexLagging { .. }

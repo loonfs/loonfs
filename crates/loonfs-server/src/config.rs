@@ -35,7 +35,7 @@ pub struct InlineContentOverrides {
 impl Default for InlineContentOverrides {
     fn default() -> Self {
         Self {
-            inline_content_threshold_bytes: loonfs::InlineContentOptions::default()
+            inline_content_threshold_bytes: loonfs::InlineContentPolicy::default()
                 .inline_content_threshold_bytes,
             inline_content_wal_object_budget_bytes: None,
             inline_content_fold_at_bytes: None,
@@ -78,9 +78,9 @@ where
 }
 
 impl InlineContentOverrides {
-    pub(crate) fn resolve(&self) -> loonfs::InlineContentOptions {
-        let defaults = loonfs::InlineContentOptions::default();
-        loonfs::InlineContentOptions {
+    pub(crate) fn resolve(&self) -> loonfs::InlineContentPolicy {
+        let defaults = loonfs::InlineContentPolicy::default();
+        loonfs::InlineContentPolicy {
             inline_content_threshold_bytes: self.inline_content_threshold_bytes,
             inline_content_wal_object_budget_bytes: self
                 .inline_content_wal_object_budget_bytes
@@ -1383,7 +1383,7 @@ root = "/tmp/loonfs-server"
 
     #[test]
     fn inline_content_defaults_and_overrides_preserve_explicit_disablement() {
-        let defaults = loonfs::InlineContentOptions::default();
+        let defaults = loonfs::InlineContentPolicy::default();
         assert_eq!(defaults.inline_content_threshold_bytes, Some(64 * 1024));
         assert_eq!(defaults.inline_content_fold_at_bytes, 2 * 1024 * 1024);
         assert_eq!(defaults.inline_content_wal_object_budget_bytes, 1024 * 1024);

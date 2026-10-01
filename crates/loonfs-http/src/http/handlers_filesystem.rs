@@ -221,7 +221,7 @@ pub(super) async fn list_path_entries(
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(query): AppQuery<ListPathPageQuery>,
 ) -> Result<Response, ApiResponseError> {
-    let scoped_runtime = subject.map(|subject| state.runtime.as_subject(subject));
+    let scoped_runtime = subject.map(|subject| state.runtime.with_subject(subject));
     let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);
     let path = required_query_param(query.path, "path")?;
     // An absent parameter leaves the option type's own default in place, so
@@ -278,7 +278,7 @@ pub(super) async fn get_path_entry(
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(query): AppQuery<PathQuery>,
 ) -> Result<Json<loonfs_api::PathEntry>, ApiResponseError> {
-    let scoped_runtime = subject.map(|subject| state.runtime.as_subject(subject));
+    let scoped_runtime = subject.map(|subject| state.runtime.with_subject(subject));
     let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);
     let path = required_query_param(query.path, "path")?;
     let mut options = StatPathOptions::default();
@@ -330,7 +330,7 @@ pub(super) async fn get_file_bytes(
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(query): AppQuery<ContentQuery>,
 ) -> Result<Response, ApiResponseError> {
-    let scoped_runtime = subject.map(|subject| state.runtime.as_subject(subject));
+    let scoped_runtime = subject.map(|subject| state.runtime.with_subject(subject));
     let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);
     let path = required_query_param(query.path, "path")?;
     let revision_no = query
@@ -395,7 +395,7 @@ pub(super) async fn list_trash(
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(query): AppQuery<PageQuery>,
 ) -> Result<Json<ListTrashResponse>, ApiResponseError> {
-    let scoped_runtime = subject.map(|subject| state.runtime.as_subject(subject));
+    let scoped_runtime = subject.map(|subject| state.runtime.with_subject(subject));
     let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);
     let namespace = runtime.namespace(&namespace_id);
     let response = namespace
@@ -447,7 +447,7 @@ pub(super) async fn list_file_revisions(
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(query): AppQuery<PathPageQuery>,
 ) -> Result<Json<ListFileRevisionsResponse>, ApiResponseError> {
-    let scoped_runtime = subject.map(|subject| state.runtime.as_subject(subject));
+    let scoped_runtime = subject.map(|subject| state.runtime.with_subject(subject));
     let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);
     let namespace = runtime.namespace(&namespace_id);
     let path = required_query_param(query.path, "path")?;
@@ -631,7 +631,7 @@ pub(super) async fn list_changes(
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(query): AppQuery<ChangesQuery>,
 ) -> Result<Json<ListChangesResponse>, ApiResponseError> {
-    let scoped_runtime = subject.map(|subject| state.runtime.as_subject(subject));
+    let scoped_runtime = subject.map(|subject| state.runtime.with_subject(subject));
     let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);
     let after_seq = parse_after_seq(&required_query_param(query.after_seq, "after_seq")?)?;
     let limit = resolve_page_limit(query.limit)?;
@@ -663,7 +663,7 @@ pub(super) async fn read_target(
         .await
         .map(|view| ReadTarget::Snapshot(Box::new(view)))
         .map_err(|error| {
-            ApiResponseError::runtime_for_namespace(namespace.namespace_id(), error)
+            ApiResponseError::runtime_for_namespace(namespace.id(), error)
                 .with_invalid_request_param("snapshot_id")
         })
 }

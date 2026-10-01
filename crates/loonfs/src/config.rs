@@ -65,7 +65,7 @@ impl Default for PublicationLimits {
 /// Retrying a completed inline commit does not upload its content again while
 /// the commit receipt is retained. See `docs/specs/api.md`, section 5.2.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InlineContentOptions {
+pub struct InlineContentPolicy {
     /// Maximum size prepared inline; defaults to 64 KiB. `None` disables inline preparation.
     pub inline_content_threshold_bytes: Option<usize>,
     /// Maximum inline bytes in one WAL object; defaults to 1 MiB.
@@ -82,7 +82,7 @@ pub struct InlineContentOptions {
     pub inline_content_tail_limit_bytes: usize,
 }
 
-impl Default for InlineContentOptions {
+impl Default for InlineContentPolicy {
     fn default() -> Self {
         Self {
             inline_content_threshold_bytes: Some(64 * 1024),
@@ -93,7 +93,7 @@ impl Default for InlineContentOptions {
     }
 }
 
-impl InlineContentOptions {
+impl InlineContentPolicy {
     pub(crate) fn validate(&self) -> crate::Result<()> {
         use loonfs_api::wire::wal::{
             MAX_WAL_INLINE_CONTENT_BYTES, MAX_WAL_OBJECT_INLINE_CONTENT_BYTES,
@@ -102,24 +102,24 @@ impl InlineContentOptions {
             .inline_content_threshold_bytes
             .is_some_and(|value| value > MAX_WAL_INLINE_CONTENT_BYTES)
         {
-            return Err(crate::RuntimeError::Config(format!(
+            return Err(crate::Error::Config(format!(
                 "`inline_content_threshold_bytes` must not exceed {MAX_WAL_INLINE_CONTENT_BYTES}"
             )));
         }
         if self.inline_content_wal_object_budget_bytes == 0
             || self.inline_content_wal_object_budget_bytes > MAX_WAL_OBJECT_INLINE_CONTENT_BYTES
         {
-            return Err(crate::RuntimeError::Config(format!(
+            return Err(crate::Error::Config(format!(
                 "`inline_content_wal_object_budget_bytes` must be between 1 and {MAX_WAL_OBJECT_INLINE_CONTENT_BYTES}"
             )));
         }
         if self.inline_content_fold_at_bytes == 0 || self.inline_content_tail_limit_bytes == 0 {
-            return Err(crate::RuntimeError::Config(
+            return Err(crate::Error::Config(
                 "`inline_content_fold_at_bytes` and `inline_content_tail_limit_bytes` must be greater than zero".to_owned()
             ));
         }
         if self.inline_content_fold_at_bytes > self.inline_content_tail_limit_bytes {
-            return Err(crate::RuntimeError::Config(
+            return Err(crate::Error::Config(
                 "`inline_content_fold_at_bytes` must not exceed `inline_content_tail_limit_bytes`"
                     .to_owned(),
             ));

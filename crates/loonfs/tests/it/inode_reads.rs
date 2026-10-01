@@ -233,7 +233,8 @@ async fn stat_inode_and_stat_path_have_the_same_point_lookup_request_count() {
     drop(fs);
     let _ = recorded.take_gets();
 
-    let path_reader = LoonFs::reader_with_store(shared.clone())
+    let path_reader = LoonFs::builder_with_store(shared.clone())
+        .read_only()
         .build()
         .await
         .expect("build path reader");
@@ -245,7 +246,8 @@ async fn stat_inode_and_stat_path_have_the_same_point_lookup_request_count() {
     let path_gets = recorded.take_gets();
     drop(path_reader);
 
-    let inode_reader = LoonFs::reader_with_store(shared)
+    let inode_reader = LoonFs::builder_with_store(shared)
+        .read_only()
         .build()
         .await
         .expect("build inode reader");

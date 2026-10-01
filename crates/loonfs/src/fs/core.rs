@@ -8,7 +8,7 @@ use crate::{
     ChangeSeq, CoreError, ErrorCode, InodeId, ListFileRevisionsResponse, MaintenanceHint,
     MaintenanceHintObserver, MetadataCache, NamespaceId, NamespacePublication, ObjectStore,
 };
-use crate::{Result, RuntimeError, SharedObjectStore};
+use crate::{Error, Result, SharedObjectStore};
 use loonfs_api::{
     encode_cursor, CapabilityDocument, FileRevision, FileRevisionsPageCursor, Page, PageCursor,
     PaginationPolicy, Subject, WriterId, API_GROUP_FILESYSTEM_V0, API_GROUP_MAINTENANCE_V0,
@@ -55,7 +55,7 @@ pub(crate) struct WriterIdentity {
 
 /// Writer state shared weakly with the publisher worker.
 pub(crate) struct WriterBits {
-    pub(crate) inline_content: crate::InlineContentOptions,
+    pub(crate) inline_content: crate::InlineContentPolicy,
     pub(crate) identity: WriterIdentity,
     pub(crate) wal_fold_permits: Semaphore,
     pub(crate) wal_folds_waiting: AtomicUsize,
@@ -125,13 +125,13 @@ impl WriterIdentity {
     /// Mints an identity, rejecting a blank writer id.
     pub(crate) fn new(writer_id: String) -> Result<Self> {
         let writer_id =
-            WriterId::parse(writer_id).map_err(|error| RuntimeError::Config(error.to_string()))?;
+            WriterId::parse(writer_id).map_err(|error| Error::Config(error.to_string()))?;
         Ok(Self { writer_id })
     }
 }
 
 impl RuntimeCore {
-    pub(crate) fn as_subject(&self, subject: Subject) -> Self {
+    pub(crate) fn with_subject(&self, subject: Subject) -> Self {
         Self {
             inner: Arc::clone(&self.inner),
             subject: Some(subject),
@@ -216,7 +216,7 @@ impl RuntimeCore {
     /// Returns capabilities implemented by the embedded runtime.
     ///
     /// A host may add extension capabilities before serving this document.
-    pub(crate) fn get_capabilities(&self) -> CapabilityDocument {
+    pub(crate) fn capabilities(&self) -> CapabilityDocument {
         CapabilityDocument {
             protocol_version: PROTOCOL_VERSION.to_owned(),
             api_groups: vec![
@@ -315,7 +315,7 @@ impl RuntimeCore {
 pub(crate) fn should_invalidate_after_result<T>(result: &Result<T>) -> bool {
     match result {
         Ok(_) => true,
-        Err(RuntimeError::Core(error))
+        Err(Error::Core(error))
             if matches!(error.code(), ErrorCode::StaleHead | ErrorCode::WriterFenced) =>
         {
             true

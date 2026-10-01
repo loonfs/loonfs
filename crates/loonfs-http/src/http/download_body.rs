@@ -20,7 +20,7 @@ pub(super) fn streamed_download_response(
     if stream.size_bytes() > max_content_bytes {
         return Err(ApiResponseError::runtime_for_namespace(
             namespace_id,
-            loonfs::RuntimeError::Core(loonfs::CoreError::ContentTooLarge {
+            loonfs::Error::Core(loonfs::CoreError::ContentTooLarge {
                 size_bytes: stream.size_bytes(),
                 max_bytes: max_content_bytes,
             }),

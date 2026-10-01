@@ -7,7 +7,7 @@
 
 use super::*;
 use crate::maintenance::hints::dropped_hints;
-use crate::{ChangeSeq, NamespaceId, Result, RuntimeError};
+use crate::{ChangeSeq, Error, NamespaceId, Result};
 use loonfs_test_support::ids::{namespace_id, nonzero_usize};
 use std::collections::VecDeque;
 use std::num::NonZeroUsize;
@@ -197,7 +197,7 @@ impl MaintenanceJob for TestJob {
                 not_before_ms: Some(not_before_ms),
                 follow_up: None,
             }),
-            ScriptedStep::Fail => Err(RuntimeError::Config("scripted step failure".to_owned())),
+            ScriptedStep::Fail => Err(Error::Config("scripted step failure".to_owned())),
             ScriptedStep::Panic => panic!("injected maintenance pass panic"),
         }
     }
@@ -1019,7 +1019,7 @@ async fn retired_fork_collection_schedules_the_source_namespace() {
         .expect("fork");
     let namespace = writer.open_namespace(&target).expect("open namespace");
     namespace
-        .delete_namespace(Default::default())
+        .delete(Default::default())
         .await
         .expect("delete target");
     let maintenance = crate::LoonFs::builder_with_store(store.clone())
@@ -1124,7 +1124,7 @@ async fn an_idle_tail_folds_once_and_again_only_after_a_write() {
     runner.dispatch_now();
     runner.drain().await.expect("the idle fold settles");
     let folded = maintenance
-        .get_namespace_diagnostics(&namespace_id)
+        .diagnostics(&namespace_id)
         .await
         .expect("diagnostics");
     assert_eq!(folded.wal_tail_objects, 0, "the wake folded the idle tail");
@@ -1143,7 +1143,7 @@ async fn an_idle_tail_folds_once_and_again_only_after_a_write() {
     runner.dispatch_now();
     runner.drain().await.expect("the second idle fold settles");
     let refolded = maintenance
-        .get_namespace_diagnostics(&namespace_id)
+        .diagnostics(&namespace_id)
         .await
         .expect("diagnostics");
     assert_eq!(refolded.wal_tail_objects, 0);
@@ -1234,7 +1234,7 @@ impl IdleFoldHarness {
 
     async fn wal_tail_objects(&self) -> u64 {
         self.maintenance
-            .get_namespace_diagnostics(&self.namespace_id)
+            .diagnostics(&self.namespace_id)
             .await
             .expect("diagnostics")
             .wal_tail_objects

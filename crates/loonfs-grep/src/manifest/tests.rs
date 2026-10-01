@@ -1,7 +1,7 @@
 //! Publication confirmation at the metadata budget boundary.
 
 use super::*;
-use loonfs::{CoreError, Deadline, RuntimeError, METADATA_PUBLICATION_BUDGET_MS};
+use loonfs::{CoreError, Deadline, METADATA_PUBLICATION_BUDGET_MS};
 use loonfs_api::{ManifestNo, RunNo};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::clock::ManualClock;
@@ -61,7 +61,7 @@ async fn publication_returning_at_budget(drop_acknowledgement: bool) {
             publish_grep_manifest(&store, Some(&first), &state(ManifestNo(2)), &deadline).await;
         if elapsed_ms > METADATA_PUBLICATION_BUDGET_MS {
             assert!(
-                matches!(outcome, Err(crate::GrepError::Runtime(RuntimeError::Core(CoreError::OutcomeUnknown {
+                matches!(outcome, Err(crate::GrepError::Runtime(loonfs::Error::Core(CoreError::OutcomeUnknown {
                     object_key: actual_key, message,
                 }))) if actual_key == object_key && message == format!(
                     "the publication took {elapsed_ms}ms, over its {METADATA_PUBLICATION_BUDGET_MS}ms budget"

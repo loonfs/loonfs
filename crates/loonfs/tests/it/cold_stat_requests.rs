@@ -207,7 +207,8 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
         .collect();
 
     // The measured operation: first stat on a fresh handle, nothing warm.
-    let reader = LoonFs::reader_with_store(store.clone())
+    let reader = LoonFs::builder_with_store(store.clone())
+        .read_only()
         .build()
         .await
         .expect("build reader");

@@ -226,7 +226,8 @@ async fn warm_phase_request_accounting() {
 
     // Warm phases, each on the same fresh handle like the bench: a full
     // paged list, then stat, read, write.
-    let reader = LoonFs::reader_with_store(store.clone())
+    let reader = LoonFs::builder_with_store(store.clone())
+        .read_only()
         .build()
         .await
         .expect("build reader");

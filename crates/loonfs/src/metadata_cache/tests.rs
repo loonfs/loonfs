@@ -64,7 +64,8 @@ async fn same_shape_store(
 }
 
 async fn reader(root: &Path, cache: &MetadataCache) -> LoonFs<ReadOnly> {
-    LoonFs::reader_with_store(local_store(root))
+    LoonFs::builder_with_store(local_store(root))
+        .read_only()
         .metadata_cache(cache.clone())
         .build()
         .await
@@ -200,7 +201,7 @@ async fn read_policy_stays_with_each_binding() {
                 LocalFsStore::new(root.path()).expect("create local-fs store"),
                 KeyPredicate::any(),
             ));
-            let runtime = configure(LoonFs::reader_with_store(recording.clone()))
+            let runtime = configure(LoonFs::builder_with_store(recording.clone()).read_only())
                 .metadata_cache(cache.clone())
                 .build();
             async move { (runtime.await.expect("build reader"), recording) }
@@ -275,7 +276,8 @@ async fn the_cache_reports_its_own_metrics_once() {
         .build();
     let runtime_recorder = Arc::new(DefaultMetricsRecorder::new());
     for (root, bytes) in [(&first_root, b"first"), (&second_root, b"other")] {
-        let runtime = LoonFs::reader_with_store(local_store(root.path()))
+        let runtime = LoonFs::builder_with_store(local_store(root.path()))
+            .read_only()
             .metadata_cache(cache.clone())
             .metrics_recorder(runtime_recorder.clone())
             .build()
@@ -312,7 +314,8 @@ async fn the_cache_reports_its_own_metrics_once() {
     );
 
     let private_recorder = Arc::new(DefaultMetricsRecorder::new());
-    let private = LoonFs::reader_with_store(local_store(first_root.path()))
+    let private = LoonFs::builder_with_store(local_store(first_root.path()))
+        .read_only()
         .metrics_recorder(private_recorder.clone())
         .build()
         .await

@@ -89,7 +89,8 @@ async fn reader_downloads_materialize_tail_content_by_path_and_inode() {
         .build()
         .await
         .expect("writer");
-    let reader = LoonFs::reader_with_store(store.clone())
+    let reader = LoonFs::builder_with_store(store.clone())
+        .read_only()
         .build()
         .await
         .expect("reader");
@@ -362,7 +363,7 @@ async fn imports_of_fork_content_read_the_deleted_owners_key() {
             .expect("fork");
         let destination_writer = writer.open_namespace(&destination).expect("open namespace");
         source_writer
-            .delete_namespace(DeleteNamespaceOptions::default())
+            .delete(DeleteNamespaceOptions::default())
             .await
             .expect("delete source");
         let entry = fork_namespace

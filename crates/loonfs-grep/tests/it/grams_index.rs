@@ -366,7 +366,7 @@ async fn a_thousand_file_commit_is_byte_bounded_query_complete_and_crash_resumab
     let namespace_id = NamespaceId::parse("grams-thousand-atomic").expect("namespace id");
     let writer = LoonFs::builder_with_store(store.clone())
         .writer_id("grams-thousand-writer")
-        .inline_content(loonfs::InlineContentOptions {
+        .inline_content(loonfs::InlineContentPolicy {
             inline_content_threshold_bytes: None,
             ..Default::default()
         })
@@ -782,7 +782,7 @@ async fn a_failed_candidate_read_surfaces_in_traversal_order() {
 
     let writer = LoonFs::builder_with_store(store.clone())
         .writer_id("grams-fault-writer")
-        .inline_content(loonfs::InlineContentOptions {
+        .inline_content(loonfs::InlineContentPolicy {
             inline_content_threshold_bytes: None,
             ..Default::default()
         })

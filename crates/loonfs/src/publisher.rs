@@ -23,7 +23,7 @@ use crate::fs::{RuntimeCore, WriterBits};
 use crate::metrics::{PublishOutcome, RESULT_OK};
 use crate::publish::CommitCandidate;
 use crate::trace::{phase_event, phase_span};
-use crate::{CoreError, DeleteNamespaceOptions, DeleteNamespaceResponse, RuntimeError};
+use crate::{CoreError, DeleteNamespaceOptions, DeleteNamespaceResponse, Error};
 use admission::{AdmissionPermit, AdmittedWaiter, PublicationAdmission};
 use futures::FutureExt;
 use loonfs_api::v0::Commit;
@@ -47,8 +47,8 @@ use tokio::task::JoinHandle;
 use tokio::time::Duration;
 use tracing::Instrument;
 
-type CommitResult = Result<Commit, RuntimeError>;
-type DeleteResult = Result<DeleteNamespaceResponse, RuntimeError>;
+type CommitResult = Result<Commit, Error>;
+type DeleteResult = Result<DeleteNamespaceResponse, Error>;
 
 /// A report that one namespace's durable mutation history advanced.
 ///
@@ -183,7 +183,7 @@ impl NamespaceSession {
         self.publisher.session_state()
     }
 
-    pub(crate) async fn wait_for_fold(&self) -> Result<(), RuntimeError> {
+    pub(crate) async fn wait_for_fold(&self) -> Result<(), Error> {
         self.publisher.wait_for_fold().await
     }
 
@@ -360,7 +360,7 @@ impl PublisherRegistry {
     ///
     /// Returns an error if any publication, deletion, or fold panicked and
     /// its task contained the panic.
-    pub(crate) async fn drain(&self) -> Result<(), RuntimeError> {
+    pub(crate) async fn drain(&self) -> Result<(), Error> {
         let publishers: Vec<NamespacePublisher> = self
             .shared
             .lock_state()
@@ -379,7 +379,7 @@ impl PublisherRegistry {
         }
         let panicked = self.shared.panicked_units.load(Ordering::SeqCst);
         if panicked > 0 {
-            return Err(RuntimeError::RuntimeTask(format!(
+            return Err(Error::RuntimeTask(format!(
                 "{panicked} publisher task(s) panicked"
             )));
         }
@@ -412,7 +412,7 @@ struct NamespacePublisher {
     runtime: Handle,
     timer: Arc<dyn MonotonicTimer>,
     min_publish_interval: Duration,
-    inline_content: crate::InlineContentOptions,
+    inline_content: crate::InlineContentPolicy,
 }
 
 /// Commit engine and writer session retained by one namespace publisher.
@@ -1181,7 +1181,7 @@ impl NamespacePublisher {
                 .map(|result| {
                     result
                         .expect("each candidate received a publication result")
-                        .map_err(RuntimeError::Core)
+                        .map_err(Error::Core)
                 })
                 .collect::<Vec<_>>();
             (results, retry_count)
@@ -1370,7 +1370,7 @@ impl NamespacePublisher {
                 self.runtime_core.instruments().publisher_wal_fold();
             }
             Err(error) => {
-                let error = RuntimeError::Core(error);
+                let error = Error::Core(error);
                 phase_event!(
                     self.runtime_core,
                     "wal_fold",
@@ -1483,7 +1483,7 @@ impl NamespacePublisher {
         }
     }
 
-    async fn wait_for_fold(&self) -> Result<(), RuntimeError> {
+    async fn wait_for_fold(&self) -> Result<(), Error> {
         let fold = self
             .lock_state()
             .fold
@@ -1513,7 +1513,7 @@ impl NamespacePublisher {
         };
         if let Some(task) = task {
             task.await.map_err(|error| {
-                RuntimeError::RuntimeTask(format!("WAL-tail fold task failed: {error}"))
+                Error::RuntimeTask(format!("WAL-tail fold task failed: {error}"))
             })?;
         }
         Ok(())
@@ -1566,7 +1566,7 @@ impl NamespacePublisher {
             // count mismatch fails every candidate instead of delivering
             // misaligned results to the earlier ones.
             let count_mismatch = (results.len() != commit_ids.len()).then(|| {
-                RuntimeError::Core(CoreError::Internal(format!(
+                Error::Core(CoreError::Internal(format!(
                     "publisher batch returned {got} results for {want} candidates",
                     got = results.len(),
                     want = commit_ids.len(),

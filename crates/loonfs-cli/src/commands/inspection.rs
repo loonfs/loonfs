@@ -636,7 +636,7 @@ mod tests {
                 store.clone(),
                 None,
                 config.kind(),
-                loonfs::InlineContentOptions::default(),
+                loonfs::InlineContentPolicy::default(),
                 false,
             )
             .await

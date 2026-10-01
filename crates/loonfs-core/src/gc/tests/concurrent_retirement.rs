@@ -78,7 +78,7 @@ async fn overlapping_retirement_retries_lost_delete_ack_and_preserves_a_live_sib
             .expect("delete");
     }
     let deadline = context(setup.now_ms + GRACE_MS);
-    let config = config();
+    let gc_options = options();
     let store = BlockingStore::new(
         FailStore::new(
             inner,
@@ -91,55 +91,58 @@ async fn overlapping_retirement_retries_lost_delete_ack_and_preserves_a_live_sib
         OperationClass::Delete,
     );
     store.block_next();
-    let (delayed, ()) = tokio::join!(gc_namespace(&store, &target, &config, &deadline), async {
-        store.wait_until_blocked().await;
-        store.inner().fail_next(1);
-        gc_namespace(store.inner(), &target, &config, &deadline)
-            .await
-            .expect_err("a delete landed but its acknowledgement was lost");
-        assert!(store
-            .inner()
-            .head(&target_keys[0])
-            .await
-            .expect("landed delete")
-            .is_none());
-        assert!(
-            pin_exists(store.inner(), &source, &target_pin).await,
-            "failed sweep does not release its source pin"
-        );
-        store.inner().clear();
-        gc_namespace(store.inner(), &source, &config, &deadline)
-            .await
-            .expect("source stays pinned");
-        for key in &source_keys {
+    let (delayed, ()) = tokio::join!(
+        gc_namespace(&store, &target, &gc_options, &deadline),
+        async {
+            store.wait_until_blocked().await;
+            store.inner().fail_next(1);
+            gc_namespace(store.inner(), &target, &gc_options, &deadline)
+                .await
+                .expect_err("a delete landed but its acknowledgement was lost");
             assert!(store
                 .inner()
-                .head(key)
+                .head(&target_keys[0])
                 .await
-                .expect("inherited content")
-                .is_some());
-        }
+                .expect("landed delete")
+                .is_none());
+            assert!(
+                pin_exists(store.inner(), &source, &target_pin).await,
+                "failed sweep does not release its source pin"
+            );
+            store.inner().clear();
+            gc_namespace(store.inner(), &source, &gc_options, &deadline)
+                .await
+                .expect("source stays pinned");
+            for key in &source_keys {
+                assert!(store
+                    .inner()
+                    .head(key)
+                    .await
+                    .expect("inherited content")
+                    .is_some());
+            }
 
-        gc_namespace(store.inner(), &target, &config, &deadline)
-            .await
-            .expect("second collector retries from the beginning");
-        assert!(!pin_exists(store.inner(), &source, &target_pin).await);
-        assert!(pin_exists(store.inner(), &source, &sibling_pin).await);
-        assert!(store
-            .inner()
-            .list_prefix(&target_content_prefix)
-            .await
-            .expect("target content")
-            .is_empty());
-        // Recreate an immutable object after one sweep finishes, while the
-        // first collector still has its original delete in flight.
-        store
-            .inner()
-            .put_if_absent(&target_keys[0], late_bytes.clone())
-            .await
-            .expect("late materialization");
-        store.release();
-    });
+            gc_namespace(store.inner(), &target, &gc_options, &deadline)
+                .await
+                .expect("second collector retries from the beginning");
+            assert!(!pin_exists(store.inner(), &source, &target_pin).await);
+            assert!(pin_exists(store.inner(), &source, &sibling_pin).await);
+            assert!(store
+                .inner()
+                .list_prefix(&target_content_prefix)
+                .await
+                .expect("target content")
+                .is_empty());
+            // Recreate an immutable object after one sweep finishes, while the
+            // first collector still has its original delete in flight.
+            store
+                .inner()
+                .put_if_absent(&target_keys[0], late_bytes.clone())
+                .await
+                .expect("late materialization");
+            store.release();
+        }
+    );
     delayed.expect("the older collector tolerates already-deleted objects and pin");
     assert!(store
         .list_prefix(&target_content_prefix)
@@ -169,10 +172,10 @@ async fn overlapping_retirement_retries_lost_delete_ack_and_preserves_a_live_sib
         .await
         .expect("inherited file stays visible");
     }
-    gc_namespace(&store, &target, &config, &deadline)
+    gc_namespace(&store, &target, &gc_options, &deadline)
         .await
         .expect("repeated target retirement");
-    gc_namespace(&store, &source, &config, &deadline)
+    gc_namespace(&store, &source, &gc_options, &deadline)
         .await
         .expect("sibling continues to retain source");
     for key in source_keys {

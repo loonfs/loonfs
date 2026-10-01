@@ -979,7 +979,8 @@ const API_SPEC_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/spe
 
 /// A grep worker over the same handles the server composes.
 async fn grep_worker(store: &SharedObjectStore, actor: &str) -> GrepWorker<SharedObjectStore> {
-    let reader = LoonFs::reader_with_store(store.clone())
+    let reader = LoonFs::builder_with_store(store.clone())
+        .read_only()
         .build()
         .await
         .expect("build reader");

@@ -22,7 +22,7 @@ struct Harness {
 
 impl Harness {
     async fn new(threshold: Option<usize>, wal_object_budget: usize) -> Self {
-        Self::with_policy(loonfs::InlineContentOptions {
+        Self::with_policy(loonfs::InlineContentPolicy {
             inline_content_threshold_bytes: threshold,
             inline_content_wal_object_budget_bytes: wal_object_budget,
             ..Default::default()
@@ -30,7 +30,7 @@ impl Harness {
         .await
     }
 
-    async fn with_policy(inline_content: loonfs::InlineContentOptions) -> Self {
+    async fn with_policy(inline_content: loonfs::InlineContentPolicy) -> Self {
         let directory = tempdir().expect("directory");
         let store = Arc::new(RecordingStore::new(
             LocalFsStore::new(directory.path()).expect("store"),

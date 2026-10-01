@@ -143,7 +143,7 @@ impl Shape {
     /// comes from the grants, so every read walks the access rows.
     fn reader(&self, reader: LoonFs<ReadOnly>) -> LoonFs<ReadOnly> {
         match self.rows {
-            Rows::Dense => reader.as_subject(subject(1)),
+            Rows::Dense => reader.with_subject(subject(1)),
             Rows::Directories | Rows::Large => reader,
         }
     }
@@ -356,7 +356,8 @@ where
     Fut: std::future::Future<Output = ()>,
 {
     let store: SharedObjectStore = Arc::new(LocalFsStore::new(root).expect("local store"));
-    let reader = LoonFs::reader_with_store(store)
+    let reader = LoonFs::builder_with_store(store)
+        .read_only()
         .metadata_cache(cache)
         .build()
         .await

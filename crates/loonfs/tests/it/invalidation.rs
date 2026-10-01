@@ -6,8 +6,8 @@
 
 use loonfs::metrics::{DefaultMetricsRecorder, MetricValue};
 use loonfs::{
-    CreateNamespaceOptions, CreateSnapshotOptions, DeleteNamespaceOptions, LoonFs, LoonFsBuilder,
-    MetadataCache, NamespaceId, PutFileOptions, ReadOnly, RuntimeError, SharedObjectStore,
+    CreateNamespaceOptions, CreateSnapshotOptions, DeleteNamespaceOptions, Error, LoonFs,
+    LoonFsBuilder, MetadataCache, NamespaceId, PutFileOptions, ReadOnly, SharedObjectStore,
     SnapshotPolicy, Writable, WriterFence, READ_REVALIDATION_BOUND_MS,
 };
 use loonfs_api::wire::control::NamespaceStatus;
@@ -105,12 +105,12 @@ fn expect_writer_fenced<T: std::fmt::Debug>(result: loonfs::Result<T>, when: &st
     assert!(
         matches!(
             &error,
-            RuntimeError::Core(core) if core.code() == loonfs::ErrorCode::WriterFenced
+            Error::Core(core) if core.code() == loonfs::ErrorCode::WriterFenced
         ),
         "{when}: unexpected error: {error:?}"
     );
     match error {
-        RuntimeError::Core(loonfs::CoreError::WriterFenced(fence)) => fence,
+        Error::Core(loonfs::CoreError::WriterFenced(fence)) => fence,
         other => panic!("{when}: {other:?}"),
     }
 }
@@ -172,7 +172,7 @@ async fn fenced_writer_stays_fenced_instead_of_reacquiring() {
     assert!(
         matches!(
             &fenced,
-            RuntimeError::Core(error) if error.code() == loonfs::ErrorCode::WriterFenced
+            Error::Core(error) if error.code() == loonfs::ErrorCode::WriterFenced
         ),
         "unexpected error: {fenced:?}"
     );
@@ -190,7 +190,7 @@ async fn fenced_writer_stays_fenced_instead_of_reacquiring() {
     assert!(
         matches!(
             &still_fenced,
-            RuntimeError::Core(error) if error.code() == loonfs::ErrorCode::WriterFenced
+            Error::Core(error) if error.code() == loonfs::ErrorCode::WriterFenced
         ),
         "unexpected error: {still_fenced:?}"
     );
@@ -270,7 +270,7 @@ async fn fenced_session_cannot_delete_namespace() {
 
     let fence = expect_writer_fenced(
         namespace_writer_a
-            .delete_namespace(DeleteNamespaceOptions::default())
+            .delete(DeleteNamespaceOptions::default())
             .await,
         "a fenced session must not delete the namespace",
     );
@@ -540,7 +540,8 @@ async fn a_cached_view_older_than_the_revalidation_bound_rediscovers() {
     let namespace_id = NamespaceId::parse("revalidation-bound").expect("namespace");
     let timer = Arc::new(ManualClock::new(0));
     let interval_ms = 1_000;
-    let reader = LoonFs::reader_with_store(store.clone())
+    let reader = LoonFs::builder_with_store(store.clone())
+        .read_only()
         .monotonic_timer(timer.clone())
         .manifest_revalidation_interval_ms(interval_ms)
         .build()
@@ -634,7 +635,8 @@ async fn warm_answers_are_measured_against_the_previous_check() {
     let store: SharedObjectStore = recording.clone();
     let timer = Arc::new(ManualClock::new(0));
     let interval_ms = 1_000;
-    let reader = LoonFs::reader_with_store(store.clone())
+    let reader = LoonFs::builder_with_store(store.clone())
+        .read_only()
         .monotonic_timer(timer.clone())
         .manifest_revalidation_interval_ms(interval_ms)
         .build()
@@ -760,7 +762,8 @@ async fn other_head_state_bytes(other_id: &NamespaceId) -> usize {
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("create local-fs store"));
     fill_other(&store, other_id).await;
-    let reader = LoonFs::reader_with_store(store)
+    let reader = LoonFs::builder_with_store(store)
+        .read_only()
         .build()
         .await
         .expect("build reader");
@@ -845,7 +848,7 @@ async fn a_seeded_view_carries_the_writers_basis_confirmation() {
     // seeds a new view.
     writer
         .maintenance(loonfs_test_support::ids::writer_id("seeded-check-gc"))
-        .gc_namespace(&namespace_id, &loonfs::GcConfig::default())
+        .gc(&namespace_id, &loonfs::GcOptions::default())
         .await
         .expect("drop the cached view");
     timer.advance_ms(interval_ms);
@@ -1023,7 +1026,7 @@ async fn read_after_write_only_probes_the_next_wal_number_without_replay() {
                 name: "pinned".to_owned(),
                 expires_at_ms: u64::MAX,
             },
-            SnapshotPolicy::default().max_live_per_namespace,
+            &SnapshotPolicy::default(),
         )
         .await
         .expect("create snapshot");
@@ -1168,7 +1171,8 @@ async fn read_pressure_evicts_an_idle_writer_tail_and_its_next_publish_replays_o
     }
     let replays = tail_replays(&recorder);
 
-    let reader = LoonFs::reader_with_store(store.clone())
+    let reader = LoonFs::builder_with_store(store.clone())
+        .read_only()
         .metadata_cache(cache.clone())
         .build()
         .await
@@ -1238,7 +1242,8 @@ async fn a_tail_evicted_while_its_publish_runs_returns_when_the_publish_lands() 
     };
     put("/first.txt").await.expect("first put");
     let replays = tail_replays(&recorder);
-    let reader = LoonFs::reader_with_store(store.clone())
+    let reader = LoonFs::builder_with_store(store.clone())
+        .read_only()
         .metadata_cache(cache.clone())
         .build()
         .await

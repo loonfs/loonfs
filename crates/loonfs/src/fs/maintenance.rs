@@ -15,7 +15,7 @@ use crate::{
     MetadataCompactionResponse, MetadataMaintenanceOptions, MetadataMaintenanceResponse,
     NamespaceId, PinId, SharedObjectStore, SnapshotSummary, WalFoldStepOutcome,
 };
-use crate::{ChangeSeq, Result, RuntimeError};
+use crate::{ChangeSeq, Error, Result};
 use loonfs_api::CompactorEpoch;
 use loonfs_api::PageRequest;
 use loonfs_core::cache::NamespaceStorageDiagnostics;
@@ -37,7 +37,7 @@ enum CompactionStep {
 }
 
 /// A pager over existing checkpoints.
-pub type CheckpointsPager = loonfs_api::Pager<ListCheckpointsResponse, RuntimeError>;
+pub type CheckpointsPager = loonfs_api::Pager<ListCheckpointsResponse, Error>;
 
 fn metadata_compaction_response(
     namespace_id: &NamespaceId,
@@ -121,10 +121,7 @@ impl Maintenance {
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn get_namespace_diagnostics(
-        &self,
-        namespace_id: &NamespaceId,
-    ) -> Result<NamespaceDiagnostics> {
+    pub async fn diagnostics(&self, namespace_id: &NamespaceId) -> Result<NamespaceDiagnostics> {
         self.core.record_trace_context(&tracing::Span::current());
         let diagnostics =
             loonfs_core::cache::load_namespace_diagnostics(self.core.store(), namespace_id).await?;
@@ -150,7 +147,7 @@ impl Maintenance {
                     cursor,
                 })
                 .await
-                .map_err(RuntimeError::from)?;
+                .map_err(Error::from)?;
             for checkpoint in page.items {
                 if let loonfs_api::CheckpointOwnerSummary::User { .. } = checkpoint.owner {
                     live_checkpoints = live_checkpoints.saturating_add(1);
@@ -256,7 +253,7 @@ impl Maintenance {
     /// The age is measured on this handle's wall clock. Inline byte thresholds
     /// use publication hints instead. Active leases may prevent an eligible
     /// merge from running until their expiry.
-    pub async fn metadata_probe(
+    pub async fn probe_metadata(
         &self,
         namespace_id: &NamespaceId,
         options: &MetadataMaintenanceOptions,
@@ -281,7 +278,7 @@ impl Maintenance {
                 MaintenanceProbe::Idle
             }
         })
-        .map_err(RuntimeError::Core)
+        .map_err(Error::Core)
     }
 
     /// Optionally folds the WAL tail, then runs one compaction step.
@@ -308,7 +305,7 @@ impl Maintenance {
                         }
                     }
                 },
-                Err(RuntimeError::Core(error)) if error.code() == ErrorCode::StaleHead => {
+                Err(Error::Core(error)) if error.code() == ErrorCode::StaleHead => {
                     WalFoldStepOutcome::RetriesExhausted { observed_head_seq }
                 }
                 Err(error) => return Err(error),
@@ -356,7 +353,7 @@ impl Maintenance {
             .engine(namespace_id)
             .claim_compactor()
             .await
-            .map_err(RuntimeError::Core)?;
+            .map_err(Error::Core)?;
         epochs.insert(namespace_id.clone(), epoch);
         Ok(epoch)
     }
@@ -392,7 +389,7 @@ impl Maintenance {
                 compaction_policy,
             )
             .await
-            .map_err(RuntimeError::Core)?
+            .map_err(Error::Core)?
         {
             return Ok(CompactionStep::Concluded(
                 CompactionStepOutcome::NotNeeded {},
@@ -403,7 +400,7 @@ impl Maintenance {
             .engine(namespace_id)
             .metadata_compaction_step(compaction_policy, compactor_epoch)
             .await
-            .map_err(RuntimeError::Core)?;
+            .map_err(Error::Core)?;
         Ok(CompactionStep::Concluded(match outcome {
             loonfs_core::CompactionStepOutcome::NotNeeded { .. } => {
                 CompactionStepOutcome::NotNeeded {}
@@ -468,12 +465,12 @@ impl Maintenance {
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<MetadataCompactionResponse> {
-        self.compact_metadata_with(namespace_id, &MaintenanceCancellation::new())
+        self.compact_metadata_with_cancellation(namespace_id, &MaintenanceCancellation::new())
             .await
     }
 
     /// `compact_metadata` with caller-owned cancellation.
-    pub async fn compact_metadata_with(
+    pub async fn compact_metadata_with_cancellation(
         &self,
         namespace_id: &NamespaceId,
         cancellation: &MaintenanceCancellation,
@@ -527,7 +524,7 @@ impl Maintenance {
             .engine(namespace_id)
             .run_metadata_compaction(spec, compactor_epoch, cancellation)
             .await
-            .map_err(RuntimeError::Core);
+            .map_err(Error::Core);
         if matches!(
             outcome,
             Ok(loonfs_core::MetadataCompactionJobOutcome::Fenced)
@@ -574,10 +571,10 @@ impl Maintenance {
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn gc_namespace(
+    pub async fn gc(
         &self,
         namespace_id: &NamespaceId,
-        config: &crate::GcConfig,
+        options: &crate::GcOptions,
     ) -> Result<crate::GcResponse> {
         self.core.record_trace_context(&tracing::Span::current());
         // Core collection reports an empty pass for a namespace that does not exist.
@@ -587,11 +584,11 @@ impl Maintenance {
         let report = loonfs_core::gc_namespace(
             self.core.store(),
             namespace_id,
-            config,
+            options,
             &self.core.mutation_context(&self.actor)?,
         )
         .await
-        .map_err(RuntimeError::Core)?;
+        .map_err(Error::Core)?;
         // A caller may drop the response, so its counts survive only when
         // this shared pass records them here.
         self.core.instruments().gc_pass(&report);
@@ -633,7 +630,7 @@ impl Maintenance {
             .engine(namespace_id)
             .create_checkpoint(options.name, options.ttl_ms)
             .await
-            .map_err(RuntimeError::from);
+            .map_err(Error::from);
         self.finish_namespace_mutation(namespace_id, result)
     }
 
@@ -703,7 +700,7 @@ impl Maintenance {
             .engine(namespace_id)
             .list_checkpoints_page(request)
             .await
-            .map_err(RuntimeError::from)?;
+            .map_err(Error::from)?;
         let next_cursor = page.next_cursor;
         Ok((
             ListCheckpointsResponse {
@@ -738,7 +735,7 @@ impl Maintenance {
             .engine(namespace_id)
             .delete_checkpoint(checkpoint_id)
             .await
-            .map_err(RuntimeError::from);
+            .map_err(Error::from);
         self.finish_namespace_mutation(namespace_id, result)
     }
 
@@ -792,7 +789,7 @@ impl Maintenance {
             .engine(namespace_id)
             .advance_retention_floor()
             .await
-            .map_err(RuntimeError::from);
+            .map_err(Error::from);
         self.finish_namespace_mutation(namespace_id, result)
     }
 
@@ -803,7 +800,7 @@ impl Maintenance {
                 .engine(namespace_id)
                 .fold_wal()
                 .await
-                .map_err(RuntimeError::from);
+                .map_err(Error::from);
             if result.is_ok() {
                 self.publisher.record_fold_outcome(namespace_id).await;
             }
@@ -837,7 +834,7 @@ impl crate::Namespace<crate::Writable> {
             .union(AccessRights::from_iter([AccessRight::Admin]));
         entries.insert(principal_id.clone(), rights);
         let grants = AccessGrants::new(entries).map_err(|error| {
-            RuntimeError::Core(crate::CoreError::InvalidCommitField {
+            Error::Core(crate::CoreError::InvalidCommitField {
                 field: "grants",
                 message: error.to_string(),
                 precondition_index: None,
@@ -868,7 +865,7 @@ impl crate::Namespace<crate::Writable> {
                 _ => None,
             })
             .ok_or_else(|| {
-                RuntimeError::Core(crate::CoreError::Internal(
+                Error::Core(crate::CoreError::Internal(
                     "administrator recovery published no access change".to_owned(),
                 ))
             })?;

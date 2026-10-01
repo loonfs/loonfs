@@ -368,7 +368,7 @@ pub(super) async fn build_handles(
 ) -> Result<(LoonFs<Writable>, Maintenance), ServerConfigError> {
     let trace_store_kind = TraceStoreKind::from(config.store.kind());
     let samples = object_store_metrics_recorder(metrics_jsonl_path)?;
-    let runtime_error = |error: loonfs::RuntimeError| ServerConfigError::InvalidField {
+    let invalid_runtime = |error: loonfs::Error| ServerConfigError::InvalidField {
         field: "runtime",
         reason: error.to_string(),
     };
@@ -408,7 +408,7 @@ pub(super) async fn build_handles(
     if let Some(local_cache) = local_cache {
         builder = builder.stored_metadata_block_cache(local_cache);
     }
-    let runtime = builder.build().await.map_err(runtime_error)?;
+    let runtime = builder.build().await.map_err(invalid_runtime)?;
     let maintenance_writer_id = WriterId::parse(format!("{}-maintenance", config.writer_id))
         .map_err(|error| ServerConfigError::InvalidField {
             field: "writer_id",
@@ -453,7 +453,7 @@ pub enum ServeError {
     #[error("server failed while serving requests: {0}")]
     Serve(#[source] std::io::Error),
     #[error("runtime or maintenance shutdown did not settle: {0}")]
-    Shutdown(#[source] loonfs::RuntimeError),
+    Shutdown(#[source] loonfs::Error),
     #[error("the local block cache did not close during shutdown: {0}")]
     LocalCacheClose(#[source] StoredMetadataBlockCacheCloseError),
 }
@@ -599,7 +599,7 @@ where
         result = server.as_mut() => result,
         () = shutdown.as_mut() => {
             // This is synchronous so readiness changes before the drain waits.
-            runtime.close_admission_for_shutdown();
+            runtime.close_admission();
             if let Some(runner) = &runner {
                 runner.close_admission();
             }

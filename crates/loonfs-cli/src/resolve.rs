@@ -293,7 +293,7 @@ impl ResolvedTarget {
             store,
             writer_id,
             store_config.kind(),
-            loonfs::InlineContentOptions::default(),
+            loonfs::InlineContentPolicy::default(),
             no_retry,
         )
         .await?;
@@ -314,7 +314,7 @@ impl ResolvedTarget {
         store: SharedObjectStore,
         writer_id: Option<&str>,
         store_kind: loonfs_objectstore::ConfiguredObjectStoreKind,
-        inline_content: loonfs::InlineContentOptions,
+        inline_content: loonfs::InlineContentPolicy,
         no_retry: bool,
     ) -> Result<Self, CliError> {
         let writer_id = writer_id

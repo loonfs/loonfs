@@ -50,7 +50,8 @@ async fn uncached_segment_reader(
     store: &loonfs::SharedObjectStore,
     head_state_bytes: usize,
 ) -> LoonFs<ReadOnly> {
-    LoonFs::reader_with_store(store.clone())
+    LoonFs::builder_with_store(store.clone())
+        .read_only()
         .metadata_cache(
             MetadataCache::builder()
                 .max_segment_bytes(0)
@@ -126,7 +127,8 @@ async fn a_replaced_file_is_not_served_from_the_cached_reference() {
     let namespace_writer = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
-    let reader = LoonFs::reader_with_store(store.clone())
+    let reader = LoonFs::builder_with_store(store.clone())
+        .read_only()
         .build()
         .await
         .expect("build reader");

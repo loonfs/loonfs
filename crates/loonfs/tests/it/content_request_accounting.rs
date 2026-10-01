@@ -9,8 +9,8 @@ use loonfs::publish::{
 use loonfs::uploads::ResolvedUploadCompletion;
 use loonfs::{
     CommitId, CoreError, CreateDirectoryOptions, CreateNamespaceOptions, DestinationBehavior,
-    ErrorCode, LoonFs, NamespaceId, PutFileOptions, RevisionNo, RuntimeError, SharedObjectStore,
-    Writable, CONTENT_READ_CHUNK_BYTES,
+    Error, ErrorCode, LoonFs, NamespaceId, PutFileOptions, RevisionNo, SharedObjectStore, Writable,
+    CONTENT_READ_CHUNK_BYTES,
 };
 use loonfs_api::ContentId;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -141,7 +141,7 @@ async fn build_initialized_writer(
 ) -> LoonFs<Writable> {
     let writer = LoonFs::builder_with_store(store)
         .writer_id(writer_id)
-        .inline_content(loonfs::InlineContentOptions {
+        .inline_content(loonfs::InlineContentPolicy {
             inline_content_threshold_bytes: None,
             ..Default::default()
         })
@@ -211,13 +211,13 @@ fn assert_content_counts(
     assert_eq!(counts.content_get_bytes, bytes_read);
 }
 
-fn assert_content_not_prepared(error: impl Into<RuntimeError>, content_ref: &loonfs::ContentRef) {
+fn assert_content_not_prepared(error: impl Into<Error>, content_ref: &loonfs::ContentRef) {
     let error = error.into();
     assert_eq!(error.code(), ErrorCode::ContentNotPrepared);
     assert!(
         matches!(
             error,
-            RuntimeError::Core(CoreError::ContentPreparation(
+            Error::Core(CoreError::ContentPreparation(
                 ContentPreparationError::ContentNotPrepared { ref content_id }
             )) if content_id == &content_ref.content_id
         ),
@@ -336,10 +336,10 @@ async fn prepared_content_for_another_store_is_rejected_without_content_io() {
         .await
         .expect_err("another store must reject the admission");
     assert!(
-        matches!(error, RuntimeError::Core(_)),
+        matches!(error, Error::Core(_)),
         "expected core content-preparation error"
     );
-    let RuntimeError::Core(error) = error else {
+    let Error::Core(error) = error else {
         return;
     };
 
@@ -721,7 +721,7 @@ async fn an_unprepared_external_ref_fails_typed_without_content_io() {
                     expected_revision_no: None,
                 },
             );
-            let error: RuntimeError = match entry_point {
+            let error: Error = match entry_point {
                 UnpreparedEntryPoint::Publisher => namespace
                     .commit_candidate(CommitCandidate::new(request))
                     .await
@@ -967,7 +967,7 @@ async fn new_rejected_preparation_fails_before_path_planning_without_content_ope
     assert_eq!(error.code(), ErrorCode::ContentNotPrepared);
     assert!(matches!(
         error,
-        RuntimeError::Core(CoreError::ContentPreparation(
+        Error::Core(CoreError::ContentPreparation(
             ContentPreparationError::ContentToken(ref rejections)
         ))
             if matches!(rejections[..], [(_, ContentTokenError::Expired)])

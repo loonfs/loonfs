@@ -7,7 +7,7 @@ use super::{
     MaintenanceJobId, MaintenanceProbe, MaintenanceRegistry, MaintenanceRunReport,
 };
 use crate::metrics::{MaintenanceInstruments, MetricsRecorder, RESULT_ERROR};
-use crate::{NamespaceId, Result, RuntimeError, WallClock};
+use crate::{Error, NamespaceId, Result, WallClock};
 use futures::FutureExt as _;
 use std::collections::hash_map::RandomState;
 use std::fmt;
@@ -342,7 +342,7 @@ impl MaintenanceRunner {
         }
         panicked += self.inner.panicked_tasks.load(Ordering::SeqCst);
         if panicked > 0 {
-            return Err(RuntimeError::RuntimeTask(format!(
+            return Err(Error::RuntimeTask(format!(
                 "{panicked} background maintenance task(s) panicked"
             )));
         }
@@ -480,9 +480,7 @@ impl MaintenanceRunnerBuilder {
     /// Builds the runner on the current Tokio runtime.
     pub fn build(self) -> Result<MaintenanceRunner> {
         let runtime = tokio::runtime::Handle::try_current().map_err(|_| {
-            RuntimeError::Config(
-                "maintenance runner must be built inside a Tokio runtime".to_owned(),
-            )
+            Error::Config("maintenance runner must be built inside a Tokio runtime".to_owned())
         })?;
         Ok(MaintenanceRunner::new(
             self.registry,

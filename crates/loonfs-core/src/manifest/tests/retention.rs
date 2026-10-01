@@ -642,10 +642,10 @@ async fn an_expired_pin_still_enumerates_its_files_until_deleted() {
     crate::gc::gc_namespace(
         &store,
         &namespace_id,
-        &crate::gc::GcConfig::default(),
+        &crate::gc::GcOptions::default(),
         &mutation_context(
             "expired",
-            context.now_ms + crate::gc::GcConfig::default().grace_window_ms,
+            context.now_ms + crate::gc::GcOptions::default().grace_window_ms,
         ),
     )
     .await
@@ -688,7 +688,7 @@ async fn a_pin_without_a_ttl_is_held_until_it_is_deleted() {
         crate::gc::gc_namespace(
             &store,
             &namespace_id,
-            &crate::gc::GcConfig::default(),
+            &crate::gc::GcOptions::default(),
             &distant,
         )
         .await
@@ -2445,7 +2445,7 @@ async fn a_floor_past_a_pin_keeps_its_manifest_and_runs_readable_until_deletion(
     crate::gc::gc_namespace(
         &store,
         &namespace_id,
-        &crate::gc::GcConfig::default(),
+        &crate::gc::GcOptions::default(),
         &aged,
     )
     .await
@@ -2471,7 +2471,7 @@ async fn a_floor_past_a_pin_keeps_its_manifest_and_runs_readable_until_deletion(
     crate::gc::gc_namespace(
         &store,
         &namespace_id,
-        &crate::gc::GcConfig::default(),
+        &crate::gc::GcOptions::default(),
         &aged,
     )
     .await

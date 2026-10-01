@@ -70,7 +70,8 @@ async fn warm_reads_and_writes_reuse_their_manifest() {
     let namespace_id = NamespaceId::parse("pins").expect("valid namespace id");
     build_namespace(&store, &namespace_id).await;
 
-    let reader = LoonFs::reader_with_store(store.clone())
+    let reader = LoonFs::builder_with_store(store.clone())
+        .read_only()
         .build()
         .await
         .expect("build reader");

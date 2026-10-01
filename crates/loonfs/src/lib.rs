@@ -55,8 +55,6 @@ mod options;
 mod publisher;
 mod trace;
 
-use thiserror::Error;
-
 pub use loonfs_api::v0::{
     Commit, CompleteMultipartUploadRequest, CompleteUploadBody, CreateUploadBody, FilesystemChange,
     ListChangesResponse, ObjectTransferAccess, UploadContentClaim, UploadMode, UploadSession,
@@ -97,7 +95,7 @@ pub use loonfs_core::{
     delete_if_aged, grace_age, next_run_no_after, refill_iterators, select_next_iterator,
     write_segments_in_waves, CheckpointFile, CheckpointFilesPage, CheckpointFilesPageCursor,
     CheckpointPageCursor, CreateNamespaceOptions, CurrentFileState, DeleteNamespaceOptions,
-    Error as CoreError, ErrorCode, ErrorKind, FileContentStream, GcConfig, GraceAge,
+    Error as CoreError, ErrorCode, ErrorKind, FileContentStream, GcOptions, GraceAge,
     ListCheckpointFilesOptions, MetadataCompactionJobOutcome, MetadataCompactionPolicy,
     MetadataViewError, SegmentBlockLoader, SegmentRowIterator, StoreFailureClass, WriterFence,
     CONTENT_READ_CHUNK_BYTES, MAX_RESOLVE_CURRENT_FILES,
@@ -151,9 +149,8 @@ pub mod content_tokens {
 /// part uploads. Most embedded applications do not need this module.
 pub mod uploads {
     pub use loonfs_core::{
-        BeginDirectMultipartUploadTargetResponse, BeginDirectPutUploadTargetResponse,
-        DirectMultipartUploadTarget, MultipartPartTarget, MultipartPartTargets,
-        ResolvedUploadCompletion, UploadSessionView,
+        DirectMultipartUploadTarget, DirectPutUploadTarget, MultipartPartTarget,
+        MultipartPartTargets, ResolvedUploadCompletion, UploadSessionView,
     };
 }
 
@@ -182,7 +179,7 @@ pub use loonfs_objectstore::{
 };
 
 pub use config::{
-    InlineContentOptions, PublicationLimits, DEFAULT_MAX_CONCURRENT_COMPACTIONS,
+    InlineContentPolicy, PublicationLimits, DEFAULT_MAX_CONCURRENT_COMPACTIONS,
     DEFAULT_MAX_CONCURRENT_FOLDS, DEFAULT_MAX_CONCURRENT_MAINTENANCE,
 };
 pub use fs::{
@@ -213,14 +210,12 @@ pub use publisher::{CloseNamespaceReport, NamespaceSessionState};
 pub use trace::{payload_class, TraceMode, TraceStoreKind};
 
 /// Result type used by the embedded runtime.
-pub type Result<T> = std::result::Result<T, RuntimeError>;
+pub type Result<T> = std::result::Result<T, Error>;
 
-pub use self::RuntimeError as Error;
-
-/// The embedded runtime's error type, also exported as [`enum@Error`].
-#[derive(Debug, Clone, Error)]
+/// The embedded runtime's error type.
+#[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
-pub enum RuntimeError {
+pub enum Error {
     /// An error surfaced by the underlying `loonfs-core` engine.
     #[error(transparent)]
     Core(#[from] CoreError),
@@ -248,7 +243,7 @@ pub enum RuntimeError {
     RuntimeTask(String),
 }
 
-impl RuntimeError {
+impl Error {
     /// Returns this error as the public API error body.
     pub fn to_api_error(&self) -> loonfs_api::ApiError {
         loonfs_api::ApiError {

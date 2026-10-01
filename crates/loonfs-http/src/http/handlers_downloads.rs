@@ -58,7 +58,7 @@ pub(super) async fn create_download(
     AppQuery(_): AppQuery<NoQuery>,
     AppJson(request): AppJson<CreateDownloadRequest>,
 ) -> Result<Json<CreateDownloadResponse>, ApiResponseError> {
-    let scoped_runtime = subject.map(|subject| state.runtime.as_subject(subject));
+    let scoped_runtime = subject.map(|subject| state.runtime.with_subject(subject));
     let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);
     reject_snapshot_with_revision(request.snapshot_id.as_ref(), request.revision_no)?;
     let target = read_target(runtime.namespace(&namespace_id), request.snapshot_id).await?;
@@ -114,7 +114,7 @@ pub(super) async fn create_download_by_inode(
     AppPath(path): AppPath<InodeRevisionPathParams>,
     AppQuery(_): AppQuery<NoQuery>,
 ) -> Result<Json<CreateDownloadByInodeResponse>, ApiResponseError> {
-    let scoped_runtime = subject.map(|subject| state.runtime.as_subject(subject));
+    let scoped_runtime = subject.map(|subject| state.runtime.with_subject(subject));
     let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);
     let namespace = runtime.namespace(&namespace_id);
     let inode_id = parse_inode_id(&path.inode_id)?;

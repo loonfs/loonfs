@@ -116,7 +116,7 @@ async fn create_compacted_directory(
         .await
         .expect("namespace");
     let writer = match subject {
-        Some(subject) => writer.as_subject(subject.clone()),
+        Some(subject) => writer.with_subject(subject.clone()),
         None => writer,
     };
     let namespace = writer.open_namespace(namespace_id).expect("open namespace");
@@ -233,12 +233,13 @@ async fn compacted_directory_page_overlaps_segment_reads(
     let delayed = Arc::new(LatencyStore::new(store, keys.clone(), latency));
     let reads = Arc::new(ConcurrencyWatchStore::new(delayed.clone(), keys.clone()));
     let recording = Arc::new(RecordingStore::new(reads.clone(), keys));
-    let reader = LoonFs::reader_with_store(recording.clone())
+    let reader = LoonFs::builder_with_store(recording.clone())
+        .read_only()
         .build()
         .await
         .expect("reader");
     let reader = match subject {
-        Some(subject) => reader.as_subject(subject),
+        Some(subject) => reader.with_subject(subject),
         None => reader,
     };
     let namespace = reader.namespace(&namespace_id);
