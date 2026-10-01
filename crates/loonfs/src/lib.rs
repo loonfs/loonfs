@@ -81,8 +81,8 @@ pub use loonfs_api::{
 };
 pub use loonfs_core::cache::{
     DecodedBlock, DecodedBlockCache, DecodedBlockCacheConfig, DecodedBlockCacheObserver,
-    DecodedBlockCacheStats, DecodedBlockWeight, DecodedSegmentBlock, MetadataSegmentCacheConfig,
-    Recency, SegmentBlockKind, SegmentCacheKey, StoredMetadataBlockCache,
+    DecodedBlockCacheStats, DecodedSegmentBlock, MetadataSegmentCacheConfig, Recency,
+    SegmentBlockKind, SegmentCacheKey, StoredMetadataBlockCache,
     StoredMetadataBlockCacheCloseError, StoredMetadataBlockKey, StoredMetadataBlockKind,
 };
 pub use loonfs_core::limits::{

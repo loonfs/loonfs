@@ -3,12 +3,8 @@
 use crate::trace::{TraceMode, TraceStoreKind};
 use crate::MetadataSegmentCacheConfig;
 
-/// Default maximum namespaces retained in runtime caches.
-pub(crate) const DEFAULT_MAX_CACHED_NAMESPACES: usize = 64;
-/// Default maximum metadata rows retained across cached WAL-tail projections.
-pub(crate) const DEFAULT_MAX_CACHED_WAL_TAIL_PROJECTION_ROWS: usize =
-    loonfs_core::cache::DEFAULT_WAL_TAIL_PROJECTION_ROWS;
-/// Default decoded-byte budget for cached WAL-tail projections.
+/// Default decoded-byte budget for head state and for the WAL-tail
+/// projections a writer's publishers retain.
 pub(crate) const DEFAULT_MAX_CACHED_WAL_TAIL_PROJECTION_DECODED_BYTES: usize =
     loonfs_core::cache::DEFAULT_WAL_TAIL_PROJECTION_DECODED_BYTES;
 /// Default minimum interval, in milliseconds, between publication starts
@@ -159,27 +155,18 @@ pub struct RuntimeCacheConfig {
     /// Minimum monotonic interval between checks for a successor to the cached manifest.
     /// Defaults to 1000 milliseconds; zero checks on every read.
     pub manifest_revalidation_interval_ms: u64,
-    /// Maximum namespaces retained by entry-counted runtime caches: head
-    /// anchors and read-side WAL-tail projections. Zero disables those
-    /// caches. This does not affect maintenance scheduling.
+    /// Approximate decoded-byte budget for head state: namespace head
+    /// anchors and read-side WAL-tail projections, least recently used first
+    /// out. Defaults to 64 MiB; zero keeps none. Nothing limits how many
+    /// namespaces it holds.
     ///
-    /// It does not count the WAL-tail projections a writer's publishers
-    /// retain, which only the two projection budgets bound, or writer
-    /// sessions, which live as long as the host holds their
-    /// writable [`Namespace`](crate::Namespace) handles.
-    pub max_cached_namespaces: usize,
-    /// Maximum metadata rows retained across WAL-tail projections. The read
-    /// cache and the publish side each hold their own total against it, so
-    /// this is the ceiling per side rather than for the process. On the
-    /// publish side this and the byte budget are the only bound, and the
-    /// least recently published projection goes first. Zero disables the
-    /// projection cache.
-    pub max_cached_wal_tail_projection_rows: usize,
-    /// Approximate decoded-byte budget for WAL-tail projections, per side
-    /// like the row budget. Defaults to 64 MiB. Both budgets also cap one
-    /// projection: a publish whose tail outgrows either keeps nothing, so
-    /// each later publish replays the tail from the store until a fold
-    /// shortens it.
+    /// A writer's publishers hold their own total of retained WAL-tail
+    /// projections against the same budget, so this is the ceiling per side,
+    /// not for the process. The budget also caps one entry: a publish whose
+    /// tail outgrows it keeps nothing, so each later publish replays the tail
+    /// from the store until a fold shortens it. Writer sessions are not
+    /// counted; they live as long as the host holds their writable
+    /// [`Namespace`](crate::Namespace) handles.
     pub max_cached_wal_tail_projection_decoded_bytes: usize,
     /// Cache settings for decoded metadata segments. The byte budget
     /// defaults to 256 MiB. The block memo budget, 64 MiB by default, bounds
@@ -194,8 +181,6 @@ impl RuntimeCacheConfig {
     pub fn disabled() -> Self {
         Self {
             manifest_revalidation_interval_ms: 1000,
-            max_cached_namespaces: 0,
-            max_cached_wal_tail_projection_rows: 0,
             max_cached_wal_tail_projection_decoded_bytes: 0,
             metadata_segment_cache: MetadataSegmentCacheConfig {
                 max_decoded_bytes: 0,
@@ -209,8 +194,6 @@ impl Default for RuntimeCacheConfig {
     fn default() -> Self {
         Self {
             manifest_revalidation_interval_ms: 1000,
-            max_cached_namespaces: DEFAULT_MAX_CACHED_NAMESPACES,
-            max_cached_wal_tail_projection_rows: DEFAULT_MAX_CACHED_WAL_TAIL_PROJECTION_ROWS,
             max_cached_wal_tail_projection_decoded_bytes:
                 DEFAULT_MAX_CACHED_WAL_TAIL_PROJECTION_DECODED_BYTES,
             metadata_segment_cache: MetadataSegmentCacheConfig::default(),

@@ -14,8 +14,7 @@ use crate::namespace::writer_epoch::acquire_writer;
 use crate::options::DeleteNamespaceOptions;
 use crate::path::write::{commit_fingerprint, CommitRequest, FilesystemOperation};
 use crate::protocol::{
-    load_publish_metadata_view, PublishTailOptions, PublishTailProjection, PublishTailWeight,
-    PublishViewEffect,
+    load_publish_metadata_view, PublishTailOptions, PublishTailProjection, PublishViewEffect,
 };
 use crate::storage::content_admission::{ContentTokenError, PreparedContent};
 use crate::storage::inline_content::InlineContent;
@@ -624,13 +623,13 @@ impl NamespaceCommitEngine {
             })
     }
 
-    /// Returns the retained tail projection's memory weight, or `None` when no
+    /// Returns the retained tail projection's decoded bytes, or `None` when no
     /// projection is cached. Runtimes can sum this value across namespace engines
     /// to enforce a global cache limit.
-    pub fn retained_tail_weight(&self) -> Option<PublishTailWeight> {
+    pub fn retained_tail_decoded_bytes(&self) -> Option<usize> {
         self.publish_tail_projection
             .as_ref()
-            .map(PublishTailProjection::weight)
+            .map(|projection| projection.tail_state.decoded_bytes())
     }
 
     /// The retained projection as a fold input, or `None` when the engine

@@ -108,19 +108,18 @@ pub mod time;
 pub mod cache {
     pub use crate::block_cache::{
         DecodedBlock, DecodedBlockCache, DecodedBlockCacheConfig, DecodedBlockCacheObserver,
-        DecodedBlockCacheStats, DecodedBlockWeight, DecodedSegmentBlock, SegmentBlockKind,
-        SegmentCacheKey,
+        DecodedBlockCacheStats, DecodedSegmentBlock, SegmentBlockKind, SegmentCacheKey,
     };
     pub use crate::recency::Recency;
     pub use crate::wal::ProjectedWalTail;
 
     pub use crate::manifest::metadata_maintenance_due;
     pub use crate::manifest::{
-        MetadataSegmentCache, MetadataSegmentCacheConfig, MetadataSegmentCacheStats,
+        CachedReadAnchor, HeadStateCache, HeadStateCacheStats, MetadataSegmentCache,
+        MetadataSegmentCacheConfig, MetadataSegmentCacheStats, NamespaceValidation,
         StoredMetadataBlockCache, StoredMetadataBlockCacheCloseError, StoredMetadataBlockKey,
-        StoredMetadataBlockKind, WalTailProjectionCache, WalTailProjectionCacheConfig,
-        WalTailProjectionCacheKey, WalTailProjectionCacheStats,
-        DEFAULT_WAL_TAIL_PROJECTION_DECODED_BYTES, DEFAULT_WAL_TAIL_PROJECTION_ROWS,
+        StoredMetadataBlockKind, WalTailProjectionCacheKey,
+        DEFAULT_WAL_TAIL_PROJECTION_DECODED_BYTES,
     };
     pub use crate::namespace::status::{
         load_namespace, load_namespace_diagnostics, NamespaceStorageDiagnostics,
@@ -165,7 +164,7 @@ pub mod publish {
         WalFoldInput, WriterSessionState,
     };
     pub use crate::path::write::{CommitRequest, FilesystemOperation};
-    pub use crate::protocol::{PublishTailOptions, PublishTailWeight};
+    pub use crate::protocol::PublishTailOptions;
     pub use crate::storage::content_admission::PreparedContent;
     pub use crate::storage::inline_content::InlineContent;
 }

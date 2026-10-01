@@ -113,7 +113,7 @@ async fn a_scrape_reports_requests_object_store_calls_and_cache_metrics() {
     assert!(first.contains_key("loonfs_runtime_cache_latest_metadata_view_reads_total"));
     assert!(first.contains_key("loonfs_runtime_cache_snapshot_view_reads_total"));
     assert!(first.contains_key("loonfs_grep_block_cache_gets_total{result=\"hit\"}"));
-    assert!(first.contains_key("loonfs_wal_tail_projection_cache_retained_rows"));
+    assert!(first.contains_key("loonfs_head_state_cache_retained_decoded_bytes"));
     assert_eq!(
         series(&first, "loonfs_server_upload_permits_available"),
         8.0,

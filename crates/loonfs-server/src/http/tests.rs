@@ -116,12 +116,10 @@ async fn runtime_and_grep_cache_metrics_render_from_the_recorder() {
         "loonfs_metadata_segment_cache_filter_false_positives_total",
         "loonfs_wal_tail_projection_cache_gets_total",
         "loonfs_wal_tail_projection_cache_inserts_total",
-        "loonfs_wal_tail_projection_cache_evictions_total",
-        "loonfs_wal_tail_projection_cache_evicted_rows_total",
-        "loonfs_wal_tail_projection_cache_evicted_decoded_bytes_total",
-        "loonfs_wal_tail_projection_cache_rejections_total",
-        "loonfs_wal_tail_projection_cache_rejected_rows_total",
-        "loonfs_wal_tail_projection_cache_rejected_decoded_bytes_total",
+        "loonfs_head_state_cache_evictions_total",
+        "loonfs_head_state_cache_evicted_decoded_bytes_total",
+        "loonfs_head_state_cache_rejections_total",
+        "loonfs_head_state_cache_rejected_decoded_bytes_total",
         "loonfs_grep_block_cache_gets_total",
         "loonfs_grep_block_cache_inserts_total",
         "loonfs_grep_block_cache_evictions_total",
@@ -131,15 +129,10 @@ async fn runtime_and_grep_cache_metrics_render_from_the_recorder() {
             "missing counter `{name}`"
         );
     }
-    for name in [
-        "loonfs_wal_tail_projection_cache_retained_rows",
-        "loonfs_wal_tail_projection_cache_retained_decoded_bytes",
-    ] {
-        assert!(
-            rendered.contains(&format!("# TYPE {name} gauge\n")),
-            "missing gauge `{name}`"
-        );
-    }
+    assert!(
+        rendered.contains("# TYPE loonfs_head_state_cache_retained_decoded_bytes gauge\n"),
+        "missing the head-state gauge"
+    );
     assert!(!rendered.contains("loonfs_cache_metadata_segment_cache_hits"));
 }
 

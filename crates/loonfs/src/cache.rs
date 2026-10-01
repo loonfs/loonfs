@@ -1,51 +1,23 @@
-//! Runtime caches for control-object reads and WAL-tail projections.
+//! The head anchors and WAL-tail projections runtime reads start from.
 //! WAL probes observe commits; interval checks observe manifest changes.
 
 use crate::fs::RuntimeCore;
 use crate::metrics::RuntimeInstruments;
 use crate::trace::phase_span;
-use crate::{CoreError, NamespaceId, PinId, Recency, RuntimeCacheConfig};
+use crate::{CoreError, NamespaceId, PinId, RuntimeCacheConfig};
 use crate::{Result, RuntimeError};
 use loonfs_core::cache::{
-    MetadataSegmentCacheStats, WalTailProjectionCacheKey, WalTailProjectionCacheStats,
+    CachedReadAnchor, HeadStateCacheStats, MetadataSegmentCacheStats, WalTailProjectionCacheKey,
 };
-use loonfs_core::control::NamespaceReadState;
 use loonfs_core::control::{
     load_checkpoint_read_basis, load_read_anchor, load_snapshot_read_basis, manifest_has_successor,
-    project_anchor_tail, CheckpointReadBasis, MetadataBasis, NamespaceReadAnchor,
-    VerifiedNamespaceCatalogEntry,
+    project_anchor_tail, CheckpointReadBasis, NamespaceReadAnchor, VerifiedNamespaceCatalogEntry,
 };
 use loonfs_core::time::Observation;
 use loonfs_core::{MetadataProjectionLoadError, RuntimeReadContext};
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tracing::Instrument;
-
-pub(crate) struct RuntimeControlCache {
-    namespaces: HashMap<NamespaceId, (CachedNamespaceAnchor, u64)>,
-    namespace_order: Recency<NamespaceId>,
-    instruments: Arc<RuntimeInstruments>,
-}
-
-/// A head snapshot and the metadata basis it authorized at that point.
-/// Keeping them together ensures reads use a consistent pair. If compaction
-/// advances the live root, reads may replay additional WAL entries until the
-/// cache refreshes.
-#[derive(Debug, Clone)]
-pub(crate) struct CachedNamespaceAnchor {
-    pub(crate) head: NamespaceReadState,
-    pub(crate) basis: MetadataBasis,
-    basis_checked: Option<Observation>,
-    validation: Arc<NamespaceValidation>,
-    completed_validation_no: u64,
-}
-
-#[derive(Debug, Default)]
-struct NamespaceValidation {
-    lock: tokio::sync::Mutex<()>,
-    started: AtomicU64,
-}
 
 /// Snapshot of runtime cache counters.
 ///
@@ -63,22 +35,18 @@ pub struct RuntimeCacheStats {
     pub wal_tail_projection_cache_misses: usize,
     /// WAL-tail projections inserted.
     pub wal_tail_projection_cache_inserts: usize,
-    /// WAL-tail projections evicted or invalidated.
-    pub wal_tail_projection_cache_evictions: usize,
-    /// Metadata rows dropped with evicted WAL-tail projections.
-    pub wal_tail_projection_cache_evicted_rows: usize,
-    /// Decoded bytes dropped with evicted WAL-tail projections.
-    pub wal_tail_projection_cache_evicted_decoded_bytes: usize,
-    /// WAL-tail projections too heavy to cache under configured limits.
-    pub wal_tail_projection_cache_uncacheable_count: usize,
-    /// Metadata rows in WAL-tail projections too heavy to cache.
-    pub wal_tail_projection_cache_uncacheable_rows: usize,
-    /// Decoded bytes in WAL-tail projections too heavy to cache.
-    pub wal_tail_projection_cache_uncacheable_decoded_bytes: usize,
-    /// Metadata rows currently retained across cached WAL-tail projections.
-    pub wal_tail_projection_cache_cached_rows: usize,
-    /// Decoded bytes currently retained across cached WAL-tail projections.
-    pub wal_tail_projection_cache_cached_decoded_bytes: usize,
+    /// Head anchors and WAL-tail projections evicted to stay within the
+    /// head-state budget.
+    pub head_state_cache_evictions: usize,
+    /// Decoded bytes dropped with evicted head state.
+    pub head_state_cache_evicted_decoded_bytes: usize,
+    /// Head anchors and WAL-tail projections too heavy to cache at all.
+    pub head_state_cache_rejections: usize,
+    /// Decoded bytes in head state too heavy to cache.
+    pub head_state_cache_rejected_decoded_bytes: usize,
+    /// Decoded bytes currently retained as head anchors and WAL-tail
+    /// projections.
+    pub head_state_cache_cached_decoded_bytes: usize,
     /// Decoded metadata-segment cache hits.
     pub metadata_segment_cache_hits: usize,
     /// Decoded metadata-segment cache misses.
@@ -111,26 +79,19 @@ impl RuntimeCacheStatsInner {
     pub(crate) fn snapshot(
         &self,
         metadata_segment_cache: MetadataSegmentCacheStats,
-        wal_tail_projection_cache: WalTailProjectionCacheStats,
+        head_state: HeadStateCacheStats,
     ) -> RuntimeCacheStats {
         RuntimeCacheStats {
             latest_metadata_view_reads: self.latest_metadata_view_reads.load(Ordering::SeqCst),
             snapshot_view_reads: self.snapshot_view_reads.load(Ordering::SeqCst),
-            wal_tail_projection_cache_hits: wal_tail_projection_cache.hits,
-            wal_tail_projection_cache_misses: wal_tail_projection_cache.misses,
-            wal_tail_projection_cache_inserts: wal_tail_projection_cache.inserts,
-            wal_tail_projection_cache_evictions: wal_tail_projection_cache.evictions,
-            wal_tail_projection_cache_evicted_rows: wal_tail_projection_cache.evicted_rows,
-            wal_tail_projection_cache_evicted_decoded_bytes: wal_tail_projection_cache
-                .evicted_decoded_bytes,
-            wal_tail_projection_cache_uncacheable_count: wal_tail_projection_cache
-                .uncacheable_count,
-            wal_tail_projection_cache_uncacheable_rows: wal_tail_projection_cache.uncacheable_rows,
-            wal_tail_projection_cache_uncacheable_decoded_bytes: wal_tail_projection_cache
-                .uncacheable_decoded_bytes,
-            wal_tail_projection_cache_cached_rows: wal_tail_projection_cache.cached_rows,
-            wal_tail_projection_cache_cached_decoded_bytes: wal_tail_projection_cache
-                .cached_decoded_bytes,
+            wal_tail_projection_cache_hits: head_state.tail_hits,
+            wal_tail_projection_cache_misses: head_state.tail_misses,
+            wal_tail_projection_cache_inserts: head_state.tail_inserts,
+            head_state_cache_evictions: head_state.evictions,
+            head_state_cache_evicted_decoded_bytes: head_state.evicted_decoded_bytes,
+            head_state_cache_rejections: head_state.rejections,
+            head_state_cache_rejected_decoded_bytes: head_state.rejected_decoded_bytes,
+            head_state_cache_cached_decoded_bytes: head_state.cached_decoded_bytes,
             metadata_segment_cache_hits: metadata_segment_cache.hits,
             metadata_segment_cache_misses: metadata_segment_cache.misses,
             metadata_segment_cache_inserts: metadata_segment_cache.inserts,
@@ -153,121 +114,35 @@ impl RuntimeCacheStatsInner {
     }
 }
 
-impl RuntimeControlCache {
-    pub(crate) fn new(instruments: Arc<RuntimeInstruments>) -> Self {
-        Self {
-            namespaces: HashMap::new(),
-            namespace_order: Recency::default(),
-            instruments,
-        }
-    }
-
-    fn cached_namespace_head(
-        &mut self,
-        namespace_id: &NamespaceId,
-    ) -> Option<CachedNamespaceAnchor> {
-        let head = self.namespaces.get(namespace_id)?.0.clone();
-        self.touch_namespace(namespace_id);
-        Some(head)
-    }
-
-    /// Looks up the head for a load and counts the hit or miss. A
-    /// speculative read peeks first and then loads, so only the load counts.
-    fn lookup_namespace_head(
-        &mut self,
-        namespace_id: &NamespaceId,
-    ) -> Option<CachedNamespaceAnchor> {
-        let head = self.cached_namespace_head(namespace_id);
-        match head {
-            Some(_) => self.instruments.namespace_head_cache_hit(),
-            None => self.instruments.namespace_head_cache_miss(),
-        }
-        head
-    }
-
-    fn insert_namespace_head(
-        &mut self,
-        namespace_id: &NamespaceId,
-        head: CachedNamespaceAnchor,
-        max_cached_namespaces: usize,
-    ) {
-        if max_cached_namespaces == 0 {
-            return;
-        }
-        let last_touch = self.namespace_order.touch(namespace_id);
-        self.namespaces
-            .insert(namespace_id.clone(), (head, last_touch));
-        let Self {
-            namespaces,
-            namespace_order,
-            instruments,
-        } = self;
-        while namespaces.len() > max_cached_namespaces {
-            let Some(evicted) = namespace_order
-                .pop_oldest(|key, stamp| namespace_slot_is_live(namespaces, key, stamp))
-            else {
-                break;
-            };
-            namespaces.remove(&evicted);
-            instruments.namespace_head_cache_eviction();
-        }
-        namespace_order.compact(namespaces.len(), |key, stamp| {
-            namespace_slot_is_live(namespaces, key, stamp)
-        });
-        instruments.namespace_head_cache_entries(namespaces.len());
-    }
-
-    fn invalidate_namespace(&mut self, namespace_id: &NamespaceId) {
-        self.namespaces.remove(namespace_id);
-        self.instruments
-            .namespace_head_cache_entries(self.namespaces.len());
-    }
-
-    fn touch_namespace(&mut self, namespace_id: &NamespaceId) {
-        let stamp = self.namespace_order.touch(namespace_id);
-        if let Some((_, last_touch)) = self.namespaces.get_mut(namespace_id) {
-            *last_touch = stamp;
-        }
-        let namespaces = &self.namespaces;
-        self.namespace_order
-            .compact(namespaces.len(), |key, stamp| {
-                namespace_slot_is_live(namespaces, key, stamp)
-            });
-    }
-}
-
-fn namespace_slot_is_live(
-    namespaces: &HashMap<NamespaceId, (CachedNamespaceAnchor, u64)>,
-    namespace_id: &NamespaceId,
-    stamp: u64,
-) -> bool {
-    namespaces
-        .get(namespace_id)
-        .is_some_and(|(_, last_touch)| *last_touch == stamp)
-}
-
 impl RuntimeCore {
     pub(crate) fn cached_read_context(
         &self,
         namespace_id: &NamespaceId,
     ) -> Option<RuntimeReadContext> {
-        let anchor = self
-            .inner
-            .control_cache()
-            .cached_namespace_head(namespace_id)?;
+        let anchor = self.inner.head_state.get_anchor(namespace_id)?;
         Some(self.runtime_read_context(&anchor))
+    }
+
+    /// Looks up the head for a load and counts the hit or miss. A
+    /// speculative read peeks first and then loads, so only the load counts.
+    fn lookup_namespace_head(&self, namespace_id: &NamespaceId) -> Option<Arc<CachedReadAnchor>> {
+        let head = self.inner.head_state.get_anchor(namespace_id);
+        match head {
+            Some(_) => self.inner.instruments.namespace_head_cache_hit(),
+            None => self.inner.instruments.namespace_head_cache_miss(),
+        }
+        head
     }
 
     pub(crate) async fn load_namespace_head_cached(
         &self,
         namespace_id: &NamespaceId,
-    ) -> std::result::Result<CachedNamespaceAnchor, CoreError> {
+    ) -> std::result::Result<Arc<CachedReadAnchor>, CoreError> {
         let validation = self
             .inner
-            .control_cache()
-            .namespaces
-            .get(namespace_id)
-            .map(|(head, _)| Arc::clone(&head.validation))
+            .head_state
+            .peek_anchor(namespace_id)
+            .map(|head| Arc::clone(&head.validation))
             .unwrap_or_default();
         let observed_validation_no = validation.started.load(Ordering::SeqCst);
         let _validation = validation
@@ -276,23 +151,23 @@ impl RuntimeCore {
             .instrument(phase_span!(self, "namespace_validation_wait", namespace_id))
             .instrument(tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "validation_wait"))
             .await;
-        {
-            let mut cache = self.inner.control_cache();
-            let reusable = cache.namespaces.get(namespace_id).is_some_and(|(head, _)| {
+        let reusable = self
+            .inner
+            .head_state
+            .get_anchor(namespace_id)
+            .filter(|head| {
                 Arc::ptr_eq(&head.validation, &validation)
                     && head.completed_validation_no > observed_validation_no
             });
-            if reusable {
-                // A successful remote validation STARTED after this read
-                // arrived. Its observation is inside our read interval. A
-                // probe already in flight when we arrived cannot authorize
-                // this shortcut: it may have observed before an intervening
-                // write completed. Local publication is not a remote proof.
-                return tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "validation_reuse")
-                    .in_scope(|| Ok(cache
-                        .lookup_namespace_head(namespace_id)
-                        .expect("checked cached head")));
-            }
+        if let Some(head) = reusable {
+            // A successful remote validation STARTED after this read
+            // arrived. Its observation is inside our read interval. A
+            // probe already in flight when we arrived cannot authorize
+            // this shortcut: it may have observed before an intervening
+            // write completed. Local publication is not a remote proof.
+            let _span = tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "validation_reuse").entered();
+            self.inner.instruments.namespace_head_cache_hit();
+            return Ok(head);
         }
         // Saturate instead of wrapping: at exhaustion reads simply stop
         // sharing, since no later validation number can exceed the observed one.
@@ -304,35 +179,28 @@ impl RuntimeCore {
         let result = self
             .refresh_namespace_head(namespace_id)
             .instrument(tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "validation_refresh"))
-            .await
-            .map(|mut head| {
+            .await;
+        match result {
+            Ok(mut head) => {
                 head.validation = Arc::clone(&validation);
                 head.completed_validation_no = validation_no;
-                head
-            });
-        match &result {
-            Ok(head) => self.inner.control_cache().insert_namespace_head(
-                namespace_id,
-                head.clone(),
-                self.runtime_cache_config().max_cached_namespaces,
-            ),
-            Err(_) => self
-                .inner
-                .control_cache()
-                .invalidate_namespace(namespace_id),
+                let head = Arc::new(head);
+                self.inner.head_state.insert_anchor(Arc::clone(&head));
+                Ok(head)
+            }
+            Err(error) => {
+                self.inner.head_state.invalidate_anchor(namespace_id);
+                Err(error)
+            }
         }
-        result
     }
 
     async fn refresh_namespace_head(
         &self,
         namespace_id: &NamespaceId,
-    ) -> std::result::Result<CachedNamespaceAnchor, CoreError> {
-        let cached = self
-            .inner
-            .control_cache()
-            .lookup_namespace_head(namespace_id);
-        if let Some(mut head) = cached {
+    ) -> std::result::Result<CachedReadAnchor, CoreError> {
+        if let Some(cached) = self.lookup_namespace_head(namespace_id) {
+            let mut head = CachedReadAnchor::clone(&cached);
             // Measure every answer against the previous check, not against the probe
             // it answers. A successor published after that check cannot be collected
             // within the bound. An answer that arrives later may miss one, however
@@ -377,7 +245,7 @@ impl RuntimeCore {
                 &loaded,
             )
             .await?;
-            self.inner.wal_tail_projection_cache.insert(
+            self.inner.head_state.insert_tail(
                 WalTailProjectionCacheKey {
                     namespace_id: namespace_id.clone(),
                     manifest_no: loaded.basis().manifest_no(),
@@ -394,14 +262,10 @@ impl RuntimeCore {
     pub(crate) async fn head_for_metadata_read(
         &self,
         namespace_id: &NamespaceId,
-    ) -> Result<CachedNamespaceAnchor> {
+    ) -> Result<Arc<CachedReadAnchor>> {
         self.load_namespace_head_cached(namespace_id)
             .await
             .map_err(RuntimeError::Core)
-    }
-
-    pub(crate) fn control_cache_enabled(&self) -> bool {
-        self.inner.config.runtime_cache.max_cached_namespaces > 0
     }
 
     /// The budgets every runtime cache sizes itself from, including the
@@ -410,15 +274,12 @@ impl RuntimeCore {
         &self.inner.config.runtime_cache
     }
 
-    pub(crate) fn runtime_read_context(
-        &self,
-        anchor: &CachedNamespaceAnchor,
-    ) -> RuntimeReadContext {
+    pub(crate) fn runtime_read_context(&self, anchor: &CachedReadAnchor) -> RuntimeReadContext {
         RuntimeReadContext {
             head: anchor.head.clone(),
             basis: anchor.basis.clone(),
             segment_cache: Arc::clone(&self.inner.metadata_segment_cache),
-            tail_cache: Arc::clone(&self.inner.wal_tail_projection_cache),
+            head_state: Arc::clone(&self.inner.head_state),
         }
     }
 
@@ -486,12 +347,12 @@ impl RuntimeCore {
         &self,
         namespace_id: &NamespaceId,
         pinned: CheckpointReadBasis,
-        live: &CachedNamespaceAnchor,
+        live: &CachedReadAnchor,
     ) -> (
         loonfs_core::NamespaceReaderEngine<crate::SharedObjectStore>,
         RuntimeReadContext,
     ) {
-        let read_context = self.runtime_read_context(&CachedNamespaceAnchor {
+        let read_context = self.runtime_read_context(&CachedReadAnchor {
             head: pinned.head,
             basis: pinned.basis,
             basis_checked: None,
@@ -533,17 +394,13 @@ impl RuntimeCore {
         namespace_id: &NamespaceId,
         state: loonfs_core::publish::ResultingReadState,
     ) {
-        if !self.control_cache_enabled() {
-            return;
-        }
-        let max_cached_namespaces = self.inner.config.runtime_cache.max_cached_namespaces;
         let head_seq = state.head.seq;
         let manifest_no = state.basis.manifest_no();
-        let mut cache = self.inner.control_cache();
-        let (cached_check, validation) = cache
-            .namespaces
-            .get(namespace_id)
-            .map(|(cached, _)| {
+        let (cached_check, validation) = self
+            .inner
+            .head_state
+            .peek_anchor(namespace_id)
+            .map(|cached| {
                 // The cached check also confirms the seeded view only if it checked
                 // the same basis and the seeded tip is not behind the cached one.
                 // Otherwise it says nothing about the seeded basis, or about the WAL
@@ -560,20 +417,17 @@ impl RuntimeCore {
             .into_iter()
             .chain([state.basis_checked])
             .min_by_key(Observation::age_ms);
-        cache.insert_namespace_head(
-            namespace_id,
-            CachedNamespaceAnchor {
+        self.inner
+            .head_state
+            .insert_anchor(Arc::new(CachedReadAnchor {
                 head: state.head,
                 basis: state.basis,
                 basis_checked,
                 validation,
                 completed_validation_no: 0,
-            },
-            max_cached_namespaces,
-        );
-        drop(cache);
-        self.inner.wal_tail_projection_cache.insert(
-            loonfs_core::cache::WalTailProjectionCacheKey {
+            }));
+        self.inner.head_state.insert_tail(
+            WalTailProjectionCacheKey {
                 namespace_id: namespace_id.clone(),
                 manifest_no,
                 head_seq,
@@ -582,26 +436,28 @@ impl RuntimeCore {
         );
     }
 
-    /// Drops the namespace's read caches. The publish-side view of the same
-    /// state — a namespace publisher's WAL tail projection — is stale for
-    /// exactly the same reasons, so a caller that owns a publication service
-    /// drops that too; see `LoonFs::invalidate_namespace`.
+    /// Drops the namespace's head anchor, so its next read revalidates from
+    /// the store. A caller that owns a publication service also drops its
+    /// publisher's projection; see `LoonFs::invalidate_namespace`.
+    ///
+    /// Cached WAL-tail projections stay. A tail is keyed by namespace,
+    /// manifest number, and head sequence, and that key names one immutable
+    /// fact: a namespace id names one lifetime, each manifest and WAL number
+    /// names one object that is never replaced or recreated, a fence adds no
+    /// rows, and a writer seeds only a put it saw land. A tail whose key the
+    /// reloaded anchor no longer uses is never wrong, only unused, and recency
+    /// evicts it.
     pub(crate) fn invalidate_namespace_read_cache(&self, namespace_id: &NamespaceId) {
         let _span = phase_span!(self, "update_cache", namespace_id).entered();
-        self.inner
-            .control_cache()
-            .invalidate_namespace(namespace_id);
-        self.inner
-            .wal_tail_projection_cache
-            .invalidate_namespace(namespace_id);
+        self.inner.head_state.invalidate_anchor(namespace_id);
     }
 }
 
 fn cached_anchor(
     anchor: NamespaceReadAnchor,
     basis_checked: Option<Observation>,
-) -> CachedNamespaceAnchor {
-    CachedNamespaceAnchor {
+) -> CachedReadAnchor {
+    CachedReadAnchor {
         basis: anchor.basis(),
         head: anchor.read_state,
         basis_checked,

@@ -3,11 +3,7 @@
 #![allow(clippy::panic)]
 
 use super::*;
-use crate::block_cache::DecodedBlock;
-use crate::cache::{
-    MetadataSegmentCache, WalTailProjectionCache, WalTailProjectionCacheConfig,
-    WalTailProjectionCacheKey,
-};
+use crate::cache::{HeadStateCache, MetadataSegmentCache, WalTailProjectionCacheKey};
 use crate::namespace::read_anchor::load_read_anchor;
 use crate::storage::content::{ContentLocation, DurableContentValidationError};
 use crate::{NamespaceEngine, RuntimeReadContext};
@@ -21,14 +17,7 @@ fn read_context(head: NamespaceReadState, basis: MetadataBasis) -> RuntimeReadCo
         head,
         basis,
         segment_cache: Arc::new(MetadataSegmentCache::new(Default::default())),
-        tail_cache: Arc::new(WalTailProjectionCache::new(
-            WalTailProjectionCacheConfig {
-                max_entries: 16,
-                max_rows: usize::MAX,
-                max_decoded_bytes: usize::MAX,
-            },
-            None,
-        )),
+        head_state: Arc::new(HeadStateCache::new(usize::MAX)),
     }
 }
 
@@ -210,14 +199,13 @@ async fn published_projection_reads_without_replay_and_counts_inline_bytes() {
     assert!(result.results[0].is_ok());
     let state = result.resulting_read_state.expect("published state");
     let context = read_context(state.head, state.basis);
-    let tail_bytes = state.tail.weight().bytes;
+    let tail_bytes = state.tail.decoded_bytes();
     assert_eq!(state.tail.inline_bytes(), value.bytes().len());
     assert!(tail_bytes >= state.tail.rows.decoded_bytes() + value.bytes().len());
     assert_eq!(
         publisher
-            .retained_tail_weight()
-            .expect("weight")
-            .decoded_bytes,
+            .retained_tail_decoded_bytes()
+            .expect("retained tail"),
         tail_bytes
     );
     let cloned = state.tail.as_ref().clone();
@@ -232,8 +220,10 @@ async fn published_projection_reads_without_replay_and_counts_inline_bytes() {
             .expect("cloned bytes")
             .as_ptr()
     );
-    context.tail_cache.insert(cache_key(&context), state.tail);
-    assert_eq!(context.tail_cache.stats().cached_decoded_bytes, tail_bytes);
+    context
+        .head_state
+        .insert_tail(cache_key(&context), state.tail);
+    assert_eq!(context.head_state.stats().cached_decoded_bytes, tail_bytes);
     let engine = NamespaceEngine::reader(&store, publisher.namespace_id.clone());
     store.reset();
     assert_eq!(
@@ -311,8 +301,8 @@ async fn a_copy_and_an_advanced_reader_keep_earlier_inline_content() {
     assert_no_content_requests(&store);
     assert_eq!(
         context
-            .tail_cache
-            .get(&cache_key(&context))
+            .head_state
+            .get_tail(&cache_key(&context))
             .expect("advanced tail"),
         publisher.wal_fold_input().expect("publish tail").tail_state
     );

@@ -28,10 +28,9 @@ pub(crate) mod tests;
 mod validate;
 
 pub use self::cache::{
-    MetadataSegmentCache, MetadataSegmentCacheConfig, MetadataSegmentCacheStats,
-    WalTailProjectionCache, WalTailProjectionCacheConfig, WalTailProjectionCacheKey,
-    WalTailProjectionCacheStats, DEFAULT_WAL_TAIL_PROJECTION_DECODED_BYTES,
-    DEFAULT_WAL_TAIL_PROJECTION_ROWS,
+    CachedReadAnchor, HeadStateCache, HeadStateCacheStats, MetadataSegmentCache,
+    MetadataSegmentCacheConfig, MetadataSegmentCacheStats, NamespaceValidation,
+    WalTailProjectionCacheKey, DEFAULT_WAL_TAIL_PROJECTION_DECODED_BYTES,
 };
 pub use self::compaction_merge::{
     refill_iterators, select_next_iterator, SegmentBlockLoader, SegmentRowIterator,

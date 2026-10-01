@@ -1,5 +1,5 @@
 //! Shared caches for decoded manifest state: SST blocks keyed by owner and
-//! segment id, validated manifests, and bounded WAL-tail projections.
+//! segment id, validated manifests, and the head state reads start from.
 //!
 //! The decoded block cache also carries the handle to the optional
 //! node-local cache of the same blocks in their encoded form; see
@@ -10,14 +10,18 @@ use super::runs::MetadataRunManifest;
 use super::stored_block_cache::StoredMetadataBlockCache;
 use crate::block_cache::{
     DecodedBlock, DecodedBlockCache, DecodedBlockCacheConfig, DecodedBlockCacheObserver,
-    DecodedBlockWeight, DecodedSegmentBlock, SegmentBlockKind, SegmentCacheKey,
+    DecodedSegmentBlock, SegmentBlockKind, SegmentCacheKey,
 };
+use crate::heap_bytes::{arc_bytes, HeapBytes};
+use crate::namespace::basis::MetadataBasis;
+use crate::namespace::state::NamespaceReadState;
+use crate::time::Observation;
 use crate::wal::ProjectedWalTail;
 use loonfs_api::wire::manifest::MetadataRow;
 use loonfs_api::wire::manifest::NamespaceManifestEnvelope;
 use loonfs_api::{ChangeSeq, ManifestNo, NamespaceId};
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 /// Default decoded-byte budget for metadata segment blocks. A value of zero
@@ -114,8 +118,6 @@ impl MetadataSegmentCache {
         Self {
             blocks: DecodedBlockCache::new(DecodedBlockCacheConfig {
                 max_decoded_bytes: config.max_decoded_bytes,
-                max_rows: None,
-                max_entries: None,
                 observer: observer.clone(),
             }),
             max_block_memo_bytes: config.max_block_memo_bytes,
@@ -180,32 +182,20 @@ impl MetadataSegmentCache {
     }
 }
 
-/// Default bounds for WAL-tail projections, shared by the read-side
-/// projection cache and the publish-side tail reuse check.
-pub const DEFAULT_WAL_TAIL_PROJECTION_ROWS: usize = 1_000_000;
+/// Default byte budget for head state, which the publish side also applies
+/// to the projections its sessions retain.
 pub const DEFAULT_WAL_TAIL_PROJECTION_DECODED_BYTES: usize = 64 * 1024 * 1024;
 
-/// Zero entries disables the cache; the row and byte limits bound what one
-/// entry may hold and what the cache may retain in total.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WalTailProjectionCacheConfig {
-    pub max_entries: usize,
-    pub max_rows: usize,
-    pub max_decoded_bytes: usize,
-}
-
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct WalTailProjectionCacheStats {
-    pub hits: usize,
-    pub misses: usize,
-    pub inserts: usize,
+pub struct HeadStateCacheStats {
+    pub tail_hits: usize,
+    pub tail_misses: usize,
+    pub tail_inserts: usize,
     pub evictions: usize,
-    pub evicted_rows: usize,
     pub evicted_decoded_bytes: usize,
-    pub uncacheable_count: usize,
-    pub uncacheable_rows: usize,
-    pub uncacheable_decoded_bytes: usize,
-    pub cached_rows: usize,
+    /// Entries heavier than the whole budget, which are never kept.
+    pub rejections: usize,
+    pub rejected_decoded_bytes: usize,
     pub cached_decoded_bytes: usize,
 }
 
@@ -216,112 +206,214 @@ pub struct WalTailProjectionCacheKey {
     pub head_seq: ChangeSeq,
 }
 
-impl DecodedBlock for Arc<ProjectedWalTail> {
-    fn weight(&self) -> DecodedBlockWeight {
-        DecodedBlockWeight {
-            bytes: self.decoded_bytes(),
-            rows: self.rows.row_count(),
+/// A namespace head and the metadata basis it was read against. Keeping them
+/// together ensures reads use a consistent pair. If compaction advances the
+/// current manifest, reads may replay additional WAL entries until the anchor
+/// refreshes.
+#[derive(Debug, Clone)]
+pub struct CachedReadAnchor {
+    pub head: NamespaceReadState,
+    pub basis: MetadataBasis,
+    /// The successor check that last confirmed `basis`.
+    pub basis_checked: Option<Observation>,
+    pub validation: Arc<NamespaceValidation>,
+    /// The validation that produced this anchor; a seeded anchor carries zero.
+    pub completed_validation_no: u64,
+}
+
+/// Lets concurrent reads of one namespace share one revalidation.
+#[derive(Debug, Default)]
+pub struct NamespaceValidation {
+    pub lock: tokio::sync::Mutex<()>,
+    pub started: AtomicU64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum HeadStateKey {
+    Anchor(NamespaceId),
+    Tail(WalTailProjectionCacheKey),
+}
+
+#[derive(Debug, Clone)]
+enum HeadState {
+    Anchor(Arc<CachedReadAnchor>),
+    Tail(Arc<ProjectedWalTail>),
+}
+
+impl HeadState {
+    fn into_anchor(self) -> Option<Arc<CachedReadAnchor>> {
+        match self {
+            Self::Anchor(anchor) => Some(anchor),
+            Self::Tail(_) => None,
+        }
+    }
+
+    fn into_tail(self) -> Option<Arc<ProjectedWalTail>> {
+        match self {
+            Self::Tail(tail) => Some(tail),
+            Self::Anchor(_) => None,
         }
     }
 }
 
-pub struct WalTailProjectionCache {
-    config: WalTailProjectionCacheConfig,
-    observer: Option<Arc<dyn DecodedBlockCacheObserver>>,
-    blocks: DecodedBlockCache<WalTailProjectionCacheKey, Arc<ProjectedWalTail>>,
-    rejection_stats: WalTailProjectionCacheRejectionStats,
+impl DecodedBlock for HeadState {
+    fn weight(&self) -> usize {
+        match self {
+            Self::Anchor(anchor) => {
+                arc_bytes::<CachedReadAnchor>()
+                    + arc_bytes::<NamespaceValidation>()
+                    + anchor.head.heap_bytes()
+                    + anchor.basis.0.heap_bytes()
+            }
+            Self::Tail(tail) => tail.decoded_bytes(),
+        }
+    }
 }
 
-impl std::fmt::Debug for WalTailProjectionCache {
+/// Namespace head anchors and WAL-tail projections under one byte budget and
+/// one recency order. An entry heavier than the whole budget is not kept,
+/// because inserting it would evict everything else first.
+pub struct HeadStateCache {
+    entries: DecodedBlockCache<HeadStateKey, HeadState>,
+    max_decoded_bytes: usize,
+    observer: Option<Arc<dyn DecodedBlockCacheObserver>>,
+    tail_observer: Option<Arc<dyn DecodedBlockCacheObserver>>,
+    counters: HeadStateCounters,
+}
+
+impl std::fmt::Debug for HeadStateCache {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
-            .debug_struct("WalTailProjectionCache")
-            .field("config", &self.config)
-            .field("blocks", &self.blocks)
-            .field("rejection_stats", &self.rejection_stats)
+            .debug_struct("HeadStateCache")
+            .field("entries", &self.entries)
+            .field("max_decoded_bytes", &self.max_decoded_bytes)
+            .field("counters", &self.counters)
             .finish_non_exhaustive()
     }
 }
 
 #[derive(Debug, Default)]
-struct WalTailProjectionCacheRejectionStats {
-    uncacheable_count: AtomicUsize,
-    uncacheable_rows: AtomicUsize,
-    uncacheable_decoded_bytes: AtomicUsize,
+struct HeadStateCounters {
+    tail_hits: AtomicUsize,
+    tail_misses: AtomicUsize,
+    tail_inserts: AtomicUsize,
+    rejections: AtomicUsize,
+    rejected_decoded_bytes: AtomicUsize,
 }
 
-impl WalTailProjectionCache {
-    pub fn new(
-        config: WalTailProjectionCacheConfig,
+impl HeadStateCache {
+    pub fn new(max_decoded_bytes: usize) -> Self {
+        Self::with_observers(max_decoded_bytes, None, None)
+    }
+
+    /// `observer` sees evictions, rejections, and retained bytes across both
+    /// kinds of entry; `tail_observer` sees WAL-tail lookups and inserts.
+    pub fn with_observers(
+        max_decoded_bytes: usize,
         observer: Option<Arc<dyn DecodedBlockCacheObserver>>,
+        tail_observer: Option<Arc<dyn DecodedBlockCacheObserver>>,
     ) -> Self {
-        let blocks = DecodedBlockCache::new(DecodedBlockCacheConfig {
-            max_decoded_bytes: config.max_decoded_bytes,
-            max_rows: Some(config.max_rows),
-            max_entries: Some(config.max_entries),
-            observer: observer.clone(),
-        });
         Self {
-            config,
+            entries: DecodedBlockCache::new(DecodedBlockCacheConfig {
+                max_decoded_bytes,
+                observer: observer.clone(),
+            }),
+            max_decoded_bytes,
             observer,
-            blocks,
-            rejection_stats: WalTailProjectionCacheRejectionStats::default(),
+            tail_observer,
+            counters: HeadStateCounters::default(),
         }
     }
 
-    pub fn stats(&self) -> WalTailProjectionCacheStats {
-        let blocks = self.blocks.stats();
-        WalTailProjectionCacheStats {
-            hits: blocks.hits,
-            misses: blocks.misses,
-            inserts: blocks.inserts,
-            evictions: blocks.evictions,
-            evicted_rows: blocks.evicted_rows,
-            evicted_decoded_bytes: blocks.evicted_decoded_bytes,
-            uncacheable_count: self
-                .rejection_stats
-                .uncacheable_count
-                .load(Ordering::SeqCst),
-            uncacheable_rows: self.rejection_stats.uncacheable_rows.load(Ordering::SeqCst),
-            uncacheable_decoded_bytes: self
-                .rejection_stats
-                .uncacheable_decoded_bytes
-                .load(Ordering::SeqCst),
-            cached_rows: blocks.cached_rows,
-            cached_decoded_bytes: blocks.cached_decoded_bytes,
+    pub fn stats(&self) -> HeadStateCacheStats {
+        let entries = self.entries.stats();
+        let counters = &self.counters;
+        HeadStateCacheStats {
+            tail_hits: counters.tail_hits.load(Ordering::SeqCst),
+            tail_misses: counters.tail_misses.load(Ordering::SeqCst),
+            tail_inserts: counters.tail_inserts.load(Ordering::SeqCst),
+            evictions: entries.evictions,
+            evicted_decoded_bytes: entries.evicted_decoded_bytes,
+            rejections: counters.rejections.load(Ordering::SeqCst),
+            rejected_decoded_bytes: counters.rejected_decoded_bytes.load(Ordering::SeqCst),
+            cached_decoded_bytes: entries.cached_decoded_bytes,
         }
     }
 
-    pub fn get(&self, key: &WalTailProjectionCacheKey) -> Option<Arc<ProjectedWalTail>> {
-        self.blocks.get(key)
+    /// Returns the namespace's anchor and marks it recently used.
+    pub fn get_anchor(&self, namespace_id: &NamespaceId) -> Option<Arc<CachedReadAnchor>> {
+        self.entries
+            .get(&HeadStateKey::Anchor(namespace_id.clone()))
+            .and_then(HeadState::into_anchor)
     }
 
-    pub fn insert(&self, key: WalTailProjectionCacheKey, tail: Arc<ProjectedWalTail>) {
-        if self.config.max_entries == 0 {
-            return;
+    /// Returns the namespace's anchor without marking it used.
+    pub fn peek_anchor(&self, namespace_id: &NamespaceId) -> Option<Arc<CachedReadAnchor>> {
+        self.entries
+            .peek(&HeadStateKey::Anchor(namespace_id.clone()))
+            .and_then(HeadState::into_anchor)
+    }
+
+    pub fn insert_anchor(&self, anchor: Arc<CachedReadAnchor>) {
+        self.insert(
+            HeadStateKey::Anchor(anchor.head.namespace_id.clone()),
+            HeadState::Anchor(anchor),
+        );
+    }
+
+    pub fn invalidate_anchor(&self, namespace_id: &NamespaceId) {
+        self.entries
+            .remove(&HeadStateKey::Anchor(namespace_id.clone()));
+    }
+
+    pub fn get_tail(&self, key: &WalTailProjectionCacheKey) -> Option<Arc<ProjectedWalTail>> {
+        if self.max_decoded_bytes == 0 {
+            return None;
         }
-        let weight = tail.weight();
-        if weight.rows > self.config.max_rows || weight.bytes > self.config.max_decoded_bytes {
-            self.rejection_stats
-                .uncacheable_count
-                .fetch_add(1, Ordering::SeqCst);
-            self.rejection_stats
-                .uncacheable_rows
-                .fetch_add(weight.rows, Ordering::SeqCst);
-            self.rejection_stats
-                .uncacheable_decoded_bytes
-                .fetch_add(weight.bytes, Ordering::SeqCst);
-            if let Some(observer) = &self.observer {
-                observer.reject(weight);
+        let tail = self
+            .entries
+            .get(&HeadStateKey::Tail(key.clone()))
+            .and_then(HeadState::into_tail);
+        let counter = match &tail {
+            Some(_) => &self.counters.tail_hits,
+            None => &self.counters.tail_misses,
+        };
+        counter.fetch_add(1, Ordering::SeqCst);
+        if let Some(observer) = &self.tail_observer {
+            match &tail {
+                Some(_) => observer.hit(),
+                None => observer.miss(),
             }
-            return;
         }
-        self.blocks.insert(key, tail);
+        tail
     }
 
-    pub fn invalidate_namespace(&self, namespace_id: &NamespaceId) {
-        self.blocks
-            .invalidate(|key| &key.namespace_id == namespace_id);
+    pub fn insert_tail(&self, key: WalTailProjectionCacheKey, tail: Arc<ProjectedWalTail>) {
+        if self.insert(HeadStateKey::Tail(key), HeadState::Tail(tail)) {
+            self.counters.tail_inserts.fetch_add(1, Ordering::SeqCst);
+            if let Some(observer) = &self.tail_observer {
+                observer.insert();
+            }
+        }
+    }
+
+    fn insert(&self, key: HeadStateKey, entry: HeadState) -> bool {
+        if self.max_decoded_bytes == 0 {
+            return false;
+        }
+        let decoded_bytes = entry.weight();
+        if decoded_bytes > self.max_decoded_bytes {
+            self.counters.rejections.fetch_add(1, Ordering::SeqCst);
+            self.counters
+                .rejected_decoded_bytes
+                .fetch_add(decoded_bytes, Ordering::SeqCst);
+            if let Some(observer) = &self.observer {
+                observer.reject(decoded_bytes);
+            }
+            return false;
+        }
+        self.entries.insert(key, entry);
+        true
     }
 }
 
@@ -329,9 +421,9 @@ impl WalTailProjectionCache {
 #[allow(clippy::panic)]
 mod tests {
     use super::{
-        DecodedMetadataSegmentBlock, MetadataSegmentBlockKind, MetadataSegmentCache,
-        MetadataSegmentCacheConfig, MetadataSegmentCacheKey, WalTailProjectionCache,
-        WalTailProjectionCacheConfig, WalTailProjectionCacheKey,
+        DecodedMetadataSegmentBlock, HeadStateCache, MetadataSegmentBlockKind,
+        MetadataSegmentCache, MetadataSegmentCacheConfig, MetadataSegmentCacheKey,
+        WalTailProjectionCacheKey,
     };
     use crate::metadata::{InodeRecord, MetadataState};
     use crate::wal::ProjectedWalTail;
@@ -359,14 +451,7 @@ mod tests {
 
     #[test]
     fn row_attribution_and_timestamps_never_enter_projection_cache_keys() {
-        let cache = WalTailProjectionCache::new(
-            WalTailProjectionCacheConfig {
-                max_entries: 1,
-                max_rows: 10,
-                max_decoded_bytes: 16 * 1024,
-            },
-            None,
-        );
+        let cache = HeadStateCache::new(16 * 1024);
         let key = WalTailProjectionCacheKey {
             namespace_id: NamespaceId::parse("demo").expect("namespace id"),
             manifest_no: ManifestNo(7),
@@ -397,10 +482,16 @@ mod tests {
                 Vec::new(),
                 Vec::new(),
             );
-            cache.insert(key.clone(), Arc::new(ProjectedWalTail::from_rows(rows)));
+            let tail = Arc::new(ProjectedWalTail::from_rows(rows));
+            cache.insert_tail(key.clone(), Arc::clone(&tail));
+            assert_eq!(
+                cache.stats().cached_decoded_bytes,
+                tail.decoded_bytes(),
+                "the same key replaces its entry"
+            );
             assert_eq!(
                 cache
-                    .get(&key)
+                    .get_tail(&key)
                     .expect("same projection cache key should hit")
                     .rows
                     .inodes()[0]
@@ -408,7 +499,6 @@ mod tests {
                 actor
             );
         }
-        assert_eq!(cache.stats().cached_rows, 1);
     }
 
     #[test]

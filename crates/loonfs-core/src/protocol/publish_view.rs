@@ -52,31 +52,19 @@ impl<S: ObjectStore + ?Sized> PublishMetadataView<'_, S> {
     }
 }
 
-/// Size bounds on the publish-time WAL-tail projection a view load will
+/// The size bound on the publish-time WAL-tail projection a view load will
 /// accept for reuse.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublishTailOptions {
-    pub max_tail_rows: usize,
     pub max_tail_decoded_bytes: usize,
 }
 
 impl Default for PublishTailOptions {
     fn default() -> Self {
         Self {
-            max_tail_rows: crate::manifest::DEFAULT_WAL_TAIL_PROJECTION_ROWS,
             max_tail_decoded_bytes: crate::manifest::DEFAULT_WAL_TAIL_PROJECTION_DECODED_BYTES,
         }
     }
-}
-
-/// The row and decoded-byte cost of a retained publish-tail projection.
-///
-/// Runtimes use these values to enforce aggregate cache limits without
-/// recounting the projection.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct PublishTailWeight {
-    pub rows: usize,
-    pub decoded_bytes: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -138,17 +126,8 @@ impl PublishTailProjection {
         Ok(())
     }
 
-    pub(crate) fn weight(&self) -> PublishTailWeight {
-        PublishTailWeight {
-            rows: self.tail_state.rows.row_count(),
-            decoded_bytes: self.tail_state.decoded_bytes(),
-        }
-    }
-
     pub(crate) fn within_limits(&self, options: &PublishTailOptions) -> bool {
-        let weight = self.weight();
-        weight.rows <= options.max_tail_rows
-            && weight.decoded_bytes <= options.max_tail_decoded_bytes
+        self.tail_state.decoded_bytes() <= options.max_tail_decoded_bytes
     }
 
     pub(crate) fn basis(&self) -> &MetadataBasis {

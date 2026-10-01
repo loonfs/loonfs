@@ -2,7 +2,7 @@
 //! uploads, checkpoints, and maintenance.
 
 use crate::authorize::{Authorizer, CommitAuthority, ReadAccess};
-use crate::cache::{MetadataSegmentCache, WalTailProjectionCache};
+use crate::cache::{HeadStateCache, MetadataSegmentCache};
 use crate::commit_engine::CommitCandidate;
 use crate::context::MutationContext;
 use crate::error::{CoreError, Result};
@@ -62,7 +62,7 @@ pub struct RuntimeReadContext {
     /// Verified manifest used to replay the pinned WAL tail.
     pub basis: MetadataBasis,
     pub segment_cache: Arc<MetadataSegmentCache>,
-    pub tail_cache: Arc<WalTailProjectionCache>,
+    pub head_state: Arc<HeadStateCache>,
 }
 
 /// Owned metadata for one buffered read, without retaining its metadata view.
@@ -95,7 +95,7 @@ fn runtime_read_load_context(context: &RuntimeReadContext) -> ReadLoadContext<'_
         &context.head,
         &context.basis,
         Some(&context.segment_cache),
-        Some(&context.tail_cache),
+        Some(&context.head_state),
     )
 }
 
@@ -1356,7 +1356,6 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::manifest::WalTailProjectionCacheConfig;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use tempfile::tempdir;
 
@@ -1404,14 +1403,7 @@ mod tests {
             basis: loaded.basis(),
             head: loaded.read_state,
             segment_cache: Arc::new(MetadataSegmentCache::new(Default::default())),
-            tail_cache: Arc::new(WalTailProjectionCache::new(
-                WalTailProjectionCacheConfig {
-                    max_entries: 1,
-                    max_rows: usize::MAX,
-                    max_decoded_bytes: usize::MAX,
-                },
-                None,
-            )),
+            head_state: Arc::new(HeadStateCache::new(usize::MAX)),
         };
         let changes = reader
             .list_changes_after(

@@ -9,30 +9,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::OnceCell;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct DecodedBlockWeight {
-    pub bytes: usize,
-    pub rows: usize,
-}
-
-impl DecodedBlockWeight {
-    fn saturating_add(self, other: Self) -> Self {
-        Self {
-            bytes: self.bytes.saturating_add(other.bytes),
-            rows: self.rows.saturating_add(other.rows),
-        }
-    }
-
-    fn saturating_sub(self, other: Self) -> Self {
-        Self {
-            bytes: self.bytes.saturating_sub(other.bytes),
-            rows: self.rows.saturating_sub(other.rows),
-        }
-    }
-}
-
 pub trait DecodedBlock: Clone {
-    fn weight(&self) -> DecodedBlockWeight;
+    /// The decoded bytes this value holds, charged against the cache budget.
+    fn weight(&self) -> usize;
 }
 
 /// Receives decoded-block cache events for metrics.
@@ -40,9 +19,9 @@ pub trait DecodedBlockCacheObserver: Send + Sync + 'static {
     fn hit(&self) {}
     fn miss(&self) {}
     fn insert(&self) {}
-    fn evict(&self, _weight: DecodedBlockWeight) {}
-    fn reject(&self, _weight: DecodedBlockWeight) {}
-    fn retained(&self, _weight: DecodedBlockWeight) {}
+    fn evict(&self, _decoded_bytes: usize) {}
+    fn reject(&self, _decoded_bytes: usize) {}
+    fn retained(&self, _decoded_bytes: usize) {}
     fn filter_skip(&self) {}
     fn filter_false_positive(&self) {}
 }
@@ -50,8 +29,6 @@ pub trait DecodedBlockCacheObserver: Send + Sync + 'static {
 #[derive(Clone)]
 pub struct DecodedBlockCacheConfig {
     pub max_decoded_bytes: usize,
-    pub max_rows: Option<usize>,
-    pub max_entries: Option<usize>,
     pub observer: Option<Arc<dyn DecodedBlockCacheObserver>>,
 }
 
@@ -60,20 +37,16 @@ impl std::fmt::Debug for DecodedBlockCacheConfig {
         formatter
             .debug_struct("DecodedBlockCacheConfig")
             .field("max_decoded_bytes", &self.max_decoded_bytes)
-            .field("max_rows", &self.max_rows)
-            .field("max_entries", &self.max_entries)
             .field("observer", &self.observer.as_ref().map(|_| "configured"))
             .finish()
     }
 }
 
 impl DecodedBlockCacheConfig {
-    /// A byte-bounded cache with no row bound, no entry bound, and no observer.
+    /// A byte-bounded cache with no observer.
     pub fn with_max_decoded_bytes(max_decoded_bytes: usize) -> Self {
         Self {
             max_decoded_bytes,
-            max_rows: None,
-            max_entries: None,
             observer: None,
         }
     }
@@ -85,9 +58,7 @@ pub struct DecodedBlockCacheStats {
     pub misses: usize,
     pub inserts: usize,
     pub evictions: usize,
-    pub evicted_rows: usize,
     pub evicted_decoded_bytes: usize,
-    pub cached_rows: usize,
     pub cached_decoded_bytes: usize,
 }
 
@@ -114,7 +85,7 @@ impl<K: std::fmt::Debug, V: std::fmt::Debug> std::fmt::Debug for DecodedBlockCac
 struct Inner<K, V> {
     entries: HashMap<K, CacheSlot<V>>,
     order: Recency<K>,
-    weight: DecodedBlockWeight,
+    decoded_bytes: usize,
 }
 
 #[derive(Debug)]
@@ -129,7 +100,6 @@ struct StatsInner {
     misses: AtomicUsize,
     inserts: AtomicUsize,
     evictions: AtomicUsize,
-    evicted_rows: AtomicUsize,
     evicted_decoded_bytes: AtomicUsize,
 }
 
@@ -140,7 +110,7 @@ impl<K: Clone + Eq + Hash, V: DecodedBlock> DecodedBlockCache<K, V> {
             inner: Mutex::new(Inner {
                 entries: HashMap::new(),
                 order: Recency::default(),
-                weight: DecodedBlockWeight::default(),
+                decoded_bytes: 0,
             }),
             stats: StatsInner::default(),
             in_flight: Mutex::new(HashMap::new()),
@@ -198,10 +168,8 @@ impl<K: Clone + Eq + Hash, V: DecodedBlock> DecodedBlockCache<K, V> {
             misses: self.stats.misses.load(Ordering::SeqCst),
             inserts: self.stats.inserts.load(Ordering::SeqCst),
             evictions: self.stats.evictions.load(Ordering::SeqCst),
-            evicted_rows: self.stats.evicted_rows.load(Ordering::SeqCst),
             evicted_decoded_bytes: self.stats.evicted_decoded_bytes.load(Ordering::SeqCst),
-            cached_rows: inner.weight.rows,
-            cached_decoded_bytes: inner.weight.bytes,
+            cached_decoded_bytes: inner.decoded_bytes,
         }
     }
 
@@ -228,6 +196,17 @@ impl<K: Clone + Eq + Hash, V: DecodedBlock> DecodedBlockCache<K, V> {
         Some(block)
     }
 
+    /// Returns a cached value without touching its recency or counting a
+    /// hit or a miss.
+    pub fn peek(&self, key: &K) -> Option<V> {
+        self.inner
+            .lock()
+            .expect("decoded block cache lock should not be poisoned")
+            .entries
+            .get(key)
+            .map(|slot| slot.block.clone())
+    }
+
     pub fn insert(&self, key: K, block: V) {
         if self.disabled() {
             return;
@@ -236,7 +215,7 @@ impl<K: Clone + Eq + Hash, V: DecodedBlock> DecodedBlockCache<K, V> {
             .inner
             .lock()
             .expect("decoded block cache lock should not be poisoned");
-        let weight = block.weight();
+        let decoded_bytes = block.weight();
         if let Some(previous) = inner.entries.insert(
             key.clone(),
             CacheSlot {
@@ -244,83 +223,62 @@ impl<K: Clone + Eq + Hash, V: DecodedBlock> DecodedBlockCache<K, V> {
                 last_touch: 0,
             },
         ) {
-            inner.weight = inner.weight.saturating_sub(previous.block.weight());
+            inner.decoded_bytes = inner.decoded_bytes.saturating_sub(previous.block.weight());
         }
-        inner.weight = inner.weight.saturating_add(weight);
+        inner.decoded_bytes = inner.decoded_bytes.saturating_add(decoded_bytes);
         inner.touch(&key);
         self.stats.inserts.fetch_add(1, Ordering::SeqCst);
         if let Some(observer) = &self.config.observer {
             observer.insert();
         }
         self.evict_over_budget(&mut inner);
-        self.record_retained(inner.weight);
+        self.record_retained(inner.decoded_bytes);
     }
 
-    pub fn invalidate(&self, matches: impl Fn(&K) -> bool) {
+    /// Drops one entry without counting an eviction.
+    pub fn remove(&self, key: &K) {
         let mut inner = self
             .inner
             .lock()
             .expect("decoded block cache lock should not be poisoned");
-        let keys = inner
-            .entries
-            .keys()
-            .filter(|key| matches(key))
-            .cloned()
-            .collect::<Vec<_>>();
-        for key in keys {
-            if let Some(slot) = inner.entries.remove(&key) {
-                let weight = slot.block.weight();
-                inner.weight = inner.weight.saturating_sub(weight);
-                self.record_eviction(weight);
-            }
+        if let Some(slot) = inner.entries.remove(key) {
+            inner.decoded_bytes = inner.decoded_bytes.saturating_sub(slot.block.weight());
+            self.record_retained(inner.decoded_bytes);
         }
-        self.record_retained(inner.weight);
     }
 
     fn disabled(&self) -> bool {
-        self.config.max_decoded_bytes == 0 || self.config.max_entries == Some(0)
+        self.config.max_decoded_bytes == 0
     }
 
     fn evict_over_budget(&self, inner: &mut Inner<K, V>) {
-        while inner.weight.bytes > self.config.max_decoded_bytes
-            || self
-                .config
-                .max_rows
-                .is_some_and(|max_rows| inner.weight.rows > max_rows)
-            || self
-                .config
-                .max_entries
-                .is_some_and(|max_entries| inner.entries.len() > max_entries)
-        {
+        while inner.decoded_bytes > self.config.max_decoded_bytes {
             let Inner { entries, order, .. } = &mut *inner;
             let Some(candidate) = order.pop_oldest(|key, stamp| slot_is_live(entries, key, stamp))
             else {
                 break;
             };
             if let Some(slot) = entries.remove(&candidate) {
-                let weight = slot.block.weight();
-                inner.weight = inner.weight.saturating_sub(weight);
-                self.record_eviction(weight);
+                let decoded_bytes = slot.block.weight();
+                inner.decoded_bytes = inner.decoded_bytes.saturating_sub(decoded_bytes);
+                self.record_eviction(decoded_bytes);
             }
         }
     }
 
-    fn record_eviction(&self, weight: DecodedBlockWeight) {
+    fn record_eviction(&self, decoded_bytes: usize) {
         self.stats.evictions.fetch_add(1, Ordering::SeqCst);
         self.stats
-            .evicted_rows
-            .fetch_add(weight.rows, Ordering::SeqCst);
-        self.stats
             .evicted_decoded_bytes
-            .fetch_add(weight.bytes, Ordering::SeqCst);
+            .fetch_add(decoded_bytes, Ordering::SeqCst);
         if let Some(observer) = &self.config.observer {
-            observer.evict(weight);
+            observer.evict(decoded_bytes);
         }
     }
 
-    fn record_retained(&self, weight: DecodedBlockWeight) {
+    fn record_retained(&self, decoded_bytes: usize) {
         if let Some(observer) = &self.config.observer {
-            observer.retained(weight);
+            observer.retained(decoded_bytes);
         }
     }
 }
@@ -381,14 +339,13 @@ pub enum DecodedSegmentBlock<Row, Manifest> {
 }
 
 impl<Row: Clone, Manifest: Clone> DecodedBlock for DecodedSegmentBlock<Row, Manifest> {
-    fn weight(&self) -> DecodedBlockWeight {
-        let bytes = match self {
+    fn weight(&self) -> usize {
+        match self {
             Self::Index { decoded_bytes, .. }
             | Self::Filter { decoded_bytes, .. }
             | Self::Data { decoded_bytes, .. }
             | Self::Manifest { decoded_bytes, .. } => *decoded_bytes,
-        };
-        DecodedBlockWeight { bytes, rows: 0 }
+        }
     }
 }
 
@@ -464,17 +421,14 @@ fn wrong_kind(object_key: &str, message: &str) -> ManifestLoadError {
 
 #[cfg(test)]
 mod tests {
-    use super::{DecodedBlock, DecodedBlockCache, DecodedBlockCacheConfig, DecodedBlockWeight};
+    use super::{DecodedBlock, DecodedBlockCache, DecodedBlockCacheConfig};
 
     #[derive(Clone)]
     struct Block(usize);
 
     impl DecodedBlock for Block {
-        fn weight(&self) -> DecodedBlockWeight {
-            DecodedBlockWeight {
-                bytes: self.0,
-                rows: 0,
-            }
+        fn weight(&self) -> usize {
+            self.0
         }
     }
 

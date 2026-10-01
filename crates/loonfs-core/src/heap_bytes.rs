@@ -1,12 +1,13 @@
 //! The heap that decoded metadata holds, which the metadata segment cache,
-//! the per-view block memo, and the WAL-tail projection budgets charge.
+//! the per-view block memo, and the head-state budgets charge.
 //!
 //! A weight counts the bytes a value asks the allocator for: every slot a
 //! container reserved, filled or not, and every string, vector, map table,
 //! tree node, and reference count the value owns. Allocator rounding and
 //! bookkeeping stay outside every budget.
 
-use loonfs_api::wire::control::{ForkBasis, WriterBlock};
+use crate::namespace::state::NamespaceReadState;
+use loonfs_api::wire::control::{ForkBasis, ManifestRef, WriterBlock};
 use loonfs_api::wire::envelope::VerifiedEnvelope;
 use loonfs_api::wire::manifest::{
     AccessRevisionRecord, ActiveDeletionRecord, ActiveDeletionRowAction, AttributesRevisionRecord,
@@ -338,11 +339,25 @@ impl HeapBytes for NamespaceAccess {
     }
 }
 
+impl HeapBytes for NamespaceReadState {
+    fn heap_bytes(&self) -> usize {
+        self.namespace_id.heap_bytes()
+            + self.created_by.heap_bytes()
+            + self.access.heap_bytes()
+            + self.fork_basis.heap_bytes()
+            + self.writer.heap_bytes()
+    }
+}
+
+impl HeapBytes for ManifestRef {
+    fn heap_bytes(&self) -> usize {
+        self.owner_namespace_id.heap_bytes() + self.payload_checksum.heap_bytes()
+    }
+}
+
 impl HeapBytes for ForkBasis {
     fn heap_bytes(&self) -> usize {
-        self.manifest.owner_namespace_id.heap_bytes()
-            + self.manifest.payload_checksum.heap_bytes()
-            + self.source_pin_id.heap_bytes()
+        self.manifest.heap_bytes() + self.source_pin_id.heap_bytes()
     }
 }
 

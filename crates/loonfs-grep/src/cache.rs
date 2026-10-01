@@ -4,8 +4,8 @@ use crate::codec::IndexRow;
 use crate::manifest::GrepManifestState;
 use loonfs::metrics::{CounterHandle, MetricsRecorder, RESULT_HIT, RESULT_MISS};
 use loonfs::{
-    DecodedBlockCache, DecodedBlockCacheConfig, DecodedBlockCacheObserver, DecodedBlockWeight,
-    DecodedSegmentBlock, SegmentBlockKind, SegmentCacheKey,
+    DecodedBlockCache, DecodedBlockCacheConfig, DecodedBlockCacheObserver, DecodedSegmentBlock,
+    SegmentBlockKind, SegmentCacheKey,
 };
 use loonfs_api::wire::sst_blocks::DEFAULT_TARGET_BLOCK_BYTES;
 use std::sync::Arc;
@@ -78,7 +78,7 @@ impl DecodedBlockCacheObserver for GrepBlockCacheMetrics {
         self.inserts.increment(1);
     }
 
-    fn evict(&self, _weight: DecodedBlockWeight) {
+    fn evict(&self, _decoded_bytes: usize) {
         self.evictions.increment(1);
     }
 }

@@ -24,9 +24,7 @@ use crate::fs::{RuntimeCore, WriterBits};
 use crate::metrics::{PublishOutcome, RESULT_OK};
 use crate::publish::CommitCandidate;
 use crate::trace::{phase_event, phase_span};
-use crate::{
-    CoreError, DeleteNamespaceOptions, DeleteNamespaceResponse, RuntimeCacheConfig, RuntimeError,
-};
+use crate::{CoreError, DeleteNamespaceOptions, DeleteNamespaceResponse, RuntimeError};
 use admission::{AdmissionPermit, AdmittedWaiter, PublicationAdmission};
 use futures::FutureExt;
 use loonfs_api::v0::Commit;
@@ -37,9 +35,7 @@ use loonfs_core::commit::{
     is_retryable_wal_publish, settle_publish_attempt, CommitFingerprint, WalPublishError,
 };
 use loonfs_core::limits::{CONTENTION_RETRY_LIMIT, FOLD_AT_WAL_OBJECTS};
-use loonfs_core::publish::{
-    NamespaceCommitEngine, PublishTailWeight, SharedWriterSessionState, WriterSessionState,
-};
+use loonfs_core::publish::{NamespaceCommitEngine, SharedWriterSessionState, WriterSessionState};
 use loonfs_core::time::{Deadline, Observation};
 use loonfs_objectstore::timing::MonotonicTimer;
 use std::collections::{HashMap, VecDeque};
@@ -243,15 +239,15 @@ impl RegistryShared {
     fn settle_projection(
         &self,
         namespace_id: &NamespaceId,
-        weight: Option<PublishTailWeight>,
-        budget: &RuntimeCacheConfig,
+        decoded_bytes: Option<usize>,
+        max_decoded_bytes: usize,
         instruments: &crate::metrics::RuntimeInstruments,
     ) -> RetainedProjectionTotals {
         let mut state = self.lock_state();
-        state.projections.record(namespace_id, weight);
+        state.projections.record(namespace_id, decoded_bytes);
         let attempts = state.projections.len();
         for _ in 0..attempts {
-            if !state.projections.is_over_budget(budget) {
+            if state.projections.decoded_bytes <= max_decoded_bytes {
                 break;
             }
             let Some(victim) = state.projections.oldest() else {
@@ -280,9 +276,8 @@ impl RegistryShared {
 /// namespaces actually holds.
 #[derive(Debug, Default)]
 struct RetainedProjections {
-    entries: HashMap<NamespaceId, (PublishTailWeight, u64)>,
+    entries: HashMap<NamespaceId, (usize, u64)>,
     order: Recency<NamespaceId>,
-    rows: usize,
     decoded_bytes: usize,
 }
 
@@ -290,23 +285,21 @@ struct RetainedProjections {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct RetainedProjectionTotals {
     projections: usize,
-    rows: usize,
     decoded_bytes: usize,
 }
 
 impl RetainedProjections {
     /// Records what one namespace retains after a publish; `None` is a
     /// publish that kept nothing.
-    fn record(&mut self, namespace_id: &NamespaceId, weight: Option<PublishTailWeight>) {
+    fn record(&mut self, namespace_id: &NamespaceId, decoded_bytes: Option<usize>) {
         self.remove_entry(namespace_id);
-        let Some(weight) = weight else {
+        let Some(decoded_bytes) = decoded_bytes else {
             return;
         };
         let last_touch = self.order.touch(namespace_id);
-        self.rows = self.rows.saturating_add(weight.rows);
-        self.decoded_bytes = self.decoded_bytes.saturating_add(weight.decoded_bytes);
+        self.decoded_bytes = self.decoded_bytes.saturating_add(decoded_bytes);
         self.entries
-            .insert(namespace_id.clone(), (weight, last_touch));
+            .insert(namespace_id.clone(), (decoded_bytes, last_touch));
         self.compact_order();
     }
 
@@ -323,11 +316,10 @@ impl RetainedProjections {
     }
 
     fn remove_entry(&mut self, namespace_id: &NamespaceId) {
-        let Some((weight, _)) = self.entries.remove(namespace_id) else {
+        let Some((decoded_bytes, _)) = self.entries.remove(namespace_id) else {
             return;
         };
-        self.rows = self.rows.saturating_sub(weight.rows);
-        self.decoded_bytes = self.decoded_bytes.saturating_sub(weight.decoded_bytes);
+        self.decoded_bytes = self.decoded_bytes.saturating_sub(decoded_bytes);
     }
 
     fn oldest(&mut self) -> Option<NamespaceId> {
@@ -343,11 +335,6 @@ impl RetainedProjections {
         });
     }
 
-    fn is_over_budget(&self, budget: &RuntimeCacheConfig) -> bool {
-        self.rows > budget.max_cached_wal_tail_projection_rows
-            || self.decoded_bytes > budget.max_cached_wal_tail_projection_decoded_bytes
-    }
-
     fn len(&self) -> usize {
         self.entries.len()
     }
@@ -355,14 +342,13 @@ impl RetainedProjections {
     fn totals(&self) -> RetainedProjectionTotals {
         RetainedProjectionTotals {
             projections: self.entries.len(),
-            rows: self.rows,
             decoded_bytes: self.decoded_bytes,
         }
     }
 }
 
 fn projection_is_live(
-    entries: &HashMap<NamespaceId, (PublishTailWeight, u64)>,
+    entries: &HashMap<NamespaceId, (usize, u64)>,
     namespace_id: &NamespaceId,
     stamp: u64,
 ) -> bool {
@@ -960,15 +946,16 @@ impl NamespacePublisher {
     /// The caller still holds the engine lock, so the recorded weight matches the
     /// projection in the engine. Eviction only tries engine locks, so it
     /// does not wait while holding the registry lock.
-    fn settle_retained_projection(&self, weight: Option<PublishTailWeight>) {
+    fn settle_retained_projection(&self, decoded_bytes: Option<usize>) {
         let Some(shared) = self.shared.upgrade() else {
             return;
         };
-        let budget = self.runtime_core.runtime_cache_config();
         let totals = shared.settle_projection(
             &self.namespace_id,
-            weight,
-            budget,
+            decoded_bytes,
+            self.runtime_core
+                .runtime_cache_config()
+                .max_cached_wal_tail_projection_decoded_bytes,
             self.runtime_core.instruments(),
         );
         self.report_retained_projections(totals);
@@ -1435,11 +1422,11 @@ impl NamespacePublisher {
         } else {
             None
         };
-        let retained_tail_weight = engine.retained_tail_weight();
+        let retained_tail_decoded_bytes = engine.retained_tail_decoded_bytes();
         if publish.wal_tail_observed {
             slot.last_known_wal_tail_inline_bytes = Some(publish.wal_tail_inline_bytes);
         }
-        self.settle_retained_projection(retained_tail_weight);
+        self.settle_retained_projection(retained_tail_decoded_bytes);
         drop(slot);
         if let Some(start) = fold_start {
             let _ = start.send(());

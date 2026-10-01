@@ -11,7 +11,7 @@ use loonfs::{
     maintenance_hint_relay, CreateCheckpointOptions, CreateNamespaceOptions, CreateSnapshotOptions,
     GarbageCollectionJob, LoonFs, MaintenanceConclusion, MaintenanceJobId, MaintenanceRegistry,
     MaintenanceRunner, MetadataCompactionJob, MetadataMaintenanceJob, MetadataMaintenanceOptions,
-    PutFileOptions, RuntimeCacheConfig, SnapshotPolicy,
+    PutFileOptions, SnapshotPolicy,
 };
 use loonfs_test_support::block_on::block_on;
 use loonfs_test_support::ids::namespace_id;
@@ -307,7 +307,7 @@ fn snapshot_read_views_report_the_snapshot_view_counter() {
 }
 
 #[test]
-fn reads_report_head_cache_lookups_and_retained_segment_bytes() {
+fn reads_report_head_cache_lookups_and_retained_bytes() {
     let temp_dir = tempdir().expect("tempdir");
     let recorder = Arc::new(DefaultMetricsRecorder::new());
     let (first, second) = (namespace_id("first"), namespace_id("second"));
@@ -323,10 +323,6 @@ fn reads_report_head_cache_lookups_and_retained_segment_bytes() {
                 .expect("create namespace");
         }
         let reader = LoonFs::reader_with_store(store(temp_dir.path()))
-            .runtime_cache(RuntimeCacheConfig {
-                max_cached_namespaces: 1,
-                ..RuntimeCacheConfig::default()
-            })
             .metrics_recorder(recorder.clone())
             .build()
             .await
@@ -351,14 +347,13 @@ fn reads_report_head_cache_lookups_and_retained_segment_bytes() {
             "{labels:?}"
         );
     }
-    assert_eq!(
-        counter(&snapshot, "loonfs.namespace_head_cache.evictions", &[]),
-        1,
-        "the second namespace takes the only slot"
-    );
-    assert_eq!(
-        gauge(&snapshot, "loonfs.namespace_head_cache.entries", &[]),
-        1
+    assert!(
+        gauge(
+            &snapshot,
+            "loonfs.head_state_cache.retained_decoded_bytes",
+            &[]
+        ) > 0,
+        "the head loads cached both namespaces' head state"
     );
     assert!(
         gauge(
