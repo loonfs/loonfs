@@ -1,6 +1,8 @@
 //! Read views that keep related reads on one captured namespace state.
 
-use crate::common::{assert_core_error_kind, open_runtime_async, store, SettableWallClock};
+use crate::common::{
+    assert_core_error_kind, metadata_options, open_runtime_async, store, SettableWallClock,
+};
 use loonfs::{
     CreateNamespaceOptions, CreateSnapshotOptions, DestinationBehavior, ErrorCode, LoonFs,
     NamespaceId, PageRequest, PaginationPolicy, PutFileOptions, SnapshotPolicy,
@@ -59,9 +61,15 @@ async fn read_during_compaction_and_collection(
             .expect("file");
         runtime
             .maintenance
-            .fold_wal(&namespace)
+            .maintain_metadata(
+                &namespace,
+                loonfs::MetadataMaintenanceOptions {
+                    compaction_policy: loonfs::MetadataCompactionPolicy::CompactImmediately,
+                    ..metadata_options(1)
+                },
+            )
             .await
-            .expect("fold");
+            .expect("fold and compact");
     }
     let segment_keys = store
         .list_prefix(&loonfs_objectstore::keys::metadata_segment_prefix(

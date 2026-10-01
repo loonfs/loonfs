@@ -207,11 +207,11 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
             "folded" => {
                 let step = runtime
                     .maintenance
-                    .run_maintenance(&source, metadata_request(1))
+                    .maintain_metadata(&source, metadata_options(1))
                     .await
                     .expect("fold WAL");
                 assert_eq!(
-                    upkeep(&step).wal_fold,
+                    step.wal_fold,
                     WalFoldStepOutcome::Folded {
                         manifest_head_seq: head_seq,
                     }
@@ -242,7 +242,7 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
                     .committed_seq;
                 runtime
                     .maintenance
-                    .run_maintenance(&source, metadata_request(1))
+                    .maintain_metadata(&source, metadata_options(1))
                     .await
                     .expect("materialize source head before advancing retention");
                 let advanced = runtime

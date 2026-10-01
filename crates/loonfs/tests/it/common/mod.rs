@@ -9,13 +9,12 @@ use loonfs::uploads::ResolvedUploadCompletion;
 use loonfs::{
     AdvanceRetentionResponse, ChangeSeq, Checkpoint, ChecksumAlgorithm, Commit, ContentRef,
     CopyOptions, CreateCheckpointOptions, CreateDirectoryOptions, CreateNamespaceOptions,
-    DeleteOptions, DirectoryPageCursor, ErrorCode, FileBytes, ListChangesOptions,
-    ListChangesResponse, LoonFs, LoonFsBuilder, Maintenance, MetadataMaintenanceResponse,
-    MoveOptions, Namespace, NamespaceDiagnostics, NamespaceId, PageRequest, PaginationPolicy,
-    PathEntry, PutFileOptions, ReadOnly, RunMaintenanceRequest, RunMaintenanceResponse,
-    RuntimeError, SharedObjectStore, UploadId, UploadSession, Writable,
+    DeleteOptions, DirectoryPageCursor, ErrorCode, FileBytes, FoldWalResponse, ListChangesOptions,
+    ListChangesResponse, LoonFs, LoonFsBuilder, Maintenance, MetadataMaintenanceOptions,
+    MetadataMaintenanceResponse, MoveOptions, Namespace, NamespaceDiagnostics, NamespaceId,
+    PageRequest, PaginationPolicy, PathEntry, PutFileOptions, ReadOnly, RuntimeError,
+    SharedObjectStore, UploadId, UploadSession, Writable,
 };
-use loonfs_api::MetadataMaintenanceRequest;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::stores::{
     FailStore, InjectedError, KeyPredicate, OperationClass, RecordingStore,
@@ -174,19 +173,13 @@ pub(crate) async fn collect_checkpoints(
     Ok(response)
 }
 
-/// The upkeep report returned by a metadata maintenance request.
-pub(crate) fn upkeep(response: &RunMaintenanceResponse) -> &MetadataMaintenanceResponse {
-    let RunMaintenanceResponse::Metadata(metadata) = response else {
-        panic!("metadata request returned a different response")
-    };
-    metadata
-}
-
-/// A metadata request with an explicit fold threshold.
-pub(crate) fn metadata_request(max_wal_tail_objects: u64) -> RunMaintenanceRequest {
-    RunMaintenanceRequest::Metadata(MetadataMaintenanceRequest {
-        max_wal_tail_objects: Some(max_wal_tail_objects),
-    })
+/// Metadata maintenance options with an explicit fold threshold.
+pub(crate) fn metadata_options(max_wal_tail_objects: u64) -> MetadataMaintenanceOptions {
+    MetadataMaintenanceOptions {
+        max_wal_tail_objects: std::num::NonZeroU64::new(max_wal_tail_objects)
+            .expect("a fold threshold should be nonzero"),
+        ..MetadataMaintenanceOptions::default()
+    }
 }
 
 /// One handle set per test fixture: a writer, its derived reader, and an
@@ -434,15 +427,12 @@ pub(crate) trait RuntimeTestExt {
         &self,
         namespace_id: &NamespaceId,
     ) -> loonfs::Result<NamespaceDiagnostics>;
-    fn maintenance_run_namespace_blocking(
+    fn maintain_metadata_blocking(
         &self,
         namespace_id: &NamespaceId,
-        request: RunMaintenanceRequest,
-    ) -> loonfs::Result<RunMaintenanceResponse>;
-    fn fold_wal_blocking(
-        &self,
-        namespace_id: &NamespaceId,
+        options: MetadataMaintenanceOptions,
     ) -> loonfs::Result<MetadataMaintenanceResponse>;
+    fn fold_wal_blocking(&self, namespace_id: &NamespaceId) -> loonfs::Result<FoldWalResponse>;
     fn stat_path_blocking(
         &self,
         namespace_id: &NamespaceId,
@@ -553,18 +543,15 @@ impl RuntimeTestExt for TestRuntime {
         block_on(self.maintenance.get_namespace_diagnostics(namespace_id))
     }
 
-    fn maintenance_run_namespace_blocking(
+    fn maintain_metadata_blocking(
         &self,
         namespace_id: &NamespaceId,
-        request: RunMaintenanceRequest,
-    ) -> loonfs::Result<RunMaintenanceResponse> {
-        block_on(self.maintenance.run_maintenance(namespace_id, request))
+        options: MetadataMaintenanceOptions,
+    ) -> loonfs::Result<MetadataMaintenanceResponse> {
+        block_on(self.maintenance.maintain_metadata(namespace_id, options))
     }
 
-    fn fold_wal_blocking(
-        &self,
-        namespace_id: &NamespaceId,
-    ) -> loonfs::Result<MetadataMaintenanceResponse> {
+    fn fold_wal_blocking(&self, namespace_id: &NamespaceId) -> loonfs::Result<FoldWalResponse> {
         block_on(self.maintenance.fold_wal(namespace_id))
     }
 

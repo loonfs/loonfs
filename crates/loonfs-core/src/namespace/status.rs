@@ -11,14 +11,6 @@ use loonfs_api::{
 };
 use loonfs_objectstore::ObjectStore;
 
-/// Whether a namespace carries visible commits its basis manifest does not
-/// cover, and the head sequence they run to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct NamespaceFoldBasis {
-    pub head_seq: ChangeSeq,
-    pub has_unfolded_wal_tail: bool,
-}
-
 /// Decoded WAL tail usage for test assertions.
 #[cfg(any(test, feature = "test-support"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -131,16 +123,4 @@ pub async fn load_namespace_diagnostics<S: ObjectStore + ?Sized>(
         wal_tail_objects,
         wal_tail_newest_commit_at_ms,
     ))
-}
-
-pub async fn load_namespace_fold_basis<S: ObjectStore + ?Sized>(
-    store: &S,
-    expected_namespace_id: &NamespaceId,
-) -> Result<NamespaceFoldBasis> {
-    let loaded = load_read_anchor(store, expected_namespace_id).await?;
-    super::control::ensure_namespace_live(&loaded.read_state)?;
-    Ok(NamespaceFoldBasis {
-        head_seq: loaded.read_state.seq,
-        has_unfolded_wal_tail: loaded.read_state.folded_wal_no < loaded.read_state.wal_no,
-    })
 }

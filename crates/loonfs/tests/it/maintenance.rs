@@ -7,12 +7,11 @@ use crate::common::*;
 use loonfs::publish::{parse_mutation_path, CommitRequest, FilesystemOperation};
 use loonfs::{
     ChangeSeq, CommitId, CompactionStepOutcome, CreateCheckpointOptions, CreateNamespaceOptions,
-    CreateSnapshotOptions, DeleteNamespaceOptions, ErrorCode, ManifestNo,
-    MetadataCompactionOutcome, NamespaceId, PutFileOptions, RunMaintenanceRequest,
-    RunMaintenanceResponse, SharedObjectStore, SnapshotPolicy, WalFoldStepOutcome,
+    CreateSnapshotOptions, DeleteNamespaceOptions, ErrorCode, FoldWalOutcome, GcConfig, ManifestNo,
+    MetadataCompactionOutcome, MetadataCompactionPolicy, MetadataMaintenanceOptions, NamespaceId,
+    PutFileOptions, SharedObjectStore, SnapshotPolicy, WalFoldStepOutcome,
 };
 use loonfs_api::wire::manifest::decode_namespace_manifest_json;
-use loonfs_api::{AdvanceRetentionRequest, GcRequest, MetadataCompactionRequest};
 use loonfs_objectstore::keys::{hint, metadata_manifest_object};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
@@ -130,13 +129,13 @@ fn namespace_diagnostics_and_step_reject_missing_namespace() {
         ErrorCode::NamespaceNotFound,
     );
     assert_core_error_kind(
-        fs.maintenance_run_namespace_blocking(&namespace_id, metadata_request(1)),
+        fs.maintain_metadata_blocking(&namespace_id, metadata_options(1)),
         ErrorCode::NamespaceNotFound,
     );
     assert_core_error_kind(
-        fs.maintenance_run_namespace_blocking(
-            &namespace_id,
-            RunMaintenanceRequest::Gc(GcRequest::default()),
+        block_on(
+            fs.maintenance
+                .gc_namespace(&namespace_id, &GcConfig::default()),
         ),
         ErrorCode::NamespaceNotFound,
     );
@@ -162,13 +161,13 @@ fn namespace_diagnostics_and_step_reject_a_namespace_whose_hint_is_gone() {
         ErrorCode::NamespaceNotFound,
     );
     assert_core_error_kind(
-        fs.maintenance_run_namespace_blocking(&namespace_id, metadata_request(1)),
+        fs.maintain_metadata_blocking(&namespace_id, metadata_options(1)),
         ErrorCode::NamespaceNotFound,
     );
     assert_core_error_kind(
-        fs.maintenance_run_namespace_blocking(
-            &namespace_id,
-            RunMaintenanceRequest::Gc(GcRequest::default()),
+        block_on(
+            fs.maintenance
+                .gc_namespace(&namespace_id, &GcConfig::default()),
         ),
         ErrorCode::NamespaceNotFound,
     );
@@ -185,13 +184,11 @@ fn namespace_diagnostics_and_step_reject_a_namespace_whose_hint_is_gone() {
         .expect("open namespace");
     block_on(namespace.delete_namespace(DeleteNamespaceOptions::default()))
         .expect("delete namespace");
-    let response = fs
-        .maintenance_run_namespace_blocking(
-            &deleted_namespace,
-            RunMaintenanceRequest::Gc(GcRequest::default()),
-        )
-        .expect("GC accepts a deleted namespace");
-    assert!(matches!(response, RunMaintenanceResponse::Gc(_)));
+    block_on(
+        fs.maintenance
+            .gc_namespace(&deleted_namespace, &GcConfig::default()),
+    )
+    .expect("GC accepts a deleted namespace");
 }
 
 #[test]
@@ -214,9 +211,9 @@ fn maintenance_step_below_threshold_is_not_needed() {
     .expect("put file");
 
     let response = fs
-        .maintenance_run_namespace_blocking(&namespace_id, metadata_request(3))
+        .maintain_metadata_blocking(&namespace_id, metadata_options(3))
         .expect("maintenance pass");
-    assert_eq!(upkeep(&response).wal_fold, WalFoldStepOutcome::NotNeeded);
+    assert_eq!(response.wal_fold, WalFoldStepOutcome::NotNeeded);
 }
 
 #[test]
@@ -239,10 +236,10 @@ fn maintenance_step_at_wal_object_threshold_folds_the_wal() {
     .expect("put file");
 
     let response = fs
-        .maintenance_run_namespace_blocking(&namespace_id, metadata_request(2))
+        .maintain_metadata_blocking(&namespace_id, metadata_options(2))
         .expect("maintenance pass");
     assert_eq!(
-        upkeep(&response).wal_fold,
+        response.wal_fold,
         WalFoldStepOutcome::Folded {
             manifest_head_seq: ChangeSeq(1)
         }
@@ -286,10 +283,10 @@ fn metadata_run_does_not_advance_retention() {
     .expect("put file");
 
     let response = fs
-        .maintenance_run_namespace_blocking(&namespace_id, metadata_request(1))
+        .maintain_metadata_blocking(&namespace_id, metadata_options(1))
         .expect("step without retention");
     assert_eq!(
-        upkeep(&response).wal_fold,
+        response.wal_fold,
         WalFoldStepOutcome::Folded {
             manifest_head_seq: ChangeSeq(1)
         }
@@ -301,15 +298,9 @@ fn metadata_run_does_not_advance_retention() {
         ChangeSeq(0)
     );
 
-    let response = fs
-        .maintenance_run_namespace_blocking(
-            &namespace_id,
-            RunMaintenanceRequest::Retention(AdvanceRetentionRequest {}),
-        )
+    let retention = fs
+        .advance_retention_floor_blocking(&namespace_id)
         .expect("step with retention");
-    let RunMaintenanceResponse::Retention(retention) = response else {
-        panic!("retention request returned a different response")
-    };
     assert_eq!(retention.retention_floor_seq, ChangeSeq(1));
 
     // A plan naming retention alone is the same opt-in.
@@ -320,24 +311,22 @@ fn metadata_run_does_not_advance_retention() {
         PutFileOptions::new(loonfs_test_support::test_actor()),
     )
     .expect("put second file");
-    fs.maintenance_run_namespace_blocking(&namespace_id, metadata_request(1))
+    fs.maintain_metadata_blocking(&namespace_id, metadata_options(1))
         .expect("fold second WAL object");
-    let response = fs
-        .maintenance_run_namespace_blocking(
-            &namespace_id,
-            RunMaintenanceRequest::Retention(AdvanceRetentionRequest {}),
-        )
+    let retention = fs
+        .advance_retention_floor_blocking(&namespace_id)
         .expect("retention-only step");
-    let RunMaintenanceResponse::Retention(retention) = response else {
-        panic!("retention request returned a different response")
-    };
     assert_eq!(retention.retention_floor_seq, ChangeSeq(2));
 }
 
 #[test]
 fn the_typed_wrappers_are_single_action_steps() {
     let temp_dir = tempdir().expect("tempdir");
-    let fs = runtime(temp_dir.path(), "typed-wrapper-test");
+    let store = Arc::new(RecordingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
+        KeyPredicate::any(),
+    ));
+    let fs = open_runtime(store.clone(), "typed-wrapper-test");
     let namespace_id = namespace_id("demo");
 
     fs.create_namespace_blocking(
@@ -345,13 +334,16 @@ fn the_typed_wrappers_are_single_action_steps() {
         CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
     )
     .expect("create namespace");
+    store.reset();
+    let folded = fs
+        .fold_wal_blocking(&namespace_id)
+        .expect("fold an empty tail");
     assert_eq!(
-        fs.fold_wal_blocking(&namespace_id)
-            .expect("fold an empty tail")
-            .wal_fold,
-        WalFoldStepOutcome::NotNeeded,
+        (folded.outcome, folded.manifest_no),
+        (FoldWalOutcome::AlreadyCurrent, ManifestNo(1)),
         "the wrapper folds a tail; it does not publish a manifest for a namespace with none"
     );
+    assert_eq!(store.count(OperationClass::Put), 0);
 
     fs.put_file_bytes_blocking(
         &namespace_id,
@@ -362,13 +354,21 @@ fn the_typed_wrappers_are_single_action_steps() {
     .expect("put first file");
     let folded = fs.fold_wal_blocking(&namespace_id).expect("fold the tail");
     assert_eq!(
-        folded.wal_fold,
-        WalFoldStepOutcome::Folded {
-            manifest_head_seq: ChangeSeq(1)
-        }
+        (folded.outcome, folded.manifest_head_seq),
+        (FoldWalOutcome::Published, ChangeSeq(1))
     );
+    let compaction = fs
+        .maintain_metadata_blocking(
+            &namespace_id,
+            MetadataMaintenanceOptions {
+                compaction_policy: MetadataCompactionPolicy::CompactImmediately,
+                ..metadata_options(1)
+            },
+        )
+        .expect("compaction step after the fold")
+        .compaction;
     assert_eq!(
-        folded.compaction,
+        compaction,
         CompactionStepOutcome::NotNeeded {},
         "the upkeep pass reports its compaction half rather than hiding it"
     );
@@ -381,10 +381,10 @@ fn the_typed_wrappers_are_single_action_steps() {
     )
     .expect("put second file");
     let metadata = fs
-        .maintenance_run_namespace_blocking(&namespace_id, metadata_request(1))
+        .maintain_metadata_blocking(&namespace_id, metadata_options(1))
         .expect("upkeep-only step");
     assert_eq!(
-        upkeep(&metadata).wal_fold,
+        metadata.wal_fold,
         WalFoldStepOutcome::Folded {
             manifest_head_seq: ChangeSeq(2)
         },
@@ -399,34 +399,16 @@ fn the_typed_wrappers_are_single_action_steps() {
         .expect("advance retention");
     assert_eq!(advanced.retention_floor_seq, checkpoint.captured_seq);
     let retention = fs
-        .maintenance_run_namespace_blocking(
-            &namespace_id,
-            RunMaintenanceRequest::Retention(AdvanceRetentionRequest {}),
-        )
+        .advance_retention_floor_blocking(&namespace_id)
         .expect("retention-only step");
-    let RunMaintenanceResponse::Retention(retention) = retention else {
-        panic!("retention request returned a different response")
-    };
     assert_eq!(retention.retention_floor_seq, advanced.retention_floor_seq);
 
-    let gc = fs
-        .maintenance_run_namespace_blocking(
-            &namespace_id,
-            RunMaintenanceRequest::Gc(GcRequest::default()),
-        )
-        .expect("GC run");
-    assert!(matches!(gc, RunMaintenanceResponse::Gc(_)));
-
-    let compaction = fs
-        .maintenance_run_namespace_blocking(
-            &namespace_id,
-            RunMaintenanceRequest::MetadataCompaction(MetadataCompactionRequest {}),
-        )
-        .expect("metadata compaction run");
-    assert!(matches!(
-        compaction,
-        RunMaintenanceResponse::MetadataCompaction(_)
-    ));
+    block_on(
+        fs.maintenance
+            .gc_namespace(&namespace_id, &GcConfig::default()),
+    )
+    .expect("GC run");
+    block_on(fs.maintenance.compact_metadata(&namespace_id)).expect("metadata compaction run");
     assert_eq!(
         fs.namespace_diagnostics_blocking(&namespace_id)
             .expect("status")
@@ -453,7 +435,7 @@ fn maintenance_step_after_existing_manifest_writes_delta_manifest() {
         PutFileOptions::new(loonfs_test_support::test_actor()),
     )
     .expect("put first file");
-    fs.maintenance_run_namespace_blocking(&namespace_id, metadata_request(1))
+    fs.maintain_metadata_blocking(&namespace_id, metadata_options(1))
         .expect("first maintenance pass");
 
     fs.put_file_bytes_blocking(
@@ -464,10 +446,10 @@ fn maintenance_step_after_existing_manifest_writes_delta_manifest() {
     )
     .expect("put second file");
     let step = fs
-        .maintenance_run_namespace_blocking(&namespace_id, metadata_request(1))
+        .maintain_metadata_blocking(&namespace_id, metadata_options(1))
         .expect("second maintenance pass");
     assert_eq!(
-        upkeep(&step).wal_fold,
+        step.wal_fold,
         WalFoldStepOutcome::Folded {
             manifest_head_seq: ChangeSeq(2)
         }
@@ -811,18 +793,18 @@ fn maintenance_step_counts_wal_objects_not_commits() {
     assert_eq!(status.wal_tail_objects, 2);
 
     let response = fs
-        .maintenance_run_namespace_blocking(&namespace_id, metadata_request(3))
+        .maintain_metadata_blocking(&namespace_id, metadata_options(3))
         .expect("maintenance pass");
-    assert_eq!(upkeep(&response).wal_fold, WalFoldStepOutcome::NotNeeded);
+    assert_eq!(response.wal_fold, WalFoldStepOutcome::NotNeeded);
 
     fs.mutate_blocking(&namespace_id, create_directory_request("create-c", "/c"))
         .expect("second WAL object commit");
 
     let response = fs
-        .maintenance_run_namespace_blocking(&namespace_id, metadata_request(3))
+        .maintain_metadata_blocking(&namespace_id, metadata_options(3))
         .expect("maintenance pass at WAL object threshold");
     assert_eq!(
-        upkeep(&response).wal_fold,
+        response.wal_fold,
         WalFoldStepOutcome::Folded {
             manifest_head_seq: ChangeSeq(3)
         }
@@ -860,7 +842,7 @@ async fn maintenance_step_treats_manifest_number_collision_as_benign_race() {
     blocked.block_next();
     let (step, ()) = futures::join!(
         fs.maintenance
-            .run_maintenance(&namespace_id, metadata_request(1)),
+            .maintain_metadata(&namespace_id, metadata_options(1)),
         async {
             blocked.wait_until_blocked().await;
             winner
@@ -874,7 +856,7 @@ async fn maintenance_step_treats_manifest_number_collision_as_benign_race() {
     let step = step.expect("maintenance pass should not fail on metadata root publish race");
 
     assert_eq!(
-        upkeep(&step).wal_fold,
+        step.wal_fold,
         WalFoldStepOutcome::AlreadyPublished {
             attempted_seq: ChangeSeq(1),
             current_manifest_no: ManifestNo(3),

@@ -9,13 +9,13 @@
 use crate::publish::{CommitCandidate, CommitRequest, FilesystemOperation, InlineContent};
 use crate::{
     CreateDirectoryOptions, CreateNamespaceOptions, DestinationBehavior, LoonFs, NamespaceId,
-    PageRequest, RunMaintenanceRequest, RunMaintenanceResponse, SharedObjectStore,
+    PageRequest, SharedObjectStore,
 };
 use loonfs_api::wire::manifest::MetadataRowFamily;
 use loonfs_api::{
     AbsolutePath, AccessGrants, AccessRight, AccessRights, CommitId, ContentId,
-    MetadataCompactionOutcome, MetadataCompactionRequest, MetadataCompactionResponse,
-    MonotonicTimer, NamespaceAccess, PrincipalId, PrincipalScope, PrincipalSet, Subject, SubjectId,
+    MetadataCompactionOutcome, MonotonicTimer, NamespaceAccess, PrincipalId, PrincipalScope,
+    PrincipalSet, Subject, SubjectId,
 };
 use loonfs_core::test_support::STORE_READ_WAVE;
 use loonfs_objectstore::keys::metadata_segment_object_key;
@@ -179,19 +179,10 @@ async fn create_compacted_directory(
     }
     loop {
         let response = maintenance
-            .run_maintenance(
-                namespace_id,
-                RunMaintenanceRequest::MetadataCompaction(MetadataCompactionRequest {}),
-            )
+            .compact_metadata(namespace_id)
             .await
             .expect("compact metadata");
-        if matches!(
-            response,
-            RunMaintenanceResponse::MetadataCompaction(MetadataCompactionResponse {
-                compaction: MetadataCompactionOutcome::NotNeeded,
-                ..
-            })
-        ) {
+        if response.compaction == MetadataCompactionOutcome::NotNeeded {
             break;
         }
     }

@@ -7,6 +7,7 @@ mod attribution;
 mod hosted_content_ref_access;
 mod http_access;
 mod inline_commits;
+mod maintenance_runs;
 mod namespaces;
 mod pin_deletion;
 mod surface;
