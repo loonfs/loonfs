@@ -92,21 +92,26 @@ impl Namespaces {
         }
     }
 
-    /// Returns the handle held for `namespace_id`. When none is held, opens
-    /// one and holds it only if the namespace exists; a missing or deleted
-    /// namespace fails with `namespace_not_found` or `namespace_deleted`.
+    /// Returns the handle held for `namespace_id`. When none is held, first
+    /// reads the namespace through a read-only handle, which holds no writer
+    /// session. A missing or deleted namespace fails that read with
+    /// `namespace_not_found` or `namespace_deleted`. Otherwise this opens
+    /// the writable handle and holds it in one step, with no await between,
+    /// so a `close` that runs during the read cannot leave a closed session
+    /// in the table.
     pub async fn open(&self, namespace_id: &NamespaceId) -> loonfs::Result<Namespace<Writable>> {
         let held = self.lock().get(namespace_id).cloned();
         if let Some(handle) = held {
             return Ok(handle);
         }
+        self.runtime.namespace(namespace_id).metadata().await?;
+        let mut handles = self.lock();
+        if let Some(handle) = handles.get(namespace_id) {
+            return Ok(handle.clone());
+        }
         let handle = self.runtime.open_namespace(namespace_id)?;
-        handle.metadata().await?;
-        Ok(self
-            .lock()
-            .entry(namespace_id.clone())
-            .or_insert(handle)
-            .clone())
+        handles.insert(namespace_id.clone(), handle.clone());
+        Ok(handle)
     }
 
     /// Closes the session of the handle held for `namespace_id` and stops
