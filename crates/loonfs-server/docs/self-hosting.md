@@ -319,6 +319,9 @@ Set `[grep].mode` to choose whether this server serves searches, maintains the
 index, or does both. Omit the table to disable grep. The optional
 `max_files_per_step` and `max_content_bytes_per_step` bound input work per
 indexing step; their defaults are 256 files and 64 MiB, and both must be positive.
+The optional `max_concurrent_steps` bounds how many indexing steps hold file
+content or index segments at once; it defaults to 2 and must be positive. See
+[Resource sizing](#resource-sizing).
 The maintenance sweep builds the index, so indexing runs only on a server
 whose `maintenance` mode maintains. See
 [Background maintenance](#background-maintenance).
@@ -349,6 +352,7 @@ counted in any budget and sit on top.
 | WAL folds | `max_concurrent_folds` | 2 | Folds running at once, including folds that maintenance requests start | Concurrency |
 | Compactions | `max_concurrent_compactions` | 2 | Metadata merges running at once, bounded steps and streaming compactions alike, whether writer sessions, the maintenance sweep, or maintenance requests start them | Concurrency |
 | Sweep visits | `max_concurrent_maintenance` | 8 | Namespaces the maintenance sweep visits at once, including their grep indexing | Concurrency |
+| Grep steps | `[grep].max_concurrent_steps` | 2 | Grep build and reorganize steps that hold file content or index segments at once, across sweep visits and the index pass | Concurrency |
 | Publications | `publication.max_concurrent_publications` | 8 | Publications running at once | Concurrency |
 
 A fold holds a block memo and its segment output, so it can use up to 96 MiB.
@@ -399,11 +403,14 @@ Grep adds a 256 MiB block cache on a server that answers queries. The cache
 has no setting. A query reads up to 32 candidate files of at most 8 MiB each
 at once, so one query can hold up to 256 MiB. Queries have no concurrency
 limit. Index building runs in sweep visits and in the index pass over held
-sessions, and each step reads at most `max_content_bytes_per_step` of
-content. Up to `max_concurrent_maintenance` sweep visits and one index pass
-build at once, so indexing can read nine steps of content at once by
-default, up to 576 MiB. Lower `max_concurrent_maintenance` or
-`[grep].max_content_bytes_per_step` to lower that ceiling.
+sessions. A build step reads at most `max_content_bytes_per_step` of file
+content, 64 MiB by default, and a reorganize step merges at most 64 MiB of
+decoded index blocks. A step that finds work waits for one of
+`[grep].max_concurrent_steps` permits before it reads either, and holds it
+until it publishes. Indexing therefore holds at most two steps of content at
+once by default, up to 128 MiB, whatever `max_concurrent_maintenance` is. A
+step that finds the index up to date takes no permit, so idle visits still
+run in parallel. Lower `[grep].max_concurrent_steps` to lower that ceiling.
 
 The local cache adds `memory_bytes`, 64 MiB of write buffers for its disk
 tier, and up to 256 MiB of inserts waiting for the disk tier. The last two
@@ -615,7 +622,8 @@ does this, in order:
    compaction runs as a streaming compaction.
 2. When `[grep].mode` maintains the index, runs grep build steps while each
    one publishes, at most 16, then one reorganize step once the index is up
-   to date.
+   to date. A step that finds work first waits for a grep step permit. See
+   [Resource sizing](#resource-sizing).
 3. On a collection pass, collects garbage, then grep garbage.
 
 A pass starts every `maintenance_interval_ms`, 300000 ms (5 minutes) by

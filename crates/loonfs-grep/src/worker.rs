@@ -42,6 +42,7 @@ use loonfs_types::{
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::sync::Arc;
+use tokio::sync::{Semaphore, SemaphorePermit};
 
 /// Lifetime of the checkpoint used by one grep backfill attempt.
 ///
@@ -66,6 +67,10 @@ const INDEX_GRAMS_MID_LEVEL: u32 = 1;
 const INDEX_GRAMS_BASE_LEVEL: u32 = 2;
 // Keep grep's fold threshold independent of metadata reorganization limits.
 const GREP_MAX_MID_RUNS: usize = 8;
+
+/// Default for how many build and reorganize steps of one worker hold file
+/// content or index segments in memory at once.
+pub const DEFAULT_MAX_CONCURRENT_GREP_STEPS: NonZeroUsize = NonZeroUsize::new(2).unwrap();
 
 /// Writer-side budgets for one grep build or reorganize step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -162,12 +167,15 @@ pub enum GrepReorganizeOutcome {
 /// The worker writes only grep keys. It reads namespace state through a
 /// read-only `LoonFs` and creates or deletes backfill checkpoints through
 /// `Maintenance`, preserving the writer id maintenance acts as. Scheduling is
-/// external to this type.
+/// external to this type. A build or reorganize step that finds work waits
+/// for one of the worker's step permits before it reads file content or
+/// index segments. Every clone of a worker shares its permits.
 #[derive(Clone)]
 pub struct GrepWorker<S> {
     store: S,
     reader: LoonFs<ReadOnly>,
     pub(crate) maintenance: Maintenance,
+    step_permits: Arc<Semaphore>,
 }
 
 /// The runtime and its maintenance carry no debug representation — they are
@@ -184,13 +192,32 @@ impl<S: std::fmt::Debug> std::fmt::Debug for GrepWorker<S> {
 
 impl<S: ObjectStore + Clone> GrepWorker<S> {
     /// Creates a worker over one grep-keyspace store handle and the runtime
-    /// handles it reads and checkpoints through.
-    pub fn new(store: S, reader: LoonFs<ReadOnly>, maintenance: Maintenance) -> Self {
+    /// handles it reads and checkpoints through. At most
+    /// `max_concurrent_steps` steps of this worker and its clones hold file
+    /// content or index segments at once.
+    pub fn new(
+        store: S,
+        reader: LoonFs<ReadOnly>,
+        maintenance: Maintenance,
+        max_concurrent_steps: NonZeroUsize,
+    ) -> Self {
         Self {
             store,
             reader,
             maintenance,
+            step_permits: Arc::new(Semaphore::new(
+                max_concurrent_steps.get().min(Semaphore::MAX_PERMITS),
+            )),
         }
+    }
+
+    /// Waits for a permit to hold file content or index segments. Dropping
+    /// the wait or the permit returns it.
+    async fn step_permit(&self) -> SemaphorePermit<'_> {
+        self.step_permits
+            .acquire()
+            .await
+            .expect("grep step permit semaphore should remain open")
     }
 
     /// This worker's filesystem reads for one namespace.
@@ -302,6 +329,12 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
     }
 
     /// Runs one bounded checkpoint-backfill or incremental build unit.
+    ///
+    /// The step first reads the checkpoint listing or the change feed to
+    /// learn what content it needs. Only then does it wait for a step permit,
+    /// which it holds while it reads that content and until it publishes. A
+    /// step that finds the index up to date, or that restarts the backfill,
+    /// takes no permit.
     pub async fn build_step(
         &self,
         namespace_id: &NamespaceId,
@@ -321,12 +354,12 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         }
         let reads = self.reads(namespace_id);
         reads.head().await?;
-        let unit = match current.manifest_state().status() {
+        let planned = match current.manifest_state().status() {
             GrepIndexStatus::Backfilling {
                 captured_seq,
                 cursor_inode_id,
                 checkpoint_id,
-            } => match collect_backfill_unit(
+            } => match plan_backfill_unit(
                 &reads,
                 checkpoint_id,
                 *captured_seq,
@@ -335,7 +368,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             )
             .await
             {
-                Ok(unit) => unit,
+                Ok(planned) => planned,
                 Err(error) if rebootstrap_required(&error) => {
                     return self
                         .restart_backfill(namespace_id, &current, &deadline)
@@ -347,8 +380,8 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                 let resume = status
                     .active_watermark()
                     .expect("an active grep status should have a watermark");
-                match collect_incremental_unit(&reads, resume, policy).await {
-                    Ok(IncrementalWork::Unit(unit)) => unit,
+                match plan_incremental_unit(&reads, resume, policy).await {
+                    Ok(IncrementalWork::Unit(planned)) => planned,
                     Ok(IncrementalWork::UpToDate(resume)) => {
                         return Ok(GrepBuildOutcome::UpToDate {
                             built_through_seq: resume.built_through_seq(),
@@ -364,7 +397,8 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             }
             GrepIndexStatus::Disabled {} => return Ok(GrepBuildOutcome::NotEnabled),
         };
-
+        let _permit = self.step_permit().await;
+        let unit = index_planned_unit(&reads, planned).await?;
         self.publish_build_unit(namespace_id, current, unit, policy, &deadline)
             .await
     }
@@ -641,8 +675,16 @@ struct CollectedIndexUnit {
     progress: CollectedProgress,
 }
 
+/// The file content one build step reads, and the progress it publishes
+/// once that content is indexed.
+struct PlannedIndexUnit {
+    pending: Vec<PendingRevisionContent>,
+    stats: IndexingStats,
+    progress: CollectedProgress,
+}
+
 enum IncrementalWork {
-    Unit(CollectedIndexUnit),
+    Unit(PlannedIndexUnit),
     UpToDate(ChangeFeedResume),
 }
 
@@ -703,7 +745,8 @@ enum CollectedProgress {
     },
 }
 
-/// Collects one backfill step from the files the checkpoint pins.
+/// Plans one backfill step from the files the checkpoint pins. Reads no file
+/// content.
 ///
 /// The enumeration answers the checkpointed state directly — one current
 /// revision per retained file, deleted or not, in ascending inode order — so
@@ -712,14 +755,13 @@ enum CollectedProgress {
 /// `max_files_per_step` files examined, and content planning stops once
 /// `max_content_bytes_per_step` is reached (the file that crosses it is
 /// still included, exactly as the row walk did).
-async fn collect_backfill_unit(
+async fn plan_backfill_unit(
     reads: &NamespaceReads,
     checkpoint_id: &PinId,
     captured_seq: ChangeSeq,
     cursor: Option<InodeId>,
     policy: GramIndexBuildPolicy,
-) -> Result<CollectedIndexUnit> {
-    let mut postings = BTreeMap::new();
+) -> Result<PlannedIndexUnit> {
     let mut stats = IndexingStats::default();
     let mut next_cursor = cursor;
     let mut pending = Vec::new();
@@ -774,9 +816,8 @@ async fn collect_backfill_unit(
             break;
         }
     }
-    load_and_fold_revision_contents(reads, &pending, &mut postings, &mut stats).await?;
-    Ok(CollectedIndexUnit {
-        postings,
+    Ok(PlannedIndexUnit {
+        pending,
         stats,
         progress: CollectedProgress::Backfill {
             checkpoint_id: checkpoint_id.clone(),
@@ -786,10 +827,12 @@ async fn collect_backfill_unit(
     })
 }
 
-/// Collects one incremental step from the semantic change feed.
+/// Plans one incremental step from the semantic change feed. Reads no file
+/// content.
 ///
-/// `Ok(None)` means the index is already at the namespace head.
-async fn collect_incremental_unit(
+/// `IncrementalWork::UpToDate` means the index is already at the namespace
+/// head.
+async fn plan_incremental_unit(
     reads: &NamespaceReads,
     resume: ChangeFeedResume,
     policy: GramIndexBuildPolicy,
@@ -800,7 +843,6 @@ async fn collect_incremental_unit(
     if feed.changes.is_empty() {
         return Ok(IncrementalWork::UpToDate(resume));
     }
-    let mut postings = BTreeMap::new();
     let mut stats = IndexingStats::default();
     let mut cursor = IncrementalCursor::new(resume);
     let mut pending = Vec::new();
@@ -857,9 +899,8 @@ async fn collect_incremental_unit(
     if cursor.resume == resume {
         return Ok(IncrementalWork::UpToDate(resume));
     }
-    load_and_fold_revision_contents(reads, &pending, &mut postings, &mut stats).await?;
-    Ok(IncrementalWork::Unit(CollectedIndexUnit {
-        postings,
+    Ok(IncrementalWork::Unit(PlannedIndexUnit {
+        pending,
         stats,
         progress: CollectedProgress::Incremental {
             built_through_seq: cursor.resume.built_through_seq(),
@@ -874,12 +915,17 @@ struct PendingRevisionContent {
     content_ref: ContentRef,
 }
 
-async fn load_and_fold_revision_contents(
+/// Reads the file content a step planned and extracts its grams.
+async fn index_planned_unit(
     reads: &NamespaceReads,
-    pending: &[PendingRevisionContent],
-    postings: &mut BTreeMap<Gram, Vec<GramPosting>>,
-    stats: &mut IndexingStats,
-) -> Result<()> {
+    planned: PlannedIndexUnit,
+) -> Result<CollectedIndexUnit> {
+    let PlannedIndexUnit {
+        pending,
+        mut stats,
+        progress,
+    } = planned;
+    let mut postings: BTreeMap<Gram, Vec<GramPosting>> = BTreeMap::new();
     for chunk in pending.chunks(MAX_GREP_WORKER_IO) {
         let contents = try_join_all(chunk.iter().map(|revision| {
             // Index eligibility is the worker's own read budget: content
@@ -902,7 +948,11 @@ async fn load_and_fold_revision_contents(
             stats.indexed_revisions += 1;
         }
     }
-    Ok(())
+    Ok(CollectedIndexUnit {
+        postings,
+        stats,
+        progress,
+    })
 }
 
 fn gram_postings_rows(postings: BTreeMap<Gram, Vec<GramPosting>>) -> Result<Vec<IndexRow>> {
@@ -984,6 +1034,10 @@ async fn write_index_segment<S: ObjectStore + ?Sized>(
 
 impl<S: ObjectStore + Clone> GrepWorker<S> {
     /// Runs one partitioned delta-to-mid or mid-plus-base reorganize step.
+    ///
+    /// A step that has runs to merge waits for a step permit before it reads
+    /// index segments, and holds it until it publishes. A step with nothing
+    /// to merge takes no permit.
     pub async fn reorganize_step(
         &self,
         namespace_id: &NamespaceId,
@@ -1070,6 +1124,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                     })
             })
             .collect::<Result<Vec<_>>>()?;
+        let _permit = self.step_permit().await;
         let merged = merge_snapshot_range(
             &self.store,
             namespace_id,

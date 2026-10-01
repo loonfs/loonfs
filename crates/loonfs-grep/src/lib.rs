@@ -36,7 +36,7 @@ pub use reads::NamespaceReads;
 pub use service::{GrepService, MAX_GREP_SCAN_FILES, MAX_GREP_TAIL_FILES};
 pub use worker::{
     GramIndexBuildPolicy, GrepBuildOutcome, GrepDisableOutcome, GrepEnableOutcome,
-    GrepReorganizeOutcome, GrepWorker,
+    GrepReorganizeOutcome, GrepWorker, DEFAULT_MAX_CONCURRENT_GREP_STEPS,
 };
 
 pub use gc::{run_grep_gc, GrepGcReport, GREP_GC_GRACE_WINDOW_MS};
