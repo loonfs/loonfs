@@ -4,7 +4,7 @@
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::{BoxStream, TryStreamExt};
-use loonfs_types::Checksum;
+use loonfs_types::{Checksum, EffectiveLimit, Page};
 use std::borrow::Cow;
 use std::fmt::Debug;
 use std::sync::Arc;
@@ -507,6 +507,28 @@ pub trait ObjectStore: Send + Sync + Debug {
         self.list_prefix_stream(prefix).try_collect().await
     }
 
+    /// Lists one page of the child prefixes directly under `prefix`, in
+    /// ascending order.
+    ///
+    /// A child prefix is a key prefix one level below `prefix` that holds at
+    /// least one object, and it ends with `/`: listing `a/` over the keys
+    /// `a/b/1`, `a/b/c/2`, `a/d/3`, and `a/e` returns `a/b/` and `a/d/`. An
+    /// object directly under `prefix` is not a child. `prefix` must be empty
+    /// or end with `/`.
+    ///
+    /// The page starts strictly after `start_after`, which is a child prefix
+    /// or the `next_cursor` of an earlier page, and holds at most `limit`
+    /// children. When `next_cursor` is `None`, no child follows the page. One
+    /// page costs one provider list request. A provider counts the objects
+    /// directly under `prefix` against the same page size, so a page can hold
+    /// fewer than `limit` children, or none, and still have a `next_cursor`.
+    async fn list_child_prefixes(
+        &self,
+        prefix: &str,
+        start_after: Option<&str>,
+        limit: EffectiveLimit,
+    ) -> Result<Page<String, String>>;
+
     /// Writes bytes unconditionally, replacing any existing object at `key`.
     ///
     /// Invalid keys, permission failures, and ambiguous transport failures are returned.
@@ -630,6 +652,17 @@ impl<T: ObjectStore + ?Sized> ObjectStore for Arc<T> {
         self.as_ref().list_prefix(prefix).await
     }
 
+    async fn list_child_prefixes(
+        &self,
+        prefix: &str,
+        start_after: Option<&str>,
+        limit: EffectiveLimit,
+    ) -> Result<Page<String, String>> {
+        self.as_ref()
+            .list_child_prefixes(prefix, start_after, limit)
+            .await
+    }
+
     async fn put_overwrite(&self, key: &str, bytes: Bytes) -> Result<ObjectMetadata> {
         self.as_ref().put_overwrite(key, bytes).await
     }
@@ -724,6 +757,17 @@ impl<T: ObjectStore + ?Sized> ObjectStore for &T {
 
     async fn list_prefix(&self, prefix: &str) -> Result<Vec<String>> {
         (*self).list_prefix(prefix).await
+    }
+
+    async fn list_child_prefixes(
+        &self,
+        prefix: &str,
+        start_after: Option<&str>,
+        limit: EffectiveLimit,
+    ) -> Result<Page<String, String>> {
+        (*self)
+            .list_child_prefixes(prefix, start_after, limit)
+            .await
     }
 
     async fn put_overwrite(&self, key: &str, bytes: Bytes) -> Result<ObjectMetadata> {
@@ -840,6 +884,18 @@ mod tests {
         async fn list_prefix(&self, _prefix: &str) -> Result<Vec<String>> {
             self.override_reached.store(true, Ordering::SeqCst);
             Ok(vec!["overridden".to_owned()])
+        }
+
+        async fn list_child_prefixes(
+            &self,
+            _prefix: &str,
+            _start_after: Option<&str>,
+            _limit: EffectiveLimit,
+        ) -> Result<Page<String, String>> {
+            Ok(Page {
+                items: Vec::new(),
+                next_cursor: None,
+            })
         }
     }
 

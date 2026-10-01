@@ -8,8 +8,8 @@
 //! whole-tree listings) and are not optimization targets.
 
 use crate::keyspace::{
-    normalize_key_prefix, scope_list_prefix, scope_object_key, unscope_listed_key,
-    validate_segments,
+    normalize_key_prefix, scope_child_listing_prefix, scope_list_prefix, scope_object_key,
+    unscope_listed_key, validate_segments,
 };
 use crate::object_store::Result;
 use crate::{
@@ -19,7 +19,7 @@ use crate::{
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::{self, BoxStream, StreamExt};
-use loonfs_types::{sha256_digest, Checksum};
+use loonfs_types::{sha256_digest, Checksum, EffectiveLimit, Page};
 use std::io::SeekFrom;
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -567,6 +567,44 @@ impl ObjectStore for LocalFsStore {
             }),
         )
     }
+
+    async fn list_child_prefixes(
+        &self,
+        prefix: &str,
+        start_after: Option<&str>,
+        limit: EffectiveLimit,
+    ) -> Result<Page<String, String>> {
+        let scoped = scope_child_listing_prefix(self.key_prefix.as_deref(), prefix)?;
+        let mut directory = self.root.clone();
+        for segment in validate_segments(&scoped, true)? {
+            directory.push(segment);
+        }
+        let mut candidates: Vec<(String, PathBuf)> = directory_entries(prefix, &directory)
+            .await?
+            .into_iter()
+            .filter_map(|path| {
+                let name = path.file_name()?.to_string_lossy().into_owned();
+                Some((format!("{prefix}{name}/"), path))
+            })
+            .filter(|(child, _)| start_after.is_none_or(|start_after| child.as_str() > start_after))
+            .collect();
+        candidates.sort();
+
+        let mut children = Vec::new();
+        for (child, path) in candidates {
+            if children.len() > limit.as_usize() {
+                break;
+            }
+            if holds_object(prefix, path).await? {
+                children.push(child);
+            }
+        }
+        let next_cursor = limit.finish_page(&mut children, Clone::clone);
+        Ok(Page {
+            items: children,
+            next_cursor,
+        })
+    }
 }
 
 #[cfg(unix)]
@@ -738,6 +776,58 @@ async fn collect_keys(
 
     keys.sort();
     Ok(keys)
+}
+
+/// Lists the entries of `directory` that are not scratch files. A directory
+/// that is gone, or that is an object, has none.
+async fn directory_entries(prefix: &str, directory: &Path) -> Result<Vec<PathBuf>> {
+    let mut reader = match fs::read_dir(directory).await {
+        Ok(reader) => reader,
+        Err(err)
+            if matches!(
+                err.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            return Ok(Vec::new())
+        }
+        Err(err) => return Err(io_error(prefix, err)),
+    };
+    let mut entries = Vec::new();
+    loop {
+        match reader.next_entry().await {
+            Ok(Some(entry)) => entries.push(entry.path()),
+            Ok(None) => break,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => break,
+            Err(err) => return Err(io_error(prefix, err)),
+        }
+    }
+    entries.retain(|path| {
+        !path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(is_scratch_name)
+    });
+    Ok(entries)
+}
+
+/// Whether an object lives anywhere under `path`. A failed write or a delete
+/// race can leave a directory with no object in it, and a provider never
+/// lists a prefix that holds no object.
+async fn holds_object(prefix: &str, path: PathBuf) -> Result<bool> {
+    let mut directories = vec![path];
+    while let Some(directory) = directories.pop() {
+        for entry in directory_entries(prefix, &directory).await? {
+            match fs::metadata(&entry).await {
+                Ok(metadata) if metadata.is_file() => return Ok(true),
+                Ok(metadata) if metadata.is_dir() => directories.push(entry),
+                Ok(_) => {}
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => return Err(io_error(prefix, err)),
+            }
+        }
+    }
+    Ok(false)
 }
 
 fn relative_key(prefix: &str, root: &Path, path: &Path) -> Result<String> {

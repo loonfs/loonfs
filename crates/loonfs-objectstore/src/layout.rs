@@ -1,6 +1,16 @@
-//! The durable key grammar: object families and key classification.
+//! The durable key grammar: object families, key classification, and the
+//! namespace listing built on it.
 
-use loonfs_types::{ManifestNo, UploadId};
+use crate::keys::namespace_prefix;
+use crate::{ObjectStore, Result};
+use loonfs_types::{EffectiveLimit, ManifestNo, NamespaceId, UploadId};
+use std::num::NonZeroU32;
+
+const NAMESPACES_PREFIX: &str = "namespaces/";
+
+/// Most namespace ids one [`list_namespace_ids`] page holds: the most keys
+/// S3 and Google Cloud Storage return for one list request.
+pub const MAX_NAMESPACE_IDS_PAGE_LIMIT: u32 = 1_000;
 
 /// One family in the [durable object key grammar].
 ///
@@ -137,6 +147,67 @@ pub fn upload_id_of(key: &str) -> Option<UploadId> {
         .filter(|parsed| parsed.family() == DurableObjectFamily::UploadSession)
         .and_then(|parsed| parsed.identifier())
         .and_then(|identifier| UploadId::parse(identifier).ok())
+}
+
+/// One page of namespace ids from [`list_namespace_ids`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamespaceIdPage {
+    /// Namespace ids in ascending key order.
+    pub namespace_ids: Vec<NamespaceId>,
+    /// Children of `namespaces/` on this page whose names are not namespace ids.
+    pub skipped_entries: usize,
+    /// Where the next page starts, or `None` when this page ends the listing.
+    pub next_cursor: Option<NamespacePageCursor>,
+}
+
+/// A position in the namespace listing that [`list_namespace_ids`] resumes after.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamespacePageCursor(String);
+
+impl NamespacePageCursor {
+    /// Builds the position just after `namespace_id`.
+    pub fn after(namespace_id: &NamespaceId) -> Self {
+        Self(namespace_prefix(namespace_id))
+    }
+}
+
+/// Lists one page of the namespace ids in `store`, in ascending key order.
+///
+/// The page starts after `start_after` and holds at most `limit` ids, or
+/// [`MAX_NAMESPACE_IDS_PAGE_LIMIT`] when `limit` is larger. One page costs
+/// one store list request, however many objects each namespace holds; see
+/// [`ObjectStore::list_child_prefixes`]. A child of `namespaces/` whose name
+/// is not a namespace id is skipped and counted in `skipped_entries`. A
+/// deleted namespace is still listed: its tombstone manifest stays after
+/// deletion and after garbage collection. The listing sees only keys inside
+/// the store's key prefix.
+pub async fn list_namespace_ids<S: ObjectStore + ?Sized>(
+    store: &S,
+    start_after: Option<&NamespacePageCursor>,
+    limit: EffectiveLimit,
+) -> Result<NamespaceIdPage> {
+    let max_limit =
+        EffectiveLimit::new(const { NonZeroU32::new(MAX_NAMESPACE_IDS_PAGE_LIMIT).unwrap() });
+    let page = store
+        .list_child_prefixes(
+            NAMESPACES_PREFIX,
+            start_after.map(|cursor| cursor.0.as_str()),
+            limit.min(max_limit),
+        )
+        .await?;
+    let namespace_ids: Vec<NamespaceId> = page
+        .items
+        .iter()
+        .filter_map(|child| {
+            let name = child.strip_prefix(NAMESPACES_PREFIX)?.strip_suffix('/')?;
+            NamespaceId::parse(name).ok()
+        })
+        .collect();
+    Ok(NamespaceIdPage {
+        skipped_entries: page.items.len() - namespace_ids.len(),
+        namespace_ids,
+        next_cursor: page.next_cursor.map(NamespacePageCursor),
+    })
 }
 
 fn parsed<'a>(

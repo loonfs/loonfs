@@ -15,7 +15,8 @@ use loonfs_objectstore::{
     ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, ObjectStoreErrorClass,
     PutMode,
 };
-use loonfs_types::ManifestNo;
+use loonfs_test_support::ids::page_limit;
+use loonfs_types::{EffectiveLimit, ManifestNo, Page};
 use std::sync::{Arc, Mutex};
 use tempfile::tempdir;
 
@@ -249,6 +250,16 @@ async fn records_list_count() {
     assert_eq!(sample.result, ObjectStoreResultClass::Ok);
     assert_eq!(sample.item_count, Some(2));
     assert_eq!(sample.range_class, Some(RangeClass::Prefix));
+
+    let page = store
+        .list_child_prefixes("namespaces/", None, page_limit(10))
+        .await
+        .expect("list namespaces");
+    assert_eq!(page.items, ["namespaces/ns-1/"]);
+    let sample = recorder.samples().pop().expect("child-prefix sample");
+    assert_eq!(sample.operation, ObjectStoreOperation::ListPrefix);
+    assert_eq!(sample.key_class, KeyClass::Unknown);
+    assert_eq!(sample.item_count, Some(1));
 }
 
 #[tokio::test]
@@ -472,5 +483,17 @@ impl ObjectStore for DelegatingWriteStore {
         _start_after: Option<&str>,
     ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
         Box::pin(stream::empty())
+    }
+
+    async fn list_child_prefixes(
+        &self,
+        _prefix: &str,
+        _start_after: Option<&str>,
+        _limit: EffectiveLimit,
+    ) -> Result<Page<String, String>, ObjectStoreError> {
+        Ok(Page {
+            items: Vec::new(),
+            next_cursor: None,
+        })
     }
 }

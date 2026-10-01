@@ -176,7 +176,8 @@ pub enum OperationKind<'a> {
     },
     /// A `delete` call.
     Delete,
-    /// A `list_prefix_stream` call.
+    /// A prefix listing: a `list_prefix_from_stream` call or one
+    /// `list_child_prefixes` page.
     List,
 }
 

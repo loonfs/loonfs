@@ -4,7 +4,8 @@
 
 use crate::immutable_write::{readback, ImmutableReadback};
 use crate::keyspace::{
-    normalize_key_prefix, scope_list_prefix, scope_object_key, unscope_listed_key,
+    normalize_key_prefix, scope_child_listing_prefix, scope_list_prefix, scope_object_key,
+    unscope_listed_key,
 };
 use crate::object_store::Result;
 use crate::retry::{provider_transport_retryable, with_transport_retry, DEFAULT};
@@ -18,14 +19,16 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::{self, BoxStream, FuturesUnordered, StreamExt};
 use loonfs_types::Checksum;
-use loonfs_types::{OperationDeadline, TransportRetryPolicy};
+use loonfs_types::{EffectiveLimit, OperationDeadline, Page, TransportRetryPolicy};
 use object_store as provider_store;
+use provider_store::list::{PaginatedListOptions, PaginatedListStore};
 use provider_store::multipart::{MultipartStore, PartId};
 use provider_store::path::Path;
 use provider_store::{
     GetOptions, GetRange, ObjectMeta, ObjectStoreExt, PutOptions, PutPayload, PutResult,
     UpdateVersion,
 };
+use std::borrow::Cow;
 use std::fmt;
 use std::ops::Range;
 use std::sync::Arc;
@@ -194,6 +197,7 @@ pub struct ProviderObjectStore {
     inner: Arc<dyn provider_store::ObjectStore>,
     one_attempt: Arc<dyn provider_store::ObjectStore>,
     multipart: Arc<dyn MultipartStore>,
+    paginated: Arc<dyn PaginatedListStore>,
     checksum_reader: Option<Arc<dyn StoredChecksumReader>>,
     multipart_controller: Option<Arc<dyn MultipartController>>,
     compare_token: CompareToken,
@@ -217,7 +221,8 @@ impl fmt::Debug for ProviderObjectStore {
 
 impl ProviderObjectStore {
     /// Wraps a provider client, the same client built to never resend a
-    /// request, and the native multipart surface.
+    /// request, and the native multipart and paged delimiter listing
+    /// surfaces.
     ///
     /// Conditional flat puts go to `one_attempt`; everything else uses
     /// `inner`. Construction fails when `config.key_prefix` is not a
@@ -226,6 +231,7 @@ impl ProviderObjectStore {
         inner: Arc<dyn provider_store::ObjectStore>,
         one_attempt: Arc<dyn provider_store::ObjectStore>,
         multipart: Arc<dyn MultipartStore>,
+        paginated: Arc<dyn PaginatedListStore>,
         config: ProviderObjectStoreConfig,
         kind: ConfiguredObjectStoreKind,
         io_runtime: StoreIoRuntime,
@@ -234,6 +240,7 @@ impl ProviderObjectStore {
             inner,
             one_attempt,
             multipart,
+            paginated,
             checksum_reader: None,
             multipart_controller: None,
             compare_token: CompareToken::Etag,
@@ -307,6 +314,13 @@ impl ProviderObjectStore {
                 object_key: prefix.to_owned(),
                 message: err.to_string(),
             })
+    }
+
+    fn unscoped(&self, scoped_key: &str) -> Option<String> {
+        match self.key_prefix.as_deref() {
+            Some(key_prefix) => unscope_listed_key(Some(key_prefix), scoped_key),
+            None => Some(scoped_key.to_owned()),
+        }
     }
 
     fn metadata_from_meta(&self, meta: ObjectMeta) -> ObjectMetadata {
@@ -1106,6 +1120,69 @@ impl ObjectStore for ProviderObjectStore {
             })
             .boxed()
     }
+
+    async fn list_child_prefixes(
+        &self,
+        prefix: &str,
+        start_after: Option<&str>,
+        limit: EffectiveLimit,
+    ) -> Result<Page<String, String>> {
+        let scoped_prefix = scope_child_listing_prefix(self.key_prefix.as_deref(), prefix)?;
+        let offset = start_after
+            .map(|key| {
+                // Every key under a child `p/c/` sorts before `p/c0`, because
+                // `0` is the byte after `/`. Starting after `p/c0` skips the
+                // whole child; the only other key it skips is the object
+                // `p/c0`, which is never a child.
+                let resume_key = match key.strip_suffix('/') {
+                    Some(child) => format!("{child}0"),
+                    None => key.to_owned(),
+                };
+                scope_object_key(self.key_prefix.as_deref(), &resume_key)
+            })
+            .transpose()?;
+        let options = PaginatedListOptions {
+            offset,
+            delimiter: Some(Cow::Borrowed("/")),
+            max_keys: Some(limit.as_usize()),
+            ..Default::default()
+        };
+        let listed = self
+            .paginated
+            .list_paginated(
+                Some(scoped_prefix.as_str()).filter(|scoped| !scoped.is_empty()),
+                options,
+            )
+            .await
+            .map_err(|err| map_provider_error(prefix, err))?;
+        let children: Vec<String> = listed
+            .result
+            .common_prefixes
+            .iter()
+            .filter_map(|child| self.unscoped(&format!("{child}/")))
+            .collect();
+        let next_cursor = match listed.page_token {
+            None => None,
+            Some(_) => {
+                let last_object = listed
+                    .result
+                    .objects
+                    .last()
+                    .and_then(|object| self.unscoped(object.location.as_ref()));
+                let last_entry = children.last().cloned().max(last_object);
+                Some(last_entry.ok_or_else(|| {
+                    ObjectStoreError::transport(
+                        prefix,
+                        "provider reported more entries after an empty listing page",
+                    )
+                })?)
+            }
+        };
+        Ok(Page {
+            items: children,
+            next_cursor,
+        })
+    }
 }
 
 impl ProviderObjectStore {
@@ -1287,17 +1364,22 @@ mod tests {
         InstrumentedObjectStore, ObjectStoreOperation, VecObjectStoreMetricsRecorder,
     };
     use crate::test_support::{aws_environment_lock, isolated_aws_environment, SteppingTimer};
-    use futures::StreamExt;
+    use futures::{StreamExt, TryStreamExt};
     use loonfs_types::transport_retry_backoff;
     use object_store::client::CredentialProvider;
     use object_store::memory::InMemory;
+    use provider_store::list::PaginatedListResult;
 
     fn memory_store() -> ProviderObjectStore {
-        let inner = Arc::new(InMemory::default());
+        memory_store_over(Arc::new(InMemory::default()))
+    }
+
+    fn memory_store_over(inner: Arc<InMemory>) -> ProviderObjectStore {
         ProviderObjectStore::new(
             Arc::clone(&inner) as Arc<dyn provider_store::ObjectStore>,
             Arc::clone(&inner) as Arc<dyn provider_store::ObjectStore>,
-            inner,
+            Arc::clone(&inner) as Arc<dyn MultipartStore>,
+            Arc::new(DelimiterPages(inner)),
             ProviderObjectStoreConfig {
                 key_prefix: Some("tenant-a".to_owned()),
             },
@@ -1305,6 +1387,75 @@ mod tests {
             StoreIoRuntime::new().expect("store io runtime"),
         )
         .expect("provider store")
+    }
+
+    /// Answers paged delimiter listings over an in-memory provider, which
+    /// does not offer them itself.
+    struct DelimiterPages(Arc<InMemory>);
+
+    #[async_trait]
+    impl PaginatedListStore for DelimiterPages {
+        async fn list_paginated(
+            &self,
+            prefix: Option<&str>,
+            options: PaginatedListOptions,
+        ) -> provider_store::Result<PaginatedListResult> {
+            delimiter_page(&self.0, prefix, options).await
+        }
+    }
+
+    /// Builds one page the way S3 does: keys after `offset` roll up into a
+    /// common prefix at the first `/` past `prefix`, and objects and common
+    /// prefixes share `max_keys`.
+    async fn delimiter_page(
+        store: &InMemory,
+        prefix: Option<&str>,
+        options: PaginatedListOptions,
+    ) -> provider_store::Result<PaginatedListResult> {
+        let prefix = prefix.unwrap_or_default();
+        let max_keys = options.max_keys.unwrap_or(1_000);
+        let mut listed: Vec<ObjectMeta> = provider_store::ObjectStore::list(store, None)
+            .try_collect()
+            .await?;
+        listed.sort_by(|left, right| left.location.as_ref().cmp(right.location.as_ref()));
+        let mut objects = Vec::new();
+        let mut common_prefixes: Vec<String> = Vec::new();
+        let mut truncated = false;
+        for meta in listed {
+            let key = meta.location.as_ref().to_owned();
+            let after_offset = options
+                .offset
+                .as_deref()
+                .is_none_or(|offset| key.as_str() > offset);
+            if !key.starts_with(prefix) || !after_offset {
+                continue;
+            }
+            let common = key[prefix.len()..]
+                .find('/')
+                .map(|end| key[..prefix.len() + end + 1].to_owned());
+            if common.is_some() && common.as_ref() == common_prefixes.last() {
+                continue;
+            }
+            if objects.len() + common_prefixes.len() == max_keys {
+                truncated = true;
+                break;
+            }
+            match common {
+                Some(common) => common_prefixes.push(common),
+                None => objects.push(meta),
+            }
+        }
+        Ok(PaginatedListResult {
+            result: ListResult {
+                common_prefixes: common_prefixes
+                    .iter()
+                    .map(Path::parse)
+                    .collect::<std::result::Result<_, _>>()?,
+                objects,
+                extensions: Default::default(),
+            },
+            page_token: truncated.then(|| "more".to_owned()),
+        })
     }
 
     #[test]
@@ -1459,6 +1610,63 @@ mod tests {
             store.list_prefix("namespaces/demo/").await.expect("list"),
             vec![key.to_owned()]
         );
+    }
+
+    #[tokio::test]
+    async fn child_prefix_pages_resume_after_whole_children_inside_the_key_prefix() {
+        let inner = Arc::new(InMemory::default());
+        let store = memory_store_over(Arc::clone(&inner));
+        for key in [
+            "namespaces/a/hint.json",
+            "namespaces/a1",
+            "namespaces/b/hint.json",
+            "namespaces/b/wal/00000000000000000001.wal.zst",
+            "namespaces/b0/hint.json",
+            "namespaces/c/hint.json",
+        ] {
+            store
+                .put_overwrite(key, Bytes::from_static(b"listed"))
+                .await
+                .expect("put");
+        }
+        provider_store::ObjectStoreExt::put(
+            inner.as_ref(),
+            &Path::from("tenant-b/namespaces/z/hint.json"),
+            PutPayload::from_static(b"outside"),
+        )
+        .await
+        .expect("put outside the key prefix");
+
+        let first = child_page(&store, "namespaces/", None, 2).await;
+        assert_eq!(first.items, ["namespaces/a/"]);
+        assert_eq!(first.next_cursor.as_deref(), Some("namespaces/a1"));
+        let second = child_page(&store, "namespaces/", Some("namespaces/a1"), 2).await;
+        assert_eq!(second.items, ["namespaces/b/", "namespaces/b0/"]);
+        assert_eq!(second.next_cursor.as_deref(), Some("namespaces/b0/"));
+        let third = child_page(&store, "namespaces/", Some("namespaces/b0/"), 2).await;
+        assert_eq!(third.items, ["namespaces/c/"]);
+        assert_eq!(third.next_cursor, None);
+
+        let after_child = child_page(&store, "namespaces/", Some("namespaces/b/"), 2).await;
+        assert_eq!(after_child.items, ["namespaces/b0/", "namespaces/c/"]);
+        let objects_only = child_page(&store, "namespaces/", Some("namespaces/a/"), 1).await;
+        assert!(objects_only.items.is_empty());
+        assert_eq!(objects_only.next_cursor.as_deref(), Some("namespaces/a1"));
+        let root = child_page(&store, "", None, 10).await;
+        assert_eq!(root.items, ["namespaces/"]);
+    }
+
+    async fn child_page(
+        store: &ProviderObjectStore,
+        prefix: &str,
+        start_after: Option<&str>,
+        limit: u32,
+    ) -> Page<String, String> {
+        let limit = EffectiveLimit::new(std::num::NonZeroU32::new(limit).expect("nonzero limit"));
+        store
+            .list_child_prefixes(prefix, start_after, limit)
+            .await
+            .expect("list child prefixes")
     }
 
     #[tokio::test]
@@ -1806,6 +2014,17 @@ mod tests {
     }
 
     #[async_trait]
+    impl PaginatedListStore for FlakyStore {
+        async fn list_paginated(
+            &self,
+            prefix: Option<&str>,
+            options: PaginatedListOptions,
+        ) -> provider_store::Result<PaginatedListResult> {
+            delimiter_page(&self.inner, prefix, options).await
+        }
+    }
+
+    #[async_trait]
     impl MultipartStore for FlakyStore {
         async fn create_multipart(
             &self,
@@ -1914,6 +2133,7 @@ mod tests {
         ProviderObjectStore::new(
             Arc::clone(&flaky) as Arc<dyn provider_store::ObjectStore>,
             Arc::clone(&flaky) as Arc<dyn provider_store::ObjectStore>,
+            Arc::clone(&flaky) as Arc<dyn MultipartStore>,
             flaky,
             ProviderObjectStoreConfig {
                 key_prefix: Some("tenant-a".to_owned()),
@@ -2146,6 +2366,7 @@ mod tests {
             Arc::clone(&resending) as Arc<dyn provider_store::ObjectStore>,
             Arc::clone(&one_attempt) as Arc<dyn provider_store::ObjectStore>,
             Arc::clone(&resending) as Arc<dyn MultipartStore>,
+            Arc::clone(&resending) as Arc<dyn PaginatedListStore>,
             ProviderObjectStoreConfig { key_prefix: None },
             ConfiguredObjectStoreKind::LocalFs,
             StoreIoRuntime::new().expect("store io runtime"),

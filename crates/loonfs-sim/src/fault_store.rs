@@ -11,6 +11,7 @@ use loonfs_objectstore::{
     ByteRange, ByteStream, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
     StoredObjectChecksum,
 };
+use loonfs_types::{EffectiveLimit, Page};
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -470,6 +471,24 @@ where
                 result
             }
         }
+    }
+
+    /// Traces child-prefix pages without injecting scheduled faults. The one
+    /// list fault omits a recently written object, and a page of child
+    /// prefixes holds no object keys.
+    async fn list_child_prefixes(
+        &self,
+        prefix: &str,
+        start_after: Option<&str>,
+        limit: EffectiveLimit,
+    ) -> Result<Page<String, String>, ObjectStoreError> {
+        let op = self.next_object_op(ObjectOperationKind::ListPrefix, prefix);
+        let result = self
+            .inner
+            .list_child_prefixes(prefix, start_after, limit)
+            .await;
+        self.push_trace(op, "list_child_prefixes", None, result_class(&result));
+        result
     }
 
     async fn put_overwrite(

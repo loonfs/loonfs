@@ -8,7 +8,7 @@ use loonfs_objectstore::{
     ByteRange, ByteStream, MultipartPart, ObjectBody, ObjectMetadata, ObjectStore,
     ObjectStoreError, PutMode, StoredObjectChecksum,
 };
-use loonfs_types::Checksum;
+use loonfs_types::{Checksum, EffectiveLimit, Page};
 use std::fmt;
 use std::sync::Arc;
 
@@ -187,5 +187,15 @@ impl<S: ObjectStore> ObjectStore for MetadataMapStore<S> {
         start_after: Option<&str>,
     ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
         self.inner.list_prefix_from_stream(prefix, start_after)
+    }
+    async fn list_child_prefixes(
+        &self,
+        prefix: &str,
+        start_after: Option<&str>,
+        limit: EffectiveLimit,
+    ) -> Result<Page<String, String>, ObjectStoreError> {
+        self.inner
+            .list_child_prefixes(prefix, start_after, limit)
+            .await
     }
 }

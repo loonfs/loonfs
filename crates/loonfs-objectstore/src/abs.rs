@@ -65,6 +65,7 @@ pub fn azure_abs(config: AzureAbsStoreConfig) -> Result<ProviderObjectStore> {
     ProviderObjectStore::new(
         Arc::clone(&provider) as Arc<dyn object_store::ObjectStore>,
         Arc::new(one_attempt),
+        Arc::clone(&provider) as Arc<dyn object_store::multipart::MultipartStore>,
         provider,
         ProviderObjectStoreConfig {
             key_prefix: config.key_prefix,

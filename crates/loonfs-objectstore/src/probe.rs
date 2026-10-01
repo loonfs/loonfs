@@ -772,6 +772,7 @@ mod tests {
     use crate::{ObjectBody, ObjectMetadata, PutMode};
     use async_trait::async_trait;
     use futures::stream::BoxStream;
+    use loonfs_types::{EffectiveLimit, Page};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
     use tempfile::TempDir;
@@ -837,6 +838,15 @@ mod tests {
             Box::pin(futures::stream::once(std::future::ready(Err(
                 Self::denied(prefix),
             ))))
+        }
+
+        async fn list_child_prefixes(
+            &self,
+            prefix: &str,
+            _start_after: Option<&str>,
+            _limit: EffectiveLimit,
+        ) -> StoreResult<Page<String, String>> {
+            Err(Self::denied(prefix))
         }
     }
 
@@ -992,6 +1002,17 @@ mod tests {
         ) -> BoxStream<'static, StoreResult<String>> {
             self.inner.list_prefix_from_stream(prefix, start_after)
         }
+
+        async fn list_child_prefixes(
+            &self,
+            prefix: &str,
+            start_after: Option<&str>,
+            limit: EffectiveLimit,
+        ) -> StoreResult<Page<String, String>> {
+            self.inner
+                .list_child_prefixes(prefix, start_after, limit)
+                .await
+        }
     }
 
     #[tokio::test]
@@ -1079,6 +1100,17 @@ mod tests {
         ) -> BoxStream<'static, StoreResult<String>> {
             self.inner.list_prefix_from_stream(prefix, start_after)
         }
+
+        async fn list_child_prefixes(
+            &self,
+            prefix: &str,
+            start_after: Option<&str>,
+            limit: EffectiveLimit,
+        ) -> StoreResult<Page<String, String>> {
+            self.inner
+                .list_child_prefixes(prefix, start_after, limit)
+                .await
+        }
     }
 
     /// A checksum-capable provider may encounter an object written without
@@ -1130,6 +1162,17 @@ mod tests {
         ) -> BoxStream<'static, StoreResult<String>> {
             self.inner.list_prefix_from_stream(prefix, start_after)
         }
+
+        async fn list_child_prefixes(
+            &self,
+            prefix: &str,
+            start_after: Option<&str>,
+            limit: EffectiveLimit,
+        ) -> StoreResult<Page<String, String>> {
+            self.inner
+                .list_child_prefixes(prefix, start_after, limit)
+                .await
+        }
     }
 
     /// A store that stamps every object at the unix epoch — what an
@@ -1171,6 +1214,17 @@ mod tests {
             start_after: Option<&str>,
         ) -> BoxStream<'static, StoreResult<String>> {
             self.inner.list_prefix_from_stream(prefix, start_after)
+        }
+
+        async fn list_child_prefixes(
+            &self,
+            prefix: &str,
+            start_after: Option<&str>,
+            limit: EffectiveLimit,
+        ) -> StoreResult<Page<String, String>> {
+            self.inner
+                .list_child_prefixes(prefix, start_after, limit)
+                .await
         }
     }
 
