@@ -209,8 +209,10 @@ does not fail on template-level errors.
 
 The server's shutdown stops accepting, drains the requests in flight, and
 settles its background work. The drain abandons requests still running after
-`shutdown_deadline_ms`, which defaults to 600 seconds. The extra minute lets
-writer and cache settlement finish before the kubelet sends SIGKILL.
+`shutdown_deadline_ms`, which defaults to 600 seconds, and the server drops
+maintenance sweep visits still running at the same deadline. The extra
+minute lets writer and cache settlement finish before the kubelet sends
+SIGKILL.
 
 The kubelet sends SIGKILL when the grace period runs out. Writer-epoch
 fencing contains what that leaves behind, so a killed process corrupts

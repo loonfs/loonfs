@@ -719,5 +719,5 @@ Behavior notes
   with `--jobs metadata,gc` to select jobs. Run `loonfs maintenance metadata`
   for one pass. Live writers fold their own WAL
   tails; explicit maintenance handles inactive namespaces and the other jobs.
-  Servers maintain the namespaces they use automatically by default.
+  Servers maintain every namespace in their store by default.
 ```

@@ -32,12 +32,13 @@ writer_id = "loonfs-server-local"
 # front of LoonFS — a load balancer, an ingress controller, a sidecar.
 #allow_remote_without_tls = true
 
-# Whether this server serves the maintenance API group, schedules maintenance,
-# both, or neither. `serve_and_maintain` is the default. The other values are
-# `serve_only`, `maintain_only`, and `disabled`. A mode that does not serve the
-# group answers its routes with `route_not_found`; a mode that does not maintain
-# leaves scheduled work to another process. Assign dedicated maintenance work
-# with `loonfs maintenance loop --namespaces ...`.
+# Whether this server serves the maintenance API group, runs the maintenance
+# sweep, both, or neither. `serve_and_maintain` is the default. The other
+# values are `serve_only`, `maintain_only`, and `disabled`. A mode that does
+# not serve the group answers its routes with `route_not_found`; a mode that
+# does not maintain leaves background work to another process. The sweep
+# visits every namespace in the store: it folds idle WAL tails, compacts
+# metadata, builds the grep index, and collects garbage.
 #maintenance = "serve_and_maintain"
 
 # Largest request body accepted for service-proxied upload content, in
@@ -65,9 +66,16 @@ writer_id = "loonfs-server-local"
 #max_concurrent_uploads = 8
 #max_concurrent_downloads = 16
 
-# How many maintenance jobs the local runner may invoke at once. Each job and
-# namespace pair runs at most once concurrently. Defaults to 2.
-#max_concurrent_maintenance = 2
+# How many namespaces the maintenance sweep visits at once. Defaults to 8.
+#max_concurrent_maintenance = 8
+
+# Milliseconds from the start of one sweep pass to the start of the next. A
+# pass that runs longer is followed at once. Defaults to 300000 (5 minutes).
+#maintenance_interval_ms = 300000
+
+# Least milliseconds between the starts of two sweep passes that collect
+# garbage. The first pass after a start collects. Defaults to 3600000 (1 hour).
+#gc_interval_ms = 3600000
 
 # Decoded metadata bytes one maintenance step may merge. A step merges only
 # the runs that fit; a larger window runs as a streaming compaction that holds
@@ -83,9 +91,9 @@ writer_id = "loonfs-server-local"
 #max_block_memo_bytes = 67108864
 
 # How old a namespace's newest commit must be before maintenance folds a WAL
-# tail that is below the fold thresholds, in milliseconds. Scheduled
-# maintenance and explicit `metadata` requests use the same period. Zero turns
-# the rule off. Defaults to 900000 (15 minutes).
+# tail that is below the fold thresholds, in milliseconds. The maintenance
+# sweep and explicit `metadata` requests use the same period. Zero turns the
+# rule off. Defaults to 900000 (15 minutes).
 #idle_fold_after_ms = 900000
 
 # Direct-put needs no configuration. It is offered only where the adapter can
@@ -137,7 +145,7 @@ writer_id = "loonfs-server-local"
 #[grep]
 #mode = "serve_and_maintain"
 # Bounded indexing input budgets; every value must be greater than zero. How many
-# maintenance passes run at once — grep's included — is `max_concurrent_maintenance`.
+# namespaces the sweep indexes at once is `max_concurrent_maintenance`.
 #max_files_per_step = 256
 #max_content_bytes_per_step = 67108864
 # Segment layout and merge policy use engine defaults.

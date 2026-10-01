@@ -1,12 +1,21 @@
 # loonfs-grep
 
 `loonfs-grep` implements LoonFS's optional gram index. Each namespace stores
-its index under `namespaces/{namespace_id}/extensions/grep/`. A server or
-maintenance process registers the grep job with a maintenance registry. Grep
-never scans the store to discover namespaces.
+its index under `namespaces/{namespace_id}/extensions/grep/`. Grep never scans
+the store to discover namespaces. Its host drives it through `GrepWorker`'s
+typed steps: `build_step`, `reorganize_step`, and
+`garbage_collect_namespace`.
 
-A server can run the job with its other maintenance work. A separate process
-can maintain namespaces named on the command line:
+Commits do not schedule index work. The reference server's maintenance sweep
+visits every namespace on a cadence. Each visit runs build steps while they
+publish, at most 16, then one reorganize step once the index is up to date,
+and a collection pass also runs grep garbage collection. A second pass every
+5 seconds builds the index of each writer session the server holds whose
+last published seq moved since that pass last indexed it. A query stays
+correct while the index is behind: it scans the files committed after the
+index.
+
+A separate process can maintain namespaces named on the command line:
 
 ```console
 loonfs maintenance loop --namespaces docs,source --jobs grep-index,grep-gc
@@ -42,5 +51,5 @@ max_content_bytes_per_step = 67108864
 ```
 
 Both input limits must be greater than zero. These values do not control
-concurrency. The runtime's shared `max_concurrent_maintenance` limit applies
-across all maintenance jobs, including grep.
+concurrency. The server's `max_concurrent_maintenance` bounds how many
+namespaces its sweep visits at once, grep indexing included.

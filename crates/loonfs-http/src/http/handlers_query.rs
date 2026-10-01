@@ -75,12 +75,6 @@ pub(super) async fn grep(
 ) -> Result<Json<GrepResponse>, ApiResponseError> {
     let limit = resolve_page_limit(query.limit.take())?;
     let request = grep_request(query)?;
-    // First touch: on a deployment that maintains this index, a search is
-    // also the hint that someone cares about this namespace again — after a
-    // restart, nothing else has said so.
-    if let Some(maintenance) = &state.grep_maintenance {
-        maintenance.nudge_if_behind(&namespace_id).await;
-    }
     let service = state.grep_service();
     // Grep's own segments come off the instrumented store every LoonFS
     // request in this process is measured on; its filesystem reads go
@@ -154,7 +148,7 @@ pub(super) async fn grep_index_not_maintained() -> ApiResponseError {
         path = "/v0/maintenance/namespaces/{namespace_id}/grep/index/enable",
         tag = "maintenance",
         summary = "Enable the grep index",
-        description = "Enables the namespace's grep index and asks this deployment's maintenance runner for the backfill's first step. The response reports the lifecycle and bookkeeping read after the transition: a fresh enable is `backfilling` with the sequence its checkpoint captured, while an already-enabled namespace answers with its current status. Idempotent. Requires this deployment to maintain the grep index.",
+        description = "Enables the namespace's grep index. A deployment that runs maintenance builds the backfill on its next maintenance pass. The response reports the lifecycle and bookkeeping read after the transition: a fresh enable is `backfilling` with the sequence its checkpoint captured, while an already-enabled namespace answers with its current status. Idempotent. Requires this deployment to maintain the grep index.",
         params(("namespace_id" = String, Path, description = "Namespace id")),
         responses(
             (status = 200, description = "Grep index enabled or already enabled", body = GrepIndex),
@@ -187,10 +181,6 @@ pub(super) async fn enable_grep_index(
     // Read after the transition so every index endpoint reports bookkeeping
     // from the same durable root source as the status handler.
     let response = read_grep_index_status(&state, &namespace_id).await?;
-    // The root is durable now; the backfill is one nudge away from starting.
-    if let Some(maintenance) = &state.grep_maintenance {
-        maintenance.nudge(&namespace_id);
-    }
     Ok(Json(response))
 }
 

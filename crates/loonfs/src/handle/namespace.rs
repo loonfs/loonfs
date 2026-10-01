@@ -3,7 +3,7 @@
 use super::{LoonFs, ReadOnly, Writable};
 use crate::fs::RuntimeCore;
 use crate::publisher::{CloseNamespaceReport, NamespaceSession, NamespaceSessionState};
-use crate::{NamespaceId, Result};
+use crate::{ChangeSeq, NamespaceId, Result};
 use loonfs_types::Subject;
 use std::fmt;
 use std::sync::Arc;
@@ -117,6 +117,13 @@ impl Namespace<Writable> {
     /// Returns the state of this handle's writer session.
     pub fn session_state(&self) -> NamespaceSessionState {
         self.session().state()
+    }
+
+    /// Returns the highest seq this session has committed, or `None` before
+    /// its first commit. Reads memory only. A commit from another session or
+    /// another process does not change it.
+    pub fn last_published_seq(&self) -> Option<ChangeSeq> {
+        self.session().last_published_seq()
     }
 
     /// Refuses new work, cancels the session's metadata compaction, drains

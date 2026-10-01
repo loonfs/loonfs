@@ -286,8 +286,7 @@ Prometheus must send the API token as
 `Authorization: Bearer <LOONFS_AUTH_TOKEN>` when scraping `/metrics`.
 
 These metrics show whether the limits in [Resource sizing](#resource-sizing)
-fit the namespaces a server serves. A maintenance key is one job for one
-namespace.
+fit the namespaces a server serves.
 
 | Metric | Type | What moves it |
 | --- | --- | --- |
@@ -297,13 +296,10 @@ namespace.
 | `loonfs.metadata_segment_cache.retained_decoded_bytes` | Gauge | Decoded bytes the metadata segment cache holds, up to `metadata_cache.max_segment_bytes`. |
 | `loonfs.publisher.tail_replays` | Counter | A publish rereads the WAL tail from the store instead of finding it in the head-state cache. This happens on a session's first publish, after the cache evicted the tail, after a failed publish, when the namespace's last write was more than a minute ago, and when a fold the publisher did not run has published a new manifest. |
 | `loonfs.publisher.sessions_open` | Gauge | Writer sessions the server holds: one for each namespace it has written since it started, plus any whose admitted work is still finishing. |
-| `loonfs.maintenance.keys_admitted` | Gauge | Keys the runner reconciles. |
-| `loonfs.maintenance.keys_queued` | Gauge | Keys waiting for a `max_concurrent_maintenance` permit. |
-| `loonfs.maintenance.oldest_queued_ms` | Gauge | How long the oldest queued key has waited. |
-| `loonfs.maintenance.reconcile_sweeps` | Counter | A reconciliation sweep runs, once a minute. |
-| `loonfs.maintenance.reconcile_probes` | Counter | A sweep probes a key, at most 64 per sweep. |
-| `loonfs.maintenance.reconcile_re_admitted` | Counter | A probe finds work and queues its key. |
-| `loonfs.maintenance.step_failures` | Counter, `job` label | A step fails and schedules one backoff retry. |
+| `loonfs.maintenance.sweep_passes` | Counter, `result` label | A maintenance sweep pass ends: `ok` when it listed every namespace, `error` when the listing failed. |
+| `loonfs.maintenance.sweep_pass_seconds` | Histogram | How long one sweep pass took. A pass that takes longer than `maintenance_interval_ms` is followed at once by the next. |
+| `loonfs.maintenance.sweep_visit_failures` | Counter, `call` label | One call of a sweep visit failed on one namespace: `metadata`, `grep_index`, `gc`, or `grep_gc`. The next pass tries it again. |
+| `loonfs.maintenance.sweep_namespaces` | Gauge | Namespaces the last finished sweep pass listed, deleted ones included. |
 | `loonfs.object_store.operations` | Counter, `operation`, `result`, and `key_class` labels | A store call finishes. `key_class` is `content`, `wal_object`, `namespace_manifest` (manifests and the hint), `metadata_segment`, `gc_control` (pins), `metadata` (upload sessions), or `unknown`. |
 
 ## Logs
@@ -323,7 +319,9 @@ Set `[grep].mode` to choose whether this server serves searches, maintains the
 index, or does both. Omit the table to disable grep. The optional
 `max_files_per_step` and `max_content_bytes_per_step` bound input work per
 indexing step; their defaults are 256 files and 64 MiB, and both must be positive.
-Indexing shares `max_concurrent_maintenance` with other maintenance work.
+The maintenance sweep builds the index, so indexing runs only on a server
+whose `maintenance` mode maintains. See
+[Background maintenance](#background-maintenance).
 
 Segment sizes, merge thresholds, and reorganization step sizes use engine
 defaults, like metadata compaction. The accepted input limits are
@@ -349,16 +347,16 @@ counted in any budget and sit on top.
 | Merge input | `max_merge_input_bytes` | 64 MiB | Decoded blocks one compaction or maintenance step merges | Per operation |
 | Segment output | None | 32 MiB | Encoded segments one fold, compaction, or maintenance step holds while it writes them | Per operation |
 | WAL folds | `max_concurrent_folds` | 2 | Folds running at once, including folds that maintenance requests start | Concurrency |
-| Compactions | `max_concurrent_compactions` | 2 | Metadata merges running at once, bounded steps and streaming compactions alike, whether writer sessions, scheduled maintenance, or maintenance requests start them | Concurrency |
-| Maintenance runs | `max_concurrent_maintenance` | 2 | Scheduled maintenance runs at once, including compactions and grep indexing | Concurrency |
-| Scheduled compaction jobs | None | 2 | Streaming compaction jobs the runner admits at once, inside the maintenance limit. Each also waits for a compaction permit | Concurrency |
+| Compactions | `max_concurrent_compactions` | 2 | Metadata merges running at once, bounded steps and streaming compactions alike, whether writer sessions, the maintenance sweep, or maintenance requests start them | Concurrency |
+| Sweep visits | `max_concurrent_maintenance` | 8 | Namespaces the maintenance sweep visits at once, including their grep indexing | Concurrency |
 | Publications | `publication.max_concurrent_publications` | 8 | Publications running at once | Concurrency |
 
 A fold holds a block memo and its segment output, so it can use up to 96 MiB.
 A merge holds its merge input and its segment output, so it can also use up
 to 96 MiB, and `max_concurrent_compactions` merges can use that much each. A
-maintenance run that folds the WAL tail and then merges takes a fold permit
-for the fold and then a compaction permit for the merge.
+sweep visit that folds the WAL tail and then merges takes a fold permit for
+the fold and then a compaction permit for the merge, so the fold and
+compaction limits, not `max_concurrent_maintenance`, bound that memory.
 
 A maintenance step merges only the runs that fit in `max_merge_input_bytes`.
 A larger window runs as a streaming compaction, which holds at most that much
@@ -400,8 +398,12 @@ Reads have no concurrency limit, so their block memos have no total.
 Grep adds a 256 MiB block cache on a server that answers queries. The cache
 has no setting. A query reads up to 32 candidate files of at most 8 MiB each
 at once, so one query can hold up to 256 MiB. Queries have no concurrency
-limit. Index building runs as a maintenance run, and each step reads at most
-`max_content_bytes_per_step` of content.
+limit. Index building runs in sweep visits and in the index pass over held
+sessions, and each step reads at most `max_content_bytes_per_step` of
+content. Up to `max_concurrent_maintenance` sweep visits and one index pass
+build at once, so indexing can read nine steps of content at once by
+default, up to 576 MiB. Lower `max_concurrent_maintenance` or
+`[grep].max_content_bytes_per_step` to lower that ceiling.
 
 The local cache adds `memory_bytes`, 64 MiB of write buffers for its disk
 tier, and up to 256 MiB of inserts waiting for the disk tier. The last two
@@ -409,7 +411,7 @@ have no setting.
 
 This config for a 256 MiB container uses a 64 MiB segment cache, a 16 MiB
 head-state budget, 8 MiB block memos, an 8 MiB merge input, two running
-publications, one fold, one compaction, and one maintenance run:
+publications, one fold, one compaction, and one sweep visit at a time:
 
 ```toml
 max_concurrent_folds = 1
@@ -553,8 +555,8 @@ chart uses an `emptyDir`, so a replacement pod starts with an empty cache.
 ## Shutdown and upgrades
 
 The server handles `SIGTERM` by stopping new requests, waiting for active
-requests, and finishing shutdown work. The default shutdown deadline is
-600 seconds. Docker and the Helm chart should allow 660 seconds before
+requests and running maintenance sweep visits, and finishing shutdown work.
+The default shutdown deadline is 600 seconds, and it bounds both waits. Docker and the Helm chart should allow 660 seconds before
 sending `SIGKILL`.
 
 Before an upgrade, fold each namespace with the current version:
@@ -588,48 +590,109 @@ helm rollback loonfs-server --namespace loonfs
 ## Background maintenance
 
 `maintenance` defaults to `serve_and_maintain`, which serves the maintenance
-API group and schedules metadata maintenance and garbage collection. Use
-`serve_only` to serve explicit requests without scheduling work,
-`maintain_only` to schedule work without serving the group, or `disabled` to
-do neither. A mode that does not serve the group answers every route under
-`/v0/maintenance/` with `route_not_found`; a mode that does not maintain leaves
-scheduled work to another process. Long metadata compactions can log progress
-for an extended period. No action is required unless failures repeat.
+API group and runs the maintenance sweep. Use `serve_only` to serve explicit
+requests without the sweep, `maintain_only` to run the sweep without serving
+the group, or `disabled` to do neither. A mode that does not serve the group
+answers every route under `/v0/maintenance/` with `route_not_found`; a mode
+that does not maintain leaves background work to another process. Long
+metadata compactions can log progress for an extended period. No action is
+required unless failures repeat.
 
-Deleted namespaces are not enumerated for maintenance. Assign them explicitly
-with `loonfs maintenance loop --namespaces <id>` and keep running GC until a
-pass completes after `reclaimable_at_ms` with no future `next_reclamation_at_ms`.
-`deleted.retired_content_objects` counts listed content objects that the pass
-deleted; a pass with nothing left under the content prefix reports zero. Late writes through already-issued upload
-capabilities and dependent forks can extend reclamation. An empty pass does
-not rule out later writes, so keep these namespaces assigned to the loop.
-See the API spec's [namespace deletion section](../../../docs/specs/api.md#63-delete-v0namespacesns)
+Background work has two parts. A writer session folds its own WAL tail at
+the fold thresholds, and it compacts its namespace's metadata after each fold
+it publishes. The sweep does everything else on a cadence. Nothing is
+scheduled by hints, and the sweep keeps no state about a namespace between
+passes, so a restart loses no work: the first pass after a start visits
+every namespace.
+
+A sweep pass lists every namespace in the store, deleted ones included. It
+reads one page of up to 1,000 namespace ids per list request and visits up
+to `max_concurrent_maintenance` namespaces at once, 8 by default. A visit
+does this, in order:
+
+1. Folds a WAL tail whose newest commit is `idle_fold_after_ms` old, then
+   compacts the namespace's metadata while compaction is due. A large
+   compaction runs as a streaming compaction.
+2. When `[grep].mode` maintains the index, runs grep build steps while each
+   one publishes, at most 16, then one reorganize step once the index is up
+   to date.
+3. On a collection pass, collects garbage, then grep garbage.
+
+A pass starts every `maintenance_interval_ms`, 300000 ms (5 minutes) by
+default. When a pass takes longer, the next one starts as soon as it ends.
+A pass collects garbage when `gc_interval_ms`, 3600000 ms (1 hour) by
+default, has passed since the start of the last collection pass that listed
+every namespace. The first pass after a start collects.
+
+When `[grep].mode` maintains the index, a second, shorter pass runs every 5
+seconds over the writer sessions this server holds, one at a time. It runs
+build steps for a session only when the session has committed since that
+pass last indexed it, so a commit through this server is indexed within
+seconds. A held
+session that has not committed costs no store request. The two passes never
+build one namespace's index at the same time. Commits made through another
+server or writer are indexed by the next sweep pass. A grep query stays
+correct while the index is behind: it scans the files committed after the
+index, and fails with `index_lagging` past its scan budget unless
+`allow_stale` is set.
+
+A failed call on one namespace is logged with the namespace id and the call
+name, counted in `loonfs.maintenance.sweep_visit_failures`, and tried again
+on the next pass. It does not stop the visits to other namespaces. A failed
+namespace listing ends the pass with a warning, and the next pass lists
+again. On shutdown, the server stops the sweep at the same moment it stops
+admitting requests. No new visit starts, and a running streaming compaction
+stops at its next block. After the request drain, the server waits for the
+visits that are still running, until the same `shutdown_deadline_ms` that
+bounds the drain. At that deadline it drops the visits still running, logs
+a warning, and shuts the runtime down. A dropped visit leaves what a crash
+leaves, and a later pass does the work again. Like an abandoned request, it
+does not make the shutdown fail.
+
+One pass costs one list request per page of namespaces, plus a fixed number
+of requests for each namespace. An idle namespace, one with nothing to fold,
+compact, or collect, costs:
+
+| Pass | Grep not maintained | Grep maintained, index not enabled | Grep index enabled |
+| --- | --- | --- | --- |
+| Does not collect | 6 GET or HEAD | 7 GET or HEAD | 26 GET or HEAD |
+| Collects | 12 GET or HEAD and 7 LIST | 20 GET or HEAD and 9 LIST | 38 GET or HEAD and 9 LIST |
+
+An object still inside its collection grace adds a request on a collection
+pass, and a namespace with work due adds the requests of that work. Deleted
+namespaces stay listed, so each one keeps this cost on every pass. A server
+with 1,000 idle namespaces and no grep sends about 6,000 requests every
+5 minutes and about 19,000 on each hourly collection pass. Raise
+`maintenance_interval_ms` and `gc_interval_ms` when that is too many.
+
+The sweep collects deleted namespaces too. A collection pass reclaims a
+deleted namespace's content once its retirement grace passes, about 63
+minutes after the delete, and later passes keep collecting it. Late writes
+through already-issued upload capabilities and dependent forks can extend
+reclamation; the later passes find them.
+`deleted.retired_content_objects` in a GC report counts listed content
+objects that the pass deleted; a pass with nothing left under the content
+prefix reports zero. See the API spec's
+[namespace deletion section](../../../docs/specs/api.md#63-delete-v0namespacesns)
 for the blockers.
 
-A `metadata_compaction_required` compaction outcome asks the registered
-`metadata_compaction` job to run.
-The self-hosted server schedules that follow-up automatically.
+A `metadata_compaction_required` compaction outcome in a `metadata`
+maintenance response means a streaming compaction is due. The writer
+session or the next sweep visit runs it.
 
-A namespace that stops writing below the fold thresholds is folded once its
-newest commit is `idle_fold_after_ms` old. The period defaults to 900000 ms,
-which is 15 minutes. After each write that leaves a short tail, the server
-schedules one metadata pass for that namespace one period later, and each
-later write moves that pass back. A namespace written more often than once
-per period is therefore never folded this way. One idle fold costs about
-55 store requests for a one-commit tail and about 90 for a ten-commit tail,
-counting the pass that confirms nothing is left and the probe after it. Most
-are reads, and each WAL object in the tail is read twice. The writes are one
-segment per metadata family, one content object per inline file, the manifest,
-and the hint. The server schedules only namespaces it has written since it
-started. A namespace that was written before a restart and has only been read
-since keeps its tail until its next write, or until
-`loonfs maintenance fold --namespace <id>` folds it. Set
+A namespace that stops writing below the fold thresholds is folded by the
+first sweep pass after its newest commit is `idle_fold_after_ms` old. The
+period defaults to 900000 ms, which is 15 minutes, so at the default
+interval an idle tail is folded within about 20 minutes, after a restart
+too. A namespace written more often than once per period is never folded
+this way; its writer folds it at the thresholds. Set
 `idle_fold_after_ms = 0` to turn the rule off. An explicit `metadata`
-maintenance request uses the same period as the scheduled pass.
+maintenance request uses the same period as the sweep.
 `loonfs maintenance loop` does not read the server config and always uses
-15 minutes. Embedded hosts set
-`MetadataMaintenanceOptions::idle_fold_after_ms` through
-`MetadataMaintenanceJob::options`, where zero also turns the rule off.
+15 minutes. Embedded hosts pass
+`MetadataMaintenanceOptions::idle_fold_after_ms` to
+`Maintenance::maintain_metadata_while_due_with_options`, where zero also
+turns the rule off.
 
 ## Current limitations
 

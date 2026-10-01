@@ -186,6 +186,10 @@ impl NamespaceSession {
         self.publisher.session_state()
     }
 
+    pub(crate) fn last_published_seq(&self) -> Option<ChangeSeq> {
+        self.publisher.lock_state().last_published_seq
+    }
+
     pub(crate) async fn wait_for_fold(&self) -> Result<(), Error> {
         self.publisher.wait_for_fold().await
     }
@@ -509,6 +513,7 @@ struct NamespacePublisherState {
     /// queued when its last batch settled, so the next request publishes
     /// immediately.
     last_publish: Option<Observation>,
+    last_published_seq: Option<ChangeSeq>,
 }
 
 impl NamespacePublisherState {
@@ -660,6 +665,7 @@ impl NamespacePublisher {
                 compaction: None,
                 next_task_id: 0,
                 last_publish: None,
+                last_published_seq: None,
             })),
             engine: Arc::new(AsyncMutex::new(EngineSlot {
                 engine: None,
@@ -1245,6 +1251,16 @@ impl NamespacePublisher {
         };
         if publish.wal_tail_observed {
             slot.last_known_wal_tail_inline_bytes = Some(publish.wal_tail_inline_bytes);
+        }
+        let committed_seq = publish
+            .results
+            .iter()
+            .filter_map(|result| result.as_ref().ok())
+            .map(|commit| commit.committed_seq)
+            .max();
+        if committed_seq.is_some() {
+            let mut state = self.lock_state();
+            state.last_published_seq = state.last_published_seq.max(committed_seq);
         }
         drop(slot);
         if let Some(start) = fold_start {

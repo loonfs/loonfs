@@ -10,8 +10,8 @@ use crate::error::CliError;
 use crate::profiles::default_namespace;
 use loonfs::engine::DecodedBlockCacheConfig;
 use loonfs::{
-    maintenance_hint_relay, GarbageCollectionJob, LoonFs, MaintenanceRegistry, MaintenanceRunner,
-    MetadataCompactionJob, MetadataMaintenanceJob, SharedObjectStore, TraceStoreKind, WriterId,
+    GarbageCollectionJob, LoonFs, MaintenanceRegistry, MaintenanceRunner, MetadataCompactionJob,
+    MetadataMaintenanceJob, SharedObjectStore, TraceStoreKind, WriterId,
 };
 use loonfs_client::Client;
 use loonfs_grep::{
@@ -320,13 +320,9 @@ impl ResolvedTarget {
         let writer_id = writer_id
             .map(ToOwned::to_owned)
             .unwrap_or_else(default_writer_id);
-        let (observer, receiver) = maintenance_hint_relay(
-            std::num::NonZeroUsize::new(1024).expect("relay capacity is nonzero"),
-        );
         let runtime = LoonFs::builder_with_store(store.clone())
             .writer_id(writer_id.clone())
             .inline_content(inline_content.clone())
-            .maintenance_hint_observer(move |hint| observer(hint))
             // A CLI invocation is one solo mutation: holding the commit
             // window open would only add its full delay to every command.
             .min_publish_interval_ms(0)
@@ -363,7 +359,6 @@ impl ResolvedTarget {
         let runner = MaintenanceRunner::builder(jobs.clone())
             .build()
             .map_err(CliError::from)?;
-        runner.attach_hints(receiver);
         let maintenance = MaintenanceHost {
             runtime,
             maintenance,

@@ -55,8 +55,6 @@ pub(crate) fn client(
         direct_transfers: None,
         grep_worker: Some(host.grep_worker.clone()),
         grep_service: Some(Arc::new(grep_service)),
-        // The command drives index steps so --no-wait and step budgets stay exact.
-        grep_maintenance: None,
         metrics: HttpMetrics::new(),
     };
     let router = loonfs_http::router(state);

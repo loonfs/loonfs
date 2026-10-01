@@ -8,6 +8,7 @@
 mod config;
 mod http;
 mod local_cache;
+mod sweep;
 mod trace;
 
 pub use config::{
@@ -20,4 +21,5 @@ pub use http::{
     TlsConfigError,
 };
 pub use local_cache::FoyerStoredMetadataBlockCache;
+pub use sweep::Sweep;
 pub use trace::{init_tracing_from_env, TraceInitError};
