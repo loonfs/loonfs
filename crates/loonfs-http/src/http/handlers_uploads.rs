@@ -256,7 +256,9 @@ async fn begin_direct_multipart_upload(
     }
     // Use the server's default when no part size is requested.
     let prepared = namespace
-        .create_direct_multipart_upload_target(DirectMultipartUploadOptions { part_size_bytes })
+        .create_direct_multipart_upload_target_with_options(&DirectMultipartUploadOptions {
+            part_size_bytes,
+        })
         .await
         .map_err(|error| {
             ApiResponseError::runtime_for_namespace_writer(&state.namespaces, &namespace_id, error)
@@ -780,10 +782,7 @@ mod completion_body_tests {
             .expect("writer");
         let namespace_id = NamespaceId::parse("demo").expect("namespace id");
         writer
-            .create_namespace(
-                &namespace_id,
-                loonfs::CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-            )
+            .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
             .await
             .expect("namespace");
         let namespace = writer

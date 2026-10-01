@@ -195,7 +195,7 @@ async fn inode_of<S: ObjectStore + ?Sized>(
 #[tokio::test]
 async fn an_update_writes_attributes_on_a_file_and_on_a_directory() {
     let (_temp_dir, store, namespace_id, context) = setup().await;
-    put_file_bytes(
+    put_file(
         &store,
         &namespace_id,
         "/docs/a.txt",
@@ -241,7 +241,7 @@ async fn an_update_writes_attributes_on_a_file_and_on_a_directory() {
 #[tokio::test]
 async fn an_empty_string_is_stored_until_the_key_is_removed() {
     let (_temp_dir, store, namespace_id, context) = setup().await;
-    put_file_bytes(
+    put_file(
         &store,
         &namespace_id,
         "/docs/a.txt",
@@ -313,7 +313,7 @@ async fn an_update_rejects_the_root_and_a_missing_path() {
 #[tokio::test]
 async fn an_update_rejects_a_request_that_does_not_describe_one_change() {
     let (_temp_dir, store, namespace_id, context) = setup().await;
-    put_file_bytes(
+    put_file(
         &store,
         &namespace_id,
         "/docs/a.txt",
@@ -378,7 +378,7 @@ async fn an_update_rejects_a_request_that_does_not_describe_one_change() {
 #[tokio::test]
 async fn an_unchanged_update_replays_its_receipt_without_advancing_again() {
     let (_temp_dir, store, namespace_id, context) = setup().await;
-    put_file_bytes(
+    put_file(
         &store,
         &namespace_id,
         "/docs/a.txt",
@@ -436,7 +436,7 @@ async fn an_unchanged_update_replays_its_receipt_without_advancing_again() {
 #[tokio::test]
 async fn an_update_is_rejected_when_the_resulting_map_breaks_a_limit() {
     let (_temp_dir, store, namespace_id, context) = setup().await;
-    put_file_bytes(
+    put_file(
         &store,
         &namespace_id,
         "/docs/a.txt",
@@ -498,7 +498,7 @@ async fn an_update_is_rejected_when_the_resulting_map_breaks_a_limit() {
 #[tokio::test]
 async fn an_already_satisfied_patch_reports_a_stale_expectation() {
     let (_temp_dir, store, namespace_id, context) = setup().await;
-    put_file_bytes(
+    put_file(
         &store,
         &namespace_id,
         "/docs/a.txt",
@@ -551,7 +551,7 @@ async fn an_already_satisfied_patch_reports_a_stale_expectation() {
 #[tokio::test]
 async fn an_attribute_revision_precondition_requires_an_inode_before_resolving_the_path() {
     let (_temp_dir, store, namespace_id, context) = setup().await;
-    put_file_bytes(
+    put_file(
         &store,
         &namespace_id,
         "/docs/a.txt",
@@ -632,7 +632,7 @@ async fn an_attribute_revision_precondition_requires_an_inode_before_resolving_t
 #[tokio::test]
 async fn an_attribute_precondition_rejects_a_recreated_path_before_checking_its_revision() {
     let (_temp_dir, store, namespace_id, context) = setup().await;
-    put_file_bytes(
+    put_file(
         &store,
         &namespace_id,
         "/docs/a.txt",
@@ -668,7 +668,7 @@ async fn an_attribute_precondition_rejects_a_recreated_path_before_checking_its_
     )
     .await
     .expect("delete original inode");
-    put_file_bytes(
+    put_file(
         &store,
         &namespace_id,
         "/docs/a.txt",
@@ -719,7 +719,7 @@ async fn an_attribute_precondition_rejects_a_recreated_path_before_checking_its_
 #[tokio::test]
 async fn a_wrong_expected_inode_is_rejected() {
     let (_temp_dir, store, namespace_id, context) = setup().await;
-    put_file_bytes(
+    put_file(
         &store,
         &namespace_id,
         "/docs/a.txt",
@@ -797,7 +797,7 @@ async fn a_put_and_an_update_of_the_new_path_commit_together() {
 #[tokio::test]
 async fn an_unchanged_update_and_a_second_update_commit_together() {
     let (_temp_dir, store, namespace_id, context) = setup().await;
-    put_file_bytes(
+    put_file(
         &store,
         &namespace_id,
         "/docs/a.txt",
@@ -848,7 +848,7 @@ async fn an_unchanged_update_and_a_second_update_commit_together() {
 #[tokio::test]
 async fn a_request_that_stops_at_a_bad_update_publishes_nothing() {
     let (_temp_dir, store, namespace_id, context) = setup().await;
-    put_file_bytes(
+    put_file(
         &store,
         &namespace_id,
         "/docs/a.txt",
@@ -902,7 +902,7 @@ async fn a_request_that_stops_at_a_bad_update_publishes_nothing() {
 #[tokio::test]
 async fn attributes_survive_a_fold_and_the_counter_keeps_going() {
     let (_temp_dir, store, namespace_id, context) = setup().await;
-    put_file_bytes(
+    put_file(
         &store,
         &namespace_id,
         "/docs/a.txt",
@@ -985,7 +985,7 @@ async fn attributes_survive_a_fold_and_the_counter_keeps_going() {
 #[tokio::test]
 async fn a_fork_reads_the_sources_attributes_before_and_after_its_first_fold() {
     let (_temp_dir, store, source, context) = setup().await;
-    put_file_bytes(
+    put_file(
         &store,
         &source,
         "/docs/a.txt",
@@ -1080,7 +1080,7 @@ async fn a_fork_reads_the_sources_attributes_before_and_after_its_first_fold() {
 #[tokio::test]
 async fn move_rename_replace_and_restore_preserve_attributes() {
     let (_temp_dir, store, namespace_id, context) = setup().await;
-    put_file_bytes(
+    put_file(
         &store,
         &namespace_id,
         "/docs/a.txt",
@@ -1157,7 +1157,7 @@ async fn move_rename_replace_and_restore_preserve_attributes() {
 #[tokio::test]
 async fn a_delete_keeps_attributes_and_an_undelete_gives_them_back() {
     let (_temp_dir, store, namespace_id, context) = setup().await;
-    put_file_bytes(
+    put_file(
         &store,
         &namespace_id,
         "/docs/a.txt",
@@ -1241,7 +1241,7 @@ async fn a_delete_keeps_attributes_and_an_undelete_gives_them_back() {
 #[tokio::test]
 async fn a_copy_to_a_vacant_destination_inherits_the_sources_attributes() {
     let (_temp_dir, store, namespace_id, context) = setup().await;
-    put_file_bytes(
+    put_file(
         &store,
         &namespace_id,
         "/docs/a.txt",
@@ -1312,7 +1312,7 @@ async fn a_copy_to_a_vacant_destination_inherits_the_sources_attributes() {
 #[tokio::test]
 async fn a_copy_of_a_file_without_attributes_publishes_no_attribute_event() {
     let (_temp_dir, store, namespace_id, context) = setup().await;
-    put_file_bytes(
+    put_file(
         &store,
         &namespace_id,
         "/docs/a.txt",
@@ -1355,7 +1355,7 @@ async fn a_copy_over_an_existing_file_leaves_its_attributes_alone() {
         ("/docs/a.txt", "seed-source"),
         ("/docs/b.txt", "seed-target"),
     ] {
-        put_file_bytes(
+        put_file(
             &store,
             &namespace_id,
             path_value,
@@ -1415,7 +1415,7 @@ async fn a_copy_over_an_existing_file_leaves_its_attributes_alone() {
 #[tokio::test]
 async fn clearing_every_attribute_publishes_the_empty_map() {
     let (_temp_dir, store, namespace_id, context) = setup().await;
-    put_file_bytes(
+    put_file(
         &store,
         &namespace_id,
         "/docs/a.txt",

@@ -23,7 +23,7 @@ The record has two states:
 | State | Stored information | Recovery action |
 | --- | --- | --- |
 | `uploading` | Original options and source metadata, with multipart geometry and accepted parts when applicable | Continue the existing upload. |
-| `prepared` | The complete commit request, including either its original content reference and proof or its inline bytes | Resubmit that request through `create_commit`. |
+| `prepared` | The complete commit request, including either its original content reference and proof or its inline bytes | Resubmit that request through the `create_commit` operation. |
 
 A resumed command uses the recorded options. If the source metadata or options have changed, the command stops and preserves the record. It also stops if the record cannot be read or its JSON is malformed. It does not replace a questionable record with a new upload attempt.
 

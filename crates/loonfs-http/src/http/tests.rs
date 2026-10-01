@@ -22,10 +22,7 @@ use axum::body::Bytes;
 use axum::http::StatusCode;
 use fixtures::{test_app, test_options, TestAppOptions, TestOptions};
 use futures::stream::StreamExt;
-use loonfs::{
-    CreateNamespaceOptions, DeleteOptions, LoonFs, PutFileOptions, TraceMode, TraceStoreKind,
-    Writable,
-};
+use loonfs::{DeleteOptions, LoonFs, PutFileOptions, TraceMode, TraceStoreKind, Writable};
 use loonfs_api::{
     AttributesRevisionNo, ErrorCode, ErrorDetails, InodeId, WriterEpoch, ALL_LIMIT_KEYS,
 };
@@ -162,8 +159,8 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "path_absence",
     "path_binding",
     "path_prefix",
+    "prepare_content",
     "prepare_content_ref",
-    "prepare_file_bytes",
     "protocol_version",
     "put_file",
     "put_file_prepared",
@@ -213,7 +210,7 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
 fn replace_file_options() -> PutFileOptions {
     PutFileOptions {
         behavior: DestinationBehavior::Replace,
-        ..PutFileOptions::new(loonfs_test_support::test_actor())
+        ..Default::default()
     }
 }
 
@@ -639,10 +636,7 @@ async fn maintenance_namespace_diagnostics_route_answers_storage_fields() {
     let namespace_id = namespace_id("diagnostics");
     state
         .runtime
-        .create_namespace(
-            &namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let namespace = state
@@ -650,10 +644,10 @@ async fn maintenance_namespace_diagnostics_route_answers_storage_fields() {
         .open_namespace(&namespace_id)
         .expect("open namespace");
     namespace
-        .put_file_bytes(
+        .put_file(
             "/note.txt",
             b"diagnostic tail",
-            PutFileOptions::new(loonfs_test_support::test_actor()),
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("publish one WAL object");
@@ -1026,22 +1020,19 @@ async fn runtime_created_state_is_readable_through_http() {
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     let fs = test_runtime(store.clone(), "runtime-writer").await;
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    fs.create_namespace(
-        &namespace_id,
-        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-    )
-    .await
-    .expect("create namespace through runtime");
+    fs.create_namespace(&namespace_id, &loonfs_test_support::test_actor())
+        .await
+        .expect("create namespace through runtime");
     let namespace = fs.open_namespace(&namespace_id).expect("open namespace");
     namespace
-        .put_file_bytes(
+        .put_file_with_options(
             "/notes/hello.txt",
             b"hello from runtime",
-            PutFileOptions {
+            &loonfs_test_support::test_actor(),
+            &PutFileOptions {
                 behavior: DestinationBehavior::NoReplace,
                 commit: loonfs_api::options::CommitOptions {
                     preconditions: Vec::new(),
-                    actor_id: loonfs_test_support::test_actor(),
                     commit_id: Some(CommitId::parse("runtime-put").expect("valid commit id")),
                     message: None,
                 },
@@ -1083,7 +1074,12 @@ async fn http_created_state_is_readable_through_runtime() {
     let target = NamespacePath::parse("demo", "/notes/from-http.txt").expect("target");
     harness
         .client
-        .put_file_bytes(&target, b"hello from http", &replace_file_options())
+        .put_file_with_options(
+            &target,
+            b"hello from http",
+            &loonfs_test_support::test_actor(),
+            &replace_file_options(),
+        )
         .await
         .expect("write file through http");
 
@@ -1106,7 +1102,12 @@ async fn http_missing_namespace_mutations_return_namespace_not_found() {
     assert_api_error(
         harness
             .client
-            .put_file_bytes(&target, b"hello", &replace_file_options())
+            .put_file_with_options(
+                &target,
+                b"hello",
+                &loonfs_test_support::test_actor(),
+                &replace_file_options(),
+            )
             .await,
         404,
         "namespace_not_found",
@@ -1115,10 +1116,7 @@ async fn http_missing_namespace_mutations_return_namespace_not_found() {
     assert_api_error(
         harness
             .client
-            .delete_path(
-                &target,
-                &DeleteOptions::new(loonfs_test_support::test_actor()),
-            )
+            .delete_path(&target, &loonfs_test_support::test_actor())
             .await,
         404,
         "namespace_not_found",
@@ -1128,14 +1126,14 @@ async fn http_missing_namespace_mutations_return_namespace_not_found() {
     assert_api_error(
         harness
             .client
-            .move_path(
+            .move_path_with_options(
                 &target,
                 &destination,
+                &loonfs_test_support::test_actor(),
                 &MoveOptions {
                     behavior: DestinationBehavior::NoReplace,
                     commit: loonfs_api::options::CommitOptions {
                         preconditions: Vec::new(),
-                        actor_id: loonfs_test_support::test_actor(),
                         commit_id: None,
                         message: None,
                     },
@@ -1181,10 +1179,7 @@ async fn http_delete_missing_path_returns_path_not_found() {
     assert_api_error(
         harness
             .client
-            .delete_path(
-                &target,
-                &DeleteOptions::new(loonfs_test_support::test_actor()),
-            )
+            .delete_path(&target, &loonfs_test_support::test_actor())
             .await,
         404,
         "path_not_found",
@@ -1229,7 +1224,12 @@ async fn http_put_over_directory_and_move_into_existing_target_return_path_confl
     assert_api_error(
         harness
             .client
-            .put_file_bytes(&dir_target, b"not a file", &replace_file_options())
+            .put_file_with_options(
+                &dir_target,
+                b"not a file",
+                &loonfs_test_support::test_actor(),
+                &replace_file_options(),
+            )
             .await,
         409,
         "path_conflict",
@@ -1241,14 +1241,14 @@ async fn http_put_over_directory_and_move_into_existing_target_return_path_confl
     assert_api_error(
         harness
             .client
-            .move_path(
+            .move_path_with_options(
                 &from,
                 &to,
+                &loonfs_test_support::test_actor(),
                 &MoveOptions {
                     behavior: DestinationBehavior::NoReplace,
                     commit: loonfs_api::options::CommitOptions {
                         preconditions: Vec::new(),
-                        actor_id: loonfs_test_support::test_actor(),
                         commit_id: None,
                         message: None,
                     },
@@ -1284,19 +1284,12 @@ async fn http_put_with_preconditions_rejects_a_delete_recreate_race() {
     let observed = harness.client.stat(&target).await.expect("observe file");
     harness
         .client
-        .delete_path(
-            &target,
-            &DeleteOptions::new(loonfs_test_support::test_actor()),
-        )
+        .delete_path(&target, &loonfs_test_support::test_actor())
         .await
         .expect("delete observed file");
     harness
         .client
-        .put_file_bytes(
-            &target,
-            b"new inode",
-            &PutFileOptions::new(loonfs_test_support::test_actor()),
-        )
+        .put_file(&target, b"new inode", &loonfs_test_support::test_actor())
         .await
         .expect("recreate path");
     let recreated = harness
@@ -1310,7 +1303,12 @@ async fn http_put_with_preconditions_rejects_a_delete_recreate_race() {
     with_preconditions.expected_revision_no = Some(RevisionNo(1));
     match harness
         .client
-        .put_file_bytes(&target, b"must not land", &with_preconditions)
+        .put_file_with_options(
+            &target,
+            b"must not land",
+            &loonfs_test_support::test_actor(),
+            &with_preconditions,
+        )
         .await
         .expect_err("the recreated inode must fail the precondition")
     {
@@ -1359,23 +1357,27 @@ async fn http_move_with_preconditions_rejects_a_bumped_destination_revision() {
     let observed = harness.client.stat(&to).await.expect("observe destination");
     harness
         .client
-        .put_file_bytes(&to, b"destination v2", &replace_file_options())
+        .put_file_with_options(
+            &to,
+            b"destination v2",
+            &loonfs_test_support::test_actor(),
+            &replace_file_options(),
+        )
         .await
         .expect("bump destination revision");
 
     assert_api_error(
         harness
             .client
-            .move_path(
+            .move_path_with_options(
                 &from,
                 &to,
+                &loonfs_test_support::test_actor(),
                 &MoveOptions {
                     behavior: DestinationBehavior::Replace,
-                    commit: loonfs_api::options::CommitOptions::new(
-                        loonfs_test_support::test_actor(),
-                    ),
                     expected_destination_inode_id: Some(observed.inode_id),
                     expected_destination_revision_no: Some(RevisionNo(1)),
+                    ..Default::default()
                 },
             )
             .await,
@@ -1416,7 +1418,12 @@ async fn http_put_and_move_under_deleted_ancestor_create_fresh_subtrees() {
     let put_target = NamespacePath::parse("demo", "/docs/new.txt").expect("put target");
     harness
         .client
-        .put_file_bytes(&put_target, b"new", &replace_file_options())
+        .put_file_with_options(
+            &put_target,
+            b"new",
+            &loonfs_test_support::test_actor(),
+            &replace_file_options(),
+        )
         .await
         .expect("put recreates the subtree");
     let old_child = NamespacePath::parse("demo", "/docs/old.txt").expect("old child");
@@ -1431,14 +1438,14 @@ async fn http_put_and_move_under_deleted_ancestor_create_fresh_subtrees() {
     let to = NamespacePath::parse("demo", "/docs/source.txt").expect("to");
     harness
         .client
-        .move_path(
+        .move_path_with_options(
             &from,
             &to,
+            &loonfs_test_support::test_actor(),
             &MoveOptions {
                 behavior: DestinationBehavior::NoReplace,
                 commit: loonfs_api::options::CommitOptions {
                     preconditions: Vec::new(),
-                    actor_id: loonfs_test_support::test_actor(),
                     commit_id: None,
                     message: None,
                 },
@@ -1469,7 +1476,12 @@ async fn http_path_mutation_retries_a_wal_put_collision() {
     let target = NamespacePath::parse("demo", "/notes/race.txt").expect("target");
     let result = harness
         .client
-        .put_file_bytes(&target, b"race", &replace_file_options())
+        .put_file_with_options(
+            &target,
+            b"race",
+            &loonfs_test_support::test_actor(),
+            &replace_file_options(),
+        )
         .await
         .expect("path write retries the WAL collision");
     assert_eq!(result.committed_seq, ChangeSeq(1));
@@ -1491,7 +1503,12 @@ async fn http_first_write_takes_over_a_namespace_owned_by_another_writer() {
     let target = NamespacePath::parse("demo", "/notes/taken-over.txt").expect("target");
     let result = harness
         .client
-        .put_file_bytes(&target, b"taken over", &replace_file_options())
+        .put_file_with_options(
+            &target,
+            b"taken over",
+            &loonfs_test_support::test_actor(),
+            &replace_file_options(),
+        )
         .await
         .expect("first write takes over the namespace");
     assert_eq!(result.committed_seq, ChangeSeq(1));
@@ -1940,7 +1957,12 @@ async fn http_upload_body_over_the_limit_answers_content_too_large() {
     // direct transport on offer here, the payload has nowhere to go and the
     // refusal comes before the bytes move.
     match client
-        .put_file_bytes(&target, &[0u8; 4096], &replace_file_options())
+        .put_file_with_options(
+            &target,
+            &[0u8; 4096],
+            &loonfs_test_support::test_actor(),
+            &replace_file_options(),
+        )
         .await
     {
         Err(ClientError::UploadTooLarge { size_bytes, .. }) => assert_eq!(size_bytes, 4096),
@@ -1949,7 +1971,12 @@ async fn http_upload_body_over_the_limit_answers_content_too_large() {
 
     // A body inside the limit still goes through on the same route.
     client
-        .put_file_bytes(&target, &[0u8; 512], &replace_file_options())
+        .put_file_with_options(
+            &target,
+            &[0u8; 512],
+            &loonfs_test_support::test_actor(),
+            &replace_file_options(),
+        )
         .await
         .expect("small upload fits under the limit");
 
@@ -1982,7 +2009,12 @@ async fn the_proxied_upload_route_never_holds_the_whole_payload() {
     let target = NamespacePath::parse("demo", "/streamed.bin").expect("target");
     harness
         .client
-        .put_file_bytes(&target, &payload, &replace_file_options())
+        .put_file_with_options(
+            &target,
+            &payload,
+            &loonfs_test_support::test_actor(),
+            &replace_file_options(),
+        )
         .await
         .expect("a multi-part payload uploads through the proxied route");
 
@@ -2265,7 +2297,12 @@ async fn http_uploads_answer_server_busy_at_the_concurrency_cap() {
     let target = NamespacePath::parse("demo", "/one.bin").expect("target");
     assert_api_error(
         client
-            .put_file_bytes(&target, &[0u8; 64], &replace_file_options())
+            .put_file_with_options(
+                &target,
+                &[0u8; 64],
+                &loonfs_test_support::test_actor(),
+                &replace_file_options(),
+            )
             .await,
         503,
         "server_busy",
@@ -2284,7 +2321,12 @@ async fn http_uploads_answer_server_busy_at_the_concurrency_cap() {
     let client = Client::new(client_config).expect("valid client config");
     let target = NamespacePath::parse("demo", "/one.bin").expect("target");
     client
-        .put_file_bytes(&target, &[0u8; 64], &replace_file_options())
+        .put_file_with_options(
+            &target,
+            &[0u8; 64],
+            &loonfs_test_support::test_actor(),
+            &replace_file_options(),
+        )
         .await
         .expect("a freed slot admits the upload");
 
@@ -2579,18 +2621,15 @@ async fn seed_grep_error_namespace(
 
 async fn seed_grep_error_namespace_on(writer: &LoonFs<Writable>, namespace_id: &NamespaceId) {
     writer
-        .create_namespace(
-            namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create grep-error namespace");
     let namespace = writer.open_namespace(namespace_id).expect("open namespace");
     namespace
-        .put_file_bytes(
+        .put_file(
             "/core.txt",
             b"core remains readable",
-            PutFileOptions::new(loonfs_test_support::test_actor()),
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("write core isolation sentinel");
@@ -2767,10 +2806,7 @@ async fn bootstrap_namespace(
 ) -> LoonFs<Writable> {
     let writer = test_runtime(store.clone(), writer_id).await;
     writer
-        .create_namespace(
-            namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("bootstrap namespace");
     writer
@@ -2785,14 +2821,14 @@ async fn write_file_bytes(
 ) {
     let namespace = fs.open_namespace(namespace_id).expect("open namespace");
     namespace
-        .put_file_bytes(
+        .put_file_with_options(
             absolute_path,
             bytes,
-            PutFileOptions {
+            &loonfs_test_support::test_actor(),
+            &PutFileOptions {
                 behavior: DestinationBehavior::Replace,
                 commit: loonfs_api::options::CommitOptions {
                     preconditions: Vec::new(),
-                    actor_id: loonfs_test_support::test_actor(),
                     commit_id: Some(CommitId::parse(commit_id).expect("valid test commit id")),
                     message: None,
                 },
@@ -2812,13 +2848,13 @@ async fn delete_path_recursive(
 ) {
     let namespace = fs.open_namespace(namespace_id).expect("open namespace");
     namespace
-        .delete_path(
+        .delete_path_with_options(
             absolute_path,
-            DeleteOptions {
+            &loonfs_test_support::test_actor(),
+            &DeleteOptions {
                 behavior: DeleteDirectoryBehavior::Recursive,
                 commit: loonfs_api::options::CommitOptions {
                     preconditions: Vec::new(),
-                    actor_id: loonfs_test_support::test_actor(),
                     commit_id: Some(CommitId::parse(commit_id).expect("valid test commit id")),
                     message: None,
                 },
@@ -2895,10 +2931,7 @@ mod direct_download {
         let namespace = namespace_id("inline-download");
         let writer = test_runtime(store.clone(), "inline-writer").await;
         writer
-            .create_namespace(
-                &namespace,
-                CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-            )
+            .create_namespace(&namespace, &loonfs_test_support::test_actor())
             .await
             .expect("namespace");
         let namespace_writer = writer.open_namespace(&namespace).expect("open namespace");
@@ -2908,11 +2941,7 @@ mod direct_download {
         ];
         for (path, bytes) in &values {
             namespace_writer
-                .put_file_bytes(
-                    path,
-                    bytes,
-                    PutFileOptions::new(loonfs_test_support::test_actor()),
-                )
+                .put_file(path, bytes, &loonfs_test_support::test_actor())
                 .await
                 .expect("publish inline content");
         }
@@ -3367,7 +3396,12 @@ mod direct_download {
             .map(|index| (index % 251) as u8)
             .collect();
         client
-            .put_file_bytes(&target, &payload, &replace_file_options())
+            .put_file_with_options(
+                &target,
+                &payload,
+                &loonfs_test_support::test_actor(),
+                &replace_file_options(),
+            )
             .await
             .expect("seed the oversized file");
         let entry = client.stat(&target).await.expect("stat seeded file");
@@ -3398,10 +3432,7 @@ mod direct_download {
         assert_eq!(received, payload);
 
         client
-            .delete_path(
-                &target,
-                &DeleteOptions::new(loonfs_test_support::test_actor()),
-            )
+            .delete_path(&target, &loonfs_test_support::test_actor())
             .await
             .expect("delete current binding");
         let inode_grant = client
@@ -3445,7 +3476,12 @@ mod direct_download {
         let first = vec![b'a'; PROXY_CAP_BYTES as usize * 2];
         let second = vec![b'b'; PROXY_CAP_BYTES as usize * 2];
         client
-            .put_file_bytes(&target, &first, &replace_file_options())
+            .put_file_with_options(
+                &target,
+                &first,
+                &loonfs_test_support::test_actor(),
+                &replace_file_options(),
+            )
             .await
             .expect("seed revision 1");
 
@@ -3456,7 +3492,12 @@ mod direct_download {
         assert_eq!(grant.revision_no, RevisionNo(1));
 
         client
-            .put_file_bytes(&target, &second, &replace_file_options())
+            .put_file_with_options(
+                &target,
+                &second,
+                &loonfs_test_support::test_actor(),
+                &replace_file_options(),
+            )
             .await
             .expect("replace with revision 2");
 
@@ -3499,7 +3540,12 @@ mod direct_download {
             .expect("create namespace");
         let target = NamespacePath::parse(namespace.as_str(), "/small.txt").expect("target");
         client
-            .put_file_bytes(&target, b"small enough to proxy", &replace_file_options())
+            .put_file_with_options(
+                &target,
+                b"small enough to proxy",
+                &loonfs_test_support::test_actor(),
+                &replace_file_options(),
+            )
             .await
             .expect("seed a file");
 
@@ -3708,7 +3754,12 @@ mod direct_download {
             .collect();
 
         client
-            .put_file_bytes(&target, &payload, &replace_file_options())
+            .put_file_with_options(
+                &target,
+                &payload,
+                &loonfs_test_support::test_actor(),
+                &replace_file_options(),
+            )
             .await
             .expect("a large file goes straight to object storage under a crc32c claim");
 
@@ -3767,7 +3818,12 @@ mod direct_download {
             .collect();
 
         client
-            .put_file_bytes(&target, &payload, &replace_file_options())
+            .put_file_with_options(
+                &target,
+                &payload,
+                &loonfs_test_support::test_actor(),
+                &replace_file_options(),
+            )
             .await
             .expect("a large file goes straight to object storage");
 
@@ -3818,7 +3874,12 @@ mod direct_download {
         let payload = vec![7u8; loonfs_client::STREAMING_PUT_MIN_BYTES as usize];
 
         let error = client
-            .put_file_bytes(&target, &payload, &replace_file_options())
+            .put_file_with_options(
+                &target,
+                &payload,
+                &loonfs_test_support::test_actor(),
+                &replace_file_options(),
+            )
             .await
             .expect_err("no transport can carry this payload");
         match &error {
@@ -3947,7 +4008,7 @@ async fn stale_commit_precondition_returns_409_with_its_index() {
         .runtime
         .create_namespace(
             &NamespaceId::parse("demo").expect("namespace"),
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("namespace");
@@ -4000,7 +4061,7 @@ async fn scoped_commit_precondition_returns_409_with_its_index() {
         .runtime
         .create_namespace(
             &NamespaceId::parse("demo").expect("namespace"),
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("namespace");

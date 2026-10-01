@@ -4,10 +4,7 @@
 // Runtime integration tests use panic in helper assertions for precise diagnostics.
 
 use crate::common::*;
-use loonfs::{
-    CopyOptions, CreateNamespaceOptions, DestinationBehavior, MoveOptions, NamespaceId,
-    PutFileOptions, TraceStoreKind,
-};
+use loonfs::{DestinationBehavior, NamespaceId, PutFileOptions, TraceStoreKind};
 use loonfs_objectstore::metrics::{ObjectStoreOperation, VecObjectStoreMetricsRecorder};
 use loonfs_test_support::ids::namespace_id;
 use std::sync::Arc;
@@ -23,11 +20,8 @@ fn builder_object_store_metrics_recorder_instruments_object_store() {
             .object_store_metrics_recorder(recorder.clone())
     });
 
-    fs.create_namespace_blocking(
-        &namespace_id("demo"),
-        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-    )
-    .expect("create namespace");
+    fs.create_namespace_blocking(&namespace_id("demo"), &loonfs_test_support::test_actor())
+        .expect("create namespace");
 
     let samples = recorder.samples();
     assert!(!samples.is_empty());
@@ -45,16 +39,13 @@ fn filesystem_operations_match_core_semantics() {
     let fs = runtime(temp_dir.path(), "filesystem-test");
     let namespace_id = namespace_id("demo");
 
-    fs.create_namespace_blocking(
-        &namespace_id,
-        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-    )
-    .expect("create namespace");
-    fs.put_file_bytes_blocking(
+    fs.create_namespace_blocking(&namespace_id, &loonfs_test_support::test_actor())
+        .expect("create namespace");
+    fs.put_file_blocking(
         &namespace_id,
         "/docs/hello.txt",
         b"hello",
-        PutFileOptions::new(loonfs_test_support::test_actor()),
+        &loonfs_test_support::test_actor(),
     )
     .expect("put file");
 
@@ -75,15 +66,15 @@ fn filesystem_operations_match_core_semantics() {
         .expect("read file");
     assert_eq!(read.bytes, b"hello");
 
-    fs.put_file_bytes_blocking(
+    fs.put_file_with_options_blocking(
         &namespace_id,
         "/docs/hello.txt",
         b"updated",
-        PutFileOptions {
+        &loonfs_test_support::test_actor(),
+        &PutFileOptions {
             behavior: DestinationBehavior::Replace,
             commit: loonfs_api::options::CommitOptions {
                 preconditions: Vec::new(),
-                actor_id: loonfs_test_support::test_actor(),
                 commit_id: None,
                 message: None,
             },
@@ -101,14 +92,14 @@ fn filesystem_operations_match_core_semantics() {
         &namespace_id,
         "/docs/hello.txt",
         "/docs/copy.txt",
-        CopyOptions::new(loonfs_test_support::test_actor()),
+        &loonfs_test_support::test_actor(),
     )
     .expect("copy file");
     fs.move_path_blocking(
         &namespace_id,
         "/docs/copy.txt",
         "/docs/moved.txt",
-        MoveOptions::new(loonfs_test_support::test_actor()),
+        &loonfs_test_support::test_actor(),
     )
     .expect("move file");
     assert_eq!(
@@ -126,16 +117,13 @@ fn forked_namespace_shares_content_then_diverges() {
     let source = namespace_id("demo");
     let clone = NamespaceId::parse("clone").expect("valid namespace id");
 
-    fs.create_namespace_blocking(
-        &source,
-        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-    )
-    .expect("create source namespace");
-    fs.put_file_bytes_blocking(
+    fs.create_namespace_blocking(&source, &loonfs_test_support::test_actor())
+        .expect("create source namespace");
+    fs.put_file_blocking(
         &source,
         "/docs/shared.txt",
         b"source",
-        PutFileOptions::new(loonfs_test_support::test_actor()),
+        &loonfs_test_support::test_actor(),
     )
     .expect("put source file");
     fs.fork_namespace_blocking(&source, &clone)
@@ -149,15 +137,15 @@ fn forked_namespace_shares_content_then_diverges() {
         .expect("stat clone");
     assert_eq!(source_entry.content_ref(), clone_entry.content_ref());
 
-    fs.put_file_bytes_blocking(
+    fs.put_file_with_options_blocking(
         &clone,
         "/docs/shared.txt",
         b"clone",
-        PutFileOptions {
+        &loonfs_test_support::test_actor(),
+        &PutFileOptions {
             behavior: DestinationBehavior::Replace,
             commit: loonfs_api::options::CommitOptions {
                 preconditions: Vec::new(),
-                actor_id: loonfs_test_support::test_actor(),
                 commit_id: None,
                 message: None,
             },

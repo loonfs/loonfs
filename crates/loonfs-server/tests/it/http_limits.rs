@@ -77,7 +77,12 @@ async fn http_malformed_bodies_fail_inside_the_error_envelope() {
     let source = NamespacePath::parse("demo", "/docs/source.txt").expect("source");
     harness
         .client
-        .put_file_bytes(&source, b"source", &replace_file_options())
+        .put_file_with_options(
+            &source,
+            b"source",
+            &loonfs_test_support::test_actor(),
+            &replace_file_options(),
+        )
         .await
         .expect("seed source");
 

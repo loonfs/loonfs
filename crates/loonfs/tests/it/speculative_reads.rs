@@ -3,8 +3,8 @@
 //! replaced file is never served from the reference the cached view named.
 
 use loonfs::{
-    CreateNamespaceOptions, DestinationBehavior, LoonFs, MetadataCache, NamespaceId,
-    PutFileOptions, ReadOnly, Writable, DEFAULT_MAX_HEAD_STATE_BYTES,
+    DestinationBehavior, LoonFs, MetadataCache, NamespaceId, PutFileOptions, ReadOnly, Writable,
+    DEFAULT_MAX_HEAD_STATE_BYTES,
 };
 use loonfs_core::time::Deadline;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -26,19 +26,12 @@ async fn writer_with_file(
         .await
         .expect("build writer");
     writer
-        .create_namespace(
-            namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let namespace = writer.open_namespace(namespace_id).expect("open namespace");
     namespace
-        .put_file_bytes(
-            PATH,
-            b"first",
-            PutFileOptions::new(loonfs_test_support::test_actor()),
-        )
+        .put_file(PATH, b"first", &loonfs_test_support::test_actor())
         .await
         .expect("write file");
     writer
@@ -139,10 +132,12 @@ async fn a_replaced_file_is_not_served_from_the_cached_reference() {
         .expect("read that caches the namespace");
     assert_eq!(first.bytes, b"first");
 
-    let mut replace = PutFileOptions::new(loonfs_test_support::test_actor());
-    replace.behavior = DestinationBehavior::Replace;
+    let replace = PutFileOptions {
+        behavior: DestinationBehavior::Replace,
+        ..Default::default()
+    };
     namespace_writer
-        .put_file_bytes(PATH, b"again", replace)
+        .put_file_with_options(PATH, b"again", &loonfs_test_support::test_actor(), &replace)
         .await
         .expect("replace file");
 
@@ -177,9 +172,10 @@ async fn buffered_inline_reads_request_no_content_object_on_either_branch() {
     let namespace_id = NamespaceId::parse("inline-reads").expect("namespace");
     let writer_id = WriterId::parse("inline-writer").expect("writer");
     NamespaceEngine::writer(store.clone(), namespace_id.clone(), writer_id.clone())
-        .bootstrap_namespace(CreateNamespaceOptions::new(
-            loonfs_test_support::test_actor(),
-        ))
+        .bootstrap_namespace(
+            &loonfs_test_support::test_actor(),
+            &CreateNamespaceOptions::default(),
+        )
         .await
         .expect("bootstrap");
     let values: Vec<_> = [

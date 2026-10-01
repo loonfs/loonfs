@@ -7,11 +7,10 @@
 use loonfs::publish::{CommitCandidate, CommitRequest};
 use loonfs::uploads::ResolvedUploadCompletion;
 use loonfs::{
-    AdvanceRetentionResponse, ChangeSeq, Checkpoint, ChecksumAlgorithm, Commit, ContentRef,
-    CopyOptions, CreateCheckpointOptions, CreateDirectoryOptions, CreateNamespaceOptions,
-    DeleteOptions, DirectoryPageCursor, Error, ErrorCode, FileBytes, FileRevisionsPager,
-    FoldWalResponse, InodeChildrenPager, ListChangesResponse, LoonFs, LoonFsBuilder, Maintenance,
-    MetadataMaintenanceOptions, MetadataMaintenanceResponse, MoveOptions, Namespace,
+    ActorId, AdvanceRetentionResponse, ChangeSeq, Checkpoint, ChecksumAlgorithm, Commit,
+    ContentRef, DeleteOptions, DirectoryPageCursor, Error, ErrorCode, FileBytes,
+    FileRevisionsPager, FoldWalResponse, InodeChildrenPager, ListChangesResponse, LoonFs,
+    LoonFsBuilder, Maintenance, MetadataMaintenanceOptions, MetadataMaintenanceResponse, Namespace,
     NamespaceDiagnostics, NamespaceId, PathEntriesPager, PathEntry, PutFileOptions, ReadOnly,
     SharedObjectStore, UploadId, UploadSession, Writable,
 };
@@ -120,10 +119,6 @@ pub(crate) async fn writer_epoch(store: &SharedObjectStore, namespace_id: &Names
         .expect("load namespace head")
         .writer_epoch
         .0
-}
-
-pub(crate) fn directory_options() -> CreateDirectoryOptions {
-    CreateDirectoryOptions::new(loonfs_test_support::test_actor())
 }
 
 pub(crate) fn expect_code<T: std::fmt::Debug>(result: loonfs::Result<T>, code: ErrorCode) {
@@ -249,21 +244,33 @@ impl TestRuntime {
     pub(crate) async fn create_namespace(
         &self,
         namespace_id: &NamespaceId,
-        options: CreateNamespaceOptions,
+        actor: &ActorId,
     ) -> loonfs::Result<loonfs_api::NamespaceMetadata> {
-        self.writer.create_namespace(namespace_id, options).await
+        self.writer.create_namespace(namespace_id, actor).await
     }
 
-    pub(crate) async fn put_file_bytes(
+    pub(crate) async fn put_file(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
         bytes: &[u8],
-        options: PutFileOptions,
+        actor: &ActorId,
+    ) -> loonfs::Result<Commit> {
+        let namespace = self.namespace_writer(namespace_id)?;
+        namespace.put_file(absolute_path, bytes, actor).await
+    }
+
+    pub(crate) async fn put_file_with_options(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+        bytes: &[u8],
+        actor: &ActorId,
+        options: &PutFileOptions,
     ) -> loonfs::Result<Commit> {
         let namespace = self.namespace_writer(namespace_id)?;
         namespace
-            .put_file_bytes(absolute_path, bytes, options)
+            .put_file_with_options(absolute_path, bytes, actor, options)
             .await
     }
 
@@ -272,11 +279,11 @@ impl TestRuntime {
         namespace_id: &NamespaceId,
         absolute_path: &str,
         content_ref: ContentRef,
-        options: PutFileOptions,
+        actor: &ActorId,
     ) -> loonfs::Result<Commit> {
         let namespace = self.namespace_writer(namespace_id)?;
         namespace
-            .put_file_content_ref(absolute_path, content_ref, options)
+            .put_file_content_ref(absolute_path, content_ref, actor)
             .await
     }
 
@@ -336,13 +343,7 @@ impl TestRuntime {
         namespace_id: &NamespaceId,
     ) -> loonfs::Result<Checkpoint> {
         self.maintenance
-            .create_checkpoint(
-                namespace_id,
-                CreateCheckpointOptions {
-                    name: "test-pin".to_owned(),
-                    ttl_ms: None,
-                },
-            )
+            .create_checkpoint(namespace_id, "test-pin")
             .await
     }
 
@@ -389,7 +390,7 @@ pub(crate) trait RuntimeTestExt {
     fn create_namespace_blocking(
         &self,
         namespace_id: &NamespaceId,
-        options: CreateNamespaceOptions,
+        actor: &ActorId,
     ) -> loonfs::Result<loonfs_api::NamespaceMetadata>;
     fn fork_namespace_blocking(
         &self,
@@ -421,38 +422,53 @@ pub(crate) trait RuntimeTestExt {
         namespace_id: &NamespaceId,
         absolute_path: &str,
     ) -> loonfs::Result<FileBytes>;
-    fn put_file_bytes_blocking(
+    fn put_file_blocking(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
         bytes: &[u8],
-        options: PutFileOptions,
+        actor: &ActorId,
+    ) -> loonfs::Result<Commit>;
+    fn put_file_with_options_blocking(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+        bytes: &[u8],
+        actor: &ActorId,
+        options: &PutFileOptions,
     ) -> loonfs::Result<Commit>;
     fn create_directory_blocking(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
-        options: CreateDirectoryOptions,
+        actor: &ActorId,
     ) -> loonfs::Result<Commit>;
     fn delete_path_blocking(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
-        options: DeleteOptions,
+        actor: &ActorId,
+    ) -> loonfs::Result<Commit>;
+    fn delete_path_with_options_blocking(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+        actor: &ActorId,
+        options: &DeleteOptions,
     ) -> loonfs::Result<Commit>;
     fn move_path_blocking(
         &self,
         namespace_id: &NamespaceId,
         source_path: &str,
         destination_path: &str,
-        options: MoveOptions,
+        actor: &ActorId,
     ) -> loonfs::Result<Commit>;
     fn copy_path_blocking(
         &self,
         namespace_id: &NamespaceId,
         source_path: &str,
         destination_path: &str,
-        options: CopyOptions,
+        actor: &ActorId,
     ) -> loonfs::Result<Commit>;
     fn begin_upload_blocking(&self, namespace_id: &NamespaceId) -> loonfs::Result<UploadSession>;
     fn upload_content_blocking(
@@ -492,9 +508,9 @@ impl RuntimeTestExt for TestRuntime {
     fn create_namespace_blocking(
         &self,
         namespace_id: &NamespaceId,
-        options: CreateNamespaceOptions,
+        actor: &ActorId,
     ) -> loonfs::Result<loonfs_api::NamespaceMetadata> {
-        block_on(self.writer.create_namespace(namespace_id, options))
+        block_on(self.writer.create_namespace(namespace_id, actor))
     }
 
     fn fork_namespace_blocking(
@@ -502,11 +518,10 @@ impl RuntimeTestExt for TestRuntime {
         source: &NamespaceId,
         target: &NamespaceId,
     ) -> loonfs::Result<loonfs_api::NamespaceMetadata> {
-        block_on(self.writer.fork_namespace(
-            source,
-            target,
-            loonfs_api::options::ForkNamespaceOptions::new(loonfs_test_support::test_actor()),
-        ))
+        block_on(
+            self.writer
+                .fork_namespace(source, target, &loonfs_test_support::test_actor()),
+        )
     }
 
     fn namespace_diagnostics_blocking(
@@ -521,7 +536,10 @@ impl RuntimeTestExt for TestRuntime {
         namespace_id: &NamespaceId,
         options: MetadataMaintenanceOptions,
     ) -> loonfs::Result<MetadataMaintenanceResponse> {
-        block_on(self.maintenance.maintain_metadata(namespace_id, options))
+        block_on(
+            self.maintenance
+                .maintain_metadata_with_options(namespace_id, &options),
+        )
     }
 
     fn fold_wal_blocking(&self, namespace_id: &NamespaceId) -> loonfs::Result<FoldWalResponse> {
@@ -559,35 +577,58 @@ impl RuntimeTestExt for TestRuntime {
         block_on(namespace.read_file(absolute_path))
     }
 
-    fn put_file_bytes_blocking(
+    fn put_file_blocking(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
         bytes: &[u8],
-        options: PutFileOptions,
+        actor: &ActorId,
     ) -> loonfs::Result<Commit> {
         let namespace = self.namespace_writer(namespace_id)?;
-        block_on(namespace.put_file_bytes(absolute_path, bytes, options))
+        block_on(namespace.put_file(absolute_path, bytes, actor))
+    }
+
+    fn put_file_with_options_blocking(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+        bytes: &[u8],
+        actor: &ActorId,
+        options: &PutFileOptions,
+    ) -> loonfs::Result<Commit> {
+        let namespace = self.namespace_writer(namespace_id)?;
+        block_on(namespace.put_file_with_options(absolute_path, bytes, actor, options))
     }
 
     fn create_directory_blocking(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
-        options: CreateDirectoryOptions,
+        actor: &ActorId,
     ) -> loonfs::Result<Commit> {
         let namespace = self.namespace_writer(namespace_id)?;
-        block_on(namespace.create_directory(absolute_path, options))
+        block_on(namespace.create_directory(absolute_path, actor))
     }
 
     fn delete_path_blocking(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
-        options: DeleteOptions,
+        actor: &ActorId,
     ) -> loonfs::Result<Commit> {
         let namespace = self.namespace_writer(namespace_id)?;
-        block_on(namespace.delete_path(absolute_path, options))
+        block_on(namespace.delete_path(absolute_path, actor))
+    }
+
+    fn delete_path_with_options_blocking(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+        actor: &ActorId,
+        options: &DeleteOptions,
+    ) -> loonfs::Result<Commit> {
+        let namespace = self.namespace_writer(namespace_id)?;
+        block_on(namespace.delete_path_with_options(absolute_path, actor, options))
     }
 
     fn move_path_blocking(
@@ -595,10 +636,10 @@ impl RuntimeTestExt for TestRuntime {
         namespace_id: &NamespaceId,
         source_path: &str,
         destination_path: &str,
-        options: MoveOptions,
+        actor: &ActorId,
     ) -> loonfs::Result<Commit> {
         let namespace = self.namespace_writer(namespace_id)?;
-        block_on(namespace.move_path(source_path, destination_path, options))
+        block_on(namespace.move_path(source_path, destination_path, actor))
     }
 
     fn copy_path_blocking(
@@ -606,10 +647,10 @@ impl RuntimeTestExt for TestRuntime {
         namespace_id: &NamespaceId,
         source_path: &str,
         destination_path: &str,
-        options: CopyOptions,
+        actor: &ActorId,
     ) -> loonfs::Result<Commit> {
         let namespace = self.namespace_writer(namespace_id)?;
-        block_on(namespace.copy_path(source_path, destination_path, options))
+        block_on(namespace.copy_path(source_path, destination_path, actor))
     }
 
     fn begin_upload_blocking(&self, namespace_id: &NamespaceId) -> loonfs::Result<UploadSession> {
@@ -643,7 +684,7 @@ impl RuntimeTestExt for TestRuntime {
         request: CommitRequest,
     ) -> loonfs::Result<Commit> {
         let namespace = self.namespace_writer(namespace_id)?;
-        block_on(namespace.create_commit(request))
+        block_on(namespace.commit(request))
     }
 
     fn mutate_batch_blocking(

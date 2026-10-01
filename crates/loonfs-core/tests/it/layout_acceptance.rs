@@ -78,9 +78,10 @@ async fn reads_commits_and_change_feed_never_list() {
     let context = mutation_context("acceptance", 1_000);
     let engine = namespace_engine(&store, &namespace_id, &context);
     engine
-        .bootstrap_namespace(CreateNamespaceOptions::new(
-            loonfs_test_support::test_actor(),
-        ))
+        .bootstrap_namespace(
+            &loonfs_test_support::test_actor(),
+            &CreateNamespaceOptions::default(),
+        )
         .await
         .expect("bootstrap");
 
@@ -172,9 +173,10 @@ async fn maintenance_preserves_writer_and_logical_head() {
     let context = mutation_context("acceptance", 1_000);
     let engine = namespace_engine(&store, &namespace_id, &context);
     engine
-        .bootstrap_namespace(CreateNamespaceOptions::new(
-            loonfs_test_support::test_actor(),
-        ))
+        .bootstrap_namespace(
+            &loonfs_test_support::test_actor(),
+            &CreateNamespaceOptions::default(),
+        )
         .await
         .expect("bootstrap");
     put_file(

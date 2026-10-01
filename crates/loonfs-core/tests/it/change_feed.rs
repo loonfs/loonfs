@@ -56,7 +56,7 @@ async fn creation_and_republication_operations_emit_exact_event_kinds_in_order()
         .await
         .expect("bootstrap namespace");
 
-    put_file_bytes(
+    put_file(
         &store,
         &namespace_id,
         "/report.txt",
@@ -82,7 +82,7 @@ async fn creation_and_republication_operations_emit_exact_event_kinds_in_order()
     )
     .await
     .expect("create nested directories");
-    put_file_bytes(
+    put_file(
         &store,
         &namespace_id,
         "/report.txt",

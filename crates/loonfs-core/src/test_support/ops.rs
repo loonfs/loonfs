@@ -69,7 +69,7 @@ async fn submit_operation<S: ObjectStore + ?Sized>(
         .expect("single-candidate batch should hold exactly one result")
 }
 
-pub(crate) async fn put_file_bytes<S: ObjectStore + ?Sized>(
+pub(crate) async fn put_file<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     absolute_path: &str,
@@ -100,7 +100,7 @@ pub(crate) async fn write_file_bytes<S: ObjectStore + ?Sized>(
     context: &MutationContext,
     commit_id: Option<&CommitId>,
 ) -> Result<Commit> {
-    put_file_bytes(
+    put_file(
         store,
         namespace_id,
         absolute_path,

@@ -1,7 +1,7 @@
 //! Publication recovery must not clean up resources a manifest may name.
 
 use crate::common::{control, default_page_limit, GrepHost};
-use loonfs::{CreateNamespaceOptions, LoonFs, PutFileOptions, SharedObjectStore};
+use loonfs::{LoonFs, SharedObjectStore};
 use loonfs_api::{ErrorCode, ManifestNo, PageRequest};
 use loonfs_grep::keyspace::manifest_key;
 use loonfs_grep::manifest::{load_current_grep_manifest, GrepIndexStatus};
@@ -26,10 +26,7 @@ async fn a_collected_publication_does_not_abandon_a_successors_backfill_checkpoi
         .await
         .expect("writer");
     writer
-        .create_namespace(
-            &namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("namespace");
     let namespace = writer
@@ -37,11 +34,7 @@ async fn a_collected_publication_does_not_abandon_a_successors_backfill_checkpoi
         .expect("open namespace");
     for path in ["/first", "/second"] {
         namespace
-            .put_file_bytes(
-                path,
-                b"needle\n",
-                PutFileOptions::new(loonfs_test_support::test_actor()),
-            )
+            .put_file(path, b"needle\n", &loonfs_test_support::test_actor())
             .await
             .expect("file");
     }
@@ -128,10 +121,7 @@ async fn an_enable_whose_put_reads_back_absent_fails_and_keeps_its_checkpoint() 
         .await
         .expect("writer");
     writer
-        .create_namespace(
-            &namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("namespace");
     let failing = FailStore::new(

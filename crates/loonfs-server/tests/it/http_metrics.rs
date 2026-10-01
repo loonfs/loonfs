@@ -59,7 +59,12 @@ async fn a_scrape_reports_requests_object_store_calls_and_cache_metrics() {
     let target = NamespacePath::parse("metered", "/note.txt").expect("parse path");
     harness
         .client
-        .put_file_bytes(&target, b"body", &replace_file_options())
+        .put_file_with_options(
+            &target,
+            b"body",
+            &loonfs_test_support::test_actor(),
+            &replace_file_options(),
+        )
         .await
         .expect("write file");
     harness

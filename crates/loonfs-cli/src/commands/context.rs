@@ -38,7 +38,7 @@ pub(crate) async fn create_directory_tolerating_existing(
     match context
         .target
         .client
-        .create_directory(spec, options)
+        .create_directory_with_options(spec, context.actor(), options)
         .await
         .map_err(CliError::from)
     {

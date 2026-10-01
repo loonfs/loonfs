@@ -7,20 +7,23 @@ use crate::trace::phase_span;
 use crate::ByteStream;
 use crate::Result;
 use crate::{
-    ChangeSeq, Commit, CommitId, CommitOptions, ContentRef, CopyOptions, CreateDirectoryOptions,
-    DeleteOptions, InodeId, MoveOptions, NamespaceId, NamespacePublication, PutFileOptions,
-    RestoreRevisionOptions, RevisionNo, UndeleteOptions, UpdateAccessOptions,
-    UpdateAttributesOptions,
+    AccessState, ActorId, AttributeChanges, ChangeSeq, Commit, CommitId, CommitOptions, ContentRef,
+    CopyOptions, CreateDirectoryOptions, DeleteOptions, InodeId, MoveOptions, NamespaceId,
+    NamespacePublication, PutFileOptions, RevisionNo, UpdateAccessOptions, UpdateAttributesOptions,
 };
 use crate::{LoonFs, Namespace, Writable};
 use futures::StreamExt;
 use loonfs_core::NamespaceWriterEngine;
 use std::sync::Arc;
 
-fn single_operation(commit: &CommitOptions, operation: FilesystemOperation) -> CommitRequest {
+fn single_operation(
+    actor: &ActorId,
+    commit: &CommitOptions,
+    operation: FilesystemOperation,
+) -> CommitRequest {
     CommitRequest::single(
         commit.commit_id.clone().unwrap_or_else(CommitId::generate),
-        commit.actor_id.clone(),
+        actor.clone(),
         commit.message.clone(),
         operation,
     )
@@ -80,38 +83,63 @@ impl Namespace<Writable> {
         result
     }
 
+    /// Writes file bytes to a path, refusing to replace an existing file.
+    pub async fn put_file(
+        &self,
+        absolute_path: &str,
+        bytes: &[u8],
+        actor: &ActorId,
+    ) -> Result<Commit> {
+        self.put_file_with_options(absolute_path, bytes, actor, &PutFileOptions::default())
+            .await
+    }
+
     /// Writes file bytes to a path.
     ///
     /// Content at or under the configured inline threshold is prepared inline
     /// and identified by its bytes. A rerun with the same bytes and commit ID
     /// replays. Larger content stages, so a rerun conflicts. At every size,
-    /// retain [`Self::prepare_file_bytes`]'s result and retry with
-    /// [`Self::put_file_prepared`], the same commit ID, and unchanged options.
+    /// retain [`Self::prepare_content`]'s result and retry with
+    /// [`Self::put_file_prepared_with_options`], the same commit ID, and
+    /// unchanged options.
     #[tracing::instrument(
         level = "debug",
-        name = "loonfs.put",
+        name = "loonfs.put_file",
         err(level = "debug"),
         skip_all,
         fields(
-            operation = "put",
-            method = "put_file_bytes",
+            operation = "put_file",
+            method = "put_file",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
             payload_class = tracing::field::Empty,
         )
     )]
-    pub async fn put_file_bytes(
+    pub async fn put_file_with_options(
         &self,
         absolute_path: &str,
         bytes: &[u8],
-        options: PutFileOptions,
+        actor: &ActorId,
+        options: &PutFileOptions,
     ) -> Result<Commit> {
         let span = tracing::Span::current();
         self.core.record_trace_context(&span);
         span.record("payload_class", crate::trace::payload_class(bytes.len()));
-        let prepared_content = self.prepare_file_bytes_inner(bytes).await?;
-        self.put_file_prepared_inner(absolute_path, prepared_content, options)
+        let prepared_content = self.prepare_content_inner(bytes).await?;
+        self.put_file_prepared_inner(absolute_path, prepared_content, actor, options)
+            .await
+    }
+
+    /// Writes a file from a payload read once from its source, refusing to
+    /// replace an existing file.
+    pub async fn put_file_stream(
+        &self,
+        absolute_path: &str,
+        body: ByteStream,
+        actor: &ActorId,
+    ) -> Result<Commit> {
+        self.put_file_stream_with_options(absolute_path, body, actor, &PutFileOptions::default())
             .await
     }
 
@@ -120,15 +148,16 @@ impl Namespace<Writable> {
     /// Content at or under the configured inline threshold is prepared inline
     /// and identified by its bytes. A rerun with the same bytes and commit ID
     /// replays. Larger content stages, so a rerun conflicts. At every size,
-    /// retain [`Self::prepare_file_stream`]'s result and retry with
-    /// [`Self::put_file_prepared`], the same commit ID, and unchanged options.
+    /// retain [`Self::prepare_content_stream`]'s result and retry with
+    /// [`Self::put_file_prepared_with_options`], the same commit ID, and
+    /// unchanged options.
     #[tracing::instrument(
         level = "debug",
-        name = "loonfs.put",
+        name = "loonfs.put_file_stream",
         err(level = "debug"),
         skip_all,
         fields(
-            operation = "put",
+            operation = "put_file_stream",
             method = "put_file_stream",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
@@ -136,45 +165,46 @@ impl Namespace<Writable> {
             payload_class = "streamed",
         )
     )]
-    pub async fn put_file_stream(
+    pub async fn put_file_stream_with_options(
         &self,
         absolute_path: &str,
         body: ByteStream,
-        options: PutFileOptions,
+        actor: &ActorId,
+        options: &PutFileOptions,
     ) -> Result<Commit> {
         self.core.record_trace_context(&tracing::Span::current());
-        let prepared_content = self.prepare_file_stream_inner(body).await?;
-        self.put_file_prepared_inner(absolute_path, prepared_content, options)
+        let prepared_content = self.prepare_content_stream_inner(body).await?;
+        self.put_file_prepared_inner(absolute_path, prepared_content, actor, options)
             .await
     }
 
-    /// Prepares file bytes for publication.
+    /// Prepares content for publication.
     ///
     /// Content at or under the configured inline threshold needs no store
     /// request and has no expiry. Larger content writes an upload session and
     /// object. Its proof expires at the completed upload's receipt horizon.
     #[tracing::instrument(
         level = "debug",
-        name = "loonfs.prepare",
+        name = "loonfs.prepare_content",
         err(level = "debug"),
         skip_all,
         fields(
-            operation = "prepare",
-            method = "prepare_file_bytes",
+            operation = "prepare_content",
+            method = "prepare_content",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
             payload_class = tracing::field::Empty,
         )
     )]
-    pub async fn prepare_file_bytes(&self, bytes: &[u8]) -> Result<PreparedContent> {
+    pub async fn prepare_content(&self, bytes: &[u8]) -> Result<PreparedContent> {
         let span = tracing::Span::current();
         self.core.record_trace_context(&span);
         span.record("payload_class", crate::trace::payload_class(bytes.len()));
-        self.prepare_file_bytes_inner(bytes).await
+        self.prepare_content_inner(bytes).await
     }
 
-    async fn prepare_file_bytes_inner(&self, bytes: &[u8]) -> Result<PreparedContent> {
+    async fn prepare_content_inner(&self, bytes: &[u8]) -> Result<PreparedContent> {
         if self
             .mode
             .bits
@@ -207,24 +237,24 @@ impl Namespace<Writable> {
     /// before choosing inline content or forwarding the stream to storage.
     #[tracing::instrument(
         level = "debug",
-        name = "loonfs.prepare",
+        name = "loonfs.prepare_content_stream",
         err(level = "debug"),
         skip_all,
         fields(
-            operation = "prepare",
-            method = "prepare_file_stream",
+            operation = "prepare_content_stream",
+            method = "prepare_content_stream",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
             payload_class = "streamed",
         )
     )]
-    pub async fn prepare_file_stream(&self, body: ByteStream) -> Result<PreparedContent> {
+    pub async fn prepare_content_stream(&self, body: ByteStream) -> Result<PreparedContent> {
         self.core.record_trace_context(&tracing::Span::current());
-        self.prepare_file_stream_inner(body).await
+        self.prepare_content_stream_inner(body).await
     }
 
-    async fn prepare_file_stream_inner(&self, mut body: ByteStream) -> Result<PreparedContent> {
+    async fn prepare_content_stream_inner(&self, mut body: ByteStream) -> Result<PreparedContent> {
         if let Some(threshold) = self.mode.bits.inline_content.inline_content_threshold_bytes {
             let mut buffered = bytes::BytesMut::with_capacity(threshold + 1);
             while buffered.len() <= threshold {
@@ -265,6 +295,23 @@ impl Namespace<Writable> {
             .await?)
     }
 
+    /// Publishes a file revision from already-prepared content, refusing to
+    /// replace an existing file.
+    pub async fn put_file_prepared(
+        &self,
+        absolute_path: &str,
+        prepared_content: PreparedContent,
+        actor: &ActorId,
+    ) -> Result<Commit> {
+        self.put_file_prepared_with_options(
+            absolute_path,
+            prepared_content,
+            actor,
+            &PutFileOptions::default(),
+        )
+        .await
+    }
+
     /// Publishes a file revision from already-prepared content.
     ///
     /// Inline content may stage before submission when a policy limit is reached.
@@ -275,11 +322,11 @@ impl Namespace<Writable> {
     /// Replay is bounded by the namespace's receipt retention horizon.
     #[tracing::instrument(
         level = "debug",
-        name = "loonfs.put",
+        name = "loonfs.put_file_prepared",
         err(level = "debug"),
         skip_all,
         fields(
-            operation = "put",
+            operation = "put_file_prepared",
             method = "put_file_prepared",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
@@ -287,11 +334,12 @@ impl Namespace<Writable> {
             payload_class = tracing::field::Empty,
         )
     )]
-    pub async fn put_file_prepared(
+    pub async fn put_file_prepared_with_options(
         &self,
         absolute_path: &str,
         prepared_content: PreparedContent,
-        options: PutFileOptions,
+        actor: &ActorId,
+        options: &PutFileOptions,
     ) -> Result<Commit> {
         let span = tracing::Span::current();
         self.core.record_trace_context(&span);
@@ -301,7 +349,7 @@ impl Namespace<Writable> {
                 usize::try_from(prepared_content.content_ref().size_bytes).unwrap_or(usize::MAX),
             ),
         );
-        self.put_file_prepared_inner(absolute_path, prepared_content, options)
+        self.put_file_prepared_inner(absolute_path, prepared_content, actor, options)
             .await
     }
 
@@ -309,11 +357,13 @@ impl Namespace<Writable> {
         &self,
         absolute_path: &str,
         prepared_content: PreparedContent,
-        options: PutFileOptions,
+        actor: &ActorId,
+        options: &PutFileOptions,
     ) -> Result<Commit> {
         let content_ref = prepared_content.content_ref().clone();
         self.commit_candidate_inner(CommitCandidate::prepared(
             single_operation(
+                actor,
                 &options.commit,
                 FilesystemOperation::PutFile {
                     path: loonfs_core::path::parse_mutation_path(absolute_path)?,
@@ -329,21 +379,38 @@ impl Namespace<Writable> {
         .await
     }
 
+    /// Publishes a file revision by importing an already-durable content
+    /// reference, refusing to replace an existing file.
+    pub async fn put_file_content_ref(
+        &self,
+        absolute_path: &str,
+        content_ref: ContentRef,
+        actor: &ActorId,
+    ) -> Result<Commit> {
+        self.put_file_content_ref_with_options(
+            absolute_path,
+            content_ref,
+            actor,
+            &PutFileOptions::default(),
+        )
+        .await
+    }
+
     /// Publishes a file revision by importing an already-durable content reference.
     ///
     /// This explicitly slow helper reads and verifies the full source object,
     /// then stages a fresh copy owned by this namespace before publication.
     /// A subject must be an administrator of the reference's owner namespace.
     /// Callers that already hold same-namespace proof should prefer
-    /// [`Self::put_file_prepared`]. The published revision points at the fresh
-    /// prepared ref, not the input ref.
+    /// [`Self::put_file_prepared_with_options`]. The published revision points
+    /// at the fresh prepared ref, not the input ref.
     #[tracing::instrument(
         level = "debug",
-        name = "loonfs.put",
+        name = "loonfs.put_file_content_ref",
         err(level = "debug"),
         skip_all,
         fields(
-            operation = "put",
+            operation = "put_file_content_ref",
             method = "put_file_content_ref",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
@@ -351,11 +418,12 @@ impl Namespace<Writable> {
             payload_class = tracing::field::Empty,
         )
     )]
-    pub async fn put_file_content_ref(
+    pub async fn put_file_content_ref_with_options(
         &self,
         absolute_path: &str,
         content_ref: ContentRef,
-        options: PutFileOptions,
+        actor: &ActorId,
+        options: &PutFileOptions,
     ) -> Result<Commit> {
         let span = tracing::Span::current();
         self.core.record_trace_context(&span);
@@ -366,7 +434,7 @@ impl Namespace<Writable> {
             ),
         );
         let prepared_content = self.prepare_content_ref_inner(content_ref).await?;
-        self.put_file_prepared_inner(absolute_path, prepared_content, options)
+        self.put_file_prepared_inner(absolute_path, prepared_content, actor, options)
             .await
     }
 
@@ -378,11 +446,11 @@ impl Namespace<Writable> {
     /// See the API specification's content preparation contract.
     #[tracing::instrument(
         level = "debug",
-        name = "loonfs.prepare",
+        name = "loonfs.prepare_content_ref",
         err(level = "debug"),
         skip_all,
         fields(
-            operation = "prepare",
+            operation = "prepare_content_ref",
             method = "prepare_content_ref",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
@@ -456,11 +524,11 @@ impl Namespace<Writable> {
     /// Verifies an authorized content token for this namespace.
     #[tracing::instrument(
         level = "debug",
-        name = "loonfs.prepare",
+        name = "loonfs.prepare_content_token",
         err(level = "debug"),
         skip_all,
         fields(
-            operation = "prepare",
+            operation = "prepare_content_token",
             method = "prepare_content_token",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
@@ -490,27 +558,35 @@ impl Namespace<Writable> {
             .await
     }
 
+    /// Creates a directory at an absolute path, failing when its parent is missing.
+    pub async fn create_directory(&self, absolute_path: &str, actor: &ActorId) -> Result<Commit> {
+        self.create_directory_with_options(absolute_path, actor, &CreateDirectoryOptions::default())
+            .await
+    }
+
     /// Creates a directory at an absolute path.
     #[tracing::instrument(
         level = "debug",
-        name = "loonfs.apply_commit",
+        name = "loonfs.create_directory",
         err(level = "debug"),
         skip_all,
         fields(
-            operation = "apply_commit",
+            operation = "create_directory",
             method = "create_directory",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn create_directory(
+    pub async fn create_directory_with_options(
         &self,
         absolute_path: &str,
-        options: CreateDirectoryOptions,
+        actor: &ActorId,
+        options: &CreateDirectoryOptions,
     ) -> Result<Commit> {
         self.core.record_trace_context(&tracing::Span::current());
         self.commit_one(
+            actor,
             &options.commit,
             FilesystemOperation::CreateDirectory {
                 path: loonfs_core::path::parse_mutation_path(absolute_path)?,
@@ -518,6 +594,12 @@ impl Namespace<Writable> {
             },
         )
         .await
+    }
+
+    /// Deletes a file or empty directory path.
+    pub async fn delete_path(&self, absolute_path: &str, actor: &ActorId) -> Result<Commit> {
+        self.delete_path_with_options(absolute_path, actor, &DeleteOptions::default())
+            .await
     }
 
     /// Deletes a file or directory path.
@@ -528,20 +610,26 @@ impl Namespace<Writable> {
     /// maintenance pass that opted in.
     #[tracing::instrument(
         level = "debug",
-        name = "loonfs.apply_commit",
+        name = "loonfs.delete_path",
         err(level = "debug"),
         skip_all,
         fields(
-            operation = "apply_commit",
+            operation = "delete_path",
             method = "delete_path",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn delete_path(&self, absolute_path: &str, options: DeleteOptions) -> Result<Commit> {
+    pub async fn delete_path_with_options(
+        &self,
+        absolute_path: &str,
+        actor: &ActorId,
+        options: &DeleteOptions,
+    ) -> Result<Commit> {
         self.core.record_trace_context(&tracing::Span::current());
         self.commit_one(
+            actor,
             &options.commit,
             FilesystemOperation::DeletePath {
                 path: loonfs_core::path::parse_mutation_path(absolute_path)?,
@@ -552,28 +640,47 @@ impl Namespace<Writable> {
         .await
     }
 
+    /// Moves a path within the same namespace, refusing to replace the
+    /// destination.
+    pub async fn move_path(
+        &self,
+        source_path: &str,
+        destination_path: &str,
+        actor: &ActorId,
+    ) -> Result<Commit> {
+        self.move_path_with_options(
+            source_path,
+            destination_path,
+            actor,
+            &MoveOptions::default(),
+        )
+        .await
+    }
+
     /// Moves a path within the same namespace.
     #[tracing::instrument(
         level = "debug",
-        name = "loonfs.apply_commit",
+        name = "loonfs.move_path",
         err(level = "debug"),
         skip_all,
         fields(
-            operation = "apply_commit",
+            operation = "move_path",
             method = "move_path",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn move_path(
+    pub async fn move_path_with_options(
         &self,
         source_path: &str,
         destination_path: &str,
-        options: MoveOptions,
+        actor: &ActorId,
+        options: &MoveOptions,
     ) -> Result<Commit> {
         self.core.record_trace_context(&tracing::Span::current());
         self.commit_one(
+            actor,
             &options.commit,
             FilesystemOperation::MovePath {
                 source_path: loonfs_core::path::parse_mutation_path(source_path)?,
@@ -588,29 +695,48 @@ impl Namespace<Writable> {
         .await
     }
 
+    /// Copies a file to a new path in the same namespace, refusing to replace
+    /// the destination.
+    pub async fn copy_path(
+        &self,
+        source_path: &str,
+        destination_path: &str,
+        actor: &ActorId,
+    ) -> Result<Commit> {
+        self.copy_path_with_options(
+            source_path,
+            destination_path,
+            actor,
+            &CopyOptions::default(),
+        )
+        .await
+    }
+
     /// Copies a file to a new path in the same namespace. The new file
     /// reuses the source revision's content reference: no bytes are copied.
     #[tracing::instrument(
         level = "debug",
-        name = "loonfs.apply_commit",
+        name = "loonfs.copy_path",
         err(level = "debug"),
         skip_all,
         fields(
-            operation = "apply_commit",
+            operation = "copy_path",
             method = "copy_path",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn copy_path(
+    pub async fn copy_path_with_options(
         &self,
         source_path: &str,
         destination_path: &str,
-        options: CopyOptions,
+        actor: &ActorId,
+        options: &CopyOptions,
     ) -> Result<Commit> {
         self.core.record_trace_context(&tracing::Span::current());
         self.commit_one(
+            actor,
             &options.commit,
             FilesystemOperation::CopyPath {
                 source_path: loonfs_core::path::parse_mutation_path(source_path)?,
@@ -626,32 +752,67 @@ impl Namespace<Writable> {
     }
 
     /// Restores a prior file revision by appending a new current revision.
+    pub async fn restore_revision(
+        &self,
+        absolute_path: &str,
+        source_revision_no: RevisionNo,
+        actor: &ActorId,
+    ) -> Result<Commit> {
+        self.restore_revision_with_options(
+            absolute_path,
+            source_revision_no,
+            actor,
+            &CommitOptions::default(),
+        )
+        .await
+    }
+
+    /// Restores a prior file revision by appending a new current revision,
+    /// under the given commit settings.
     #[tracing::instrument(
         level = "debug",
-        name = "loonfs.apply_commit",
+        name = "loonfs.restore_revision",
         err(level = "debug"),
         skip_all,
         fields(
-            operation = "apply_commit",
+            operation = "restore_revision",
             method = "restore_revision",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn restore_revision(
+    pub async fn restore_revision_with_options(
         &self,
         absolute_path: &str,
         source_revision_no: RevisionNo,
-        options: RestoreRevisionOptions,
+        actor: &ActorId,
+        options: &CommitOptions,
     ) -> Result<Commit> {
         self.core.record_trace_context(&tracing::Span::current());
         self.commit_one(
-            &options.commit,
+            actor,
+            options,
             FilesystemOperation::RestoreRevision {
                 path: loonfs_core::path::parse_mutation_path(absolute_path)?,
                 source_revision_no,
             },
+        )
+        .await
+    }
+
+    /// Writes and removes attributes on the inode a path resolves to.
+    pub async fn update_attributes(
+        &self,
+        absolute_path: &str,
+        actor: &ActorId,
+        changes: AttributeChanges,
+    ) -> Result<Commit> {
+        self.update_attributes_with_options(
+            absolute_path,
+            actor,
+            changes,
+            &UpdateAttributesOptions::default(),
         )
         .await
     }
@@ -664,29 +825,32 @@ impl Namespace<Writable> {
     /// would leave the map exactly as it was.
     #[tracing::instrument(
         level = "debug",
-        name = "loonfs.apply_commit",
+        name = "loonfs.update_attributes",
         err(level = "debug"),
         skip_all,
         fields(
-            operation = "apply_commit",
+            operation = "update_attributes",
             method = "update_attributes",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn update_attributes(
+    pub async fn update_attributes_with_options(
         &self,
         absolute_path: &str,
-        options: UpdateAttributesOptions,
+        actor: &ActorId,
+        changes: AttributeChanges,
+        options: &UpdateAttributesOptions,
     ) -> Result<Commit> {
         self.core.record_trace_context(&tracing::Span::current());
         self.commit_one(
+            actor,
             &options.commit,
             FilesystemOperation::UpdateAttributes {
                 path: loonfs_core::path::parse_mutation_path(absolute_path)?,
-                set: options.set,
-                remove: options.remove,
+                set: changes.set,
+                remove: changes.remove,
                 expected_inode_id: options.expected_inode_id,
                 expected_attributes_revision_no: options.expected_attributes_revision_no,
             },
@@ -694,33 +858,52 @@ impl Namespace<Writable> {
         .await
     }
 
+    /// Replaces a visible inode's access row, including the root.
+    pub async fn update_access(
+        &self,
+        absolute_path: &str,
+        actor: &ActorId,
+        access: AccessState,
+    ) -> Result<Commit> {
+        self.update_access_with_options(
+            absolute_path,
+            actor,
+            access,
+            &UpdateAccessOptions::default(),
+        )
+        .await
+    }
+
     /// Replaces a visible inode's access row, including the root, under optional inode and revision preconditions.
     #[tracing::instrument(
         level = "debug",
-        name = "loonfs.apply_commit",
+        name = "loonfs.update_access",
         err(level = "debug"),
         skip_all,
         fields(
-            operation = "apply_commit",
+            operation = "update_access",
             method = "update_access",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn update_access(
+    pub async fn update_access_with_options(
         &self,
         absolute_path: &str,
-        options: UpdateAccessOptions,
+        actor: &ActorId,
+        access: AccessState,
+        options: &UpdateAccessOptions,
     ) -> Result<Commit> {
         self.core.record_trace_context(&tracing::Span::current());
         self.commit_one(
+            actor,
             &options.commit,
             FilesystemOperation::UpdateAccess {
                 path: loonfs_api::AbsolutePath::parse(absolute_path)
                     .map_err(|error| loonfs_core::Error::InvalidPath(error.to_string()))?,
-                boundary: options.boundary,
-                grants: options.grants,
+                boundary: access.boundary,
+                grants: access.grants,
                 expected_inode_id: options.expected_inode_id,
                 expected_access_revision_no: options.expected_access_revision_no,
             },
@@ -729,25 +912,45 @@ impl Namespace<Writable> {
     }
 
     /// Restores a deleted file or subtree, optionally at a new path.
+    pub async fn undelete(
+        &self,
+        inode_id: InodeId,
+        deletion_seq: ChangeSeq,
+        destination_path: Option<&str>,
+        actor: &ActorId,
+    ) -> Result<Commit> {
+        self.undelete_with_options(
+            inode_id,
+            deletion_seq,
+            destination_path,
+            actor,
+            &CommitOptions::default(),
+        )
+        .await
+    }
+
+    /// Restores a deleted file or subtree, optionally at a new path, under
+    /// the given commit settings.
     #[tracing::instrument(
         level = "debug",
-        name = "loonfs.apply_commit",
+        name = "loonfs.undelete",
         err(level = "debug"),
         skip_all,
         fields(
-            operation = "apply_commit",
+            operation = "undelete",
             method = "undelete",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn undelete(
+    pub async fn undelete_with_options(
         &self,
         inode_id: InodeId,
         deletion_seq: ChangeSeq,
         destination_path: Option<&str>,
-        options: UndeleteOptions,
+        actor: &ActorId,
+        options: &CommitOptions,
     ) -> Result<Commit> {
         self.core.record_trace_context(&tracing::Span::current());
         // An absent destination restores in place: the entry re-binds under
@@ -756,7 +959,8 @@ impl Namespace<Writable> {
             .map(loonfs_core::path::parse_mutation_path)
             .transpose()?;
         self.commit_one(
-            &options.commit,
+            actor,
+            options,
             FilesystemOperation::Undelete {
                 inode_id,
                 deletion_seq,
@@ -777,18 +981,18 @@ impl Namespace<Writable> {
     /// [`Self::commit_prepared`].
     #[tracing::instrument(
         level = "debug",
-        name = "loonfs.apply_commit",
+        name = "loonfs.commit",
         err(level = "debug"),
         skip_all,
         fields(
-            operation = "apply_commit",
-            method = "create_commit",
+            operation = "commit",
+            method = "commit",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn create_commit(&self, request: CommitRequest) -> Result<Commit> {
+    pub async fn commit(&self, request: CommitRequest) -> Result<Commit> {
         self.core.record_trace_context(&tracing::Span::current());
         self.commit_candidate_inner(CommitCandidate::new(request))
             .await
@@ -800,11 +1004,11 @@ impl Namespace<Writable> {
     /// One prepared value covers every operation that uses its content ref.
     #[tracing::instrument(
         level = "debug",
-        name = "loonfs.apply_commit",
+        name = "loonfs.commit_prepared",
         err(level = "debug"),
         skip_all,
         fields(
-            operation = "apply_commit",
+            operation = "commit_prepared",
             method = "commit_prepared",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
@@ -827,11 +1031,11 @@ impl Namespace<Writable> {
     /// caller abandons only its result delivery, never the publication.
     #[tracing::instrument(
         level = "debug",
-        name = "loonfs.apply_commit",
+        name = "loonfs.commit_candidate",
         err(level = "debug"),
         skip_all,
         fields(
-            operation = "apply_commit",
+            operation = "commit_candidate",
             method = "commit_candidate",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
@@ -856,11 +1060,14 @@ impl Namespace<Writable> {
 
     async fn commit_one(
         &self,
+        actor: &ActorId,
         commit: &CommitOptions,
         operation: FilesystemOperation,
     ) -> Result<Commit> {
-        self.commit_candidate_inner(CommitCandidate::new(single_operation(commit, operation)))
-            .await
+        self.commit_candidate_inner(CommitCandidate::new(single_operation(
+            actor, commit, operation,
+        )))
+        .await
     }
 }
 

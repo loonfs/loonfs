@@ -1206,13 +1206,15 @@ mod tests {
             ContentId::generate(),
             b"hello",
         );
-        let mut options = PutFileOptions::new(test_actor());
-        options.behavior = DestinationBehavior::Replace;
+        let options = PutFileOptions {
+            behavior: DestinationBehavior::Replace,
+            ..Default::default()
+        };
         let fingerprint =
             |namespace_id: &NamespaceId, path: &AbsolutePath, options: &PutFileOptions| {
                 semantic_commit_fingerprint(
                     namespace_id,
-                    &options.commit.actor_id,
+                    &test_actor(),
                     None,
                     options.commit.message.as_deref(),
                     &[FilesystemOperation::PutFile {

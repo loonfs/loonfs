@@ -4,10 +4,9 @@
 // The panicking observer under test is written as a `panic!` closure.
 
 use loonfs::{
-    maintenance_hint_relay, CreateNamespaceOptions, LoonFs, MaintenanceCancellation,
-    MaintenanceConclusion, MaintenanceJob, MaintenanceJobId, MaintenanceProbe, MaintenanceRegistry,
-    MaintenanceRunReport, MaintenanceRunner, NamespaceAdvanceHint, NamespacePublication,
-    PutFileOptions, Result, SharedObjectStore,
+    maintenance_hint_relay, LoonFs, MaintenanceCancellation, MaintenanceConclusion, MaintenanceJob,
+    MaintenanceJobId, MaintenanceProbe, MaintenanceRegistry, MaintenanceRunReport,
+    MaintenanceRunner, NamespaceAdvanceHint, NamespacePublication, Result, SharedObjectStore,
 };
 use loonfs_api::{ChangeSeq, NamespaceId};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -35,10 +34,7 @@ async fn registered_observer_sees_one_hint_per_publication() {
         .expect("writer");
     let namespace_id = NamespaceId::parse("observer").expect("namespace id");
     writer
-        .create_namespace(
-            &namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let namespace = writer
@@ -53,10 +49,10 @@ async fn registered_observer_sees_one_hint_per_publication() {
     );
 
     let response = namespace
-        .put_file_bytes(
+        .put_file(
             "/note.txt",
             b"observer needle\n",
-            PutFileOptions::new(loonfs_test_support::test_actor()),
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("publish file");
@@ -137,10 +133,7 @@ async fn an_observer_panic_leaves_the_commit_the_publisher_and_maintenance_intac
     let namespace_id = NamespaceId::parse("observer-panic").expect("namespace id");
     let namespace = writer.namespace(&namespace_id);
     writer
-        .create_namespace(
-            &namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let namespace_writer = writer
@@ -148,11 +141,7 @@ async fn an_observer_panic_leaves_the_commit_the_publisher_and_maintenance_intac
         .expect("open namespace");
 
     let first = namespace_writer
-        .put_file_bytes(
-            "/note.txt",
-            b"first\n",
-            PutFileOptions::new(loonfs_test_support::test_actor()),
-        )
+        .put_file("/note.txt", b"first\n", &loonfs_test_support::test_actor())
         .await
         .expect("the commit was already durable when the observer panicked");
     assert_eq!(first.committed_seq, ChangeSeq(1));
@@ -166,10 +155,10 @@ async fn an_observer_panic_leaves_the_commit_the_publisher_and_maintenance_intac
     );
 
     let second = namespace_writer
-        .put_file_bytes(
+        .put_file(
             "/second.txt",
             b"second\n",
-            PutFileOptions::new(loonfs_test_support::test_actor()),
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("the namespace publisher keeps publishing");

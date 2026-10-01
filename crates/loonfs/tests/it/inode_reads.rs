@@ -2,8 +2,7 @@
 
 use crate::common::{open_runtime_async, store};
 use loonfs::{
-    CreateDirectoryOptions, CreateNamespaceOptions, DeleteOptions, ErrorCode, InodeId, LoonFs,
-    MoveOptions, PageRequest, PaginationPolicy, PutFileOptions, RevisionNo,
+    ErrorCode, InodeId, LoonFs, PageRequest, PaginationPolicy, PutFileOptions, RevisionNo,
 };
 use loonfs_test_support::ids::namespace_id;
 use tempfile::tempdir;
@@ -25,10 +24,7 @@ async fn stat_inode_tracks_a_rename_and_retained_revisions_keep_the_same_identit
     let namespace = fs.reader.namespace(&namespace_id);
     let actor = loonfs_test_support::test_actor();
     fs.writer
-        .create_namespace(
-            &namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let namespace_writer = fs
@@ -36,16 +32,17 @@ async fn stat_inode_tracks_a_rename_and_retained_revisions_keep_the_same_identit
         .open_namespace(&namespace_id)
         .expect("open namespace");
     namespace_writer
-        .put_file_bytes("/before.txt", b"one", PutFileOptions::new(actor.clone()))
+        .put_file("/before.txt", b"one", &actor)
         .await
         .expect("put first revision");
     namespace_writer
-        .put_file_bytes(
+        .put_file_with_options(
             "/before.txt",
             b"two",
-            PutFileOptions {
+            &actor,
+            &PutFileOptions {
                 behavior: loonfs::DestinationBehavior::Replace,
-                ..PutFileOptions::new(actor.clone())
+                ..Default::default()
             },
         )
         .await
@@ -70,7 +67,7 @@ async fn stat_inode_tracks_a_rename_and_retained_revisions_keep_the_same_identit
     );
 
     namespace_writer
-        .move_path("/before.txt", "/after.txt", MoveOptions::new(actor.clone()))
+        .move_path("/before.txt", "/after.txt", &actor)
         .await
         .expect("rename file");
     let after = namespace
@@ -102,7 +99,7 @@ async fn stat_inode_tracks_a_rename_and_retained_revisions_keep_the_same_identit
     );
 
     namespace_writer
-        .delete_path("/after.txt", DeleteOptions::new(actor))
+        .delete_path("/after.txt", &actor)
         .await
         .expect("delete file");
     let hidden = namespace
@@ -137,10 +134,7 @@ async fn stat_inode_preserves_the_nameless_root_and_revision_error_conventions()
     let namespace = fs.reader.namespace(&namespace_id);
     let actor = loonfs_test_support::test_actor();
     fs.writer
-        .create_namespace(
-            &namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let namespace_writer = fs
@@ -158,7 +152,7 @@ async fn stat_inode_preserves_the_nameless_root_and_revision_error_conventions()
     assert_eq!(root, namespace.stat("/").await.expect("stat root path"));
 
     namespace_writer
-        .create_directory("/docs", CreateDirectoryOptions::new(actor))
+        .create_directory("/docs", &actor)
         .await
         .expect("create directory");
     let directory = namespace.stat("/docs").await.expect("stat directory");
@@ -200,10 +194,7 @@ async fn stat_inode_and_stat_path_have_the_same_point_lookup_request_count() {
     let namespace_id = namespace_id("demo");
     let namespace = fs.reader.namespace(&namespace_id);
     fs.writer
-        .create_namespace(
-            &namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let namespace_writer = fs
@@ -211,11 +202,7 @@ async fn stat_inode_and_stat_path_have_the_same_point_lookup_request_count() {
         .open_namespace(&namespace_id)
         .expect("open namespace");
     namespace_writer
-        .put_file_bytes(
-            "/file.txt",
-            b"body",
-            PutFileOptions::new(loonfs_test_support::test_actor()),
-        )
+        .put_file("/file.txt", b"body", &loonfs_test_support::test_actor())
         .await
         .expect("put file");
     let inode_id = namespace

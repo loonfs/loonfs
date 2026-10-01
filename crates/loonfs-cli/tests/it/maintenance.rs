@@ -47,7 +47,7 @@ async fn grep_allow_stale_serves_indexed_results_and_warns_for_jsonl() {
         .open_namespace(&namespace_id)
         .expect("open namespace");
     let prepared = namespace
-        .prepare_file_bytes(b"needle\n")
+        .prepare_content(b"needle\n")
         .await
         .expect("prepare content");
     let operations = (0..=loonfs_grep::MAX_GREP_TAIL_FILES)

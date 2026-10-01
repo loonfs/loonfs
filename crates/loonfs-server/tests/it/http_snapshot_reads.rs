@@ -10,7 +10,7 @@ use loonfs_api::{
     ApiError, ChangeSeq, CreateCheckpointRequest, ListPathEntriesResponse, PathEntry,
     SnapshotSummary,
 };
-use loonfs_client::{DeleteOptions, NamespacePath, PutFileOptions};
+use loonfs_client::NamespacePath;
 use loonfs_test_support::http::{raw_agent, retry_result_on_macos_teardown_einval};
 use loonfs_test_support::ids::{namespace_id, page_limit};
 use serde::de::DeserializeOwned;
@@ -219,19 +219,15 @@ async fn snapshot_reads_answer_the_captured_namespace() {
     let deleted = NamespacePath::parse(namespace.as_str(), "/deleted.txt").expect("deleted path");
     harness
         .client
-        .put_file_bytes(
-            &keep,
-            b"captured bytes",
-            &PutFileOptions::new(loonfs_test_support::test_actor()),
-        )
+        .put_file(&keep, b"captured bytes", &loonfs_test_support::test_actor())
         .await
         .expect("create kept file");
     harness
         .client
-        .put_file_bytes(
+        .put_file(
             &deleted,
             b"deleted after snapshot",
-            &PutFileOptions::new(loonfs_test_support::test_actor()),
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("create deleted file");
@@ -249,21 +245,28 @@ async fn snapshot_reads_answer_the_captured_namespace() {
 
     harness
         .client
-        .put_file_bytes(&keep, b"current bytes", &replace_file_options())
+        .put_file_with_options(
+            &keep,
+            b"current bytes",
+            &loonfs_test_support::test_actor(),
+            &replace_file_options(),
+        )
         .await
         .expect("replace kept file");
     let added = NamespacePath::parse(namespace.as_str(), "/added.txt").expect("added path");
     harness
         .client
-        .put_file_bytes(&added, b"added", &replace_file_options())
+        .put_file_with_options(
+            &added,
+            b"added",
+            &loonfs_test_support::test_actor(),
+            &replace_file_options(),
+        )
         .await
         .expect("add current file");
     harness
         .client
-        .delete_path(
-            &deleted,
-            &DeleteOptions::new(loonfs_test_support::test_actor()),
-        )
+        .delete_path(&deleted, &loonfs_test_support::test_actor())
         .await
         .expect("delete captured file");
 
@@ -383,7 +386,12 @@ async fn snapshot_change_feed_stops_at_the_captured_sequence() {
             NamespacePath::parse(namespace.as_str(), &format!("/{name}.txt")).expect("file path");
         harness
             .client
-            .put_file_bytes(&path, name.as_bytes(), &replace_file_options())
+            .put_file_with_options(
+                &path,
+                name.as_bytes(),
+                &loonfs_test_support::test_actor(),
+                &replace_file_options(),
+            )
             .await
             .expect("seed change");
     }
@@ -391,7 +399,12 @@ async fn snapshot_change_feed_stops_at_the_captured_sequence() {
     let later = NamespacePath::parse(namespace.as_str(), "/later.txt").expect("later path");
     harness
         .client
-        .put_file_bytes(&later, b"later", &replace_file_options())
+        .put_file_with_options(
+            &later,
+            b"later",
+            &loonfs_test_support::test_actor(),
+            &replace_file_options(),
+        )
         .await
         .expect("write after snapshot");
 
@@ -473,7 +486,12 @@ async fn snapshot_reads_enforce_lease_identity_and_revision_rules() {
     let keep = NamespacePath::parse(namespace.as_str(), "/keep.txt").expect("keep path");
     harness
         .client
-        .put_file_bytes(&keep, b"kept", &replace_file_options())
+        .put_file_with_options(
+            &keep,
+            b"kept",
+            &loonfs_test_support::test_actor(),
+            &replace_file_options(),
+        )
         .await
         .expect("create file");
     let deleted = create_snapshot(&harness.server_url, namespace.as_str(), "deleted", 10_000);
@@ -626,7 +644,12 @@ async fn snapshot_page_cursors_resume_one_pinned_directory() {
             NamespacePath::parse(namespace.as_str(), &format!("/{name}.txt")).expect("file path");
         harness
             .client
-            .put_file_bytes(&path, name.as_bytes(), &replace_file_options())
+            .put_file_with_options(
+                &path,
+                name.as_bytes(),
+                &loonfs_test_support::test_actor(),
+                &replace_file_options(),
+            )
             .await
             .expect("seed file");
     }
@@ -653,10 +676,7 @@ async fn snapshot_page_cursors_resume_one_pinned_directory() {
             .expect("removed path");
         harness
             .client
-            .delete_path(
-                &removed,
-                &DeleteOptions::new(loonfs_test_support::test_actor()),
-            )
+            .delete_path(&removed, &loonfs_test_support::test_actor())
             .await
             .expect("remove captured file");
     }
@@ -665,7 +685,12 @@ async fn snapshot_page_cursors_resume_one_pinned_directory() {
             NamespacePath::parse(namespace.as_str(), &format!("/{name}.txt")).expect("added path");
         harness
             .client
-            .put_file_bytes(&path, name.as_bytes(), &replace_file_options())
+            .put_file_with_options(
+                &path,
+                name.as_bytes(),
+                &loonfs_test_support::test_actor(),
+                &replace_file_options(),
+            )
             .await
             .expect("add current file");
     }

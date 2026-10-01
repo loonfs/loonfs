@@ -17,10 +17,7 @@
 // Runtime integration tests use panic in helper assertions for precise diagnostics.
 
 use crate::common::{open_runtime_with_async, store, TestRuntime};
-use loonfs::{
-    ContentRef, CreateNamespaceOptions, GcOptions, GcResponse, NamespaceId, PutFileOptions,
-    SharedObjectStore,
-};
+use loonfs::{ContentRef, GcOptions, GcResponse, NamespaceId, PutFileOptions, SharedObjectStore};
 use loonfs_core::limits::{CONTENT_RECLAMATION_GRACE_MS, UPLOAD_SESSION_LEASE_MS};
 use loonfs_core::MutationContext;
 use loonfs_objectstore::layout::DurableObjectFamily;
@@ -71,10 +68,7 @@ async fn collect(store: &SharedObjectStore, namespace_id: &NamespaceId, now_ms: 
 async fn namespace(runtime: &TestRuntime) -> NamespaceId {
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     runtime
-        .create_namespace(
-            &namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     namespace_id
@@ -111,16 +105,16 @@ async fn content_prepared_and_never_published_is_reclaimed_with_its_session() {
     // A published file, so the reference scan has a root to read and the
     // verdict on the prepared object is "absent" rather than "unknown".
     namespace_writer
-        .put_file_bytes(
+        .put_file(
             "/docs/live.txt",
             b"live",
-            PutFileOptions::new(loonfs_test_support::test_actor()),
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("published put");
 
     let prepared = namespace_writer
-        .prepare_file_bytes(b"never published")
+        .prepare_content(b"never published")
         .await
         .expect("prepare content");
     let orphan_key = content_key(prepared.content_ref());
@@ -164,10 +158,10 @@ async fn a_published_put_keeps_its_content_and_loses_only_the_session_record() {
         .open_namespace(&namespace_id)
         .expect("open namespace");
     namespace_writer
-        .put_file_bytes(
+        .put_file(
             "/docs/kept.txt",
             b"kept",
-            PutFileOptions::new(loonfs_test_support::test_actor()),
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("published put");
@@ -213,11 +207,7 @@ async fn imported_content_survives_collection_in_the_source_namespace() {
     let namespace = runtime.reader.namespace(&target);
     runtime
         .writer
-        .fork_namespace(
-            &source,
-            &target,
-            loonfs_api::options::ForkNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .fork_namespace(&source, &target, &loonfs_test_support::test_actor())
         .await
         .expect("fork namespace");
     let target_writer = runtime
@@ -230,7 +220,7 @@ async fn imported_content_survives_collection_in_the_source_namespace() {
         .expect("open namespace");
 
     let source_prepared = source_writer
-        .prepare_file_bytes(b"owned by the target after import")
+        .prepare_content(b"owned by the target after import")
         .await
         .expect("prepare source content");
     let source_ref = source_prepared.content_ref().clone();
@@ -250,7 +240,7 @@ async fn imported_content_survives_collection_in_the_source_namespace() {
         .put_file_prepared(
             "/imported.txt",
             imported,
-            PutFileOptions::new(loonfs_test_support::test_actor()),
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("publish imported content");
@@ -286,14 +276,19 @@ async fn a_conflicting_upload_is_reclaimed_and_the_published_content_survives() 
         .open_namespace(&namespace_id)
         .expect("open namespace");
     let options = || {
-        let mut options = PutFileOptions::new(loonfs_test_support::test_actor());
+        let mut options = PutFileOptions::default();
         options.commit.commit_id =
             Some(loonfs::CommitId::parse("cmt_original").expect("valid commit id"));
         options
     };
 
     let first = namespace_writer
-        .put_file_bytes("/docs/retry.txt", b"same bytes", options())
+        .put_file_with_options(
+            "/docs/retry.txt",
+            b"same bytes",
+            &loonfs_test_support::test_actor(),
+            &options(),
+        )
         .await
         .expect("first put");
     let committed_content_ref = namespace
@@ -306,7 +301,12 @@ async fn a_conflicting_upload_is_reclaimed_and_the_published_content_survives() 
     let committed_key = content_key(&committed_content_ref);
 
     let retry = namespace_writer
-        .put_file_bytes("/docs/retry.txt", b"same bytes", options())
+        .put_file_with_options(
+            "/docs/retry.txt",
+            b"same bytes",
+            &loonfs_test_support::test_actor(),
+            &options(),
+        )
         .await
         .expect_err("the fresh upload conflicts with the committed request");
     assert_eq!(
@@ -369,10 +369,10 @@ async fn staging_that_fails_leaves_a_session_the_expiry_sweep_reclaims() {
 
     failing.fail_all();
     namespace_writer
-        .put_file_bytes(
+        .put_file(
             "/docs/lost.txt",
             b"never lands",
-            PutFileOptions::new(loonfs_test_support::test_actor()),
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect_err("the content write fails");
@@ -417,10 +417,10 @@ async fn a_put_pays_two_control_writes_for_the_session_that_owns_its_content() {
 
     sessions.reset();
     namespace_writer
-        .put_file_bytes(
+        .put_file(
             "/docs/counted.txt",
             b"counted",
-            PutFileOptions::new(loonfs_test_support::test_actor()),
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("put file");

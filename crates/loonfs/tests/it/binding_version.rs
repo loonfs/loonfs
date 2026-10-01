@@ -2,7 +2,7 @@
 // Runtime integration tests use panic in helper assertions for precise diagnostics.
 
 use crate::common::*;
-use loonfs::{ChangeSeq, CreateNamespaceOptions, DestinationBehavior, MoveOptions, PutFileOptions};
+use loonfs::{ChangeSeq, DestinationBehavior, PutFileOptions};
 use loonfs_api::v0::FilesystemChange;
 use loonfs_test_support::ids::namespace_id;
 use tempfile::tempdir;
@@ -12,16 +12,13 @@ fn binding_version_changes_on_move_but_not_content_update() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "binding-version-test");
     let namespace_id = namespace_id("demo");
-    fs.create_namespace_blocking(
-        &namespace_id,
-        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-    )
-    .expect("create namespace");
-    fs.put_file_bytes_blocking(
+    fs.create_namespace_blocking(&namespace_id, &loonfs_test_support::test_actor())
+        .expect("create namespace");
+    fs.put_file_blocking(
         &namespace_id,
         "/docs/report.txt",
         b"draft one",
-        PutFileOptions::new(loonfs_test_support::test_actor()),
+        &loonfs_test_support::test_actor(),
     )
     .expect("put the first revision");
 
@@ -38,13 +35,14 @@ fn binding_version_changes_on_move_but_not_content_update() {
         "the nameless root has no binding"
     );
 
-    fs.put_file_bytes_blocking(
+    fs.put_file_with_options_blocking(
         &namespace_id,
         "/docs/report.txt",
         b"draft two",
-        PutFileOptions {
+        &loonfs_test_support::test_actor(),
+        &PutFileOptions {
             behavior: DestinationBehavior::Replace,
-            ..PutFileOptions::new(loonfs_test_support::test_actor())
+            ..Default::default()
         },
     )
     .expect("put the second revision");
@@ -61,7 +59,7 @@ fn binding_version_changes_on_move_but_not_content_update() {
             &namespace_id,
             "/docs/report.txt",
             "/docs/final.txt",
-            MoveOptions::new(loonfs_test_support::test_actor()),
+            &loonfs_test_support::test_actor(),
         )
         .expect("move the file")
         .committed_seq;

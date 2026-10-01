@@ -335,7 +335,7 @@ async fn metadata_queries_do_not_get_content_blobs_but_file_reads_do_once() {
         let path = format!("/docs/file-{index}.txt");
         let bytes = format!("file-{index}-bytes");
         let commit_id = format!("put-file-{index}");
-        put_file_bytes(
+        put_file(
             &store,
             &namespace_id,
             &path,
@@ -387,7 +387,7 @@ async fn query_driven_stat_and_list_use_metadata_view_with_delta_run_and_wal_ove
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    put_file_bytes(
+    put_file(
         &store,
         &namespace_id,
         "/docs/a.txt",
@@ -398,7 +398,7 @@ async fn query_driven_stat_and_list_use_metadata_view_with_delta_run_and_wal_ove
     )
     .await
     .expect("put alpha");
-    put_file_bytes(
+    put_file(
         &store,
         &namespace_id,
         "/docs/b.txt",
@@ -409,7 +409,7 @@ async fn query_driven_stat_and_list_use_metadata_view_with_delta_run_and_wal_ove
     )
     .await
     .expect("put bravo");
-    put_file_bytes(
+    put_file(
         &store,
         &namespace_id,
         "/dead/leaf.txt",
@@ -434,7 +434,7 @@ async fn query_driven_stat_and_list_use_metadata_view_with_delta_run_and_wal_ove
     )
     .await
     .expect("move alpha");
-    put_file_bytes(
+    put_file(
         &store,
         &namespace_id,
         "/docs/b.txt",
@@ -458,7 +458,7 @@ async fn query_driven_stat_and_list_use_metadata_view_with_delta_run_and_wal_ove
         .await
         .expect("delta checkpoint");
 
-    put_file_bytes(
+    put_file(
         &store,
         &namespace_id,
         "/docs/wal.txt",
@@ -518,7 +518,7 @@ async fn query_driven_stat_uses_exact_name_key_for_dash_containing_siblings() {
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    put_file_bytes(
+    put_file(
         &store,
         &namespace_id,
         "/docs/report",
@@ -529,7 +529,7 @@ async fn query_driven_stat_uses_exact_name_key_for_dash_containing_siblings() {
     )
     .await
     .expect("put report");
-    put_file_bytes(
+    put_file(
         &store,
         &namespace_id,
         "/docs/report-2024",
@@ -590,7 +590,7 @@ async fn wide_directory_listing_resolves_tail_unbinds_cross_directory_renames_an
                 .expect("fold seed writes");
         }
         let path = format!("/wide/file-{index:03}.txt");
-        put_file_bytes(
+        put_file(
             &store,
             &namespace_id,
             &path,
@@ -604,7 +604,7 @@ async fn wide_directory_listing_resolves_tail_unbinds_cross_directory_renames_an
     }
     for index in [3u32, 35, 68] {
         let path = format!("/wide/file-{index:03}.txt");
-        put_file_bytes(
+        put_file(
             &store,
             &namespace_id,
             &path,
@@ -642,7 +642,7 @@ async fn wide_directory_listing_resolves_tail_unbinds_cross_directory_renames_an
     )
     .await
     .expect("move into other directory");
-    put_file_bytes(
+    put_file(
         &store,
         &namespace_id,
         "/wide/file-005.txt",
@@ -707,7 +707,7 @@ async fn query_driven_directory_page_merges_manifest_and_tail_visible_children()
     )
     .await
     .expect("create a-dir");
-    put_file_bytes(
+    put_file(
         &store,
         &namespace_id,
         "/docs/c-file.txt",
@@ -718,7 +718,7 @@ async fn query_driven_directory_page_merges_manifest_and_tail_visible_children()
     )
     .await
     .expect("put c-file");
-    put_file_bytes(
+    put_file(
         &store,
         &namespace_id,
         "/docs/stale.txt",
@@ -739,7 +739,7 @@ async fn query_driven_directory_page_merges_manifest_and_tail_visible_children()
     )
     .await
     .expect("move stale");
-    put_file_bytes(
+    put_file(
         &store,
         &namespace_id,
         "/docs/dead/leaf.txt",
@@ -763,7 +763,7 @@ async fn query_driven_directory_page_merges_manifest_and_tail_visible_children()
         .await
         .expect("checkpoint manifest children");
 
-    put_file_bytes(
+    put_file(
         &store,
         &namespace_id,
         "/docs/d-tail.txt",
@@ -783,7 +783,7 @@ async fn query_driven_directory_page_merges_manifest_and_tail_visible_children()
     )
     .await
     .expect("create tail dir");
-    put_file_bytes(
+    put_file(
         &store,
         &namespace_id,
         "/docs/tail-dead/leaf.txt",
@@ -936,7 +936,7 @@ async fn revision_queries_read_historical_bytes_and_path_restore_appends_revisio
         .await
         .expect("bootstrap");
 
-    put_file_bytes(
+    put_file(
         &store,
         &namespace_id,
         "/docs/rev.txt",
@@ -1482,7 +1482,7 @@ async fn no_replace_put_rejects_an_existing_name_and_an_equivalent_spelling() {
     .await
     .expect("seed unicode name");
 
-    let error = put_file_bytes(
+    let error = put_file(
         &store,
         &namespace_id("demo"),
         "/docs/hello.txt",
@@ -1495,7 +1495,7 @@ async fn no_replace_put_rejects_an_existing_name_and_an_equivalent_spelling() {
     .expect_err("put without force");
     assert_eq!(error.code(), ErrorCode::PathConflict);
 
-    let error = put_file_bytes(
+    let error = put_file(
         &store,
         &namespace_id("demo"),
         "/CAF\u{00c9}.TXT",
@@ -1843,7 +1843,7 @@ async fn tombstoned_children_stay_unlisted_and_live_entries_keep_revision_data()
     create_directory_path(&store, &namespace_id("demo"), "/dead", &context, None)
         .await
         .expect("create dead dir");
-    put_file_bytes(
+    put_file(
         &store,
         &namespace_id("demo"),
         "/live/kept.txt",
@@ -1854,7 +1854,7 @@ async fn tombstoned_children_stay_unlisted_and_live_entries_keep_revision_data()
     )
     .await
     .expect("put live file");
-    put_file_bytes(
+    put_file(
         &store,
         &namespace_id("demo"),
         "/dead/gone.txt",
@@ -1923,7 +1923,7 @@ async fn move_replace_atomically_replaces_a_file_destination() {
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    put_file_bytes(
+    put_file(
         &store,
         &namespace_id,
         "/docs/a.txt",
@@ -1934,7 +1934,7 @@ async fn move_replace_atomically_replaces_a_file_destination() {
     )
     .await
     .expect("put a");
-    put_file_bytes(
+    put_file(
         &store,
         &namespace_id,
         "/docs/b.txt",
@@ -2008,7 +2008,7 @@ async fn move_replace_rejects_directory_destinations_and_self_moves() {
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    put_file_bytes(
+    put_file(
         &store,
         &namespace_id,
         "/docs/a.txt",
@@ -2080,7 +2080,7 @@ async fn copy_replace_appends_a_revision_to_the_destination_inode() {
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    put_file_bytes(
+    put_file(
         &store,
         &namespace_id,
         "/docs/a.txt",
@@ -2091,7 +2091,7 @@ async fn copy_replace_appends_a_revision_to_the_destination_inode() {
     )
     .await
     .expect("put a");
-    put_file_bytes(
+    put_file(
         &store,
         &namespace_id,
         "/docs/b.txt",

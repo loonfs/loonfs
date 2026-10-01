@@ -488,11 +488,7 @@ async fn snapshot_file_read_returns_the_captured_state() {
         .expect("create namespace");
     harness
         .client
-        .put_file_bytes(
-            &path,
-            b"captured",
-            &PutFileOptions::new(loonfs_test_support::test_actor()),
-        )
+        .put_file(&path, b"captured", &loonfs_test_support::test_actor())
         .await
         .expect("write captured content");
     let snapshot = harness
@@ -501,11 +497,18 @@ async fn snapshot_file_read_returns_the_captured_state() {
         .await
         .expect("create snapshot");
 
-    let mut replace = PutFileOptions::new(loonfs_test_support::test_actor());
-    replace.behavior = DestinationBehavior::Replace;
+    let replace = PutFileOptions {
+        behavior: DestinationBehavior::Replace,
+        ..Default::default()
+    };
     harness
         .client
-        .put_file_bytes(&path, b"current", &replace)
+        .put_file_with_options(
+            &path,
+            b"current",
+            &loonfs_test_support::test_actor(),
+            &replace,
+        )
         .await
         .expect("replace content");
 

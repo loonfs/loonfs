@@ -45,7 +45,7 @@ impl MaintenanceJob for MetadataMaintenanceJob {
     ) -> Result<MaintenanceRunReport> {
         match self
             .maintenance
-            .maintain_metadata_step(namespace_id, self.options.clone())
+            .maintain_metadata_step(namespace_id, &self.options)
             .await
         {
             Ok((metadata, idle_fold_at_ms)) => {
@@ -70,7 +70,7 @@ impl MaintenanceJob for MetadataMaintenanceJob {
     async fn probe(&self, namespace_id: &NamespaceId) -> Result<MaintenanceProbe> {
         match self
             .maintenance
-            .probe_metadata(namespace_id, &self.options)
+            .probe_metadata_with_options(namespace_id, &self.options)
             .await
         {
             Ok(probe) => Ok(probe),

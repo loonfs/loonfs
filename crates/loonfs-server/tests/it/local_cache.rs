@@ -74,7 +74,12 @@ async fn a_restarted_server_uses_the_local_cache_for_index_but_not_scan_data() {
         let target = NamespacePath::parse("warm", &path).expect("parse path");
         writer
             .client
-            .put_file_bytes(&target, b"file", &replace_file_options())
+            .put_file_with_options(
+                &target,
+                b"file",
+                &loonfs_test_support::test_actor(),
+                &replace_file_options(),
+            )
             .await
             .expect("put file");
     }
@@ -94,7 +99,12 @@ async fn a_restarted_server_uses_the_local_cache_for_index_but_not_scan_data() {
     let extra = NamespacePath::parse("warm", "/docs/after.txt").expect("parse path");
     writer
         .client
-        .put_file_bytes(&extra, b"after", &replace_file_options())
+        .put_file_with_options(
+            &extra,
+            b"after",
+            &loonfs_test_support::test_actor(),
+            &replace_file_options(),
+        )
         .await
         .expect("put file after the checkpoint");
 

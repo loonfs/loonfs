@@ -7,15 +7,14 @@
 //! already return `Commit` and `FoldWalResponse`.
 
 use crate::{Error, MetadataCompactionPolicy, Result};
-use loonfs_api::{CreateCheckpointRequest, MetadataMaintenanceRequest};
+use loonfs_api::MetadataMaintenanceRequest;
 use loonfs_core::limits::{FOLD_AT_WAL_OBJECTS, MAX_UNFOLDED_WAL_OBJECTS};
 use std::num::{NonZeroU64, NonZeroUsize};
 
 pub use loonfs_api::options::{
-    CommitOptions, CopyOptions, CreateDirectoryOptions, DeleteOptions,
-    DirectMultipartUploadOptions, ForkNamespaceOptions, ListOptions, MoveOptions, PutFileOptions,
-    RestoreRevisionOptions, StatOptions, UndeleteOptions, UpdateAccessOptions,
-    UpdateAttributesOptions,
+    AccessState, AttributeChanges, CommitOptions, CopyOptions, CreateDirectoryOptions,
+    DeleteOptions, DirectMultipartUploadOptions, ForkNamespaceOptions, ListOptions, MoveOptions,
+    PutFileOptions, StatOptions, UpdateAccessOptions, UpdateAttributesOptions,
 };
 
 /// Overrides for the metadata-upkeep action.
@@ -110,35 +109,11 @@ impl MetadataMaintenanceOptions {
 }
 
 /// Options for creating a durable checkpoint pin.
-///
-/// The name is a label recorded on the record, not a key. No `Default`:
-/// a checkpoint always names its owner.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CreateCheckpointOptions {
-    /// Label recorded on the pin.
-    pub name: String,
     /// Optional lifetime; the record's expiry is computed from the runtime's
     /// clock. Absent means the pin holds until deleted.
     pub ttl_ms: Option<u64>,
-}
-
-impl CreateCheckpointOptions {
-    /// Resolves the wire-level create request onto runtime options.
-    pub fn from_request(request: CreateCheckpointRequest) -> Self {
-        Self {
-            name: request.name,
-            ttl_ms: request.ttl_ms,
-        }
-    }
-}
-
-/// Options for creating a snapshot.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CreateSnapshotOptions {
-    /// A label that does not need to be unique.
-    pub name: String,
-    /// Expiry time in Unix milliseconds.
-    pub expires_at_ms: u64,
 }
 
 /// Options for a streaming file read.

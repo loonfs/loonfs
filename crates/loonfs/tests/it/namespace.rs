@@ -3,11 +3,8 @@
 
 #![allow(clippy::panic)]
 
-use crate::common::{data_wal_put_for, directory_options, expect_code, writer, writer_epoch};
-use loonfs::{
-    CreateNamespaceOptions, ErrorCode, LoonFs, NamespaceId, NamespaceSessionState,
-    SharedObjectStore, Writable,
-};
+use crate::common::{data_wal_put_for, expect_code, writer, writer_epoch};
+use loonfs::{ErrorCode, LoonFs, NamespaceId, NamespaceSessionState, SharedObjectStore, Writable};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::stores::{BlockingStore, KeyPredicate, RecordingStore};
 use std::sync::{Arc, Barrier};
@@ -15,10 +12,7 @@ use tempfile::tempdir;
 
 async fn create_namespace(writer: &LoonFs<Writable>, namespace_id: &NamespaceId) {
     writer
-        .create_namespace(
-            namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
 }
@@ -45,7 +39,7 @@ async fn opening_does_no_store_io_and_the_first_publish_acquires_the_epoch() {
     assert_eq!(writer_epoch(&store, &namespace_id).await, created);
 
     namespace
-        .create_directory("/first", directory_options())
+        .create_directory("/first", &loonfs_test_support::test_actor())
         .await
         .expect("first publish");
     assert_eq!(writer_epoch(&store, &namespace_id).await, created + 1);
@@ -84,7 +78,10 @@ async fn concurrent_opens_share_one_session_and_one_epoch() {
 
     for (index, namespace) in namespaces.iter().enumerate() {
         namespace
-            .create_directory(&format!("/from-{index}"), directory_options())
+            .create_directory(
+                &format!("/from-{index}"),
+                &loonfs_test_support::test_actor(),
+            )
             .await
             .expect("every handle publishes through the shared session");
     }
@@ -111,18 +108,21 @@ async fn close_drains_admitted_commits_and_refuses_later_work_from_every_clone()
         let namespace = namespace.clone();
         async move {
             namespace
-                .create_directory("/first", directory_options())
+                .create_directory("/first", &loonfs_test_support::test_actor())
                 .await
         }
     });
     blocking.wait_until_blocked().await;
-    let mut second = Box::pin(clone.create_directory("/second", directory_options()));
+    let actor = loonfs_test_support::test_actor();
+    let mut second = Box::pin(clone.create_directory("/second", &actor));
     assert!(futures::poll!(second.as_mut()).is_pending());
 
     let mut close = Box::pin(namespace.close());
     assert!(futures::poll!(close.as_mut()).is_pending());
     expect_code(
-        clone.create_directory("/third", directory_options()).await,
+        clone
+            .create_directory("/third", &loonfs_test_support::test_actor())
+            .await,
         ErrorCode::WriterSessionClosed,
     );
 
@@ -151,7 +151,7 @@ async fn reopening_after_close_starts_a_new_epoch() {
         .open_namespace(&namespace_id)
         .expect("open namespace");
     namespace
-        .create_directory("/before", directory_options())
+        .create_directory("/before", &loonfs_test_support::test_actor())
         .await
         .expect("first session publishes");
     let first_epoch = writer_epoch(&store, &namespace_id).await;
@@ -161,7 +161,7 @@ async fn reopening_after_close_starts_a_new_epoch() {
         .open_namespace(&namespace_id)
         .expect("reopen namespace");
     reopened
-        .create_directory("/after", directory_options())
+        .create_directory("/after", &loonfs_test_support::test_actor())
         .await
         .expect("second session publishes");
     assert_eq!(writer_epoch(&store, &namespace_id).await, first_epoch + 1);
@@ -183,18 +183,20 @@ async fn fencing_lasts_until_close_and_a_reopened_handle_takes_a_new_epoch() {
         .open_namespace(&namespace_id)
         .expect("open writer B");
     handle_a
-        .create_directory("/a-one", directory_options())
+        .create_directory("/a-one", &loonfs_test_support::test_actor())
         .await
         .expect("writer A acquires the epoch");
     handle_b
-        .create_directory("/b-one", directory_options())
+        .create_directory("/b-one", &loonfs_test_support::test_actor())
         .await
         .expect("writer B takes over");
     let taken_over = writer_epoch(&store, &namespace_id).await;
 
     for path in ["/a-two", "/a-three"] {
         expect_code(
-            handle_a.create_directory(path, directory_options()).await,
+            handle_a
+                .create_directory(path, &loonfs_test_support::test_actor())
+                .await,
             ErrorCode::WriterFenced,
         );
     }
@@ -206,7 +208,7 @@ async fn fencing_lasts_until_close_and_a_reopened_handle_takes_a_new_epoch() {
         .open_namespace(&namespace_id)
         .expect("reopen writer A");
     reopened_a
-        .create_directory("/a-four", directory_options())
+        .create_directory("/a-four", &loonfs_test_support::test_actor())
         .await
         .expect("the reopened session acquires a new epoch");
     assert_eq!(writer_epoch(&store, &namespace_id).await, taken_over + 1);
@@ -226,7 +228,7 @@ async fn dropping_the_last_clone_ends_the_session_and_a_kept_clone_keeps_it_open
         .expect("open namespace");
     let kept = namespace.clone();
     namespace
-        .create_directory("/first", directory_options())
+        .create_directory("/first", &loonfs_test_support::test_actor())
         .await
         .expect("first session publishes");
     let first_epoch = writer_epoch(&store, &namespace_id).await;
@@ -236,7 +238,7 @@ async fn dropping_the_last_clone_ends_the_session_and_a_kept_clone_keeps_it_open
         .open_namespace(&namespace_id)
         .expect("open while a clone is kept");
     shared
-        .create_directory("/shared", directory_options())
+        .create_directory("/shared", &loonfs_test_support::test_actor())
         .await
         .expect("the kept session publishes");
     assert_eq!(
@@ -256,7 +258,7 @@ async fn dropping_the_last_clone_ends_the_session_and_a_kept_clone_keeps_it_open
         .expect("reopen namespace");
     assert_eq!(reopened.session_state(), NamespaceSessionState::Open);
     reopened
-        .create_directory("/reopened", directory_options())
+        .create_directory("/reopened", &loonfs_test_support::test_actor())
         .await
         .expect("the new session publishes");
     assert_eq!(
@@ -290,7 +292,7 @@ async fn a_read_only_handle_does_no_io_and_does_not_keep_the_session_open() {
         .open_namespace(&namespace_id)
         .expect("open namespace");
     namespace_writer
-        .create_directory("/first", directory_options())
+        .create_directory("/first", &loonfs_test_support::test_actor())
         .await
         .expect("first session publishes");
     let first_epoch = writer_epoch(&store, &namespace_id).await;
@@ -305,7 +307,7 @@ async fn a_read_only_handle_does_no_io_and_does_not_keep_the_session_open() {
         .open_namespace(&namespace_id)
         .expect("reopen namespace");
     reopened
-        .create_directory("/reopened", directory_options())
+        .create_directory("/reopened", &loonfs_test_support::test_actor())
         .await
         .expect("the new session publishes");
     assert_eq!(
@@ -344,12 +346,13 @@ async fn shutdown_publishes_the_commits_open_handles_queued_before_it_returns() 
         let namespace = namespace.clone();
         async move {
             namespace
-                .create_directory("/first", directory_options())
+                .create_directory("/first", &loonfs_test_support::test_actor())
                 .await
         }
     });
     blocking.wait_until_blocked().await;
-    let mut queued = Box::pin(namespace.create_directory("/queued", directory_options()));
+    let actor = loonfs_test_support::test_actor();
+    let mut queued = Box::pin(namespace.create_directory("/queued", &actor));
     assert!(futures::poll!(queued.as_mut()).is_pending());
 
     let mut shutdown = Box::pin(writer.shutdown());
@@ -394,14 +397,14 @@ async fn the_runtime_holds_as_many_sessions_as_the_host_opens() {
     let first = namespaces[0].id().clone();
     create_namespace(&writer, &first).await;
     namespaces[0]
-        .create_directory("/written", directory_options())
+        .create_directory("/written", &loonfs_test_support::test_actor())
         .await
         .expect("the first session publishes");
     let epoch = writer_epoch(&store, &first).await;
     writer
         .open_namespace(&first)
         .expect("open the first namespace again")
-        .create_directory("/again", directory_options())
+        .create_directory("/again", &loonfs_test_support::test_actor())
         .await
         .expect("publish through the first session");
     assert_eq!(

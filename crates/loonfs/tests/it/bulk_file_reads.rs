@@ -7,11 +7,10 @@
 
 use crate::common::*;
 use loonfs::{
-    CheckpointFile, CheckpointFilesPageCursor, ContentRef, CreateCheckpointOptions,
-    CreateNamespaceOptions, CurrentFileState, DeleteDirectoryBehavior, DeleteOptions,
-    DestinationBehavior, Error, ErrorCode, InodeId, ListCheckpointFilesOptions, LoonFs,
-    MoveOptions, NamespaceId, PageRequest, PutFileOptions, ReadOnly, RevisionNo, SharedObjectStore,
-    StoreConfig, UndeleteOptions,
+    CheckpointFile, CheckpointFilesPageCursor, ContentRef, CurrentFileState,
+    DeleteDirectoryBehavior, DeleteOptions, DestinationBehavior, Error, ErrorCode, InodeId,
+    ListCheckpointFilesOptions, LoonFs, NamespaceId, PageRequest, PutFileOptions, ReadOnly,
+    RevisionNo, SharedObjectStore, StoreConfig,
 };
 use loonfs_test_support::ids::{namespace_id, page_limit};
 use loonfs_test_support::stores::{KeyPredicate, OperationClass, RecordingStore};
@@ -132,12 +131,9 @@ async fn checkpoint_files(
 /// directories, a replaced file, a deleted subtree, an undeleted file, and a
 /// directory holding no files at all.
 async fn build_mixed_namespace(fs: &TestRuntime, namespace_id: &NamespaceId) {
-    fs.create_namespace(
-        namespace_id,
-        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-    )
-    .await
-    .expect("create namespace");
+    fs.create_namespace(namespace_id, &loonfs_test_support::test_actor())
+        .await
+        .expect("create namespace");
     let namespace = fs
         .writer
         .open_namespace(namespace_id)
@@ -149,31 +145,29 @@ async fn build_mixed_namespace(fs: &TestRuntime, namespace_id: &NamespaceId) {
         ("/scratch/discarded.txt", &b"discarded"[..]),
         ("/notes/recovered.txt", &b"recovered"[..]),
     ] {
-        fs.put_file_bytes(
+        fs.put_file(
             namespace_id,
             path,
             bytes,
-            PutFileOptions::new(loonfs_test_support::test_actor()),
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("put file");
     }
     namespace
-        .create_directory(
-            "/empty",
-            loonfs::CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_directory("/empty", &loonfs_test_support::test_actor())
         .await
         .expect("create a directory holding no files");
 
     // A replaced file: the enumeration must report the newer revision.
-    fs.put_file_bytes(
+    fs.put_file_with_options(
         namespace_id,
         "/docs/deep/charlie.txt",
         b"charlie again",
-        PutFileOptions {
+        &loonfs_test_support::test_actor(),
+        &PutFileOptions {
             behavior: DestinationBehavior::Replace,
-            ..PutFileOptions::new(loonfs_test_support::test_actor())
+            ..Default::default()
         },
     )
     .await
@@ -182,11 +176,12 @@ async fn build_mixed_namespace(fs: &TestRuntime, namespace_id: &NamespaceId) {
     // A deleted subtree: neither the directory nor the file below it is
     // visible any more.
     namespace
-        .delete_path(
+        .delete_path_with_options(
             "/scratch",
-            DeleteOptions {
+            &loonfs_test_support::test_actor(),
+            &DeleteOptions {
                 behavior: DeleteDirectoryBehavior::Recursive,
-                ..DeleteOptions::new(loonfs_test_support::test_actor())
+                ..Default::default()
             },
         )
         .await
@@ -199,10 +194,7 @@ async fn build_mixed_namespace(fs: &TestRuntime, namespace_id: &NamespaceId) {
         .expect("stat before delete")
         .inode_id;
     let deletion_seq = namespace
-        .delete_path(
-            "/notes/recovered.txt",
-            DeleteOptions::new(loonfs_test_support::test_actor()),
-        )
+        .delete_path("/notes/recovered.txt", &loonfs_test_support::test_actor())
         .await
         .expect("delete file")
         .committed_seq;
@@ -211,7 +203,7 @@ async fn build_mixed_namespace(fs: &TestRuntime, namespace_id: &NamespaceId) {
             recovered_inode_id,
             deletion_seq,
             Some("/notes/restored.txt"),
-            UndeleteOptions::new(loonfs_test_support::test_actor()),
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("undelete file");
@@ -239,37 +231,35 @@ async fn checkpoint_enumeration_answers_the_state_it_pinned() {
 
     // Everything after the checkpoint is the change feed's job, so none of
     // it may show up in the enumeration.
-    fs.put_file_bytes(
+    fs.put_file(
         &namespace_id,
         "/docs/added-later.txt",
         b"added later",
-        PutFileOptions::new(loonfs_test_support::test_actor()),
+        &loonfs_test_support::test_actor(),
     )
     .await
     .expect("create a file after the checkpoint");
-    fs.put_file_bytes(
+    fs.put_file_with_options(
         &namespace_id,
         "/docs/alpha.txt",
         b"alpha again",
-        PutFileOptions {
+        &loonfs_test_support::test_actor(),
+        &PutFileOptions {
             behavior: DestinationBehavior::Replace,
-            ..PutFileOptions::new(loonfs_test_support::test_actor())
+            ..Default::default()
         },
     )
     .await
     .expect("replace a file after the checkpoint");
     namespace_writer
-        .delete_path(
-            "/docs/deep/bravo.txt",
-            DeleteOptions::new(loonfs_test_support::test_actor()),
-        )
+        .delete_path("/docs/deep/bravo.txt", &loonfs_test_support::test_actor())
         .await
         .expect("delete a file after the checkpoint");
     namespace_writer
         .move_path(
             "/docs/deep/charlie.txt",
             "/docs/charlie.txt",
-            MoveOptions::new(loonfs_test_support::test_actor()),
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("move a file after the checkpoint");
@@ -378,18 +368,15 @@ async fn checkpoint_files_page_without_gaps_or_duplicates() {
     let fs = open_runtime_async(store(temp_dir.path()), "checkpoint-files-paging-test").await;
     let namespace_id = namespace_id("demo");
     let namespace = fs.reader.namespace(&namespace_id);
-    fs.create_namespace(
-        &namespace_id,
-        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-    )
-    .await
-    .expect("create namespace");
+    fs.create_namespace(&namespace_id, &loonfs_test_support::test_actor())
+        .await
+        .expect("create namespace");
     for index in 0..5 {
-        fs.put_file_bytes(
+        fs.put_file(
             &namespace_id,
             &format!("/docs/file-{index}.txt"),
             format!("body {index}").as_bytes(),
-            PutFileOptions::new(loonfs_test_support::test_actor()),
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("put file");
@@ -433,12 +420,9 @@ async fn an_empty_namespace_answers_one_empty_page() {
     let fs = open_runtime_async(store(temp_dir.path()), "checkpoint-files-empty-test").await;
     let namespace_id = namespace_id("demo");
     let namespace = fs.reader.namespace(&namespace_id);
-    fs.create_namespace(
-        &namespace_id,
-        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-    )
-    .await
-    .expect("create namespace");
+    fs.create_namespace(&namespace_id, &loonfs_test_support::test_actor())
+        .await
+        .expect("create namespace");
     let checkpoint = fs
         .create_checkpoint(&namespace_id)
         .await
@@ -464,33 +448,21 @@ async fn a_fork_targets_checkpoint_enumerates_the_source_state() {
     let fs = open_runtime_async(store.clone(), "checkpoint-files-fork-test").await;
     let source = namespace_id("source");
     let target = namespace_id("target");
-    fs.create_namespace(
-        &source,
-        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-    )
-    .await
-    .expect("create source namespace");
+    fs.create_namespace(&source, &loonfs_test_support::test_actor())
+        .await
+        .expect("create source namespace");
     for (path, bytes) in [
         ("/docs/alpha.txt", &b"alpha"[..]),
         ("/docs/deep/bravo.txt", &b"bravo"[..]),
     ] {
-        fs.put_file_bytes(
-            &source,
-            path,
-            bytes,
-            PutFileOptions::new(loonfs_test_support::test_actor()),
-        )
-        .await
-        .expect("put file");
+        fs.put_file(&source, path, bytes, &loonfs_test_support::test_actor())
+            .await
+            .expect("put file");
     }
     let at_fork = listed_files(&fs.reader, &source).await;
 
     fs.writer
-        .fork_namespace(
-            &source,
-            &target,
-            loonfs_api::options::ForkNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .fork_namespace(&source, &target, &loonfs_test_support::test_actor())
         .await
         .expect("fork namespace");
 
@@ -498,13 +470,7 @@ async fn a_fork_targets_checkpoint_enumerates_the_source_state() {
     // manifest names metadata files the source owns.
     let checkpoint = fs
         .maintenance
-        .create_checkpoint(
-            &target,
-            CreateCheckpointOptions {
-                name: "fork-pin".to_owned(),
-                ttl_ms: None,
-            },
-        )
+        .create_checkpoint(&target, "fork-pin")
         .await
         .expect("checkpoint the unfolded fork target");
     assert!(
@@ -564,17 +530,14 @@ async fn a_deleted_checkpoint_refuses_enumeration_instead_of_answering_current_s
     let fs = open_runtime_async(store(temp_dir.path()), "checkpoint-files-release-test").await;
     let namespace_id = namespace_id("demo");
     let namespace = fs.reader.namespace(&namespace_id);
-    fs.create_namespace(
-        &namespace_id,
-        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-    )
-    .await
-    .expect("create namespace");
-    fs.put_file_bytes(
+    fs.create_namespace(&namespace_id, &loonfs_test_support::test_actor())
+        .await
+        .expect("create namespace");
+    fs.put_file(
         &namespace_id,
         "/docs/alpha.txt",
         b"alpha",
-        PutFileOptions::new(loonfs_test_support::test_actor()),
+        &loonfs_test_support::test_actor(),
     )
     .await
     .expect("put file");
@@ -616,12 +579,9 @@ async fn resolve_current_files_answers_the_whole_matrix_in_input_order() {
     let fs = open_runtime_async(store(temp_dir.path()), "resolve-current-files-test").await;
     let namespace_id = namespace_id("demo");
     let namespace = fs.reader.namespace(&namespace_id);
-    fs.create_namespace(
-        &namespace_id,
-        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-    )
-    .await
-    .expect("create namespace");
+    fs.create_namespace(&namespace_id, &loonfs_test_support::test_actor())
+        .await
+        .expect("create namespace");
     let namespace_writer = fs
         .writer
         .open_namespace(&namespace_id)
@@ -635,11 +595,11 @@ async fn resolve_current_files_answers_the_whole_matrix_in_input_order() {
         ("/m/subtree/child.txt", &b"child"[..]),
         ("/m/recovered.txt", &b"recovered"[..]),
     ] {
-        fs.put_file_bytes(
+        fs.put_file(
             &namespace_id,
             path,
             bytes,
-            PutFileOptions::new(loonfs_test_support::test_actor()),
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("put file");
@@ -663,13 +623,14 @@ async fn resolve_current_files_answers_the_whole_matrix_in_input_order() {
     let recovered = inode_of("/m/recovered.txt").await;
     let directory = inode_of("/m").await;
 
-    fs.put_file_bytes(
+    fs.put_file_with_options(
         &namespace_id,
         "/m/replaced.txt",
         b"second",
-        PutFileOptions {
+        &loonfs_test_support::test_actor(),
+        &PutFileOptions {
             behavior: DestinationBehavior::Replace,
-            ..PutFileOptions::new(loonfs_test_support::test_actor())
+            ..Default::default()
         },
     )
     .await
@@ -678,7 +639,7 @@ async fn resolve_current_files_answers_the_whole_matrix_in_input_order() {
         .move_path(
             "/m/moved.txt",
             "/m/moved-away.txt",
-            MoveOptions::new(loonfs_test_support::test_actor()),
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("move file");
@@ -686,32 +647,27 @@ async fn resolve_current_files_answers_the_whole_matrix_in_input_order() {
         .move_path(
             "/m/carried",
             "/m/carried-elsewhere",
-            MoveOptions::new(loonfs_test_support::test_actor()),
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("move directory");
     namespace_writer
-        .delete_path(
-            "/m/deleted.txt",
-            DeleteOptions::new(loonfs_test_support::test_actor()),
-        )
+        .delete_path("/m/deleted.txt", &loonfs_test_support::test_actor())
         .await
         .expect("delete file");
     namespace_writer
-        .delete_path(
+        .delete_path_with_options(
             "/m/subtree",
-            DeleteOptions {
+            &loonfs_test_support::test_actor(),
+            &DeleteOptions {
                 behavior: DeleteDirectoryBehavior::Recursive,
-                ..DeleteOptions::new(loonfs_test_support::test_actor())
+                ..Default::default()
             },
         )
         .await
         .expect("delete subtree");
     let recovered_deletion_seq = namespace_writer
-        .delete_path(
-            "/m/recovered.txt",
-            DeleteOptions::new(loonfs_test_support::test_actor()),
-        )
+        .delete_path("/m/recovered.txt", &loonfs_test_support::test_actor())
         .await
         .expect("delete file")
         .committed_seq;
@@ -720,7 +676,7 @@ async fn resolve_current_files_answers_the_whole_matrix_in_input_order() {
             recovered,
             recovered_deletion_seq,
             Some("/m/recovered-again.txt"),
-            UndeleteOptions::new(loonfs_test_support::test_actor()),
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("undelete file");
@@ -800,17 +756,14 @@ async fn resolve_current_files_refuses_a_batch_over_the_cap() {
     let fs = open_runtime_async(store(temp_dir.path()), "resolve-current-files-cap-test").await;
     let namespace_id = namespace_id("demo");
     let namespace = fs.reader.namespace(&namespace_id);
-    fs.create_namespace(
-        &namespace_id,
-        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-    )
-    .await
-    .expect("create namespace");
-    fs.put_file_bytes(
+    fs.create_namespace(&namespace_id, &loonfs_test_support::test_actor())
+        .await
+        .expect("create namespace");
+    fs.put_file(
         &namespace_id,
         "/docs/alpha.txt",
         b"alpha",
-        PutFileOptions::new(loonfs_test_support::test_actor()),
+        &loonfs_test_support::test_actor(),
     )
     .await
     .expect("put file");
@@ -860,17 +813,14 @@ async fn read_content_ref_answers_bytes_and_refuses_over_budget_before_fetching(
     .await;
     let namespace_id = namespace_id("demo");
     let namespace = fs.reader.namespace(&namespace_id);
-    fs.create_namespace(
-        &namespace_id,
-        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-    )
-    .await
-    .expect("create namespace");
-    fs.put_file_bytes(
+    fs.create_namespace(&namespace_id, &loonfs_test_support::test_actor())
+        .await
+        .expect("create namespace");
+    fs.put_file(
         &namespace_id,
         "/docs/alpha.txt",
         b"alpha bytes",
-        PutFileOptions::new(loonfs_test_support::test_actor()),
+        &loonfs_test_support::test_actor(),
     )
     .await
     .expect("put file");
@@ -920,17 +870,14 @@ async fn read_content_ref_refuses_bytes_that_do_not_match_the_reference() {
     .await;
     let namespace_id = namespace_id("demo");
     let namespace = fs.reader.namespace(&namespace_id);
-    fs.create_namespace(
-        &namespace_id,
-        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-    )
-    .await
-    .expect("create namespace");
-    fs.put_file_bytes(
+    fs.create_namespace(&namespace_id, &loonfs_test_support::test_actor())
+        .await
+        .expect("create namespace");
+    fs.put_file(
         &namespace_id,
         "/docs/alpha.txt",
         b"alpha bytes",
-        PutFileOptions::new(loonfs_test_support::test_actor()),
+        &loonfs_test_support::test_actor(),
     )
     .await
     .expect("put file");
@@ -982,7 +929,7 @@ async fn a_standalone_reader_serves_every_operation() {
         .move_path(
             "/docs/alpha.txt",
             "/docs/alpha-moved.txt",
-            MoveOptions::new(loonfs_test_support::test_actor()),
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("move a file after the checkpoint");

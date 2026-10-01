@@ -11,7 +11,7 @@
 //! Alone in its process, the read callsites are first hit with the capture
 //! subscriber installed, and the assertions are deterministic.
 
-use loonfs::{CreateNamespaceOptions, LoonFs, PutFileOptions, StoreConfig, Writable};
+use loonfs::{LoonFs, StoreConfig, Writable};
 use loonfs_test_support::block_on::block_on;
 use loonfs_test_support::ids::namespace_id;
 use std::path::Path;
@@ -67,20 +67,17 @@ fn reads_name_their_anchor_and_the_lookup_that_came_back_empty() {
     block_on(async {
         let writer = writer(temp_dir.path()).await;
         writer
-            .create_namespace(
-                &namespace_id,
-                CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-            )
+            .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
             .await
             .expect("create namespace");
         let namespace_writer = writer
             .open_namespace(&namespace_id)
             .expect("open namespace");
         namespace_writer
-            .put_file_bytes(
+            .put_file(
                 "/docs/report.txt",
                 b"body",
-                PutFileOptions::new(loonfs_test_support::test_actor()),
+                &loonfs_test_support::test_actor(),
             )
             .await
             .expect("put file");

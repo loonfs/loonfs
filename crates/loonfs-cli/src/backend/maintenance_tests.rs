@@ -3,7 +3,7 @@
 use super::*;
 use crate::config::StoreConfig;
 use crate::resolve::ResolvedTarget;
-use loonfs::{CreateNamespaceOptions, MaintenanceConclusion, MetadataMaintenanceOptions};
+use loonfs::{MaintenanceConclusion, MetadataMaintenanceOptions};
 use loonfs_api::NamespaceId;
 use loonfs_core::test_support::append_wal_objects;
 use loonfs_core::MutationContext;
@@ -31,11 +31,11 @@ async fn embedded_writes_drain_maintenance_before_the_wal_backpressure_cap() {
     for index in 0..140 {
         target
             .client
-            .put_file_bytes(
+            .put_file(
                 &loonfs_client::NamespacePath::parse("demo", &format!("/file-{index}"))
                     .expect("file path"),
                 b"payload",
-                &loonfs_client::PutFileOptions::new(actor.clone()),
+                &actor,
             )
             .await
             .expect("write past the unmaintained WAL limit");
@@ -71,10 +71,7 @@ async fn seed_wal_backlog(store: &SharedObjectStore, namespace_id: &NamespaceId)
         .await
         .expect("build backlog writer");
     writer
-        .create_namespace(
-            namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     append_wal_objects(

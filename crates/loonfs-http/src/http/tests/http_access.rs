@@ -19,10 +19,7 @@ async fn subject_headers_are_parsed_and_rejected_with_the_header_named() {
     .expect("build app");
     state
         .runtime
-        .create_namespace(
-            &namespace_id("demo"),
-            loonfs::CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace_id("demo"), &loonfs_test_support::test_actor())
         .await
         .expect("namespace");
     let too_many = (0..65)
@@ -337,10 +334,7 @@ async fn read_handlers_accept_the_subject_headers() {
     .expect("app");
     state
         .runtime
-        .create_namespace(
-            &namespace_id("demo"),
-            loonfs::CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace_id("demo"), &loonfs_test_support::test_actor())
         .await
         .expect("namespace");
     for (principals, status) in [

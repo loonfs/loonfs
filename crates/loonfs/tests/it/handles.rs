@@ -8,11 +8,10 @@
 
 use crate::common::collect_path_entries;
 use loonfs::{
-    maintenance_hint_relay, CommitId, CreateCheckpointOptions, CreateDirectoryOptions,
-    CreateNamespaceOptions, Error, ErrorCode, GarbageCollectionJob, LoonFs, Maintenance,
-    MaintenanceRegistry, MaintenanceRunner, ManifestNo, MetadataCache, MetadataCompactionJob,
-    MetadataMaintenanceJob, MetadataMaintenanceOptions, NamespaceId, PutFileOptions,
-    SharedObjectStore, StoreConfig, Writable,
+    maintenance_hint_relay, Commit, CommitId, CreateDirectoryOptions, Error, ErrorCode,
+    GarbageCollectionJob, LoonFs, Maintenance, MaintenanceRegistry, MaintenanceRunner, ManifestNo,
+    MetadataCache, MetadataCompactionJob, MetadataMaintenanceJob, MetadataMaintenanceOptions,
+    NamespaceId, PutFileOptions, SharedObjectStore, StoreConfig, Writable,
 };
 use loonfs_core::test_support::append_wal_objects;
 use loonfs_core::MutationContext;
@@ -123,20 +122,17 @@ fn writer_reader_and_maintenance_share_a_namespace_through_store_config() {
     block_on(async {
         let writer = writer(temp_dir.path()).await;
         writer
-            .create_namespace(
-                &namespace_id,
-                CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-            )
+            .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
             .await
             .expect("create namespace");
         let namespace = writer
             .open_namespace(&namespace_id)
             .expect("open namespace");
         namespace
-            .put_file_bytes(
+            .put_file(
                 "/docs/hello.txt",
                 b"hello",
-                PutFileOptions::new(loonfs_test_support::test_actor()),
+                &loonfs_test_support::test_actor(),
             )
             .await
             .expect("put file");
@@ -196,20 +192,17 @@ fn standalone_reader_builds_without_writer_identity() {
     block_on(async {
         let writer = writer(temp_dir.path()).await;
         writer
-            .create_namespace(
-                &namespace_id,
-                CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-            )
+            .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
             .await
             .expect("create namespace");
         let namespace_writer = writer
             .open_namespace(&namespace_id)
             .expect("open namespace");
         namespace_writer
-            .put_file_bytes(
+            .put_file(
                 "/docs/hello.txt",
                 b"hello",
-                PutFileOptions::new(loonfs_test_support::test_actor()),
+                &loonfs_test_support::test_actor(),
             )
             .await
             .expect("put file");
@@ -255,10 +248,7 @@ fn maintenance_invalidates_the_runtimes_shared_read_caches() {
         let (writer, maintenance, runner) =
             writer_with_runner(temp_dir.path(), MetadataCache::default()).await;
         writer
-            .create_namespace(
-                &namespace_id,
-                CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-            )
+            .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
             .await
             .expect("create namespace");
         let namespace_writer = writer
@@ -268,10 +258,10 @@ fn maintenance_invalidates_the_runtimes_shared_read_caches() {
         let namespace = reader.namespace(&namespace_id);
         for round in 0..writes_past_wal_tail_threshold() {
             namespace_writer
-                .put_file_bytes(
+                .put_file(
                     &format!("/docs/file-{round}.txt"),
                     b"body",
-                    PutFileOptions::new(loonfs_test_support::test_actor()),
+                    &loonfs_test_support::test_actor(),
                 )
                 .await
                 .expect("put file");
@@ -301,10 +291,10 @@ fn maintenance_invalidates_the_runtimes_shared_read_caches() {
             .await
             .expect("read after maintenance is served from revalidated caches");
         namespace_writer
-            .put_file_bytes(
+            .put_file(
                 "/docs/after-maintenance.txt",
                 b"body",
-                PutFileOptions::new(loonfs_test_support::test_actor()),
+                &loonfs_test_support::test_actor(),
             )
             .await
             .expect("writes continue against the post-maintenance head");
@@ -319,7 +309,47 @@ fn maintenance_invalidates_the_runtimes_shared_read_caches() {
 }
 
 #[test]
-fn put_file_bytes_and_prepare_then_put_commit_equivalent_state() {
+fn a_plain_mutation_commits_what_its_options_form_commits_with_default_options() {
+    let namespace_id = namespace_id("demo");
+    let actor = loonfs_test_support::test_actor();
+    let plain_dir = tempdir().expect("tempdir");
+    let options_dir = tempdir().expect("tempdir");
+    block_on(async {
+        let plain_writer = writer(plain_dir.path()).await;
+        let options_writer = writer(options_dir.path()).await;
+        for runtime in [&plain_writer, &options_writer] {
+            runtime
+                .create_namespace(&namespace_id, &actor)
+                .await
+                .expect("create namespace");
+        }
+        let plain = plain_writer
+            .open_namespace(&namespace_id)
+            .expect("open namespace")
+            .create_directory("/docs", &actor)
+            .await
+            .expect("plain create");
+        let with_options = options_writer
+            .open_namespace(&namespace_id)
+            .expect("open namespace")
+            .create_directory_with_options("/docs", &actor, &CreateDirectoryOptions::default())
+            .await
+            .expect("create with default options");
+        // Each call generates its own commit id, and each commit is stamped
+        // with its own wall-clock time.
+        assert_eq!(
+            Commit {
+                commit_id: with_options.commit_id.clone(),
+                committed_at_ms: with_options.committed_at_ms,
+                ..plain
+            },
+            with_options
+        );
+    });
+}
+
+#[test]
+fn put_file_and_prepare_then_put_commit_equivalent_state() {
     let temp_dir = tempdir().expect("tempdir");
     block_on(async {
         let writer = writer(temp_dir.path()).await;
@@ -328,10 +358,7 @@ fn put_file_bytes_and_prepare_then_put_commit_equivalent_state() {
             NamespaceId::parse("prepared-put").expect("valid prepared namespace id");
         for namespace_id in [&simple_namespace, &prepared_namespace] {
             writer
-                .create_namespace(
-                    namespace_id,
-                    CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-                )
+                .create_namespace(namespace_id, &loonfs_test_support::test_actor())
                 .await
                 .expect("create namespace");
         }
@@ -346,23 +373,32 @@ fn put_file_bytes_and_prepare_then_put_commit_equivalent_state() {
         let options = PutFileOptions {
             commit: loonfs_api::options::CommitOptions {
                 preconditions: Vec::new(),
-                actor_id: loonfs_test_support::test_actor(),
                 commit_id: Some(commit_id.clone()),
                 message: None,
             },
-            ..PutFileOptions::new(loonfs_test_support::test_actor())
+            ..Default::default()
         };
 
         let simple = simple_namespace_writer
-            .put_file_bytes("/file.txt", bytes, options.clone())
+            .put_file_with_options(
+                "/file.txt",
+                bytes,
+                &loonfs_test_support::test_actor(),
+                &options,
+            )
             .await
             .expect("put file bytes");
         let prepared = prepared_namespace_writer
-            .prepare_file_bytes(bytes)
+            .prepare_content(bytes)
             .await
             .expect("prepare file bytes");
         let composed = prepared_namespace_writer
-            .put_file_prepared("/file.txt", prepared, options)
+            .put_file_prepared_with_options(
+                "/file.txt",
+                prepared,
+                &loonfs_test_support::test_actor(),
+                &options,
+            )
             .await
             .expect("put prepared file");
 
@@ -413,10 +449,7 @@ fn manual_only_writer_folds_without_scheduling_maintenance() {
     block_on(async {
         let writer = writer(temp_dir.path()).await;
         writer
-            .create_namespace(
-                &namespace_id,
-                CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-            )
+            .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
             .await
             .expect("create namespace");
         let namespace = writer
@@ -424,10 +457,10 @@ fn manual_only_writer_folds_without_scheduling_maintenance() {
             .expect("open namespace");
         for round in 0..=(wal_tail_object_threshold() * 2) {
             namespace
-                .put_file_bytes(
+                .put_file(
                     &format!("/docs/file-{round}.txt"),
                     b"body",
-                    PutFileOptions::new(loonfs_test_support::test_actor()),
+                    &loonfs_test_support::test_actor(),
                 )
                 .await
                 .expect("put file");
@@ -476,10 +509,7 @@ fn a_writer_with_a_runner_maintains_what_it_touches() {
             let (writer, maintenance, runner) =
                 writer_with_runner(temp_dir.path(), metadata_cache).await;
             writer
-                .create_namespace(
-                    &namespace_id,
-                    CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-                )
+                .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
                 .await
                 .expect("create namespace");
             let namespace = writer
@@ -487,10 +517,10 @@ fn a_writer_with_a_runner_maintains_what_it_touches() {
                 .expect("open namespace");
 
             namespace
-                .put_file_bytes(
+                .put_file(
                     "/docs/under-threshold.txt",
                     b"body",
-                    PutFileOptions::new(loonfs_test_support::test_actor()),
+                    &loonfs_test_support::test_actor(),
                 )
                 .await
                 .expect("put file below the threshold");
@@ -508,10 +538,10 @@ fn a_writer_with_a_runner_maintains_what_it_touches() {
 
             for round in 0..writes_past_wal_tail_threshold() {
                 namespace
-                    .put_file_bytes(
+                    .put_file(
                         &format!("/docs/file-{round}.txt"),
                         b"body",
-                        PutFileOptions::new(loonfs_test_support::test_actor()),
+                        &loonfs_test_support::test_actor(),
                     )
                     .await
                     .expect("put file");
@@ -578,10 +608,7 @@ fn a_runner_retries_a_failed_writer_fold_without_another_write() {
         runner.attach_hints(receiver);
 
         writer
-            .create_namespace(
-                &namespace_id,
-                CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-            )
+            .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
             .await
             .expect("create namespace");
         let namespace = writer
@@ -601,10 +628,10 @@ fn a_runner_retries_a_failed_writer_fold_without_another_write() {
 
         failing.fail_next(1);
         namespace
-            .put_file_bytes(
+            .put_file(
                 "/docs/cross-threshold.txt",
                 b"body",
-                PutFileOptions::new(loonfs_test_support::test_actor()),
+                &loonfs_test_support::test_actor(),
             )
             .await
             .expect("publish across the fold threshold");
@@ -653,20 +680,21 @@ fn a_runtime_publish_folds_a_preexisting_write_stopped_tail_and_lands() {
             .await
             .expect("build the writer that leaves the debt");
         stalled
-            .create_namespace(
-                &namespace_id,
-                CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-            )
+            .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
             .await
             .expect("create namespace");
         let stalled_namespace_writer = stalled
             .open_namespace(&namespace_id)
             .expect("open namespace");
-        let mut replay_options = CreateDirectoryOptions::new(loonfs_test_support::test_actor());
+        let mut replay_options = CreateDirectoryOptions::default();
         replay_options.commit.commit_id =
             Some(CommitId::parse("before-write-stop").expect("commit id"));
         let original = stalled_namespace_writer
-            .create_directory("/before-write-stop", replay_options.clone())
+            .create_directory_with_options(
+                "/before-write-stop",
+                &loonfs_test_support::test_actor(),
+                &replay_options,
+            )
             .await
             .expect("land the commit before the ceiling");
         let tail_store = LocalFsStore::new(temp_dir.path()).expect("open tail store");
@@ -690,17 +718,21 @@ fn a_runtime_publish_folds_a_preexisting_write_stopped_tail_and_lands() {
             .expect("open namespace");
         blocking.block_next();
         let refused = namespace
-            .put_file_bytes(
+            .put_file(
                 "/write-stop/recovered.txt",
                 b"body",
-                PutFileOptions::new(loonfs_test_support::test_actor()),
+                &loonfs_test_support::test_actor(),
             )
             .await
             .expect_err("the write-stopped tail refuses the first publish");
         assert_eq!(refused.code(), ErrorCode::MaintenanceRequired);
         blocking.wait_until_blocked().await;
         let replay = namespace
-            .create_directory("/before-write-stop", replay_options)
+            .create_directory_with_options(
+                "/before-write-stop",
+                &loonfs_test_support::test_actor(),
+                &replay_options,
+            )
             .await
             .expect("replay succeeds while the tail remains at the bound");
         assert_eq!(replay, original);
@@ -710,10 +742,10 @@ fn a_runtime_publish_folds_a_preexisting_write_stopped_tail_and_lands() {
             .await
             .expect("settle the fold started by the refusal");
         namespace
-            .put_file_bytes(
+            .put_file(
                 "/write-stop/recovered.txt",
                 b"body",
-                PutFileOptions::new(loonfs_test_support::test_actor()),
+                &loonfs_test_support::test_actor(),
             )
             .await
             .expect("the retry lands after the fold");
@@ -759,10 +791,7 @@ fn a_failed_fold_preserves_the_write_stop_until_the_store_recovers() {
             .await
             .expect("build writer");
         writer
-            .create_namespace(
-                &namespace_id,
-                CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-            )
+            .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
             .await
             .expect("create namespace");
         let namespace = writer
@@ -784,19 +813,19 @@ fn a_failed_fold_preserves_the_write_stop_until_the_store_recovers() {
         failing.fail_all();
         for round in 0..(loonfs_core::limits::MAX_UNFOLDED_WAL_OBJECTS - seed_wal_objects - 2) {
             namespace
-                .put_file_bytes(
+                .put_file(
                     &format!("/failed-fold/file-{round}.txt"),
                     b"body",
-                    PutFileOptions::new(loonfs_test_support::test_actor()),
+                    &loonfs_test_support::test_actor(),
                 )
                 .await
                 .expect("publishes below the write-stop bound continue after a failed fold");
         }
         let error = namespace
-            .put_file_bytes(
+            .put_file(
                 "/failed-fold/refused.txt",
                 b"body",
-                PutFileOptions::new(loonfs_test_support::test_actor()),
+                &loonfs_test_support::test_actor(),
             )
             .await
             .expect_err("the write-stop invariant still refuses the full tail");
@@ -808,10 +837,10 @@ fn a_failed_fold_preserves_the_write_stop_until_the_store_recovers() {
             .await
             .expect("settle the fold after the manifest store recovers");
         namespace
-            .put_file_bytes(
+            .put_file(
                 "/failed-fold/recovered.txt",
                 b"body",
-                PutFileOptions::new(loonfs_test_support::test_actor()),
+                &loonfs_test_support::test_actor(),
             )
             .await
             .expect("the recovered manifest store lets the retry land");
@@ -849,10 +878,7 @@ fn a_threshold_crossing_publish_returns_before_its_fold_completes() {
             .await
             .expect("build writer");
         writer
-            .create_namespace(
-                &namespace_id,
-                CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-            )
+            .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
             .await
             .expect("create namespace");
         let namespace = writer
@@ -875,11 +901,7 @@ fn a_threshold_crossing_publish_returns_before_its_fold_completes() {
             let namespace = namespace.clone();
             async move {
                 namespace
-                    .put_file_bytes(
-                        "/crossing.txt",
-                        b"body",
-                        PutFileOptions::new(loonfs_test_support::test_actor()),
-                    )
+                    .put_file("/crossing.txt", b"body", &loonfs_test_support::test_actor())
                     .await
             }
         });
@@ -924,20 +946,17 @@ fn a_shut_down_writer_refuses_mutations_and_keeps_reading() {
         let writer = writer(temp_dir.path()).await;
         let namespace = writer.namespace(&namespace_id);
         writer
-            .create_namespace(
-                &namespace_id,
-                CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-            )
+            .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
             .await
             .expect("create namespace");
         let namespace_writer = writer
             .open_namespace(&namespace_id)
             .expect("open namespace");
         namespace_writer
-            .put_file_bytes(
+            .put_file(
                 "/docs/hello.txt",
                 b"hello",
-                PutFileOptions::new(loonfs_test_support::test_actor()),
+                &loonfs_test_support::test_actor(),
             )
             .await
             .expect("put file before the shutdown");
@@ -959,10 +978,10 @@ fn a_shut_down_writer_refuses_mutations_and_keeps_reading() {
         assert!(writer.is_shutting_down());
 
         let refused = namespace_writer
-            .put_file_bytes(
+            .put_file(
                 "/docs/after.txt",
                 b"body",
-                PutFileOptions::new(loonfs_test_support::test_actor()),
+                &loonfs_test_support::test_actor(),
             )
             .await
             .expect_err("a mutation after shutdown must be refused");
@@ -1038,20 +1057,17 @@ fn maintenance_checkpoint_and_retention_are_explicit_one_shot_calls() {
     block_on(async {
         let writer = writer(temp_dir.path()).await;
         writer
-            .create_namespace(
-                &namespace_id,
-                CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-            )
+            .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
             .await
             .expect("create namespace");
         let namespace = writer
             .open_namespace(&namespace_id)
             .expect("open namespace");
         namespace
-            .put_file_bytes(
+            .put_file(
                 "/docs/hello.txt",
                 b"hello",
-                PutFileOptions::new(loonfs_test_support::test_actor()),
+                &loonfs_test_support::test_actor(),
             )
             .await
             .expect("put file");
@@ -1065,13 +1081,7 @@ fn maintenance_checkpoint_and_retention_are_explicit_one_shot_calls() {
                 "handle-test-maintenance",
             ));
         let checkpoint = maintenance
-            .create_checkpoint(
-                &namespace_id,
-                CreateCheckpointOptions {
-                    name: "handle-pin".to_owned(),
-                    ttl_ms: None,
-                },
-            )
+            .create_checkpoint(&namespace_id, "handle-pin")
             .await
             .expect("create checkpoint");
         assert!(checkpoint.manifest_no > ManifestNo(0));
@@ -1111,21 +1121,14 @@ async fn namespace_deletion_drops_cached_reads_and_schedules_gc_even_when_its_an
             .await
             .expect("writer");
         writer
-            .create_namespace(
-                &namespace_id,
-                CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-            )
+            .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
             .await
             .expect("namespace");
         let namespace_writer = writer
             .open_namespace(&namespace_id)
             .expect("open namespace");
         namespace_writer
-            .put_file_bytes(
-                "/file",
-                b"data",
-                PutFileOptions::new(loonfs_test_support::test_actor()),
-            )
+            .put_file("/file", b"data", &loonfs_test_support::test_actor())
             .await
             .expect("put");
         writer
@@ -1140,7 +1143,7 @@ async fn namespace_deletion_drops_cached_reads_and_schedules_gc_even_when_its_an
         if lost_answer {
             store.fail_next(1);
         }
-        let deleted = namespace_writer.delete(Default::default()).await;
+        let deleted = namespace_writer.delete().await;
         assert_eq!(store.remaining(), 0);
         if let Err(error) = &deleted {
             assert!(lost_answer, "unexpected error: {error:?}");

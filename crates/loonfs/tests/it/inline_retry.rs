@@ -105,14 +105,15 @@ async fn open(store: SharedObjectStore, wal_object_budget: usize) -> LoonFs<Writ
 
 async fn seed(writer: &LoonFs<Writable>) -> Namespace<Writable> {
     writer
-        .create_namespace(
+        .create_namespace_with_options(
             &namespace(),
-            CreateNamespaceOptions {
+            &loonfs_test_support::test_actor(),
+            &CreateNamespaceOptions {
                 access: NamespaceAccess::Acl {
                     principal_scope: PrincipalScope::parse("scope").expect("scope"),
                     root_grants: grants("root", &[AccessRight::Admin]),
                 },
-                ..CreateNamespaceOptions::new(loonfs_test_support::test_actor())
+                ..Default::default()
             },
         )
         .await
@@ -130,7 +131,7 @@ async fn seed(writer: &LoonFs<Writable>) -> Namespace<Writable> {
         "alice",
         &[AccessRight::Read, AccessRight::Write, AccessRight::Create],
     )));
-    namespace_writer.create_commit(seed).await.expect("seed");
+    namespace_writer.commit(seed).await.expect("seed");
     namespace_writer
 }
 
@@ -157,7 +158,7 @@ async fn retained_receipt_skips_fallback(state: ReceiptState) {
         .await
         .expect("original commit");
     namespace_writer
-        .create_commit(request("revoke", "root", access(AccessGrants::default())))
+        .commit(request("revoke", "root", access(AccessGrants::default())))
         .await
         .expect("revoke access");
     if matches!(state, ReceiptState::Folded | ReceiptState::ManifestOnly) {
@@ -174,7 +175,7 @@ async fn retained_receipt_skips_fallback(state: ReceiptState) {
     }
     if matches!(state, ReceiptState::ManifestOnly) {
         namespace_writer
-            .create_commit(request(
+            .commit(request(
                 "warm-after-fold",
                 "root",
                 FilesystemOperation::CreateDirectory {
@@ -284,7 +285,7 @@ async fn cold_receipt_lookup_does_not_acquire_authority_or_block_other_submissio
         blocking.wait_until_blocked().await;
         assert_eq!(recording.count(OperationClass::Put), 0);
         original_namespace_writer
-            .create_commit(request(
+            .commit(request(
                 "old-writer",
                 "root",
                 access(AccessGrants::default()),
@@ -292,7 +293,7 @@ async fn cold_receipt_lookup_does_not_acquire_authority_or_block_other_submissio
             .await
             .expect("lookup has not fenced the original writer");
         cold_namespace_writer
-            .create_commit(request(
+            .commit(request(
                 "new-writer",
                 "root",
                 access(AccessGrants::default()),

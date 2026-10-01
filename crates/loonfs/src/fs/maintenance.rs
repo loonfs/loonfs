@@ -111,11 +111,11 @@ impl Maintenance {
     /// Returns namespace state and storage details used by maintenance.
     #[tracing::instrument(
         level = "debug",
-        name = "loonfs.get_namespace_diagnostics",
+        name = "loonfs.maintenance.diagnostics",
         err(level = "debug"),
         skip_all,
         fields(
-            operation = "get_namespace_diagnostics",
+            operation = "maintenance.diagnostics",
             namespace_id = %namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
@@ -190,14 +190,24 @@ impl Maintenance {
         Ok(loonfs_core::cache::load_namespace_diagnostics(self.core.store(), namespace_id).await?)
     }
 
+    /// Runs [`Self::maintain_metadata_with_options`] with the default
+    /// thresholds.
+    pub async fn maintain_metadata(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> Result<MetadataMaintenanceResponse> {
+        self.maintain_metadata_with_options(namespace_id, &MetadataMaintenanceOptions::default())
+            .await
+    }
+
     /// Folds the WAL tail at the WAL object threshold, at the inline byte
     /// threshold when the writer knows the count, or once the tail's newest
     /// commit is `idle_fold_after_ms` old on this handle's wall clock. Then
     /// runs one bounded compaction step.
-    pub async fn maintain_metadata(
+    pub async fn maintain_metadata_with_options(
         &self,
         namespace_id: &NamespaceId,
-        options: MetadataMaintenanceOptions,
+        options: &MetadataMaintenanceOptions,
     ) -> Result<MetadataMaintenanceResponse> {
         self.maintain_metadata_step(namespace_id, options)
             .await
@@ -211,7 +221,7 @@ impl Maintenance {
     pub(crate) async fn maintain_metadata_step(
         &self,
         namespace_id: &NamespaceId,
-        options: MetadataMaintenanceOptions,
+        options: &MetadataMaintenanceOptions,
     ) -> Result<(MetadataMaintenanceResponse, Option<u64>)> {
         let status = self.load_maintenance_status(namespace_id).await?;
         let inline_bytes = if status.wal_tail_objects > 0 {
@@ -247,13 +257,20 @@ impl Maintenance {
         Ok((response, idle_fold_at_ms))
     }
 
+    /// Runs [`Self::probe_metadata_with_options`] with the default
+    /// thresholds.
+    pub async fn probe_metadata(&self, namespace_id: &NamespaceId) -> Result<MaintenanceProbe> {
+        self.probe_metadata_with_options(namespace_id, &MetadataMaintenanceOptions::default())
+            .await
+    }
+
     /// Checks the WAL object threshold, the age of the tail's newest commit,
     /// and manifest descriptors without replaying the tail.
     ///
     /// The age is measured on this handle's wall clock. Inline byte thresholds
     /// use publication hints instead. Active leases may prevent an eligible
     /// merge from running until their expiry.
-    pub async fn probe_metadata(
+    pub async fn probe_metadata_with_options(
         &self,
         namespace_id: &NamespaceId,
         options: &MetadataMaintenanceOptions,
@@ -552,6 +569,12 @@ impl Maintenance {
         outcome
     }
 
+    /// Runs [`Self::gc_with_options`] with the default grace window.
+    pub async fn gc(&self, namespace_id: &NamespaceId) -> Result<crate::GcResponse> {
+        self.gc_with_options(namespace_id, &crate::GcOptions::default())
+            .await
+    }
+
     /// Runs one complete garbage-collection pass for one namespace.
     ///
     /// Every call rebuilds the current live roots and keeps no cursor. A pass
@@ -561,17 +584,17 @@ impl Maintenance {
     /// does not exist returns `namespace_not_found`.
     #[tracing::instrument(
         level = "debug",
-        name = "loonfs.maintenance.gc_namespace",
+        name = "loonfs.maintenance.gc",
         err(level = "debug"),
         skip_all,
         fields(
-            operation = "maintenance.gc_namespace",
+            operation = "maintenance.gc",
             namespace_id = %namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn gc(
+    pub async fn gc_with_options(
         &self,
         namespace_id: &NamespaceId,
         options: &crate::GcOptions,
@@ -598,6 +621,17 @@ impl Maintenance {
         Ok(report)
     }
 
+    /// Creates a new user checkpoint for the current namespace head that
+    /// lasts until it is deleted.
+    pub async fn create_checkpoint(
+        &self,
+        namespace_id: &NamespaceId,
+        name: &str,
+    ) -> Result<Checkpoint> {
+        self.create_checkpoint_with_options(namespace_id, name, &CreateCheckpointOptions::default())
+            .await
+    }
+
     /// Creates a new user checkpoint for the current namespace head.
     ///
     /// A checkpoint pins a manifest for retention and provenance. Every call
@@ -609,26 +643,27 @@ impl Maintenance {
     /// ([format section 8](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#8-pins)).
     #[tracing::instrument(
         level = "debug",
-        name = "loonfs.maintenance.checkpoint_create",
+        name = "loonfs.maintenance.create_checkpoint",
         err(level = "debug"),
         skip_all,
         fields(
-            operation = "maintenance.checkpoint_create",
+            operation = "maintenance.create_checkpoint",
             namespace_id = %namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn create_checkpoint(
+    pub async fn create_checkpoint_with_options(
         &self,
         namespace_id: &NamespaceId,
-        options: CreateCheckpointOptions,
+        name: &str,
+        options: &CreateCheckpointOptions,
     ) -> Result<Checkpoint> {
         let span = tracing::Span::current();
         self.core.record_trace_context(&span);
         let result = self
             .engine(namespace_id)
-            .create_checkpoint(options.name, options.ttl_ms)
+            .create_checkpoint(name.to_owned(), options.ttl_ms)
             .await
             .map_err(Error::from);
         self.finish_namespace_mutation(namespace_id, result)
@@ -658,7 +693,7 @@ impl Maintenance {
         skip_all,
         fields(
             operation = "maintenance.list_checkpoints",
-            method = "list_checkpoints_page",
+            method = "list_checkpoints",
             namespace_id = %namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
@@ -717,11 +752,11 @@ impl Maintenance {
     /// compaction step.
     #[tracing::instrument(
         level = "debug",
-        name = "loonfs.maintenance.wal_fold",
+        name = "loonfs.maintenance.fold_wal",
         err(level = "debug"),
         skip_all,
         fields(
-            operation = "maintenance.wal_fold",
+            operation = "maintenance.fold_wal",
             namespace_id = %namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
@@ -788,7 +823,7 @@ impl crate::Namespace<crate::Writable> {
     pub async fn recover_administrator(
         &self,
         principal_id: &loonfs_api::PrincipalId,
-        actor_id: loonfs_api::ActorId,
+        actor: &loonfs_api::ActorId,
     ) -> Result<loonfs_api::RecoverAdministratorResponse> {
         use loonfs_api::v0::FilesystemChange;
         use loonfs_api::{AccessGrants, AccessRight, AccessRights};
@@ -812,7 +847,7 @@ impl crate::Namespace<crate::Writable> {
         })?;
         let request = crate::publish::CommitRequest::single(
             loonfs_api::CommitId::generate(),
-            actor_id,
+            actor.clone(),
             Some("administrator recovery".to_owned()),
             crate::publish::FilesystemOperation::UpdateAccess {
                 path: loonfs_api::AbsolutePath::root(),

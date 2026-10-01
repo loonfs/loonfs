@@ -142,7 +142,7 @@ async fn batch_delete_then_recreate_of_a_durable_file_layers_over_cached_state()
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    put_file_bytes(
+    put_file(
         &store,
         &namespace_id,
         "/docs/cycled.txt",
@@ -1550,7 +1550,7 @@ async fn file_revision_preconditions_ignore_unrelated_commits_and_reject_rewrite
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    put_file_bytes(
+    put_file(
         &store,
         &namespace_id,
         "/input",
@@ -1640,7 +1640,7 @@ async fn binding_preconditions_track_identity_absence_and_moves() {
         .await
         .expect("bootstrap");
     for (path, commit_id) in [("/input", "seed"), ("/other", "other")] {
-        put_file_bytes(
+        put_file(
             &store,
             &namespace_id,
             path,
@@ -1750,7 +1750,7 @@ async fn attributes_preconditions_ignore_content_rewrites_and_reject_attribute_u
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    put_file_bytes(
+    put_file(
         &store,
         &namespace_id,
         "/input",

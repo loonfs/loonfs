@@ -517,11 +517,11 @@ impl<M> Namespace<M> {
     /// An id that names no user checkpoint returns `checkpoint_not_found`.
     #[tracing::instrument(
         level = "debug",
-        name = "loonfs.read_view",
+        name = "loonfs.read_view_at_checkpoint",
         err(level = "debug"),
         skip_all,
         fields(
-            operation = "read_view",
+            operation = "read_view_at_checkpoint",
             method = "read_view_at_checkpoint",
             namespace_id = %self.namespace_id,
             checkpoint_id = %checkpoint_id,
@@ -545,11 +545,11 @@ impl<M> Namespace<M> {
     /// Captures the namespace state a live snapshot preserves.
     #[tracing::instrument(
         level = "debug",
-        name = "loonfs.read_view",
+        name = "loonfs.read_view_at_snapshot",
         err(level = "debug"),
         skip_all,
         fields(
-            operation = "read_view",
+            operation = "read_view_at_snapshot",
             method = "read_view_at_snapshot",
             namespace_id = %self.namespace_id,
             snapshot_id = %snapshot_id,
@@ -571,11 +571,11 @@ impl<M> Namespace<M> {
     /// basis, current head, and retention floor.
     #[tracing::instrument(
         level = "debug",
-        name = "loonfs.get_namespace",
+        name = "loonfs.metadata",
         err(level = "debug"),
         skip_all,
         fields(
-            operation = "get_namespace",
+            operation = "metadata",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
@@ -644,11 +644,11 @@ impl<M> Namespace<M> {
     /// `options` asks for.
     #[tracing::instrument(
         level = "debug",
-        name = "loonfs.stat_inode",
+        name = "loonfs.stat_by_inode",
         err(level = "debug"),
         skip_all,
         fields(
-            operation = "stat_inode",
+            operation = "stat_by_inode",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
@@ -712,12 +712,12 @@ impl<M> Namespace<M> {
 
     #[tracing::instrument(
         level = "debug",
-        name = "loonfs.list_path_entries",
+        name = "loonfs.list",
         err(level = "debug"),
         skip_all,
         fields(
-            operation = "list_path_entries",
-            method = "list_path_entries_page",
+            operation = "list",
+            method = "list",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
@@ -796,12 +796,12 @@ impl<M> Namespace<M> {
 
     #[tracing::instrument(
         level = "debug",
-        name = "loonfs.list_inode_children",
+        name = "loonfs.list_by_inode",
         err(level = "debug"),
         skip_all,
         fields(
-            operation = "list_inode_children",
-            method = "list_inode_children_page",
+            operation = "list_by_inode",
+            method = "list_by_inode",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
@@ -850,12 +850,12 @@ impl<M> Namespace<M> {
     /// Reads a file's current content plus the metadata entry it came from.
     #[tracing::instrument(
         level = "debug",
-        name = "loonfs.get_file_bytes",
+        name = "loonfs.read_file",
         err(level = "debug"),
         skip_all,
         fields(
-            operation = "get_file_bytes",
-            method = "get_file_bytes",
+            operation = "read_file",
+            method = "read_file",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
@@ -890,11 +890,11 @@ impl<M> Namespace<M> {
     /// [`FileContentStream::fold_resumed_prefix`].
     #[tracing::instrument(
         level = "debug",
-        name = "loonfs.get_file_bytes",
+        name = "loonfs.read_file_stream",
         err(level = "debug"),
         skip_all,
         fields(
-            operation = "get_file_bytes",
+            operation = "read_file_stream",
             method = "read_file_stream",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
@@ -930,11 +930,11 @@ impl<M> Namespace<M> {
     /// `max_read_content_bytes` does not apply to direct downloads.
     #[tracing::instrument(
         level = "debug",
-        name = "loonfs.begin_download",
+        name = "loonfs.create_download",
         err(level = "debug"),
         skip_all,
         fields(
-            operation = "begin_download",
+            operation = "create_download",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
@@ -960,11 +960,11 @@ impl<M> Namespace<M> {
     /// requiring a current path.
     #[tracing::instrument(
         level = "debug",
-        name = "loonfs.begin_download_by_inode",
+        name = "loonfs.create_download_by_inode",
         err(level = "debug"),
         skip_all,
         fields(
-            operation = "begin_download_by_inode",
+            operation = "create_download_by_inode",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
@@ -1022,11 +1022,11 @@ impl<M> Namespace<M> {
 
     #[tracing::instrument(
         level = "debug",
-        name = "loonfs.list_checkpoint_files_page",
+        name = "loonfs.list_checkpoint_files",
         err(level = "debug"),
         skip_all,
         fields(
-            operation = "list_checkpoint_files_page",
+            operation = "list_checkpoint_files",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
@@ -1093,11 +1093,11 @@ impl<M> Namespace<M> {
     /// does not match the reference.
     #[tracing::instrument(
         level = "debug",
-        name = "loonfs.read_content_ref",
+        name = "loonfs.read_content",
         err(level = "debug"),
         skip_all,
         fields(
-            operation = "read_content_ref",
+            operation = "read_content",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
@@ -1266,12 +1266,12 @@ impl<M> Namespace<M> {
     /// Reads the content of one historical file revision by path.
     #[tracing::instrument(
         level = "debug",
-        name = "loonfs.get_file_bytes",
+        name = "loonfs.read_file_revision",
         err(level = "debug"),
         skip_all,
         fields(
-            operation = "get_file_bytes",
-            method = "get_file_revision_bytes",
+            operation = "read_file_revision",
+            method = "read_file_revision",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
@@ -1302,11 +1302,11 @@ impl<M> Namespace<M> {
     /// Complete verification requires consuming the stream to its end.
     #[tracing::instrument(
         level = "debug",
-        name = "loonfs.get_file_revision_bytes_by_inode",
+        name = "loonfs.read_file_revision_stream_by_inode",
         err(level = "debug"),
         skip_all,
         fields(
-            operation = "get_file_revision_bytes_by_inode",
+            operation = "read_file_revision_stream_by_inode",
             method = "read_file_revision_stream_by_inode",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
@@ -1332,11 +1332,11 @@ impl<M> Namespace<M> {
     /// Current visibility and path are not required.
     #[tracing::instrument(
         level = "debug",
-        name = "loonfs.get_file_revision_bytes_by_inode",
+        name = "loonfs.read_file_revision_by_inode",
         err(level = "debug"),
         skip_all,
         fields(
-            operation = "get_file_revision_bytes_by_inode",
+            operation = "read_file_revision_by_inode",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
@@ -1383,7 +1383,7 @@ impl<M> Namespace<M> {
         skip_all,
         fields(
             operation = "list_changes",
-            method = "list_changes_page",
+            method = "list_changes",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,

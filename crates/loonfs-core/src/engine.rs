@@ -446,13 +446,14 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// the namespace's status after manifest 1 is installed.
     pub async fn bootstrap_namespace(
         &self,
-        options: CreateNamespaceOptions,
+        actor_id: &loonfs_api::ActorId,
+        options: &CreateNamespaceOptions,
     ) -> Result<NamespaceMetadata> {
         bootstrap::bootstrap_namespace(
             &self.store,
             &self.namespace_id,
             &self.mutation_context()?,
-            &options.actor_id,
+            actor_id,
             &options.access,
             options.allow_existing,
         )

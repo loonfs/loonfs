@@ -1,10 +1,7 @@
 //! Downloads and imports of committed inline content.
 
 use bytes::Bytes;
-use loonfs::{
-    CreateNamespaceOptions, DeleteNamespaceOptions, ForkNamespaceOptions, LoonFs, PutFileOptions,
-    SharedObjectStore,
-};
+use loonfs::{CreateNamespaceOptions, LoonFs, PutFileOptions, SharedObjectStore};
 use loonfs_api::{
     AbsolutePath, AccessGrants, AccessRight, AccessRights, CommitId, ContentId, ContentRef,
     DestinationBehavior, NamespaceAccess, NamespaceId, PrincipalId, PrincipalScope, PrincipalSet,
@@ -99,10 +96,7 @@ async fn reader_downloads_materialize_tail_content_by_path_and_inode() {
             NamespaceId::parse(if by_inode { "inode" } else { "path" }).expect("namespace");
         let namespace = reader.namespace(&namespace_id);
         writer
-            .create_namespace(
-                &namespace_id,
-                CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-            )
+            .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
             .await
             .expect("namespace");
         let content_ref = publish_inline(&store, &namespace_id, None).await;
@@ -167,9 +161,10 @@ async fn imports_read_the_owners_tail_before_folding_and_object_after_folding() 
         principals: PrincipalSet::new(BTreeSet::from([principal.clone()])).expect("principals"),
     };
     writer
-        .create_namespace(
+        .create_namespace_with_options(
             &source,
-            CreateNamespaceOptions {
+            &loonfs_test_support::test_actor(),
+            &CreateNamespaceOptions {
                 access: NamespaceAccess::Acl {
                     principal_scope: PrincipalScope::parse("scope").expect("scope"),
                     root_grants: AccessGrants::new(BTreeMap::from([(
@@ -178,16 +173,13 @@ async fn imports_read_the_owners_tail_before_folding_and_object_after_folding() 
                     )]))
                     .expect("grants"),
                 },
-                ..CreateNamespaceOptions::new(loonfs_test_support::test_actor())
+                ..Default::default()
             },
         )
         .await
         .expect("source namespace");
     writer
-        .create_namespace(
-            &destination,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&destination, &loonfs_test_support::test_actor())
         .await
         .expect("destination namespace");
     let namespace_writer = writer.open_namespace(&destination).expect("open namespace");
@@ -212,7 +204,7 @@ async fn imports_read_the_owners_tail_before_folding_and_object_after_folding() 
             .put_file_content_ref(
                 path,
                 content_ref.clone(),
-                PutFileOptions::new(loonfs_test_support::test_actor()),
+                &loonfs_test_support::test_actor(),
             )
             .await
             .expect("import without source administrator rights");
@@ -270,10 +262,7 @@ async fn same_namespace_imports_read_inline_bytes_without_a_content_request() {
     let namespace_id = NamespaceId::parse("same-namespace").expect("namespace");
     let namespace = writer.namespace(&namespace_id);
     writer
-        .create_namespace(
-            &namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("namespace");
     let namespace_writer = writer
@@ -282,12 +271,13 @@ async fn same_namespace_imports_read_inline_bytes_without_a_content_request() {
     let content_ref = publish_inline(&store, &namespace_id, None).await;
     recording.reset();
     namespace_writer
-        .put_file_content_ref(
+        .put_file_content_ref_with_options(
             "/file",
             content_ref.clone(),
-            PutFileOptions {
+            &loonfs_test_support::test_actor(),
+            &PutFileOptions {
                 behavior: DestinationBehavior::Replace,
-                ..PutFileOptions::new(loonfs_test_support::test_actor())
+                ..Default::default()
             },
         )
         .await
@@ -324,10 +314,7 @@ async fn imports_of_fork_content_read_the_deleted_owners_key() {
         let destination_namespace = writer.namespace(&destination);
         for namespace_id in [&source, &destination] {
             writer
-                .create_namespace(
-                    namespace_id,
-                    CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-                )
+                .create_namespace(namespace_id, &loonfs_test_support::test_actor())
                 .await
                 .expect("namespace");
         }
@@ -335,27 +322,20 @@ async fn imports_of_fork_content_read_the_deleted_owners_key() {
             publish_inline(&store, &source, None).await;
         } else {
             source_writer
-                .put_file_bytes(
+                .put_file(
                     "/file",
                     b"inline content",
-                    PutFileOptions::new(loonfs_test_support::test_actor()),
+                    &loonfs_test_support::test_actor(),
                 )
                 .await
                 .expect("publish object");
         }
         writer
-            .fork_namespace(
-                &source,
-                &fork,
-                ForkNamespaceOptions::new(loonfs_test_support::test_actor()),
-            )
+            .fork_namespace(&source, &fork, &loonfs_test_support::test_actor())
             .await
             .expect("fork");
         let destination_writer = writer.open_namespace(&destination).expect("open namespace");
-        source_writer
-            .delete(DeleteNamespaceOptions::default())
-            .await
-            .expect("delete source");
+        source_writer.delete().await.expect("delete source");
         let entry = fork_namespace.stat("/file").await.expect("fork entry");
         let content_ref = entry.content_ref().expect("fork reference");
         assert_eq!(content_ref.owner_namespace_id, source);
@@ -366,7 +346,7 @@ async fn imports_of_fork_content_read_the_deleted_owners_key() {
             .put_file_content_ref(
                 "/imported",
                 content_ref.clone(),
-                PutFileOptions::new(loonfs_test_support::test_actor()),
+                &loonfs_test_support::test_actor(),
             )
             .await
             .expect("import after owner deletion");

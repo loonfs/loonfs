@@ -1,12 +1,13 @@
 //! Retained namespace views across metadata maintenance and collection.
 
 use crate::common::*;
+use loonfs::AccessState;
+use loonfs::AttributeChanges;
 use loonfs::{
     current_time_ms, CompactionStepOutcome, CreateDirectoryOptions, CreateNamespaceOptions,
-    DeleteOptions, DestinationBehavior, ForkNamespaceOptions, GcOptions, InlineContentPolicy,
-    LoonFs, MetadataCompactionPolicy, MetadataMaintenanceOptions, MoveOptions, PutFileOptions,
-    UndeleteOptions, UpdateAccessOptions, UpdateAttributesOptions, WalFoldStepOutcome,
-    GC_DEFAULT_GRACE_WINDOW_MS, UNREFERENCED_SEGMENT_MIN_AGE_MS,
+    DestinationBehavior, GcOptions, InlineContentPolicy, LoonFs, MetadataCompactionPolicy,
+    MetadataMaintenanceOptions, PutFileOptions, WalFoldStepOutcome, GC_DEFAULT_GRACE_WINDOW_MS,
+    UNREFERENCED_SEGMENT_MIN_AGE_MS,
 };
 use loonfs_api::wire::manifest::{MetadataRow, MetadataRowFamily, RunTier};
 use loonfs_api::wire::sst_blocks::{decode_data_block, decode_index_block};
@@ -50,9 +51,10 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
     let writer = runtime.writer.with_subject(subject.clone());
     let source_namespace = writer.namespace(&source);
     writer
-        .create_namespace(
+        .create_namespace_with_options(
             &source,
-            CreateNamespaceOptions {
+            &test_actor(),
+            &CreateNamespaceOptions {
                 access: NamespaceAccess::Acl {
                     principal_scope: subject.principal_scope.clone(),
                     root_grants: AccessGrants::new(BTreeMap::from([(
@@ -61,18 +63,19 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
                     )]))
                     .expect("root grants"),
                 },
-                ..CreateNamespaceOptions::new(test_actor())
+                ..Default::default()
             },
         )
         .await
         .expect("create ACL namespace");
     let namespace_writer = writer.open_namespace(&source).expect("open namespace");
     namespace_writer
-        .create_directory(
+        .create_directory_with_options(
             "/docs/nested",
-            CreateDirectoryOptions {
+            &test_actor(),
+            &CreateDirectoryOptions {
                 parents: true,
-                ..directory_options()
+                ..Default::default()
             },
         )
         .await
@@ -83,46 +86,39 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
         ("/docs/recover.txt", b"recovered".as_slice()),
     ] {
         let prepared = namespace_writer
-            .prepare_file_bytes(bytes)
+            .prepare_content(bytes)
             .await
             .expect("prepare inline content");
         assert!(prepared.upload_id().is_none());
         namespace_writer
-            .put_file_prepared(path, prepared, PutFileOptions::new(test_actor()))
+            .put_file_prepared(path, prepared, &test_actor())
             .await
             .expect("commit inline content");
     }
     let uploaded_bytes = vec![b'u'; 128 * 1024];
     let prepared = namespace_writer
-        .prepare_file_bytes(&uploaded_bytes)
+        .prepare_content(&uploaded_bytes)
         .await
         .expect("stage upload");
     assert!(prepared.upload_id().is_some());
     namespace_writer
-        .put_file_prepared(
-            "/docs/nested/uploaded.txt",
-            prepared,
-            PutFileOptions::new(test_actor()),
-        )
+        .put_file_prepared("/docs/nested/uploaded.txt", prepared, &test_actor())
         .await
         .expect("commit uploaded content");
     namespace_writer
-        .put_file_bytes(
+        .put_file_with_options(
             "/docs/inline.txt",
             b"second revision",
-            PutFileOptions {
+            &test_actor(),
+            &PutFileOptions {
                 behavior: DestinationBehavior::Replace,
-                ..PutFileOptions::new(test_actor())
+                ..Default::default()
             },
         )
         .await
         .expect("replace inline file");
     namespace_writer
-        .move_path(
-            "/docs/inline.txt",
-            "/docs/renamed.txt",
-            MoveOptions::new(test_actor()),
-        )
+        .move_path("/docs/inline.txt", "/docs/renamed.txt", &test_actor())
         .await
         .expect("rename inline file");
     for (set, remove) in [
@@ -135,11 +131,8 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
         namespace_writer
             .update_attributes(
                 "/docs/renamed.txt",
-                UpdateAttributesOptions {
-                    set,
-                    remove,
-                    ..UpdateAttributesOptions::new(test_actor())
-                },
+                &test_actor(),
+                AttributeChanges { set, remove },
             )
             .await
             .expect("update attributes");
@@ -158,10 +151,8 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
         namespace_writer
             .update_access(
                 "/docs/nested",
-                UpdateAccessOptions {
-                    boundary,
-                    ..UpdateAccessOptions::new(test_actor(), grants)
-                },
+                &test_actor(),
+                AccessState { boundary, grants },
             )
             .await
             .expect("update directory access");
@@ -172,7 +163,7 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
         .expect("file to delete")
         .inode_id;
     let deleted = namespace_writer
-        .delete_path("/docs/deleted.txt", DeleteOptions::new(test_actor()))
+        .delete_path("/docs/deleted.txt", &test_actor())
         .await
         .expect("delete file");
     let restored_inode = source_namespace
@@ -181,7 +172,7 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
         .expect("file to recover")
         .inode_id;
     let recover = namespace_writer
-        .delete_path("/docs/recover.txt", DeleteOptions::new(test_actor()))
+        .delete_path("/docs/recover.txt", &test_actor())
         .await
         .expect("delete file before recovery");
     let restored = namespace_writer
@@ -189,7 +180,7 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
             restored_inode,
             recover.committed_seq,
             Some("/docs/restored.txt"),
-            UndeleteOptions::new(test_actor()),
+            &test_actor(),
         )
         .await
         .expect("restore file at a new name");
@@ -209,7 +200,7 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
             "folded" => {
                 let step = runtime
                     .maintenance
-                    .maintain_metadata(&source, metadata_options(1))
+                    .maintain_metadata_with_options(&source, &metadata_options(1))
                     .await
                     .expect("fold WAL");
                 assert_eq!(
@@ -226,7 +217,7 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
                     .expect("checkpoint");
                 assert_eq!(captured.captured_seq, head_seq);
                 let target = writer
-                    .fork_namespace(&source, &fork, ForkNamespaceOptions::new(test_actor()))
+                    .fork_namespace(&source, &fork, &test_actor())
                     .await
                     .expect("fork checkpointed head");
                 assert_eq!(target.head_seq, captured.captured_seq);
@@ -234,17 +225,13 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
             }
             "floor_advanced" => {
                 head_seq = namespace_writer
-                    .put_file_bytes(
-                        "/later.txt",
-                        b"source only",
-                        PutFileOptions::new(test_actor()),
-                    )
+                    .put_file("/later.txt", b"source only", &test_actor())
                     .await
                     .expect("commit after fork")
                     .committed_seq;
                 runtime
                     .maintenance
-                    .maintain_metadata(&source, metadata_options(1))
+                    .maintain_metadata_with_options(&source, &metadata_options(1))
                     .await
                     .expect("materialize source head before advancing retention");
                 let advanced = runtime
@@ -260,9 +247,9 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
                 for _ in 0..32 {
                     let step = runtime
                         .maintenance
-                        .maintain_metadata(
+                        .maintain_metadata_with_options(
                             &source,
-                            MetadataMaintenanceOptions {
+                            &MetadataMaintenanceOptions {
                                 compaction_policy: MetadataCompactionPolicy::CompactImmediately,
                                 ..Default::default()
                             },

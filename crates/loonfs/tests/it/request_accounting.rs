@@ -8,8 +8,8 @@
 //!   cargo test -p loonfs --test it request_accounting -- --ignored --nocapture
 
 use loonfs::{
-    CreateNamespaceOptions, LoonFs, MetadataMaintenanceOptions, Namespace, NamespaceId,
-    PageRequest, PaginationPolicy, PutFileOptions, SharedObjectStore, Writable,
+    LoonFs, MetadataMaintenanceOptions, Namespace, NamespaceId, PageRequest, PaginationPolicy,
+    PutFileOptions, SharedObjectStore, Writable,
 };
 use loonfs_api::AbsolutePath;
 
@@ -144,10 +144,7 @@ async fn warm_phase_request_accounting() {
         .expect("build maintenance")
         .maintenance(loonfs_test_support::ids::writer_id("acct-maintenance"));
     writer
-        .create_namespace(
-            &namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let namespace_writer = writer
@@ -202,9 +199,9 @@ async fn warm_phase_request_accounting() {
         publish_candidates(&namespace_writer, candidates).await;
         if (index / BATCH).is_multiple_of(STEP_EVERY_BATCHES) {
             maintenance
-                .maintain_metadata(
+                .maintain_metadata_with_options(
                     &namespace_id,
-                    MetadataMaintenanceOptions {
+                    &MetadataMaintenanceOptions {
                         max_wal_tail_objects: std::num::NonZeroU64::MIN,
                         ..Default::default()
                     },
@@ -271,14 +268,14 @@ async fn warm_phase_request_accounting() {
         .open_namespace(&namespace_id)
         .expect("open namespace");
     namespace_writer
-        .put_file_bytes(
+        .put_file_with_options(
             "/hot/file-05001.txt",
             b"replaced",
-            PutFileOptions {
+            &loonfs_test_support::test_actor(),
+            &PutFileOptions {
                 behavior: loonfs::DestinationBehavior::Replace,
                 commit: loonfs_api::options::CommitOptions {
                     preconditions: Vec::new(),
-                    actor_id: loonfs_test_support::test_actor(),
                     commit_id: None,
                     message: None,
                 },
@@ -293,14 +290,14 @@ async fn warm_phase_request_accounting() {
     // A second write on the same handle separates per-handle warmup cost
     // from per-write cost.
     namespace_writer
-        .put_file_bytes(
+        .put_file_with_options(
             "/hot/file-05002.txt",
             b"replaced again",
-            PutFileOptions {
+            &loonfs_test_support::test_actor(),
+            &PutFileOptions {
                 behavior: loonfs::DestinationBehavior::Replace,
                 commit: loonfs_api::options::CommitOptions {
                     preconditions: Vec::new(),
-                    actor_id: loonfs_test_support::test_actor(),
                     commit_id: None,
                     message: None,
                 },

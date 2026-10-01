@@ -8,10 +8,9 @@
 use crate::common::*;
 use loonfs::metrics::{DefaultMetricsRecorder, MetricValue, MetricsSnapshot};
 use loonfs::{
-    maintenance_hint_relay, CreateCheckpointOptions, CreateNamespaceOptions, CreateSnapshotOptions,
-    GarbageCollectionJob, LoonFs, MaintenanceConclusion, MaintenanceJobId, MaintenanceRegistry,
-    MaintenanceRunner, MetadataCompactionJob, MetadataMaintenanceJob, MetadataMaintenanceOptions,
-    PutFileOptions, SnapshotPolicy,
+    maintenance_hint_relay, GarbageCollectionJob, LoonFs, MaintenanceConclusion, MaintenanceJobId,
+    MaintenanceRegistry, MaintenanceRunner, MetadataCompactionJob, MetadataMaintenanceJob,
+    MetadataMaintenanceOptions, SnapshotPolicy,
 };
 use loonfs_test_support::block_on::block_on;
 use loonfs_test_support::ids::namespace_id;
@@ -89,10 +88,7 @@ fn a_writer_with_a_recorder_reports_stores_publications_and_steps() {
             .expect("runner");
         runner.attach_hints(receiver);
         fs.writer
-            .create_namespace(
-                &namespace_id,
-                CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-            )
+            .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
             .await
             .expect("create namespace");
         let namespace = fs
@@ -101,10 +97,10 @@ fn a_writer_with_a_recorder_reports_stores_publications_and_steps() {
             .expect("open namespace");
         for file in 0..writes {
             namespace
-                .put_file_bytes(
+                .put_file(
                     &format!("/docs/file-{file}.txt"),
                     b"body",
-                    PutFileOptions::new(loonfs_test_support::test_actor()),
+                    &loonfs_test_support::test_actor(),
                 )
                 .await
                 .expect("put file");
@@ -212,10 +208,7 @@ fn a_collection_step_reports_what_the_pass_retained() {
         })
         .await;
         fs.writer
-            .create_namespace(
-                &namespace_id,
-                CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-            )
+            .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
             .await
             .expect("create namespace");
         let registry = MaintenanceRegistry::new();
@@ -256,10 +249,7 @@ fn snapshot_read_views_report_the_snapshot_view_counter() {
         .await;
         let namespace = fs.reader.namespace(&namespace_id);
         fs.writer
-            .create_namespace(
-                &namespace_id,
-                CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-            )
+            .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
             .await
             .expect("create namespace");
         let namespace_writer = fs
@@ -268,13 +258,7 @@ fn snapshot_read_views_report_the_snapshot_view_counter() {
             .expect("open namespace");
         let checkpoint = fs
             .maintenance
-            .create_checkpoint(
-                &namespace_id,
-                CreateCheckpointOptions {
-                    name: "operator".to_owned(),
-                    ttl_ms: None,
-                },
-            )
+            .create_checkpoint(&namespace_id, "operator")
             .await
             .expect("create checkpoint");
         let _checkpoint_view = namespace
@@ -282,13 +266,7 @@ fn snapshot_read_views_report_the_snapshot_view_counter() {
             .await
             .expect("view checkpoint");
         let reader_snapshot = namespace_writer
-            .create_snapshot(
-                CreateSnapshotOptions {
-                    name: "reader".to_owned(),
-                    expires_at_ms: u64::MAX,
-                },
-                &SnapshotPolicy::default(),
-            )
+            .create_snapshot("reader", u64::MAX, &SnapshotPolicy::default())
             .await
             .expect("create snapshot");
         let _snapshot_view = namespace
@@ -321,10 +299,7 @@ fn reads_report_head_cache_lookups_and_retained_bytes() {
         let setup = writer(store(temp_dir.path()), "head-cache-setup").await;
         for namespace_id in [&first, &second] {
             setup
-                .create_namespace(
-                    namespace_id,
-                    CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-                )
+                .create_namespace(namespace_id, &loonfs_test_support::test_actor())
                 .await
                 .expect("create namespace");
         }

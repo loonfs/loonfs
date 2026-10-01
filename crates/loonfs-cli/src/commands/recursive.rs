@@ -236,7 +236,6 @@ async fn create_remote_directory(
             &CreateDirectoryOptions {
                 commit: CommitOptions {
                     preconditions: Vec::new(),
-                    actor_id: context.actor().clone(),
                     commit_id: None,
                     message,
                 },
@@ -321,7 +320,6 @@ pub(crate) async fn run_put_tree(
                     behavior,
                     commit: CommitOptions {
                         preconditions: Vec::new(),
-                        actor_id: context.actor().clone(),
                         commit_id: None,
                         message,
                     },
@@ -497,14 +495,14 @@ pub(crate) async fn run_copy_tree(
             let result = context
                 .target
                 .client
-                .copy_path(
+                .copy_path_with_options(
                     &from,
                     &to,
+                    context.actor(),
                     &loonfs_client::CopyOptions {
                         behavior,
                         commit: CommitOptions {
                             preconditions: Vec::new(),
-                            actor_id: context.actor().clone(),
                             commit_id: None,
                             message: message.clone(),
                         },
@@ -823,10 +821,7 @@ mod tests {
         context
             .target
             .client
-            .delete_path(
-                &broken,
-                &loonfs_client::DeleteOptions::new(context.actor().clone()),
-            )
+            .delete_path(&broken, context.actor())
             .await
             .expect("delete child");
         let tally = transfer_tree(

@@ -8,9 +8,8 @@ use bytes::Bytes;
 use loonfs::publish::{parse_mutation_path, CommitCandidate, CommitRequest, FilesystemOperation};
 use loonfs::uploads::ResolvedUploadCompletion;
 use loonfs::{
-    ChangeSeq, ChecksumAlgorithm, CommitId, CreateDirectoryOptions, CreateNamespaceOptions,
-    DestinationBehavior, ErrorCode, MetadataCache, NamespaceId, PutFileOptions, SharedObjectStore,
-    UploadMode,
+    ChangeSeq, ChecksumAlgorithm, CommitId, DestinationBehavior, ErrorCode, MetadataCache,
+    NamespaceId, PutFileOptions, SharedObjectStore, UploadMode,
 };
 use loonfs_api::v0::{UploadContentClaim, UploadSessionStatus};
 use loonfs_api::Checksum;
@@ -66,11 +65,8 @@ fn upload_flow_is_available_from_runtime() {
     let fs = runtime(temp_dir.path(), "upload-test");
     let namespace_id = namespace_id("demo");
 
-    fs.create_namespace_blocking(
-        &namespace_id,
-        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-    )
-    .expect("create namespace");
+    fs.create_namespace_blocking(&namespace_id, &loonfs_test_support::test_actor())
+        .expect("create namespace");
     let begin = fs
         .begin_upload_blocking(&namespace_id)
         .expect("begin upload");
@@ -102,11 +98,8 @@ fn direct_put_upload_flow_validates_durable_object_on_complete() {
     let namespace_id = namespace_id("demo");
     let bytes = b"direct uploaded";
 
-    fs.create_namespace_blocking(
-        &namespace_id,
-        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-    )
-    .expect("create namespace");
+    fs.create_namespace_blocking(&namespace_id, &loonfs_test_support::test_actor())
+        .expect("create namespace");
     let claim = direct_put_claim(bytes);
     let begin =
         block_on(fs.create_direct_put_upload_target(&namespace_id, ChecksumAlgorithm::Sha256))
@@ -136,7 +129,7 @@ fn direct_put_upload_flow_validates_durable_object_on_complete() {
         &namespace_id,
         "/docs/direct.txt",
         content_ref,
-        PutFileOptions::new(loonfs_test_support::test_actor()),
+        &loonfs_test_support::test_actor(),
     ))
     .expect("publish direct put content");
     assert_eq!(
@@ -159,11 +152,8 @@ fn direct_put_completion_proves_upload_without_reading_content() {
     let fs = open_runtime(object_store, "direct-put-probe-test");
     let bytes = b"direct uploaded, provider verified";
 
-    fs.create_namespace_blocking(
-        &namespace_id,
-        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-    )
-    .expect("create namespace");
+    fs.create_namespace_blocking(&namespace_id, &loonfs_test_support::test_actor())
+        .expect("create namespace");
     let claim = direct_put_claim(bytes);
     let begin =
         block_on(fs.create_direct_put_upload_target(&namespace_id, ChecksumAlgorithm::Sha256))
@@ -204,11 +194,8 @@ fn direct_put_completion_rejects_a_mis_declared_size() {
     let mut claim = direct_put_claim(bytes);
     claim.size_bytes += 1;
 
-    fs.create_namespace_blocking(
-        &namespace_id,
-        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-    )
-    .expect("create namespace");
+    fs.create_namespace_blocking(&namespace_id, &loonfs_test_support::test_actor())
+        .expect("create namespace");
     let begin =
         block_on(fs.create_direct_put_upload_target(&namespace_id, ChecksumAlgorithm::Sha256))
             .expect("begin direct put");
@@ -234,11 +221,8 @@ fn direct_put_completion_rejects_bytes_that_do_not_match_the_claim_and_keeps_the
     let delivered = b"different bytes, same length!";
     assert_eq!(promised.len(), delivered.len(), "size must not be the tell");
 
-    fs.create_namespace_blocking(
-        &namespace_id,
-        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-    )
-    .expect("create namespace");
+    fs.create_namespace_blocking(&namespace_id, &loonfs_test_support::test_actor())
+        .expect("create namespace");
     let claim = direct_put_claim(promised);
     let begin =
         block_on(fs.create_direct_put_upload_target(&namespace_id, ChecksumAlgorithm::Sha256))
@@ -271,11 +255,8 @@ fn direct_put_completion_reports_a_failed_read_back_as_a_store_failure() {
     let fs = open_runtime(object_store, "direct-put-read-back-failure-test");
     let bytes = b"direct put bytes the store would not vouch for";
 
-    fs.create_namespace_blocking(
-        &namespace_id,
-        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-    )
-    .expect("create namespace");
+    fs.create_namespace_blocking(&namespace_id, &loonfs_test_support::test_actor())
+        .expect("create namespace");
     let namespace = fs
         .writer
         .open_namespace(&namespace_id)
@@ -323,7 +304,7 @@ fn direct_put_completion_reports_a_failed_read_back_as_a_store_failure() {
 }
 
 #[test]
-fn put_file_bytes_gates_publish_on_its_own_content_write_without_probing() {
+fn put_file_gates_publish_on_its_own_content_write_without_probing() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
     let raw_store = Arc::new(RecordingStore::new(
@@ -342,18 +323,15 @@ fn put_file_bytes_gates_publish_on_its_own_content_write_without_probing() {
         },
     );
 
-    fs.create_namespace_blocking(
-        &namespace_id,
-        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-    )
-    .expect("create namespace");
+    fs.create_namespace_blocking(&namespace_id, &loonfs_test_support::test_actor())
+        .expect("create namespace");
 
     raw_store.reset();
-    fs.put_file_bytes_blocking(
+    fs.put_file_blocking(
         &namespace_id,
         "/docs/direct.txt",
         b"direct bytes",
-        PutFileOptions::new(loonfs_test_support::test_actor()),
+        &loonfs_test_support::test_actor(),
     )
     .expect("put file bytes");
 
@@ -365,15 +343,15 @@ fn put_file_bytes_gates_publish_on_its_own_content_write_without_probing() {
 
     // A replace put rides the same overlapped path: new blob, no probe.
     raw_store.reset();
-    fs.put_file_bytes_blocking(
+    fs.put_file_with_options_blocking(
         &namespace_id,
         "/docs/direct.txt",
         b"replaced bytes",
-        PutFileOptions {
+        &loonfs_test_support::test_actor(),
+        &PutFileOptions {
             behavior: DestinationBehavior::Replace,
             commit: loonfs_api::options::CommitOptions {
                 preconditions: Vec::new(),
-                actor_id: loonfs_test_support::test_actor(),
                 commit_id: None,
                 message: None,
             },
@@ -388,7 +366,7 @@ fn put_file_bytes_gates_publish_on_its_own_content_write_without_probing() {
 }
 
 #[test]
-fn put_file_bytes_retries_a_transient_content_write_failure() {
+fn put_file_retries_a_transient_content_write_failure() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
     let raw_store = Arc::new(fail_content_blob_puts_store(temp_dir.path()));
@@ -400,22 +378,19 @@ fn put_file_bytes_retries_a_transient_content_write_failure() {
         })
     });
 
-    fs.create_namespace_blocking(
-        &namespace_id,
-        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-    )
-    .expect("create namespace");
+    fs.create_namespace_blocking(&namespace_id, &loonfs_test_support::test_actor())
+        .expect("create namespace");
 
     raw_store.fail_next(1);
-    fs.put_file_bytes_blocking(
+    fs.put_file_with_options_blocking(
         &namespace_id,
         "/docs/report.txt",
         b"overlap survives",
-        PutFileOptions {
+        &loonfs_test_support::test_actor(),
+        &PutFileOptions {
             behavior: DestinationBehavior::NoReplace,
             commit: loonfs_api::options::CommitOptions {
                 preconditions: Vec::new(),
-                actor_id: loonfs_test_support::test_actor(),
                 commit_id: Some(CommitId::parse("overlap-put-retry").expect("valid commit id")),
                 message: None,
             },
@@ -437,12 +412,9 @@ fn path_mutations_return_the_commit_id_they_committed_under() {
     let object_store = store(temp_dir.path());
     block_on(async {
         let fs = open_runtime_async(object_store, "commit-id-echo-test").await;
-        fs.create_namespace(
-            &namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
-        .await
-        .expect("create namespace");
+        fs.create_namespace(&namespace_id, &loonfs_test_support::test_actor())
+            .await
+            .expect("create namespace");
         let namespace = fs
             .writer
             .open_namespace(&namespace_id)
@@ -450,18 +422,18 @@ fn path_mutations_return_the_commit_id_they_committed_under() {
 
         let commit_id = CommitId::parse("retry-key-1").expect("valid commit id");
         let first = fs
-            .put_file_bytes(
+            .put_file_with_options(
                 &namespace_id,
                 "/docs/a.txt",
                 b"alpha",
-                PutFileOptions {
+                &loonfs_test_support::test_actor(),
+                &PutFileOptions {
                     commit: loonfs_api::options::CommitOptions {
                         preconditions: Vec::new(),
-                        actor_id: loonfs_test_support::test_actor(),
                         commit_id: Some(commit_id.clone()),
                         message: None,
                     },
-                    ..PutFileOptions::new(loonfs_test_support::test_actor())
+                    ..Default::default()
                 },
             )
             .await
@@ -472,10 +444,7 @@ fn path_mutations_return_the_commit_id_they_committed_under() {
         // Without a caller-supplied id, the generated one is still returned,
         // so every caller holds a reconciliation handle.
         let generated = namespace
-            .create_directory(
-                "/docs/sub",
-                CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
-            )
+            .create_directory("/docs/sub", &loonfs_test_support::test_actor())
             .await
             .expect("mkdir");
         assert!(!generated.commit_id.as_str().is_empty());
@@ -492,12 +461,9 @@ fn concurrent_puts_coalesce_into_one_wal_object() {
     block_on(async {
         let fs = open_runtime_async(object_store.clone(), "publication-batch-test").await;
         let namespace = fs.reader.namespace(&namespace_id);
-        fs.create_namespace(
-            &namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
-        .await
-        .expect("create namespace");
+        fs.create_namespace(&namespace_id, &loonfs_test_support::test_actor())
+            .await
+            .expect("create namespace");
         let namespace_writer = fs
             .writer
             .open_namespace(&namespace_id)
@@ -606,12 +572,9 @@ fn zero_interval_publishes_sequential_submissions_immediately() {
             builder.min_publish_interval_ms(0)
         })
         .await;
-        fs.create_namespace(
-            &namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
-        .await
-        .expect("create namespace");
+        fs.create_namespace(&namespace_id, &loonfs_test_support::test_actor())
+            .await
+            .expect("create namespace");
         let wal_objects_before = wal_object_count(&object_store, &namespace_id).await;
 
         // Sequential awaited puts leave nothing to batch: with a zero
@@ -623,11 +586,11 @@ fn zero_interval_publishes_sequential_submissions_immediately() {
             ("/docs/b.txt", b"beta".as_slice()),
             ("/docs/c.txt", b"gamma".as_slice()),
         ] {
-            fs.put_file_bytes(
+            fs.put_file(
                 &namespace_id,
                 path,
                 bytes,
-                PutFileOptions::new(loonfs_test_support::test_actor()),
+                &loonfs_test_support::test_actor(),
             )
             .await
             .expect("sequential put");
@@ -653,29 +616,17 @@ fn concurrent_puts_both_commit_after_one_transient_content_failure() {
         })
         .await;
         let namespace = fs.reader.namespace(&namespace_id);
-        fs.create_namespace(
-            &namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
-        .await
-        .expect("create namespace");
+        fs.create_namespace(&namespace_id, &loonfs_test_support::test_actor())
+            .await
+            .expect("create namespace");
 
         // One content write fails once before either submission enters the
         // commit window. Its immutable retry is independent of its peer.
         raw_store.fail_next(1);
+        let actor = loonfs_test_support::test_actor();
         let (a, b) = tokio::join!(
-            fs.put_file_bytes(
-                &namespace_id,
-                "/docs/a.txt",
-                b"alpha",
-                PutFileOptions::new(loonfs_test_support::test_actor())
-            ),
-            fs.put_file_bytes(
-                &namespace_id,
-                "/docs/b.txt",
-                b"beta",
-                PutFileOptions::new(loonfs_test_support::test_actor())
-            ),
+            fs.put_file(&namespace_id, "/docs/a.txt", b"alpha", &actor),
+            fs.put_file(&namespace_id, "/docs/b.txt", b"beta", &actor),
         );
 
         for (path, bytes, result) in [
@@ -700,29 +651,26 @@ fn begin_upload_validates_controls_without_replay_reads() {
     let object_store = raw_store.store();
     let fs = open_runtime(object_store, "begin-upload-cache-test");
 
-    fs.create_namespace_blocking(
-        &namespace_id,
-        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-    )
-    .expect("create namespace");
-    fs.put_file_bytes_blocking(
+    fs.create_namespace_blocking(&namespace_id, &loonfs_test_support::test_actor())
+        .expect("create namespace");
+    fs.put_file_blocking(
         &namespace_id,
         "/docs/hello.txt",
         b"hello",
-        PutFileOptions::new(loonfs_test_support::test_actor()),
+        &loonfs_test_support::test_actor(),
     )
     .expect("put file");
     fs.create_checkpoint_blocking(&namespace_id)
         .expect("checkpoint");
-    fs.put_file_bytes_blocking(
+    fs.put_file_with_options_blocking(
         &namespace_id,
         "/docs/hello.txt",
         b"updated",
-        PutFileOptions {
+        &loonfs_test_support::test_actor(),
+        &PutFileOptions {
             behavior: DestinationBehavior::Replace,
             commit: loonfs_api::options::CommitOptions {
                 preconditions: Vec::new(),
-                actor_id: loonfs_test_support::test_actor(),
                 commit_id: None,
                 message: None,
             },
@@ -755,11 +703,8 @@ fn begin_upload_rejects_missing_and_unreadable_namespaces() {
         ErrorCode::NamespaceNotFound,
     );
 
-    fs.create_namespace_blocking(
-        &namespace_id,
-        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-    )
-    .expect("create namespace");
+    fs.create_namespace_blocking(&namespace_id, &loonfs_test_support::test_actor())
+        .expect("create namespace");
     fs.begin_upload_blocking(&namespace_id)
         .expect("a live namespace admits uploads");
 
@@ -789,11 +734,8 @@ fn begin_upload_rejects_malformed_head_and_lease_when_cache_disabled() {
     );
 
     let head_bad = NamespaceId::parse("head-bad").expect("valid namespace id");
-    fs.create_namespace_blocking(
-        &head_bad,
-        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-    )
-    .expect("create head-bad namespace");
+    fs.create_namespace_blocking(&head_bad, &loonfs_test_support::test_actor())
+        .expect("create head-bad namespace");
     block_on(raw_store.put_overwrite(&hint(&head_bad), Bytes::from_static(br#"{"not":"a head"}"#)))
         .expect("corrupt head");
     assert_core_error_kind(
@@ -808,11 +750,8 @@ fn a_mutation_request_appears_in_change_feed() {
     let fs = runtime(temp_dir.path(), "commit-test");
     let namespace_id = namespace_id("demo");
 
-    fs.create_namespace_blocking(
-        &namespace_id,
-        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-    )
-    .expect("create namespace");
+    fs.create_namespace_blocking(&namespace_id, &loonfs_test_support::test_actor())
+        .expect("create namespace");
     let commit_id = CommitId::parse("create-dir").expect("valid commit id");
     let response = fs
         .mutate_blocking(

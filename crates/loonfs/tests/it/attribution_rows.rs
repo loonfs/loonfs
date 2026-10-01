@@ -3,10 +3,10 @@
 #![allow(clippy::panic)]
 
 use crate::common::*;
+use loonfs::AttributeChanges;
 use loonfs::{
-    ActorId, CopyOptions, CreateNamespaceOptions, DeleteDirectoryBehavior, DeleteOptions,
-    DestinationBehavior, MoveOptions, PageRequest, PutFileOptions, RestoreRevisionOptions,
-    RevisionNo, UpdateAttributesOptions,
+    ActorId, DeleteDirectoryBehavior, DeleteOptions, DestinationBehavior, PageRequest,
+    PutFileOptions, RevisionNo,
 };
 use loonfs_test_support::ids::{attribute_key, attribute_text, namespace_id, page_limit};
 use std::collections::BTreeMap;
@@ -22,11 +22,8 @@ fn embedded_reads_project_commit_attribution_without_rewriting_inode_creation() 
     let fs = runtime(temp_dir.path(), "attribution-rows");
     let namespace_id = namespace_id("demo");
     let namespace = fs.reader.namespace(&namespace_id);
-    fs.create_namespace_blocking(
-        &namespace_id,
-        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-    )
-    .expect("create namespace");
+    fs.create_namespace_blocking(&namespace_id, &loonfs_test_support::test_actor())
+        .expect("create namespace");
     let namespace_writer = fs
         .writer
         .open_namespace(&namespace_id)
@@ -34,11 +31,11 @@ fn embedded_reads_project_commit_attribution_without_rewriting_inode_creation() 
 
     let creator = actor("creator");
     let create = fs
-        .put_file_bytes_blocking(
+        .put_file_blocking(
             &namespace_id,
             "/implicit/parent/report.txt",
             b"v1",
-            PutFileOptions::new(creator.clone()),
+            &creator,
         )
         .expect("create file and parents");
     let created = fs
@@ -56,13 +53,14 @@ fn embedded_reads_project_commit_attribution_without_rewriting_inode_creation() 
     assert_eq!(created.head_seq, create.committed_seq);
 
     let replacer = actor("replacer");
-    fs.put_file_bytes_blocking(
+    fs.put_file_with_options_blocking(
         &namespace_id,
         "/implicit/parent/report.txt",
         b"v2",
-        PutFileOptions {
+        &replacer,
+        &PutFileOptions {
             behavior: DestinationBehavior::Replace,
-            ..PutFileOptions::new(replacer.clone())
+            ..Default::default()
         },
     )
     .expect("replace file");
@@ -77,7 +75,7 @@ fn embedded_reads_project_commit_attribution_without_rewriting_inode_creation() 
     block_on(namespace_writer.restore_revision(
         "/implicit/parent/report.txt",
         RevisionNo(1),
-        RestoreRevisionOptions::new(restorer.clone()),
+        &restorer,
     ))
     .expect("restore first revision");
     let revisions = block_on(
@@ -95,9 +93,10 @@ fn embedded_reads_project_commit_attribution_without_rewriting_inode_creation() 
     let source_attribute_editor = actor("source-attribute-editor");
     block_on(namespace_writer.update_attributes(
         "/implicit/parent/report.txt",
-        UpdateAttributesOptions {
+        &source_attribute_editor,
+        AttributeChanges {
             set: BTreeMap::from([(attribute_key("owner"), attribute_text("source"))]),
-            ..UpdateAttributesOptions::new(source_attribute_editor.clone())
+            ..Default::default()
         },
     ))
     .expect("annotate source before copy");
@@ -107,7 +106,7 @@ fn embedded_reads_project_commit_attribution_without_rewriting_inode_creation() 
         &namespace_id,
         "/implicit/parent/report.txt",
         "/copy.txt",
-        CopyOptions::new(copier.clone()),
+        &copier,
     )
     .expect("copy file");
     let copied = fs
@@ -137,13 +136,8 @@ fn embedded_reads_project_commit_attribution_without_rewriting_inode_creation() 
     let before_move = fs
         .stat_path_blocking(&namespace_id, "/copy.txt")
         .expect("stat before move");
-    fs.move_path_blocking(
-        &namespace_id,
-        "/copy.txt",
-        "/moved.txt",
-        MoveOptions::new(actor("mover")),
-    )
-    .expect("move copy");
+    fs.move_path_blocking(&namespace_id, "/copy.txt", "/moved.txt", &actor("mover"))
+        .expect("move copy");
     let after_move = fs
         .stat_path_blocking(&namespace_id, "/moved.txt")
         .expect("stat after move");
@@ -159,11 +153,8 @@ fn attributes_root_forks_and_trash_report_their_row_attribution() {
     let fs = open_runtime(object_store.clone(), "attribution-projections");
     let source_id = namespace_id("source");
     let source_namespace = fs.reader.namespace(&source_id);
-    fs.create_namespace_blocking(
-        &source_id,
-        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-    )
-    .expect("create namespace");
+    fs.create_namespace_blocking(&source_id, &loonfs_test_support::test_actor())
+        .expect("create namespace");
     let namespace = fs
         .writer
         .open_namespace(&source_id)
@@ -175,19 +166,15 @@ fn attributes_root_forks_and_trash_report_their_row_attribution() {
     assert_eq!(root_attributes.attributes_updated_at_ms, None);
 
     let creator = actor("file-owner");
-    fs.put_file_bytes_blocking(
-        &source_id,
-        "/report.txt",
-        b"report",
-        PutFileOptions::new(creator.clone()),
-    )
-    .expect("create report");
+    fs.put_file_blocking(&source_id, "/report.txt", b"report", &creator)
+        .expect("create report");
     let updater = actor("metadata-editor");
     block_on(namespace.update_attributes(
         "/report.txt",
-        UpdateAttributesOptions {
+        &updater,
+        AttributeChanges {
             set: BTreeMap::from([(attribute_key("owner"), attribute_text("platform"))]),
-            ..UpdateAttributesOptions::new(updater.clone())
+            ..Default::default()
         },
     ))
     .expect("update attributes");
@@ -202,9 +189,10 @@ fn attributes_root_forks_and_trash_report_their_row_attribution() {
     let later_updater = actor("metadata-reviewer");
     block_on(namespace.update_attributes(
         "/report.txt",
-        UpdateAttributesOptions {
+        &later_updater,
+        AttributeChanges {
             set: BTreeMap::from([(attribute_key("stage"), attribute_text("reviewed"))]),
-            ..UpdateAttributesOptions::new(later_updater.clone())
+            ..Default::default()
         },
     ))
     .expect("update attributes again");
@@ -233,21 +221,22 @@ fn attributes_root_forks_and_trash_report_their_row_attribution() {
     assert_eq!(forked.attributes, source_before_fork.attributes);
 
     let trash_creator = actor("trash-creator");
-    fs.put_file_bytes_blocking(
+    fs.put_file_blocking(
         &source_id,
         "/trash/subtree/file.txt",
         b"trash",
-        PutFileOptions::new(trash_creator),
+        &trash_creator,
     )
     .expect("create subtree to delete");
     let deleter = actor("deleter");
     let deletion = fs
-        .delete_path_blocking(
+        .delete_path_with_options_blocking(
             &source_id,
             "/trash",
-            DeleteOptions {
+            &deleter,
+            &DeleteOptions {
                 behavior: DeleteDirectoryBehavior::Recursive,
-                ..DeleteOptions::new(deleter.clone())
+                ..Default::default()
             },
         )
         .expect("delete subtree");

@@ -29,15 +29,28 @@ impl Client {
             .await
     }
 
+    /// Opens a direct multipart upload session with the server's default part
+    /// size.
+    pub async fn create_direct_multipart_upload(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> Result<UploadSession> {
+        self.create_direct_multipart_upload_with_options(
+            namespace_id,
+            &DirectMultipartUploadOptions::default(),
+        )
+        .await
+    }
+
     /// Opens a direct multipart upload session.
     ///
     /// The request does not need a payload length or checksum. The server
     /// returns the part size and checksum algorithm; provider details remain
     /// private and the content reference is returned at completion.
-    pub async fn create_direct_multipart_upload(
+    pub async fn create_direct_multipart_upload_with_options(
         &self,
         namespace_id: &NamespaceId,
-        options: DirectMultipartUploadOptions,
+        options: &DirectMultipartUploadOptions,
     ) -> Result<UploadSession> {
         self.create_upload(
             namespace_id,

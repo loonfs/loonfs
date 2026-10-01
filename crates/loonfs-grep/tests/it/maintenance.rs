@@ -5,8 +5,8 @@
 use crate::common::is_content_object;
 use bytes::Bytes;
 use loonfs::{
-    DeleteNamespaceOptions, LoonFs, MaintenanceCancellation, MaintenanceConclusion, MaintenanceJob,
-    MaintenanceProbe, MaintenanceRegistry, MaintenanceRunner, SharedObjectStore, Writable,
+    LoonFs, MaintenanceCancellation, MaintenanceConclusion, MaintenanceJob, MaintenanceProbe,
+    MaintenanceRegistry, MaintenanceRunner, SharedObjectStore, Writable,
 };
 use loonfs_api::{ChangeSeq, IndexSegmentId, NamespaceId};
 use loonfs_grep::keyspace::{hint_key, segment_key};
@@ -85,10 +85,7 @@ async fn a_tombstoned_namespace_concludes_not_enabled() {
         .expect("open namespace");
     let worker = worker(store, "deleted-worker").await;
     worker.enable(&namespace_id).await.expect("enable grep");
-    namespace_writer
-        .delete(DeleteNamespaceOptions::default())
-        .await
-        .expect("delete namespace");
+    namespace_writer.delete().await.expect("delete namespace");
 
     let job = job(&worker);
     assert_eq!(

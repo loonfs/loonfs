@@ -162,12 +162,30 @@ impl Client {
             .await
     }
 
-    /// Creates a new namespace from the selected current head or live snapshot and
-    /// returns the target's state at the fork point.
+    /// Creates a new namespace from the source's current head and returns the
+    /// target's state at the fork point.
     pub async fn fork_namespace(
         &self,
         source_namespace_id: &NamespaceId,
         new_namespace_id: &NamespaceId,
+        actor: &loonfs_api::ActorId,
+    ) -> Result<NamespaceMetadata> {
+        self.fork_namespace_with_options(
+            source_namespace_id,
+            new_namespace_id,
+            actor,
+            &ForkNamespaceOptions::default(),
+        )
+        .await
+    }
+
+    /// Creates a new namespace from the selected current head or live snapshot and
+    /// returns the target's state at the fork point.
+    pub async fn fork_namespace_with_options(
+        &self,
+        source_namespace_id: &NamespaceId,
+        new_namespace_id: &NamespaceId,
+        actor: &loonfs_api::ActorId,
         options: &ForkNamespaceOptions,
     ) -> Result<NamespaceMetadata> {
         let url = format!(
@@ -176,8 +194,7 @@ impl Client {
         );
         // Namespace forks have no durable request identity to replay after an ambiguous success.
         self.request_json::<_, NamespaceMetadata>(
-            self.post(&url)
-                .header("Loonfs-Actor", options.actor_id.as_str()),
+            self.post(&url).header("Loonfs-Actor", actor.as_str()),
             Some(&ForkNamespaceRequest {
                 new_namespace_id: new_namespace_id.clone(),
                 snapshot_id: options.snapshot_id.clone(),

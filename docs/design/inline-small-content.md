@@ -38,7 +38,7 @@ Inline content has no object to name. For a hosted write the server draws the co
 
 Identity is fixed when content is prepared. Preparing content at or under the writer's threshold makes an inline prepared value, and that value keeps the inline form even if it falls back to staging. The same bytes sent once inline and once as an uploaded object under one commit ID are different requests and conflict. A writer whose threshold changed between two attempts can meet this case.
 
-`put_file_bytes` prepares and then publishes, so a rerun under the same commit ID replays for content small enough to be inline and conflicts for larger content. The failure is safe in both directions: a conflict, never a replay of the wrong bytes. The advice is the same at every size: retry with the prepared content.
+`put_file` prepares and then publishes, so a rerun under the same commit ID replays for content small enough to be inline and conflicts for larger content. The failure is safe in both directions: a conflict, never a replay of the wrong bytes. The advice is the same at every size: retry with the prepared content.
 
 ## Where the writer chooses the path
 
@@ -96,7 +96,7 @@ Cold-stat time and fold time grew with the tail. Tails of 2, 8, and 32 MiB of 4 
 
 **Deriving the content ID from the commit ID and operation index.** A retry would then build the same reference, but the scheme is unsound. The fingerprint leaves out the checksum because a fresh ID pins the bytes. With a derived ID, a second request under the same commit ID, with different bytes of the same length, has an equal fingerprint and replays the first receipt. A commit ID can also be reused after its receipt is reclaimed, while the revision it wrote is kept, so one immutable key could be asked to hold two different contents. Adding the payload digest to the derivation repairs both cases, but it still lets a staged attempt and an inline attempt share one object, and that object then has two cleanup lifecycles.
 
-**Payload identity for every put that supplies bytes.** A rerun of `put_file_bytes` would then replay at any size. This reverses the rule that a put is identified by its content object, for a small benefit: a rerun of a large write uploads everything again before it finds its receipt, and prepared content already avoids that. It would also split the two Rust interfaces, because the server never sees the bytes of a direct upload and could not fingerprint a hosted large write the same way.
+**Payload identity for every put that supplies bytes.** A rerun of `put_file` would then replay at any size. This reverses the rule that a put is identified by its content object, for a small benefit: a rerun of a large write uploads everything again before it finds its receipt, and prepared content already avoids that. It would also split the two Rust interfaces, because the server never sees the bytes of a direct upload and could not fingerprint a hosted large write the same way.
 
 **Content IDs drawn by the client for hosted inline writes.** A resent request would carry the same ID, so the reference form could stay the only form. But the server could not check that the ID is unused by an open upload session, so the one-lifecycle rule would depend on every client being correct. A wrong ID can stop a fold or let an expired session delete committed content.
 

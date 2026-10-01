@@ -74,11 +74,12 @@ async fn hosted_subject_cannot_import_a_foreign_bare_content_reference() {
     let destination_namespace = state.runtime.namespace(&destination);
     state
         .runtime
-        .create_namespace(
+        .create_namespace_with_options(
             &source,
-            CreateNamespaceOptions {
+            &loonfs_test_support::test_actor(),
+            &CreateNamespaceOptions {
                 access: acl("administrator"),
-                ..CreateNamespaceOptions::new(loonfs_test_support::test_actor())
+                ..Default::default()
             },
         )
         .await
@@ -89,16 +90,18 @@ async fn hosted_subject_cannot_import_a_foreign_bare_content_reference() {
         .expect("open namespace");
     state
         .runtime
-        .create_namespace(
-            &destination,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&destination, &loonfs_test_support::test_actor())
         .await
         .expect("destination namespace");
-    let options = PutFileOptions::new(loonfs_test_support::test_actor());
+    let options = PutFileOptions::default();
     namespace
         .with_subject(subject("administrator"))
-        .put_file_bytes("/private", b"private bytes", options)
+        .put_file_with_options(
+            "/private",
+            b"private bytes",
+            &loonfs_test_support::test_actor(),
+            &options,
+        )
         .await
         .expect("publish source");
     let content_ref = source_namespace

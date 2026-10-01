@@ -74,11 +74,13 @@ pub(crate) mod commit_split_support {
         context: &MutationContext,
     ) -> Result<loonfs_api::NamespaceMetadata, CoreError> {
         namespace_engine(store, namespace_id, context)
-            .bootstrap_namespace(CreateNamespaceOptions {
-                actor_id: loonfs_test_support::test_actor(),
-                access: loonfs_api::NamespaceAccess::Unrestricted {},
-                allow_existing: false,
-            })
+            .bootstrap_namespace(
+                &loonfs_test_support::test_actor(),
+                &CreateNamespaceOptions {
+                    access: loonfs_api::NamespaceAccess::Unrestricted {},
+                    allow_existing: false,
+                },
+            )
             .await
     }
 
@@ -88,11 +90,13 @@ pub(crate) mod commit_split_support {
         context: &MutationContext,
     ) -> Result<loonfs_api::NamespaceMetadata, CoreError> {
         namespace_engine(store, namespace_id, context)
-            .bootstrap_namespace(CreateNamespaceOptions {
-                actor_id: loonfs_test_support::test_actor(),
-                access: loonfs_api::NamespaceAccess::Unrestricted {},
-                allow_existing: true,
-            })
+            .bootstrap_namespace(
+                &loonfs_test_support::test_actor(),
+                &CreateNamespaceOptions {
+                    access: loonfs_api::NamespaceAccess::Unrestricted {},
+                    allow_existing: true,
+                },
+            )
             .await
     }
 
@@ -242,7 +246,7 @@ pub(crate) mod commit_split_support {
         .await
     }
 
-    pub(crate) async fn put_file_bytes<S: ObjectStore + ?Sized>(
+    pub(crate) async fn put_file<S: ObjectStore + ?Sized>(
         store: &S,
         namespace_id: &NamespaceId,
         absolute_path: &str,
@@ -277,7 +281,7 @@ pub(crate) mod commit_split_support {
         context: &MutationContext,
         commit_id: Option<&str>,
     ) -> Result<loonfs_api::Commit, CoreError> {
-        put_file_bytes(
+        put_file(
             store,
             namespace_id,
             absolute_path,

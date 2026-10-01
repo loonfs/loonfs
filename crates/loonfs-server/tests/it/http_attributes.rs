@@ -7,9 +7,9 @@
 use crate::common::http_split_support::*;
 use crate::common::{collect_path_entries, start_server};
 use loonfs_api::AttributesRevisionNo;
-use loonfs_client::{
-    ListOptions, NamespacePath, PutFileOptions, StatOptions, UpdateAttributesOptions,
-};
+use loonfs_client::AccessState;
+use loonfs_client::AttributeChanges;
+use loonfs_client::{ListOptions, NamespacePath, StatOptions};
 use loonfs_test_support::http::raw_agent;
 use loonfs_test_support::ids::{attribute_key, attribute_text, namespace_id};
 use std::collections::BTreeMap;
@@ -34,10 +34,10 @@ async fn served_namespace(harness: &crate::common::TestServer) {
     for absolute_path in ["/docs/report.txt", "/docs/notes.txt"] {
         harness
             .client
-            .put_file_bytes(
+            .put_file(
                 &path(absolute_path),
                 b"body",
-                &PutFileOptions::new(loonfs_test_support::test_actor()),
+                &loonfs_test_support::test_actor(),
             )
             .await
             .expect("put file");
@@ -46,9 +46,10 @@ async fn served_namespace(harness: &crate::common::TestServer) {
         .client
         .update_attributes(
             &path("/docs/report.txt"),
-            &UpdateAttributesOptions {
+            &loonfs_test_support::test_actor(),
+            AttributeChanges {
                 set: BTreeMap::from([(attribute_key("owner"), attribute_text("platform"))]),
-                ..UpdateAttributesOptions::new(loonfs_test_support::test_actor())
+                ..Default::default()
             },
         )
         .await
@@ -297,10 +298,11 @@ async fn an_unrestricted_namespace_answers_namespace_unrestricted_over_http() {
         .client
         .update_access(
             &path("/"),
-            &loonfs_client::UpdateAccessOptions::new(
-                loonfs_test_support::test_actor(),
-                loonfs_api::AccessGrants::default(),
-            ),
+            &loonfs_test_support::test_actor(),
+            AccessState {
+                boundary: false,
+                grants: loonfs_api::AccessGrants::default(),
+            },
         )
         .await
         .expect_err("unrestricted namespace");

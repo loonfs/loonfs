@@ -11,7 +11,7 @@ use axum::http::{Method, Request};
 use axum::Router;
 use bytes::Bytes;
 use common::http_split_support::test_config;
-use loonfs::{CreateNamespaceOptions, LoonFs, SharedObjectStore, TraceMode, TraceStoreKind};
+use loonfs::{LoonFs, SharedObjectStore, TraceMode, TraceStoreKind};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_server::{app, AppOptions, MaintenanceMode};
 use loonfs_test_support::ids::namespace_id;
@@ -219,10 +219,7 @@ async fn missing_path_has_one_debug_completion_and_no_errors() {
     let (router, state) = app(config, AppOptions::default()).await.expect("build app");
     let writer = state.runtime;
     writer
-        .create_namespace(
-            &namespace_id("demo"),
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace_id("demo"), &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     capture.clear();
@@ -267,10 +264,7 @@ async fn expected_typed_errors_use_debug_or_warn_and_keep_completion_fields() {
     let writer = state.runtime;
     let namespace = namespace_id("demo");
     writer
-        .create_namespace(
-            &namespace,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let namespace_writer = writer.open_namespace(&namespace).expect("open namespace");
@@ -394,10 +388,7 @@ async fn store_fault_has_one_error_from_the_boundary() {
         .await
         .expect("build bootstrap writer");
     bootstrap
-        .create_namespace(
-            &namespace_id("faulty"),
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace_id("faulty"), &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     bootstrap

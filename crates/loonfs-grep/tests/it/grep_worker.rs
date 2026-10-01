@@ -6,8 +6,8 @@
 use crate::common::{control, default_page_limit, grep_with, page_limit, GrepHost};
 use bytes::Bytes;
 use loonfs::{
-    CoreError, CreateNamespaceOptions, DeleteNamespaceOptions, ErrorCode, LoonFs, Maintenance,
-    MetadataMaintenanceOptions, NamespaceId, PutFileOptions, SharedObjectStore,
+    CoreError, CreateNamespaceOptions, ErrorCode, LoonFs, Maintenance, MetadataMaintenanceOptions,
+    NamespaceId, PutFileOptions, SharedObjectStore,
 };
 use loonfs_api::wire::control::PinOwner;
 use loonfs_api::{
@@ -115,9 +115,9 @@ async fn fold_wal_and_advance_retention(
     namespace_id: &NamespaceId,
 ) -> ChangeSeq {
     maintenance
-        .maintain_metadata(
+        .maintain_metadata_with_options(
             namespace_id,
-            MetadataMaintenanceOptions {
+            &MetadataMaintenanceOptions {
                 max_wal_tail_objects: std::num::NonZeroU64::MIN,
                 ..Default::default()
             },
@@ -148,10 +148,7 @@ async fn an_index_built_past_a_stale_read_view_stays_enabled_and_refreshes_queri
         .await
         .expect("writer");
     writer
-        .create_namespace(
-            &namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("namespace");
     let namespace = writer
@@ -190,11 +187,7 @@ async fn an_index_built_past_a_stale_read_view_stays_enabled_and_refreshes_queri
             blocking.wait_until_blocked().await;
             let path = if query { "/second" } else { "/first" };
             let committed = namespace
-                .put_file_bytes(
-                    path,
-                    b"needle\n",
-                    PutFileOptions::new(loonfs_test_support::test_actor()),
-                )
+                .put_file(path, b"needle\n", &loonfs_test_support::test_actor())
                 .await
                 .expect("commit after the read captures its head");
             host.catch_up_grep_index(&namespace_id, committed.committed_seq)
@@ -219,10 +212,7 @@ async fn grep_query_keeps_its_read_view_when_a_matching_file_commits_mid_query()
         .await
         .expect("writer");
     writer
-        .create_namespace(
-            &namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let namespace = writer
@@ -246,10 +236,10 @@ async fn grep_query_keeps_its_read_view_when_a_matching_file_commits_mid_query()
     let publish = async {
         blocking.wait_until_blocked().await;
         let committed = namespace
-            .put_file_bytes(
+            .put_file(
                 "/later.txt",
                 b"mid-query needle\n",
-                PutFileOptions::new(loonfs_test_support::test_actor()),
+                &loonfs_test_support::test_actor(),
             )
             .await;
         blocking.release();
@@ -283,10 +273,7 @@ async fn grep_worker_lifecycle_uses_and_releases_checkpointed_backfill() {
         .await
         .expect("writer");
     writer
-        .create_namespace(
-            &namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let namespace = writer
@@ -294,10 +281,10 @@ async fn grep_worker_lifecycle_uses_and_releases_checkpointed_backfill() {
         .expect("open namespace");
     for index in 0..3u32 {
         namespace
-            .put_file_bytes(
+            .put_file(
                 &format!("/before-{index}.txt"),
                 format!("checkpoint needle {index}\n").as_bytes(),
-                PutFileOptions::new(loonfs_test_support::test_actor()),
+                &loonfs_test_support::test_actor(),
             )
             .await
             .expect("write preexisting file");
@@ -424,20 +411,17 @@ async fn exhausted_run_numbers_fail_as_server_errors_without_writing_the_manifes
         .await
         .expect("writer");
     writer
-        .create_namespace(
-            &namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
     namespace
-        .put_file_bytes(
+        .put_file(
             "/initial.txt",
             b"initial run number boundary needle\n",
-            PutFileOptions::new(loonfs_test_support::test_actor()),
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("write initial file");
@@ -470,10 +454,10 @@ async fn exhausted_run_numbers_fail_as_server_errors_without_writing_the_manifes
         .expect("install manifest at the public maximum");
 
     namespace
-        .put_file_bytes(
+        .put_file(
             "/incremental.txt",
             b"incremental run number boundary needle\n",
-            PutFileOptions::new(loonfs_test_support::test_actor()),
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("write incremental file");
@@ -563,10 +547,7 @@ async fn enable_creates_no_checkpoint_when_the_manifest_load_fails() {
         .await
         .expect("writer");
     writer
-        .create_namespace(
-            &namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let host = GrepHost::new(&store, "enable-manifest-failure-maintenance").await;
@@ -622,10 +603,7 @@ async fn enable_confirms_its_checkpoint_after_an_ambiguous_manifest_write() {
         .await
         .expect("writer");
     writer
-        .create_namespace(
-            &namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let host = GrepHost::new(&store, "ambiguous-enable-maintenance").await;
@@ -681,10 +659,7 @@ async fn restart_confirms_its_checkpoint_after_an_ambiguous_manifest_write() {
         .await
         .expect("writer");
     writer
-        .create_namespace(
-            &namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let host = GrepHost::new(&store, "ambiguous-restart-maintenance").await;
@@ -757,10 +732,7 @@ async fn retention_gap_and_vanished_checkpoint_restart_fresh_backfill() {
         .expect("maintenance")
         .maintenance(loonfs_test_support::ids::writer_id("gap-maintenance"));
     writer
-        .create_namespace(
-            &namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let namespace = writer
@@ -771,10 +743,10 @@ async fn retention_gap_and_vanished_checkpoint_restart_fresh_backfill() {
     drive_worker_to_current(&worker, &namespace_id, GramIndexBuildPolicy::default()).await;
 
     namespace
-        .put_file_bytes(
+        .put_file(
             "/gap.txt",
             b"retention gap needle\n",
-            PutFileOptions::new(loonfs_test_support::test_actor()),
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("write after watermark");
@@ -843,10 +815,7 @@ async fn retention_passing_a_backfill_checkpoint_never_serves_a_partial_query() 
             "handoff-gap-maintenance",
         ));
     writer
-        .create_namespace(
-            &namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let namespace = writer
@@ -854,10 +823,10 @@ async fn retention_passing_a_backfill_checkpoint_never_serves_a_partial_query() 
         .expect("open namespace");
     for index in 0..2u32 {
         namespace
-            .put_file_bytes(
+            .put_file(
                 &format!("/before-{index}.txt"),
                 format!("handoff needle before {index}\n").as_bytes(),
-                PutFileOptions::new(loonfs_test_support::test_actor()),
+                &loonfs_test_support::test_actor(),
             )
             .await
             .expect("write checkpointed file");
@@ -897,10 +866,10 @@ async fn retention_passing_a_backfill_checkpoint_never_serves_a_partial_query() 
     ));
 
     namespace
-        .put_file_bytes(
+        .put_file(
             "/during.txt",
             b"handoff needle during\n",
-            PutFileOptions::new(loonfs_test_support::test_actor()),
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("write during backfill");
@@ -966,20 +935,17 @@ async fn an_expired_backfill_pin_keeps_enumerating_until_deleted() {
         .await
         .expect("writer");
     writer
-        .create_namespace(
-            &namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
     namespace
-        .put_file_bytes(
+        .put_file(
             "/expiring.txt",
             b"expiring needle\n",
-            PutFileOptions::new(loonfs_test_support::test_actor()),
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("write");
@@ -1115,10 +1081,7 @@ async fn commits_during_backfill_are_indexed_once_by_the_feed_phase() {
         .await
         .expect("writer");
     writer
-        .create_namespace(
-            &namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let namespace = writer
@@ -1126,10 +1089,10 @@ async fn commits_during_backfill_are_indexed_once_by_the_feed_phase() {
         .expect("open namespace");
     for index in 0..4u32 {
         namespace
-            .put_file_bytes(
+            .put_file(
                 &format!("/before-{index}.txt"),
                 format!("overlap needle before {index}\n").as_bytes(),
-                PutFileOptions::new(loonfs_test_support::test_actor()),
+                &loonfs_test_support::test_actor(),
             )
             .await
             .expect("write preexisting file");
@@ -1162,20 +1125,21 @@ async fn commits_during_backfill_are_indexed_once_by_the_feed_phase() {
     // Commits strictly after the pinned sequence: one new file, and a
     // replacement of a file the checkpoint already pinned.
     namespace
-        .put_file_bytes(
+        .put_file(
             "/during.txt",
             b"overlap needle during\n",
-            PutFileOptions::new(loonfs_test_support::test_actor()),
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("write during backfill");
     namespace
-        .put_file_bytes(
+        .put_file_with_options(
             "/before-0.txt",
             b"overlap needle replaced\n",
-            PutFileOptions {
+            &loonfs_test_support::test_actor(),
+            &PutFileOptions {
                 behavior: loonfs::DestinationBehavior::Replace,
-                ..PutFileOptions::new(loonfs_test_support::test_actor())
+                ..Default::default()
             },
         )
         .await
@@ -1226,20 +1190,17 @@ async fn a_move_reindexes_nothing_and_answers_the_new_path() {
         .await
         .expect("writer");
     writer
-        .create_namespace(
-            &namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
     namespace
-        .put_file_bytes(
+        .put_file(
             "/docs/note.txt",
             b"moved needle\n",
-            PutFileOptions::new(loonfs_test_support::test_actor()),
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("write file");
@@ -1253,7 +1214,7 @@ async fn a_move_reindexes_nothing_and_answers_the_new_path() {
         .move_path(
             "/docs/note.txt",
             "/docs/renamed.txt",
-            loonfs::MoveOptions::new(loonfs_test_support::test_actor()),
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("move the indexed file");
@@ -1291,10 +1252,7 @@ async fn a_recursive_delete_hides_matches_and_an_undelete_restores_them() {
     let reader = writer.read_only();
     let namespace = reader.namespace(&namespace_id);
     writer
-        .create_namespace(
-            &namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let namespace_writer = writer
@@ -1302,10 +1260,10 @@ async fn a_recursive_delete_hides_matches_and_an_undelete_restores_them() {
         .expect("open namespace");
     for name in ["a", "b"] {
         namespace_writer
-            .put_file_bytes(
+            .put_file(
                 &format!("/docs/{name}.txt"),
                 format!("subtree needle {name}\n").as_bytes(),
-                PutFileOptions::new(loonfs_test_support::test_actor()),
+                &loonfs_test_support::test_actor(),
             )
             .await
             .expect("write file");
@@ -1329,11 +1287,12 @@ async fn a_recursive_delete_hides_matches_and_an_undelete_restores_them() {
     );
 
     let deleted = namespace_writer
-        .delete_path(
+        .delete_path_with_options(
             "/docs",
-            loonfs::DeleteOptions {
+            &loonfs_test_support::test_actor(),
+            &loonfs::DeleteOptions {
                 behavior: loonfs::DeleteDirectoryBehavior::Recursive,
-                ..loonfs::DeleteOptions::new(loonfs_test_support::test_actor())
+                ..Default::default()
             },
         )
         .await
@@ -1359,7 +1318,7 @@ async fn a_recursive_delete_hides_matches_and_an_undelete_restores_them() {
             docs_inode_id,
             deleted.committed_seq,
             Some("/docs"),
-            loonfs::UndeleteOptions::new(loonfs_test_support::test_actor()),
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("undelete the subtree");
@@ -1392,10 +1351,7 @@ async fn undeleting_a_subtree_deleted_before_backfill_needs_no_rebuild() {
     let reader = writer.read_only();
     let namespace = reader.namespace(&namespace_id);
     writer
-        .create_namespace(
-            &namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let namespace_writer = writer
@@ -1403,10 +1359,10 @@ async fn undeleting_a_subtree_deleted_before_backfill_needs_no_rebuild() {
         .expect("open namespace");
     for name in ["a", "b"] {
         namespace_writer
-            .put_file_bytes(
+            .put_file(
                 &format!("/docs/{name}.txt"),
                 format!("restored needle {name}\n").as_bytes(),
-                PutFileOptions::new(loonfs_test_support::test_actor()),
+                &loonfs_test_support::test_actor(),
             )
             .await
             .expect("write file before delete");
@@ -1417,11 +1373,12 @@ async fn undeleting_a_subtree_deleted_before_backfill_needs_no_rebuild() {
         .expect("stat docs before delete")
         .inode_id;
     let deleted = namespace_writer
-        .delete_path(
+        .delete_path_with_options(
             "/docs",
-            loonfs::DeleteOptions {
+            &loonfs_test_support::test_actor(),
+            &loonfs::DeleteOptions {
                 behavior: loonfs::DeleteDirectoryBehavior::Recursive,
-                ..loonfs::DeleteOptions::new(loonfs_test_support::test_actor())
+                ..Default::default()
             },
         )
         .await
@@ -1444,7 +1401,7 @@ async fn undeleting_a_subtree_deleted_before_backfill_needs_no_rebuild() {
             docs_inode_id,
             deleted.committed_seq,
             Some("/docs"),
-            loonfs::UndeleteOptions::new(loonfs_test_support::test_actor()),
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("undelete subtree after backfill");
@@ -1495,10 +1452,7 @@ async fn a_failing_worker_step_never_blocks_a_concurrent_commit() {
     let reader = writer.read_only();
     let namespace = reader.namespace(&namespace_id);
     writer
-        .create_namespace(
-            &namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let namespace_writer = writer
@@ -1516,13 +1470,10 @@ async fn a_failing_worker_step_never_blocks_a_concurrent_commit() {
         .await
         .expect("poison the grep manifest");
 
+    let actor = loonfs_test_support::test_actor();
     let (build, commit) = tokio::join!(
         worker.build_step(&namespace_id, GramIndexBuildPolicy::default()),
-        namespace_writer.put_file_bytes(
-            "/during-failure.txt",
-            b"isolated needle\n",
-            PutFileOptions::new(loonfs_test_support::test_actor()),
-        ),
+        namespace_writer.put_file("/during-failure.txt", b"isolated needle\n", &actor),
     );
     let error = build.expect_err("an unreadable grep manifest fails the step");
     assert_eq!(error.code(), ErrorCode::IndexCorrupt);
@@ -1547,10 +1498,7 @@ async fn grep_manifest_lifecycle_pins_not_materialized_error_surface() {
         .await
         .expect("writer");
     writer
-        .create_namespace(
-            &namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let worker = worker(&store).await;
@@ -1620,10 +1568,7 @@ async fn a_backfill_checkpoint_mismatch_is_corruption_without_writes() {
         .await
         .expect("writer");
     writer
-        .create_namespace(
-            &namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create");
     let worker = worker(&store).await;
@@ -1679,10 +1624,7 @@ async fn backfilling_manifest_without_checkpoint_id_is_index_corrupt() {
         .await
         .expect("writer");
     writer
-        .create_namespace(
-            &namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let worker = worker(&store).await;
@@ -1774,10 +1716,7 @@ async fn planless_scan_covers_wal_revisions_at_or_below_index_watermark() {
         .await
         .expect("writer");
     writer
-        .create_namespace(
-            &namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let namespace = writer
@@ -1789,10 +1728,10 @@ async fn planless_scan_covers_wal_revisions_at_or_below_index_watermark() {
     drive_worker_to_current(&worker, &namespace_id, GramIndexBuildPolicy::default()).await;
 
     namespace
-        .put_file_bytes(
+        .put_file(
             "/only-in-wal.txt",
             b"x\n",
-            PutFileOptions::new(loonfs_test_support::test_actor()),
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("write WAL-only file");
@@ -1894,10 +1833,7 @@ async fn grep_worker_pins_reorganized_tail_and_pagination_results() {
         .await
         .expect("writer");
     writer
-        .create_namespace(
-            &namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let namespace = writer
@@ -1914,10 +1850,10 @@ async fn grep_worker_pins_reorganized_tail_and_pagination_results() {
 
     for round in 0..6u32 {
         namespace
-            .put_file_bytes(
+            .put_file(
                 &format!("/docs/file-{round}.txt"),
                 format!("shared needle {round}\nshared needle again {round}\n").as_bytes(),
-                PutFileOptions::new(loonfs_test_support::test_actor()),
+                &loonfs_test_support::test_actor(),
             )
             .await
             .expect("write indexed file");
@@ -1933,10 +1869,10 @@ async fn grep_worker_pins_reorganized_tail_and_pagination_results() {
     drive_worker_to_current(&worker, &namespace_id, policy).await;
 
     namespace
-        .put_file_bytes(
+        .put_file(
             "/tail.txt",
             b"tail-only needle\n",
-            PutFileOptions::new(loonfs_test_support::test_actor()),
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("write tail file");
@@ -2035,18 +1971,15 @@ async fn fork_of_grep_enabled_namespace_starts_unmaterialized_without_manifest_s
         .await
         .expect("writer");
     writer
-        .create_namespace(
-            &source,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&source, &loonfs_test_support::test_actor())
         .await
         .expect("create source");
     let namespace = writer.open_namespace(&source).expect("open namespace");
     namespace
-        .put_file_bytes(
+        .put_file(
             "/source.txt",
             b"fork needle\n",
-            PutFileOptions::new(loonfs_test_support::test_actor()),
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("write source");
@@ -2080,11 +2013,7 @@ async fn fork_of_grep_enabled_namespace_starts_unmaterialized_without_manifest_s
     );
 
     writer
-        .fork_namespace(
-            &source,
-            &target,
-            loonfs_api::options::ForkNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .fork_namespace(&source, &target, &loonfs_test_support::test_actor())
         .await
         .expect("fork source");
 
@@ -2131,10 +2060,7 @@ async fn checkpoint_backfill_matches_incremental_worker_results() {
         .expect("writer");
     for namespace_id in [&backfill_namespace, &incremental_namespace] {
         writer
-            .create_namespace(
-                namespace_id,
-                CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-            )
+            .create_namespace(namespace_id, &loonfs_test_support::test_actor())
             .await
             .expect("create namespace");
     }
@@ -2154,10 +2080,10 @@ async fn checkpoint_backfill_matches_incremental_worker_results() {
         for namespace_id in [&backfill_namespace, &incremental_namespace] {
             let namespace = writer.open_namespace(namespace_id).expect("open namespace");
             namespace
-                .put_file_bytes(
+                .put_file(
                     &format!("/file-{index}.txt"),
                     format!("equivalence needle {index}\n").as_bytes(),
-                    PutFileOptions::new(loonfs_test_support::test_actor()),
+                    &loonfs_test_support::test_actor(),
                 )
                 .await
                 .expect("write file");
@@ -2209,20 +2135,17 @@ async fn a_backfilling_manifest_never_reports_a_built_through_sequence() {
         .await
         .expect("writer");
     writer
-        .create_namespace(
-            &namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
     namespace
-        .put_file_bytes(
+        .put_file(
             "/note.txt",
             b"honest needle\n",
-            PutFileOptions::new(loonfs_test_support::test_actor()),
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("write file");
@@ -2308,10 +2231,7 @@ async fn enable_disable_and_cached_queries_use_numbered_publication() {
         .await
         .expect("writer");
     writer
-        .create_namespace(
-            &namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("namespace");
     let host = GrepHost::new(&store, "numbered-query").await;
@@ -2415,10 +2335,7 @@ async fn gc_preserves_discovery_and_applies_manifest_and_segment_age_rules() {
         .await
         .expect("writer");
     writer
-        .create_namespace(
-            &namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("namespace");
     let namespace = writer
@@ -2538,10 +2455,7 @@ async fn gc_preserves_discovery_and_applies_manifest_and_segment_age_rules() {
         Err(GrepError::CorruptIndex { .. })
     ));
     assert_eq!(recording.counts().deletes, 0);
-    namespace
-        .delete(DeleteNamespaceOptions::default())
-        .await
-        .expect("tombstone");
+    namespace.delete().await.expect("tombstone");
     let core_keys: Vec<_> = store
         .list_prefix(&format!("namespaces/{namespace_id}/"))
         .await
@@ -2609,10 +2523,7 @@ async fn gc_keeps_a_superseded_manifest_and_its_segments_while_its_successor_is_
         .await
         .expect("writer");
     writer
-        .create_namespace(
-            &namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("namespace");
     let superseded = crate::golden_formats::segment_ref(1, 1, 0);
@@ -2717,14 +2628,15 @@ async fn grep_filters_candidates_the_subject_cannot_read() {
         .expect("writer");
     let namespace_id = NamespaceId::parse("grep-access").expect("namespace");
     writer
-        .create_namespace(
+        .create_namespace_with_options(
             &namespace_id,
-            CreateNamespaceOptions {
+            &loonfs_test_support::test_actor(),
+            &CreateNamespaceOptions {
                 access: NamespaceAccess::Acl {
                     principal_scope: PrincipalScope::parse("org_demo").expect("scope"),
                     root_grants: grants("prn_root", &[AccessRight::Admin]),
                 },
-                ..CreateNamespaceOptions::new(loonfs_test_support::test_actor())
+                ..Default::default()
             },
         )
         .await
@@ -2758,7 +2670,7 @@ async fn grep_filters_candidates_the_subject_cannot_read() {
         },
     ] {
         namespace
-            .create_commit(
+            .commit(
                 CommitRequest::single(
                     CommitId::generate(),
                     loonfs_test_support::test_actor(),
@@ -2772,7 +2684,7 @@ async fn grep_filters_candidates_the_subject_cannot_read() {
     }
     for path in ["/team/file", "/team/secret/file"] {
         let content = namespace
-            .prepare_file_bytes(b"needle\n")
+            .prepare_content(b"needle\n")
             .await
             .expect("content");
         namespace

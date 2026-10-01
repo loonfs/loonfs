@@ -11,9 +11,9 @@ use crate::{ServerConfig, StoreConfig};
 use async_trait::async_trait;
 use axum::http::StatusCode;
 use loonfs::{
-    CreateNamespaceOptions, LoonFs, MaintenanceCancellation, MaintenanceConclusion, MaintenanceJob,
-    MaintenanceJobId, MaintenanceProbe, MaintenanceRunReport, PutFileOptions, SharedObjectStore,
-    StoredMetadataBlockCache, TraceMode, TraceStoreKind, Writable,
+    LoonFs, MaintenanceCancellation, MaintenanceConclusion, MaintenanceJob, MaintenanceJobId,
+    MaintenanceProbe, MaintenanceRunReport, SharedObjectStore, StoredMetadataBlockCache, TraceMode,
+    TraceStoreKind, Writable,
 };
 use loonfs_api::{
     CapabilityDocument, ChangeSeq, GrepRequest, NamespaceId, PaginationPolicy,
@@ -54,10 +54,7 @@ async fn build_handles_installs_jsonl_object_store_metrics_recorder() {
         .await
         .expect("build handles");
         runtime
-            .create_namespace(
-                &namespace_id("metrics"),
-                CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-            )
+            .create_namespace(&namespace_id("metrics"), &loonfs_test_support::test_actor())
             .await
             .expect("create namespace");
     }
@@ -344,10 +341,7 @@ async fn embedded_runner_shutdown_drains_an_active_grep_step() {
     let store = blocking_store.clone() as SharedObjectStore;
     let writer = test_runtime(store.clone(), "grep-shutdown-seed").await;
     writer
-        .create_namespace(
-            &namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     grep_worker(&store, "grep-shutdown-enable")
@@ -437,10 +431,7 @@ async fn shutdown_closes_maintenance_admission_before_draining_publications() {
     .expect("build app");
     state
         .runtime
-        .create_namespace(
-            &namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let namespace = state
@@ -477,11 +468,7 @@ async fn shutdown_closes_maintenance_admission_before_draining_publications() {
         let namespace = namespace.clone();
         async move {
             namespace
-                .put_file_bytes(
-                    "/parked.txt",
-                    b"body",
-                    PutFileOptions::new(loonfs_test_support::test_actor()),
-                )
+                .put_file("/parked.txt", b"body", &loonfs_test_support::test_actor())
                 .await
         }
     });
@@ -534,10 +521,7 @@ async fn a_namespace_advance_nudges_the_enabled_namespaces_index() {
     let namespace_id = namespace_id("grep-observer");
     state
         .runtime
-        .create_namespace(
-            &namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let namespace = state
@@ -573,10 +557,10 @@ async fn a_namespace_advance_nudges_the_enabled_namespaces_index() {
 
     // The publish is the only trigger from here on: nothing below nudges.
     namespace
-        .put_file_bytes(
+        .put_file(
             "/note.txt",
             b"observer-driven needle\n",
-            PutFileOptions::new(loonfs_test_support::test_actor()),
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("publish file");
@@ -809,10 +793,7 @@ async fn hidden_maintenance_surface_keeps_filesystem_and_query_routes_served() {
     let namespace_id = namespace_id("hidden");
     state
         .runtime
-        .create_namespace(
-            &namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let commit_response = router

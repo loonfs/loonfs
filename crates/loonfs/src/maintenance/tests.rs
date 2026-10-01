@@ -1003,25 +1003,15 @@ async fn retired_fork_collection_schedules_the_source_namespace() {
     let source = namespace_id("source");
     let target = namespace_id("target");
     writer
-        .create_namespace(
-            &source,
-            crate::CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&source, &loonfs_test_support::test_actor())
         .await
         .expect("source");
     writer
-        .fork_namespace(
-            &source,
-            &target,
-            loonfs_api::options::ForkNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .fork_namespace(&source, &target, &loonfs_test_support::test_actor())
         .await
         .expect("fork");
     let namespace = writer.open_namespace(&target).expect("open namespace");
-    namespace
-        .delete(Default::default())
-        .await
-        .expect("delete target");
+    namespace.delete().await.expect("delete target");
     let maintenance = crate::LoonFs::builder_with_store(store.clone())
         .writer_id("gc-follow-up")
         .build()
@@ -1050,11 +1040,7 @@ async fn write_file(
 ) {
     let namespace = writer.open_namespace(namespace_id).expect("open namespace");
     namespace
-        .put_file_bytes(
-            path,
-            b"body",
-            crate::PutFileOptions::new(loonfs_test_support::test_actor()),
-        )
+        .put_file(path, b"body", &loonfs_test_support::test_actor())
         .await
         .expect("write a file");
 }
@@ -1092,10 +1078,7 @@ async fn an_idle_tail_folds_once_and_again_only_after_a_write() {
     runner.attach_hints(receiver);
     let namespace_id = namespace_id("idle");
     writer
-        .create_namespace(
-            &namespace_id,
-            crate::CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("namespace");
 
@@ -1198,10 +1181,7 @@ impl IdleFoldHarness {
         runner.attach_hints(receiver);
         let namespace_id = namespace_id("idle");
         writer
-            .create_namespace(
-                &namespace_id,
-                crate::CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-            )
+            .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
             .await
             .expect("namespace");
         Self {

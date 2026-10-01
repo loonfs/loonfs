@@ -70,10 +70,7 @@ async fn host(writer_id: &str) -> (tempfile::TempDir, axum::Router, BindingState
 async fn create_namespace(state: &BindingState, namespace_id: &NamespaceId) {
     state
         .runtime
-        .create_namespace(
-            namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
 }

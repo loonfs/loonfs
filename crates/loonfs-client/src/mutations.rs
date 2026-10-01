@@ -3,9 +3,20 @@
 use super::*;
 use crate::transport::SendPolicy;
 use crate::uploads::staging::{PreparedContent, PreparedContentKind, UploadContinuity};
+use loonfs_api::options::{AccessState, AttributeChanges};
+use loonfs_api::ActorId;
 
 fn commit_id_or_generated(commit: &CommitOptions) -> CommitId {
     commit.commit_id.clone().unwrap_or_else(CommitId::generate)
+}
+
+fn single_operation(commit: &CommitOptions, operation: FilesystemOperation) -> CommitRequest {
+    CommitRequest::single(
+        commit_id_or_generated(commit),
+        commit.message.clone(),
+        operation,
+    )
+    .preconditions(commit.preconditions.clone())
 }
 
 impl Client {
@@ -15,20 +26,31 @@ impl Client {
     /// Operations that introduce new external content carry their proofs in
     /// the request's `content_tokens`; stage the bytes with the upload
     /// methods first.
-    pub async fn create_commit(
+    pub async fn commit(
         &self,
         namespace_id: &NamespaceId,
+        actor: &ActorId,
         request: &CommitRequest,
-        actor_id: &loonfs_api::ActorId,
     ) -> Result<Commit> {
         let url = format!("{}/v0/namespaces/{namespace_id}/commits", self.base_url);
         // The request's commit id resolves an ambiguous resend through a durable receipt.
         self.request_json::<_, Commit>(
-            self.post(&url).header("Loonfs-Actor", actor_id.as_str()),
+            self.post(&url).header("Loonfs-Actor", actor.as_str()),
             Some(request),
             SendPolicy::Retry,
         )
         .await
+    }
+
+    /// Writes file bytes to a path, refusing to replace an existing file.
+    pub async fn put_file(
+        &self,
+        spec: &NamespacePath,
+        bytes: &[u8],
+        actor: &ActorId,
+    ) -> Result<Commit> {
+        self.put_file_with_options(spec, bytes, actor, &PutFileOptions::default())
+            .await
     }
 
     /// Writes file bytes to a path.
@@ -36,16 +58,31 @@ impl Client {
     /// Content at or under the advertised inline limit is identified by its bytes.
     /// A rerun with the same bytes and commit ID replays. Larger content, or content
     /// prepared without inline support, uploads a new object, so a rerun conflicts.
-    /// At every size, retain [`Self::prepare_file_bytes`]'s result and retry with
-    /// [`Self::put_file_prepared`], the same commit ID, and unchanged options.
-    pub async fn put_file_bytes(
+    /// At every size, retain [`Self::prepare_content`]'s result and retry with
+    /// [`Self::put_file_prepared_with_options`], the same commit ID, and
+    /// unchanged options.
+    pub async fn put_file_with_options(
         &self,
         spec: &NamespacePath,
         bytes: &[u8],
+        actor: &ActorId,
         options: &PutFileOptions,
     ) -> Result<Commit> {
-        let prepared = self.prepare_file_bytes(spec.namespace(), bytes).await?;
-        self.put_file_prepared(spec, prepared, options).await
+        let prepared = self.prepare_content(spec.namespace(), bytes).await?;
+        self.put_file_prepared_with_options(spec, prepared, actor, options)
+            .await
+    }
+
+    /// Writes a file from a payload read once from its source, refusing to
+    /// replace an existing file.
+    pub async fn put_file_stream(
+        &self,
+        spec: &NamespacePath,
+        source: PayloadSource,
+        actor: &ActorId,
+    ) -> Result<Commit> {
+        self.put_file_stream_with_options(spec, source, actor, &PutFileOptions::default())
+            .await
     }
 
     /// Writes a file from a payload read once from its source.
@@ -58,15 +95,17 @@ impl Client {
     ///
     /// Inline content is identified by its bytes, so a rerun with the same bytes
     /// and commit ID replays. Larger content uploads, so a rerun conflicts.
-    /// At every size, retain [`Self::prepare_file_stream`]'s result and retry with
-    /// [`Self::put_file_prepared`], the same commit ID, and unchanged options.
-    pub async fn put_file_stream(
+    /// At every size, retain [`Self::prepare_content_stream`]'s result and retry with
+    /// [`Self::put_file_prepared_with_options`], the same commit ID, and
+    /// unchanged options.
+    pub async fn put_file_stream_with_options(
         &self,
         spec: &NamespacePath,
         source: PayloadSource,
+        actor: &ActorId,
         options: &PutFileOptions,
     ) -> Result<Commit> {
-        self.put_file_stream_continuing(spec, source, options, UploadContinuity::default())
+        self.put_file_stream_continuing(spec, source, actor, options, UploadContinuity::default())
             .await
     }
 
@@ -74,7 +113,7 @@ impl Client {
     ///
     /// The journal records the complete commit request before submission for
     /// every transport. Multipart uploads also record session geometry and parts.
-    /// Save the request and actor and replay them with [`Self::create_commit`] after an
+    /// Save the request and actor and replay them with [`Self::commit`] after an
     /// interruption; it carries the inline bytes or uploaded reference and commit ID.
     ///
     /// A resumed multipart attempt still receives the source from the
@@ -83,6 +122,7 @@ impl Client {
         &self,
         spec: &NamespacePath,
         source: PayloadSource,
+        actor: &ActorId,
         options: &PutFileOptions,
         journal: &dyn PutFileJournal,
         resume: Option<&MultipartUploadResume>,
@@ -90,6 +130,7 @@ impl Client {
         self.put_file_stream_continuing(
             spec,
             source,
+            actor,
             options,
             UploadContinuity {
                 resume,
@@ -103,23 +144,24 @@ impl Client {
         &self,
         spec: &NamespacePath,
         source: PayloadSource,
+        actor: &ActorId,
         options: &PutFileOptions,
         continuity: UploadContinuity<'_>,
     ) -> Result<Commit> {
         let prepared_content = self
             .prepare_file_source(spec.namespace(), source, continuity)
             .await?;
-        self.commit_prepared_file(spec, prepared_content, options, continuity.journal)
+        self.commit_prepared_file(spec, prepared_content, actor, options, continuity.journal)
             .await
     }
 
-    /// Prepares file bytes for publication.
+    /// Prepares content for publication.
     ///
     /// Content at or under the advertised inline limit needs no upload and has
     /// no expiry. Larger content uploads; its proof expires at the upload's
     /// receipt horizon. Retain this value and an explicit commit ID to retry
-    /// [`Self::put_file_prepared`] at every size.
-    pub async fn prepare_file_bytes(
+    /// [`Self::put_file_prepared_with_options`] at every size.
+    pub async fn prepare_content(
         &self,
         namespace_id: &NamespaceId,
         bytes: &[u8],
@@ -138,14 +180,31 @@ impl Client {
 
     /// Prepares a stream, buffering up to the advertised inline limit plus one byte.
     ///
-    /// The result has the same retry contract as [`Self::prepare_file_bytes`].
-    pub async fn prepare_file_stream(
+    /// The result has the same retry contract as [`Self::prepare_content`].
+    pub async fn prepare_content_stream(
         &self,
         namespace_id: &NamespaceId,
         source: PayloadSource,
     ) -> Result<PreparedContent> {
         self.prepare_file_source(namespace_id, source, UploadContinuity::default())
             .await
+    }
+
+    /// Publishes already-prepared content, refusing to replace an existing
+    /// file.
+    pub async fn put_file_prepared(
+        &self,
+        spec: &NamespacePath,
+        prepared_content: PreparedContent,
+        actor: &ActorId,
+    ) -> Result<Commit> {
+        self.put_file_prepared_with_options(
+            spec,
+            prepared_content,
+            actor,
+            &PutFileOptions::default(),
+        )
+        .await
     }
 
     /// Publishes already-prepared content without uploading it again.
@@ -155,13 +214,14 @@ impl Client {
     /// generates a new one on each call. Replay is bounded by server receipt
     /// retention. For process recovery, use [`Self::put_file_stream_resumable`]
     /// to save the full request before submission.
-    pub async fn put_file_prepared(
+    pub async fn put_file_prepared_with_options(
         &self,
         spec: &NamespacePath,
         prepared_content: PreparedContent,
+        actor: &ActorId,
         options: &PutFileOptions,
     ) -> Result<Commit> {
-        self.commit_prepared_file(spec, prepared_content, options, None)
+        self.commit_prepared_file(spec, prepared_content, actor, options, None)
             .await
     }
 
@@ -175,6 +235,7 @@ impl Client {
         spec: &NamespacePath,
         content_ref: ContentRef,
         content_token: Option<ContentToken>,
+        actor: &ActorId,
         options: &PutFileOptions,
         journal: Option<&dyn PutFileJournal>,
     ) -> Result<Commit> {
@@ -185,7 +246,7 @@ impl Client {
                 content_token,
             },
         };
-        self.commit_prepared_file(spec, staged, options, journal)
+        self.commit_prepared_file(spec, staged, actor, options, journal)
             .await
     }
 
@@ -194,6 +255,7 @@ impl Client {
         &self,
         spec: &NamespacePath,
         prepared_content: PreparedContent,
+        actor: &ActorId,
         options: &PutFileOptions,
         journal: Option<&dyn PutFileJournal>,
     ) -> Result<Commit> {
@@ -222,118 +284,172 @@ impl Client {
         };
         if let Some(journal) = journal {
             journal
-                .commit_prepared(&request, &options.commit.actor_id, upload_id.as_ref())
+                .commit_prepared(&request, actor, upload_id.as_ref())
                 .map_err(|error| {
                     ClientError::Io(format!(
                         "could not record file commit `{commit_id}` before submission: {error}"
                     ))
                 })?;
         }
-        self.create_commit(spec.namespace(), &request, &options.commit.actor_id)
+        self.commit(spec.namespace(), actor, &request).await
+    }
+
+    /// Creates a directory at the requested path, failing when its parent is
+    /// missing.
+    pub async fn create_directory(&self, spec: &NamespacePath, actor: &ActorId) -> Result<Commit> {
+        self.create_directory_with_options(spec, actor, &CreateDirectoryOptions::default())
             .await
     }
 
     /// Creates a directory at the requested path.
-    pub async fn create_directory(
+    pub async fn create_directory_with_options(
         &self,
         spec: &NamespacePath,
+        actor: &ActorId,
         options: &CreateDirectoryOptions,
     ) -> Result<Commit> {
-        self.create_commit(
+        self.commit(
             spec.namespace(),
-            &CommitRequest::single(
-                commit_id_or_generated(&options.commit),
-                options.commit.message.clone(),
+            actor,
+            &single_operation(
+                &options.commit,
                 FilesystemOperation::CreateDirectory {
                     path: spec.absolute_path().clone(),
                     parents: options.parents,
                 },
-            )
-            .preconditions(options.commit.preconditions.clone()),
-            &options.commit.actor_id,
+            ),
         )
         .await
     }
 
+    /// Deletes the requested file or empty directory.
+    pub async fn delete_path(&self, spec: &NamespacePath, actor: &ActorId) -> Result<Commit> {
+        self.delete_path_with_options(spec, actor, &DeleteOptions::default())
+            .await
+    }
+
     /// Deletes the requested path.
-    pub async fn delete_path(
+    pub async fn delete_path_with_options(
         &self,
         spec: &NamespacePath,
+        actor: &ActorId,
         options: &DeleteOptions,
     ) -> Result<Commit> {
-        self.create_commit(
+        self.commit(
             spec.namespace(),
-            &CommitRequest::single(
-                commit_id_or_generated(&options.commit),
-                options.commit.message.clone(),
+            actor,
+            &single_operation(
+                &options.commit,
                 FilesystemOperation::DeletePath {
                     path: spec.absolute_path().clone(),
                     behavior: options.behavior,
                     expected_inode_id: options.expected_inode_id,
                 },
-            )
-            .preconditions(options.commit.preconditions.clone()),
-            &options.commit.actor_id,
+            ),
+        )
+        .await
+    }
+
+    /// Writes and removes attributes on the inode a path resolves to.
+    pub async fn update_attributes(
+        &self,
+        spec: &NamespacePath,
+        actor: &ActorId,
+        changes: AttributeChanges,
+    ) -> Result<Commit> {
+        self.update_attributes_with_options(
+            spec,
+            actor,
+            changes,
+            &UpdateAttributesOptions::default(),
         )
         .await
     }
 
     /// Writes and removes attributes on the inode a path resolves to. The
     /// target may be a file or a directory.
-    pub async fn update_attributes(
+    pub async fn update_attributes_with_options(
         &self,
         spec: &NamespacePath,
+        actor: &ActorId,
+        changes: AttributeChanges,
         options: &UpdateAttributesOptions,
     ) -> Result<Commit> {
-        self.create_commit(
+        self.commit(
             spec.namespace(),
-            &CommitRequest::single(
-                commit_id_or_generated(&options.commit),
-                options.commit.message.clone(),
+            actor,
+            &single_operation(
+                &options.commit,
                 FilesystemOperation::UpdateAttributes {
                     path: spec.absolute_path().clone(),
-                    set: options.set.clone(),
-                    remove: options.remove.clone(),
+                    set: changes.set,
+                    remove: changes.remove,
                     expected_inode_id: options.expected_inode_id,
                     expected_attributes_revision_no: options.expected_attributes_revision_no,
                 },
-            )
-            .preconditions(options.commit.preconditions.clone()),
-            &options.commit.actor_id,
+            ),
         )
         .await
     }
 
-    /// Replaces a visible inode's access row, including the root, under optional inode and revision preconditions.
+    /// Replaces a visible inode's access row, including the root.
     pub async fn update_access(
         &self,
         spec: &NamespacePath,
+        actor: &ActorId,
+        access: AccessState,
+    ) -> Result<Commit> {
+        self.update_access_with_options(spec, actor, access, &UpdateAccessOptions::default())
+            .await
+    }
+
+    /// Replaces a visible inode's access row, including the root, under optional inode and revision preconditions.
+    pub async fn update_access_with_options(
+        &self,
+        spec: &NamespacePath,
+        actor: &ActorId,
+        access: AccessState,
         options: &UpdateAccessOptions,
     ) -> Result<Commit> {
-        self.create_commit(
+        self.commit(
             spec.namespace(),
-            &CommitRequest::single(
-                commit_id_or_generated(&options.commit),
-                options.commit.message.clone(),
+            actor,
+            &single_operation(
+                &options.commit,
                 FilesystemOperation::UpdateAccess {
                     path: spec.absolute_path().clone(),
-                    boundary: options.boundary,
-                    grants: options.grants.clone(),
+                    boundary: access.boundary,
+                    grants: access.grants,
                     expected_inode_id: options.expected_inode_id,
                     expected_access_revision_no: options.expected_access_revision_no,
                 },
-            )
-            .preconditions(options.commit.preconditions.clone()),
-            &options.commit.actor_id,
+            ),
+        )
+        .await
+    }
+
+    /// Moves a path within one namespace, refusing to replace the destination.
+    pub async fn move_path(
+        &self,
+        source_path: &NamespacePath,
+        destination_path: &NamespacePath,
+        actor: &ActorId,
+    ) -> Result<Commit> {
+        self.move_path_with_options(
+            source_path,
+            destination_path,
+            actor,
+            &MoveOptions::default(),
         )
         .await
     }
 
     /// Moves a path within one namespace.
-    pub async fn move_path(
+    pub async fn move_path_with_options(
         &self,
         source_path: &NamespacePath,
         destination_path: &NamespacePath,
+        actor: &ActorId,
         options: &MoveOptions,
     ) -> Result<Commit> {
         if source_path.namespace() != destination_path.namespace() {
@@ -343,11 +459,11 @@ impl Client {
                 destination_path.namespace()
             )));
         }
-        self.create_commit(
+        self.commit(
             source_path.namespace(),
-            &CommitRequest::single(
-                commit_id_or_generated(&options.commit),
-                options.commit.message.clone(),
+            actor,
+            &single_operation(
+                &options.commit,
                 FilesystemOperation::MovePath {
                     source_path: source_path.absolute_path().clone(),
                     destination_path: destination_path.absolute_path().clone(),
@@ -357,18 +473,33 @@ impl Client {
                         expected_revision_no: options.expected_destination_revision_no,
                     },
                 },
-            )
-            .preconditions(options.commit.preconditions.clone()),
-            &options.commit.actor_id,
+            ),
+        )
+        .await
+    }
+
+    /// Copies a path within one namespace, refusing to replace the destination.
+    pub async fn copy_path(
+        &self,
+        source_path: &NamespacePath,
+        destination_path: &NamespacePath,
+        actor: &ActorId,
+    ) -> Result<Commit> {
+        self.copy_path_with_options(
+            source_path,
+            destination_path,
+            actor,
+            &CopyOptions::default(),
         )
         .await
     }
 
     /// Copies a path within one namespace.
-    pub async fn copy_path(
+    pub async fn copy_path_with_options(
         &self,
         source_path: &NamespacePath,
         destination_path: &NamespacePath,
+        actor: &ActorId,
         options: &CopyOptions,
     ) -> Result<Commit> {
         if source_path.namespace() != destination_path.namespace() {
@@ -378,11 +509,11 @@ impl Client {
                 destination_path.namespace()
             )));
         }
-        self.create_commit(
+        self.commit(
             source_path.namespace(),
-            &CommitRequest::single(
-                commit_id_or_generated(&options.commit),
-                options.commit.message.clone(),
+            actor,
+            &single_operation(
+                &options.commit,
                 FilesystemOperation::CopyPath {
                     source_path: source_path.absolute_path().clone(),
                     destination_path: destination_path.absolute_path().clone(),
@@ -392,9 +523,7 @@ impl Client {
                         expected_revision_no: options.expected_destination_revision_no,
                     },
                 },
-            )
-            .preconditions(options.commit.preconditions.clone()),
-            &options.commit.actor_id,
+            ),
         )
         .await
     }
@@ -406,23 +535,43 @@ impl Client {
         inode_id: InodeId,
         deletion_seq: ChangeSeq,
         destination_path: Option<&AbsolutePath>,
-        options: &UndeleteOptions,
+        actor: &ActorId,
+    ) -> Result<Commit> {
+        self.undelete_with_options(
+            namespace_id,
+            inode_id,
+            deletion_seq,
+            destination_path,
+            actor,
+            &CommitOptions::default(),
+        )
+        .await
+    }
+
+    /// Restores a deleted file or subtree, optionally at a new path, under
+    /// the given commit settings.
+    pub async fn undelete_with_options(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        deletion_seq: ChangeSeq,
+        destination_path: Option<&AbsolutePath>,
+        actor: &ActorId,
+        options: &CommitOptions,
     ) -> Result<Commit> {
         // An absent destination restores in place: the entry re-binds under
         // the parent and name its deletion recorded.
-        self.create_commit(
+        self.commit(
             namespace_id,
-            &CommitRequest::single(
-                commit_id_or_generated(&options.commit),
-                options.commit.message.clone(),
+            actor,
+            &single_operation(
+                options,
                 FilesystemOperation::Undelete {
                     inode_id,
                     deletion_seq,
                     destination_path: destination_path.cloned(),
                 },
-            )
-            .preconditions(options.commit.preconditions.clone()),
-            &options.commit.actor_id,
+            ),
         )
         .await
     }
@@ -432,20 +581,36 @@ impl Client {
         &self,
         spec: &NamespacePath,
         source_revision_no: RevisionNo,
-        options: &RestoreRevisionOptions,
+        actor: &ActorId,
     ) -> Result<Commit> {
-        self.create_commit(
+        self.restore_revision_with_options(
+            spec,
+            source_revision_no,
+            actor,
+            &CommitOptions::default(),
+        )
+        .await
+    }
+
+    /// Makes an earlier file revision the current revision, under the given
+    /// commit settings.
+    pub async fn restore_revision_with_options(
+        &self,
+        spec: &NamespacePath,
+        source_revision_no: RevisionNo,
+        actor: &ActorId,
+        options: &CommitOptions,
+    ) -> Result<Commit> {
+        self.commit(
             spec.namespace(),
-            &CommitRequest::single(
-                commit_id_or_generated(&options.commit),
-                options.commit.message.clone(),
+            actor,
+            &single_operation(
+                options,
                 FilesystemOperation::RestoreRevision {
                     path: spec.absolute_path().clone(),
                     source_revision_no,
                 },
-            )
-            .preconditions(options.commit.preconditions.clone()),
-            &options.commit.actor_id,
+            ),
         )
         .await
     }
@@ -689,11 +854,7 @@ mod tests {
         let (transport, client) = single_attempt_probe();
         assert_single_attempt(
             client
-                .fork_namespace(
-                    &namespace_id,
-                    &fork_id,
-                    &ForkNamespaceOptions::new(loonfs_test_support::test_actor()),
-                )
+                .fork_namespace(&namespace_id, &fork_id, &loonfs_test_support::test_actor())
                 .await,
             &transport,
         );
@@ -779,11 +940,17 @@ mod tests {
         let spec = NamespacePath::parse("demo", "/docs").expect("valid namespace path");
 
         let actual = client
-            .create_directory(&spec, &{
-                let mut options = CreateDirectoryOptions::new(loonfs_test_support::test_actor());
-                options.commit.commit_id = Some(commit_id);
-                options
-            })
+            .create_directory_with_options(
+                &spec,
+                &loonfs_test_support::test_actor(),
+                &CreateDirectoryOptions {
+                    commit: CommitOptions {
+                        commit_id: Some(commit_id),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            )
             .await
             .expect("commit-id mutation should retry");
         assert_eq!(actual, response);

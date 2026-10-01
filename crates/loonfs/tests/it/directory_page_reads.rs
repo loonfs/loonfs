@@ -1,8 +1,7 @@
 //! Store reads and entry metadata for a directory page across folded batches.
 
 use loonfs::{
-    CreateDirectoryOptions, CreateNamespaceOptions, DestinationBehavior, LoonFs, PageRequest,
-    PutFileOptions, SharedObjectStore, StatOptions,
+    DestinationBehavior, LoonFs, PageRequest, PutFileOptions, SharedObjectStore, StatOptions,
 };
 use loonfs_api::wire::manifest::MetadataRowFamily;
 use loonfs_core::test_support::STORE_READ_WAVE;
@@ -55,14 +54,14 @@ async fn directory_pages_use_bindings_and_load_revision_heads_concurrently() {
             "directory-page-maintenance",
         ));
     writer
-        .create_namespace(&namespace_id, CreateNamespaceOptions::new(actor.clone()))
+        .create_namespace(&namespace_id, &actor)
         .await
         .expect("namespace");
     let namespace_writer = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
     namespace_writer
-        .create_directory("/files", CreateDirectoryOptions::new(actor.clone()))
+        .create_directory("/files", &actor)
         .await
         .expect("directory");
     maintenance
@@ -73,10 +72,10 @@ async fn directory_pages_use_bindings_and_load_revision_heads_concurrently() {
     for batch in 0..6 {
         for index in batch * 50..(batch + 1) * 50 {
             namespace_writer
-                .put_file_bytes(
+                .put_file(
                     &format!("/files/{index:03}.txt"),
                     &vec![b'a'; index + 1],
-                    PutFileOptions::new(actor.clone()),
+                    &actor,
                 )
                 .await
                 .expect("create file");
@@ -88,12 +87,13 @@ async fn directory_pages_use_bindings_and_load_revision_heads_concurrently() {
     }
     for index in (0..300).step_by(3) {
         namespace_writer
-            .put_file_bytes(
+            .put_file_with_options(
                 &format!("/files/{index:03}.txt"),
                 &vec![b'b'; index + 2],
-                PutFileOptions {
+                &loonfs_api::ActorId::parse("editor").expect("actor"),
+                &PutFileOptions {
                     behavior: DestinationBehavior::Replace,
-                    ..PutFileOptions::new(loonfs_api::ActorId::parse("editor").expect("actor"))
+                    ..Default::default()
                 },
             )
             .await

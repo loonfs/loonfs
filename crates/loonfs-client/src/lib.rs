@@ -73,10 +73,9 @@ pub use ClientError as Error;
 /// Per-operation options, defined once in `loonfs-api` and shared with the
 /// embedded `loonfs` runtime so the two surfaces cannot drift a field apart.
 pub use loonfs_api::options::{
-    CommitOptions, CopyOptions, CreateDirectoryOptions, DeleteOptions,
-    DirectMultipartUploadOptions, ForkNamespaceOptions, ListOptions, MoveOptions, PutFileOptions,
-    RestoreRevisionOptions, StatOptions, UndeleteOptions, UpdateAccessOptions,
-    UpdateAttributesOptions,
+    AccessState, AttributeChanges, CommitOptions, CopyOptions, CreateDirectoryOptions,
+    DeleteOptions, DirectMultipartUploadOptions, ForkNamespaceOptions, ListOptions, MoveOptions,
+    PutFileOptions, StatOptions, UpdateAccessOptions, UpdateAttributesOptions,
 };
 
 /// Result type returned by the client.

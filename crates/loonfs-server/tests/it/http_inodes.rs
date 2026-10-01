@@ -6,10 +6,8 @@ use crate::common::http_split_support::{replace_file_options, test_config};
 use crate::common::start_server;
 use loonfs_api::PageRequest;
 use loonfs_api::{ApiError, DeleteDirectoryBehavior, ErrorCode, InodeId, RevisionNo};
-use loonfs_client::{
-    ClientError, CreateDirectoryOptions, DeleteOptions, MoveOptions, NamespacePath, PutFileOptions,
-    UpdateAttributesOptions,
-};
+use loonfs_client::AttributeChanges;
+use loonfs_client::{ClientError, DeleteOptions, NamespacePath};
 use loonfs_test_support::http::raw_agent;
 use loonfs_test_support::ids::{
     attribute_key, attribute_text, first_page, namespace_id, page_limit,
@@ -61,12 +59,17 @@ async fn http_stat_inode_tracks_renames_and_revision_reads_survive_deletion() {
     let after = NamespacePath::parse("demo", "/after.txt").expect("after path");
     harness
         .client
-        .put_file_bytes(&before, b"one", &PutFileOptions::new(actor.clone()))
+        .put_file(&before, b"one", &actor)
         .await
         .expect("put revision one");
     harness
         .client
-        .put_file_bytes(&before, b"two", &replace_file_options())
+        .put_file_with_options(
+            &before,
+            b"two",
+            &loonfs_test_support::test_actor(),
+            &replace_file_options(),
+        )
         .await
         .expect("put revision two");
 
@@ -91,7 +94,7 @@ async fn http_stat_inode_tracks_renames_and_revision_reads_survive_deletion() {
 
     harness
         .client
-        .move_path(&before, &after, &MoveOptions::new(actor.clone()))
+        .move_path(&before, &after, &actor)
         .await
         .expect("rename file");
     let renamed = harness
@@ -139,7 +142,7 @@ async fn http_stat_inode_tracks_renames_and_revision_reads_survive_deletion() {
 
     harness
         .client
-        .delete_path(&after, &DeleteOptions::new(actor))
+        .delete_path(&after, &actor)
         .await
         .expect("delete file");
     assert_api_code(
@@ -202,7 +205,7 @@ async fn http_inode_read_errors_use_identity_codes_and_root_is_nameless() {
     let directory = NamespacePath::parse("demo", "/docs").expect("directory path");
     harness
         .client
-        .create_directory(&directory, &CreateDirectoryOptions::new(actor.clone()))
+        .create_directory(&directory, &actor)
         .await
         .expect("create directory");
     let directory_id = harness
@@ -238,7 +241,7 @@ async fn http_inode_read_errors_use_identity_codes_and_root_is_nameless() {
     let file = NamespacePath::parse("demo", "/file.txt").expect("file path");
     harness
         .client
-        .put_file_bytes(&file, b"body", &PutFileOptions::new(actor))
+        .put_file(&file, b"body", &actor)
         .await
         .expect("put file");
     let file_id = harness
@@ -316,7 +319,7 @@ async fn http_lists_inode_children_in_name_key_order_and_paginates() {
         let path = NamespacePath::parse("demo", &format!("/docs/{name}")).expect("child path");
         harness
             .client
-            .put_file_bytes(&path, name.as_bytes(), &PutFileOptions::new(actor.clone()))
+            .put_file(&path, name.as_bytes(), &actor)
             .await
             .expect("put child");
     }
@@ -324,9 +327,10 @@ async fn http_lists_inode_children_in_name_key_order_and_paginates() {
         .client
         .update_attributes(
             &NamespacePath::parse("demo", "/docs/apple.txt").expect("annotated path"),
-            &UpdateAttributesOptions {
+            &actor,
+            AttributeChanges {
                 set: BTreeMap::from([(attribute_key("owner"), attribute_text("platform"))]),
-                ..UpdateAttributesOptions::new(actor)
+                ..Default::default()
             },
         )
         .await
@@ -453,7 +457,7 @@ async fn http_inode_children_errors_use_directory_identity_codes() {
     let child = NamespacePath::parse("demo", "/docs/child.txt").expect("child path");
     harness
         .client
-        .put_file_bytes(&child, b"body", &PutFileOptions::new(actor.clone()))
+        .put_file(&child, b"body", &actor)
         .await
         .expect("put child");
     let directory = NamespacePath::parse("demo", "/docs").expect("directory path");
@@ -503,11 +507,12 @@ async fn http_inode_children_errors_use_directory_identity_codes() {
 
     harness
         .client
-        .delete_path(
+        .delete_path_with_options(
             &directory,
+            &actor,
             &DeleteOptions {
                 behavior: DeleteDirectoryBehavior::Recursive,
-                ..DeleteOptions::new(actor)
+                ..Default::default()
             },
         )
         .await
@@ -551,7 +556,7 @@ async fn inode_routes_reject_invalid_ids_after_authorization() {
         let path = NamespacePath::parse("demo", &format!("/file-{index}.txt")).expect("seed path");
         harness
             .client
-            .put_file_bytes(&path, b"body", &PutFileOptions::new(actor.clone()))
+            .put_file(&path, b"body", &actor)
             .await
             .expect("seed inode");
         inode_27_path = Some(path);

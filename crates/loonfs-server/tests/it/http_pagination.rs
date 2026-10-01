@@ -10,10 +10,7 @@ use loonfs_api::{
     DestinationBehavior, ListCheckpointsResponse, ListPathEntriesResponse, RevisionNo,
     DEFAULT_MAX_PAGE_LIMIT,
 };
-use loonfs_client::{
-    ClientError, CreateDirectoryOptions, MoveOptions, NamespacePath, PutFileOptions,
-    RestoreRevisionOptions,
-};
+use loonfs_client::{ClientError, MoveOptions, NamespacePath, PutFileOptions};
 use loonfs_test_support::http::{raw_agent, retry_result_on_macos_teardown_einval};
 use loonfs_test_support::ids::{first_page, namespace_id, page_limit};
 use tempfile::tempdir;
@@ -268,25 +265,24 @@ async fn http_paginates_directory_listing_and_rejects_cursor_path_mismatch() {
     let other = NamespacePath::parse("demo", "/other").expect("other path");
     harness
         .client
-        .create_directory(
-            &docs,
-            &CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_directory(&docs, &loonfs_test_support::test_actor())
         .await
         .expect("create docs dir");
     harness
         .client
-        .create_directory(
-            &other,
-            &CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_directory(&other, &loonfs_test_support::test_actor())
         .await
         .expect("create other dir");
     for name in ["a.txt", "b.txt", "c.txt"] {
         let path = NamespacePath::parse("demo", &format!("/docs/{name}")).expect("file path");
         harness
             .client
-            .put_file_bytes(&path, name.as_bytes(), &replace_file_options())
+            .put_file_with_options(
+                &path,
+                name.as_bytes(),
+                &loonfs_test_support::test_actor(),
+                &replace_file_options(),
+            )
             .await
             .expect("write file");
     }
@@ -385,17 +381,19 @@ async fn http_client_listing_preserves_canonical_name_key_order() {
     let docs = NamespacePath::parse("demo", "/docs").expect("docs path");
     harness
         .client
-        .create_directory(
-            &docs,
-            &CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_directory(&docs, &loonfs_test_support::test_actor())
         .await
         .expect("create docs dir");
     for name in ["B.txt", "a.txt", "c.txt"] {
         let path = NamespacePath::parse("demo", &format!("/docs/{name}")).expect("file path");
         harness
             .client
-            .put_file_bytes(&path, name.as_bytes(), &replace_file_options())
+            .put_file_with_options(
+                &path,
+                name.as_bytes(),
+                &loonfs_test_support::test_actor(),
+                &replace_file_options(),
+            )
             .await
             .expect("write file");
     }
@@ -432,17 +430,18 @@ async fn http_restore_revision_appends_new_head_and_reports_change() {
 
     harness
         .client
-        .put_file_bytes(
+        .put_file_with_options(
             &target,
             b"first bytes\n",
+            &loonfs_test_support::test_actor(),
             &PutFileOptions {
                 commit: loonfs_api::options::CommitOptions {
                     commit_id: Some(
                         CommitId::parse("req-restore-create").expect("valid commit id"),
                     ),
-                    ..loonfs_api::options::CommitOptions::new(loonfs_test_support::test_actor())
+                    ..Default::default()
                 },
-                ..PutFileOptions::new(loonfs_test_support::test_actor())
+                ..Default::default()
             },
         )
         .await
@@ -460,18 +459,19 @@ async fn http_restore_revision_appends_new_head_and_reports_change() {
 
     let replace = harness
         .client
-        .put_file_bytes(
+        .put_file_with_options(
             &target,
             b"second bytes\n",
+            &loonfs_test_support::test_actor(),
             &PutFileOptions {
                 behavior: DestinationBehavior::Replace,
                 commit: loonfs_api::options::CommitOptions {
                     commit_id: Some(
                         CommitId::parse("req-restore-replace").expect("valid commit id"),
                     ),
-                    ..loonfs_api::options::CommitOptions::new(loonfs_test_support::test_actor())
+                    ..Default::default()
                 },
-                ..PutFileOptions::new(loonfs_test_support::test_actor())
+                ..Default::default()
             },
         )
         .await
@@ -480,18 +480,14 @@ async fn http_restore_revision_appends_new_head_and_reports_change() {
 
     let restore = harness
         .client
-        .restore_revision(
+        .restore_revision_with_options(
             &target,
             RevisionNo(1),
-            &RestoreRevisionOptions {
-                commit: loonfs_api::options::CommitOptions {
-                    preconditions: Vec::new(),
-                    actor_id: loonfs_test_support::test_actor(),
-                    commit_id: Some(
-                        CommitId::parse("req-restore-restore").expect("valid commit id"),
-                    ),
-                    message: Some("restore revision".to_owned()),
-                },
+            &loonfs_test_support::test_actor(),
+            &loonfs_api::options::CommitOptions {
+                preconditions: Vec::new(),
+                commit_id: Some(CommitId::parse("req-restore-restore").expect("valid commit id")),
+                message: Some("restore revision".to_owned()),
             },
         )
         .await
@@ -597,16 +593,17 @@ async fn http_revision_routes_list_read_and_restore_by_path() {
     let target = NamespacePath::parse("demo", "/docs/rev.txt").expect("target");
     harness
         .client
-        .put_file_bytes(
-            &target,
-            b"one",
-            &PutFileOptions::new(loonfs_test_support::test_actor()),
-        )
+        .put_file(&target, b"one", &loonfs_test_support::test_actor())
         .await
         .expect("create file");
     harness
         .client
-        .put_file_bytes(&target, b"two", &replace_file_options())
+        .put_file_with_options(
+            &target,
+            b"two",
+            &loonfs_test_support::test_actor(),
+            &replace_file_options(),
+        )
         .await
         .expect("replace file");
 
@@ -637,14 +634,14 @@ async fn http_revision_routes_list_read_and_restore_by_path() {
     let moved = NamespacePath::parse("demo", "/docs/moved.txt").expect("moved");
     harness
         .client
-        .move_path(
+        .move_path_with_options(
             &target,
             &moved,
+            &loonfs_test_support::test_actor(),
             &MoveOptions {
                 behavior: DestinationBehavior::NoReplace,
                 commit: loonfs_api::options::CommitOptions {
                     preconditions: Vec::new(),
-                    actor_id: loonfs_test_support::test_actor(),
                     commit_id: None,
                     message: None,
                 },
@@ -670,11 +667,7 @@ async fn http_revision_routes_list_read_and_restore_by_path() {
 
     harness
         .client
-        .restore_revision(
-            &moved,
-            RevisionNo(1),
-            &RestoreRevisionOptions::new(loonfs_test_support::test_actor()),
-        )
+        .restore_revision(&moved, RevisionNo(1), &loonfs_test_support::test_actor())
         .await
         .expect("path restore");
     assert_eq!(
@@ -712,29 +705,26 @@ async fn http_restore_revision_missing_source_returns_revision_not_found() {
     let target = NamespacePath::parse("demo", "/restore.txt").expect("target");
     harness
         .client
-        .put_file_bytes(
+        .put_file(
             &target,
             b"first bytes\n",
-            &PutFileOptions::new(loonfs_test_support::test_actor()),
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("create file");
 
     match harness
         .client
-        .restore_revision(
+        .restore_revision_with_options(
             &target,
             RevisionNo(99),
-            &RestoreRevisionOptions {
-                commit: loonfs_api::options::CommitOptions {
-                    preconditions: Vec::new(),
-                    actor_id: loonfs_test_support::test_actor(),
-                    commit_id: Some(
-                        CommitId::parse("req-restore-missing-source-restore")
-                            .expect("valid commit id"),
-                    ),
-                    message: None,
-                },
+            &loonfs_test_support::test_actor(),
+            &loonfs_api::options::CommitOptions {
+                preconditions: Vec::new(),
+                commit_id: Some(
+                    CommitId::parse("req-restore-missing-source-restore").expect("valid commit id"),
+                ),
+                message: None,
             },
         )
         .await

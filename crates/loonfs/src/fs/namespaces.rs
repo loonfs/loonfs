@@ -3,8 +3,8 @@
 use super::core::{should_invalidate_after_result, RuntimeCore, WriterBits};
 use crate::maintenance::namespace_reclaim_at_ms;
 use crate::{
-    CreateNamespaceOptions, DeleteNamespaceOptions, DeleteNamespaceResponse, ForkNamespaceOptions,
-    NamespaceId,
+    ActorId, CreateNamespaceOptions, DeleteNamespaceOptions, DeleteNamespaceResponse,
+    ForkNamespaceOptions, NamespaceId,
 };
 use crate::{Error, Result};
 use crate::{ErrorCode, LoonFs, MaintenanceHint, MaintenanceJobId, Namespace, Writable};
@@ -18,6 +18,17 @@ impl LoonFs<Writable> {
         }
         let (engine, context) = self.core.pinned_metadata_read(namespace_id).await?;
         Ok(engine.require_administrator(&context).await?)
+    }
+
+    /// Creates an unrestricted namespace, bootstrapping its durable state.
+    /// An existing namespace is an error.
+    pub async fn create_namespace(
+        &self,
+        namespace_id: &NamespaceId,
+        actor: &ActorId,
+    ) -> Result<crate::NamespaceMetadata> {
+        self.create_namespace_with_options(namespace_id, actor, &CreateNamespaceOptions::default())
+            .await
     }
 
     /// Creates a namespace, bootstrapping its durable state.
@@ -36,18 +47,35 @@ impl LoonFs<Writable> {
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn create_namespace(
+    pub async fn create_namespace_with_options(
         &self,
         namespace_id: &NamespaceId,
-        options: CreateNamespaceOptions,
+        actor: &ActorId,
+        options: &CreateNamespaceOptions,
     ) -> Result<crate::NamespaceMetadata> {
         self.core.record_trace_context(&tracing::Span::current());
         let result = self
             .engine(namespace_id)
-            .bootstrap_namespace(options)
+            .bootstrap_namespace(actor, options)
             .await
             .map_err(Error::from);
         self.finish_namespace_mutation(namespace_id, result)
+    }
+
+    /// Forks `source_namespace_id` into `new_namespace_id` at its current head.
+    pub async fn fork_namespace(
+        &self,
+        source_namespace_id: &NamespaceId,
+        new_namespace_id: &NamespaceId,
+        actor: &ActorId,
+    ) -> Result<crate::NamespaceMetadata> {
+        self.fork_namespace_with_options(
+            source_namespace_id,
+            new_namespace_id,
+            actor,
+            &ForkNamespaceOptions::default(),
+        )
+        .await
     }
 
     /// Forks `source_namespace_id` into `new_namespace_id` at the selected current head or live snapshot.
@@ -63,21 +91,18 @@ impl LoonFs<Writable> {
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn fork_namespace(
+    pub async fn fork_namespace_with_options(
         &self,
         source_namespace_id: &NamespaceId,
         new_namespace_id: &NamespaceId,
-        options: ForkNamespaceOptions,
+        actor: &ActorId,
+        options: &ForkNamespaceOptions,
     ) -> Result<crate::NamespaceMetadata> {
         self.require_administrator(source_namespace_id).await?;
         self.core.record_trace_context(&tracing::Span::current());
         let result = self
             .engine(source_namespace_id)
-            .fork_namespace(
-                new_namespace_id,
-                &options.actor_id,
-                options.snapshot_id.as_ref(),
-            )
+            .fork_namespace(new_namespace_id, actor, options.snapshot_id.as_ref())
             .await
             .map_err(Error::from);
         if should_invalidate_after_result(&result) {
@@ -101,6 +126,13 @@ impl Namespace<Writable> {
         Ok(engine.require_administrator(&context).await?)
     }
 
+    /// Ends the namespace after folding its final WAL tail, whatever its
+    /// head.
+    pub async fn delete(&self) -> Result<DeleteNamespaceResponse> {
+        self.delete_with_options(&DeleteNamespaceOptions::default())
+            .await
+    }
+
     /// Ends the namespace after folding its final WAL tail.
     /// See [namespace deletion](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#94-deleting-a-namespace).
     ///
@@ -109,20 +141,23 @@ impl Namespace<Writable> {
     /// after it fail once it succeeds.
     #[tracing::instrument(
         level = "debug",
-        name = "loonfs.delete_namespace",
+        name = "loonfs.delete",
         err(level = "debug"),
         skip_all,
         fields(
-            operation = "delete_namespace",
+            operation = "delete",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn delete(&self, options: DeleteNamespaceOptions) -> Result<DeleteNamespaceResponse> {
+    pub async fn delete_with_options(
+        &self,
+        options: &DeleteNamespaceOptions,
+    ) -> Result<DeleteNamespaceResponse> {
         self.require_administrator().await?;
         self.core.record_trace_context(&tracing::Span::current());
-        self.session().submit_delete(options).await
+        self.session().submit_delete(*options).await
     }
 }
 

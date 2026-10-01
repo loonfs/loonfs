@@ -46,17 +46,14 @@ async fn runtime_jobs_answer_a_missing_and_a_deleted_namespace_with_fixed_codes(
     let deleted = namespace_id("deleted");
     state
         .runtime
-        .create_namespace(
-            &deleted,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&deleted, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     state
         .runtime
         .open_namespace(&deleted)
         .expect("open namespace")
-        .delete(Default::default())
+        .delete()
         .await
         .expect("delete namespace");
 

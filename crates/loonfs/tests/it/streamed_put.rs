@@ -9,10 +9,7 @@
 use crate::common::{open_runtime_async, TestRuntime};
 use bytes::Bytes;
 use futures::StreamExt;
-use loonfs::{
-    ByteStream, CreateNamespaceOptions, DestinationBehavior, NamespaceId, PutFileOptions,
-    SharedObjectStore,
-};
+use loonfs::{ByteStream, DestinationBehavior, NamespaceId, PutFileOptions, SharedObjectStore};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::PROVIDER_MULTIPART_PART_BYTES;
 use loonfs_test_support::stores::BufferWatchStore;
@@ -42,10 +39,7 @@ fn streamed(payload: &[u8]) -> ByteStream {
 async fn namespace(runtime: &TestRuntime) -> NamespaceId {
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     runtime
-        .create_namespace(
-            &namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     namespace_id
@@ -68,12 +62,13 @@ async fn a_streamed_put_holds_one_part_of_its_payload() {
     let payload = payload(PAYLOAD_BYTES);
 
     namespace_writer
-        .put_file_stream(
+        .put_file_stream_with_options(
             PATH,
             streamed(&payload),
-            PutFileOptions {
+            &loonfs_test_support::test_actor(),
+            &PutFileOptions {
                 behavior: DestinationBehavior::Replace,
-                ..PutFileOptions::new(loonfs_test_support::test_actor())
+                ..Default::default()
             },
         )
         .await

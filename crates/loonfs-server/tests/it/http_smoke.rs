@@ -21,7 +21,7 @@ use loonfs_api::{
     LIMIT_UPLOAD_SERVICE_PROXIED_MAX_CONCURRENT_REQUESTS,
     LIMIT_UPLOAD_SERVICE_PROXIED_MAX_CONTENT_BYTES,
 };
-use loonfs_client::{ClientError, CreateDirectoryOptions, NamespacePath, PutFileOptions};
+use loonfs_client::{ClientError, NamespacePath, PutFileOptions};
 use loonfs_test_support::ids::{first_page, namespace_id};
 use tempfile::tempdir;
 
@@ -48,7 +48,12 @@ async fn delete_namespace_blocks_operations() {
     let target = NamespacePath::parse("doomed", "/note.txt").expect("parse path");
     harness
         .client
-        .put_file_bytes(&target, b"last words", &replace_file_options())
+        .put_file_with_options(
+            &target,
+            b"last words",
+            &loonfs_test_support::test_actor(),
+            &replace_file_options(),
+        )
         .await
         .expect("write file");
 
@@ -282,10 +287,7 @@ async fn http_round_trip_supports_namespace_create_and_file_read_write() {
     let directory = NamespacePath::parse("demo", "/notes").expect("parse directory path");
     harness
         .client
-        .create_directory(
-            &directory,
-            &CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_directory(&directory, &loonfs_test_support::test_actor())
         .await
         .expect("create directory");
     let directory_entry = harness
@@ -298,14 +300,14 @@ async fn http_round_trip_supports_namespace_create_and_file_read_write() {
     let target = NamespacePath::parse("demo", "/notes/hello.txt").expect("parse namespace path");
     let written = harness
         .client
-        .put_file_bytes(
+        .put_file_with_options(
             &target,
             b"hello over http\n",
+            &loonfs_test_support::test_actor(),
             &PutFileOptions {
                 behavior: DestinationBehavior::Replace,
                 commit: loonfs_api::options::CommitOptions {
                     preconditions: Vec::new(),
-                    actor_id: loonfs_test_support::test_actor(),
                     commit_id: Some(CommitId::parse("smoke-write-1").expect("valid commit id")),
                     message: None,
                 },
@@ -372,7 +374,12 @@ async fn http_namespace_fork_shares_content_and_diverges() {
     let clone_path = NamespacePath::parse("clone", "/docs/shared.txt").expect("clone path");
     harness
         .client
-        .put_file_bytes(&source_path, b"base\n", &replace_file_options())
+        .put_file_with_options(
+            &source_path,
+            b"base\n",
+            &loonfs_test_support::test_actor(),
+            &replace_file_options(),
+        )
         .await
         .expect("write source");
 
@@ -381,9 +388,7 @@ async fn http_namespace_fork_shares_content_and_diverges() {
         .fork_namespace(
             &namespace_id("demo"),
             &namespace_id("clone"),
-            &loonfs_client::ForkNamespaceOptions::new(
-                loonfs_api::ActorId::parse("forker").expect("actor"),
-            ),
+            &loonfs_api::ActorId::parse("forker").expect("actor"),
         )
         .await
         .expect("fork namespace");
@@ -418,9 +423,10 @@ async fn http_namespace_fork_shares_content_and_diverges() {
 
     harness
         .client
-        .put_file_bytes(
+        .put_file_with_options(
             &source_path,
             b"source-after-fork\n",
+            &loonfs_test_support::test_actor(),
             &replace_file_options(),
         )
         .await
@@ -436,7 +442,12 @@ async fn http_namespace_fork_shares_content_and_diverges() {
 
     let clone_write = harness
         .client
-        .put_file_bytes(&clone_path, b"clone-after-fork\n", &replace_file_options())
+        .put_file_with_options(
+            &clone_path,
+            b"clone-after-fork\n",
+            &loonfs_test_support::test_actor(),
+            &replace_file_options(),
+        )
         .await
         .expect("replace clone");
     assert_eq!(clone_write.committed_seq, ChangeSeq(2));
@@ -502,7 +513,12 @@ async fn http_namespace_fork_uses_the_snapshot_sequence() {
     let path = NamespacePath::parse("source", "/file.txt").expect("path");
     harness
         .client
-        .put_file_bytes(&path, b"captured", &replace_file_options())
+        .put_file_with_options(
+            &path,
+            b"captured",
+            &loonfs_test_support::test_actor(),
+            &replace_file_options(),
+        )
         .await
         .expect("first write");
     let snapshot = harness
@@ -512,16 +528,21 @@ async fn http_namespace_fork_uses_the_snapshot_sequence() {
         .expect("snapshot");
     harness
         .client
-        .put_file_bytes(&path, b"current", &replace_file_options())
+        .put_file_with_options(
+            &path,
+            b"current",
+            &loonfs_test_support::test_actor(),
+            &replace_file_options(),
+        )
         .await
         .expect("advance source");
     let fork = harness
         .client
-        .fork_namespace(
+        .fork_namespace_with_options(
             &source,
             &target,
+            &loonfs_test_support::test_actor(),
             &loonfs_client::ForkNamespaceOptions {
-                actor_id: loonfs_test_support::test_actor(),
                 snapshot_id: Some(snapshot.snapshot_id),
             },
         )

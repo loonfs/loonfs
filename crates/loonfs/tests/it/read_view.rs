@@ -4,8 +4,8 @@ use crate::common::{
     assert_core_error_kind, metadata_options, open_runtime_async, store, SettableWallClock,
 };
 use loonfs::{
-    CreateNamespaceOptions, CreateSnapshotOptions, DestinationBehavior, ErrorCode, LoonFs,
-    NamespaceId, PageRequest, PaginationPolicy, PutFileOptions, SnapshotPolicy,
+    DestinationBehavior, ErrorCode, LoonFs, NamespaceId, PageRequest, PaginationPolicy,
+    PutFileOptions, SnapshotPolicy,
 };
 use tempfile::tempdir;
 
@@ -44,10 +44,7 @@ async fn read_during_compaction_and_collection(
     let runtime = open_runtime_async(store.clone(), "reader-gc-probe").await;
     let runtime_namespace = runtime.reader.namespace(&namespace);
     runtime
-        .create_namespace(
-            &namespace,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace, &loonfs_test_support::test_actor())
         .await
         .expect("namespace");
     let namespace_writer = runtime
@@ -56,19 +53,19 @@ async fn read_during_compaction_and_collection(
         .expect("open namespace");
     for name in ["a", "b"] {
         runtime
-            .put_file_bytes(
+            .put_file(
                 &namespace,
                 &format!("/{name}"),
                 name.as_bytes(),
-                PutFileOptions::new(loonfs_test_support::test_actor()),
+                &loonfs_test_support::test_actor(),
             )
             .await
             .expect("file");
         runtime
             .maintenance
-            .maintain_metadata(
+            .maintain_metadata_with_options(
                 &namespace,
-                loonfs::MetadataMaintenanceOptions {
+                &loonfs::MetadataMaintenanceOptions {
                     compaction_policy: loonfs::MetadataCompactionPolicy::CompactImmediately,
                     ..metadata_options(1)
                 },
@@ -95,10 +92,8 @@ async fn read_during_compaction_and_collection(
         Some(
             namespace_writer
                 .create_snapshot(
-                    CreateSnapshotOptions {
-                        name: "durable".to_owned(),
-                        expires_at_ms: loonfs::current_time_ms().expect("time") + 60_000,
-                    },
+                    "durable",
+                    loonfs::current_time_ms().expect("time") + 60_000,
                     &SnapshotPolicy::default(),
                 )
                 .await
@@ -141,13 +136,14 @@ async fn read_during_compaction_and_collection(
         .await
         .expect("read reached an uncached segment");
         runtime
-            .put_file_bytes(
+            .put_file_with_options(
                 &namespace,
                 "/a",
                 b"current",
-                PutFileOptions {
+                &loonfs_test_support::test_actor(),
+                &PutFileOptions {
                     behavior: DestinationBehavior::Replace,
-                    ..PutFileOptions::new(loonfs_test_support::test_actor())
+                    ..Default::default()
                 },
             )
             .await
@@ -184,11 +180,7 @@ async fn read_during_compaction_and_collection(
             published = true;
         }
         assert!(published && converged);
-        let gc = runtime
-            .maintenance
-            .gc(&namespace, &Default::default())
-            .await
-            .expect("GC");
+        let gc = runtime.maintenance.gc(&namespace).await.expect("GC");
         assert!(
             gc.deleted.metadata_segments > 0,
             "the pass really collected old segments"
@@ -269,10 +261,7 @@ async fn checkpoint_and_snapshot_views_keep_missing_segments_corrupt_after_manif
     let namespace_id = NamespaceId::parse("missing-pinned-segment").expect("namespace");
     let runtime = open_runtime_async(store.clone(), "missing-pinned-segment").await;
     runtime
-        .create_namespace(
-            &namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("namespace");
     let namespace_writer = runtime
@@ -280,20 +269,18 @@ async fn checkpoint_and_snapshot_views_keep_missing_segments_corrupt_after_manif
         .open_namespace(&namespace_id)
         .expect("open namespace");
     runtime
-        .put_file_bytes(
+        .put_file(
             &namespace_id,
             "/file",
             b"content",
-            PutFileOptions::new(loonfs_test_support::test_actor()),
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("file");
     let snapshot = namespace_writer
         .create_snapshot(
-            CreateSnapshotOptions {
-                name: "durable".to_owned(),
-                expires_at_ms: loonfs::current_time_ms().expect("time") + 60_000,
-            },
+            "durable",
+            loonfs::current_time_ms().expect("time") + 60_000,
             &SnapshotPolicy::default(),
         )
         .await
@@ -365,10 +352,7 @@ async fn checkpoint_and_snapshot_views_report_their_deleted_pin_when_a_segment_i
     let namespace_id = NamespaceId::parse("deleted-pin-segment").expect("namespace");
     let runtime = open_runtime_async(store.clone(), "deleted-pin-segment").await;
     runtime
-        .create_namespace(
-            &namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("namespace");
     let namespace_writer = runtime
@@ -376,20 +360,18 @@ async fn checkpoint_and_snapshot_views_report_their_deleted_pin_when_a_segment_i
         .open_namespace(&namespace_id)
         .expect("open namespace");
     runtime
-        .put_file_bytes(
+        .put_file(
             &namespace_id,
             "/file",
             b"content",
-            PutFileOptions::new(loonfs_test_support::test_actor()),
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("file");
     let snapshot = namespace_writer
         .create_snapshot(
-            CreateSnapshotOptions {
-                name: "deleted".to_owned(),
-                expires_at_ms: loonfs::current_time_ms().expect("time") + 60_000,
-            },
+            "deleted",
+            loonfs::current_time_ms().expect("time") + 60_000,
             &SnapshotPolicy::default(),
         )
         .await
@@ -456,10 +438,7 @@ async fn snapshot_directory_cursor_resumes_only_at_its_snapshot() {
     let namespace_id = NamespaceId::parse("snapshot-cursor").expect("namespace id");
     let namespace = runtime.reader.namespace(&namespace_id);
     runtime
-        .create_namespace(
-            &namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let namespace_writer = runtime
@@ -468,11 +447,11 @@ async fn snapshot_directory_cursor_resumes_only_at_its_snapshot() {
         .expect("open namespace");
     for name in ["a", "c", "e", "g"] {
         runtime
-            .put_file_bytes(
+            .put_file(
                 &namespace_id,
                 &format!("/{name}.txt"),
                 name.as_bytes(),
-                PutFileOptions::new(loonfs_test_support::test_actor()),
+                &loonfs_test_support::test_actor(),
             )
             .await
             .expect("seed file");
@@ -480,13 +459,7 @@ async fn snapshot_directory_cursor_resumes_only_at_its_snapshot() {
 
     let now_ms = loonfs::current_time_ms().expect("current time");
     let first_snapshot = namespace_writer
-        .create_snapshot(
-            CreateSnapshotOptions {
-                name: "first".to_owned(),
-                expires_at_ms: now_ms + 60_000,
-            },
-            &SnapshotPolicy::default(),
-        )
+        .create_snapshot("first", now_ms + 60_000, &SnapshotPolicy::default())
         .await
         .expect("create first snapshot");
     let first_view = namespace
@@ -515,22 +488,16 @@ async fn snapshot_directory_cursor_resumes_only_at_its_snapshot() {
     let cursor = first_page.next_cursor.clone().expect("next cursor");
 
     runtime
-        .put_file_bytes(
+        .put_file(
             &namespace_id,
             "/d.txt",
             b"d",
-            PutFileOptions::new(loonfs_test_support::test_actor()),
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("change current directory");
     let second_snapshot = namespace_writer
-        .create_snapshot(
-            CreateSnapshotOptions {
-                name: "second".to_owned(),
-                expires_at_ms: now_ms + 60_000,
-            },
-            &SnapshotPolicy::default(),
-        )
+        .create_snapshot("second", now_ms + 60_000, &SnapshotPolicy::default())
         .await
         .expect("create second snapshot");
     let second_view = namespace
@@ -618,19 +585,16 @@ async fn checkpoint_directory_cursor_resumes_only_at_its_checkpoint() {
     let namespace_id = NamespaceId::parse("checkpoint-cursor").expect("namespace id");
     let namespace = runtime.reader.namespace(&namespace_id);
     runtime
-        .create_namespace(
-            &namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     for name in ["a", "c", "e", "g"] {
         runtime
-            .put_file_bytes(
+            .put_file(
                 &namespace_id,
                 &format!("/{name}.txt"),
                 name.as_bytes(),
-                PutFileOptions::new(loonfs_test_support::test_actor()),
+                &loonfs_test_support::test_actor(),
             )
             .await
             .expect("seed file");
@@ -697,18 +661,15 @@ async fn a_read_view_keeps_one_head_across_later_commits() {
     let namespace_id = NamespaceId::parse("snapshot-reads").expect("namespace id");
     let namespace = runtime.reader.namespace(&namespace_id);
     runtime
-        .create_namespace(
-            &namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let created = runtime
-        .put_file_bytes(
+        .put_file(
             &namespace_id,
             "/before.txt",
             b"before",
-            PutFileOptions::new(loonfs_test_support::test_actor()),
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("create initial file");
@@ -721,23 +682,24 @@ async fn a_read_view_keeps_one_head_across_later_commits() {
         .expect("resolve initial file");
 
     runtime
-        .put_file_bytes(
+        .put_file_with_options(
             &namespace_id,
             "/before.txt",
             b"after",
-            PutFileOptions {
+            &loonfs_test_support::test_actor(),
+            &PutFileOptions {
                 behavior: DestinationBehavior::Replace,
-                ..PutFileOptions::new(loonfs_test_support::test_actor())
+                ..Default::default()
             },
         )
         .await
         .expect("replace file after the view");
     runtime
-        .put_file_bytes(
+        .put_file(
             &namespace_id,
             "/later.txt",
             b"later",
-            PutFileOptions::new(loonfs_test_support::test_actor()),
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("create file after the view");
@@ -804,18 +766,15 @@ async fn checkpoint_read_views_answer_the_state_the_checkpoint_captured() {
     let namespace_id = NamespaceId::parse("snapshot-checkpoint-reads").expect("namespace id");
     let namespace = runtime.reader.namespace(&namespace_id);
     runtime
-        .create_namespace(
-            &namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     runtime
-        .put_file_bytes(
+        .put_file(
             &namespace_id,
             "/pinned.txt",
             b"pinned",
-            PutFileOptions::new(loonfs_test_support::test_actor()),
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("create initial file");
@@ -824,23 +783,24 @@ async fn checkpoint_read_views_answer_the_state_the_checkpoint_captured() {
         .await
         .expect("create checkpoint");
     runtime
-        .put_file_bytes(
+        .put_file_with_options(
             &namespace_id,
             "/pinned.txt",
             b"replaced",
-            PutFileOptions {
+            &loonfs_test_support::test_actor(),
+            &PutFileOptions {
                 behavior: DestinationBehavior::Replace,
-                ..PutFileOptions::new(loonfs_test_support::test_actor())
+                ..Default::default()
             },
         )
         .await
         .expect("replace file after the checkpoint");
     runtime
-        .put_file_bytes(
+        .put_file(
             &namespace_id,
             "/later.txt",
             b"later",
-            PutFileOptions::new(loonfs_test_support::test_actor()),
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("create file after the checkpoint");
@@ -881,18 +841,15 @@ async fn a_deleted_checkpoint_refuses_a_read_view_instead_of_reading_current_sta
     let namespace_id = NamespaceId::parse("snapshot-deleted-checkpoint").expect("namespace id");
     let namespace = runtime.reader.namespace(&namespace_id);
     runtime
-        .create_namespace(
-            &namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     runtime
-        .put_file_bytes(
+        .put_file(
             &namespace_id,
             "/pinned.txt",
             b"pinned",
-            PutFileOptions::new(loonfs_test_support::test_actor()),
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("create initial file");
@@ -921,10 +878,7 @@ async fn snapshot_read_views_serve_captured_state_and_enforce_release() {
     let namespace_id = NamespaceId::parse("snapshot-lease-reads").expect("namespace id");
     let namespace = runtime.reader.namespace(&namespace_id);
     runtime
-        .create_namespace(
-            &namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let namespace_writer = runtime
@@ -932,11 +886,11 @@ async fn snapshot_read_views_serve_captured_state_and_enforce_release() {
         .open_namespace(&namespace_id)
         .expect("open namespace");
     runtime
-        .put_file_bytes(
+        .put_file(
             &namespace_id,
             "/pinned.txt",
             b"captured",
-            PutFileOptions::new(loonfs_test_support::test_actor()),
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("create captured file");
@@ -946,13 +900,7 @@ async fn snapshot_read_views_serve_captured_state_and_enforce_release() {
         .expect("resolve captured file");
     let now_ms = loonfs::current_time_ms().expect("current time");
     let snapshot = namespace_writer
-        .create_snapshot(
-            CreateSnapshotOptions {
-                name: "reader".to_owned(),
-                expires_at_ms: now_ms + 60_000,
-            },
-            &SnapshotPolicy::default(),
-        )
+        .create_snapshot("reader", now_ms + 60_000, &SnapshotPolicy::default())
         .await
         .expect("create snapshot");
     let snapshot_options = loonfs::StatOptions {
@@ -968,13 +916,14 @@ async fn snapshot_read_views_serve_captured_state_and_enforce_release() {
     );
 
     runtime
-        .put_file_bytes(
+        .put_file_with_options(
             &namespace_id,
             "/pinned.txt",
             b"current",
-            PutFileOptions {
+            &loonfs_test_support::test_actor(),
+            &PutFileOptions {
                 behavior: DestinationBehavior::Replace,
-                ..PutFileOptions::new(loonfs_test_support::test_actor())
+                ..Default::default()
             },
         )
         .await
@@ -1044,23 +993,14 @@ async fn a_reader_judges_snapshot_expiry_on_its_own_wall_clock() {
         .expect("build reader");
     let namespace_id = NamespaceId::parse("snapshot-clock").expect("namespace id");
     writer
-        .create_namespace(
-            &namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let namespace_writer = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
     let snapshot = namespace_writer
-        .create_snapshot(
-            CreateSnapshotOptions {
-                name: "clock".to_owned(),
-                expires_at_ms: EXPIRES_AT_MS,
-            },
-            &SnapshotPolicy::default(),
-        )
+        .create_snapshot("clock", EXPIRES_AT_MS, &SnapshotPolicy::default())
         .await
         .expect("create snapshot");
 
@@ -1092,10 +1032,7 @@ async fn a_snapshot_read_view_rejects_options_naming_another_snapshot() {
     let namespace_id = NamespaceId::parse("snapshot-mismatch-reads").expect("namespace id");
     let namespace = runtime.reader.namespace(&namespace_id);
     runtime
-        .create_namespace(
-            &namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let namespace_writer = runtime
@@ -1103,11 +1040,11 @@ async fn a_snapshot_read_view_rejects_options_naming_another_snapshot() {
         .open_namespace(&namespace_id)
         .expect("open namespace");
     runtime
-        .put_file_bytes(
+        .put_file(
             &namespace_id,
             "/pinned.txt",
             b"captured",
-            PutFileOptions::new(loonfs_test_support::test_actor()),
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("create captured file");
@@ -1116,13 +1053,7 @@ async fn a_snapshot_read_view_rejects_options_naming_another_snapshot() {
     for name in ["first", "second"] {
         snapshots.push(
             namespace_writer
-                .create_snapshot(
-                    CreateSnapshotOptions {
-                        name: name.to_owned(),
-                        expires_at_ms: now_ms + 60_000,
-                    },
-                    &SnapshotPolicy::default(),
-                )
+                .create_snapshot(name, now_ms + 60_000, &SnapshotPolicy::default())
                 .await
                 .expect("create snapshot"),
         );
@@ -1217,18 +1148,15 @@ async fn a_missing_current_segment_stays_corrupt_and_manifest_read_failures_prop
     let store = Arc::new(RecordingStore::new(failures.clone(), KeyPredicate::any()));
     let runtime = open_runtime_async(store.clone(), "missing-current-segment").await;
     runtime
-        .create_namespace(
-            &namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("namespace");
     runtime
-        .put_file_bytes(
+        .put_file(
             &namespace_id,
             "/file",
             b"content",
-            PutFileOptions::new(loonfs_test_support::test_actor()),
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("file");

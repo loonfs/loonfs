@@ -7,8 +7,7 @@ use futures::StreamExt;
 use loonfs::publish::{parse_mutation_path, CommitRequest, FilesystemOperation};
 use loonfs::{
     ByteStream, ChangeSeq, CommitId, CompactionStepOutcome, CreateDirectoryOptions,
-    CreateNamespaceOptions, DestinationBehavior, MetadataMaintenanceOptions, NamespaceId,
-    PutFileOptions, RevisionNo,
+    DestinationBehavior, NamespaceId, PutFileOptions, RevisionNo,
 };
 use loonfs_api::ActorId;
 use loonfs_api::ErrorCode;
@@ -32,7 +31,6 @@ fn options(commit_id: &CommitId) -> PutFileOptions {
         behavior: DestinationBehavior::Replace,
         commit: loonfs_api::options::CommitOptions {
             preconditions: Vec::new(),
-            actor_id: loonfs_test_support::test_actor(),
             commit_id: Some(commit_id.clone()),
             message: None,
         },
@@ -69,10 +67,7 @@ async fn feed_message(
 async fn namespace(runtime: &TestRuntime) -> NamespaceId {
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     runtime
-        .create_namespace(
-            &namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     namespace_id
@@ -90,11 +85,12 @@ async fn compact_receipt_past_horizon(
     let mut last_seq = committed_seq;
     for round in 0..9 {
         let filler = runtime
-            .put_file_bytes(
+            .put_file_with_options(
                 namespace_id,
                 &format!("/docs/filler-{round}.txt"),
                 b"filler\n",
-                options(&CommitId::parse(format!("filler-{round}")).expect("valid commit id")),
+                &loonfs_test_support::test_actor(),
+                &options(&CommitId::parse(format!("filler-{round}")).expect("valid commit id")),
             )
             .await
             .expect("filler put");
@@ -122,7 +118,7 @@ async fn compact_receipt_past_horizon(
     for _ in 0..32 {
         let step = runtime
             .maintenance
-            .maintain_metadata(namespace_id, MetadataMaintenanceOptions::default())
+            .maintain_metadata(namespace_id)
             .await
             .expect("upkeep step");
         if matches!(step.compaction, CompactionStepOutcome::NotNeeded {}) {
@@ -149,7 +145,7 @@ async fn restart_replays_the_commit_actor_from_the_wal() {
         .expect("open namespace");
     let actor = ActorId::parse("replay-worker").expect("actor id");
     let committed = namespace_writer
-        .create_directory("/replayed", CreateDirectoryOptions::new(actor.clone()))
+        .create_directory("/replayed", &actor)
         .await
         .expect("commit attributed directory");
     drop(runtime);
@@ -178,11 +174,23 @@ async fn repeating_identical_inline_bytes_under_the_same_commit_id_replays() {
     let commit_id = CommitId::parse("pinned-put").expect("valid commit id");
 
     let first = runtime
-        .put_file_bytes(&namespace_id, PATH, b"stable bytes\n", options(&commit_id))
+        .put_file_with_options(
+            &namespace_id,
+            PATH,
+            b"stable bytes\n",
+            &loonfs_test_support::test_actor(),
+            &options(&commit_id),
+        )
         .await
         .expect("first put");
     let rerun = runtime
-        .put_file_bytes(&namespace_id, PATH, b"stable bytes\n", options(&commit_id))
+        .put_file_with_options(
+            &namespace_id,
+            PATH,
+            b"stable bytes\n",
+            &loonfs_test_support::test_actor(),
+            &options(&commit_id),
+        )
         .await
         .expect("identical inline bytes replay");
 
@@ -203,11 +211,23 @@ async fn reuploading_identical_bytes_above_the_inline_threshold_conflicts() {
     let payload = vec![7u8; 64 * 1024 + 1];
 
     let first = runtime
-        .put_file_bytes(&namespace_id, PATH, &payload, options(&commit_id))
+        .put_file_with_options(
+            &namespace_id,
+            PATH,
+            &payload,
+            &loonfs_test_support::test_actor(),
+            &options(&commit_id),
+        )
         .await
         .expect("first put");
     let rerun = runtime
-        .put_file_bytes(&namespace_id, PATH, &payload, options(&commit_id))
+        .put_file_with_options(
+            &namespace_id,
+            PATH,
+            &payload,
+            &loonfs_test_support::test_actor(),
+            &options(&commit_id),
+        )
         .await
         .expect_err("a fresh upload is a different request");
 
@@ -231,15 +251,22 @@ async fn different_bytes_under_a_used_commit_id_still_conflict() {
     let commit_id = CommitId::parse("pinned-put").expect("valid commit id");
 
     runtime
-        .put_file_bytes(&namespace_id, PATH, b"stable bytes\n", options(&commit_id))
+        .put_file_with_options(
+            &namespace_id,
+            PATH,
+            b"stable bytes\n",
+            &loonfs_test_support::test_actor(),
+            &options(&commit_id),
+        )
         .await
         .expect("first put");
     let error = runtime
-        .put_file_bytes(
+        .put_file_with_options(
             &namespace_id,
             PATH,
             b"different bytes\n",
-            options(&commit_id),
+            &loonfs_test_support::test_actor(),
+            &options(&commit_id),
         )
         .await
         .expect_err("different bytes are a different commit");
@@ -260,20 +287,22 @@ async fn the_same_bytes_at_a_different_path_still_conflict() {
     let commit_id = CommitId::parse("pinned-put").expect("valid commit id");
 
     let first = runtime
-        .put_file_bytes(
+        .put_file_with_options(
             &namespace_id,
             "/a.txt",
             b"stable bytes\n",
-            options(&commit_id),
+            &loonfs_test_support::test_actor(),
+            &options(&commit_id),
         )
         .await
         .expect("first put");
     let error = runtime
-        .put_file_bytes(
+        .put_file_with_options(
             &namespace_id,
             "/b.txt",
             b"stable bytes\n",
-            options(&commit_id),
+            &loonfs_test_support::test_actor(),
+            &options(&commit_id),
         )
         .await
         .expect_err("the same bytes at another path are a different commit");
@@ -305,15 +334,22 @@ async fn a_changed_behavior_under_a_used_commit_id_still_conflicts() {
     let commit_id = CommitId::parse("pinned-put").expect("valid commit id");
 
     let first = runtime
-        .put_file_bytes(&namespace_id, PATH, b"stable bytes\n", options(&commit_id))
-        .await
-        .expect("first put with replace behavior");
-    let error = runtime
-        .put_file_bytes(
+        .put_file_with_options(
             &namespace_id,
             PATH,
             b"stable bytes\n",
-            PutFileOptions {
+            &loonfs_test_support::test_actor(),
+            &options(&commit_id),
+        )
+        .await
+        .expect("first put with replace behavior");
+    let error = runtime
+        .put_file_with_options(
+            &namespace_id,
+            PATH,
+            b"stable bytes\n",
+            &loonfs_test_support::test_actor(),
+            &PutFileOptions {
                 behavior: DestinationBehavior::NoReplace,
                 ..options(&commit_id)
             },
@@ -337,16 +373,23 @@ async fn a_changed_expected_revision_under_a_used_commit_id_still_conflicts() {
     let commit_id = CommitId::parse("pinned-put").expect("valid commit id");
 
     let first = runtime
-        .put_file_bytes(&namespace_id, PATH, b"stable bytes\n", options(&commit_id))
+        .put_file_with_options(
+            &namespace_id,
+            PATH,
+            b"stable bytes\n",
+            &loonfs_test_support::test_actor(),
+            &options(&commit_id),
+        )
         .await
         .expect("first put without preconditions");
     let observed = runtime.stat(&namespace_id, PATH).await.expect("stat path");
     let error = runtime
-        .put_file_bytes(
+        .put_file_with_options(
             &namespace_id,
             PATH,
             b"stable bytes\n",
-            PutFileOptions {
+            &loonfs_test_support::test_actor(),
+            &PutFileOptions {
                 expected_inode_id: Some(observed.inode_id),
                 expected_revision_no: Some(RevisionNo(1)),
                 ..options(&commit_id)
@@ -375,7 +418,7 @@ async fn a_single_put_does_not_replay_a_multi_operation_commit() {
     let commit_id = CommitId::parse("pinned-batch").expect("valid commit id");
 
     let prepared = namespace_writer
-        .prepare_file_bytes(b"stable bytes\n")
+        .prepare_content(b"stable bytes\n")
         .await
         .expect("prepare content");
     let content_ref = prepared.content_ref().clone();
@@ -408,7 +451,13 @@ async fn a_single_put_does_not_replay_a_multi_operation_commit() {
         .expect("first two-operation commit");
 
     let error = runtime
-        .put_file_bytes(&namespace_id, PATH, b"stable bytes\n", options(&commit_id))
+        .put_file_with_options(
+            &namespace_id,
+            PATH,
+            b"stable bytes\n",
+            &loonfs_test_support::test_actor(),
+            &options(&commit_id),
+        )
         .await
         .expect_err("one put is not the two-operation commit that landed");
 
@@ -428,11 +477,23 @@ async fn same_length_different_bytes_conflict() {
     let commit_id = CommitId::parse("pinned-put").expect("valid commit id");
 
     runtime
-        .put_file_bytes(&namespace_id, PATH, b"aaaaaaaaaaaa\n", options(&commit_id))
+        .put_file_with_options(
+            &namespace_id,
+            PATH,
+            b"aaaaaaaaaaaa\n",
+            &loonfs_test_support::test_actor(),
+            &options(&commit_id),
+        )
         .await
         .expect("first put");
     let error = runtime
-        .put_file_bytes(&namespace_id, PATH, b"bbbbbbbbbbbb\n", options(&commit_id))
+        .put_file_with_options(
+            &namespace_id,
+            PATH,
+            b"bbbbbbbbbbbb\n",
+            &loonfs_test_support::test_actor(),
+            &options(&commit_id),
+        )
         .await
         .expect_err("same length is not the same content");
 
@@ -452,11 +513,16 @@ async fn prepared_content_replays_after_restart_with_the_same_message() {
     let options = || options_with_message(&commit_id, Some("import batch"));
 
     let prepared = namespace_writer
-        .prepare_file_stream(streamed(b"stable bytes\n", 3))
+        .prepare_content_stream(streamed(b"stable bytes\n", 3))
         .await
         .expect("prepare content once");
     let first = namespace_writer
-        .put_file_prepared(PATH, prepared.clone(), options())
+        .put_file_prepared_with_options(
+            PATH,
+            prepared.clone(),
+            &loonfs_test_support::test_actor(),
+            &options(),
+        )
         .await
         .expect("first put");
     drop(runtime);
@@ -466,7 +532,12 @@ async fn prepared_content_replays_after_restart_with_the_same_message() {
         .open_namespace(&namespace_id)
         .expect("open namespace");
     let rerun = namespace_writer
-        .put_file_prepared(PATH, prepared.clone(), options())
+        .put_file_prepared_with_options(
+            PATH,
+            prepared.clone(),
+            &loonfs_test_support::test_actor(),
+            &options(),
+        )
         .await
         .expect("rerunning an identical request is idempotent");
 
@@ -485,20 +556,22 @@ async fn a_changed_message_under_a_used_commit_id_still_conflicts() {
     let commit_id = CommitId::parse("pinned-put").expect("valid commit id");
 
     let first = runtime
-        .put_file_bytes(
+        .put_file_with_options(
             &namespace_id,
             PATH,
             b"stable bytes\n",
-            options_with_message(&commit_id, Some("import batch")),
+            &loonfs_test_support::test_actor(),
+            &options_with_message(&commit_id, Some("import batch")),
         )
         .await
         .expect("first put");
     let error = runtime
-        .put_file_bytes(
+        .put_file_with_options(
             &namespace_id,
             PATH,
             b"stable bytes\n",
-            options_with_message(&commit_id, Some("second thoughts")),
+            &loonfs_test_support::test_actor(),
+            &options_with_message(&commit_id, Some("second thoughts")),
         )
         .await
         .expect_err("a changed message is a different commit");
@@ -524,20 +597,22 @@ async fn an_empty_message_does_not_replay_an_absent_one() {
     let commit_id = CommitId::parse("pinned-put").expect("valid commit id");
 
     let first = runtime
-        .put_file_bytes(
+        .put_file_with_options(
             &namespace_id,
             PATH,
             b"stable bytes\n",
-            options_with_message(&commit_id, None),
+            &loonfs_test_support::test_actor(),
+            &options_with_message(&commit_id, None),
         )
         .await
         .expect("first put");
     let error = runtime
-        .put_file_bytes(
+        .put_file_with_options(
             &namespace_id,
             PATH,
             b"stable bytes\n",
-            options_with_message(&commit_id, Some("")),
+            &loonfs_test_support::test_actor(),
+            &options_with_message(&commit_id, Some("")),
         )
         .await
         .expect_err("an empty message is not the absent message");
@@ -562,7 +637,6 @@ async fn a_changed_message_on_mkdir_still_conflicts() {
     let options = |message: &str| CreateDirectoryOptions {
         commit: loonfs_api::options::CommitOptions {
             preconditions: Vec::new(),
-            actor_id: loonfs_test_support::test_actor(),
             commit_id: Some(commit_id.clone()),
             message: Some(message.to_owned()),
         },
@@ -570,17 +644,29 @@ async fn a_changed_message_on_mkdir_still_conflicts() {
     };
 
     let first = namespace_writer
-        .create_directory("/pinned", options("one"))
+        .create_directory_with_options(
+            "/pinned",
+            &loonfs_test_support::test_actor(),
+            &options("one"),
+        )
         .await
         .expect("first mkdir");
     let replay = namespace_writer
-        .create_directory("/pinned", options("one"))
+        .create_directory_with_options(
+            "/pinned",
+            &loonfs_test_support::test_actor(),
+            &options("one"),
+        )
         .await
         .expect("an identical retry replays");
     assert_eq!(replay, first);
 
     let error = namespace_writer
-        .create_directory("/pinned", options("two"))
+        .create_directory_with_options(
+            "/pinned",
+            &loonfs_test_support::test_actor(),
+            &options("two"),
+        )
         .await
         .expect_err("a changed message is a different commit");
     assert_eq!(error.code(), ErrorCode::CommitIdReuseConflict);
@@ -609,17 +695,17 @@ async fn a_changed_message_on_a_direct_commit_still_conflicts() {
     };
 
     let first = namespace_writer
-        .create_commit(request("one"))
+        .commit(request("one"))
         .await
         .expect("first commit");
     let replay = namespace_writer
-        .create_commit(request("one"))
+        .commit(request("one"))
         .await
         .expect("an identical retry replays");
     assert_eq!(replay, first);
 
     let error = namespace_writer
-        .create_commit(request("two"))
+        .commit(request("two"))
         .await
         .expect_err("a changed message is a different commit");
     assert_eq!(error.code(), ErrorCode::CommitIdReuseConflict);
@@ -640,7 +726,13 @@ async fn a_retention_trimmed_commit_seq_leaves_the_conflict_standing() {
     let commit_id = CommitId::parse("pinned-put").expect("valid commit id");
 
     let first = runtime
-        .put_file_bytes(&namespace_id, PATH, b"stable bytes\n", options(&commit_id))
+        .put_file_with_options(
+            &namespace_id,
+            PATH,
+            b"stable bytes\n",
+            &loonfs_test_support::test_actor(),
+            &options(&commit_id),
+        )
         .await
         .expect("first put");
 
@@ -665,7 +757,13 @@ async fn a_retention_trimmed_commit_seq_leaves_the_conflict_standing() {
     );
 
     let error = runtime
-        .put_file_bytes(&namespace_id, PATH, b"stable bytes\n", options(&commit_id))
+        .put_file_with_options(
+            &namespace_id,
+            PATH,
+            b"stable bytes\n",
+            &loonfs_test_support::test_actor(),
+            &options(&commit_id),
+        )
         .await
         .expect_err("fresh content must conflict while the receipt remains");
 
@@ -685,7 +783,13 @@ async fn a_retry_past_the_receipt_horizon_commits_again() {
     let commit_id = CommitId::parse("pinned-put").expect("valid commit id");
 
     let first = runtime
-        .put_file_bytes(&namespace_id, PATH, b"stable bytes\n", options(&commit_id))
+        .put_file_with_options(
+            &namespace_id,
+            PATH,
+            b"stable bytes\n",
+            &loonfs_test_support::test_actor(),
+            &options(&commit_id),
+        )
         .await
         .expect("first put");
 
@@ -704,7 +808,13 @@ async fn a_retry_past_the_receipt_horizon_commits_again() {
     // replay (which would return the original sequence without committing)
     // and not a conflict: it commits again.
     let retried = runtime
-        .put_file_bytes(&namespace_id, PATH, b"stable bytes\n", options(&commit_id))
+        .put_file_with_options(
+            &namespace_id,
+            PATH,
+            b"stable bytes\n",
+            &loonfs_test_support::test_actor(),
+            &options(&commit_id),
+        )
         .await
         .expect("a retry past the horizon is admitted as a new commit");
     assert!(
@@ -730,7 +840,13 @@ async fn concurrent_retries_past_the_receipt_horizon_commit_once() {
     let commit_id = CommitId::parse("concurrent-horizon-put").expect("valid commit id");
 
     let first = runtime
-        .put_file_bytes(&namespace_id, PATH, b"stable bytes\n", options(&commit_id))
+        .put_file_with_options(
+            &namespace_id,
+            PATH,
+            b"stable bytes\n",
+            &loonfs_test_support::test_actor(),
+            &options(&commit_id),
+        )
         .await
         .expect("first put");
     let last_seq = compact_receipt_past_horizon(&runtime, &namespace_id, first.committed_seq).await;
@@ -745,12 +861,14 @@ async fn concurrent_retries_past_the_receipt_horizon_commit_once() {
         .expect("open namespace");
 
     let prepared = namespace_writer
-        .prepare_file_bytes(b"stable bytes\n")
+        .prepare_content(b"stable bytes\n")
         .await
         .expect("prepare the new attempt once");
+    let actor = loonfs_test_support::test_actor();
+    let options = options(&commit_id);
     let (left, right) = tokio::join!(
-        namespace_writer.put_file_prepared(PATH, prepared.clone(), options(&commit_id)),
-        namespace_writer.put_file_prepared(PATH, prepared, options(&commit_id)),
+        namespace_writer.put_file_prepared_with_options(PATH, prepared.clone(), &actor, &options),
+        namespace_writer.put_file_prepared_with_options(PATH, prepared, &actor, &options),
     );
     let left = left.expect("first late retry");
     let right = right.expect("second late retry");
@@ -780,20 +898,22 @@ async fn an_unused_commit_id_is_an_ordinary_commit() {
     let namespace_id = namespace(&runtime).await;
 
     let first = runtime
-        .put_file_bytes(
+        .put_file_with_options(
             &namespace_id,
             PATH,
             b"stable bytes\n",
-            options(&CommitId::parse("first").expect("valid commit id")),
+            &loonfs_test_support::test_actor(),
+            &options(&CommitId::parse("first").expect("valid commit id")),
         )
         .await
         .expect("first put");
     let second = runtime
-        .put_file_bytes(
+        .put_file_with_options(
             &namespace_id,
             PATH,
             b"stable bytes\n",
-            options(&CommitId::parse("second").expect("valid commit id")),
+            &loonfs_test_support::test_actor(),
+            &options(&CommitId::parse("second").expect("valid commit id")),
         )
         .await
         .expect("a fresh commit id is a fresh commit");
@@ -815,11 +935,21 @@ async fn reuploading_an_identical_stream_under_the_same_commit_id_conflicts() {
     let payload = vec![7u8; 300_000];
 
     let first = namespace_writer
-        .put_file_stream(PATH, streamed(&payload, 64 * 1024), options(&commit_id))
+        .put_file_stream_with_options(
+            PATH,
+            streamed(&payload, 64 * 1024),
+            &loonfs_test_support::test_actor(),
+            &options(&commit_id),
+        )
         .await
         .expect("first streamed put");
     let rerun = namespace_writer
-        .put_file_stream(PATH, streamed(&payload, 7_919), options(&commit_id))
+        .put_file_stream_with_options(
+            PATH,
+            streamed(&payload, 7_919),
+            &loonfs_test_support::test_actor(),
+            &options(&commit_id),
+        )
         .await
         .expect_err("a fresh upload is a different request");
 
@@ -847,18 +977,20 @@ async fn different_streamed_bytes_under_a_used_commit_id_still_conflict() {
     let commit_id = CommitId::parse("pinned-stream").expect("valid commit id");
 
     namespace_writer
-        .put_file_stream(
+        .put_file_stream_with_options(
             PATH,
             streamed(&vec![7u8; 300_000], 64 * 1024),
-            options(&commit_id),
+            &loonfs_test_support::test_actor(),
+            &options(&commit_id),
         )
         .await
         .expect("first streamed put");
     let error = namespace_writer
-        .put_file_stream(
+        .put_file_stream_with_options(
             PATH,
             streamed(&vec![9u8; 300_000], 64 * 1024),
-            options(&commit_id),
+            &loonfs_test_support::test_actor(),
+            &options(&commit_id),
         )
         .await
         .expect_err("different bytes are a different commit");
@@ -884,11 +1016,22 @@ async fn a_streamed_reupload_conflicts_with_a_buffered_first_run() {
     let payload = vec![3u8; 100_000];
 
     let first = runtime
-        .put_file_bytes(&namespace_id, PATH, &payload, options(&commit_id))
+        .put_file_with_options(
+            &namespace_id,
+            PATH,
+            &payload,
+            &loonfs_test_support::test_actor(),
+            &options(&commit_id),
+        )
         .await
         .expect("first buffered put");
     let rerun = namespace_writer
-        .put_file_stream(PATH, streamed(&payload, 8_192), options(&commit_id))
+        .put_file_stream_with_options(
+            PATH,
+            streamed(&payload, 8_192),
+            &loonfs_test_support::test_actor(),
+            &options(&commit_id),
+        )
         .await
         .expect_err("a fresh upload is a different request");
 

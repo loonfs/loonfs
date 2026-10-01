@@ -6,10 +6,8 @@ use crate::common::http_split_support::*;
 use crate::common::start_server;
 use loonfs_api::PageRequest;
 use loonfs_api::{ActorId, ChangeSeq, DestinationBehavior, RevisionNo};
-use loonfs_client::{
-    CopyOptions, DeleteOptions, MoveOptions, NamespacePath, PutFileOptions, RestoreRevisionOptions,
-    UndeleteOptions, UpdateAttributesOptions,
-};
+use loonfs_client::AttributeChanges;
+use loonfs_client::{NamespacePath, PutFileOptions};
 use loonfs_test_support::ids::{
     attribute_key, attribute_text, first_page, namespace_id, page_limit,
 };
@@ -69,11 +67,7 @@ async fn http_rows_project_the_commit_that_created_each_retained_fact() {
     let creator = actor("creator");
     let create = harness
         .client
-        .put_file_bytes(
-            &path("/implicit/parent/report.txt"),
-            b"v1",
-            &PutFileOptions::new(creator.clone()),
-        )
+        .put_file(&path("/implicit/parent/report.txt"), b"v1", &creator)
         .await
         .expect("create file and implicit parents");
     assert_eq!(create.committed_by, creator);
@@ -100,12 +94,13 @@ async fn http_rows_project_the_commit_that_created_each_retained_fact() {
     let replacer = actor("replacer");
     harness
         .client
-        .put_file_bytes(
+        .put_file_with_options(
             &path("/implicit/parent/report.txt"),
             b"v2",
+            &replacer,
             &PutFileOptions {
                 behavior: DestinationBehavior::Replace,
-                ..PutFileOptions::new(replacer.clone())
+                ..Default::default()
             },
         )
         .await
@@ -125,7 +120,7 @@ async fn http_rows_project_the_commit_that_created_each_retained_fact() {
         .restore_revision(
             &path("/implicit/parent/report.txt"),
             RevisionNo(1),
-            &RestoreRevisionOptions::new(restorer.clone()),
+            &restorer,
         )
         .await
         .expect("restore first revision");
@@ -155,7 +150,7 @@ async fn http_rows_project_the_commit_that_created_each_retained_fact() {
         .copy_path(
             &path("/implicit/parent/report.txt"),
             &path("/copy.txt"),
-            &CopyOptions::new(copier.clone()),
+            &copier,
         )
         .await
         .expect("copy file");
@@ -172,11 +167,7 @@ async fn http_rows_project_the_commit_that_created_each_retained_fact() {
     let before_move = copied.clone();
     harness
         .client
-        .move_path(
-            &path("/copy.txt"),
-            &path("/moved.txt"),
-            &MoveOptions::new(actor("mover")),
-        )
+        .move_path(&path("/copy.txt"), &path("/moved.txt"), &actor("mover"))
         .await
         .expect("move file");
     let after_move = harness
@@ -196,9 +187,10 @@ async fn http_rows_project_the_commit_that_created_each_retained_fact() {
         .client
         .update_attributes(
             &path("/moved.txt"),
-            &UpdateAttributesOptions {
+            &updater,
+            AttributeChanges {
                 set: BTreeMap::from([(attribute_key("owner"), attribute_text("platform"))]),
-                ..UpdateAttributesOptions::new(updater.clone())
+                ..Default::default()
             },
         )
         .await
@@ -220,7 +212,7 @@ async fn http_rows_project_the_commit_that_created_each_retained_fact() {
     let deleter = actor("deleter");
     let delete = harness
         .client
-        .delete_path(&path("/moved.txt"), &DeleteOptions::new(deleter.clone()))
+        .delete_path(&path("/moved.txt"), &deleter)
         .await
         .expect("delete file");
     let delete_change = change_at(&harness, delete.committed_seq).await;
@@ -247,7 +239,7 @@ async fn http_rows_project_the_commit_that_created_each_retained_fact() {
             deleted.inode_id,
             deleted.deletion_seq,
             None,
-            &UndeleteOptions::new(undelete_actor.clone()),
+            &undelete_actor,
         )
         .await
         .expect("undelete file");

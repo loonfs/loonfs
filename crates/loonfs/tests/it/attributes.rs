@@ -6,20 +6,36 @@
 
 use crate::common::*;
 use loonfs::publish::{parse_mutation_path, CommitRequest, FilesystemOperation};
+use loonfs::AttributeChanges;
 use loonfs::{
-    AttributesRevisionNo, CommitId, CreateNamespaceOptions, ListOptions, PageRequest,
-    PutFileOptions, StatOptions, UpdateAttributesOptions,
+    AttributesRevisionNo, CommitId, ListOptions, PageRequest, StatOptions, UpdateAttributesOptions,
 };
 use loonfs_api::semantic_commit_fingerprint;
 use loonfs_test_support::ids::{attribute_key, attribute_text, namespace_id, page_limit};
 use std::collections::{BTreeMap, BTreeSet};
 use tempfile::tempdir;
 
-fn owner_update() -> UpdateAttributesOptions {
-    let mut options = UpdateAttributesOptions::new(loonfs_test_support::test_actor());
-    options.set = BTreeMap::from([(attribute_key("owner"), attribute_text("platform"))]);
+fn owner_changes() -> AttributeChanges {
+    AttributeChanges {
+        set: BTreeMap::from([(attribute_key("owner"), attribute_text("platform"))]),
+        ..Default::default()
+    }
+}
+
+fn owner_update_options() -> UpdateAttributesOptions {
+    let mut options = UpdateAttributesOptions::default();
     options.commit.commit_id = Some(CommitId::parse("annotate-report").expect("commit id"));
     options
+}
+
+fn annotate_owner(namespace: &loonfs::Namespace<loonfs::Writable>) {
+    block_on(namespace.update_attributes_with_options(
+        "/docs/report.txt",
+        &loonfs_test_support::test_actor(),
+        owner_changes(),
+        &owner_update_options(),
+    ))
+    .expect("annotate");
 }
 
 #[test]
@@ -35,20 +51,17 @@ fn maximum_small_attribute_updates_reopen_after_one_wal_publication() {
         KeyPredicate::prefix(loonfs_objectstore::keys::wal_prefix(&namespace_id)),
     ));
     let fs = open_runtime(counted.clone(), "large-attributes-writer");
-    fs.create_namespace_blocking(
-        &namespace_id,
-        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-    )
-    .expect("namespace");
+    fs.create_namespace_blocking(&namespace_id, &loonfs_test_support::test_actor())
+        .expect("namespace");
     let namespace = fs
         .writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
-    fs.put_file_bytes_blocking(
+    fs.put_file_blocking(
         &namespace_id,
         "/file",
         b"content",
-        PutFileOptions::new(loonfs_test_support::test_actor()),
+        &loonfs_test_support::test_actor(),
     )
     .expect("file");
     let mut set = BTreeMap::from([(attribute_key("x"), attribute_text("a"))]);
@@ -63,9 +76,15 @@ fn maximum_small_attribute_updates_reopen_after_one_wal_publication() {
     }
     let initial = Attributes::new(set.clone()).expect("full map");
     assert_eq!(initial.logical_bytes(), MAX_ATTRIBUTES_TOTAL_BYTES);
-    let mut options = UpdateAttributesOptions::new(loonfs_test_support::test_actor());
-    options.set = set;
-    block_on(namespace.update_attributes("/file", options)).expect("fill attributes");
+    block_on(namespace.update_attributes(
+        "/file",
+        &loonfs_test_support::test_actor(),
+        AttributeChanges {
+            set,
+            ..Default::default()
+        },
+    ))
+    .expect("fill attributes");
     counted.reset();
     let response = fs
         .mutate_blocking(
@@ -122,32 +141,31 @@ fn the_write_convenience_matches_a_hand_built_one_operation_commit() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "attributes-parity");
     let namespace_id = namespace_id("demo");
-    fs.create_namespace_blocking(
-        &namespace_id,
-        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-    )
-    .expect("create namespace");
+    fs.create_namespace_blocking(&namespace_id, &loonfs_test_support::test_actor())
+        .expect("create namespace");
     let namespace = fs
         .writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
-    fs.put_file_bytes_blocking(
+    fs.put_file_blocking(
         &namespace_id,
         "/docs/report.txt",
         b"body",
-        PutFileOptions::new(loonfs_test_support::test_actor()),
+        &loonfs_test_support::test_actor(),
     )
     .expect("put file");
 
-    let options = owner_update();
+    let actor = loonfs_test_support::test_actor();
+    let changes = owner_changes();
+    let options = owner_update_options();
     let explicit = CommitRequest::single(
         options.commit.commit_id.clone().expect("commit id"),
-        options.commit.actor_id.clone(),
+        actor.clone(),
         options.commit.message.clone(),
         FilesystemOperation::UpdateAttributes {
             path: parse_mutation_path("/docs/report.txt").expect("path"),
-            set: options.set.clone(),
-            remove: options.remove.clone(),
+            set: changes.set.clone(),
+            remove: changes.remove.clone(),
             expected_inode_id: options.expected_inode_id,
             expected_attributes_revision_no: options.expected_attributes_revision_no,
         },
@@ -167,8 +185,13 @@ fn the_write_convenience_matches_a_hand_built_one_operation_commit() {
     // request under the same id replays it instead of committing twice.
     // Replay is decided on the fingerprint, so this passing is the parity
     // statement: the convenience compiled into the same commit.
-    let convenience = block_on(namespace.update_attributes("/docs/report.txt", options))
-        .expect("convenience update");
+    let convenience = block_on(namespace.update_attributes_with_options(
+        "/docs/report.txt",
+        &actor,
+        changes,
+        &options,
+    ))
+    .expect("convenience update");
     let replayed = fs
         .mutate_blocking(&namespace_id, explicit)
         .expect("the explicit request replays the convenience commit");
@@ -217,24 +240,21 @@ fn a_write_is_visible_to_the_next_stat() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "attributes-round-trip");
     let namespace_id = namespace_id("demo");
-    fs.create_namespace_blocking(
-        &namespace_id,
-        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-    )
-    .expect("create namespace");
+    fs.create_namespace_blocking(&namespace_id, &loonfs_test_support::test_actor())
+        .expect("create namespace");
     let namespace = fs
         .writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
-    fs.put_file_bytes_blocking(
+    fs.put_file_blocking(
         &namespace_id,
         "/docs/report.txt",
         b"body",
-        PutFileOptions::new(loonfs_test_support::test_actor()),
+        &loonfs_test_support::test_actor(),
     )
     .expect("put file");
 
-    block_on(namespace.update_attributes("/docs/report.txt", owner_update())).expect("annotate");
+    annotate_owner(&namespace);
 
     let entry = fs
         .stat_path_blocking(&namespace_id, "/docs/report.txt")
@@ -259,9 +279,10 @@ fn a_write_is_visible_to_the_next_stat() {
     // at its own revision rather than an absent one.
     block_on(namespace.update_attributes(
         "/docs/report.txt",
-        UpdateAttributesOptions {
+        &loonfs_test_support::test_actor(),
+        AttributeChanges {
             remove: vec![attribute_key("owner")],
-            ..UpdateAttributesOptions::new(loonfs_test_support::test_actor())
+            ..Default::default()
         },
     ))
     .expect("clear");
@@ -285,24 +306,20 @@ fn plain_stat_reads_with_the_default_stat_options() {
     let fs = runtime(temp_dir.path(), "plain-stat-defaults");
     let namespace_id = namespace_id("demo");
     let namespace = fs.reader.namespace(&namespace_id);
-    fs.create_namespace_blocking(
-        &namespace_id,
-        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-    )
-    .expect("create namespace");
-    fs.put_file_bytes_blocking(
+    fs.create_namespace_blocking(&namespace_id, &loonfs_test_support::test_actor())
+        .expect("create namespace");
+    fs.put_file_blocking(
         &namespace_id,
         "/docs/report.txt",
         b"body",
-        PutFileOptions::new(loonfs_test_support::test_actor()),
+        &loonfs_test_support::test_actor(),
     )
     .expect("put file");
     let namespace_writer = fs
         .writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
-    block_on(namespace_writer.update_attributes("/docs/report.txt", owner_update()))
-        .expect("annotate");
+    annotate_owner(&namespace_writer);
 
     assert_eq!(
         block_on(namespace.stat("/docs/report.txt")).expect("plain stat"),
@@ -317,26 +334,22 @@ fn read_options_project_grouped_attributes_or_none() {
     let fs = runtime(temp_dir.path(), "attributes-projection");
     let namespace_id = namespace_id("demo");
     let namespace = fs.reader.namespace(&namespace_id);
-    fs.create_namespace_blocking(
-        &namespace_id,
-        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-    )
-    .expect("create namespace");
+    fs.create_namespace_blocking(&namespace_id, &loonfs_test_support::test_actor())
+        .expect("create namespace");
     let namespace_writer = fs
         .writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
     for path in ["/docs/report.txt", "/docs/notes.txt"] {
-        fs.put_file_bytes_blocking(
+        fs.put_file_blocking(
             &namespace_id,
             path,
             b"body",
-            PutFileOptions::new(loonfs_test_support::test_actor()),
+            &loonfs_test_support::test_actor(),
         )
         .expect("put file");
     }
-    block_on(namespace_writer.update_attributes("/docs/report.txt", owner_update()))
-        .expect("annotate");
+    annotate_owner(&namespace_writer);
 
     // Stat includes attributes by default.
     let default_stat = fs
