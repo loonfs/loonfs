@@ -9,10 +9,11 @@ use crate::manifest::{
 };
 use crate::{GrepError, GrepWorker, Result};
 use futures::StreamExt as _;
-use loonfs::{
-    delete_if_aged, grace_age, GraceAge, Observation, GC_DEFAULT_GRACE_WINDOW_MS,
-    GC_MIN_GRACE_WINDOW_MS, METADATA_PUBLICATION_BUDGET_MS, UNREFERENCED_SEGMENT_MIN_AGE_MS,
+use loonfs::engine::{
+    delete_if_aged, grace_age, GraceAge, Observation, METADATA_PUBLICATION_BUDGET_MS,
+    UNREFERENCED_SEGMENT_MIN_AGE_MS,
 };
+use loonfs::{GC_DEFAULT_GRACE_WINDOW_MS, GC_MIN_GRACE_WINDOW_MS};
 use loonfs_api::{ErrorCode, ManifestNo, NamespaceId};
 use loonfs_objectstore::timing::StdMonotonicTimer;
 use loonfs_objectstore::ObjectStore;

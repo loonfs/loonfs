@@ -53,7 +53,7 @@ impl GrepHost {
             .expect("build maintenance")
             .maintenance(loonfs_test_support::ids::writer_id(actor));
         let block_cache = Arc::new(GrepBlockCache::new(
-            loonfs::DecodedBlockCacheConfig::with_max_decoded_bytes(
+            loonfs::engine::DecodedBlockCacheConfig::with_max_decoded_bytes(
                 DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
             ),
         ));
@@ -253,8 +253,8 @@ pub(crate) async fn grep_with(
     service.query(request, limit, &reads, store).await
 }
 
-pub(crate) fn observation() -> loonfs::Observation {
-    loonfs::Observation::now(Arc::new(
+pub(crate) fn observation() -> loonfs::engine::Observation {
+    loonfs::engine::Observation::now(Arc::new(
         loonfs_objectstore::timing::StdMonotonicTimer::default(),
     ))
 }

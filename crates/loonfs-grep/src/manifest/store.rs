@@ -8,8 +8,8 @@ use super::error::{GrepManifestError, Result};
 use super::state::{GrepHint, GrepManifestState};
 use crate::keyspace::{hint_key, manifest_key};
 use bytes::Bytes;
-use loonfs::Deadline;
-use loonfs::{CoreError, Observation, StoreFailureClass, METADATA_PUBLICATION_BUDGET_MS};
+use loonfs::engine::{Deadline, Observation, METADATA_PUBLICATION_BUDGET_MS};
+use loonfs::{CoreError, StoreFailureClass};
 use loonfs_api::{ManifestNo, NamespaceId};
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 

@@ -1,5 +1,9 @@
 //! Embedded LoonFS runtime.
 //!
+//! The crate root is the host API: what a host needs to build, configure,
+//! run, read through, write through, and maintain a runtime. The parts an
+//! extension uses to keep its own index over a namespace are in [`engine`].
+//!
 //! The crate has two nouns. A [`LoonFs`] is the runtime: it owns the store
 //! client and the read budgets, and reads through a [`MetadataCache`] that
 //! several runtimes may share. A [`Namespace`] handle acts on
@@ -80,27 +84,40 @@ pub use loonfs_api::{
     FEATURE_UPLOADS_DIRECT_PUT, PROTOCOL_VERSION,
 };
 pub use loonfs_core::cache::{
-    DecodedBlock, DecodedBlockCache, DecodedBlockCacheConfig, DecodedBlockCacheObserver,
-    DecodedBlockCacheStats, DecodedSegmentBlock, Recency, SegmentBlockKind, SegmentCacheKey,
     StoredMetadataBlockCache, StoredMetadataBlockCacheCloseError, StoredMetadataBlockKey,
     StoredMetadataBlockKind,
 };
 pub use loonfs_core::limits::{
     DIRECT_TRANSFER_URL_TTL_MS, GC_DEFAULT_GRACE_WINDOW_MS, GC_MIN_GRACE_WINDOW_MS,
-    MAX_MULTIPART_PARTS, MAX_SIGNED_PARTS_PER_REQUEST, METADATA_PUBLICATION_BUDGET_MS,
-    READ_REVALIDATION_BOUND_MS, UNREFERENCED_SEGMENT_MIN_AGE_MS,
+    MAX_MULTIPART_PARTS, MAX_SIGNED_PARTS_PER_REQUEST,
 };
-pub use loonfs_core::time::{current_time_ms, Deadline, Observation, WallClock};
+pub use loonfs_core::time::{current_time_ms, WallClock};
 pub use loonfs_core::{
-    delete_if_aged, grace_age, next_run_no_after, refill_iterators, select_next_iterator,
-    write_segments_in_waves, CheckpointFile, CheckpointFilesPage, CheckpointFilesPageCursor,
-    CheckpointPageCursor, CreateNamespaceOptions, CurrentFileState, DeleteNamespaceOptions,
-    Error as CoreError, ErrorCode, ErrorKind, FileContentStream, GcOptions, GraceAge,
-    ListCheckpointFilesOptions, MetadataCompactionJobOutcome, MetadataCompactionPolicy,
-    MetadataViewError, SegmentBlockLoader, SegmentRowIterator, StoreFailureClass, WriterFence,
-    CONTENT_READ_CHUNK_BYTES, MAX_RESOLVE_CURRENT_FILES,
+    CheckpointFile, CheckpointFilesPage, CheckpointFilesPageCursor, CheckpointPageCursor,
+    CreateNamespaceOptions, CurrentFileState, DeleteNamespaceOptions, Error as CoreError,
+    ErrorCode, ErrorKind, FileContentStream, GcOptions, ListCheckpointFilesOptions,
+    MetadataCompactionJobOutcome, MetadataCompactionPolicy, MetadataViewError, StoreFailureClass,
+    WriterFence, CONTENT_READ_CHUNK_BYTES, MAX_RESOLVE_CURRENT_FILES,
 };
 pub use publisher::{NamespaceAdvanceHint, NamespaceAdvanceObserver};
+
+/// The parts an extension uses to keep its own index over a namespace.
+///
+/// The `loonfs-grep` crate is the example. A host does not need them.
+pub mod engine {
+    pub use loonfs_core::cache::{
+        DecodedBlock, DecodedBlockCache, DecodedBlockCacheConfig, DecodedBlockCacheObserver,
+        DecodedBlockCacheStats, DecodedSegmentBlock, Recency, SegmentBlockKind, SegmentCacheKey,
+    };
+    pub use loonfs_core::limits::{
+        METADATA_PUBLICATION_BUDGET_MS, READ_REVALIDATION_BOUND_MS, UNREFERENCED_SEGMENT_MIN_AGE_MS,
+    };
+    pub use loonfs_core::time::{Deadline, Observation};
+    pub use loonfs_core::{
+        delete_if_aged, grace_age, next_run_no_after, refill_iterators, select_next_iterator,
+        write_segments_in_waves, GraceAge, SegmentBlockLoader, SegmentRowIterator,
+    };
+}
 
 /// Request shapes a serving host decodes before converting them to runtime options.
 pub mod requests {

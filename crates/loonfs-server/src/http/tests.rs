@@ -611,7 +611,7 @@ async fn built_through_seq(state: &AppState, namespace_id: &NamespaceId) -> Chan
     load_current_grep_manifest(
         &*state.runtime.object_store(),
         namespace_id,
-        loonfs::Observation::now(Arc::new(
+        loonfs::engine::Observation::now(Arc::new(
             loonfs_objectstore::timing::StdMonotonicTimer::default(),
         )),
     )

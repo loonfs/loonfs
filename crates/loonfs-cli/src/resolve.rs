@@ -8,10 +8,10 @@ use crate::config::{
 };
 use crate::error::CliError;
 use crate::profiles::default_namespace;
+use loonfs::engine::DecodedBlockCacheConfig;
 use loonfs::{
-    maintenance_hint_relay, DecodedBlockCacheConfig, GarbageCollectionJob, LoonFs,
-    MaintenanceRegistry, MaintenanceRunner, MetadataCompactionJob, MetadataMaintenanceJob,
-    SharedObjectStore, TraceStoreKind, WriterId,
+    maintenance_hint_relay, GarbageCollectionJob, LoonFs, MaintenanceRegistry, MaintenanceRunner,
+    MetadataCompactionJob, MetadataMaintenanceJob, SharedObjectStore, TraceStoreKind, WriterId,
 };
 use loonfs_api::{
     ActorId, NamespaceId, PrincipalId, PrincipalScope, PrincipalSet, SecretString, Subject,

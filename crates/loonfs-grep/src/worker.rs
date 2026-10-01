@@ -19,12 +19,14 @@ use crate::reads::{page_request, published_revision, NamespaceReads};
 use crate::service::is_indexable_text_content;
 use crate::{GrepError, Result};
 use futures::future::try_join_all;
-use loonfs::{
-    next_run_no_after, refill_iterators, select_next_iterator, write_segments_in_waves,
-    CheckpointFilesPageCursor, CoreError, CreateCheckpointOptions, LoonFs, Maintenance, ReadOnly,
-    SegmentBlockLoader, SegmentRowIterator, StoreFailureClass,
+use loonfs::engine::{
+    next_run_no_after, refill_iterators, select_next_iterator, write_segments_in_waves, Deadline,
+    Observation, SegmentBlockLoader, SegmentRowIterator,
 };
-use loonfs::{Deadline, Observation};
+use loonfs::{
+    CheckpointFilesPageCursor, CoreError, CreateCheckpointOptions, LoonFs, Maintenance, ReadOnly,
+    StoreFailureClass,
+};
 use loonfs_api::v0::{GrepIndex, GrepIndexLifecycle};
 use loonfs_api::wire::sst_blocks::{
     DecodedDataBlock, SegmentBlocksBuilder, SegmentIndexEntry, SstBlockCodecError,

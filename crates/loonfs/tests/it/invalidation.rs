@@ -4,10 +4,11 @@
 
 #![allow(clippy::panic)]
 
+use loonfs::engine::READ_REVALIDATION_BOUND_MS;
 use loonfs::metrics::{DefaultMetricsRecorder, MetricValue};
 use loonfs::{
     Error, LoonFs, LoonFsBuilder, MetadataCache, NamespaceId, ReadOnly, SharedObjectStore,
-    SnapshotPolicy, Writable, WriterFence, READ_REVALIDATION_BOUND_MS,
+    SnapshotPolicy, Writable, WriterFence,
 };
 use loonfs_api::wire::control::NamespaceStatus;
 use loonfs_core::control::NamespaceReadState;
