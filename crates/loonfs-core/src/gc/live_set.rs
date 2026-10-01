@@ -55,25 +55,16 @@ impl LiveSet {
             namespace_deleted: head.status.is_deleted(),
             current_tombstone: head.status.is_deleted().then(|| head.clone()),
             discovery_start_manifest_no: anchor.hint.state.manifest_no,
-            objects: BTreeSet::from([anchor.manifest.object_key.clone()]),
+            objects: BTreeSet::new(),
             has_pins: false,
             grace_window_ms: grace_window_ms.max(NAMESPACE_RETIREMENT_GRACE_MS),
             now_ms: context.now_ms,
             live_folded_wal_no: live_folded_wal_no(&anchor.read_state),
         };
-        let mut manifests = BTreeSet::new();
         // A tombstone roots its runs like any current manifest: an import from
         // a deleted owner is still authorized against its final access state.
-        if !live
-            .load_manifest(store, namespace_id, head.manifest_no, &mut manifests)
-            .await?
-        {
-            return Err(missing_root_manifest(
-                namespace_id,
-                head.manifest_no,
-                &anchor.manifest.object_key,
-            ));
-        }
+        live.protect_manifest(anchor.manifest.object_key.clone(), head);
+        let mut manifests = BTreeSet::from([head.manifest_no]);
         let prefix = pin_prefix(namespace_id);
         let mut listing = store.list_prefix_stream(&prefix);
         while let Some(key) = listing

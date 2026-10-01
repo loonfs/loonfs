@@ -1257,8 +1257,8 @@ async fn inline_bytes_make_automatic_and_explicit_folds_due_before_wal_object_co
         assert_eq!(step.wal_fold, crate::WalFoldStepOutcome::NotNeeded);
         assert_eq!(
             family_requests(&store, DurableObjectFamily::WalObject),
-            14,
-            "two windowed WAL discoveries without a byte-count replay"
+            7,
+            "one windowed WAL discovery without a byte-count replay"
         );
         if mode == "explicit" {
             let step = maintenance

@@ -2136,16 +2136,16 @@ async fn gc_retains_everything_without_provider_timestamps() {
 }
 
 #[tokio::test]
-async fn gc_of_an_absent_namespace_reads_the_hint_and_sweeps_nothing() {
+async fn gc_of_an_absent_namespace_reads_the_hint_and_reports_it_missing() {
     let temp_dir = tempdir().expect("tempdir");
     let inner = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("orphan").expect("namespace id");
     let store = RecordingStore::new(inner, KeyPredicate::any());
 
-    let report = gc_namespace(&store, &namespace_id, &options(), &context(u64::MAX))
+    let error = gc_namespace(&store, &namespace_id, &options(), &context(u64::MAX))
         .await
-        .expect("gc absent namespace");
-    assert_eq!(report, GcResponse::empty(namespace_id.clone()));
+        .expect_err("gc absent namespace");
+    assert_eq!(error.code(), crate::error::ErrorCode::NamespaceNotFound);
     assert_eq!(store.counts().lists, 0);
     assert_eq!(store.counts().deletes, 0);
 }

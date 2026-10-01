@@ -10,7 +10,7 @@ use crate::wal::{
     discover_tail, replay_discovered_tail, DiscoveredTail, ProjectedWalTail, ValidatedWalTail,
 };
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::{ChangeSeq, ManifestNo, NamespaceId};
+use loonfs_types::{ChangeSeq, CompactorEpoch, ManifestNo, NamespaceId};
 use std::sync::Arc;
 
 #[derive(Debug, Clone)]
@@ -29,6 +29,10 @@ impl NamespaceReadAnchor {
     pub fn basis(&self) -> MetadataBasis {
         MetadataBasis(self.manifest.state.manifest().clone())
     }
+
+    pub fn compactor_epoch(&self) -> CompactorEpoch {
+        self.manifest.state.compactor_epoch()
+    }
 }
 
 pub async fn load_read_anchor<S: ObjectStore + ?Sized>(
@@ -39,6 +43,16 @@ pub async fn load_read_anchor<S: ObjectStore + ?Sized>(
         crate::time::Observation::now(Arc::new(crate::time::StdMonotonicTimer::default()));
     let (manifest, hint) = load_current_manifest_with_hint(store, namespace_id).await?;
     load_read_anchor_from_manifest(store, namespace_id, manifest, hint, observed).await
+}
+
+/// Loads the read anchor of a namespace that is not deleted.
+pub async fn load_live_read_anchor<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+) -> CoreResult<NamespaceReadAnchor> {
+    let anchor = load_read_anchor(store, namespace_id).await?;
+    crate::namespace::control::ensure_namespace_live(&anchor.read_state)?;
+    Ok(anchor)
 }
 
 pub(crate) async fn load_read_anchor_from_manifest<S: ObjectStore + ?Sized>(
