@@ -1468,9 +1468,9 @@ pub enum CompactionStepOutcome {
     /// `metadata_compaction` job, which compacts it by streaming.
     #[cfg_attr(
         feature = "openapi",
-        schema(title = "CompactionStepOutcomeStreamingRequired")
+        schema(title = "CompactionStepOutcomeMetadataCompactionRequired")
     )]
-    StreamingRequired {},
+    MetadataCompactionRequired {},
     /// Another publisher changed the current manifest before this step could publish.
     #[cfg_attr(
         feature = "openapi",

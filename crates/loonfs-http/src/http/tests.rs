@@ -187,7 +187,7 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "source_head_seq",
     "source_namespace_id",
     "source_parent_inode_id",
-    "streaming_required",
+    "metadata_compaction_required",
     "target_namespace_id",
     "captured_seq",
     "through_seq",

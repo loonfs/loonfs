@@ -1028,10 +1028,10 @@ A deleted namespace accepts only a run with `kind` set to `gc` or `grep_gc`; oth
 In a `metadata` result, `compaction.outcome` reports the bounded compaction
 step and has five values. `not_needed` means no bounded merge is due.
 `unit_published` means this run published one bounded merge.
-`streaming_required` means a family group's window is too large for one
-bounded merge and needs streaming compaction; run the `metadata_compaction`
-job. `manifest_advanced` means another publisher changed the current manifest
-first. Segments this run wrote remain unreferenced, and a later GC pass can
+`metadata_compaction_required` means a family group's window is too large
+for one bounded merge; run the `metadata_compaction` job, which compacts it
+by streaming. `manifest_advanced` means another publisher changed the current
+manifest first. Segments this run wrote remain unreferenced, and a later GC pass can
 delete them. `fenced` means a newer runtime holds the compactor epoch. This
 bounded step never runs a streaming compaction; only the `metadata_compaction`
 job does.

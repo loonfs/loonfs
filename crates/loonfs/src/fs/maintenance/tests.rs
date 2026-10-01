@@ -396,7 +396,7 @@ async fn compaction_planning_survives_restart_and_explicit_work_has_bounded_fan_
     .expect("metadata response");
     assert_eq!(
         metadata.compaction,
-        CompactionStepOutcome::StreamingRequired {}
+        CompactionStepOutcome::MetadataCompactionRequired {}
     );
 
     writer.shutdown().await.expect("shut down the first writer");
@@ -423,7 +423,7 @@ async fn compaction_planning_survives_restart_and_explicit_work_has_bounded_fan_
     .expect("metadata response");
     assert_eq!(
         metadata.compaction,
-        CompactionStepOutcome::StreamingRequired {},
+        CompactionStepOutcome::MetadataCompactionRequired {},
         "the same durable run sizes produce the same plan after restart"
     );
     fresh_writer
@@ -515,7 +515,7 @@ async fn an_immediate_step_reports_the_compaction_the_explicit_call_runs() {
         .expect("run an immediate step");
     assert_eq!(
         response.compaction,
-        CompactionStepOutcome::StreamingRequired {},
+        CompactionStepOutcome::MetadataCompactionRequired {},
         "an immediate step says the namespace needs a compaction job"
     );
 
@@ -713,7 +713,7 @@ async fn explicit_compaction_merges_twenty_deltas_and_reads_the_large_base_once(
                     .expect("plan the base rebuild");
                 assert_eq!(
                     response.compaction,
-                    CompactionStepOutcome::StreamingRequired {}
+                    CompactionStepOutcome::MetadataCompactionRequired {}
                 );
             }
         }

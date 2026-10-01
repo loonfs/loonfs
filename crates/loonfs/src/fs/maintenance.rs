@@ -406,7 +406,9 @@ impl Maintenance {
             match self.compact_once(namespace_id, compaction_policy).await? {
                 CompactionStep::Concluded(outcome) => outcome,
                 CompactionStep::Fenced => CompactionStepOutcome::Fenced {},
-                CompactionStep::CompactionPlanned(_) => CompactionStepOutcome::StreamingRequired {},
+                CompactionStep::CompactionPlanned(_) => {
+                    CompactionStepOutcome::MetadataCompactionRequired {}
+                }
             },
         )
     }
@@ -515,7 +517,7 @@ impl Maintenance {
     ///
     /// The unit is a bounded merge when the selected window fits one step,
     /// and otherwise one streaming compaction of a family group. Use this
-    /// when [`CompactionStepOutcome::StreamingRequired`] is reported, and
+    /// when [`CompactionStepOutcome::MetadataCompactionRequired`] is reported, and
     /// repeat it while it publishes to compact every eligible group.
     #[tracing::instrument(
         level = "debug",

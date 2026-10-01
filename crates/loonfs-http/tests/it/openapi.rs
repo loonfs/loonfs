@@ -1384,7 +1384,7 @@ fn openapi_names_tagged_one_of_alternatives() {
             &[
                 "CompactionStepOutcomeNotNeeded",
                 "CompactionStepOutcomeUnitPublished",
-                "CompactionStepOutcomeStreamingRequired",
+                "CompactionStepOutcomeMetadataCompactionRequired",
                 "CompactionStepOutcomeManifestAdvanced",
                 "CompactionStepOutcomeFenced",
             ][..],

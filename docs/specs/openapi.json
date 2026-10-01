@@ -608,8 +608,8 @@
           "mapping": {
             "fenced": "#/components/schemas/CompactionStepOutcomeFenced",
             "manifest_advanced": "#/components/schemas/CompactionStepOutcomeManifestAdvanced",
+            "metadata_compaction_required": "#/components/schemas/CompactionStepOutcomeMetadataCompactionRequired",
             "not_needed": "#/components/schemas/CompactionStepOutcomeNotNeeded",
-            "streaming_required": "#/components/schemas/CompactionStepOutcomeStreamingRequired",
             "unit_published": "#/components/schemas/CompactionStepOutcomeUnitPublished"
           },
           "propertyName": "outcome"
@@ -622,7 +622,7 @@
             "$ref": "#/components/schemas/CompactionStepOutcomeUnitPublished"
           },
           {
-            "$ref": "#/components/schemas/CompactionStepOutcomeStreamingRequired"
+            "$ref": "#/components/schemas/CompactionStepOutcomeMetadataCompactionRequired"
           },
           {
             "$ref": "#/components/schemas/CompactionStepOutcomeManifestAdvanced"
@@ -662,12 +662,12 @@
         ],
         "type": "object"
       },
-      "CompactionStepOutcomeNotNeeded": {
-        "description": "No family group had enough delta runs to merge.",
+      "CompactionStepOutcomeMetadataCompactionRequired": {
+        "description": "A family group's window is too large for one bounded merge. Run the\n`metadata_compaction` job, which compacts it by streaming.",
         "properties": {
           "outcome": {
             "enum": [
-              "not_needed"
+              "metadata_compaction_required"
             ],
             "type": "string"
           }
@@ -677,12 +677,12 @@
         ],
         "type": "object"
       },
-      "CompactionStepOutcomeStreamingRequired": {
-        "description": "A family group's window is too large for one bounded merge. Run the\n`metadata_compaction` job, which compacts it by streaming.",
+      "CompactionStepOutcomeNotNeeded": {
+        "description": "No family group had enough delta runs to merge.",
         "properties": {
           "outcome": {
             "enum": [
-              "streaming_required"
+              "not_needed"
             ],
             "type": "string"
           }

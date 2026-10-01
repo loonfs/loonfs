@@ -155,8 +155,8 @@ pub(super) fn human_maintenance_ran(ran: &MaintenanceRan) -> String {
             match metadata.compaction {
                 CompactionStepOutcome::NotNeeded {} => "compaction not needed",
                 CompactionStepOutcome::UnitPublished {} => "compacted one family group",
-                CompactionStepOutcome::StreamingRequired {} => {
-                    "one family group needs streaming compaction; run the metadata_compaction job"
+                CompactionStepOutcome::MetadataCompactionRequired {} => {
+                    "one family group needs the metadata_compaction job"
                 }
                 CompactionStepOutcome::Fenced {} => "compaction fenced by a newer runtime",
                 CompactionStepOutcome::ManifestAdvanced {} => {

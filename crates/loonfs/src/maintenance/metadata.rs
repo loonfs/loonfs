@@ -53,7 +53,7 @@ impl MaintenanceJob for MetadataMaintenanceJob {
                 // A publication's wake can arrive before the tail is idle: the
                 // clock moved back, or a later publication's hint was dropped.
                 report.not_before_ms = idle_fold_at_ms;
-                if metadata.compaction == (CompactionStepOutcome::StreamingRequired {}) {
+                if metadata.compaction == (CompactionStepOutcome::MetadataCompactionRequired {}) {
                     report.conclusion = MaintenanceConclusion::Blocked;
                     report.follow_up =
                         Some((MaintenanceJobId::METADATA_COMPACTION, namespace_id.clone()));
@@ -115,7 +115,9 @@ fn metadata_conclusion(step: &MetadataMaintenanceResponse) -> MaintenanceConclus
         CompactionStepOutcome::ManifestAdvanced {} | CompactionStepOutcome::Fenced {} => {
             Some(MaintenanceConclusion::Superseded)
         }
-        CompactionStepOutcome::StreamingRequired {} => Some(MaintenanceConclusion::Blocked),
+        CompactionStepOutcome::MetadataCompactionRequired {} => {
+            Some(MaintenanceConclusion::Blocked)
+        }
         CompactionStepOutcome::NotNeeded {} => None,
     };
     [fold, compaction]

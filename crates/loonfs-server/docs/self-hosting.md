@@ -603,7 +603,7 @@ not rule out later writes, so keep these namespaces assigned to the loop.
 See the API spec's [namespace deletion section](../../../docs/specs/api.md#63-delete-v0namespacesns)
 for the blockers.
 
-A `streaming_required` compaction outcome asks the registered
+A `metadata_compaction_required` compaction outcome asks the registered
 `metadata_compaction` job to run.
 The self-hosted server schedules that follow-up automatically.
 
