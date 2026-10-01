@@ -688,7 +688,7 @@ too. A namespace written more often than once per period is never folded
 this way; its writer folds it at the thresholds. Set
 `idle_fold_after_ms = 0` to turn the rule off. An explicit `metadata`
 maintenance request uses the same period as the sweep.
-`loonfs maintenance loop` does not read the server config and always uses
+An embedded CLI profile does not read the server config and always uses
 15 minutes. Embedded hosts pass
 `MetadataMaintenanceOptions::idle_fold_after_ms` to
 `Maintenance::maintain_metadata_while_due_with_options`, where zero also

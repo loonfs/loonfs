@@ -97,19 +97,22 @@ fn label_sets_of_one_name_share_a_single_header_pair() {
 fn rendering_the_same_readings_twice_produces_the_same_bytes() {
     let recorder = DefaultMetricsRecorder::new();
     for (name, labels) in [
-        ("loonfs.maintenance.steps", [("job", "gc")]),
-        ("loonfs.maintenance.steps", [("job", "metadata")]),
+        ("loonfs.maintenance.sweep_visit_failures", [("call", "gc")]),
+        (
+            "loonfs.maintenance.sweep_visit_failures",
+            [("call", "metadata")],
+        ),
         ("loonfs.gc.retained", [("category", "all")]),
     ] {
         recorder
-            .register_counter(name, "Steps", &labels)
+            .register_counter(name, "Failures", &labels)
             .increment(1);
     }
     recorder
         .register_histogram(
-            "loonfs.maintenance.step_seconds",
-            "Step duration",
-            &[("job", "gc")],
+            "loonfs.maintenance.compaction_seconds",
+            "Compaction duration",
+            &[("outcome", "published")],
             LATENCY_SECONDS_BOUNDARIES,
         )
         .record(0.02);

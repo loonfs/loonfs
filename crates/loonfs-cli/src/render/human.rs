@@ -78,16 +78,6 @@ fn human_success_text(output: &CommandOutput) -> String {
             steps,
             budget_exhausted,
         } => human_grep_index_enabled(response, *waited_for_seq, *steps, *budget_exhausted),
-        CommandData::MaintenanceHosted { namespaces, jobs } => {
-            human_maintenance_hosted(namespaces, jobs)
-        }
-        CommandData::MaintenanceDrained {
-            namespaces,
-            jobs,
-            keys,
-            steps,
-            budget_exhausted,
-        } => human_maintenance_drained(namespaces, jobs, keys, *steps, *budget_exhausted),
         CommandData::StoreProbed(response) => human_store_probed(response),
         CommandData::GrepIndexDisabled(response) => human_grep_index_disabled(response),
         CommandData::GrepIndexStatus(response) => human_grep_index_status(response),

@@ -230,23 +230,12 @@ pub(super) async fn compaction_step_with_deadline<S: ObjectStore + ?Sized>(
     }
 }
 
-/// Checks an anchor's WAL tail and manifest descriptors without reading the
-/// store.
-///
-/// `wal_tail_due` gets the unfolded WAL object count and the newest tail
-/// commit's `committed_at_ms`, and says whether the tail alone makes
-/// maintenance due.
-pub fn metadata_maintenance_due(
+/// Checks an anchor's manifest descriptors for compaction work without
+/// reading the store.
+pub fn metadata_compaction_due(
     anchor: &NamespaceReadAnchor,
-    wal_tail_due: impl FnOnce(u64, Option<u64>) -> bool,
     compaction_policy: MetadataCompactionPolicy,
 ) -> bool {
-    if wal_tail_due(
-        anchor.read_state.unfolded_wal_objects(),
-        anchor.tail.newest_commit_at_ms(),
-    ) {
-        return true;
-    }
     let manifest = anchor.manifest.state.envelope.payload();
     manifest_has_compaction_work(
         manifest,

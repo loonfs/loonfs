@@ -216,7 +216,7 @@ pub(crate) enum Command {
     Capabilities(CapabilitiesArgs),
     /// Check the selected deployment without writing to it.
     Doctor(DoctorArgs),
-    /// Maintenance operations: metadata, checkpoints, retention, GC, indexes, and the local loop.
+    /// Maintenance operations: metadata, checkpoints, retention, GC, indexes, and the store.
     Maintenance {
         #[command(subcommand)]
         command: MaintenanceCommand,
@@ -1281,9 +1281,7 @@ pub(crate) struct SnapshotDeleteArgs {
 pub(crate) enum MaintenanceCommand {
     /// Restore a principal's administrator grant on the root.
     RecoverAdministrator(MaintenanceRecoverAdministratorArgs),
-    /// Run the local scheduler loop for selected namespaces. Requires an embedded profile.
-    Loop(MaintenanceLoopArgs),
-    /// Run the metadata job once.
+    /// Run one metadata maintenance pass.
     Metadata(MaintenanceMetadataArgs),
     /// Fold the WAL tail into metadata segments, whatever its length.
     Fold(MaintenanceNamespaceArgs),
@@ -1291,8 +1289,7 @@ pub(crate) enum MaintenanceCommand {
     ///
     /// A unit is one bounded merge or one streaming compaction of a family
     /// group. Repeat the command while it publishes to compact every eligible
-    /// group, or drain the metadata-compaction job with `maintenance loop`
-    /// on an embedded profile.
+    /// group.
     Compact(MaintenanceNamespaceArgs),
     /// Create, list, or delete checkpoint pins.
     Checkpoint {
@@ -1366,55 +1363,6 @@ pub(crate) enum MaintenanceRetentionCommand {
 pub(crate) enum MaintenanceStoreCommand {
     /// Test the object-store operations LoonFS requires.
     Probe(MaintenanceStoreProbeArgs),
-}
-
-/// Minimum `--poll-interval-ms`. Each poll reads durable state for every
-/// assigned key, so shorter intervals add provider requests without improving
-/// scheduling precision.
-const MIN_POLL_INTERVAL_MS: u64 = 100;
-
-#[derive(Debug, Args)]
-pub(crate) struct MaintenanceLoopArgs {
-    #[command(flatten)]
-    pub profile: ProfileSelectorArgs,
-    #[command(flatten)]
-    pub request: RequestBehaviorArgs,
-    /// Namespaces to maintain. Comma-separated, or repeat the flag.
-    #[arg(long = "namespaces", required = true, value_delimiter = ',', value_hint = ValueHint::Other)]
-    pub namespaces: Vec<String>,
-    /// Maintenance jobs to run. Comma-separated, or repeat the flag.
-    /// Omitting it selects all five jobs.
-    #[arg(long = "jobs", value_delimiter = ',')]
-    pub jobs: Vec<MaintenanceJobArg>,
-    /// Interval between checks for assigned namespaces, in milliseconds.
-    /// Defaults to 60000. Drains ignore this setting.
-    #[arg(long, value_parser = clap::value_parser!(u64).range(MIN_POLL_INTERVAL_MS..))]
-    pub poll_interval_ms: Option<u64>,
-    /// Complete the current assignments and exit.
-    #[arg(long)]
-    pub drain: bool,
-    /// Stop the drain after this many total steps. Requires `--drain`.
-    #[arg(long, requires = "drain")]
-    pub max_steps: Option<u64>,
-    /// Stop the drain after this many milliseconds. Requires `--drain`.
-    #[arg(long, requires = "drain")]
-    pub deadline_ms: Option<u64>,
-}
-
-/// Jobs accepted by `maintenance loop --jobs`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub(crate) enum MaintenanceJobArg {
-    /// Fold the WAL tail past its threshold and run one bounded compaction
-    /// per step.
-    Metadata,
-    /// Run one metadata compaction unit per step.
-    MetadataCompaction,
-    /// Run one bounded collection call per step.
-    Gc,
-    /// Build and fold the gram content index.
-    GrepIndex,
-    /// Reclaim one namespace's unreferenced grep objects per step.
-    GrepGc,
 }
 
 #[derive(Debug, Args)]
@@ -1603,7 +1551,6 @@ command_kinds! {
     MaintenanceCheckpointDelete => "maintenance_checkpoint_delete",
     MaintenanceFold => "maintenance_fold",
     MaintenanceRetentionAdvance => "maintenance_retention_advance",
-    MaintenanceLoop => "maintenance_loop",
     MaintenanceMetadata => "maintenance_metadata",
     MaintenanceCompact => "maintenance_compact",
     MaintenanceGc => "maintenance_gc",
@@ -1675,7 +1622,6 @@ impl Cli {
                 MaintenanceCommand::RecoverAdministrator(_) => {
                     CommandKind::MaintenanceRecoverAdministrator
                 }
-                MaintenanceCommand::Loop(_) => CommandKind::MaintenanceLoop,
                 MaintenanceCommand::Metadata(_) => CommandKind::MaintenanceMetadata,
                 MaintenanceCommand::Fold(_) => CommandKind::MaintenanceFold,
                 MaintenanceCommand::Compact(_) => CommandKind::MaintenanceCompact,
@@ -2043,7 +1989,6 @@ mod tests {
             maintenance,
             &[
                 "recover-administrator",
-                "loop",
                 "metadata",
                 "fold",
                 "compact",

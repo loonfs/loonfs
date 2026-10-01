@@ -1,20 +1,14 @@
 //! What a writer built with a metrics recorder actually reports: the
-//! object-store bridge, the publication instruments, and a maintenance pass
-//! that settled through the runner.
+//! object-store bridge, the publication instruments, and a collection pass.
 
 #![allow(clippy::panic)]
 // A missing instrument is a wiring bug, and naming it beats an option.
 
 use crate::common::*;
 use loonfs::metrics::{DefaultMetricsRecorder, MetricValue, MetricsSnapshot};
-use loonfs::{
-    maintenance_hint_relay, GarbageCollectionJob, LoonFs, MaintenanceConclusion, MaintenanceJobId,
-    MaintenanceRegistry, MaintenanceRunner, MetadataCompactionJob, MetadataMaintenanceJob,
-    MetadataMaintenanceOptions, SnapshotPolicy,
-};
+use loonfs::{LoonFs, MetadataMaintenanceOptions, SnapshotPolicy};
 use loonfs_test_support::block_on::block_on;
 use loonfs_test_support::ids::namespace_id;
-use std::num::NonZeroUsize;
 use std::sync::Arc;
 use tempfile::tempdir;
 
@@ -51,42 +45,21 @@ fn histogram_count(snapshot: &MetricsSnapshot, name: &str) -> u64 {
 }
 
 #[test]
-fn a_writer_with_a_recorder_reports_stores_publications_and_steps() {
+fn a_writer_with_a_recorder_reports_stores_and_publications() {
     let temp_dir = tempdir().expect("tempdir");
     let recorder = Arc::new(DefaultMetricsRecorder::new());
     let namespace_id = namespace_id("demo");
     // Enough writes to push the WAL tail past its threshold, so the writer
-    // folds it and nudges the metadata job to compact.
+    // folds it.
     let writes = MetadataMaintenanceOptions::default()
         .max_wal_tail_objects
         .get()
         + 1;
     let snapshot = block_on(async {
-        let (observer, receiver) =
-            maintenance_hint_relay(NonZeroUsize::new(64).expect("relay capacity is nonzero"));
         let fs = open_runtime_with_async(store(temp_dir.path()), "metrics-writer", |builder| {
-            builder
-                .maintenance_hint_observer(move |hint| observer(hint))
-                .metrics_recorder(recorder.clone())
+            builder.metrics_recorder(recorder.clone())
         })
         .await;
-        let registry = MaintenanceRegistry::new();
-        registry
-            .register(Arc::new(MetadataMaintenanceJob::new(
-                fs.maintenance.clone(),
-            )))
-            .expect("metadata job");
-        registry
-            .register(Arc::new(MetadataCompactionJob::new(fs.maintenance.clone())))
-            .expect("metadata compaction job");
-        registry
-            .register(Arc::new(GarbageCollectionJob::new(fs.maintenance.clone())))
-            .expect("garbage collection job");
-        let runner = MaintenanceRunner::builder(registry)
-            .metrics_recorder(recorder.clone())
-            .build()
-            .expect("runner");
-        runner.attach_hints(receiver);
         fs.writer
             .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
             .await
@@ -109,10 +82,7 @@ fn a_writer_with_a_recorder_reports_stores_publications_and_steps() {
             .wait_for_fold()
             .await
             .expect("publisher fold settles");
-        runner.drain().await.expect("maintenance settles");
-        let snapshot = recorder.snapshot();
-        runner.shutdown().await.expect("runner shutdown");
-        snapshot
+        recorder.snapshot()
     });
 
     // The bridge: writes went out, classified by the key they wrote, and
@@ -177,24 +147,6 @@ fn a_writer_with_a_recorder_reports_stores_publications_and_steps() {
         0,
         "the test stays below the write-stop bound"
     );
-
-    // The runner: the fold nudges the metadata job, and whatever it
-    // concluded, the step settled under its own job label.
-    let metadata_steps: u64 = MetadataConclusions::all()
-        .map(|conclusion| {
-            counter(
-                &snapshot,
-                "loonfs.maintenance.steps",
-                &[("conclusion", conclusion), ("job", "metadata")],
-            )
-        })
-        .sum();
-    assert!(
-        metadata_steps > 0,
-        "a write should have settled at least one metadata step"
-    );
-    assert!(histogram_count(&snapshot, "loonfs.maintenance.step_seconds") > 0);
-    assert!(histogram_count(&snapshot, "loonfs.maintenance.queue_wait_seconds") > 0);
 }
 
 #[test]
@@ -211,12 +163,8 @@ fn a_collection_step_reports_what_the_pass_retained() {
             .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
             .await
             .expect("create namespace");
-        let registry = MaintenanceRegistry::new();
-        registry
-            .register(Arc::new(GarbageCollectionJob::new(fs.maintenance.clone())))
-            .expect("garbage collection job");
-        registry
-            .run(MaintenanceJobId::GC, &namespace_id)
+        fs.maintenance
+            .gc(&namespace_id)
             .await
             .expect("run one collection pass");
         recorder.snapshot()
@@ -342,21 +290,4 @@ fn reads_report_head_cache_lookups_and_retained_bytes() {
         ) > 0,
         "the head loads cached the manifests they decoded"
     );
-}
-
-/// The five conclusions a metadata step can settle on, as label values.
-struct MetadataConclusions;
-
-impl MetadataConclusions {
-    fn all() -> impl Iterator<Item = &'static str> {
-        [
-            MaintenanceConclusion::Progressed,
-            MaintenanceConclusion::Idle,
-            MaintenanceConclusion::Blocked,
-            MaintenanceConclusion::Superseded,
-            MaintenanceConclusion::NotEnabled,
-        ]
-        .into_iter()
-        .map(MaintenanceConclusion::as_str)
-    }
 }

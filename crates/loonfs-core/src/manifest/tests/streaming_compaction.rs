@@ -2169,7 +2169,7 @@ async fn one_directory_far_past_the_row_budget_streams_a_row_at_a_time() {
 }
 
 // -------------------------------------------------------------------------
-// The whole arc, through the step the maintenance runner calls
+// The whole arc, through the step maintenance calls
 // -------------------------------------------------------------------------
 
 /// The unbind rows a floor covers, which is the churn a rebuild reclaims.
@@ -2274,8 +2274,7 @@ async fn an_over_budget_group_is_rebuilt_by_a_job_while_maintenance_carries_on()
                 ref spec,
             } => {
                 // One job at a time per namespace: a plan that arrives while
-                // one runs is reported and skipped, which is what the runner
-                // does with it.
+                // one runs is reported and skipped.
                 if active.is_none() {
                     assert_eq!(planned_group, group, "this budget starves this group first");
                     active = Some(spec.clone());
@@ -2325,10 +2324,10 @@ async fn an_over_budget_group_is_rebuilt_by_a_job_while_maintenance_carries_on()
             "a step changed what a read answers"
         );
 
-        // The runner has the job running in another task. Waiting a few steps
-        // and then running it here is the same interleaving with the timing
-        // taken out: the steps in between did ordinary work against a
-        // manifest that holds the job's whole input.
+        // Another caller can step while the job runs in its own task.
+        // Waiting a few steps and then running it here is the same
+        // interleaving with the timing taken out: the steps in between did
+        // ordinary work against a manifest that holds the job's whole input.
         if let Some(spec) = active.clone() {
             steps_with_a_job_running += 1;
             if steps_with_a_job_running.is_multiple_of(3) {

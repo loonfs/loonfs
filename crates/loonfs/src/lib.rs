@@ -39,12 +39,12 @@
 //! # Ok(()) }
 //! ```
 //!
-//! A writable session keeps its own namespace's metadata compact: after each
-//! fold it publishes, it runs
+//! A writable session keeps its own namespace's metadata compact: it folds
+//! its WAL tail at a threshold, and after each fold it publishes, it runs
 //! [`Maintenance::maintain_metadata_while_due`] over its namespace. A runtime
-//! starts no other maintenance by itself. A host that wants scheduled
-//! maintenance registers jobs built over [`LoonFs::maintenance`] with a
-//! [`MaintenanceRunner`], which is optional.
+//! starts no other maintenance by itself. A host that wants more, such as
+//! folding idle tails or collecting garbage, calls the operations on
+//! [`LoonFs::maintenance`] on a schedule of its own.
 
 #![warn(missing_docs)]
 
@@ -55,7 +55,6 @@ mod cache;
 mod config;
 mod fs;
 mod handle;
-mod maintenance;
 mod metadata_cache;
 pub mod metrics;
 mod options;
@@ -102,7 +101,6 @@ pub use loonfs_types::{
     FEATURE_NAMESPACES_FORK, FEATURE_SNAPSHOTS, FEATURE_UPLOADS_DIRECT_MULTIPART,
     FEATURE_UPLOADS_DIRECT_PUT, PROTOCOL_VERSION,
 };
-pub use publisher::{NamespaceAdvanceHint, NamespaceAdvanceObserver};
 
 /// The parts an extension uses to keep its own index over a namespace.
 ///
@@ -200,19 +198,14 @@ pub use loonfs_objectstore::{
 
 pub use config::{
     InlineContentPolicy, PublicationLimits, DEFAULT_MAX_CONCURRENT_COMPACTIONS,
-    DEFAULT_MAX_CONCURRENT_FOLDS, DEFAULT_MAX_CONCURRENT_MAINTENANCE,
+    DEFAULT_MAX_CONCURRENT_FOLDS,
 };
 pub use fs::{
     ChangesPager, CheckpointFilesPager, CheckpointsPager, FileRevisionsPager, InodeChildrenPager,
     PathEntriesPager, ReadView, SnapshotPolicy, SnapshotsPager, TrashPager,
 };
-pub use handle::{LoonFs, LoonFsBuilder, Maintenance, Namespace, ReadOnly, Writable};
-pub use maintenance::{
-    maintenance_hint_relay, GarbageCollectionJob, MaintenanceAssignment, MaintenanceCancellation,
-    MaintenanceConclusion, MaintenanceHandle, MaintenanceHint, MaintenanceHintObserver,
-    MaintenanceHintReceiver, MaintenanceJob, MaintenanceJobId, MaintenanceProbe,
-    MaintenanceRegistry, MaintenanceRunReport, MaintenanceRunner, MaintenanceRunnerBuilder,
-    MaintenanceRunnerStats, MetadataCompactionJob, MetadataMaintenanceJob, NamespacePublication,
+pub use handle::{
+    LoonFs, LoonFsBuilder, Maintenance, MaintenanceCancellation, Namespace, ReadOnly, Writable,
 };
 pub use metadata_cache::{
     MetadataCache, MetadataCacheBuilder, MetadataCacheStats, DEFAULT_MAX_HEAD_STATE_BYTES,

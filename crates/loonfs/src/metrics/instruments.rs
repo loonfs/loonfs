@@ -12,11 +12,10 @@ use super::{
 use crate::metrics::{
     LATENCY_SECONDS_BOUNDARIES, RESULT_ERROR, RESULT_HIT, RESULT_MISS, RESULT_OK,
 };
-use crate::{GcResponse, MaintenanceConclusion, MaintenanceJobId, MetadataCompactionJobOutcome};
+use crate::{GcResponse, MetadataCompactionJobOutcome};
 use loonfs_core::cache::DecodedBlockCacheObserver;
 use std::collections::HashMap;
 use std::marker::PhantomData;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 trait MetricLabel: Copy + PartialEq + 'static {
@@ -119,20 +118,6 @@ impl MetricLabel for PublishOutcome {
     }
 }
 
-impl MetricLabel for MaintenanceConclusion {
-    const VALUES: &'static [Self] = &[
-        Self::Progressed,
-        Self::Idle,
-        Self::Blocked,
-        Self::Superseded,
-        Self::NotEnabled,
-    ];
-
-    fn as_str(self) -> &'static str {
-        MaintenanceConclusion::as_str(self)
-    }
-}
-
 /// One reclaimable family: its label, and the count a pass reports for it.
 type GcCategory = (&'static str, fn(&GcResponse) -> u64);
 
@@ -155,191 +140,6 @@ const GC_CATEGORIES: [GcCategory; 8] = [
         gc.deleted_checkpoints_by_owner.snapshot
     }),
 ];
-
-/// Instruments owned by one maintenance runner.
-pub(crate) struct MaintenanceInstruments {
-    installed: Option<InstalledMaintenance>,
-    observed_hints_dropped: AtomicU64,
-}
-
-struct InstalledMaintenance {
-    recorder: Arc<dyn MetricsRecorder>,
-    jobs: Mutex<HashMap<&'static str, MaintenanceJobInstruments>>,
-    compactions_running: Arc<dyn GaugeHandle>,
-    compactions_waiting: Arc<dyn GaugeHandle>,
-    follow_ups: Arc<dyn CounterHandle>,
-    hints_dropped: Arc<dyn CounterHandle>,
-    reconcile_sweeps: Arc<dyn CounterHandle>,
-    reconcile_probes: Arc<dyn CounterHandle>,
-    reconcile_re_admitted: Arc<dyn CounterHandle>,
-    keys_admitted: Arc<dyn GaugeHandle>,
-    keys_queued: Arc<dyn GaugeHandle>,
-    oldest_queued_ms: Arc<dyn GaugeHandle>,
-}
-
-impl MaintenanceInstruments {
-    pub(crate) fn new(recorder: Option<Arc<dyn MetricsRecorder>>) -> Arc<Self> {
-        Arc::new(Self {
-            installed: recorder.map(|recorder| InstalledMaintenance {
-                jobs: Mutex::new(HashMap::new()),
-                compactions_running: recorder.register_gauge(
-                    "loonfs.maintenance.compactions_running",
-                    "Streaming metadata compactions this process is running",
-                    &[],
-                ),
-                compactions_waiting: recorder.register_gauge(
-                    "loonfs.maintenance.compactions_waiting",
-                    "Streaming metadata compactions waiting for a process permit",
-                    &[],
-                ),
-                follow_ups: recorder.register_counter(
-                    "loonfs.maintenance.follow_ups",
-                    "Follow-up maintenance jobs requested by completed runs",
-                    &[],
-                ),
-                hints_dropped: recorder.register_counter(
-                    "loonfs.maintenance.hints_dropped",
-                    "Maintenance hints dropped by bounded relays",
-                    &[],
-                ),
-                reconcile_sweeps: recorder.register_counter(
-                    "loonfs.maintenance.reconcile_sweeps",
-                    "Reconciliation sweeps over admitted maintenance keys",
-                    &[],
-                ),
-                reconcile_probes: recorder.register_counter(
-                    "loonfs.maintenance.reconcile_probes",
-                    "Probes made by reconciliation sweeps",
-                    &[],
-                ),
-                reconcile_re_admitted: recorder.register_counter(
-                    "loonfs.maintenance.reconcile_re_admitted",
-                    "Keys a reconciliation probe found due and queued again",
-                    &[],
-                ),
-                // Sampled each time the runner looks for work to dispatch,
-                // which every timer wake does, so a reading is at most one
-                // reconciliation interval old.
-                keys_admitted: recorder.register_gauge(
-                    "loonfs.maintenance.keys_admitted",
-                    "Job and namespace keys in reconciliation scope",
-                    &[],
-                ),
-                keys_queued: recorder.register_gauge(
-                    "loonfs.maintenance.keys_queued",
-                    "Admitted keys waiting for a maintenance permit",
-                    &[],
-                ),
-                oldest_queued_ms: recorder.register_gauge(
-                    "loonfs.maintenance.oldest_queued_ms",
-                    "Milliseconds the longest-waiting queued key has waited",
-                    &[],
-                ),
-                recorder,
-            }),
-            observed_hints_dropped: AtomicU64::new(0),
-        })
-    }
-
-    pub(crate) fn maintenance_step(
-        &self,
-        job: MaintenanceJobId,
-        conclusion: MaintenanceConclusion,
-        queued_ms: u64,
-        elapsed_ms: u64,
-    ) {
-        let Some(installed) = &self.installed else {
-            return;
-        };
-        let instruments = installed.job(job);
-        instruments.steps.get(conclusion).increment(1);
-        instruments.step_seconds.record(seconds_from_ms(elapsed_ms));
-        instruments
-            .queue_wait_seconds
-            .record(seconds_from_ms(queued_ms));
-    }
-
-    pub(crate) fn maintenance_step_failed(&self, job: MaintenanceJobId, queued_ms: u64) {
-        let Some(installed) = &self.installed else {
-            return;
-        };
-        let instruments = installed.job(job);
-        instruments.failures.increment(1);
-        instruments
-            .queue_wait_seconds
-            .record(seconds_from_ms(queued_ms));
-    }
-
-    pub(crate) fn maintenance_probe_failed(&self, job: MaintenanceJobId) {
-        let Some(installed) = &self.installed else {
-            return;
-        };
-        installed.job(job).probe_failures.increment(1);
-    }
-
-    pub(crate) fn compactions(&self, running: usize, waiting: usize) {
-        let Some(installed) = &self.installed else {
-            return;
-        };
-        installed
-            .compactions_running
-            .set(i64::try_from(running).unwrap_or(i64::MAX));
-        installed
-            .compactions_waiting
-            .set(i64::try_from(waiting).unwrap_or(i64::MAX));
-    }
-
-    pub(crate) fn follow_up(&self, _job: MaintenanceJobId) {
-        if let Some(installed) = &self.installed {
-            installed.follow_ups.increment(1);
-        }
-    }
-
-    pub(crate) fn hints_dropped(&self, total: u64) {
-        let previous = self.observed_hints_dropped.swap(total, Ordering::Relaxed);
-        if let Some(installed) = &self.installed {
-            installed
-                .hints_dropped
-                .increment(total.saturating_sub(previous));
-        }
-    }
-
-    pub(crate) fn reconcile_swept(&self, probes: usize, re_admitted: usize) {
-        let Some(installed) = &self.installed else {
-            return;
-        };
-        installed.reconcile_sweeps.increment(1);
-        installed.reconcile_probes.increment(metric_count(probes));
-        installed
-            .reconcile_re_admitted
-            .increment(metric_count(re_admitted));
-    }
-
-    pub(crate) fn admission(
-        &self,
-        keys_admitted: usize,
-        keys_queued: usize,
-        oldest_queued_ms: u64,
-    ) {
-        let Some(installed) = &self.installed else {
-            return;
-        };
-        installed.keys_admitted.set(metric_level(keys_admitted));
-        installed.keys_queued.set(metric_level(keys_queued));
-        installed
-            .oldest_queued_ms
-            .set(i64::try_from(oldest_queued_ms).unwrap_or(i64::MAX));
-    }
-}
-
-impl InstalledMaintenance {
-    fn job(&self, job: MaintenanceJobId) -> MaintenanceJobInstruments {
-        let mut jobs = lock(&self.jobs);
-        jobs.entry(job.as_str())
-            .or_insert_with(|| MaintenanceJobInstruments::register(self.recorder.as_ref(), job))
-            .clone()
-    }
-}
 
 /// Every instrument one runtime reports, or nothing at all.
 pub(crate) struct RuntimeInstruments {
@@ -698,59 +498,6 @@ impl ObjectStoreOperationInstruments {
             bytes_in: Arc::clone(&self.bytes_in),
             bytes_out: Arc::clone(&self.bytes_out),
             retries: Arc::clone(&self.retries),
-        }
-    }
-}
-
-/// The instruments one maintenance job reports.
-///
-/// Job ids are `&'static str` by construction — the runtime's own are
-/// associated constants and an extension names its own with
-/// [`MaintenanceJobId::new`] — so the label stays bounded by the jobs a
-/// build registers.
-#[derive(Clone)]
-struct MaintenanceJobInstruments {
-    steps: LabeledCounters<MaintenanceConclusion>,
-    failures: Arc<dyn CounterHandle>,
-    probe_failures: Arc<dyn CounterHandle>,
-    step_seconds: Arc<dyn HistogramHandle>,
-    queue_wait_seconds: Arc<dyn HistogramHandle>,
-}
-
-impl MaintenanceJobInstruments {
-    fn register(recorder: &dyn MetricsRecorder, job: MaintenanceJobId) -> Self {
-        let job = job.as_str();
-        let common_labels = [("job", job)];
-        Self {
-            steps: LabeledCounters::register(
-                recorder,
-                "loonfs.maintenance.steps",
-                "Maintenance passes by job and conclusion",
-                "conclusion",
-                &common_labels,
-            ),
-            failures: recorder.register_counter(
-                "loonfs.maintenance.step_failures",
-                "Maintenance passes that failed before concluding, each scheduling one backoff retry",
-                &[("job", job)],
-            ),
-            probe_failures: recorder.register_counter(
-                "loonfs.maintenance.probe_failures",
-                "Reconciliation probes that failed to say whether a job has work",
-                &[("job", job)],
-            ),
-            step_seconds: recorder.register_histogram(
-                "loonfs.maintenance.step_seconds",
-                "Maintenance pass duration in seconds",
-                &[("job", job)],
-                LATENCY_SECONDS_BOUNDARIES,
-            ),
-            queue_wait_seconds: recorder.register_histogram(
-                "loonfs.maintenance.queue_wait_seconds",
-                "Seconds a maintenance pass waited for a permit",
-                &[("job", job)],
-                LATENCY_SECONDS_BOUNDARIES,
-            ),
         }
     }
 }
@@ -1238,7 +985,6 @@ mod tests {
         DefaultMetricsRecorder, KeyClass, MetricValue, MetricsSnapshot, ObjectStoreOperation,
         ObjectStoreResultClass, PutModeClass, VecObjectStoreMetricsRecorder,
     };
-    use crate::{MaintenanceConclusion, MaintenanceJobId};
 
     fn sample(
         operation: ObjectStoreOperation,
@@ -1543,104 +1289,6 @@ mod tests {
         instruments.publisher_wal_fold_duration(5);
         instruments.publisher_write_stop_refusal();
         instruments.publisher_publish(PublishOutcome::Ok);
-        MaintenanceInstruments::new(None).maintenance_step(
-            MaintenanceJobId::GC,
-            MaintenanceConclusion::Idle,
-            1,
-            2,
-        );
-    }
-
-    #[test]
-    fn a_settled_step_counts_against_its_job_and_conclusion() {
-        let recorder = Arc::new(DefaultMetricsRecorder::new());
-        let instruments = MaintenanceInstruments::new(Some(recorder.clone()));
-
-        instruments.maintenance_step(
-            MaintenanceJobId::METADATA,
-            MaintenanceConclusion::Progressed,
-            5,
-            30,
-        );
-        instruments.maintenance_step(
-            MaintenanceJobId::METADATA,
-            MaintenanceConclusion::Idle,
-            0,
-            1,
-        );
-        instruments.maintenance_step_failed(MaintenanceJobId::GC, 7);
-
-        let snapshot = recorder.snapshot();
-        assert_eq!(
-            counter(
-                &snapshot,
-                "loonfs.maintenance.steps",
-                &[("conclusion", "progressed"), ("job", "metadata")],
-            ),
-            1
-        );
-        assert_eq!(
-            counter(
-                &snapshot,
-                "loonfs.maintenance.steps",
-                &[("conclusion", "idle"), ("job", "metadata")],
-            ),
-            1
-        );
-        assert_eq!(
-            counter(
-                &snapshot,
-                "loonfs.maintenance.step_failures",
-                &[("job", "gc")],
-            ),
-            1
-        );
-        // A failed step has no duration to report, but it waited like any
-        // other, so its queue wait still counts. A job's whole instrument
-        // set registers the first time it reports anything, so `gc` has a
-        // step-duration histogram with nothing filed in it.
-        for (name, job, count) in [
-            ("loonfs.maintenance.step_seconds", "metadata", 2),
-            ("loonfs.maintenance.step_seconds", "gc", 0),
-            ("loonfs.maintenance.queue_wait_seconds", "metadata", 2),
-            ("loonfs.maintenance.queue_wait_seconds", "gc", 1),
-        ] {
-            let entry = snapshot
-                .by_name(name)
-                .find(|entry| entry.labels == [("job", job)])
-                .unwrap_or_else(|| panic!("no `{name}` for job `{job}`"));
-            match entry.value {
-                MetricValue::Histogram { count: filed, .. } => assert_eq!(filed, count),
-                ref other => panic!("expected a histogram, found {other:?}"),
-            }
-        }
-    }
-
-    #[test]
-    fn a_failed_reconciliation_probe_counts_against_its_job() {
-        let recorder = Arc::new(DefaultMetricsRecorder::new());
-        let instruments = MaintenanceInstruments::new(Some(recorder.clone()));
-
-        instruments.maintenance_probe_failed(MaintenanceJobId::METADATA);
-        instruments.maintenance_probe_failed(MaintenanceJobId::METADATA);
-
-        let snapshot = recorder.snapshot();
-        assert_eq!(
-            counter(
-                &snapshot,
-                "loonfs.maintenance.probe_failures",
-                &[("job", "metadata")],
-            ),
-            2
-        );
-        assert_eq!(
-            counter(
-                &snapshot,
-                "loonfs.maintenance.step_failures",
-                &[("job", "metadata")],
-            ),
-            0
-        );
     }
 
     #[test]

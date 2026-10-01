@@ -12,7 +12,6 @@ categories = ["filesystem"]
 readme = "README.md"
 
 [dependencies]
-async-trait.workspace = true
 bytes.workspace = true
 futures.workspace = true
 loonfs.workspace = true
@@ -28,6 +27,7 @@ tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+async-trait.workspace = true
 crc32c.workspace = true
 loonfs-test-support.workspace = true
 tempfile.workspace = true

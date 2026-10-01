@@ -1,71 +1,19 @@
 //! Staged uploads and direct-put targets.
-//!
-//! Every session opened here creates a wall-clock obligation nothing else
-//! would notice: a lease that will expire, or completed content whose
-//! reclamation grace will pass. Each path plants that deadline on the
-//! garbage-collection job as a not-before time, so the pass that reclaims
-//! the session is admitted by the clock rather than by the next unrelated
-//! write to the namespace. An attached runner may admit the hinted deadline.
 
 use crate::content_tokens::CompletedUpload;
-use crate::maintenance::{completed_upload_reclaim_at_ms, upload_session_reclaim_at_ms};
 use crate::uploads::{
     DirectMultipartUploadTarget, DirectPutUploadTarget, MultipartPartTargets,
     ResolvedUploadCompletion, UploadSessionView,
 };
 use crate::ByteStream;
 use crate::Result;
-use crate::{ChecksumAlgorithm, MaintenanceHint, MaintenanceJobId, UploadMode, UploadSession};
+use crate::{ChecksumAlgorithm, UploadMode, UploadSession};
 use crate::{Namespace, Writable};
 use loonfs_types::api::v0::UploadPartChecksumClaim;
 use loonfs_types::options::DirectMultipartUploadOptions;
 use loonfs_types::UploadId;
 
 impl Namespace<Writable> {
-    /// Plants the deadline a durable upload session just created.
-    ///
-    /// The clock is read after the session is durable, so the scheduled time
-    /// can only land after the collector's own predicate. Landing early is
-    /// the one failure that would cost something: the pass would find the
-    /// session retained, park, and have nothing left to bring it back.
-    fn schedule_upload_session_reclamation(&self) {
-        if self.mode.bits.maintenance_hint_observer.is_none() {
-            return;
-        }
-        let Ok(now_ms) = self.core.now_ms() else {
-            return;
-        };
-        self.mode.bits.send_maintenance_hint(
-            &self.namespace_id,
-            MaintenanceHint::DueAt {
-                namespace_id: self.namespace_id.clone(),
-                job: MaintenanceJobId::GC,
-                not_before_ms: upload_session_reclaim_at_ms(now_ms),
-            },
-        );
-    }
-
-    /// Plants the deadline a completed session's content just created. The
-    /// session record itself outlives completion — only a collection pass
-    /// removes it — so completion schedules its own pass rather than
-    /// relying on the one the session's lease already asked for.
-    fn schedule_completed_upload_reclamation(&self) {
-        if self.mode.bits.maintenance_hint_observer.is_none() {
-            return;
-        }
-        let Ok(now_ms) = self.core.now_ms() else {
-            return;
-        };
-        self.mode.bits.send_maintenance_hint(
-            &self.namespace_id,
-            MaintenanceHint::DueAt {
-                namespace_id: self.namespace_id.clone(),
-                job: MaintenanceJobId::GC,
-                not_before_ms: completed_upload_reclaim_at_ms(now_ms),
-            },
-        );
-    }
-
     /// Starts a durable upload session for a namespace.
     #[tracing::instrument(
         level = "debug",
@@ -81,12 +29,10 @@ impl Namespace<Writable> {
     )]
     pub async fn create_upload(&self) -> Result<UploadSession> {
         self.core.record_trace_context(&tracing::Span::current());
-        let response = self
+        Ok(self
             .engine()
             .begin_upload(self.core.subject.as_ref())
-            .await?;
-        self.schedule_upload_session_reclamation();
-        Ok(response)
+            .await?)
     }
 
     /// Mints the content object a direct upload will write to and returns
@@ -108,12 +54,10 @@ impl Namespace<Writable> {
         checksum_algorithm: ChecksumAlgorithm,
     ) -> Result<DirectPutUploadTarget> {
         self.core.record_trace_context(&tracing::Span::current());
-        let response = self
+        Ok(self
             .engine()
             .begin_direct_put_upload_target(self.core.subject.as_ref(), checksum_algorithm)
-            .await?;
-        self.schedule_upload_session_reclamation();
-        Ok(response)
+            .await?)
     }
 
     /// Runs [`Self::create_direct_multipart_upload_target_with_options`]
@@ -147,12 +91,10 @@ impl Namespace<Writable> {
         options: &DirectMultipartUploadOptions,
     ) -> Result<DirectMultipartUploadTarget> {
         self.core.record_trace_context(&tracing::Span::current());
-        let response = self
+        Ok(self
             .engine()
             .begin_direct_multipart_upload_target(self.core.subject.as_ref(), *options)
-            .await?;
-        self.schedule_upload_session_reclamation();
-        Ok(response)
+            .await?)
     }
 
     /// Resolves one wave of multipart parts for server-side signing.
@@ -263,12 +205,10 @@ impl Namespace<Writable> {
         let catalog = self
             .load_namespace_catalog_for_content_preparation()
             .await?;
-        let completed = self
+        Ok(self
             .engine()
             .complete_upload(&catalog, upload_id, self.core.subject.as_ref(), completion)
-            .await?;
-        self.schedule_completed_upload_reclamation();
-        Ok(completed)
+            .await?)
     }
 
     /// Completes an upload after decoding its request for the stored mode.
@@ -298,12 +238,10 @@ impl Namespace<Writable> {
         let catalog = self
             .load_namespace_catalog_for_content_preparation()
             .await?;
-        let completed = self
+        Ok(self
             .engine()
             .complete_upload_for_mode(&catalog, upload_id, self.core.subject.as_ref(), resolve)
-            .await?;
-        self.schedule_completed_upload_reclamation();
-        Ok(completed)
+            .await?)
     }
 
     /// Aborts an upload session and deletes the content object it owned.

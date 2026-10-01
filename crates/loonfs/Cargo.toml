@@ -11,7 +11,6 @@ keywords = ["filesystem", "object-storage", "s3", "embedded"]
 categories = ["filesystem"]
 
 [dependencies]
-async-trait.workspace = true
 bytes.workspace = true
 futures.workspace = true
 loonfs-types.workspace = true
@@ -22,6 +21,7 @@ tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+async-trait.workspace = true
 # The stored-block cache double the seam tests install lives behind
 # `loonfs-core`'s `test-support` feature; test targets are the only builds
 # that turn it on.

@@ -356,9 +356,8 @@ async fn drain_compaction<S: ObjectStore + ?Sized>(
     }
 }
 
-/// Runs the job a step planned, the way the maintenance runner's background
-/// task runs it — except that this waits for it, which is what makes a test
-/// deterministic.
+/// Runs the job a step planned, the way a maintenance caller runs it after
+/// the step, which keeps the test deterministic.
 async fn run_planned_compaction<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,

@@ -1,8 +1,8 @@
-//! Progress and budget state for iterative maintenance and grep operations.
+//! Progress and budget state for waiting on a grep index.
 
 use crate::error::CliError;
 use crate::resolve::ResolvedTarget;
-use loonfs::{MaintenanceConclusion, MaintenanceJobId};
+use loonfs_grep::{GramIndexBuildPolicy, GrepBuildOutcome};
 use loonfs_objectstore::timing::{MonotonicTimer, StdMonotonicTimer};
 use loonfs_types::api::v0::GrepIndexLifecycle;
 use loonfs_types::{ChangeSeq, NamespaceId};
@@ -15,31 +15,26 @@ impl ResolvedTarget {
         target_seq: ChangeSeq,
         budget: StepBudget,
     ) -> Result<GrepWaitProgress, CliError> {
-        use loonfs::{MaintenanceCancellation, MaintenanceJob};
-        use loonfs_grep::{GramIndexBuildPolicy, GrepMaintenanceJob};
-
-        let job = self.maintenance.as_ref().map(|host| {
-            GrepMaintenanceJob::new(host.grep_worker.clone(), GramIndexBuildPolicy::default())
-        });
         wait_for_grep_index(
             target_seq,
             budget,
             || async { Ok(self.client.get_grep_index(namespace_id).await?.lifecycle) },
             || async {
-                let Some(job) = &job else {
+                let Some(host) = &self.maintenance else {
                     rest_between_status_checks().await;
                     return Ok(GrepWaitStep::Continue);
                 };
-                let result = job
-                    .run(namespace_id, &MaintenanceCancellation::new())
+                let outcome = host
+                    .grep_worker
+                    .build_step(namespace_id, GramIndexBuildPolicy::default())
                     .await?;
-                Ok(match result.conclusion {
-                    MaintenanceConclusion::Progressed | MaintenanceConclusion::Superseded => {
-                        GrepWaitStep::Continue
+                Ok(match outcome {
+                    GrepBuildOutcome::Published { .. }
+                    | GrepBuildOutcome::BackfillRestarted { .. }
+                    | GrepBuildOutcome::Superseded => GrepWaitStep::Continue,
+                    GrepBuildOutcome::UpToDate { .. } | GrepBuildOutcome::NotEnabled => {
+                        GrepWaitStep::Settled
                     }
-                    MaintenanceConclusion::Idle
-                    | MaintenanceConclusion::Blocked
-                    | MaintenanceConclusion::NotEnabled => GrepWaitStep::Settled,
                 })
             },
         )
@@ -66,52 +61,6 @@ impl StepBudget {
             || self
                 .deadline_ms
                 .is_some_and(|deadline_ms| elapsed_ms >= deadline_ms)
-    }
-}
-
-/// Final progress for one assigned maintenance job and namespace.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct MaintenanceKeyProgress {
-    pub job: MaintenanceJobId,
-    pub namespace_id: NamespaceId,
-    /// Steps this drain ran for this key.
-    pub steps: u64,
-    /// Result of the last step, or `None` if the budget expired first.
-    pub conclusion: Option<MaintenanceConclusion>,
-}
-
-impl MaintenanceKeyProgress {
-    /// Returns whether another step would make no immediate progress.
-    ///
-    /// `Progressed` and `Superseded` require another step. `Blocked` is
-    /// settled because repeating the same step would not change the result.
-    pub(crate) fn settled(&self) -> bool {
-        match self.conclusion {
-            Some(
-                MaintenanceConclusion::Idle
-                | MaintenanceConclusion::Blocked
-                | MaintenanceConclusion::NotEnabled,
-            ) => true,
-            Some(MaintenanceConclusion::Progressed | MaintenanceConclusion::Superseded) | None => {
-                false
-            }
-        }
-    }
-}
-
-/// Progress from draining a set of maintenance assignments.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct MaintenanceDrainProgress {
-    /// Assignments in processing order.
-    pub keys: Vec<MaintenanceKeyProgress>,
-    /// Steps this drain ran across every key.
-    pub steps: u64,
-}
-
-impl MaintenanceDrainProgress {
-    /// Returns whether the budget expired before every assignment settled.
-    pub(crate) fn budget_exhausted(&self) -> bool {
-        !self.keys.iter().all(MaintenanceKeyProgress::settled)
     }
 }
 

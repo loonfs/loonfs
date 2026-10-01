@@ -1,7 +1,7 @@
 //! The writable [`Namespace`] handle's path mutations and commits, and the
 //! publication pipeline they go through.
 
-use super::core::{RuntimeCore, WriterBits};
+use super::core::RuntimeCore;
 use crate::publish::{CommitCandidate, CommitRequest, FilesystemOperation, PreparedContent};
 use crate::trace::phase_span;
 use crate::ByteStream;
@@ -9,12 +9,11 @@ use crate::Result;
 use crate::{
     AccessState, ActorId, AttributeChanges, ChangeSeq, Commit, CommitId, CommitOptions, ContentRef,
     CopyOptions, CreateDirectoryOptions, DeleteOptions, InodeId, MoveOptions, NamespaceId,
-    NamespacePublication, PutFileOptions, RevisionNo, UpdateAccessOptions, UpdateAttributesOptions,
+    PutFileOptions, RevisionNo, UpdateAccessOptions, UpdateAttributesOptions,
 };
 use crate::{LoonFs, Namespace, Writable};
 use futures::StreamExt;
 use loonfs_core::NamespaceWriterEngine;
-use std::sync::Arc;
 
 fn single_operation(
     actor: &ActorId,
@@ -1062,15 +1061,14 @@ pub(crate) struct EnginePublishResult {
 
 /// Publishes already-classified candidates as one batch — one WAL
 /// object, one numbered WAL put — through the namespace
-/// publisher's own commit engine, and settles the runtime state the
-/// batch produced: read caches, publish observer, maintenance.
+/// publisher's own commit engine, and seeds the read cache with the
+/// state the batch produced.
 ///
 /// Only the publication service calls this: it owns the engine, and
 /// borrowing it here keeps engine construction and locking in that one
 /// place. Results match candidates in order.
 pub(crate) async fn publish_batch_with_engine(
     core: &RuntimeCore,
-    writer: &Arc<WriterBits>,
     namespace_id: &NamespaceId,
     engine: &mut loonfs_core::publish::NamespaceCommitEngine,
     candidates: &[CommitCandidate],
@@ -1089,35 +1087,11 @@ pub(crate) async fn publish_batch_with_engine(
             core.seed_namespace_read_cache(namespace_id, state);
         }
     }
-    let wal_tail_objects = publish.wal_tail_objects;
-    let wal_tail_inline_bytes = publish.wal_tail_inline_bytes;
-    let wal_tail_observed = publish.wal_tail_observed;
-    let wal_tail_discovered = publish.wal_tail_discovered;
-    writer.notify_after_publish(
-        namespace_id,
-        &NamespacePublication {
-            namespace_id: namespace_id.clone(),
-            committed_through_seq: highest_committed_seq(&publish.results),
-            wal_tail_objects,
-            wal_tail_inline_bytes,
-        },
-    );
     EnginePublishResult {
         results: publish.results,
-        wal_tail_objects,
-        wal_tail_inline_bytes,
-        wal_tail_observed,
-        wal_tail_discovered,
+        wal_tail_objects: publish.wal_tail_objects,
+        wal_tail_inline_bytes: publish.wal_tail_inline_bytes,
+        wal_tail_observed: publish.wal_tail_observed,
+        wal_tail_discovered: publish.wal_tail_discovered,
     }
-}
-
-/// Returns the highest sequence committed by the batch.
-fn highest_committed_seq(
-    results: &[std::result::Result<Commit, crate::CoreError>],
-) -> Option<ChangeSeq> {
-    results
-        .iter()
-        .filter_map(|result| result.as_ref().ok())
-        .map(|response| response.committed_seq)
-        .max()
 }

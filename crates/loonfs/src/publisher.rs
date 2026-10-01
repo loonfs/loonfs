@@ -53,30 +53,6 @@ use tracing::Instrument;
 type CommitResult = Result<Commit, Error>;
 type DeleteResult = Result<DeleteNamespaceResponse, Error>;
 
-/// A report that one namespace's durable mutation history advanced.
-///
-/// A namespace-advance hint is a wake-up, not history. Consumers read the
-/// ordered change feed and keep their own durable cursor.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NamespaceAdvanceHint {
-    /// Namespace whose durable mutation history advanced.
-    pub namespace_id: NamespaceId,
-    /// The namespace is durably visible through at least this sequence.
-    ///
-    /// One publication batch may carry several commits, so this is a
-    /// high-water mark and not the identity of one commit.
-    pub through_seq: ChangeSeq,
-}
-
-/// A synchronous, best-effort notification handed one
-/// [`NamespaceAdvanceHint`] after a publication batch durably advances a
-/// namespace.
-///
-/// Register one with
-/// [`LoonFsBuilder::namespace_advance_observer`](crate::LoonFsBuilder::namespace_advance_observer),
-/// which documents what the callback may do.
-pub type NamespaceAdvanceObserver = Arc<dyn Fn(NamespaceAdvanceHint) + Send + Sync + 'static>;
-
 /// Result of closing one namespace writer session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CloseNamespaceReport {
@@ -1160,15 +1136,9 @@ impl NamespacePublisher {
                     .map(|index| Arc::clone(&permits[*index]))
                     .collect();
                 let observed = match self.writer.upgrade() {
-                    Some(writer) => {
-                        self.publish_through_engine(
-                            &writer,
-                            &candidates,
-                            &attempt_permits,
-                            &context,
-                            &batch,
-                        )
-                        .await
+                    Some(_writer) => {
+                        self.publish_through_engine(&candidates, &attempt_permits, &context, &batch)
+                            .await
                     }
                     None => candidates
                         .iter()
@@ -1209,7 +1179,6 @@ impl NamespacePublisher {
     /// engine, one writer session, for the publisher's whole life.
     async fn publish_through_engine(
         &self,
-        writer: &Arc<WriterBits>,
         candidates: &[CommitCandidate],
         permits: &[Arc<AdmissionPermit>],
         context: &loonfs_core::MutationContext,
@@ -1219,7 +1188,6 @@ impl NamespacePublisher {
         let engine = self.engine_for(&mut slot);
         let publish = crate::fs::publish_batch_with_engine(
             &self.runtime_core,
-            writer,
             &self.namespace_id,
             engine,
             candidates,
@@ -1488,7 +1456,6 @@ impl NamespacePublisher {
                 false
             }
         };
-        writer.notify_fold_finished(&self.namespace_id);
         published
     }
 

@@ -9,8 +9,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // This example intentionally prints the file content it just read.
     let root = std::env::temp_dir().join("loonfs-embedded-local-fs-example");
 
-    // This short-lived example does not need a maintenance runner. A
-    // long-running server would compose one beside the runtime.
+    // This short-lived example runs no maintenance of its own. A
+    // long-running host would sweep its namespaces on a cadence.
     let runtime = LoonFs::builder(StoreConfig::LocalFs {
         root: root.to_string_lossy().into_owned(),
         key_prefix: None,

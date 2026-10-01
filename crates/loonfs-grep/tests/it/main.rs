@@ -9,7 +9,5 @@ mod grep_publication;
 mod grep_reorganize;
 mod grep_service_differential;
 mod grep_worker;
-mod maintenance;
 mod manifest_format;
 mod manifest_store;
-mod test_seeding;

@@ -15,24 +15,21 @@ last published seq moved since that pass last indexed it. A query stays
 correct while the index is behind: it scans the files committed after the
 index.
 
-A separate process can maintain namespaces named on the command line:
+The CLI runs the same steps one command at a time:
 
 ```console
-loonfs maintenance loop --namespaces docs,source --jobs grep-index,grep-gc
-loonfs maintenance loop --namespaces docs --jobs grep-index --drain
-loonfs maintenance loop --namespaces docs --jobs grep-gc --drain
+loonfs maintenance index enable --namespace docs
 loonfs maintenance grep-gc --namespace docs
 ```
 
-Without `--drain`, the command runs until it receives a stop signal and
-periodically refreshes its assignments. With `--drain`, it brings each
-assigned namespace up to date and exits. `--max-steps` and `--deadline-ms`
-limit that work. `--namespaces` and `--jobs` accept comma-separated lists or
-repeated flags. Omitting `--jobs` also runs metadata, metadata compaction,
-and core garbage collection.
+On an embedded profile, `maintenance index enable` runs build steps until the
+index reaches the namespace's seq at the start of the command. On a remote
+profile it waits for the server to get there. `--max-steps` and
+`--deadline-ms` limit the wait. An embedded write does not move the index.
+Run `maintenance index enable` again to bring an active index up to the
+namespace head.
 
-The `grep-gc` job completes one collection pass per call.
-`loonfs maintenance grep-gc` runs a pass directly for one namespace,
+`loonfs maintenance grep-gc` runs one collection pass for one namespace,
 including an absent or deleted namespace whose old index data remains.
 Every pass reads the current manifest and hint before deletion. Manifests use
 contiguous numbers and put-if-absent publication. `hint.json` starts forward discovery

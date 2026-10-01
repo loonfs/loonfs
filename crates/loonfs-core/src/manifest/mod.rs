@@ -51,7 +51,7 @@ pub use self::streaming_compaction::{
 };
 
 pub(crate) use self::compaction_step::compaction_step;
-pub use self::compaction_step::metadata_maintenance_due;
+pub use self::compaction_step::metadata_compaction_due;
 pub(crate) use self::compactor::claim_compactor;
 #[cfg(test)]
 pub(crate) use self::fold::fold_wal;

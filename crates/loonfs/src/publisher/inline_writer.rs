@@ -1182,7 +1182,7 @@ async fn commit_two_values(
 
 #[tokio::test]
 async fn inline_bytes_make_automatic_and_explicit_folds_due_before_wal_object_count() {
-    for mode in ["automatic", "explicit", "scheduled"] {
+    for mode in ["automatic", "explicit"] {
         // Every fold takes a fold permit, so holding them would stop an
         // explicit fold too. Only the automatic case folds at four bytes on
         // the session's own path and holds the permits until it is checked.
@@ -1230,19 +1230,6 @@ async fn inline_bytes_make_automatic_and_explicit_folds_due_before_wal_object_co
             inline_content_fold_at_bytes: NonZeroUsize::new(4).expect("threshold"),
             ..Default::default()
         };
-        store.reset();
-        assert_eq!(
-            maintenance
-                .probe_metadata_with_options(&namespace, &options)
-                .await
-                .expect("probe"),
-            crate::MaintenanceProbe::Idle
-        );
-        assert_eq!(
-            family_requests(&store, DurableObjectFamily::WalObject),
-            7,
-            "one windowed WAL discovery without a byte-count replay"
-        );
         let independent = crate::LoonFs::builder_with_store(store.clone())
             .writer_id("independent")
             .build()
@@ -1276,34 +1263,6 @@ async fn inline_bytes_make_automatic_and_explicit_folds_due_before_wal_object_co
                 .await
                 .expect("pass after the fold");
             assert_eq!(again.wal_fold, crate::WalFoldStepOutcome::NotNeeded);
-        } else if mode == "scheduled" {
-            let jobs = crate::MaintenanceRegistry::new();
-            jobs.register(Arc::new(
-                crate::MetadataMaintenanceJob::new(maintenance).options(options),
-            ))
-            .expect("metadata job");
-            let runner = crate::MaintenanceRunner::builder(jobs)
-                .build()
-                .expect("runner");
-            runner.handle().hint(crate::MaintenanceHint::Published(
-                crate::NamespacePublication {
-                    namespace_id: namespace.clone(),
-                    committed_through_seq: Some(usage.head_seq),
-                    wal_tail_objects: usage.wal_tail_objects,
-                    wal_tail_inline_bytes: usage.wal_tail_inline_bytes,
-                },
-            ));
-            timeout(Duration::from_secs(10), runner.drain())
-                .await
-                .expect("scheduled maintenance settles after folding")
-                .expect("scheduled fold");
-            let usage =
-                loonfs_core::cache::load_namespace_wal_tail_usage(store.as_ref(), &namespace)
-                    .await
-                    .expect("usage after scheduled fold");
-            assert_eq!(usage.wal_tail_objects, 0);
-            assert_eq!(usage.wal_tail_inline_bytes, 0);
-            runner.shutdown().await.expect("runner shutdown");
         }
         drop(permits);
         namespace_writer

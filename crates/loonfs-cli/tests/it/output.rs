@@ -329,10 +329,8 @@ fn json_covers_command_lines_the_parser_rejects() {
         vec![
             "--json",
             "maintenance",
-            "loop",
-            "--namespaces",
-            "demo",
-            "--drain",
+            "index",
+            "enable",
             "--max-steps",
             "abc",
         ],

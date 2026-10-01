@@ -1,9 +1,7 @@
 //! Grep worker step budgets.
 //!
-//! How many steps run at once is not here and never will be: every host
-//! that schedules grep does it through the runtime's maintenance runner,
-//! whose one permit pool (`max_concurrent_maintenance`) bounds every
-//! maintenance family together.
+//! How many steps run at once is not here: the host that runs grep steps
+//! decides that.
 
 use crate::GramIndexBuildPolicy;
 use serde::{Deserialize, Serialize};
