@@ -160,15 +160,6 @@ impl LoonFs<Writable> {
         LoonFsBuilder::from_store(store)
     }
 
-    /// Returns this runtime's shared publication service: the table of live
-    /// namespace writer sessions and the admission budgets they share.
-    ///
-    /// Shutdown closes the service; callers should not manage its lifecycle
-    /// separately.
-    pub fn publisher(&self) -> PublisherRegistry {
-        self.mode.publisher.clone()
-    }
-
     /// Opens the writer session for `namespace_id` and returns a handle to it.
     ///
     /// If a handle for this namespace is already open in this runtime, the
@@ -228,6 +219,30 @@ impl LoonFs<Writable> {
     /// take the instance out before its in-flight work settles.
     pub fn is_shutting_down(&self) -> bool {
         self.mode.publisher.is_admission_closed()
+    }
+
+    /// Waits for the publication work this runtime has admitted, and the
+    /// folds that work started, to finish.
+    ///
+    /// Admission stays open. Work admitted during the wait may still be
+    /// running when this returns. [`Self::shutdown`] closes admission and
+    /// then drains. Fails if a publication, deletion, or fold on this runtime
+    /// has ever panicked. The runtime contains those panics and keeps
+    /// publishing.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.drain",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "drain",
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
+    pub async fn drain(&self) -> Result<()> {
+        self.core.record_trace_context(&tracing::Span::current());
+        self.mode.publisher.drain().await
     }
 
     /// Stops publication and drains accepted work.

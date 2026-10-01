@@ -103,7 +103,7 @@ async fn check_terminal_reload_failure(include_replay: bool) {
     armed.store(true, Ordering::SeqCst);
     let first = namespace_writer.put_file_bytes("/file", b"four", put_options("uncertain"));
     let first_error = if include_replay {
-        let registry = writer.publisher();
+        let registry = writer.mode.publisher.clone();
         let slots = registry
             .shared
             .admission
@@ -143,11 +143,12 @@ async fn check_terminal_reload_failure(include_replay: bool) {
             .expect("raw durable tail");
     assert_eq!(durable.wal_tail_inline_bytes, 4);
     assert!(writer
-        .publisher()
+        .mode
+        .publisher
         .wal_tail_inline_bytes(&namespace)
         .await
         .is_some_and(|bytes| bytes >= durable.wal_tail_inline_bytes));
-    assert_eq!(writer.publisher().shared.admission.used_requests(), 0);
+    assert_eq!(writer.mode.publisher.shared.admission.used_requests(), 0);
     assert_eq!(first_error.code(), ErrorCode::CommitOutcomeUnknown);
 
     unreadable.store(false, Ordering::SeqCst);
@@ -157,7 +158,11 @@ async fn check_terminal_reload_failure(include_replay: bool) {
         .expect("replay after recovery");
     assert_eq!(replay.committed_seq, durable.head_seq);
     assert_eq!(
-        writer.publisher().wal_tail_inline_bytes(&namespace).await,
+        writer
+            .mode
+            .publisher
+            .wal_tail_inline_bytes(&namespace)
+            .await,
         Some(4)
     );
     namespace_writer
@@ -169,7 +174,7 @@ async fn check_terminal_reload_failure(include_replay: bool) {
             .await
             .expect("recovered usage");
     assert_eq!(recovered.wal_tail_inline_bytes, 4);
-    assert_eq!(writer.publisher().shared.admission.used_requests(), 0);
+    assert_eq!(writer.mode.publisher.shared.admission.used_requests(), 0);
     assert_eq!(
         namespace_reader
             .get_file_bytes("/file")
@@ -215,7 +220,7 @@ async fn a_new_session_keeps_one_segment_budget_inline_until_it_observes_the_tai
         .acquire_many(crate::DEFAULT_MAX_CONCURRENT_FOLDS as u32)
         .await
         .expect("hold folds");
-    let registry = writer.publisher();
+    let registry = writer.mode.publisher.clone();
     let slots = registry
         .shared
         .admission
@@ -685,7 +690,11 @@ async fn retained_receipts_answer_retries_before_fallback_when_content_writes_fa
             .await
             .expect("publish");
         assert_eq!(
-            writer.publisher().wal_tail_inline_bytes(&namespace).await,
+            writer
+                .mode
+                .publisher
+                .wal_tail_inline_bytes(&namespace)
+                .await,
             Some(if bytes.len() == 4 { 4 } else { 0 })
         );
         failing.fail_all();
@@ -719,7 +728,7 @@ async fn full_queue_refuses_segment_fallback_without_store_writes() {
             ..policy()
         })
         .await;
-    let registry = writer.publisher();
+    let registry = writer.mode.publisher.clone();
     let mut permits = Vec::new();
     while let Ok(permit) = registry.shared.admission.acquire(&namespace, 0) {
         permits.push(permit);
@@ -849,7 +858,7 @@ async fn queued_writes_share_tail_reservations_and_split_at_the_segment_budget()
             options.inline_content_tail_limit_bytes = 5;
         }
         let (_directory, store, writer, _namespace, namespace) = writer_with_policy(options).await;
-        let registry = writer.publisher();
+        let registry = writer.mode.publisher.clone();
         let slots = registry
             .shared
             .admission
@@ -931,7 +940,7 @@ async fn repeated_projection_invalidation_does_not_repeat_the_tail_limit_oversho
         .acquire_many(crate::DEFAULT_MAX_CONCURRENT_FOLDS as u32)
         .await
         .expect("hold folds");
-    let registry = writer.publisher();
+    let registry = writer.mode.publisher.clone();
     for index in 0..4 {
         writer.invalidate_namespace(&namespace);
         namespace_writer
@@ -998,7 +1007,11 @@ async fn fold_completion_reports_only_inline_bytes_published_since_it_began() {
     store.release();
     namespace_writer.wait_for_fold().await.expect("finish fold");
     assert_eq!(
-        writer.publisher().wal_tail_inline_bytes(&namespace).await,
+        writer
+            .mode
+            .publisher
+            .wal_tail_inline_bytes(&namespace)
+            .await,
         Some(4)
     );
 
@@ -1015,7 +1028,11 @@ async fn fold_completion_reports_only_inline_bytes_published_since_it_began() {
         .expect("tail usage");
     assert_eq!(usage.wal_tail_inline_bytes, 8);
     assert_eq!(
-        writer.publisher().wal_tail_inline_bytes(&namespace).await,
+        writer
+            .mode
+            .publisher
+            .wal_tail_inline_bytes(&namespace)
+            .await,
         Some(8)
     );
     commit_two_values(&writer, &namespace, "recovered").await;
@@ -1318,7 +1335,11 @@ async fn check_delayed_fold_callback(cache: RuntimeCacheConfig) {
             .await
             .expect("publish against the new manifest");
         assert_eq!(
-            writer.publisher().wal_tail_inline_bytes(&namespace).await,
+            writer
+                .mode
+                .publisher
+                .wal_tail_inline_bytes(&namespace)
+                .await,
             Some(4)
         );
         store.release();
@@ -1326,7 +1347,11 @@ async fn check_delayed_fold_callback(cache: RuntimeCacheConfig) {
     let (folded, ()) = tokio::join!(fold, publish_after_fold);
     folded.expect("delayed fold completion");
     assert_eq!(
-        writer.publisher().wal_tail_inline_bytes(&namespace).await,
+        writer
+            .mode
+            .publisher
+            .wal_tail_inline_bytes(&namespace)
+            .await,
         Some(4)
     );
     let prepared = vec![

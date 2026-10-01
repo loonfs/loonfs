@@ -50,7 +50,7 @@ mod handle;
 mod maintenance;
 pub mod metrics;
 mod options;
-pub mod publisher;
+mod publisher;
 mod trace;
 
 use thiserror::Error;

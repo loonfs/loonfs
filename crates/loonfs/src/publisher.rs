@@ -8,6 +8,8 @@
 //! Admitted work continues if its caller is cancelled. Shutdown closes
 //! admission and drains the queues through
 //! [`LoonFs::shutdown`](crate::LoonFs::shutdown).
+//! [`LoonFs::drain`](crate::LoonFs::drain) drains them without closing
+//! admission.
 //!
 //! The registry keeps one table of live sessions, for three reasons: an open
 //! returns the session a handle already holds, the retained projection
@@ -109,12 +111,8 @@ pub enum NamespaceSessionState {
 /// session while a writable [`Namespace`](crate::Namespace) holds it or
 /// while work it admitted is still running. Nothing here decides how many
 /// sessions exist or how long they live.
-///
-/// Shutdown closes admission and then drains admitted work. Prefer
-/// [`LoonFs::shutdown`](crate::LoonFs::shutdown), which closes admission
-/// before draining publication work.
 #[derive(Clone)]
-pub struct PublisherRegistry {
+pub(crate) struct PublisherRegistry {
     shared: Arc<RegistryShared>,
     /// Strong: the runtime core owns neither this registry nor the writer, so
     /// holding it here cannot cycle. Publications read through its caches
@@ -492,7 +490,7 @@ impl PublisherRegistry {
 
     /// Whether [`Self::close_admission`] has run: later submissions fail
     /// with `shutting_down`. Readiness probes report this state.
-    pub fn is_admission_closed(&self) -> bool {
+    pub(crate) fn is_admission_closed(&self) -> bool {
         self.shared.lock_state().closed
     }
 
@@ -500,7 +498,7 @@ impl PublisherRegistry {
     ///
     /// Later submissions fail with `shutting_down`. Calling this more than once
     /// has no additional effect.
-    pub fn close_admission(&self) {
+    pub(crate) fn close_admission(&self) {
         let publishers: Vec<NamespacePublisher> = {
             let mut state = self.shared.lock_state();
             state.closed = true;
@@ -517,10 +515,9 @@ impl PublisherRegistry {
 
     /// Waits for all current publisher workers and folds to finish.
     ///
-    /// Returns an error if any publication or deletion panicked and the worker
-    /// contained the panic. Call [`Self::close_admission`] first to prevent new
-    /// work from being admitted during the drain.
-    pub async fn drain(&self) -> Result<(), RuntimeError> {
+    /// Returns an error if any publication, deletion, or fold panicked and
+    /// its task contained the panic.
+    pub(crate) async fn drain(&self) -> Result<(), RuntimeError> {
         let publishers: Vec<NamespacePublisher> = self
             .shared
             .lock_state()

@@ -215,7 +215,7 @@ impl LoonFsBuilder<Writable> {
     }
 
     /// Sets the minimum interval between publication starts per namespace,
-    /// in milliseconds (see [`crate::publisher`]).
+    /// in milliseconds.
     ///
     /// A request to an idle namespace publishes immediately; the interval
     /// only paces requests that queued behind a publish, so concurrent

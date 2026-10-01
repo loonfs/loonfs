@@ -571,7 +571,7 @@ async fn a_cached_view_older_than_the_revalidation_bound_rediscovers() {
         )
         .await
         .expect("commit file");
-    writer.publisher().drain().await.expect("finish hints");
+    writer.drain().await.expect("finish hints");
     namespace
         .get_path_entry("/file.txt", Default::default())
         .await
@@ -668,7 +668,7 @@ async fn warm_answers_are_measured_against_the_previous_check() {
         )
         .await
         .expect("commit file");
-    writer.publisher().drain().await.expect("finish hints");
+    writer.drain().await.expect("finish hints");
     namespace
         .get_path_entry("/file.txt", Default::default())
         .await
@@ -802,7 +802,7 @@ async fn a_seeded_view_carries_the_writers_basis_confirmation() {
     // The first put discovers the namespace, which confirms its basis, and
     // the read right after it probes only the WAL.
     put("/file.txt").await.expect("first put");
-    writer.publisher().drain().await.expect("finish hints");
+    writer.drain().await.expect("finish hints");
     let wal_no = next_wal_no().await;
     recording.reset();
     read().await.expect("read after the first put");
@@ -814,7 +814,7 @@ async fn a_seeded_view_carries_the_writers_basis_confirmation() {
     read().await.expect("a due check");
     timer.advance_ms(interval_ms - 1);
     put("/two.txt").await.expect("second put");
-    writer.publisher().drain().await.expect("finish hints");
+    writer.drain().await.expect("finish hints");
     let wal_no = next_wal_no().await;
     recording.reset();
     read().await.expect("read after the second put");
@@ -828,7 +828,7 @@ async fn a_seeded_view_carries_the_writers_basis_confirmation() {
         .expect("evict the cached view");
     timer.advance_ms(interval_ms);
     put("/three.txt").await.expect("third put");
-    writer.publisher().drain().await.expect("finish hints");
+    writer.drain().await.expect("finish hints");
     let manifest_no = loonfs_core::control::load_namespace_current_manifest(&store, &namespace_id)
         .await
         .expect("current manifest")
@@ -915,7 +915,7 @@ async fn a_seed_on_another_basis_does_not_keep_the_cached_check() {
         )
         .await
         .expect("first put");
-    writer.publisher().drain().await.expect("finish hints");
+    writer.drain().await.expect("finish hints");
 
     // The next put starts more than a budget later, so it discovers the
     // namespace again, and that discovery is held at the hint. Meanwhile the
@@ -944,7 +944,7 @@ async fn a_seed_on_another_basis_does_not_keep_the_cached_check() {
         }
     );
     put.expect("put on the new basis");
-    writer.publisher().drain().await.expect("finish hints");
+    writer.drain().await.expect("finish hints");
 
     // The seeded view stands on the new basis, confirmed when the put's
     // attempt began. A bound after that, it is rediscovered, although the
@@ -1030,11 +1030,7 @@ async fn read_after_write_only_probes_the_next_wal_number_without_replay() {
         )
         .await
         .expect("steady-state put");
-    writer
-        .publisher()
-        .drain()
-        .await
-        .expect("finish background hints");
+    writer.drain().await.expect("finish background hints");
     let _pinned = namespace
         .pin_namespace_at_snapshot(&snapshot.checkpoint_id)
         .await

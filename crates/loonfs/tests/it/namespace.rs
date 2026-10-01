@@ -248,7 +248,6 @@ async fn dropping_the_last_clone_ends_the_session_and_a_kept_clone_keeps_it_open
     drop(kept);
     drop(shared);
     writer
-        .publisher()
         .drain()
         .await
         .expect("let the dropped session's admitted work finish");
@@ -298,7 +297,6 @@ async fn a_read_only_handle_does_no_io_and_does_not_keep_the_session_open() {
     let read_only = namespace_writer.read_only();
     drop(namespace_writer);
     writer
-        .publisher()
         .drain()
         .await
         .expect("let the dropped session's admitted work finish");

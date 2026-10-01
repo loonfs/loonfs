@@ -229,7 +229,7 @@ async fn stat_inode_and_stat_path_have_the_same_point_lookup_request_count() {
         .await
         .expect("discover inode")
         .inode_id;
-    fs.writer.publisher().drain().await.expect("finish hints");
+    fs.writer.drain().await.expect("finish hints");
     drop(fs);
     let _ = recorded.take_gets();
 
