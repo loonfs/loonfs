@@ -298,7 +298,7 @@ async fn seed(store: &SharedObjectStore, shape: &Shape) {
     };
     for index in 0..shape.namespaces {
         let namespace_id = shape.namespace(index);
-        let mut options = CreateNamespaceOptions::new(shape.actor());
+        let mut options = CreateNamespaceOptions::default();
         if shape.rows == Rows::Dense {
             options.access = NamespaceAccess::Acl {
                 principal_scope: PrincipalScope::parse(PRINCIPAL_SCOPE).expect("principal scope"),
@@ -306,7 +306,7 @@ async fn seed(store: &SharedObjectStore, shape: &Shape) {
             };
         }
         writer
-            .create_namespace(&namespace_id, options)
+            .create_namespace_with_options(&namespace_id, &shape.actor(), &options)
             .await
             .expect("create namespace");
         let namespace = writer
@@ -323,7 +323,7 @@ async fn seed(store: &SharedObjectStore, shape: &Shape) {
             .await
             .expect("seed commit");
         maintenance
-            .maintain_metadata(&namespace_id, fold.clone())
+            .maintain_metadata_with_options(&namespace_id, &fold)
             .await
             .expect("fold");
         let mut next = shape.folded_entries;

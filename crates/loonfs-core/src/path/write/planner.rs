@@ -329,7 +329,7 @@ mod tests {
     use crate::path::read::load_current_metadata_view;
     use crate::storage::content::store_bytes_as_content;
     use crate::test_support::ops::create;
-    use crate::test_support::ops::{delete_path, put_file_bytes};
+    use crate::test_support::ops::{delete_path, put_file};
     use loonfs_api::wire::wal::{WalCommitDelta, WalDelta};
     use loonfs_api::{
         AbsolutePath, CommitId, DeleteDirectoryBehavior, DestinationBehavior, InodeId,
@@ -477,7 +477,7 @@ mod tests {
     #[tokio::test]
     async fn put_file_creates_missing_parent_directories() {
         let (_temp_dir, store, namespace_id, context) = setup_namespace().await;
-        put_file_bytes(
+        put_file(
             &store,
             &namespace_id,
             "/docs/nested/a.txt",
@@ -503,7 +503,7 @@ mod tests {
     #[tokio::test]
     async fn recreate_after_delete_succeeds_at_the_same_path() {
         let (_temp_dir, store, namespace_id, context) = setup_namespace().await;
-        put_file_bytes(
+        put_file(
             &store,
             &namespace_id,
             "/docs/tmp.txt",
@@ -526,7 +526,7 @@ mod tests {
 
         // The tombstone covers the dead inode, not the name: the name is
         // reusable immediately, with or without an intervening rebuild.
-        put_file_bytes(
+        put_file(
             &store,
             &namespace_id,
             "/docs/tmp.txt",
@@ -543,7 +543,7 @@ mod tests {
     async fn deleted_subtree_names_replan_as_fresh_state() {
         let (_temp_dir, store, namespace_id, context) = setup_namespace().await;
         let seed_commit_id = CommitId::parse("seed-dead-tree").expect("valid commit id");
-        put_file_bytes(
+        put_file(
             &store,
             &namespace_id,
             "/dead/file.txt",
@@ -658,7 +658,7 @@ mod tests {
     #[tokio::test]
     async fn delete_then_create_resolves_against_the_delete() {
         let (_temp_dir, store, namespace_id, context) = setup_namespace().await;
-        put_file_bytes(
+        put_file(
             &store,
             &namespace_id,
             "/docs/tmp.txt",

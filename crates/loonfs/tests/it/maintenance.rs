@@ -6,10 +6,9 @@
 use crate::common::*;
 use loonfs::publish::{parse_mutation_path, CommitRequest, FilesystemOperation};
 use loonfs::{
-    ChangeSeq, CommitId, CompactionStepOutcome, CreateCheckpointOptions, CreateNamespaceOptions,
-    CreateSnapshotOptions, DeleteNamespaceOptions, ErrorCode, FoldWalOutcome, GcOptions,
+    ChangeSeq, CommitId, CompactionStepOutcome, CreateCheckpointOptions, ErrorCode, FoldWalOutcome,
     ManifestNo, MetadataCompactionOutcome, MetadataCompactionPolicy, MetadataMaintenanceOptions,
-    NamespaceId, PutFileOptions, SharedObjectStore, SnapshotPolicy, WalFoldStepOutcome,
+    NamespaceId, SharedObjectStore, SnapshotPolicy, WalFoldStepOutcome,
 };
 use loonfs_api::wire::manifest::decode_namespace_manifest_json;
 use loonfs_objectstore::keys::{hint, metadata_manifest_object};
@@ -30,11 +29,8 @@ fn namespace_diagnostics_reports_wal_tail_objects() {
     let fs = open_runtime(store.clone(), "status-test");
     let namespace_id = namespace_id("demo");
 
-    fs.create_namespace_blocking(
-        &namespace_id,
-        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-    )
-    .expect("create namespace");
+    fs.create_namespace_blocking(&namespace_id, &loonfs_test_support::test_actor())
+        .expect("create namespace");
     let status = fs
         .namespace_diagnostics_blocking(&namespace_id)
         .expect("status for new namespace");
@@ -44,11 +40,11 @@ fn namespace_diagnostics_reports_wal_tail_objects() {
     assert_eq!(status.wal_tail_objects, 0);
     assert_eq!(status.retention_floor_seq, ChangeSeq(0));
 
-    fs.put_file_bytes_blocking(
+    fs.put_file_blocking(
         &namespace_id,
         "/docs/hello.txt",
         b"hello",
-        PutFileOptions::new(loonfs_test_support::test_actor()),
+        &loonfs_test_support::test_actor(),
     )
     .expect("put file");
 
@@ -70,44 +66,21 @@ fn namespace_diagnostics_counts_user_and_live_snapshot_records_only() {
     let source = namespace_id("source");
     let target = namespace_id("target");
 
-    fs.create_namespace_blocking(
-        &source,
-        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-    )
-    .expect("create namespace");
+    fs.create_namespace_blocking(&source, &loonfs_test_support::test_actor())
+        .expect("create namespace");
     let namespace = fs.writer.open_namespace(&source).expect("open namespace");
-    block_on(fs.maintenance.create_checkpoint(
+    block_on(fs.maintenance.create_checkpoint(&source, "durable"))
+        .expect("create durable checkpoint");
+    block_on(fs.maintenance.create_checkpoint_with_options(
         &source,
-        CreateCheckpointOptions {
-            name: "durable".to_owned(),
-            ttl_ms: None,
-        },
-    ))
-    .expect("create durable checkpoint");
-    block_on(fs.maintenance.create_checkpoint(
-        &source,
-        CreateCheckpointOptions {
-            name: "expired".to_owned(),
-            ttl_ms: Some(0),
-        },
+        "expired",
+        &CreateCheckpointOptions { ttl_ms: Some(0) },
     ))
     .expect("create expired checkpoint");
-    block_on(namespace.create_snapshot(
-        CreateSnapshotOptions {
-            name: "expired".to_owned(),
-            expires_at_ms: 1,
-        },
-        &SnapshotPolicy::default(),
-    ))
-    .expect("create expired snapshot record");
-    block_on(namespace.create_snapshot(
-        CreateSnapshotOptions {
-            name: "live".to_owned(),
-            expires_at_ms: u64::MAX,
-        },
-        &SnapshotPolicy::default(),
-    ))
-    .expect("create live snapshot");
+    block_on(namespace.create_snapshot("expired", 1, &SnapshotPolicy::default()))
+        .expect("create expired snapshot record");
+    block_on(namespace.create_snapshot("live", u64::MAX, &SnapshotPolicy::default()))
+        .expect("create live snapshot");
     fs.fork_namespace_blocking(&source, &target)
         .expect("fork namespace");
 
@@ -133,7 +106,7 @@ fn namespace_diagnostics_and_step_reject_missing_namespace() {
         ErrorCode::NamespaceNotFound,
     );
     assert_core_error_kind(
-        block_on(fs.maintenance.gc(&namespace_id, &GcOptions::default())),
+        block_on(fs.maintenance.gc(&namespace_id)),
         ErrorCode::NamespaceNotFound,
     );
 }
@@ -146,11 +119,8 @@ fn namespace_diagnostics_and_step_reject_a_namespace_whose_hint_is_gone() {
     let fs = open_runtime(object_store, "partial-status-test");
     let namespace_id = namespace_id("demo");
 
-    fs.create_namespace_blocking(
-        &namespace_id,
-        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-    )
-    .expect("create namespace");
+    fs.create_namespace_blocking(&namespace_id, &loonfs_test_support::test_actor())
+        .expect("create namespace");
     block_on(raw_store.delete(&hint(&namespace_id))).expect("delete head");
 
     assert_core_error_kind(
@@ -162,23 +132,19 @@ fn namespace_diagnostics_and_step_reject_a_namespace_whose_hint_is_gone() {
         ErrorCode::NamespaceNotFound,
     );
     assert_core_error_kind(
-        block_on(fs.maintenance.gc(&namespace_id, &GcOptions::default())),
+        block_on(fs.maintenance.gc(&namespace_id)),
         ErrorCode::NamespaceNotFound,
     );
 
     let deleted_namespace = NamespaceId::parse("deleted").expect("namespace id");
-    fs.create_namespace_blocking(
-        &deleted_namespace,
-        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-    )
-    .expect("create namespace for deletion");
+    fs.create_namespace_blocking(&deleted_namespace, &loonfs_test_support::test_actor())
+        .expect("create namespace for deletion");
     let namespace = fs
         .writer
         .open_namespace(&deleted_namespace)
         .expect("open namespace");
-    block_on(namespace.delete(DeleteNamespaceOptions::default())).expect("delete namespace");
-    block_on(fs.maintenance.gc(&deleted_namespace, &GcOptions::default()))
-        .expect("GC accepts a deleted namespace");
+    block_on(namespace.delete()).expect("delete namespace");
+    block_on(fs.maintenance.gc(&deleted_namespace)).expect("GC accepts a deleted namespace");
 }
 
 #[test]
@@ -187,16 +153,13 @@ fn maintenance_step_below_threshold_is_not_needed() {
     let fs = runtime(temp_dir.path(), "step-not-needed-test");
     let namespace_id = namespace_id("demo");
 
-    fs.create_namespace_blocking(
-        &namespace_id,
-        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-    )
-    .expect("create namespace");
-    fs.put_file_bytes_blocking(
+    fs.create_namespace_blocking(&namespace_id, &loonfs_test_support::test_actor())
+        .expect("create namespace");
+    fs.put_file_blocking(
         &namespace_id,
         "/docs/hello.txt",
         b"hello",
-        PutFileOptions::new(loonfs_test_support::test_actor()),
+        &loonfs_test_support::test_actor(),
     )
     .expect("put file");
 
@@ -212,16 +175,13 @@ fn maintenance_step_at_wal_object_threshold_folds_the_wal() {
     let fs = runtime(temp_dir.path(), "step-publish-test");
     let namespace_id = namespace_id("demo");
 
-    fs.create_namespace_blocking(
-        &namespace_id,
-        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-    )
-    .expect("create namespace");
-    fs.put_file_bytes_blocking(
+    fs.create_namespace_blocking(&namespace_id, &loonfs_test_support::test_actor())
+        .expect("create namespace");
+    fs.put_file_blocking(
         &namespace_id,
         "/docs/hello.txt",
         b"hello",
-        PutFileOptions::new(loonfs_test_support::test_actor()),
+        &loonfs_test_support::test_actor(),
     )
     .expect("put file");
 
@@ -259,16 +219,13 @@ fn metadata_run_does_not_advance_retention() {
     let fs = runtime(temp_dir.path(), "step-retention-opt-in-test");
     let namespace_id = namespace_id("demo");
 
-    fs.create_namespace_blocking(
-        &namespace_id,
-        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-    )
-    .expect("create namespace");
-    fs.put_file_bytes_blocking(
+    fs.create_namespace_blocking(&namespace_id, &loonfs_test_support::test_actor())
+        .expect("create namespace");
+    fs.put_file_blocking(
         &namespace_id,
         "/docs/hello.txt",
         b"hello",
-        PutFileOptions::new(loonfs_test_support::test_actor()),
+        &loonfs_test_support::test_actor(),
     )
     .expect("put file");
 
@@ -294,11 +251,11 @@ fn metadata_run_does_not_advance_retention() {
     assert_eq!(retention.retention_floor_seq, ChangeSeq(1));
 
     // A plan naming retention alone is the same opt-in.
-    fs.put_file_bytes_blocking(
+    fs.put_file_blocking(
         &namespace_id,
         "/docs/second.txt",
         b"second",
-        PutFileOptions::new(loonfs_test_support::test_actor()),
+        &loonfs_test_support::test_actor(),
     )
     .expect("put second file");
     fs.maintain_metadata_blocking(&namespace_id, metadata_options(1))
@@ -319,11 +276,8 @@ fn the_typed_wrappers_are_single_action_steps() {
     let fs = open_runtime(store.clone(), "typed-wrapper-test");
     let namespace_id = namespace_id("demo");
 
-    fs.create_namespace_blocking(
-        &namespace_id,
-        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-    )
-    .expect("create namespace");
+    fs.create_namespace_blocking(&namespace_id, &loonfs_test_support::test_actor())
+        .expect("create namespace");
     store.reset();
     let folded = fs
         .fold_wal_blocking(&namespace_id)
@@ -335,11 +289,11 @@ fn the_typed_wrappers_are_single_action_steps() {
     );
     assert_eq!(store.count(OperationClass::Put), 0);
 
-    fs.put_file_bytes_blocking(
+    fs.put_file_blocking(
         &namespace_id,
         "/docs/first.txt",
         b"first",
-        PutFileOptions::new(loonfs_test_support::test_actor()),
+        &loonfs_test_support::test_actor(),
     )
     .expect("put first file");
     let folded = fs.fold_wal_blocking(&namespace_id).expect("fold the tail");
@@ -363,11 +317,11 @@ fn the_typed_wrappers_are_single_action_steps() {
         "the upkeep pass reports its compaction half rather than hiding it"
     );
 
-    fs.put_file_bytes_blocking(
+    fs.put_file_blocking(
         &namespace_id,
         "/docs/second.txt",
         b"second",
-        PutFileOptions::new(loonfs_test_support::test_actor()),
+        &loonfs_test_support::test_actor(),
     )
     .expect("put second file");
     let metadata = fs
@@ -393,7 +347,7 @@ fn the_typed_wrappers_are_single_action_steps() {
         .expect("retention-only step");
     assert_eq!(retention.retention_floor_seq, advanced.retention_floor_seq);
 
-    block_on(fs.maintenance.gc(&namespace_id, &GcOptions::default())).expect("GC run");
+    block_on(fs.maintenance.gc(&namespace_id)).expect("GC run");
     block_on(fs.maintenance.compact_metadata(&namespace_id)).expect("metadata compaction run");
     assert_eq!(
         fs.namespace_diagnostics_blocking(&namespace_id)
@@ -409,26 +363,23 @@ fn maintenance_step_after_existing_manifest_writes_delta_manifest() {
     let fs = runtime(temp_dir.path(), "step-delta-run-publish-test");
     let namespace_id = namespace_id("demo");
 
-    fs.create_namespace_blocking(
-        &namespace_id,
-        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-    )
-    .expect("create namespace");
-    fs.put_file_bytes_blocking(
+    fs.create_namespace_blocking(&namespace_id, &loonfs_test_support::test_actor())
+        .expect("create namespace");
+    fs.put_file_blocking(
         &namespace_id,
         "/docs/hello.txt",
         b"hello",
-        PutFileOptions::new(loonfs_test_support::test_actor()),
+        &loonfs_test_support::test_actor(),
     )
     .expect("put first file");
     fs.maintain_metadata_blocking(&namespace_id, metadata_options(1))
         .expect("first maintenance pass");
 
-    fs.put_file_bytes_blocking(
+    fs.put_file_blocking(
         &namespace_id,
         "/docs/second.txt",
         b"second",
-        PutFileOptions::new(loonfs_test_support::test_actor()),
+        &loonfs_test_support::test_actor(),
     )
     .expect("put second file");
     let step = fs
@@ -477,11 +428,8 @@ fn a_standalone_maintenance_drives_metadata_compaction_itself() {
     let fs = runtime(temp_dir.path(), "manual-compaction-test");
     let namespace_id = namespace_id("demo");
 
-    fs.create_namespace_blocking(
-        &namespace_id,
-        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-    )
-    .expect("create namespace");
+    fs.create_namespace_blocking(&namespace_id, &loonfs_test_support::test_actor())
+        .expect("create namespace");
     assert_eq!(
         block_on(fs.maintenance.compact_metadata(&namespace_id))
             .expect("compact an empty namespace")
@@ -492,11 +440,11 @@ fn a_standalone_maintenance_drives_metadata_compaction_itself() {
     // Enough folds to put the manifest's delta run count over the compaction
     // trigger, which is what makes the planner select a group at all.
     for index in 0..9 {
-        fs.put_file_bytes_blocking(
+        fs.put_file_blocking(
             &namespace_id,
             &format!("/docs/file-{index}.txt"),
             format!("file {index}").as_bytes(),
-            PutFileOptions::new(loonfs_test_support::test_actor()),
+            &loonfs_test_support::test_actor(),
         )
         .expect("put a file");
         fs.fold_wal_blocking(&namespace_id).expect("fold the tail");
@@ -550,19 +498,16 @@ async fn fenced_compaction_blocks_until_a_new_request_claims_and_publishes() {
         let namespace_id = namespace_id("demo");
         first
             .writer
-            .create_namespace(
-                &namespace_id,
-                CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-            )
+            .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
             .await
             .expect("create namespace");
         for index in 0..2 {
             first
-                .put_file_bytes(
+                .put_file(
                     &namespace_id,
                     &format!("/file-{index}"),
                     b"data",
-                    PutFileOptions::new(loonfs_test_support::test_actor()),
+                    &loonfs_test_support::test_actor(),
                 )
                 .await
                 .expect("put file");
@@ -655,19 +600,16 @@ async fn a_delayed_fenced_compaction_does_not_forget_a_newer_claim() {
     let second = open_runtime_async(shared.clone(), "second").await;
     first
         .writer
-        .create_namespace(
-            &namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("namespace");
     for index in 0..2 {
         first
-            .put_file_bytes(
+            .put_file(
                 &namespace_id,
                 &format!("/file-{index}"),
                 b"content",
-                PutFileOptions::new(loonfs_test_support::test_actor()),
+                &loonfs_test_support::test_actor(),
             )
             .await
             .expect("put file");
@@ -758,11 +700,8 @@ fn maintenance_step_counts_wal_objects_not_commits() {
     let fs = runtime(temp_dir.path(), "step-wal-object-count-test");
     let namespace_id = namespace_id("demo");
 
-    fs.create_namespace_blocking(
-        &namespace_id,
-        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-    )
-    .expect("create namespace");
+    fs.create_namespace_blocking(&namespace_id, &loonfs_test_support::test_actor())
+        .expect("create namespace");
     let first_batch = fs.mutate_batch_blocking(
         &namespace_id,
         vec![
@@ -810,25 +749,23 @@ async fn maintenance_step_treats_manifest_number_collision_as_benign_race() {
     let fs = open_runtime_async(blocked.clone(), "step-race-test").await;
     let winner = open_runtime_async(raw_store, "competing-fold").await;
 
-    fs.create_namespace(
-        &namespace_id,
-        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-    )
-    .await
-    .expect("create namespace");
-    fs.put_file_bytes(
+    fs.create_namespace(&namespace_id, &loonfs_test_support::test_actor())
+        .await
+        .expect("create namespace");
+    fs.put_file(
         &namespace_id,
         "/docs/hello.txt",
         b"hello",
-        PutFileOptions::new(loonfs_test_support::test_actor()),
+        &loonfs_test_support::test_actor(),
     )
     .await
     .expect("put file");
 
     blocked.block_next();
+    let options = metadata_options(1);
     let (step, ()) = futures::join!(
         fs.maintenance
-            .maintain_metadata(&namespace_id, metadata_options(1)),
+            .maintain_metadata_with_options(&namespace_id, &options),
         async {
             blocked.wait_until_blocked().await;
             winner
@@ -869,18 +806,15 @@ async fn a_cold_metadata_job_probes_with_its_configured_options() {
     let runtime = open_runtime_async(store(temp_dir.path()), "writer-a").await;
     let namespace = namespace_id("probe-options");
     runtime
-        .create_namespace(
-            &namespace,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace, &loonfs_test_support::test_actor())
         .await
         .expect("namespace");
     runtime
-        .put_file_bytes(
+        .put_file(
             &namespace,
             "/one.txt",
             b"one",
-            PutFileOptions::new(loonfs_test_support::test_actor()),
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("write one WAL object");
@@ -906,11 +840,11 @@ async fn a_cold_metadata_job_probes_with_its_configured_options() {
         .await
         .expect("fold the first run");
     runtime
-        .put_file_bytes(
+        .put_file(
             &namespace,
             "/two.txt",
             b"two",
-            PutFileOptions::new(loonfs_test_support::test_actor()),
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("write another WAL object");

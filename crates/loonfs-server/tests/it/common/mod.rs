@@ -351,7 +351,7 @@ pub(crate) mod http_split_support {
     pub(crate) fn replace_file_options() -> PutFileOptions {
         PutFileOptions {
             behavior: DestinationBehavior::Replace,
-            ..PutFileOptions::new(loonfs_test_support::test_actor())
+            ..Default::default()
         }
     }
 

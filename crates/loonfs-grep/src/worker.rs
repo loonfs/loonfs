@@ -416,10 +416,10 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
     ) -> Result<loonfs_api::Checkpoint> {
         Ok(self
             .maintenance
-            .create_checkpoint(
+            .create_checkpoint_with_options(
                 namespace_id,
-                CreateCheckpointOptions {
-                    name: GREP_BACKFILL_CHECKPOINT_NAME.to_owned(),
+                GREP_BACKFILL_CHECKPOINT_NAME,
+                &CreateCheckpointOptions {
                     ttl_ms: Some(GREP_BACKFILL_CHECKPOINT_TTL_MS),
                 },
             )

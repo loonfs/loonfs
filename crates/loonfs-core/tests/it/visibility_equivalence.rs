@@ -38,9 +38,10 @@ impl VisibilityHarness {
             loonfs_api::WriterId::parse("visibility-equivalence").expect("writer id"),
         );
         engine
-            .bootstrap_namespace(CreateNamespaceOptions::new(
-                loonfs_test_support::test_actor(),
-            ))
+            .bootstrap_namespace(
+                &loonfs_test_support::test_actor(),
+                &CreateNamespaceOptions::default(),
+            )
             .await
             .expect("bootstrap namespace");
         let results = engine

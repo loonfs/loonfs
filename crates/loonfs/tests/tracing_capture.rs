@@ -15,8 +15,8 @@
 //! installed, and the assertion is deterministic.
 
 use loonfs::{
-    CreateNamespaceOptions, LoonFs, MaintenanceJobId, MaintenanceRegistry, MaintenanceRunner,
-    MetadataMaintenanceJob, MetadataMaintenanceOptions, NamespaceId, StoreConfig, Writable,
+    LoonFs, MaintenanceJobId, MaintenanceRegistry, MaintenanceRunner, MetadataMaintenanceJob,
+    MetadataMaintenanceOptions, NamespaceId, StoreConfig, Writable,
 };
 use loonfs_core::test_support::append_wal_objects;
 use loonfs_core::MutationContext;
@@ -102,10 +102,7 @@ fn background_step_conclusions_emit_debug_events() {
     block_on(async {
         let writer = writer(temp_dir.path()).await;
         writer
-            .create_namespace(
-                &namespace_id,
-                CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-            )
+            .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
             .await
             .expect("create namespace");
         fill_wal_tail_past_threshold(temp_dir.path(), &namespace_id).await;

@@ -161,7 +161,7 @@ async fn begin_upload_reads_manifest_authority_without_replaying_wal() {
     bootstrap_namespace(&setup_store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    put_file_bytes(
+    put_file(
         &setup_store,
         &namespace_id,
         "/docs/hello.txt",
@@ -175,7 +175,7 @@ async fn begin_upload_reads_manifest_authority_without_replaying_wal() {
     create_checkpoint(&setup_store, &namespace_id, &context)
         .await
         .expect("checkpoint");
-    put_file_bytes(
+    put_file(
         &setup_store,
         &namespace_id,
         "/docs/hello.txt",

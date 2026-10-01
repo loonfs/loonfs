@@ -57,11 +57,7 @@ impl MaintenanceJob for GarbageCollectionJob {
         namespace_id: &NamespaceId,
         _cancellation: &MaintenanceCancellation,
     ) -> Result<MaintenanceRunReport> {
-        let gc = match self
-            .maintenance
-            .gc(namespace_id, &GcOptions::default())
-            .await
-        {
+        let gc = match self.maintenance.gc(namespace_id).await {
             Ok(gc) => gc,
             Err(error) if error.code() == ErrorCode::NamespaceNotFound => {
                 return Ok(MaintenanceRunReport::concluded(
@@ -144,10 +140,7 @@ mod tests {
             .await
             .expect("writer");
         writer
-            .create_namespace(
-                &namespace_id,
-                crate::CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-            )
+            .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
             .await
             .expect("namespace");
         for _ in 0..3 {

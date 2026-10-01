@@ -1,9 +1,6 @@
 //! Cached reads and current retention-floor reads use different manifest requests.
 
-use loonfs::{
-    CreateNamespaceOptions, LoonFs, MetadataMaintenanceOptions, NamespaceId, PutFileOptions,
-    SharedObjectStore,
-};
+use loonfs::{LoonFs, MetadataMaintenanceOptions, NamespaceId, SharedObjectStore};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::stores::{KeyPredicate, RecordingStore};
 use std::sync::Arc;
@@ -30,27 +27,24 @@ async fn build_namespace(store: &SharedObjectStore, namespace_id: &NamespaceId) 
         .expect("build maintenance")
         .maintenance(loonfs_test_support::ids::writer_id("seed-maintenance"));
     writer
-        .create_namespace(
-            namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let namespace = writer.open_namespace(namespace_id).expect("open namespace");
     for index in 0..4 {
         namespace
-            .put_file_bytes(
+            .put_file(
                 &format!("/docs/file-{index}.txt"),
                 b"body",
-                PutFileOptions::new(loonfs_test_support::test_actor()),
+                &loonfs_test_support::test_actor(),
             )
             .await
             .expect("seed file");
     }
     maintenance
-        .maintain_metadata(
+        .maintain_metadata_with_options(
             namespace_id,
-            MetadataMaintenanceOptions {
+            &MetadataMaintenanceOptions {
                 max_wal_tail_objects: std::num::NonZeroU64::MIN,
                 ..Default::default()
             },
@@ -104,10 +98,10 @@ async fn warm_reads_and_writes_reuse_their_manifest() {
         .open_namespace(&namespace_id)
         .expect("open namespace");
     namespace_writer
-        .put_file_bytes(
+        .put_file(
             "/docs/file-5.txt",
             b"body",
-            PutFileOptions::new(loonfs_test_support::test_actor()),
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("first write");
@@ -115,10 +109,10 @@ async fn warm_reads_and_writes_reuse_their_manifest() {
     assert!(!warmup.is_empty(), "the first write loads its manifest");
 
     namespace_writer
-        .put_file_bytes(
+        .put_file(
             "/docs/file-6.txt",
             b"body",
-            PutFileOptions::new(loonfs_test_support::test_actor()),
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("second write");

@@ -252,10 +252,7 @@ impl LoonFs<Writable> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{
-        CreateNamespaceOptions, ErrorCode, LoonFs, MetadataCache, MetadataCacheStats, NamespaceId,
-        PutFileOptions, Writable,
-    };
+    use crate::{ErrorCode, LoonFs, MetadataCache, MetadataCacheStats, NamespaceId, Writable};
     use loonfs_core::test_support::RecordingStoredMetadataBlockCache;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_test_support::ids::namespace_id;
@@ -317,20 +314,13 @@ mod tests {
         .await
         .expect("build writer");
         writer
-            .create_namespace(
-                &namespace_id,
-                CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-            )
+            .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
             .await
             .expect("create namespace");
         writer
             .open_namespace(&namespace_id)
             .expect("open namespace")
-            .put_file_bytes(
-                "/file.txt",
-                b"body",
-                PutFileOptions::new(loonfs_test_support::test_actor()),
-            )
+            .put_file("/file.txt", b"body", &loonfs_test_support::test_actor())
             .await
             .expect("put file");
 
@@ -380,10 +370,7 @@ mod tests {
             .await
             .expect("build runtime");
         runtime
-            .create_namespace(
-                namespace_id,
-                CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-            )
+            .create_namespace(namespace_id, &loonfs_test_support::test_actor())
             .await
             .expect("create namespace");
         (runtime, blocking)
@@ -407,11 +394,7 @@ mod tests {
             let namespace = namespace.clone();
             async move {
                 namespace
-                    .put_file_bytes(
-                        "/parked.txt",
-                        b"body",
-                        PutFileOptions::new(loonfs_test_support::test_actor()),
-                    )
+                    .put_file("/parked.txt", b"body", &loonfs_test_support::test_actor())
                     .await
             }
         });
@@ -425,11 +408,7 @@ mod tests {
         // A mutation submitted into the drain would be work the drain then
         // has to wait for.
         let refused = namespace
-            .put_file_bytes(
-                "/late.txt",
-                b"body",
-                PutFileOptions::new(loonfs_test_support::test_actor()),
-            )
+            .put_file("/late.txt", b"body", &loonfs_test_support::test_actor())
             .await
             .expect_err("a mutation submitted during the drain must be refused");
         assert_eq!(

@@ -1,9 +1,7 @@
 //! Authorization for embedded content reference reads and imports.
 
-use loonfs::{
-    CreateNamespaceOptions, DeleteNamespaceOptions, Error, ForkNamespaceOptions, LoonFs,
-    PutFileOptions, SharedObjectStore, UpdateAccessOptions, Writable,
-};
+use loonfs::AccessState;
+use loonfs::{CreateNamespaceOptions, Error, LoonFs, PutFileOptions, SharedObjectStore, Writable};
 use loonfs_api::{
     AccessGrants, AccessRight, AccessRights, ContentRef, ErrorCode, NamespaceAccess, NamespaceId,
     PrincipalId, PrincipalScope, PrincipalSet, Subject, SubjectId,
@@ -85,11 +83,12 @@ async fn create_namespace(
     access: NamespaceAccess,
 ) {
     writer
-        .create_namespace(
+        .create_namespace_with_options(
             namespace_id,
-            CreateNamespaceOptions {
+            &loonfs_test_support::test_actor(),
+            &CreateNamespaceOptions {
                 access,
-                ..CreateNamespaceOptions::new(loonfs_test_support::test_actor())
+                ..Default::default()
             },
         )
         .await
@@ -102,10 +101,15 @@ async fn publish_inline(writer: &LoonFs<Writable>, namespace_id: &NamespaceId) -
         .with_subject(subject("administrator"))
         .namespace(namespace_id);
     let namespace_writer = writer.open_namespace(namespace_id).expect("open namespace");
-    let options = PutFileOptions::new(loonfs_test_support::test_actor());
+    let options = PutFileOptions::default();
     namespace_writer
         .with_subject(subject("administrator"))
-        .put_file_bytes("/source", b"private inline bytes", options)
+        .put_file_with_options(
+            "/source",
+            b"private inline bytes",
+            &loonfs_test_support::test_actor(),
+            &options,
+        )
         .await
         .expect("publish source");
     namespace
@@ -221,11 +225,7 @@ async fn subject_without_source_rights_cannot_prepare_or_publish_an_inline_tail_
 
     recording.reset();
     let error = namespace
-        .put_file_content_ref(
-            "/imported",
-            content_ref,
-            PutFileOptions::new(loonfs_test_support::test_actor()),
-        )
+        .put_file_content_ref("/imported", content_ref, &loonfs_test_support::test_actor())
         .await
         .expect_err("put requires source administrator");
     assert_forbidden_without_writes(recording.as_ref(), error);
@@ -255,7 +255,7 @@ async fn same_namespace_inline_tail_import_requires_its_administrator() {
         .put_file_content_ref(
             "/imported",
             content_ref.clone(),
-            PutFileOptions::new(loonfs_test_support::test_actor()),
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect_err("same-namespace import requires administrator");
@@ -317,10 +317,7 @@ async fn reclaimed_deleted_owner_import_reports_the_owner_without_writes() {
     create_namespace(&writer, &destination, NamespaceAccess::unrestricted()).await;
     let destination_writer = writer.open_namespace(&destination).expect("open namespace");
     let content_ref = publish_inline(&writer, &source).await;
-    source_writer
-        .delete(DeleteNamespaceOptions::default())
-        .await
-        .expect("delete owner");
+    source_writer.delete().await.expect("delete owner");
     let report = loonfs_core::gc_namespace(
         recording.as_ref(),
         &source,
@@ -365,29 +362,25 @@ async fn deleted_owner_import_uses_updated_access_state_in_the_surviving_head() 
     create_namespace(&writer, &destination, NamespaceAccess::unrestricted()).await;
     let content_ref = publish_inline(&writer, &source).await;
     writer
-        .fork_namespace(
-            &source,
-            &fork,
-            ForkNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .fork_namespace(&source, &fork, &loonfs_test_support::test_actor())
         .await
         .expect("fork");
     let source_writer = writer.open_namespace(&source).expect("open namespace");
     // The replacement lands after the fork, so only the source's final runs
     // carry it; the fork keeps the administrator it inherited.
-    let access = UpdateAccessOptions::new(
-        loonfs_test_support::test_actor(),
-        administrator_grants("replacement"),
-    );
     source_writer
         .with_subject(subject("administrator"))
-        .update_access("/", access)
+        .update_access(
+            "/",
+            &loonfs_test_support::test_actor(),
+            AccessState {
+                boundary: false,
+                grants: administrator_grants("replacement"),
+            },
+        )
         .await
         .expect("replace administrator");
-    source_writer
-        .delete(DeleteNamespaceOptions::default())
-        .await
-        .expect("delete source");
+    source_writer.delete().await.expect("delete source");
     assert_eq!(
         namespace
             .read_view()

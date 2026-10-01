@@ -48,14 +48,15 @@ async fn check_buffered_read_access(content_size: usize) {
         .expect("writer");
     let namespace_id = namespace_id("access-reads");
     writer
-        .create_namespace(
+        .create_namespace_with_options(
             &namespace_id,
-            CreateNamespaceOptions {
+            &loonfs_test_support::test_actor(),
+            &CreateNamespaceOptions {
                 access: NamespaceAccess::Acl {
                     principal_scope: PrincipalScope::parse("org_demo").expect("scope"),
                     root_grants: grants("prn_root", AccessRight::Admin),
                 },
-                ..CreateNamespaceOptions::new(loonfs_test_support::test_actor())
+                ..Default::default()
             },
         )
         .await
@@ -85,7 +86,7 @@ async fn check_buffered_read_access(content_size: usize) {
         },
     ] {
         namespace_writer
-            .create_commit(
+            .commit(
                 CommitRequest::single(
                     CommitId::generate(),
                     loonfs_test_support::test_actor(),
@@ -101,7 +102,7 @@ async fn check_buffered_read_access(content_size: usize) {
     for byte in *b"ab" {
         let bytes = vec![byte; content_size];
         let prepared = namespace_writer
-            .prepare_file_bytes(&bytes)
+            .prepare_content(&bytes)
             .await
             .expect("prepare file");
         namespace_writer
@@ -147,7 +148,7 @@ async fn check_buffered_read_access(content_size: usize) {
         .expect("shared file before revocation")
         .inode_id;
     namespace_writer
-        .create_commit(
+        .commit(
             CommitRequest::single(
                 CommitId::generate(),
                 loonfs_test_support::test_actor(),
@@ -210,14 +211,15 @@ async fn check_former_writer_read(warm_before_handoff: bool) {
         .expect("old writer");
     let namespace_id = namespace_id("access-handoff");
     old_writer
-        .create_namespace(
+        .create_namespace_with_options(
             &namespace_id,
-            CreateNamespaceOptions {
+            &loonfs_test_support::test_actor(),
+            &CreateNamespaceOptions {
                 access: NamespaceAccess::Acl {
                     principal_scope: PrincipalScope::parse("org_demo").expect("scope"),
                     root_grants: grants("prn_root", AccessRight::Admin),
                 },
-                ..CreateNamespaceOptions::new(loonfs_test_support::test_actor())
+                ..Default::default()
             },
         )
         .await
@@ -225,10 +227,15 @@ async fn check_former_writer_read(warm_before_handoff: bool) {
     let old_namespace_writer = old_writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
-    let options = loonfs::PutFileOptions::new(loonfs_test_support::test_actor());
+    let options = loonfs::PutFileOptions::default();
     old_namespace_writer
         .with_subject(subject("prn_root"))
-        .put_file_bytes("/team/file", b"private payload", options)
+        .put_file_with_options(
+            "/team/file",
+            b"private payload",
+            &loonfs_test_support::test_actor(),
+            &options,
+        )
         .await
         .expect("publish file");
     let access = |grants| FilesystemOperation::UpdateAccess {
@@ -239,7 +246,7 @@ async fn check_former_writer_read(warm_before_handoff: bool) {
         expected_access_revision_no: None,
     };
     old_namespace_writer
-        .create_commit(
+        .commit(
             CommitRequest::single(
                 CommitId::generate(),
                 loonfs_test_support::test_actor(),
@@ -270,7 +277,7 @@ async fn check_former_writer_read(warm_before_handoff: bool) {
         .expect("peer");
     let peer_namespace_writer = peer.open_namespace(&namespace_id).expect("open namespace");
     peer_namespace_writer
-        .create_commit(
+        .commit(
             CommitRequest::single(
                 CommitId::generate(),
                 loonfs_test_support::test_actor(),

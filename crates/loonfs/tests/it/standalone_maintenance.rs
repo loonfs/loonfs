@@ -2,11 +2,10 @@
 
 use crate::common::SettableWallClock;
 use loonfs::{
-    CreateCheckpointOptions, CreateDirectoryOptions, CreateNamespaceOptions, GarbageCollectionJob,
-    LoonFs, MaintenanceAssignment, MaintenanceCancellation, MaintenanceConclusion, MaintenanceJob,
-    MaintenanceJobId, MaintenanceProbe, MaintenanceRegistry, MetadataCompactionJob,
-    MetadataMaintenanceJob, MetadataMaintenanceOptions, PutFileOptions, SharedObjectStore,
-    WallClock,
+    CreateCheckpointOptions, GarbageCollectionJob, LoonFs, MaintenanceAssignment,
+    MaintenanceCancellation, MaintenanceConclusion, MaintenanceJob, MaintenanceJobId,
+    MaintenanceProbe, MaintenanceRegistry, MetadataCompactionJob, MetadataMaintenanceJob,
+    MetadataMaintenanceOptions, SharedObjectStore, WallClock,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
@@ -39,21 +38,14 @@ async fn a_fresh_runtime_folds_a_short_tail_once_its_newest_commit_is_idle() {
         .await
         .expect("writer");
     writer
-        .create_namespace(
-            &namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("namespace");
     let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
     namespace
-        .put_file_bytes(
-            "/file.txt",
-            b"body",
-            PutFileOptions::new(loonfs_test_support::test_actor()),
-        )
+        .put_file("/file.txt", b"body", &loonfs_test_support::test_actor())
         .await
         .expect("write file");
     writer.shutdown().await.expect("writer shutdown");
@@ -124,10 +116,7 @@ async fn injected_wall_time_collects_objects_the_system_clock_keeps() {
         .await
         .expect("writer");
     writer
-        .create_namespace(
-            &namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("namespace");
     let namespace = writer
@@ -135,10 +124,7 @@ async fn injected_wall_time_collects_objects_the_system_clock_keeps() {
         .expect("open namespace");
     assert_eq!(
         namespace
-            .create_directory(
-                "/directory",
-                CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
-            )
+            .create_directory("/directory", &loonfs_test_support::test_actor())
             .await
             .expect("directory")
             .committed_at_ms,
@@ -158,10 +144,10 @@ async fn injected_wall_time_collects_objects_the_system_clock_keeps() {
         .expect("future maintenance")
         .maintenance(loonfs_test_support::ids::writer_id("future"));
     let checkpoint = future
-        .create_checkpoint(
+        .create_checkpoint_with_options(
             &namespace_id,
-            CreateCheckpointOptions {
-                name: "pinned".to_owned(),
+            "pinned",
+            &CreateCheckpointOptions {
                 ttl_ms: Some(1_000),
             },
         )
@@ -180,10 +166,7 @@ async fn injected_wall_time_collects_objects_the_system_clock_keeps() {
             .await
             .expect("unreferenced segment");
         store.reset();
-        let kept = system
-            .gc(&namespace_id, &Default::default())
-            .await
-            .expect("system collection");
+        let kept = system.gc(&namespace_id).await.expect("system collection");
         assert_eq!(kept.deleted.metadata_segments, 0);
         assert!(!store
             .take()
@@ -195,7 +178,7 @@ async fn injected_wall_time_collects_objects_the_system_clock_keeps() {
             .expect("segment")
             .is_some());
         let collected = maintenance
-            .gc(&namespace_id, &Default::default())
+            .gc(&namespace_id)
             .await
             .expect("future collection");
         assert_eq!(collected.deleted.metadata_segments, 1);
@@ -223,10 +206,7 @@ async fn a_registry_runs_every_core_job_without_a_writer() {
         .await
         .expect("writer");
     writer
-        .create_namespace(
-            &namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("namespace");
     let namespace = writer
@@ -237,10 +217,10 @@ async fn a_registry_runs_every_core_job_without_a_writer() {
         .get();
     for index in 0..threshold {
         namespace
-            .put_file_bytes(
+            .put_file(
                 &format!("/file-{index}.txt"),
                 b"body",
-                PutFileOptions::new(loonfs_test_support::test_actor()),
+                &loonfs_test_support::test_actor(),
             )
             .await
             .expect("write file");

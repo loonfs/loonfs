@@ -237,13 +237,11 @@ async fn run_namespace_fork(
     let namespace = context
         .target
         .client
-        .fork_namespace(
+        .fork_namespace_with_options(
             &source_namespace_id,
             &new_namespace_id,
-            &loonfs::ForkNamespaceOptions {
-                actor_id,
-                snapshot_id,
-            },
+            &actor_id,
+            &loonfs::ForkNamespaceOptions { snapshot_id },
         )
         .await
         .map_err(|error| context.fail(kind, error))?;

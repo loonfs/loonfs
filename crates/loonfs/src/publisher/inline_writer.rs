@@ -80,17 +80,15 @@ async fn check_terminal_reload_failure(include_replay: bool) {
         .expect("writer");
     let namespace_reader = writer.namespace(&namespace);
     writer
-        .create_namespace(
-            &namespace,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace, &loonfs_test_support::test_actor())
         .await
         .expect("namespace");
     let namespace_writer = writer.open_namespace(&namespace).expect("open namespace");
-    let mut warmup_options = crate::CreateDirectoryOptions::new(loonfs_test_support::test_actor());
+    let actor = loonfs_test_support::test_actor();
+    let mut warmup_options = crate::CreateDirectoryOptions::default();
     warmup_options.commit.commit_id = Some(CommitId::parse("warmup").expect("commit"));
     let warmup = namespace_writer
-        .create_directory("/warmup", warmup_options.clone())
+        .create_directory_with_options("/warmup", &actor, &warmup_options)
         .await
         .expect("writer epoch");
     let permits = writer
@@ -101,7 +99,8 @@ async fn check_terminal_reload_failure(include_replay: bool) {
         .await
         .expect("hold folds");
     armed.store(true, Ordering::SeqCst);
-    let first = namespace_writer.put_file_bytes("/file", b"four", put_options("uncertain"));
+    let uncertain = put_options("uncertain");
+    let first = namespace_writer.put_file_with_options("/file", b"four", &actor, &uncertain);
     let first_error = if include_replay {
         let registry = writer.mode.publisher.clone();
         let slots = registry
@@ -113,7 +112,7 @@ async fn check_terminal_reload_failure(include_replay: bool) {
             .expect("hold publications");
         let publisher = namespace_writer.session().publisher.clone();
         let (replayed, first, ()) = tokio::join!(
-            namespace_writer.create_directory("/warmup", warmup_options),
+            namespace_writer.create_directory_with_options("/warmup", &actor, &warmup_options),
             first,
             async {
                 timeout(
@@ -153,7 +152,12 @@ async fn check_terminal_reload_failure(include_replay: bool) {
 
     unreadable.store(false, Ordering::SeqCst);
     let replay = namespace_writer
-        .put_file_bytes("/file", b"four", put_options("uncertain"))
+        .put_file_with_options(
+            "/file",
+            b"four",
+            &loonfs_test_support::test_actor(),
+            &put_options("uncertain"),
+        )
         .await
         .expect("replay after recovery");
     assert_eq!(replay.committed_seq, durable.head_seq);
@@ -166,7 +170,12 @@ async fn check_terminal_reload_failure(include_replay: bool) {
         Some(4)
     );
     namespace_writer
-        .put_file_bytes("/next", b"next", put_options("next"))
+        .put_file_with_options(
+            "/next",
+            b"next",
+            &loonfs_test_support::test_actor(),
+            &put_options("next"),
+        )
         .await
         .expect("full known tail stages next value");
     let recovered =
@@ -207,7 +216,12 @@ async fn a_new_session_keeps_one_wal_object_budget_inline_until_it_observes_the_
         .await;
     for (path, bytes) in [("/four", b"four".as_slice()), ("/three", b"abc")] {
         namespace_writer
-            .put_file_bytes(path, bytes, put_options(&path[1..]))
+            .put_file_with_options(
+                path,
+                bytes,
+                &loonfs_test_support::test_actor(),
+                &put_options(&path[1..]),
+            )
             .await
             .expect("fill tail below the fold trigger");
     }
@@ -229,10 +243,12 @@ async fn a_new_session_keeps_one_wal_object_budget_inline_until_it_observes_the_
         .await
         .expect("hold publications");
     store.reset();
+    let actor = loonfs_test_support::test_actor();
+    let (a, b, c) = (put_options("a"), put_options("b"), put_options("c"));
     let (first, second, third, ()) = tokio::join!(
-        namespace_writer.put_file_bytes("/a", b"aaaa", put_options("a")),
-        namespace_writer.put_file_bytes("/b", b"bbbb", put_options("b")),
-        namespace_writer.put_file_bytes("/c", b"cccc", put_options("c")),
+        namespace_writer.put_file_with_options("/a", b"aaaa", &actor, &a),
+        namespace_writer.put_file_with_options("/b", b"bbbb", &actor, &b),
+        namespace_writer.put_file_with_options("/c", b"cccc", &actor, &c),
         async {
             let publisher = namespace_writer.session().publisher.clone();
             timeout(
@@ -310,18 +326,12 @@ async fn writer_with_policy_and_byte_limit(
         .expect("writer");
     let namespace = NamespaceId::parse("inline").expect("namespace");
     writer
-        .create_namespace(
-            &namespace,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace, &loonfs_test_support::test_actor())
         .await
         .expect("namespace");
     let namespace_writer = writer.open_namespace(&namespace).expect("open namespace");
     namespace_writer
-        .create_directory(
-            "/warmup",
-            crate::CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_directory("/warmup", &loonfs_test_support::test_actor())
         .await
         .expect("acquire writer epoch");
     store.reset();
@@ -329,7 +339,7 @@ async fn writer_with_policy_and_byte_limit(
 }
 
 fn put_options(id: &str) -> PutFileOptions {
-    let mut options = PutFileOptions::new(loonfs_test_support::test_actor());
+    let mut options = PutFileOptions::default();
     options.commit.commit_id = Some(CommitId::parse(id).expect("commit id"));
     options
 }
@@ -381,7 +391,12 @@ async fn small_writes_use_one_wal_put_and_retry_by_bytes() {
     let namespace_reader = writer.namespace(&namespace);
     let options = put_options("small");
     let first = namespace_writer
-        .put_file_bytes("/file", b"same", options.clone())
+        .put_file_with_options(
+            "/file",
+            b"same",
+            &loonfs_test_support::test_actor(),
+            &options,
+        )
         .await
         .expect("put");
     assert_eq!(store.count(OperationClass::Put), 1);
@@ -402,7 +417,12 @@ async fn small_writes_use_one_wal_put_and_retry_by_bytes() {
     store.reset();
     assert_eq!(
         namespace_writer
-            .put_file_bytes("/file", b"same", options.clone())
+            .put_file_with_options(
+                "/file",
+                b"same",
+                &loonfs_test_support::test_actor(),
+                &options
+            )
             .await
             .expect("replay"),
         first
@@ -410,7 +430,12 @@ async fn small_writes_use_one_wal_put_and_retry_by_bytes() {
     assert_eq!(store.count(OperationClass::Put), 0);
     assert_eq!(
         namespace_writer
-            .put_file_bytes("/file", b"diff", options)
+            .put_file_with_options(
+                "/file",
+                b"diff",
+                &loonfs_test_support::test_actor(),
+                &options
+            )
             .await
             .expect_err("conflict")
             .code(),
@@ -442,14 +467,24 @@ async fn disabled_and_above_threshold_writes_keep_uploaded_object_identity() {
             b"large"
         };
         namespace
-            .put_file_bytes("/file", bytes, put_options("staged"))
+            .put_file_with_options(
+                "/file",
+                bytes,
+                &loonfs_test_support::test_actor(),
+                &put_options("staged"),
+            )
             .await
             .expect("put");
         assert!(family_requests(&store, DurableObjectFamily::ContentBlob) > 0);
         assert!(written_records(&store).await[0].inline_content.is_empty());
         assert_eq!(
             namespace
-                .put_file_bytes("/file", bytes, put_options("staged"))
+                .put_file_with_options(
+                    "/file",
+                    bytes,
+                    &loonfs_test_support::test_actor(),
+                    &put_options("staged")
+                )
                 .await
                 .expect_err("fresh object conflicts")
                 .code(),
@@ -467,7 +502,7 @@ async fn inline_preparation_makes_no_request_and_retained_values_replay() {
     for bytes in [b"".as_slice(), b"same"] {
         store.reset();
         let prepared = namespace_writer
-            .prepare_file_bytes(bytes)
+            .prepare_content(bytes)
             .await
             .expect("prepare");
         assert!(store.snapshot().is_empty());
@@ -478,7 +513,12 @@ async fn inline_preparation_makes_no_request_and_retained_values_replay() {
             "prepared"
         });
         let first = namespace_writer
-            .put_file_prepared(path, prepared.clone(), options.clone())
+            .put_file_prepared_with_options(
+                path,
+                prepared.clone(),
+                &loonfs_test_support::test_actor(),
+                &options,
+            )
             .await
             .expect("publish");
         assert_eq!(store.count(OperationClass::Put), 1);
@@ -494,7 +534,12 @@ async fn inline_preparation_makes_no_request_and_retained_values_replay() {
         store.reset();
         assert_eq!(
             namespace_writer
-                .put_file_prepared(path, prepared, options)
+                .put_file_prepared_with_options(
+                    path,
+                    prepared,
+                    &loonfs_test_support::test_actor(),
+                    &options
+                )
                 .await
                 .expect("replay"),
             first
@@ -527,7 +572,7 @@ async fn stream_preparation_preserves_chunks_across_the_threshold() {
         .boxed();
         store.reset();
         let prepared = namespace_writer
-            .prepare_file_stream(stream)
+            .prepare_content_stream(stream)
             .await
             .expect("prepare stream");
         if expected.len() <= 4 {
@@ -538,7 +583,12 @@ async fn stream_preparation_preserves_chunks_across_the_threshold() {
         let path = format!("/stream-{index}");
         let options = put_options(&format!("stream-{index}"));
         let first = namespace_writer
-            .put_file_prepared(&path, prepared.clone(), options.clone())
+            .put_file_prepared_with_options(
+                &path,
+                prepared.clone(),
+                &loonfs_test_support::test_actor(),
+                &options,
+            )
             .await
             .expect("publish");
         assert_eq!(
@@ -548,7 +598,12 @@ async fn stream_preparation_preserves_chunks_across_the_threshold() {
         store.reset();
         assert_eq!(
             namespace_writer
-                .put_file_prepared(&path, prepared, options)
+                .put_file_prepared_with_options(
+                    &path,
+                    prepared,
+                    &loonfs_test_support::test_actor(),
+                    &options
+                )
                 .await
                 .expect("replay"),
             first
@@ -587,11 +642,16 @@ async fn tail_fallback_keeps_inline_identity_across_retries_and_a_fold() {
         .await
         .expect("hold folds");
     namespace_writer
-        .put_file_bytes("/first", b"full", put_options("first"))
+        .put_file_with_options(
+            "/first",
+            b"full",
+            &loonfs_test_support::test_actor(),
+            &put_options("first"),
+        )
         .await
         .expect("fill tail");
     let prepared = namespace_writer
-        .prepare_file_bytes(b"next")
+        .prepare_content(b"next")
         .await
         .expect("prepare");
     let request = CommitRequest::single(
@@ -604,7 +664,12 @@ async fn tail_fallback_keeps_inline_identity_across_retries_and_a_fold() {
     let fingerprint = candidate.semantic_identity(&namespace).expect("identity");
     store.reset();
     let first = namespace_writer
-        .put_file_prepared("/fallback", prepared.clone(), put_options("fallback"))
+        .put_file_prepared_with_options(
+            "/fallback",
+            prepared.clone(),
+            &loonfs_test_support::test_actor(),
+            &put_options("fallback"),
+        )
         .await
         .expect("fallback");
     let records = written_records(&store).await;
@@ -621,7 +686,12 @@ async fn tail_fallback_keeps_inline_identity_across_retries_and_a_fold() {
     store.reset();
     assert_eq!(
         namespace_writer
-            .put_file_prepared("/fallback", prepared.clone(), put_options("fallback"))
+            .put_file_prepared_with_options(
+                "/fallback",
+                prepared.clone(),
+                &loonfs_test_support::test_actor(),
+                &put_options("fallback")
+            )
             .await
             .expect("replay staged fallback"),
         first
@@ -632,7 +702,12 @@ async fn tail_fallback_keeps_inline_identity_across_retries_and_a_fold() {
     store.reset();
     assert_eq!(
         namespace_writer
-            .put_file_prepared("/fallback", prepared, put_options("fallback"))
+            .put_file_prepared_with_options(
+                "/fallback",
+                prepared,
+                &loonfs_test_support::test_actor(),
+                &put_options("fallback")
+            )
             .await
             .expect("replay inline after fold"),
         first
@@ -667,19 +742,21 @@ async fn retained_receipts_answer_retries_before_fallback_when_content_writes_fa
             .expect("writer");
         let namespace = NamespaceId::parse("receipt").expect("namespace");
         writer
-            .create_namespace(
-                &namespace,
-                CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-            )
+            .create_namespace(&namespace, &loonfs_test_support::test_actor())
             .await
             .expect("namespace");
         let namespace_writer = writer.open_namespace(&namespace).expect("open namespace");
         let prepared = namespace_writer
-            .prepare_file_bytes(bytes)
+            .prepare_content(bytes)
             .await
             .expect("prepare");
         let original = namespace_writer
-            .put_file_prepared("/file", prepared.clone(), put_options("retry"))
+            .put_file_prepared_with_options(
+                "/file",
+                prepared.clone(),
+                &loonfs_test_support::test_actor(),
+                &put_options("retry"),
+            )
             .await
             .expect("publish");
         assert_eq!(
@@ -694,7 +771,12 @@ async fn retained_receipts_answer_retries_before_fallback_when_content_writes_fa
         store.reset();
         assert_eq!(
             namespace_writer
-                .put_file_prepared("/file", prepared, put_options("retry"))
+                .put_file_prepared_with_options(
+                    "/file",
+                    prepared,
+                    &loonfs_test_support::test_actor(),
+                    &put_options("retry")
+                )
                 .await
                 .expect("receipt replays despite failed content writes"),
             original
@@ -702,7 +784,12 @@ async fn retained_receipts_answer_retries_before_fallback_when_content_writes_fa
         let mut different = bytes.to_vec();
         different[0] = b'x';
         let error = namespace_writer
-            .put_file_bytes("/file", &different, put_options("retry"))
+            .put_file_with_options(
+                "/file",
+                &different,
+                &loonfs_test_support::test_actor(),
+                &put_options("retry"),
+            )
             .await
             .expect_err("receipt rejects different bytes before staging");
         assert_eq!(error.code(), ErrorCode::CommitIdReuseConflict);
@@ -728,7 +815,12 @@ async fn full_queue_refuses_overflow_staging_without_store_writes() {
     }
     store.reset();
     let error = namespace_writer
-        .put_file_bytes("/file", b"longer", put_options("full-queue"))
+        .put_file_with_options(
+            "/file",
+            b"longer",
+            &loonfs_test_support::test_actor(),
+            &put_options("full-queue"),
+        )
         .await
         .expect_err("queue full");
     assert_eq!(error.code(), ErrorCode::CommitQueueFull);
@@ -765,7 +857,7 @@ async fn overflow_staging_keeps_bulk_commit_order_and_one_atomic_commit() {
     for bytes in &payloads {
         prepared.push(
             namespace_writer
-                .prepare_file_bytes(bytes)
+                .prepare_content(bytes)
                 .await
                 .expect("prepare"),
         );
@@ -860,9 +952,11 @@ async fn queued_writes_share_tail_reservations_and_split_at_the_wal_object_budge
             .await
             .expect("hold publications");
         let publisher = namespace.session().publisher.clone();
+        let actor = loonfs_test_support::test_actor();
+        let (one, two) = (put_options("one"), put_options("two"));
         let (first, second, ()) = tokio::join!(
-            namespace.put_file_bytes("/one", b"one", put_options("one")),
-            namespace.put_file_bytes("/two", b"two", put_options("two")),
+            namespace.put_file_with_options("/one", b"one", &actor, &one),
+            namespace.put_file_with_options("/two", b"two", &actor, &two),
             async {
                 timeout(Duration::from_secs(10), async {
                     while queued_candidates(&publisher.lock_state()) < 2 {
@@ -891,7 +985,12 @@ async fn queued_writes_share_tail_reservations_and_split_at_the_wal_object_budge
         if limited_tail {
             store.reset();
             namespace
-                .put_file_bytes("/warmup", b"x", put_options("fails"))
+                .put_file_with_options(
+                    "/warmup",
+                    b"x",
+                    &loonfs_test_support::test_actor(),
+                    &put_options("fails"),
+                )
                 .await
                 .expect_err("directory cannot be replaced by a file");
             assert_eq!(store.count(OperationClass::Put), 0);
@@ -903,7 +1002,12 @@ async fn queued_writes_share_tail_reservations_and_split_at_the_wal_object_budge
                 .await
                 .expect("hold folds");
             namespace
-                .put_file_bytes("/after-failure", b"ok", put_options("after-failure"))
+                .put_file_with_options(
+                    "/after-failure",
+                    b"ok",
+                    &loonfs_test_support::test_actor(),
+                    &put_options("after-failure"),
+                )
                 .await
                 .expect("reservation released on failure");
             assert_eq!(store.count(OperationClass::Put), 1);
@@ -937,10 +1041,11 @@ async fn repeated_projection_invalidation_does_not_repeat_the_tail_limit_oversho
     for index in 0..4 {
         writer.invalidate_namespace(&namespace);
         namespace_writer
-            .put_file_bytes(
+            .put_file_with_options(
                 &format!("/file-{index}"),
                 b"full",
-                put_options(&format!("write-{index}")),
+                &loonfs_test_support::test_actor(),
+                &put_options(&format!("write-{index}")),
             )
             .await
             .expect("publish");
@@ -972,29 +1077,33 @@ async fn fold_completion_reports_only_inline_bytes_published_since_it_began() {
         .await
         .expect("writer");
     writer
-        .create_namespace(
-            &namespace,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace, &loonfs_test_support::test_actor())
         .await
         .expect("namespace");
     let namespace_writer = writer.open_namespace(&namespace).expect("open namespace");
     namespace_writer
-        .create_directory(
-            "/warmup",
-            crate::CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_directory("/warmup", &loonfs_test_support::test_actor())
         .await
         .expect("acquire writer epoch");
 
     store.block_next();
     namespace_writer
-        .put_file_bytes("/first", b"four", put_options("first"))
+        .put_file_with_options(
+            "/first",
+            b"four",
+            &loonfs_test_support::test_actor(),
+            &put_options("first"),
+        )
         .await
         .expect("start fold");
     store.wait_until_blocked().await;
     namespace_writer
-        .put_file_bytes("/during", b"next", put_options("during"))
+        .put_file_with_options(
+            "/during",
+            b"next",
+            &loonfs_test_support::test_actor(),
+            &put_options("during"),
+        )
         .await
         .expect("publish during fold");
     store.release();
@@ -1046,11 +1155,11 @@ async fn commit_two_values(
     let namespace_writer = writer.open_namespace(namespace).expect("open namespace");
     let prepared = vec![
         namespace_writer
-            .prepare_file_bytes(b"more")
+            .prepare_content(b"more")
             .await
             .expect("prepare first value"),
         namespace_writer
-            .prepare_file_bytes(b"last")
+            .prepare_content(b"last")
             .await
             .expect("prepare second value"),
     ];
@@ -1089,7 +1198,12 @@ async fn inline_bytes_make_automatic_and_explicit_folds_due_before_wal_object_co
             .await
             .expect("hold folds");
         namespace_writer
-            .put_file_bytes("/file", b"four", put_options("fold"))
+            .put_file_with_options(
+                "/file",
+                b"four",
+                &loonfs_test_support::test_actor(),
+                &put_options("fold"),
+            )
             .await
             .expect("put");
         let usage = loonfs_core::cache::load_namespace_wal_tail_usage(store.as_ref(), &namespace)
@@ -1105,7 +1219,7 @@ async fn inline_bytes_make_automatic_and_explicit_folds_due_before_wal_object_co
         store.reset();
         assert_eq!(
             maintenance
-                .probe_metadata(&namespace, &options)
+                .probe_metadata_with_options(&namespace, &options)
                 .await
                 .expect("probe"),
             crate::MaintenanceProbe::Idle
@@ -1123,7 +1237,7 @@ async fn inline_bytes_make_automatic_and_explicit_folds_due_before_wal_object_co
             .maintenance(loonfs_test_support::ids::writer_id("independent"));
         store.reset();
         let step = independent
-            .maintain_metadata(&namespace, options.clone())
+            .maintain_metadata_with_options(&namespace, &options)
             .await
             .expect("maintenance without a writer");
         assert_eq!(step.wal_fold, crate::WalFoldStepOutcome::NotNeeded);
@@ -1134,7 +1248,7 @@ async fn inline_bytes_make_automatic_and_explicit_folds_due_before_wal_object_co
         );
         if mode == "explicit" {
             let step = maintenance
-                .maintain_metadata(&namespace, options.clone())
+                .maintain_metadata_with_options(&namespace, &options)
                 .await
                 .expect("explicit fold");
             assert!(matches!(
@@ -1144,7 +1258,7 @@ async fn inline_bytes_make_automatic_and_explicit_folds_due_before_wal_object_co
             // The fold does not lower the writer's count; with nothing left
             // unfolded, the next pass does not consult it.
             let again = maintenance
-                .maintain_metadata(&namespace, options)
+                .maintain_metadata_with_options(&namespace, &options)
                 .await
                 .expect("pass after the fold");
             assert_eq!(again.wal_fold, crate::WalFoldStepOutcome::NotNeeded);
@@ -1298,10 +1412,7 @@ async fn check_delayed_fold_callback(cache: MetadataCache) {
         .expect("writer");
     let namespace_reader = writer.namespace(&namespace);
     writer
-        .create_namespace(
-            &namespace,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace, &loonfs_test_support::test_actor())
         .await
         .expect("namespace");
     let namespace_writer = writer.open_namespace(&namespace).expect("open namespace");
@@ -1313,7 +1424,12 @@ async fn check_delayed_fold_callback(cache: MetadataCache) {
         .await
         .expect("hold automatic folds");
     namespace_writer
-        .put_file_bytes("/first", b"four", put_options("first"))
+        .put_file_with_options(
+            "/first",
+            b"four",
+            &loonfs_test_support::test_actor(),
+            &put_options("first"),
+        )
         .await
         .expect("first inline commit");
     let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id("maintenance"));
@@ -1330,7 +1446,12 @@ async fn check_delayed_fold_callback(cache: MetadataCache) {
         assert_eq!(usage.wal_tail_inline_bytes, 0);
         writer.invalidate_namespace(&namespace);
         namespace_writer
-            .put_file_bytes("/during", b"next", put_options("during"))
+            .put_file_with_options(
+                "/during",
+                b"next",
+                &loonfs_test_support::test_actor(),
+                &put_options("during"),
+            )
             .await
             .expect("publish against the new manifest");
         assert_eq!(
@@ -1355,11 +1476,11 @@ async fn check_delayed_fold_callback(cache: MetadataCache) {
     );
     let prepared = vec![
         namespace_writer
-            .prepare_file_bytes(b"more")
+            .prepare_content(b"more")
             .await
             .expect("prepare"),
         namespace_writer
-            .prepare_file_bytes(b"last")
+            .prepare_content(b"last")
             .await
             .expect("prepare"),
     ];

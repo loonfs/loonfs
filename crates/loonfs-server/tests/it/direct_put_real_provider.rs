@@ -6,7 +6,6 @@ use crate::common::{start_server, test_config};
 use bytes::Bytes;
 use futures::StreamExt;
 use loonfs_api::{
-    options::DirectMultipartUploadOptions,
     v0::{
         CompleteUploadBody, ObjectTransferAccess, UploadContentClaim, UploadMode,
         UploadPartChecksumClaim, UploadSession, UploadSessionStatus,
@@ -799,7 +798,12 @@ async fn assert_gcs_read_capability_serves_ranges_and_resumes(
     let target = NamespacePath::parse(namespace, "/ranged.bin").expect("ranged target");
     harness
         .client
-        .put_file_bytes(&target, &payload, &put_options("gcs-ranged"))
+        .put_file_with_options(
+            &target,
+            &payload,
+            &loonfs_test_support::test_actor(),
+            &put_options("gcs-ranged"),
+        )
         .await
         .expect("stage an object to read back");
 
@@ -885,7 +889,12 @@ async fn assert_gcs_cap_bound_object_moves_only_directly(
     // the only direct transport on offer — and the proxy will not take it.
     harness
         .client
-        .put_file_bytes(&target, &payload, &put_options("gcs-cap-bound"))
+        .put_file_with_options(
+            &target,
+            &payload,
+            &loonfs_test_support::test_actor(),
+            &put_options("gcs-cap-bound"),
+        )
         .await
         .expect("an object past the proxy cap takes the whole-object direct write");
 
@@ -1008,7 +1017,7 @@ async fn direct_multipart_round_trip(config: ServerConfig) {
     // not have to: the claim arrives with the completion below.
     let begin = harness
         .client
-        .create_direct_multipart_upload(&namespace_id, DirectMultipartUploadOptions::default())
+        .create_direct_multipart_upload(&namespace_id)
         .await
         .expect("begin direct multipart");
     let upload_id = begin.upload_id.clone();
@@ -1171,19 +1180,19 @@ async fn direct_multipart_round_trip(config: ServerConfig) {
     // Retaining provider-checksummed content supports exact publication replay.
     let prepared = harness
         .client
-        .prepare_file_bytes(&namespace_id, &payload)
+        .prepare_content(&namespace_id, &payload)
         .await
         .expect("prepare provider content once");
     let rerun = harness
         .client
-        .put_file_prepared(
+        .put_file_prepared_with_options(
             &NamespacePath::parse(namespace, "/rerun.bin").expect("rerun target"),
             prepared.clone(),
+            &loonfs_test_support::test_actor(),
             &loonfs_client::PutFileOptions {
                 behavior: DestinationBehavior::NoReplace,
                 commit: loonfs_api::options::CommitOptions {
                     preconditions: Vec::new(),
-                    actor_id: loonfs_test_support::test_actor(),
                     commit_id: Some(CommitId::parse("multipart-rerun").expect("valid commit id")),
                     message: None,
                 },
@@ -1195,14 +1204,14 @@ async fn direct_multipart_round_trip(config: ServerConfig) {
         .expect("a multipart put through the client");
     let replayed_rerun = harness
         .client
-        .put_file_prepared(
+        .put_file_prepared_with_options(
             &NamespacePath::parse(namespace, "/rerun.bin").expect("rerun target"),
             prepared.clone(),
+            &loonfs_test_support::test_actor(),
             &loonfs_client::PutFileOptions {
                 behavior: DestinationBehavior::NoReplace,
                 commit: loonfs_api::options::CommitOptions {
                     preconditions: Vec::new(),
-                    actor_id: loonfs_test_support::test_actor(),
                     commit_id: Some(CommitId::parse("multipart-rerun").expect("valid commit id")),
                     message: None,
                 },
@@ -1241,11 +1250,12 @@ async fn one_pass_puts_against_the_provider(harness: &crate::common::TestServer,
     let from_file = NamespacePath::parse(namespace, "/one-pass-file.bin").expect("file target");
     harness
         .client
-        .put_file_stream(
+        .put_file_stream_with_options(
             &from_file,
             PayloadSource::open_file(file.path())
                 .await
                 .expect("open the payload file"),
+            &loonfs_test_support::test_actor(),
             &put_options("one-pass-file"),
         )
         .await
@@ -1272,7 +1282,12 @@ async fn one_pass_puts_against_the_provider(harness: &crate::common::TestServer,
     assert_eq!(source.size_bytes(), None, "this source declares no length");
     harness
         .client
-        .put_file_stream(&piped, source, &put_options("one-pass-piped"))
+        .put_file_stream_with_options(
+            &piped,
+            source,
+            &loonfs_test_support::test_actor(),
+            &put_options("one-pass-piped"),
+        )
         .await
         .expect("a source of unknown length uploads the same way");
     assert_eq!(
@@ -1291,7 +1306,6 @@ fn put_options(commit_id: &str) -> loonfs_client::PutFileOptions {
         behavior: DestinationBehavior::NoReplace,
         commit: loonfs_api::options::CommitOptions {
             preconditions: Vec::new(),
-            actor_id: loonfs_test_support::test_actor(),
             commit_id: Some(CommitId::parse(commit_id).expect("valid commit id")),
             message: None,
         },

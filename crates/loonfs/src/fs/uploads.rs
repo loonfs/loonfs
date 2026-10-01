@@ -69,12 +69,11 @@ impl Namespace<Writable> {
     /// Starts a durable upload session for a namespace.
     #[tracing::instrument(
         level = "debug",
-        name = "loonfs.begin_upload",
+        name = "loonfs.create_upload",
         err(level = "debug"),
         skip_all,
         fields(
-            operation = "begin_upload",
-            method = "create_upload",
+            operation = "create_upload",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
@@ -94,12 +93,11 @@ impl Namespace<Writable> {
     /// the internal target for server-side signing.
     #[tracing::instrument(
         level = "debug",
-        name = "loonfs.begin_upload",
+        name = "loonfs.create_direct_put_upload_target",
         err(level = "debug"),
         skip_all,
         fields(
-            operation = "begin_upload",
-            method = "create_direct_put_upload_target",
+            operation = "create_direct_put_upload_target",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
@@ -118,30 +116,40 @@ impl Namespace<Writable> {
         Ok(response)
     }
 
+    /// Runs [`Self::create_direct_multipart_upload_target_with_options`]
+    /// with the default part size.
+    pub async fn create_direct_multipart_upload_target(
+        &self,
+    ) -> Result<DirectMultipartUploadTarget> {
+        self.create_direct_multipart_upload_target_with_options(
+            &DirectMultipartUploadOptions::default(),
+        )
+        .await
+    }
+
     /// Mints the content object a direct multipart upload assembles into,
     /// opens the provider upload behind it, and returns the internal target
     /// for server-side signing.
     #[tracing::instrument(
         level = "debug",
-        name = "loonfs.begin_upload",
+        name = "loonfs.create_direct_multipart_upload_target",
         err(level = "debug"),
         skip_all,
         fields(
-            operation = "begin_upload",
-            method = "create_direct_multipart_upload_target",
+            operation = "create_direct_multipart_upload_target",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn create_direct_multipart_upload_target(
+    pub async fn create_direct_multipart_upload_target_with_options(
         &self,
-        options: DirectMultipartUploadOptions,
+        options: &DirectMultipartUploadOptions,
     ) -> Result<DirectMultipartUploadTarget> {
         self.core.record_trace_context(&tracing::Span::current());
         let response = self
             .engine()
-            .begin_direct_multipart_upload_target(self.core.subject.as_ref(), options)
+            .begin_direct_multipart_upload_target(self.core.subject.as_ref(), *options)
             .await?;
         self.schedule_upload_session_reclamation();
         Ok(response)
@@ -175,12 +183,11 @@ impl Namespace<Writable> {
     /// Uploads whole-file content into an upload session.
     #[tracing::instrument(
         level = "debug",
-        name = "loonfs.upload_content",
+        name = "loonfs.put_upload_content",
         err(level = "debug"),
         skip_all,
         fields(
-            operation = "upload_content",
-            method = "put_upload_content",
+            operation = "put_upload_content",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
@@ -211,12 +218,11 @@ impl Namespace<Writable> {
     /// [`Self::put_upload_content`].
     #[tracing::instrument(
         level = "debug",
-        name = "loonfs.upload_content",
+        name = "loonfs.put_upload_content_stream",
         err(level = "debug"),
         skip_all,
         fields(
-            operation = "upload_content",
-            method = "put_upload_content_stream",
+            operation = "put_upload_content_stream",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
@@ -243,7 +249,6 @@ impl Namespace<Writable> {
         skip_all,
         fields(
             operation = "complete_upload",
-            method = "complete_upload",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
@@ -269,12 +274,11 @@ impl Namespace<Writable> {
     /// Completes an upload after decoding its request for the stored mode.
     #[tracing::instrument(
         level = "debug",
-        name = "loonfs.complete_upload",
+        name = "loonfs.complete_upload_for_mode",
         err(level = "debug"),
         skip_all,
         fields(
-            operation = "complete_upload",
-            method = "complete_upload_for_mode",
+            operation = "complete_upload_for_mode",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
@@ -326,11 +330,11 @@ impl Namespace<Writable> {
     /// Returns an upload session and new evidence when the upload is complete.
     #[tracing::instrument(
         level = "debug",
-        name = "loonfs.get_upload_status",
+        name = "loonfs.get_upload",
         err(level = "debug"),
         skip_all,
         fields(
-            operation = "get_upload_status",
+            operation = "get_upload",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,

@@ -1,8 +1,8 @@
 //! Snapshot reads and mutations.
 
 use crate::{
-    Checkpoint, CreateSnapshotOptions, DeleteSnapshotResponse, Error, ListSnapshotsResponse,
-    Namespace, Result, SnapshotSummary, Writable,
+    Checkpoint, DeleteSnapshotResponse, Error, ListSnapshotsResponse, Namespace, Result,
+    SnapshotSummary, Writable,
 };
 use loonfs_api::PageRequest;
 use loonfs_api::PinId;
@@ -78,7 +78,6 @@ impl<M> Namespace<M> {
         skip_all,
         fields(
             operation = "list_snapshots",
-            method = "list_snapshots_page",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
@@ -135,7 +134,9 @@ impl<M> Namespace<M> {
 }
 
 impl Namespace<Writable> {
-    /// Creates a snapshot of the current namespace state.
+    /// Creates a snapshot of the current namespace state. The name is a
+    /// label that does not need to be unique; `expires_at_ms` is in Unix
+    /// milliseconds.
     ///
     /// Returns `snapshot_quota_exceeded` and writes nothing when the namespace
     /// already holds `policy.max_live_per_namespace` live snapshots. It counts
@@ -145,11 +146,11 @@ impl Namespace<Writable> {
     /// stays until it expires.
     #[tracing::instrument(
         level = "debug",
-        name = "loonfs.snapshot_create",
+        name = "loonfs.create_snapshot",
         err(level = "debug"),
         skip_all,
         fields(
-            operation = "snapshot_create",
+            operation = "create_snapshot",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
@@ -157,7 +158,8 @@ impl Namespace<Writable> {
     )]
     pub async fn create_snapshot(
         &self,
-        options: CreateSnapshotOptions,
+        name: &str,
+        expires_at_ms: u64,
         policy: &SnapshotPolicy,
     ) -> Result<Checkpoint> {
         self.core.record_trace_context(&tracing::Span::current());
@@ -168,7 +170,7 @@ impl Namespace<Writable> {
             .core
             .writer_engine(&self.mode.bits.identity, &self.namespace_id);
         let result = engine
-            .create_snapshot(options.name, options.expires_at_ms)
+            .create_snapshot(name.to_owned(), expires_at_ms)
             .await
             .map_err(Error::from);
         let checkpoint = self.finish_namespace_mutation(result)?;
@@ -233,11 +235,11 @@ impl Namespace<Writable> {
     /// durable creation time.
     #[tracing::instrument(
         level = "debug",
-        name = "loonfs.snapshot_extend",
+        name = "loonfs.extend_snapshot",
         err(level = "debug"),
         skip_all,
         fields(
-            operation = "snapshot_extend",
+            operation = "extend_snapshot",
             namespace_id = %self.namespace_id,
             snapshot_id = %snapshot_id,
             mode = tracing::field::Empty,
@@ -271,11 +273,11 @@ impl Namespace<Writable> {
     /// Deletes a snapshot pin. A missing id returns `snapshot_not_found`.
     #[tracing::instrument(
         level = "debug",
-        name = "loonfs.snapshot_delete",
+        name = "loonfs.delete_snapshot",
         err(level = "debug"),
         skip_all,
         fields(
-            operation = "snapshot_delete",
+            operation = "delete_snapshot",
             namespace_id = %self.namespace_id,
             snapshot_id = %snapshot_id,
             mode = tracing::field::Empty,

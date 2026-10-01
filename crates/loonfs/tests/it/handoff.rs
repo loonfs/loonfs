@@ -2,10 +2,10 @@
 
 #![allow(clippy::panic)]
 
-use crate::common::{collect_path_entries, directory_options, expect_code, writer};
+use crate::common::{collect_path_entries, expect_code, writer};
 use loonfs::{
-    CreateNamespaceOptions, ErrorCode, LoonFs, ManifestNo, MetadataMaintenanceOptions, Namespace,
-    NamespaceId, NamespaceSessionState, PutFileOptions, ReadOnly, SharedObjectStore, Writable,
+    ErrorCode, LoonFs, ManifestNo, MetadataMaintenanceOptions, Namespace, NamespaceId,
+    NamespaceSessionState, ReadOnly, SharedObjectStore, Writable,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::stores::{
@@ -14,10 +14,6 @@ use loonfs_test_support::stores::{
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use tempfile::tempdir;
-
-fn file_options() -> PutFileOptions {
-    PutFileOptions::new(loonfs_test_support::test_actor())
-}
 
 async fn fresh_reader(store: SharedObjectStore) -> LoonFs<ReadOnly> {
     LoonFs::builder_with_store(store)
@@ -44,7 +40,7 @@ async fn assert_root_paths(
 
 async fn put_file(namespace: &Namespace<Writable>, path: &str) {
     namespace
-        .put_file_bytes(path, b"body", file_options())
+        .put_file(path, b"body", &loonfs_test_support::test_actor())
         .await
         .expect("publish file");
 }
@@ -67,10 +63,7 @@ async fn a_takeover_during_a_paused_publish_fences_the_old_node() {
     let writer_a = writer(store.clone(), "paused-writer-a").await;
     let writer_b = writer(store.clone(), "takeover-writer-b").await;
     writer_a
-        .create_namespace(
-            &namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let namespace_writer_a = writer_a
@@ -80,7 +73,7 @@ async fn a_takeover_during_a_paused_publish_fences_the_old_node() {
         .open_namespace(&namespace_id)
         .expect("open writer B");
     namespace_writer_a
-        .create_directory("/from-a-first", directory_options())
+        .create_directory("/from-a-first", &loonfs_test_support::test_actor())
         .await
         .expect("writer A publishes first");
 
@@ -89,14 +82,14 @@ async fn a_takeover_during_a_paused_publish_fences_the_old_node() {
         let namespace_writer_a = namespace_writer_a.clone();
         async move {
             namespace_writer_a
-                .create_directory("/from-a-parked", directory_options())
+                .create_directory("/from-a-parked", &loonfs_test_support::test_actor())
                 .await
         }
     });
     failing.inner().wait_until_blocked().await;
 
     namespace_writer_b
-        .create_directory("/from-b", directory_options())
+        .create_directory("/from-b", &loonfs_test_support::test_actor())
         .await
         .expect("writer B takes over and publishes");
     failing.inner().release();
@@ -108,7 +101,7 @@ async fn a_takeover_during_a_paused_publish_fences_the_old_node() {
     failing.fail_all();
     expect_code(
         namespace_writer_a
-            .create_directory("/from-a-after-fence", directory_options())
+            .create_directory("/from-a-after-fence", &loonfs_test_support::test_actor())
             .await,
         ErrorCode::WriterFenced,
     );
@@ -134,10 +127,7 @@ async fn a_closed_session_does_not_reopen_for_a_stale_request() {
     let writer_a = writer(store.clone(), "session-writer-a").await;
     let writer_b = writer(store, "session-writer-b").await;
     writer_a
-        .create_namespace(
-            &namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let namespace_writer_a = writer_a
@@ -145,7 +135,7 @@ async fn a_closed_session_does_not_reopen_for_a_stale_request() {
         .expect("open writer A session");
     let stale_a = namespace_writer_a.clone();
     namespace_writer_a
-        .create_directory("/from-a-first", directory_options())
+        .create_directory("/from-a-first", &loonfs_test_support::test_actor())
         .await
         .expect("writer A publishes");
     namespace_writer_a
@@ -155,7 +145,7 @@ async fn a_closed_session_does_not_reopen_for_a_stale_request() {
 
     expect_code(
         stale_a
-            .create_directory("/from-stale-clone", directory_options())
+            .create_directory("/from-stale-clone", &loonfs_test_support::test_actor())
             .await,
         ErrorCode::WriterSessionClosed,
     );
@@ -164,7 +154,7 @@ async fn a_closed_session_does_not_reopen_for_a_stale_request() {
         .open_namespace(&namespace_id)
         .expect("open writer B session");
     namespace_writer_b
-        .create_directory("/from-b", directory_options())
+        .create_directory("/from-b", &loonfs_test_support::test_actor())
         .await
         .expect("writer B publishes");
 
@@ -172,12 +162,12 @@ async fn a_closed_session_does_not_reopen_for_a_stale_request() {
         .open_namespace(&namespace_id)
         .expect("reopen writer A session");
     namespace_writer_a
-        .create_directory("/from-a-reopened", directory_options())
+        .create_directory("/from-a-reopened", &loonfs_test_support::test_actor())
         .await
         .expect("reopened writer A publishes");
     expect_code(
         namespace_writer_b
-            .create_directory("/from-fenced-b", directory_options())
+            .create_directory("/from-fenced-b", &loonfs_test_support::test_actor())
             .await,
         ErrorCode::WriterFenced,
     );
@@ -191,10 +181,7 @@ async fn a_cold_node_reconstructs_current_state_during_active_writes() {
     let namespace_id = NamespaceId::parse("cold-handoff").expect("namespace id");
     let writer = writer(store.clone(), "active-writer").await;
     writer
-        .create_namespace(
-            &namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let namespace = writer

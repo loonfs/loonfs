@@ -60,7 +60,7 @@ use crate::protocol::list_changes_after;
 use crate::publish::{CommitCandidate, CommitRequest, FilesystemOperation, NamespaceCommitEngine};
 use crate::storage::content::{prepare_stored_content, store_bytes_as_content};
 use crate::test_support::ops::{
-    create, delete_path, move_path, put_file_bytes, restore_file_revision, write_file_bytes,
+    create, delete_path, move_path, put_file, restore_file_revision, write_file_bytes,
     write_files_bytes,
 };
 use crate::test_support::{RecordedStoredMetadataBlockCall, RecordingStoredMetadataBlockCache};

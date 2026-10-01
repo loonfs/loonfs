@@ -161,7 +161,7 @@ async fn manifest_round_trip_uses_manifest_materialization_for_mixed_namespace()
     )
     .await
     .expect("write second");
-    put_file_bytes(
+    put_file(
         &store,
         &namespace_id,
         "/docs/hello.txt",

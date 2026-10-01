@@ -1,7 +1,7 @@
 //! Namespace seeding for this crate's integration tests, through the same
 //! public writer any embedded host uses.
 
-use loonfs::{CreateNamespaceOptions, LoonFs, PutFileOptions, SharedObjectStore, Writable};
+use loonfs::{CommitOptions, LoonFs, PutFileOptions, SharedObjectStore, Writable};
 use loonfs_api::{CommitId, NamespaceId};
 
 pub(crate) async fn writer(
@@ -18,10 +18,7 @@ pub(crate) async fn writer(
         .await
         .expect("build seeding writer");
     writer
-        .create_namespace(
-            namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     writer
@@ -36,11 +33,18 @@ pub(crate) async fn put_file(
 ) {
     let namespace = writer.open_namespace(namespace_id).expect("open namespace");
     namespace
-        .put_file_bytes(path, bytes, {
-            let mut options = PutFileOptions::new(loonfs_test_support::test_actor());
-            options.commit.commit_id = Some(CommitId::parse(commit_id).expect("commit id"));
-            options
-        })
+        .put_file_with_options(
+            path,
+            bytes,
+            &loonfs_test_support::test_actor(),
+            &PutFileOptions {
+                commit: CommitOptions {
+                    commit_id: Some(CommitId::parse(commit_id).expect("commit id")),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
         .await
         .expect("publish file");
 }

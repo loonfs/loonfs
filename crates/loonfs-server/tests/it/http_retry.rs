@@ -42,17 +42,17 @@ async fn http_operation_rejects_same_commit_id_with_different_payload() {
     let commit_id = CommitId::parse("req-phase-2a-conflict").expect("valid commit id");
     let first = harness
         .client
-        .put_file_bytes(
+        .put_file_with_options(
             &NamespacePath::parse("demo", "/first.txt").expect("first target"),
             b"first payload\n",
+            &loonfs_test_support::test_actor(),
             &PutFileOptions {
                 commit: loonfs_api::options::CommitOptions {
                     preconditions: Vec::new(),
-                    actor_id: loonfs_test_support::test_actor(),
                     commit_id: Some(commit_id.clone()),
                     message: Some("first commit".to_owned()),
                 },
-                ..PutFileOptions::new(loonfs_test_support::test_actor())
+                ..Default::default()
             },
         )
         .await
@@ -60,17 +60,17 @@ async fn http_operation_rejects_same_commit_id_with_different_payload() {
 
     match harness
         .client
-        .put_file_bytes(
+        .put_file_with_options(
             &NamespacePath::parse("demo", "/second.txt").expect("second target"),
             b"second payload\n",
+            &loonfs_test_support::test_actor(),
             &PutFileOptions {
                 commit: loonfs_api::options::CommitOptions {
                     preconditions: Vec::new(),
-                    actor_id: loonfs_test_support::test_actor(),
                     commit_id: Some(commit_id.clone()),
                     message: Some("second commit".to_owned()),
                 },
-                ..PutFileOptions::new(loonfs_test_support::test_actor())
+                ..Default::default()
             },
         )
         .await
@@ -148,10 +148,10 @@ async fn http_put_commit_id_is_idempotent_and_conflicts_on_different_bytes() {
 
     let first = harness
         .client
-        .create_commit(
+        .commit(
             &namespace_id("demo"),
-            &commit_request(staged.content_ref.clone(), token.clone()),
             &loonfs_test_support::test_actor(),
+            &commit_request(staged.content_ref.clone(), token.clone()),
         )
         .await
         .expect("first put");
@@ -159,10 +159,10 @@ async fn http_put_commit_id_is_idempotent_and_conflicts_on_different_bytes() {
 
     let repeated = harness
         .client
-        .create_commit(
+        .commit(
             &namespace_id("demo"),
-            &commit_request(staged.content_ref.clone(), token),
             &loonfs_test_support::test_actor(),
+            &commit_request(staged.content_ref.clone(), token),
         )
         .await
         .expect("repeat put");
@@ -171,14 +171,14 @@ async fn http_put_commit_id_is_idempotent_and_conflicts_on_different_bytes() {
     // Fresh content is a different request even when its bytes match.
     let reuploaded = harness
         .client
-        .put_file_bytes(
+        .put_file_with_options(
             &target,
             b"stable bytes\n",
+            &loonfs_test_support::test_actor(),
             &PutFileOptions {
                 behavior: DestinationBehavior::NoReplace,
                 commit: loonfs_api::options::CommitOptions {
                     preconditions: Vec::new(),
-                    actor_id: loonfs_test_support::test_actor(),
                     commit_id: Some(commit_id.clone()),
                     message: None,
                 },
@@ -202,14 +202,14 @@ async fn http_put_commit_id_is_idempotent_and_conflicts_on_different_bytes() {
     let different_actor = ActorId::parse("retry-worker").expect("actor id");
     match harness
         .client
-        .put_file_bytes(
+        .put_file_with_options(
             &target,
             b"stable bytes\n",
+            &different_actor,
             &PutFileOptions {
                 behavior: DestinationBehavior::NoReplace,
                 commit: loonfs_api::options::CommitOptions {
                     preconditions: Vec::new(),
-                    actor_id: different_actor,
                     commit_id: Some(commit_id.clone()),
                     message: None,
                 },
@@ -229,14 +229,14 @@ async fn http_put_commit_id_is_idempotent_and_conflicts_on_different_bytes() {
     // not a retry, and stays a conflict.
     match harness
         .client
-        .put_file_bytes(
+        .put_file_with_options(
             &target,
             b"different bytes\n",
+            &loonfs_test_support::test_actor(),
             &PutFileOptions {
                 behavior: DestinationBehavior::NoReplace,
                 commit: loonfs_api::options::CommitOptions {
                     preconditions: Vec::new(),
-                    actor_id: loonfs_test_support::test_actor(),
                     commit_id: Some(commit_id),
                     message: None,
                 },
@@ -281,7 +281,6 @@ async fn http_put_conflict_stands_when_only_the_message_changed() {
         behavior: DestinationBehavior::Replace,
         commit: loonfs_api::options::CommitOptions {
             preconditions: Vec::new(),
-            actor_id: loonfs_test_support::test_actor(),
             commit_id: Some(commit_id.clone()),
             message: Some(message.to_owned()),
         },
@@ -291,24 +290,39 @@ async fn http_put_conflict_stands_when_only_the_message_changed() {
 
     let prepared = harness
         .client
-        .prepare_file_bytes(&namespace, b"stable bytes\n")
+        .prepare_content(&namespace, b"stable bytes\n")
         .await
         .expect("prepare the content once");
     let first = harness
         .client
-        .put_file_prepared(&target, prepared.clone(), &options("import batch"))
+        .put_file_prepared_with_options(
+            &target,
+            prepared.clone(),
+            &loonfs_test_support::test_actor(),
+            &options("import batch"),
+        )
         .await
         .expect("first put");
     let replay = harness
         .client
-        .put_file_prepared(&target, prepared.clone(), &options("import batch"))
+        .put_file_prepared_with_options(
+            &target,
+            prepared.clone(),
+            &loonfs_test_support::test_actor(),
+            &options("import batch"),
+        )
         .await
         .expect("resubmitting prepared content is idempotent");
     assert_eq!(replay, first);
 
     match harness
         .client
-        .put_file_prepared(&target, prepared.clone(), &options("second thoughts"))
+        .put_file_prepared_with_options(
+            &target,
+            prepared.clone(),
+            &loonfs_test_support::test_actor(),
+            &options("second thoughts"),
+        )
         .await
     {
         Err(ClientError::Api { code, .. }) => assert_eq!(code, "commit_id_reuse_conflict"),
@@ -320,11 +334,16 @@ async fn http_put_conflict_stands_when_only_the_message_changed() {
     // publication checks them before replay.
     match harness
         .client
-        .put_file_prepared(&target, prepared.clone(), &{
-            let mut options = options("unused");
-            options.commit.message = None;
-            options
-        })
+        .put_file_prepared_with_options(
+            &target,
+            prepared.clone(),
+            &loonfs_test_support::test_actor(),
+            &{
+                let mut options = options("unused");
+                options.commit.message = None;
+                options
+            },
+        )
         .await
     {
         Err(ClientError::Api { code, .. }) => assert_eq!(code, "commit_id_reuse_conflict"),
@@ -381,7 +400,6 @@ async fn http_put_conflict_stands_when_only_the_path_changed() {
         behavior: DestinationBehavior::Replace,
         commit: loonfs_api::options::CommitOptions {
             preconditions: Vec::new(),
-            actor_id: loonfs_test_support::test_actor(),
             commit_id: Some(commit_id.clone()),
             message: Some("import batch".to_owned()),
         },
@@ -392,14 +410,24 @@ async fn http_put_conflict_stands_when_only_the_path_changed() {
     let first_target = NamespacePath::parse("demo", "/a.txt").expect("first target");
     let first = harness
         .client
-        .put_file_bytes(&first_target, b"stable bytes\n", &options)
+        .put_file_with_options(
+            &first_target,
+            b"stable bytes\n",
+            &loonfs_test_support::test_actor(),
+            &options,
+        )
         .await
         .expect("first put");
 
     let second_target = NamespacePath::parse("demo", "/b.txt").expect("second target");
     match harness
         .client
-        .put_file_bytes(&second_target, b"stable bytes\n", &options)
+        .put_file_with_options(
+            &second_target,
+            b"stable bytes\n",
+            &loonfs_test_support::test_actor(),
+            &options,
+        )
         .await
     {
         Err(ClientError::Api { code, details, .. }) => {
@@ -455,7 +483,6 @@ async fn http_put_conflict_stands_when_only_a_precondition_changed() {
         behavior: DestinationBehavior::Replace,
         commit: loonfs_api::options::CommitOptions {
             preconditions: Vec::new(),
-            actor_id: loonfs_test_support::test_actor(),
             commit_id: Some(commit_id.clone()),
             message: None,
         },
@@ -465,16 +492,22 @@ async fn http_put_conflict_stands_when_only_a_precondition_changed() {
 
     let first = harness
         .client
-        .put_file_bytes(&target, b"stable bytes\n", &replacing)
+        .put_file_with_options(
+            &target,
+            b"stable bytes\n",
+            &loonfs_test_support::test_actor(),
+            &replacing,
+        )
         .await
         .expect("first put");
     let observed = harness.client.stat(&target).await.expect("stat path");
 
     match harness
         .client
-        .put_file_bytes(
+        .put_file_with_options(
             &target,
             b"stable bytes\n",
+            &loonfs_test_support::test_actor(),
             &PutFileOptions {
                 behavior: DestinationBehavior::NoReplace,
                 ..replacing.clone()
@@ -488,9 +521,10 @@ async fn http_put_conflict_stands_when_only_a_precondition_changed() {
 
     match harness
         .client
-        .put_file_bytes(
+        .put_file_with_options(
             &target,
             b"stable bytes\n",
+            &loonfs_test_support::test_actor(),
             &PutFileOptions {
                 expected_inode_id: Some(observed.inode_id),
                 expected_revision_no: Some(RevisionNo(1)),
@@ -538,8 +572,9 @@ async fn http_single_put_does_not_replay_a_multi_operation_commit() {
     let staged = stage_uploaded_content(&harness.client, &namespace, b"stable bytes\n").await;
     let first = harness
         .client
-        .create_commit(
+        .commit(
             &namespace,
+            &loonfs_test_support::test_actor(),
             &CommitRequest {
                 preconditions: Vec::new(),
                 commit_id: commit_id.clone(),
@@ -560,21 +595,20 @@ async fn http_single_put_does_not_replay_a_multi_operation_commit() {
                     },
                 ],
             },
-            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("first two-operation commit");
 
     match harness
         .client
-        .put_file_bytes(
+        .put_file_with_options(
             &target,
             b"stable bytes\n",
+            &loonfs_test_support::test_actor(),
             &PutFileOptions {
                 behavior: DestinationBehavior::Replace,
                 commit: loonfs_api::options::CommitOptions {
                     preconditions: Vec::new(),
-                    actor_id: loonfs_test_support::test_actor(),
                     commit_id: Some(commit_id),
                     message: None,
                 },
@@ -633,29 +667,29 @@ async fn http_commit_and_mkdir_conflict_when_only_the_message_changed() {
     };
     let first = harness
         .client
-        .create_commit(
+        .commit(
             &namespace,
-            &commit_request("one"),
             &loonfs_test_support::test_actor(),
+            &commit_request("one"),
         )
         .await
         .expect("first commit");
     let replay = harness
         .client
-        .create_commit(
+        .commit(
             &namespace,
-            &commit_request("one"),
             &loonfs_test_support::test_actor(),
+            &commit_request("one"),
         )
         .await
         .expect("an identical retry replays");
     assert_eq!(replay, first);
     match harness
         .client
-        .create_commit(
+        .commit(
             &namespace,
-            &commit_request("two"),
             &loonfs_test_support::test_actor(),
+            &commit_request("two"),
         )
         .await
     {
@@ -668,7 +702,6 @@ async fn http_commit_and_mkdir_conflict_when_only_the_message_changed() {
     let mkdir_options = |message: &str| CreateDirectoryOptions {
         commit: loonfs_api::options::CommitOptions {
             preconditions: Vec::new(),
-            actor_id: loonfs_test_support::test_actor(),
             commit_id: Some(CommitId::parse("req-message-mkdir").expect("valid commit id")),
             message: Some(message.to_owned()),
         },
@@ -676,18 +709,30 @@ async fn http_commit_and_mkdir_conflict_when_only_the_message_changed() {
     };
     let first = harness
         .client
-        .create_directory(&pinned, &mkdir_options("one"))
+        .create_directory_with_options(
+            &pinned,
+            &loonfs_test_support::test_actor(),
+            &mkdir_options("one"),
+        )
         .await
         .expect("first mkdir");
     let replay = harness
         .client
-        .create_directory(&pinned, &mkdir_options("one"))
+        .create_directory_with_options(
+            &pinned,
+            &loonfs_test_support::test_actor(),
+            &mkdir_options("one"),
+        )
         .await
         .expect("an identical retry replays");
     assert_eq!(replay, first);
     match harness
         .client
-        .create_directory(&pinned, &mkdir_options("two"))
+        .create_directory_with_options(
+            &pinned,
+            &loonfs_test_support::test_actor(),
+            &mkdir_options("two"),
+        )
         .await
     {
         Err(ClientError::Api { code, .. }) => assert_eq!(code, "commit_id_reuse_conflict"),
@@ -724,7 +769,6 @@ async fn http_put_conflict_stands_when_retention_trimmed_the_committed_seq() {
         behavior: DestinationBehavior::Replace,
         commit: loonfs_api::options::CommitOptions {
             preconditions: Vec::new(),
-            actor_id: loonfs_test_support::test_actor(),
             commit_id: Some(commit_id.clone()),
             message: None,
         },
@@ -734,7 +778,12 @@ async fn http_put_conflict_stands_when_retention_trimmed_the_committed_seq() {
 
     let first = harness
         .client
-        .put_file_bytes(&target, b"stable bytes\n", &options())
+        .put_file_with_options(
+            &target,
+            b"stable bytes\n",
+            &loonfs_test_support::test_actor(),
+            &options(),
+        )
         .await
         .expect("first put");
 
@@ -771,7 +820,12 @@ async fn http_put_conflict_stands_when_retention_trimmed_the_committed_seq() {
 
     match harness
         .client
-        .put_file_bytes(&target, b"stable bytes\n", &options())
+        .put_file_with_options(
+            &target,
+            b"stable bytes\n",
+            &loonfs_test_support::test_actor(),
+            &options(),
+        )
         .await
     {
         Err(ClientError::Api { code, details, .. }) => {
@@ -815,21 +869,26 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
     let source = NamespacePath::parse("demo", "/docs/source.txt").expect("source");
     harness
         .client
-        .put_file_bytes(&source, b"source bytes\n", &replace_file_options())
+        .put_file_with_options(
+            &source,
+            b"source bytes\n",
+            &loonfs_test_support::test_actor(),
+            &replace_file_options(),
+        )
         .await
         .expect("seed source");
 
     let copied = NamespacePath::parse("demo", "/docs/copied.txt").expect("copied");
     let copy_first = harness
         .client
-        .copy_path(
+        .copy_path_with_options(
             &source,
             &copied,
+            &loonfs_test_support::test_actor(),
             &CopyOptions {
                 behavior: DestinationBehavior::NoReplace,
                 commit: loonfs_api::options::CommitOptions {
                     preconditions: Vec::new(),
-                    actor_id: loonfs_test_support::test_actor(),
                     commit_id: Some(CommitId::parse("req-v1-copy").expect("valid commit id")),
                     message: None,
                 },
@@ -841,14 +900,14 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
         .expect("copy first");
     let copy_repeated = harness
         .client
-        .copy_path(
+        .copy_path_with_options(
             &source,
             &copied,
+            &loonfs_test_support::test_actor(),
             &CopyOptions {
                 behavior: DestinationBehavior::NoReplace,
                 commit: loonfs_api::options::CommitOptions {
                     preconditions: Vec::new(),
-                    actor_id: loonfs_test_support::test_actor(),
                     commit_id: Some(CommitId::parse("req-v1-copy").expect("valid commit id")),
                     message: None,
                 },
@@ -867,14 +926,14 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
     let moved = NamespacePath::parse("demo", "/docs/moved.txt").expect("moved");
     let move_first = harness
         .client
-        .move_path(
+        .move_path_with_options(
             &copied,
             &moved,
+            &loonfs_test_support::test_actor(),
             &MoveOptions {
                 behavior: DestinationBehavior::NoReplace,
                 commit: loonfs_api::options::CommitOptions {
                     preconditions: Vec::new(),
-                    actor_id: loonfs_test_support::test_actor(),
                     commit_id: Some(CommitId::parse("req-v1-move").expect("valid commit id")),
                     message: None,
                 },
@@ -886,14 +945,14 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
         .expect("move first");
     let move_repeated = harness
         .client
-        .move_path(
+        .move_path_with_options(
             &copied,
             &moved,
+            &loonfs_test_support::test_actor(),
             &MoveOptions {
                 behavior: DestinationBehavior::NoReplace,
                 commit: loonfs_api::options::CommitOptions {
                     preconditions: Vec::new(),
-                    actor_id: loonfs_test_support::test_actor(),
                     commit_id: Some(CommitId::parse("req-v1-move").expect("valid commit id")),
                     message: None,
                 },
@@ -913,32 +972,32 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
 
     let delete_first = harness
         .client
-        .delete_path(
+        .delete_path_with_options(
             &moved,
+            &loonfs_test_support::test_actor(),
             &DeleteOptions {
                 commit: loonfs_api::options::CommitOptions {
                     preconditions: Vec::new(),
-                    actor_id: loonfs_test_support::test_actor(),
                     commit_id: Some(CommitId::parse("req-v1-delete").expect("valid commit id")),
                     message: None,
                 },
-                ..DeleteOptions::new(loonfs_test_support::test_actor())
+                ..Default::default()
             },
         )
         .await
         .expect("delete first");
     let delete_repeated = harness
         .client
-        .delete_path(
+        .delete_path_with_options(
             &moved,
+            &loonfs_test_support::test_actor(),
             &DeleteOptions {
                 commit: loonfs_api::options::CommitOptions {
                     preconditions: Vec::new(),
-                    actor_id: loonfs_test_support::test_actor(),
                     commit_id: Some(CommitId::parse("req-v1-delete").expect("valid commit id")),
                     message: None,
                 },
-                ..DeleteOptions::new(loonfs_test_support::test_actor())
+                ..Default::default()
             },
         )
         .await
@@ -981,7 +1040,12 @@ async fn two_servers_share_one_store_with_last_writer_wins_fencing() {
         .expect("create namespace");
     let host_a_target = NamespacePath::parse("demo", "/docs/host-a.txt").expect("host a target");
     client_a
-        .put_file_bytes(&host_a_target, b"host a\n", &replace_file_options())
+        .put_file_with_options(
+            &host_a_target,
+            b"host a\n",
+            &loonfs_test_support::test_actor(),
+            &replace_file_options(),
+        )
         .await
         .expect("host a write");
 
@@ -989,14 +1053,14 @@ async fn two_servers_share_one_store_with_last_writer_wins_fencing() {
     // there is no lease to wait out, only last-writer-wins fencing.
     let host_b_target = NamespacePath::parse("demo", "/docs/host-b.txt").expect("host b target");
     let moved = client_b
-        .move_path(
+        .move_path_with_options(
             &host_a_target,
             &host_b_target,
+            &loonfs_test_support::test_actor(),
             &MoveOptions {
                 behavior: DestinationBehavior::NoReplace,
                 commit: loonfs_api::options::CommitOptions {
                     preconditions: Vec::new(),
-                    actor_id: loonfs_test_support::test_actor(),
                     commit_id: None,
                     message: None,
                 },
@@ -1017,7 +1081,12 @@ async fn two_servers_share_one_store_with_last_writer_wins_fencing() {
     let host_c_target = NamespacePath::parse("demo", "/docs/host-c.txt").expect("host c target");
     for attempt in 0..2 {
         match client_a
-            .put_file_bytes(&host_c_target, b"host a again\n", &replace_file_options())
+            .put_file_with_options(
+                &host_c_target,
+                b"host a again\n",
+                &loonfs_test_support::test_actor(),
+                &replace_file_options(),
+            )
             .await
         {
             Err(ClientError::Api {
@@ -1096,45 +1165,65 @@ async fn prepared_puts_replay_and_changed_options_conflict() {
         let prepared = if streamed {
             harness
                 .client
-                .prepare_file_stream(&namespace, loonfs_client::PayloadSource::reader(&bytes[..]))
+                .prepare_content_stream(
+                    &namespace,
+                    loonfs_client::PayloadSource::reader(&bytes[..]),
+                )
                 .await
         } else {
-            harness.client.prepare_file_bytes(&namespace, bytes).await
+            harness.client.prepare_content(&namespace, bytes).await
         }
         .expect("prepare content");
-        let mut options = PutFileOptions::new(loonfs_test_support::test_actor());
+        let mut options = PutFileOptions::default();
         options.commit.commit_id = Some(CommitId::generate());
         let first = harness
             .client
-            .put_file_prepared(&target, prepared.clone(), &options)
+            .put_file_prepared_with_options(
+                &target,
+                prepared.clone(),
+                &loonfs_test_support::test_actor(),
+                &options,
+            )
             .await
             .expect("first publication");
         let repeated = harness
             .client
-            .put_file_prepared(&target, prepared.clone(), &options)
+            .put_file_prepared_with_options(
+                &target,
+                prepared.clone(),
+                &loonfs_test_support::test_actor(),
+                &options,
+            )
             .await
             .expect("exact replay despite create-only behavior");
         assert_eq!(repeated, first);
+        let actor = loonfs_test_support::test_actor();
         let mut changed = Vec::new();
         let mut candidate = options.clone();
         candidate.commit.message = Some("different".to_owned());
-        changed.push(candidate);
-        let mut candidate = options.clone();
-        candidate.commit.actor_id = ActorId::parse("another-actor").expect("actor");
-        changed.push(candidate);
+        changed.push((actor.clone(), candidate));
+        changed.push((
+            ActorId::parse("another-actor").expect("actor"),
+            options.clone(),
+        ));
         let mut candidate = options.clone();
         candidate.behavior = DestinationBehavior::Replace;
-        changed.push(candidate);
+        changed.push((actor.clone(), candidate));
         let mut candidate = options.clone();
         candidate.expected_inode_id = Some(loonfs_api::InodeId(123));
-        changed.push(candidate);
+        changed.push((actor.clone(), candidate));
         let mut candidate = options.clone();
         candidate.expected_revision_no = Some(RevisionNo(123));
-        changed.push(candidate);
-        for candidate in changed {
+        changed.push((actor.clone(), candidate));
+        for (candidate_actor, candidate) in changed {
             let error = harness
                 .client
-                .put_file_prepared(&target, prepared.clone(), &candidate)
+                .put_file_prepared_with_options(
+                    &target,
+                    prepared.clone(),
+                    &candidate_actor,
+                    &candidate,
+                )
                 .await
                 .expect_err("changed options must not replay");
             assert_eq!(

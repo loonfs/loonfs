@@ -6,8 +6,7 @@
 
 use loonfs::metrics::{DefaultMetricsRecorder, MetricValue};
 use loonfs::{
-    CreateNamespaceOptions, CreateSnapshotOptions, DeleteNamespaceOptions, Error, LoonFs,
-    LoonFsBuilder, MetadataCache, NamespaceId, PutFileOptions, ReadOnly, SharedObjectStore,
+    Error, LoonFs, LoonFsBuilder, MetadataCache, NamespaceId, ReadOnly, SharedObjectStore,
     SnapshotPolicy, Writable, WriterFence, READ_REVALIDATION_BOUND_MS,
 };
 use loonfs_api::wire::control::NamespaceStatus;
@@ -79,19 +78,12 @@ async fn first_head_state_bytes(ns_fence: &NamespaceId, ns_other: &NamespaceId) 
     let mut namespaces = Vec::new();
     for (namespace_id, path) in [(ns_fence, "/a1.txt"), (ns_other, "/spill.txt")] {
         writer
-            .create_namespace(
-                namespace_id,
-                CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-            )
+            .create_namespace(namespace_id, &loonfs_test_support::test_actor())
             .await
             .expect("create namespace");
         let namespace = writer.open_namespace(namespace_id).expect("open namespace");
         namespace
-            .put_file_bytes(
-                path,
-                b"a",
-                PutFileOptions::new(loonfs_test_support::test_actor()),
-            )
+            .put_file(path, b"a", &loonfs_test_support::test_actor())
             .await
             .expect("first put");
         namespaces.push(namespace);
@@ -130,21 +122,14 @@ async fn fenced_writer_stays_fenced_instead_of_reacquiring() {
 
     let writer_a = writer(&store, "writer-a").await;
     writer_a
-        .create_namespace(
-            &namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let namespace_writer_a = writer_a
         .open_namespace(&namespace_id)
         .expect("open namespace");
     namespace_writer_a
-        .put_file_bytes(
-            "/a1.txt",
-            b"a",
-            PutFileOptions::new(loonfs_test_support::test_actor()),
-        )
+        .put_file("/a1.txt", b"a", &loonfs_test_support::test_actor())
         .await
         .expect("writer a first put");
 
@@ -153,20 +138,12 @@ async fn fenced_writer_stays_fenced_instead_of_reacquiring() {
         .open_namespace(&namespace_id)
         .expect("open namespace");
     let takeover = namespace_writer_b
-        .put_file_bytes(
-            "/b1.txt",
-            b"b",
-            PutFileOptions::new(loonfs_test_support::test_actor()),
-        )
+        .put_file("/b1.txt", b"b", &loonfs_test_support::test_actor())
         .await
         .expect("writer b takes over the epoch");
 
     let fenced = namespace_writer_a
-        .put_file_bytes(
-            "/a2.txt",
-            b"a",
-            PutFileOptions::new(loonfs_test_support::test_actor()),
-        )
+        .put_file("/a2.txt", b"a", &loonfs_test_support::test_actor())
         .await
         .expect_err("superseded writer surfaces fencing");
     assert!(
@@ -180,11 +157,7 @@ async fn fenced_writer_stays_fenced_instead_of_reacquiring() {
     // The fenced session stays fenced on the next attempt too, and the live
     // writer keeps publishing undisturbed.
     let still_fenced = namespace_writer_a
-        .put_file_bytes(
-            "/a3.txt",
-            b"a",
-            PutFileOptions::new(loonfs_test_support::test_actor()),
-        )
+        .put_file("/a3.txt", b"a", &loonfs_test_support::test_actor())
         .await
         .expect_err("fenced session never reacquires on its own");
     assert!(
@@ -208,11 +181,7 @@ async fn fenced_writer_stays_fenced_instead_of_reacquiring() {
     assert_eq!(bytes.entry.head_seq, entry.head_seq);
     assert_eq!(bytes.bytes, b"b");
     namespace_writer_b
-        .put_file_bytes(
-            "/b2.txt",
-            b"b",
-            PutFileOptions::new(loonfs_test_support::test_actor()),
-        )
+        .put_file("/b2.txt", b"b", &loonfs_test_support::test_actor())
         .await
         .expect("live writer is not fenced back");
 }
@@ -226,21 +195,14 @@ async fn fenced_session_cannot_delete_namespace() {
 
     let writer_a = writer(&store, "writer-a").await;
     writer_a
-        .create_namespace(
-            &namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let namespace_writer_a = writer_a
         .open_namespace(&namespace_id)
         .expect("open namespace");
     namespace_writer_a
-        .put_file_bytes(
-            "/a1.txt",
-            b"a",
-            PutFileOptions::new(loonfs_test_support::test_actor()),
-        )
+        .put_file("/a1.txt", b"a", &loonfs_test_support::test_actor())
         .await
         .expect("writer a first put");
 
@@ -249,29 +211,19 @@ async fn fenced_session_cannot_delete_namespace() {
         .open_namespace(&namespace_id)
         .expect("open namespace");
     namespace_writer_b
-        .put_file_bytes(
-            "/b1.txt",
-            b"b",
-            PutFileOptions::new(loonfs_test_support::test_actor()),
-        )
+        .put_file("/b1.txt", b"b", &loonfs_test_support::test_actor())
         .await
         .expect("writer b takes over the epoch");
     expect_writer_fenced(
         namespace_writer_a
-            .put_file_bytes(
-                "/a2.txt",
-                b"a",
-                PutFileOptions::new(loonfs_test_support::test_actor()),
-            )
+            .put_file("/a2.txt", b"a", &loonfs_test_support::test_actor())
             .await,
         "superseded writer surfaces fencing",
     );
     let head_after_fencing = head_state(&store, &namespace_id).await;
 
     let fence = expect_writer_fenced(
-        namespace_writer_a
-            .delete(DeleteNamespaceOptions::default())
-            .await,
+        namespace_writer_a.delete().await,
         "a fenced session must not delete the namespace",
     );
     assert_eq!(
@@ -292,11 +244,7 @@ async fn fenced_session_cannot_delete_namespace() {
         "writer-b"
     );
     namespace_writer_b
-        .put_file_bytes(
-            "/b2.txt",
-            b"b",
-            PutFileOptions::new(loonfs_test_support::test_actor()),
-        )
+        .put_file("/b2.txt", b"b", &loonfs_test_support::test_actor())
         .await
         .expect("live writer keeps publishing after the refused delete");
 }
@@ -324,27 +272,17 @@ async fn fenced_writer_stays_fenced_after_its_tail_projection_is_evicted() {
     })
     .await;
     writer_a
-        .create_namespace(
-            &ns_fence,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&ns_fence, &loonfs_test_support::test_actor())
         .await
         .expect("create fence namespace");
     let fence_writer_a = writer_a.open_namespace(&ns_fence).expect("open namespace");
     writer_a
-        .create_namespace(
-            &ns_other,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&ns_other, &loonfs_test_support::test_actor())
         .await
         .expect("create other namespace");
     let other_writer_a = writer_a.open_namespace(&ns_other).expect("open namespace");
     fence_writer_a
-        .put_file_bytes(
-            "/a1.txt",
-            b"a",
-            PutFileOptions::new(loonfs_test_support::test_actor()),
-        )
+        .put_file("/a1.txt", b"a", &loonfs_test_support::test_actor())
         .await
         .expect("writer a first put");
 
@@ -352,11 +290,7 @@ async fn fenced_writer_stays_fenced_after_its_tail_projection_is_evicted() {
     // out of the cache. Its publisher, engine position, and writer session
     // stay behind.
     other_writer_a
-        .put_file_bytes(
-            "/spill.txt",
-            b"s",
-            PutFileOptions::new(loonfs_test_support::test_actor()),
-        )
+        .put_file("/spill.txt", b"s", &loonfs_test_support::test_actor())
         .await
         .expect("writer a publishes to the other namespace");
     assert!(writer_a.metadata_cache().stats().head_state_evictions > 0);
@@ -365,11 +299,7 @@ async fn fenced_writer_stays_fenced_after_its_tail_projection_is_evicted() {
     let writer_b = writer(&store, "writer-b").await;
     let fence_writer_b = writer_b.open_namespace(&ns_fence).expect("open namespace");
     fence_writer_b
-        .put_file_bytes(
-            "/b1.txt",
-            b"b",
-            PutFileOptions::new(loonfs_test_support::test_actor()),
-        )
+        .put_file("/b1.txt", b"b", &loonfs_test_support::test_actor())
         .await
         .expect("writer b takes over the epoch");
 
@@ -378,11 +308,7 @@ async fn fenced_writer_stays_fenced_after_its_tail_projection_is_evicted() {
     // re-acquisition.
     let fence = expect_writer_fenced(
         fence_writer_a
-            .put_file_bytes(
-                "/a2.txt",
-                b"a",
-                PutFileOptions::new(loonfs_test_support::test_actor()),
-            )
+            .put_file("/a2.txt", b"a", &loonfs_test_support::test_actor())
             .await,
         "superseded writer surfaces fencing",
     );
@@ -404,22 +330,14 @@ async fn fenced_writer_stays_fenced_after_its_tail_projection_is_evicted() {
     // More budget pressure, now against a publisher whose session is fenced:
     // fencing is session state, so no eviction can reach it.
     other_writer_a
-        .put_file_bytes(
-            "/spill2.txt",
-            b"s",
-            PutFileOptions::new(loonfs_test_support::test_actor()),
-        )
+        .put_file("/spill2.txt", b"s", &loonfs_test_support::test_actor())
         .await
         .expect("writer a keeps publishing to the other namespace");
 
     let hint_raises_after_fencing = counting.count(OperationClass::CompareAndSwap);
     expect_writer_fenced(
         fence_writer_a
-            .put_file_bytes(
-                "/a3.txt",
-                b"a",
-                PutFileOptions::new(loonfs_test_support::test_actor()),
-            )
+            .put_file("/a3.txt", b"a", &loonfs_test_support::test_actor())
             .await,
         "fenced session stays fenced after eviction",
     );
@@ -432,11 +350,7 @@ async fn fenced_writer_stays_fenced_after_its_tail_projection_is_evicted() {
     assert_eq!(head.status, NamespaceStatus::Active {});
     assert_eq!(head.writer_epoch, head_after_fencing.writer_epoch);
     fence_writer_b
-        .put_file_bytes(
-            "/b2.txt",
-            b"b",
-            PutFileOptions::new(loonfs_test_support::test_actor()),
-        )
+        .put_file("/b2.txt", b"b", &loonfs_test_support::test_actor())
         .await
         .expect("live writer is not fenced back");
 }
@@ -461,21 +375,14 @@ async fn fenced_writer_stays_fenced_with_zero_cache_limits() {
     })
     .await;
     writer_a
-        .create_namespace(
-            &namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let namespace_writer_a = writer_a
         .open_namespace(&namespace_id)
         .expect("open namespace");
     namespace_writer_a
-        .put_file_bytes(
-            "/a1.txt",
-            b"a",
-            PutFileOptions::new(loonfs_test_support::test_actor()),
-        )
+        .put_file("/a1.txt", b"a", &loonfs_test_support::test_actor())
         .await
         .expect("writer a first put");
 
@@ -484,21 +391,13 @@ async fn fenced_writer_stays_fenced_with_zero_cache_limits() {
         .open_namespace(&namespace_id)
         .expect("open namespace");
     namespace_writer_b
-        .put_file_bytes(
-            "/b1.txt",
-            b"b",
-            PutFileOptions::new(loonfs_test_support::test_actor()),
-        )
+        .put_file("/b1.txt", b"b", &loonfs_test_support::test_actor())
         .await
         .expect("writer b takes over the epoch");
 
     expect_writer_fenced(
         namespace_writer_a
-            .put_file_bytes(
-                "/a2.txt",
-                b"a",
-                PutFileOptions::new(loonfs_test_support::test_actor()),
-            )
+            .put_file("/a2.txt", b"a", &loonfs_test_support::test_actor())
             .await,
         "superseded writer surfaces fencing",
     );
@@ -506,11 +405,7 @@ async fn fenced_writer_stays_fenced_with_zero_cache_limits() {
     let hint_raises_after_fencing = counting.count(OperationClass::CompareAndSwap);
     expect_writer_fenced(
         namespace_writer_a
-            .put_file_bytes(
-                "/a3.txt",
-                b"a",
-                PutFileOptions::new(loonfs_test_support::test_actor()),
-            )
+            .put_file("/a3.txt", b"a", &loonfs_test_support::test_actor())
             .await,
         "fenced session stays fenced with caches disabled",
     );
@@ -520,11 +415,7 @@ async fn fenced_writer_stays_fenced_with_zero_cache_limits() {
         "a fenced session must not raise the namespace's hint"
     );
     namespace_writer_b
-        .put_file_bytes(
-            "/b2.txt",
-            b"b",
-            PutFileOptions::new(loonfs_test_support::test_actor()),
-        )
+        .put_file("/b2.txt", b"b", &loonfs_test_support::test_actor())
         .await
         .expect("live writer is not fenced back");
 }
@@ -550,21 +441,14 @@ async fn a_cached_view_older_than_the_revalidation_bound_rediscovers() {
     let namespace = reader.namespace(&namespace_id);
     let writer = writer(&store, "revalidation-writer").await;
     writer
-        .create_namespace(
-            &namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let namespace_writer = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
     namespace_writer
-        .put_file_bytes(
-            "/file.txt",
-            b"file",
-            PutFileOptions::new(loonfs_test_support::test_actor()),
-        )
+        .put_file("/file.txt", b"file", &loonfs_test_support::test_actor())
         .await
         .expect("commit file");
     writer.drain().await.expect("finish hints");
@@ -642,21 +526,14 @@ async fn warm_answers_are_measured_against_the_previous_check() {
     let namespace = reader.namespace(&namespace_id);
     let writer = writer(&store, "probe-pause-writer").await;
     writer
-        .create_namespace(
-            &namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let namespace_writer = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
     namespace_writer
-        .put_file_bytes(
-            "/file.txt",
-            b"file",
-            PutFileOptions::new(loonfs_test_support::test_actor()),
-        )
+        .put_file("/file.txt", b"file", &loonfs_test_support::test_actor())
         .await
         .expect("commit file");
     writer.drain().await.expect("finish hints");
@@ -730,19 +607,16 @@ async fn writer_with_timer(
 async fn fill_other(store: &SharedObjectStore, other_id: &NamespaceId) {
     let setup = writer(store, "other-setup").await;
     setup
-        .create_namespace(
-            other_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(other_id, &loonfs_test_support::test_actor())
         .await
         .expect("create other namespace");
     setup
         .open_namespace(other_id)
         .expect("open other namespace")
-        .put_file_bytes(
+        .put_file(
             "/large.bin",
             &[b'x'; 16 * 1024],
-            PutFileOptions::new(loonfs_test_support::test_actor()),
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("put large file");
@@ -794,19 +668,11 @@ async fn a_seeded_view_carries_the_writers_basis_confirmation() {
     let reader = writer.read_only();
     let namespace = reader.namespace(&namespace_id);
     writer
-        .create_namespace(
-            &namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
-    let put = |path: &'static str| {
-        namespace_writer.put_file_bytes(
-            path,
-            b"file",
-            PutFileOptions::new(loonfs_test_support::test_actor()),
-        )
-    };
+    let actor = loonfs_test_support::test_actor();
+    let put = |path: &'static str| namespace_writer.put_file(path, b"file", &actor);
     let read = || namespace.stat("/file.txt");
     let next_wal_no = || async {
         head_state(&store, &namespace_id)
@@ -842,7 +708,7 @@ async fn a_seeded_view_carries_the_writers_basis_confirmation() {
     // seeds a new view.
     writer
         .maintenance(loonfs_test_support::ids::writer_id("seeded-check-gc"))
-        .gc(&namespace_id, &loonfs::GcOptions::default())
+        .gc(&namespace_id)
         .await
         .expect("drop the cached view");
     timer.advance_ms(interval_ms);
@@ -911,21 +777,14 @@ async fn a_seed_on_another_basis_does_not_keep_the_cached_check() {
         .expect("build maintenance")
         .maintenance(loonfs_test_support::ids::writer_id("reseeded-maintenance"));
     writer
-        .create_namespace(
-            &namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let namespace_writer = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
     namespace_writer
-        .put_file_bytes(
-            "/a.txt",
-            b"a",
-            PutFileOptions::new(loonfs_test_support::test_actor()),
-        )
+        .put_file("/a.txt", b"a", &loonfs_test_support::test_actor())
         .await
         .expect("first put");
     writer.drain().await.expect("finish hints");
@@ -936,23 +795,17 @@ async fn a_seed_on_another_basis_does_not_keep_the_cached_check() {
     let check_after_attempt_ms = 10_000;
     timer.advance_ms(WAL_PUBLISH_BUDGET_MS + 1);
     recording.inner().block_next();
-    let (put, ()) = futures::join!(
-        namespace_writer.put_file_bytes(
-            "/b.txt",
-            b"b",
-            PutFileOptions::new(loonfs_test_support::test_actor()),
-        ),
-        async {
-            recording.inner().wait_until_blocked().await;
-            timer.advance_ms(check_after_attempt_ms);
-            namespace.stat("/a.txt").await.expect("check the old basis");
-            maintenance
-                .fold_wal(&namespace_id)
-                .await
-                .expect("publish a new basis");
-            recording.inner().release();
-        }
-    );
+    let actor = loonfs_test_support::test_actor();
+    let (put, ()) = futures::join!(namespace_writer.put_file("/b.txt", b"b", &actor), async {
+        recording.inner().wait_until_blocked().await;
+        timer.advance_ms(check_after_attempt_ms);
+        namespace.stat("/a.txt").await.expect("check the old basis");
+        maintenance
+            .fold_wal(&namespace_id)
+            .await
+            .expect("publish a new basis");
+        recording.inner().release();
+    });
     put.expect("put on the new basis");
     writer.drain().await.expect("finish hints");
 
@@ -990,10 +843,7 @@ async fn read_after_write_only_probes_the_next_wal_number_without_replay() {
     })
     .await;
     writer
-        .create_namespace(
-            &namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let namespace_writer = writer
@@ -1003,22 +853,16 @@ async fn read_after_write_only_probes_the_next_wal_number_without_replay() {
     let namespace = reader.namespace(&namespace_id);
     for index in 0..3 {
         namespace_writer
-            .put_file_bytes(
+            .put_file(
                 &format!("/docs/warm-{index}.txt"),
                 b"warm",
-                PutFileOptions::new(loonfs_test_support::test_actor()),
+                &loonfs_test_support::test_actor(),
             )
             .await
             .expect("warmup put");
     }
     let snapshot = namespace_writer
-        .create_snapshot(
-            CreateSnapshotOptions {
-                name: "pinned".to_owned(),
-                expires_at_ms: u64::MAX,
-            },
-            &SnapshotPolicy::default(),
-        )
+        .create_snapshot("pinned", u64::MAX, &SnapshotPolicy::default())
         .await
         .expect("create snapshot");
     namespace
@@ -1028,10 +872,10 @@ async fn read_after_write_only_probes_the_next_wal_number_without_replay() {
 
     recording.take_get_keys();
     namespace_writer
-        .put_file_bytes(
+        .put_file(
             "/docs/fresh.txt",
             b"fresh",
-            PutFileOptions::new(loonfs_test_support::test_actor()),
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("steady-state put");
@@ -1072,20 +916,13 @@ async fn reads_after_maintenance_are_current_and_reuse_their_tail() {
     })
     .await;
     writer
-        .create_namespace(
-            &namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     writer
         .open_namespace(&namespace_id)
         .expect("open namespace")
-        .put_file_bytes(
-            "/file.txt",
-            b"file",
-            PutFileOptions::new(loonfs_test_support::test_actor()),
-        )
+        .put_file("/file.txt", b"file", &loonfs_test_support::test_actor())
         .await
         .expect("put file");
     let reader = writer.read_only();
@@ -1138,10 +975,7 @@ async fn read_pressure_evicts_an_idle_writer_tail_and_its_next_publish_replays_o
     let writer =
         writer_with_cache_and_metrics(&store, "idle-writer", cache.clone(), recorder.clone()).await;
     writer
-        .create_namespace(
-            &namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let namespace = writer
@@ -1149,11 +983,7 @@ async fn read_pressure_evicts_an_idle_writer_tail_and_its_next_publish_replays_o
         .expect("open namespace");
     for path in ["/first.txt", "/second.txt"] {
         namespace
-            .put_file_bytes(
-                path,
-                b"warm",
-                PutFileOptions::new(loonfs_test_support::test_actor()),
-            )
+            .put_file(path, b"warm", &loonfs_test_support::test_actor())
             .await
             .expect("warm put");
     }
@@ -1173,10 +1003,10 @@ async fn read_pressure_evicts_an_idle_writer_tail_and_its_next_publish_replays_o
     assert!(cache.stats().head_state_evictions > 0);
 
     let landed = namespace
-        .put_file_bytes(
+        .put_file(
             "/after-pressure.txt",
             b"after",
-            PutFileOptions::new(loonfs_test_support::test_actor()),
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("the publish lands after its tail was evicted");
@@ -1212,22 +1042,14 @@ async fn a_tail_evicted_while_its_publish_runs_returns_when_the_publish_lands() 
     let writer =
         writer_with_cache_and_metrics(&store, "busy-writer", cache.clone(), recorder.clone()).await;
     writer
-        .create_namespace(
-            &namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
-    let put = |path: &'static str| {
-        namespace.put_file_bytes(
-            path,
-            b"busy",
-            PutFileOptions::new(loonfs_test_support::test_actor()),
-        )
-    };
+    let actor = loonfs_test_support::test_actor();
+    let put = |path: &'static str| namespace.put_file(path, b"busy", &actor);
     put("/first.txt").await.expect("first put");
     let replays = tail_replays(&recorder);
     let reader = LoonFs::builder_with_store(store.clone())

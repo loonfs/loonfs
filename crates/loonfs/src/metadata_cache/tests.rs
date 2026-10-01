@@ -5,10 +5,7 @@
 
 use super::MetadataCache;
 use crate::metrics::{DefaultMetricsRecorder, MetricValue, MetricsRecorder, MetricsSnapshot};
-use crate::{
-    CreateNamespaceOptions, LoonFs, NamespaceId, PutFileOptions, ReadOnly, SharedObjectStore,
-    Writable,
-};
+use crate::{LoonFs, NamespaceId, ReadOnly, SharedObjectStore, Writable};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::{namespace_id, test_actor, writer_id};
 use loonfs_test_support::stores::{KeyPredicate, OperationClass, RecordingStore};
@@ -43,12 +40,12 @@ async fn same_shape_store(
         .await
         .expect("build writer");
     writer
-        .create_namespace(&demo(), CreateNamespaceOptions::new(test_actor()))
+        .create_namespace(&demo(), &test_actor())
         .await
         .expect("create namespace");
     let namespace = writer.open_namespace(&demo()).expect("open namespace");
     namespace
-        .put_file_bytes(FOLDED, bytes, PutFileOptions::new(test_actor()))
+        .put_file(FOLDED, bytes, &test_actor())
         .await
         .expect("put the folded file");
     writer
@@ -57,7 +54,7 @@ async fn same_shape_store(
         .await
         .expect("fold the first file into segments");
     namespace
-        .put_file_bytes(TAIL, bytes, PutFileOptions::new(test_actor()))
+        .put_file(TAIL, bytes, &test_actor())
         .await
         .expect("put the tail file");
     writer
@@ -177,7 +174,7 @@ async fn closing_one_runtime_leaves_the_cache_and_the_other_usable() {
     reopened
         .open_namespace(&demo())
         .expect("open namespace")
-        .put_file_bytes("/after.txt", b"after", PutFileOptions::new(test_actor()))
+        .put_file("/after.txt", b"after", &test_actor())
         .await
         .expect("write through the new runtime");
     let file = reopened

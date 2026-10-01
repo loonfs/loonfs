@@ -9,9 +9,8 @@
 
 use crate::metrics::{DefaultMetricsRecorder, MetricValue, MetricsSnapshot};
 use crate::{
-    CompactionStepOutcome, CreateCheckpointOptions, CreateNamespaceOptions, GcOptions, LoonFs,
-    Maintenance, MetadataCompactionOutcome, MetadataCompactionPolicy, MetadataMaintenanceOptions,
-    MoveOptions, NamespaceId, PutFileOptions, SharedObjectStore, Writable,
+    CompactionStepOutcome, LoonFs, Maintenance, MetadataCompactionOutcome,
+    MetadataCompactionPolicy, MetadataMaintenanceOptions, NamespaceId, SharedObjectStore, Writable,
 };
 use loonfs_api::wire::manifest::{
     decode_namespace_manifest_json, MetadataRowFamily, NamespaceManifestPayload, RunTier,
@@ -96,25 +95,18 @@ async fn a_maintenance_gc_step_records_the_pass_counters_once() {
     let (writer, maintenance, _scheduled, recorder) = manual_deployment(temp_dir.path()).await;
     let namespace = namespace_id("maintenance-gc-metrics");
     writer
-        .create_namespace(
-            &namespace,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let namespace_writer = writer.open_namespace(&namespace).expect("open namespace");
     namespace_writer
-        .put_file_bytes(
-            "/live.txt",
-            b"live",
-            PutFileOptions::new(loonfs_test_support::test_actor()),
-        )
+        .put_file("/live.txt", b"live", &loonfs_test_support::test_actor())
         .await
         .expect("write a live GC candidate");
 
     assert_eq!(counter(&recorder.snapshot(), "loonfs.gc.retained", &[]), 0);
     let gc = maintenance
-        .gc(&namespace, &GcOptions::default())
+        .gc(&namespace)
         .await
         .expect("run the maintenance GC step");
     assert!(
@@ -164,11 +156,7 @@ async fn write_and_fold(
 ) {
     let namespace = writer.open_namespace(namespace_id).expect("open namespace");
     namespace
-        .put_file_bytes(
-            path,
-            path.as_bytes(),
-            PutFileOptions::new(loonfs_test_support::test_actor()),
-        )
+        .put_file(path, path.as_bytes(), &loonfs_test_support::test_actor())
         .await
         .expect("put a file");
     maintenance
@@ -193,10 +181,7 @@ async fn namespace_with_a_frozen_base(
     namespace_id: &NamespaceId,
 ) {
     writer
-        .create_namespace(
-            namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create the namespace");
     let namespace = writer.open_namespace(namespace_id).expect("open namespace");
@@ -216,7 +201,7 @@ async fn namespace_with_a_frozen_base(
             .move_path(
                 &format!("/docs/file-{index}.txt"),
                 &format!("/docs/moved-{index}.txt"),
-                MoveOptions::new(loonfs_test_support::test_actor()),
+                &loonfs_test_support::test_actor(),
             )
             .await
             .expect("rename a file");
@@ -230,9 +215,9 @@ async fn namespace_with_a_frozen_base(
     // and with the floor still at the bottom, so the churn lands in the base.
     for _ in 0..64 {
         let response = maintenance
-            .maintain_metadata(
+            .maintain_metadata_with_options(
                 namespace_id,
-                metadata_options(MetadataCompactionPolicy::CompactImmediately),
+                &metadata_options(MetadataCompactionPolicy::CompactImmediately),
             )
             .await
             .expect("merge a unit");
@@ -244,13 +229,7 @@ async fn namespace_with_a_frozen_base(
     // Now the floor moves past that churn, so the next bottom-anchored rebuild
     // is the one that may drop it.
     maintenance
-        .create_checkpoint(
-            namespace_id,
-            CreateCheckpointOptions {
-                name: "retention".to_owned(),
-                ttl_ms: None,
-            },
-        )
+        .create_checkpoint(namespace_id, "retention")
         .await
         .expect("checkpoint the namespace");
     maintenance
@@ -382,9 +361,9 @@ async fn compaction_planning_survives_restart_and_explicit_work_has_bounded_fan_
 
     // A small group is eligible immediately, even when its rows require a job.
     let metadata = scheduled
-        .maintain_metadata(
+        .maintain_metadata_with_options(
             &automatic,
-            metadata_options(MetadataCompactionPolicy::SizeTiered),
+            &metadata_options(MetadataCompactionPolicy::SizeTiered),
         )
         .await
         .expect("plan automatic compaction");
@@ -407,9 +386,9 @@ async fn compaction_planning_survives_restart_and_explicit_work_has_bounded_fan_
         ))
         .starve_compaction_row_budget(budget);
     let metadata = fresh_scheduled
-        .maintain_metadata(
+        .maintain_metadata_with_options(
             &automatic,
-            metadata_options(MetadataCompactionPolicy::SizeTiered),
+            &metadata_options(MetadataCompactionPolicy::SizeTiered),
         )
         .await
         .expect("replan after restart");
@@ -495,9 +474,9 @@ async fn an_immediate_step_reports_the_compaction_the_explicit_call_runs() {
     sustained_writes(&writer, &standalone, &namespace).await;
 
     let response = standalone
-        .maintain_metadata(
+        .maintain_metadata_with_options(
             &namespace,
-            crate::MetadataMaintenanceOptions {
+            &crate::MetadataMaintenanceOptions {
                 max_wal_tail_objects: std::num::NonZeroU64::MIN,
                 compaction_policy: MetadataCompactionPolicy::CompactImmediately,
                 ..Default::default()
@@ -529,7 +508,7 @@ async fn explicit_compaction_merges_twenty_deltas_and_reads_the_large_base_once(
     use crate::publish::{
         parse_mutation_path, CommitCandidate, CommitRequest, FilesystemOperation,
     };
-    use crate::{CommitId, UpdateAttributesOptions};
+    use crate::{AttributeChanges, CommitId};
     use loonfs_api::Checksum;
     use loonfs_objectstore::keys::metadata_segment;
     use loonfs_test_support::ids::{attribute_key, attribute_text};
@@ -547,10 +526,7 @@ async fn explicit_compaction_merges_twenty_deltas_and_reads_the_large_base_once(
     let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id("maintenance"));
     let namespace = namespace_id("compact-deltas-first");
     writer
-        .create_namespace(
-            &namespace,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace, &loonfs_test_support::test_actor())
         .await
         .expect("namespace");
     let namespace_writer = writer.open_namespace(&namespace).expect("open namespace");
@@ -558,11 +534,7 @@ async fn explicit_compaction_merges_twenty_deltas_and_reads_the_large_base_once(
         .map(|index| attribute_key(&format!("key-{index}")))
         .collect();
     namespace_writer
-        .put_file_bytes(
-            "/file",
-            b"content",
-            PutFileOptions::new(loonfs_test_support::test_actor()),
-        )
+        .put_file("/file", b"content", &loonfs_test_support::test_actor())
         .await
         .expect("file");
     for batch in 0..10 {
@@ -603,14 +575,16 @@ async fn explicit_compaction_merges_twenty_deltas_and_reads_the_large_base_once(
     let maintenance =
         maintenance.starve_compaction_row_budget(NonZeroUsize::new(16).expect("nonzero"));
     for revision in 0..20 {
-        let mut options = UpdateAttributesOptions::new(loonfs_test_support::test_actor());
-        options.remove = keys.clone();
-        options.set.insert(
+        let mut changes = AttributeChanges {
+            remove: keys.clone(),
+            ..Default::default()
+        };
+        changes.set.insert(
             attribute_key("delta"),
             attribute_text(&revision.to_string()),
         );
         namespace_writer
-            .update_attributes("/file", options)
+            .update_attributes("/file", &loonfs_test_support::test_actor(), changes)
             .await
             .expect("write delta");
         maintenance.fold_wal(&namespace).await.expect("fold delta");
@@ -684,9 +658,9 @@ async fn explicit_compaction_merges_twenty_deltas_and_reads_the_large_base_once(
             }
             if attribute_runs(&next) == 7 {
                 let response = maintenance
-                    .maintain_metadata(
+                    .maintain_metadata_with_options(
                         &namespace,
-                        crate::MetadataMaintenanceOptions {
+                        &crate::MetadataMaintenanceOptions {
                             compaction_policy: MetadataCompactionPolicy::CompactImmediately,
                             ..Default::default()
                         },
@@ -730,10 +704,7 @@ async fn maintenance_clones_share_one_claim_and_never_reclaim_after_fencing() {
         .await
         .expect("writer");
     writer
-        .create_namespace(
-            &namespace,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace, &loonfs_test_support::test_actor())
         .await
         .expect("namespace");
     let maintenance = LoonFs::builder_with_store(shared.clone())
@@ -743,13 +714,7 @@ async fn maintenance_clones_share_one_claim_and_never_reclaim_after_fencing() {
         .expect("maintenance")
         .maintenance(loonfs_test_support::ids::writer_id("maintenance"));
     maintenance
-        .create_checkpoint(
-            &namespace,
-            CreateCheckpointOptions {
-                name: "basis".to_owned(),
-                ttl_ms: None,
-            },
-        )
+        .create_checkpoint(&namespace, "basis")
         .await
         .expect("checkpoint");
     let before = current_manifest_payload(store.as_ref(), &namespace).await;

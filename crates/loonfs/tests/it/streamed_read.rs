@@ -9,8 +9,8 @@
 
 use crate::common::{open_runtime_async, store, TestRuntime};
 use loonfs::{
-    CreateNamespaceOptions, DestinationBehavior, ErrorCode, LoonFs, NamespaceId, PutFileOptions,
-    ReadFileStreamOptions, ReadOnly, SharedObjectStore,
+    DestinationBehavior, ErrorCode, LoonFs, NamespaceId, PutFileOptions, ReadFileStreamOptions,
+    ReadOnly, SharedObjectStore,
 };
 use loonfs_objectstore::keys::content_blob;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -42,10 +42,7 @@ fn chunked() -> ReadFileStreamOptions {
 async fn namespace(runtime: &TestRuntime) -> NamespaceId {
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     runtime
-        .create_namespace(
-            &namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     namespace_id
@@ -68,12 +65,13 @@ async fn written_file(
         .open_namespace(&namespace_id)
         .expect("open namespace");
     namespace_writer
-        .put_file_bytes(
+        .put_file_with_options(
             PATH,
             bytes,
-            PutFileOptions {
+            &loonfs_test_support::test_actor(),
+            &PutFileOptions {
                 behavior: DestinationBehavior::Replace,
-                ..PutFileOptions::new(loonfs_test_support::test_actor())
+                ..Default::default()
             },
         )
         .await
@@ -193,7 +191,7 @@ async fn a_streamed_read_rejects_content_that_stopped_matching_its_reference() {
 
 #[tokio::test]
 async fn historical_and_snapshot_reads_stream_the_selected_revision() {
-    use loonfs::{CreateSnapshotOptions, RevisionNo, SnapshotPolicy};
+    use loonfs::{RevisionNo, SnapshotPolicy};
 
     let temp_dir = tempdir().expect("tempdir");
     let payload = payload(PAYLOAD_BYTES);
@@ -205,22 +203,17 @@ async fn historical_and_snapshot_reads_stream_the_selected_revision() {
         .open_namespace(&namespace_id)
         .expect("open namespace");
     let snapshot = namespace_writer
-        .create_snapshot(
-            CreateSnapshotOptions {
-                name: "before-replace".to_owned(),
-                expires_at_ms: u64::MAX,
-            },
-            &SnapshotPolicy::default(),
-        )
+        .create_snapshot("before-replace", u64::MAX, &SnapshotPolicy::default())
         .await
         .expect("snapshot");
     namespace_writer
-        .put_file_bytes(
+        .put_file_with_options(
             PATH,
             b"tiny",
-            PutFileOptions {
+            &loonfs_test_support::test_actor(),
+            &PutFileOptions {
                 behavior: DestinationBehavior::Replace,
-                ..PutFileOptions::new(loonfs_test_support::test_actor())
+                ..Default::default()
             },
         )
         .await

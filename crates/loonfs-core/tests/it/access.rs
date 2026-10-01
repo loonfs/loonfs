@@ -48,13 +48,16 @@ async fn setup() -> (
     let namespace_id = namespace_id("demo");
     let context = crate::common::mutation_context("writer", 1);
     namespace_engine(&store, &namespace_id, &context)
-        .bootstrap_namespace(CreateNamespaceOptions {
-            access: NamespaceAccess::Acl {
-                principal_scope: PrincipalScope::parse("org_demo").expect("scope"),
-                root_grants: grants("prn_root", &[AccessRight::Admin]),
+        .bootstrap_namespace(
+            &loonfs_test_support::test_actor(),
+            &CreateNamespaceOptions {
+                access: NamespaceAccess::Acl {
+                    principal_scope: PrincipalScope::parse("org_demo").expect("scope"),
+                    root_grants: grants("prn_root", &[AccessRight::Admin]),
+                },
+                ..Default::default()
             },
-            ..CreateNamespaceOptions::new(loonfs_test_support::test_actor())
-        })
+        )
         .await
         .expect("bootstrap ACL namespace");
     (temp_dir, store, namespace_id, context)

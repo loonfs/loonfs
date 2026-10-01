@@ -129,11 +129,11 @@ impl Namespace<Writable> {
     /// open. Fails with `shutting_down` after shutdown begins.
     #[tracing::instrument(
         level = "debug",
-        name = "loonfs.close_namespace",
+        name = "loonfs.close",
         err(level = "debug"),
         skip_all,
         fields(
-            operation = "close_namespace",
+            operation = "close",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,

@@ -394,6 +394,10 @@ opaque value and MUST NOT create IDs or infer ordering from the numeric suffix.
   `DeleteOptions` live in `loonfs-api` and are re-exported by both), not by a
   trait either one implements. There is no transport abstraction to program
   against: a host picks the embedded runtime or the HTTP client directly.
+- A mutation takes the actor as an argument. The remote client sends it in
+  the `Loonfs-Actor` header. An option struct holds only optional settings
+  and has a default, so each mutation has a plain form and a form that takes
+  options.
 - Unsupported surface area is typed: individual ops return the
   `not_supported` error with its `feature` name, so gating logic — check the
   capability document, fall back on `not_supported` — is identical against
@@ -443,7 +447,7 @@ the commit takes effect when the next numbered WAL object is written with
 put-if-absent. Accepting a request into a batch does not mean it has committed.
 
 With an embedded `loonfs::Namespace<Writable>`, you can prepare content separately
-from committing it. Call `prepare_file_bytes` with the file's bytes. Files at or below
+from committing it. Call `prepare_content` with the file's bytes. Files at or below
 the enabled inline threshold stay in memory; other files are uploaded as
 content objects. To import existing content, call `prepare_content_ref`. The bytes
 are verified and copied to a new object owned by the destination namespace.
@@ -765,7 +769,7 @@ This works for both inline content and completed uploads.
 
 | Client | Prepare content | Publish retained content |
 | --- | --- | --- |
-| Rust HTTP and embedded runtime | `prepare_file_bytes()` / `prepare_file_stream()` | `put_file_prepared()` |
+| Rust HTTP and embedded runtime | `prepare_content()` / `prepare_content_stream()` | `put_file_prepared()` |
 | Python synchronous client | `files.prepare()` | `files.upload_prepared()` |
 | Go | `Files.Prepare()` | `Files.UploadPrepared()` |
 | TypeScript server and browser clients | `files.prepare()` | `files.uploadPrepared()` |
@@ -800,7 +804,7 @@ visible. A commit is still required.
 
 The whole-file convenience methods (`files.upload`, `files.uploadStream`,
 `files.upload_stream`, `Files.Upload`, `Files.UploadStream`,
-`put_file_bytes()`, and `put_file_stream()`) prepare content on every call.
+`put_file()`, and `put_file_stream()`) prepare content on every call.
 Small files can be prepared inline, so another call with the same bytes,
 commit ID, and options can replay the original commit if preparation still
 selects inline content. Larger files and files prepared with inline writes

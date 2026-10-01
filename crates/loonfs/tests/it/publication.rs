@@ -6,8 +6,7 @@
 use futures::future::BoxFuture;
 use loonfs::publish::{parse_mutation_path, CommitCandidate, CommitRequest, FilesystemOperation};
 use loonfs::{
-    Commit, CommitId, CreateNamespaceOptions, DestinationBehavior, LoonFs, NamespaceId,
-    PutFileOptions, SharedObjectStore, Writable,
+    Commit, CommitId, DestinationBehavior, LoonFs, NamespaceId, SharedObjectStore, Writable,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::stores::BlockingStore;
@@ -55,10 +54,7 @@ async fn park_two_puts(temp_dir: &Path) -> ParkedPuts {
             .expect("build writer"),
     );
     writer
-        .create_namespace(
-            &namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let namespace = writer
@@ -90,11 +86,7 @@ async fn park_two_puts(temp_dir: &Path) -> ParkedPuts {
         let namespace = namespace.clone();
         tokio::spawn(async move {
             namespace
-                .put_file_bytes(
-                    "/a.txt",
-                    b"a",
-                    PutFileOptions::new(loonfs_test_support::test_actor()),
-                )
+                .put_file("/a.txt", b"a", &loonfs_test_support::test_actor())
                 .await
         })
     };

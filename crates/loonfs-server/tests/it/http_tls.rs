@@ -37,7 +37,12 @@ async fn a_client_trusting_the_server_certificate_round_trips_over_tls() {
     let target = NamespacePath::parse("over-tls", "/note.txt").expect("parse path");
     harness
         .client
-        .put_file_bytes(&target, b"ciphertext in flight", &replace_file_options())
+        .put_file_with_options(
+            &target,
+            b"ciphertext in flight",
+            &loonfs_test_support::test_actor(),
+            &replace_file_options(),
+        )
         .await
         .expect("write file");
 

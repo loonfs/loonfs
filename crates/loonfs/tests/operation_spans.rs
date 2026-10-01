@@ -3,7 +3,7 @@
 
 //! Checks operation spans for the writer, reader, and maintenance handles.
 
-use loonfs::{CreateDirectoryOptions, CreateNamespaceOptions, LoonFs, PutFileOptions, StoreConfig};
+use loonfs::{LoonFs, StoreConfig};
 use loonfs_test_support::block_on::block_on;
 use loonfs_test_support::ids::namespace_id;
 use std::path::Path;
@@ -67,10 +67,7 @@ fn every_handle_emits_an_operation_span_with_its_namespace() {
             .await
             .expect("build writer");
         writer
-            .create_namespace(
-                &namespace_id,
-                CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-            )
+            .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
             .await
             .expect("create namespace");
 
@@ -97,8 +94,8 @@ fn every_handle_emits_an_operation_span_with_its_namespace() {
     for span_name in [
         "loonfs.create_namespace",
         "loonfs.stat",
-        "loonfs.get_namespace",
-        "loonfs.get_namespace_diagnostics",
+        "loonfs.metadata",
+        "loonfs.maintenance.diagnostics",
     ] {
         assert!(
             closed_spans(&log, span_name)
@@ -131,10 +128,7 @@ fn delegated_writer_calls_close_one_operation_span() {
             .await
             .expect("build writer");
         writer
-            .create_namespace(
-                &namespace_id,
-                CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-            )
+            .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
             .await
             .expect("create namespace");
         let namespace = writer
@@ -142,18 +136,15 @@ fn delegated_writer_calls_close_one_operation_span() {
             .expect("open namespace");
         let _setup_log = take_captured_log(&captured);
         namespace
-            .create_directory(
-                "/docs",
-                CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
-            )
+            .create_directory("/docs", &loonfs_test_support::test_actor())
             .await
             .expect("create directory");
         let create_log = take_captured_log(&captured);
         namespace
-            .put_file_bytes(
+            .put_file(
                 "/docs/file.txt",
                 b"body",
-                PutFileOptions::new(loonfs_test_support::test_actor()),
+                &loonfs_test_support::test_actor(),
             )
             .await
             .expect("put file");
@@ -161,30 +152,36 @@ fn delegated_writer_calls_close_one_operation_span() {
         (create_log, put_log)
     });
 
-    let apply_commit = closed_spans(&create_log, "loonfs.apply_commit");
+    let create_directory = closed_spans(&create_log, "loonfs.create_directory");
     assert_eq!(
-        apply_commit.len(),
+        create_directory.len(),
         1,
-        "create_directory closed the wrong number of apply_commit spans:\n{create_log}"
+        "create_directory closed the wrong number of create_directory spans:\n{create_log}"
     );
     assert!(
-        apply_commit[0]["span"]["method"] == "create_directory",
-        "create_directory apply_commit span lacks its method field:\n{}",
-        apply_commit[0]
+        create_directory[0]["span"]["operation"] == "create_directory",
+        "create_directory span lacks its operation field:\n{}",
+        create_directory[0]
     );
     assert_eq!(
-        closed_spans(&put_log, "loonfs.put").len(),
+        closed_spans(&put_log, "loonfs.put_file").len(),
         1,
-        "put_file_bytes closed the wrong number of put spans:\n{put_log}"
+        "put_file closed the wrong number of put_file spans:\n{put_log}"
     );
     assert_eq!(
-        closed_spans(&put_log, "loonfs.prepare").len(),
+        closed_spans(&put_log, "loonfs.prepare_content").len(),
         0,
-        "put_file_bytes closed a prepare span:\n{put_log}"
+        "put_file closed a prepare_content span:\n{put_log}"
     );
-    assert_eq!(
-        closed_spans(&put_log, "loonfs.apply_commit").len(),
-        0,
-        "put_file_bytes closed an apply_commit span:\n{put_log}"
-    );
+    for commit_span in [
+        "loonfs.commit",
+        "loonfs.commit_prepared",
+        "loonfs.commit_candidate",
+    ] {
+        assert_eq!(
+            closed_spans(&put_log, commit_span).len(),
+            0,
+            "put_file closed a `{commit_span}` span:\n{put_log}"
+        );
+    }
 }

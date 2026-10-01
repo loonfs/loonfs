@@ -587,7 +587,7 @@ pub(super) async fn create_commit(
         .instrument(span)
         .await
     } else {
-        namespace.create_commit(request).await
+        namespace.commit(request).await
     };
     let response = response_result.map_err(|error| {
         ApiResponseError::runtime_for_namespace_writer(&state.namespaces, &namespace_id, error)

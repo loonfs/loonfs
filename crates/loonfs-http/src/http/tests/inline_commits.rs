@@ -47,10 +47,7 @@ impl Harness {
         let namespace = namespace_id("hosted-inline");
         state
             .runtime
-            .create_namespace(
-                &namespace,
-                CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-            )
+            .create_namespace(&namespace, &loonfs_test_support::test_actor())
             .await
             .expect("namespace");
         let namespace_writer = state
@@ -59,10 +56,7 @@ impl Harness {
             .await
             .expect("open namespace");
         namespace_writer
-            .create_directory(
-                "/warmup",
-                loonfs::CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
-            )
+            .create_directory("/warmup", &loonfs_test_support::test_actor())
             .await
             .expect("acquire writer epoch");
         store.reset();
@@ -400,17 +394,19 @@ async fn rust_client_small_puts_use_one_request_only_when_inline_is_advertised()
         client.get_capabilities().await.expect("capabilities");
         requests.store(0, Ordering::SeqCst);
         let spec = NamespacePath::parse(harness.namespace.as_str(), "/file").expect("path");
-        let mut options = PutFileOptions::new(loonfs_test_support::test_actor());
+        let mut options = PutFileOptions::default();
         options.commit.commit_id = Some(CommitId::parse("client-small").expect("commit id"));
         let first = client
-            .put_file_bytes(&spec, b"same", &options)
+            .put_file_with_options(&spec, b"same", &loonfs_test_support::test_actor(), &options)
             .await
             .expect("put");
         assert_eq!(
             requests.swap(0, Ordering::SeqCst),
             if threshold.is_some() { 1 } else { 4 }
         );
-        let retry = client.put_file_bytes(&spec, b"same", &options).await;
+        let retry = client
+            .put_file_with_options(&spec, b"same", &loonfs_test_support::test_actor(), &options)
+            .await;
         if threshold.is_some() {
             assert_eq!(retry.expect("replay"), first);
             assert_eq!(requests.load(Ordering::SeqCst), 1);

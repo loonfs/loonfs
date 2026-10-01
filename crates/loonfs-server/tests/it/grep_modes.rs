@@ -5,7 +5,7 @@
 use axum::body::{to_bytes, Body};
 use axum::http::{Method, Request, StatusCode};
 use axum::Router;
-use loonfs::{CreateNamespaceOptions, LoonFs, PutFileOptions, Writable};
+use loonfs::{LoonFs, Writable};
 use loonfs_api::v0::{GrepIndex, GrepIndexLifecycle};
 use loonfs_api::{
     ApiError, CapabilityDocument, ChangeSeq, GrepResponse, NamespaceId, RunMaintenanceResponse,
@@ -266,10 +266,10 @@ async fn serving_and_maintaining_enables_queries_nudges_and_disables_per_namespa
     // observed the publish: the index stays where it was until a request
     // touches the namespace again.
     namespace
-        .put_file_bytes(
+        .put_file(
             "/note.txt",
             b"automatic needle\n",
-            PutFileOptions::new(loonfs_test_support::test_actor()),
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("write file");
@@ -379,29 +379,26 @@ async fn first_query_after_restart_resumes_stale_and_mid_backfill_namespaces() {
     let backfill = NamespaceId::parse("restart-backfill").expect("namespace id");
     for namespace_id in [&stale, &backfill] {
         writer
-            .create_namespace(
-                namespace_id,
-                CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-            )
+            .create_namespace(namespace_id, &loonfs_test_support::test_actor())
             .await
             .expect("create namespace");
     }
     let stale_writer = writer.open_namespace(&stale).expect("open namespace");
     let backfill_writer = writer.open_namespace(&backfill).expect("open namespace");
     stale_writer
-        .put_file_bytes(
+        .put_file(
             "/indexed.txt",
             b"indexed before restart\n",
-            PutFileOptions::new(loonfs_test_support::test_actor()),
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("write indexed file");
     for index in 0..3 {
         backfill_writer
-            .put_file_bytes(
+            .put_file(
                 &format!("/backfill-{index}.txt"),
                 format!("mid-backfill needle {index}\n").as_bytes(),
-                PutFileOptions::new(loonfs_test_support::test_actor()),
+                &loonfs_test_support::test_actor(),
             )
             .await
             .expect("write backfill file");
@@ -411,10 +408,10 @@ async fn first_query_after_restart_resumes_stale_and_mid_backfill_namespaces() {
     worker.enable(&stale).await.expect("enable stale namespace");
     drive_worker_to_current(&worker, &stale, GramIndexBuildPolicy::default()).await;
     stale_writer
-        .put_file_bytes(
+        .put_file(
             "/tail.txt",
             b"stale steady needle\n",
-            PutFileOptions::new(loonfs_test_support::test_actor()),
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("write unindexed tail");
@@ -552,10 +549,10 @@ async fn serve_only_answers_searches_over_an_index_it_refuses_to_maintain() {
     let worker = grep_worker(&store, "external-grep-worker").await;
     worker.enable(&namespace_id).await.expect("enable grep");
     namespace
-        .put_file_bytes(
+        .put_file(
             "/note.txt",
             b"external needle\n",
-            PutFileOptions::new(loonfs_test_support::test_actor()),
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("write file");
@@ -629,10 +626,10 @@ async fn maintain_only_keeps_the_index_built_without_serving_searches() {
     // The index itself is this deployment's job: enabling it here admits the
     // backfill, and the runner carries it to the namespace's head.
     namespace
-        .put_file_bytes(
+        .put_file(
             "/note.txt",
             b"unserved needle\n",
-            PutFileOptions::new(loonfs_test_support::test_actor()),
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("write file");
@@ -681,10 +678,10 @@ async fn serve_only_maintenance_registers_the_index_job_without_scheduling_it() 
     assert!(server.runner.is_none(), "serve-only mode builds no runner");
 
     namespace
-        .put_file_bytes(
+        .put_file(
             "/note.txt",
             b"unscheduled needle\n",
-            PutFileOptions::new(loonfs_test_support::test_actor()),
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("write file");
@@ -736,10 +733,7 @@ async fn seed_namespace(
         .expect("writer");
     let namespace_id = NamespaceId::parse(name).expect("namespace id");
     writer
-        .create_namespace(
-            &namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     (store, writer, namespace_id)

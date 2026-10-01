@@ -5,7 +5,7 @@
 use crate::common::http_split_support::*;
 use crate::common::start_server;
 use loonfs_api::{DeleteDirectoryBehavior, DestinationBehavior};
-use loonfs_client::{ClientError, CopyOptions, DeleteOptions, NamespacePath, PutFileOptions};
+use loonfs_client::{ClientError, CopyOptions, DeleteOptions, NamespacePath};
 use loonfs_test_support::http::raw_agent;
 use loonfs_test_support::ids::namespace_id;
 use tempfile::tempdir;
@@ -33,7 +33,7 @@ async fn http_stat_omits_the_root_name_and_carries_named_child_names() {
         .client
         .create_directory(
             &NamespacePath::parse("demo", "/docs").expect("directory path"),
-            &loonfs_client::CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("create directory");
@@ -80,21 +80,17 @@ async fn http_put_no_replace_and_copy_preserve_cli_semantics() {
     let source = NamespacePath::parse("demo", "/docs/hello.txt").expect("source");
     harness
         .client
-        .put_file_bytes(
+        .put_file(
             &source,
             b"hello over http\n",
-            &PutFileOptions::new(loonfs_test_support::test_actor()),
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("initial create");
 
     match harness
         .client
-        .put_file_bytes(
-            &source,
-            b"conflict\n",
-            &PutFileOptions::new(loonfs_test_support::test_actor()),
-        )
+        .put_file(&source, b"conflict\n", &loonfs_test_support::test_actor())
         .await
     {
         Err(ClientError::Api { code, .. }) => assert_eq!(code, "path_conflict"),
@@ -103,21 +99,26 @@ async fn http_put_no_replace_and_copy_preserve_cli_semantics() {
 
     harness
         .client
-        .put_file_bytes(&source, b"forced overwrite\n", &replace_file_options())
+        .put_file_with_options(
+            &source,
+            b"forced overwrite\n",
+            &loonfs_test_support::test_actor(),
+            &replace_file_options(),
+        )
         .await
         .expect("forced overwrite");
 
     let destination = NamespacePath::parse("demo", "/docs/copy.txt").expect("destination");
     harness
         .client
-        .copy_path(
+        .copy_path_with_options(
             &source,
             &destination,
+            &loonfs_test_support::test_actor(),
             &CopyOptions {
                 behavior: DestinationBehavior::NoReplace,
                 commit: loonfs_api::options::CommitOptions {
                     preconditions: Vec::new(),
-                    actor_id: loonfs_test_support::test_actor(),
                     commit_id: None,
                     message: None,
                 },
@@ -164,10 +165,10 @@ async fn http_name_collision_reports_readable_error_message() {
         .expect("create namespace");
     harness
         .client
-        .put_file_bytes(
+        .put_file(
             &NamespacePath::parse("demo", "/taken.txt").expect("target"),
             b"taken bytes\n",
-            &PutFileOptions::new(loonfs_test_support::test_actor()),
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("create file");
@@ -176,10 +177,10 @@ async fn http_name_collision_reports_readable_error_message() {
     // must name both spellings so the caller can see why.
     match harness
         .client
-        .put_file_bytes(
+        .put_file(
             &NamespacePath::parse("demo", "/TAKEN.txt").expect("colliding target"),
             b"taken bytes\n",
-            &PutFileOptions::new(loonfs_test_support::test_actor()),
+            &loonfs_test_support::test_actor(),
         )
         .await
     {
@@ -231,14 +232,19 @@ async fn http_delete_path_behavior_controls_recursive_delete() {
     let child = NamespacePath::parse("demo", "/docs/child.txt").expect("child path");
     harness
         .client
-        .put_file_bytes(&child, b"child", &replace_file_options())
+        .put_file_with_options(
+            &child,
+            b"child",
+            &loonfs_test_support::test_actor(),
+            &replace_file_options(),
+        )
         .await
         .expect("write child");
 
     let dir = NamespacePath::parse("demo", "/docs").expect("dir path");
     let non_recursive = harness
         .client
-        .delete_path(&dir, &DeleteOptions::new(loonfs_test_support::test_actor()))
+        .delete_path(&dir, &loonfs_test_support::test_actor())
         .await
         .expect_err("non-recursive delete rejects non-empty dir");
     match non_recursive {
@@ -251,11 +257,12 @@ async fn http_delete_path_behavior_controls_recursive_delete() {
 
     harness
         .client
-        .delete_path(
+        .delete_path_with_options(
             &dir,
+            &loonfs_test_support::test_actor(),
             &DeleteOptions {
                 behavior: DeleteDirectoryBehavior::Recursive,
-                ..DeleteOptions::new(loonfs_test_support::test_actor())
+                ..Default::default()
             },
         )
         .await

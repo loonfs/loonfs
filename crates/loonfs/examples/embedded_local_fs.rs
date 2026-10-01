@@ -1,5 +1,6 @@
 use loonfs::{
-    CreateNamespaceOptions, DestinationBehavior, LoonFs, NamespaceId, PutFileOptions, StoreConfig,
+    ActorId, CreateNamespaceOptions, DestinationBehavior, LoonFs, NamespaceId, PutFileOptions,
+    StoreConfig,
 };
 
 #[allow(clippy::print_stdout)]
@@ -19,28 +20,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .await?;
 
     let namespace_id = NamespaceId::parse("demo")?;
+    let actor = ActorId::parse("embedded-example")?;
     runtime
-        .create_namespace(
+        .create_namespace_with_options(
             &namespace_id,
-            CreateNamespaceOptions {
-                actor_id: loonfs::ActorId::parse("embedded-example")?,
+            &actor,
+            &CreateNamespaceOptions {
                 allow_existing: true,
-                access: loonfs_api::NamespaceAccess::Unrestricted {},
+                ..Default::default()
             },
         )
         .await?;
     let namespace = runtime.open_namespace(&namespace_id)?;
     namespace
-        .put_file_bytes(
+        .put_file_with_options(
             "/hello.txt",
             b"hello from embedded LoonFS\n",
-            PutFileOptions {
+            &actor,
+            &PutFileOptions {
                 behavior: DestinationBehavior::Replace,
-                commit: loonfs::CommitOptions::new(
-                    loonfs::ActorId::parse("embedded-example").expect("valid actor id"),
-                ),
-                expected_inode_id: None,
-                expected_revision_no: None,
+                ..Default::default()
             },
         )
         .await?;

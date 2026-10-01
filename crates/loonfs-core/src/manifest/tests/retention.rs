@@ -1680,7 +1680,7 @@ async fn over_budget_wal_fold_aborts_without_publishing() {
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    put_file_bytes(
+    put_file(
         &store,
         &namespace_id,
         "/docs/budget.txt",
@@ -1741,7 +1741,7 @@ async fn over_budget_compaction_aborts_without_publishing() {
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    put_file_bytes(
+    put_file(
         &store,
         &namespace_id,
         "/docs/merge.txt",

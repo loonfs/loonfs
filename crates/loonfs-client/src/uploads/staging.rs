@@ -56,7 +56,7 @@ pub trait PutFileJournal: Send + Sync {
     fn part_completed(&self, part: &CompletedUploadPart) -> std::io::Result<()>;
     /// Persists the complete request before any attempt to submit its commit.
     /// Includes the upload id when content was staged, so a caller can renew its token.
-    /// Replay this request and actor with [`Client::create_commit`] after an interruption.
+    /// Replay this request and actor with [`Client::commit`] after an interruption.
     fn commit_prepared(
         &self,
         request: &CommitRequest,
@@ -539,12 +539,7 @@ impl Client {
                 resume.checksum_algorithm,
             ),
             None => {
-                let begin = self
-                    .create_direct_multipart_upload(
-                        namespace_id,
-                        DirectMultipartUploadOptions::default(),
-                    )
-                    .await?;
+                let begin = self.create_direct_multipart_upload(namespace_id).await?;
                 if begin.mode != UploadMode::DirectMultipart {
                     return Err(negotiated_a_different_upload_mode());
                 }

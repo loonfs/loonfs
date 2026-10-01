@@ -9,10 +9,7 @@
 //! lookups was the scale term, and dependent per-section GETs were the
 //! wave count.
 
-use loonfs::{
-    CreateNamespaceOptions, LoonFs, MetadataMaintenanceOptions, Namespace, NamespaceId,
-    PutFileOptions, Writable,
-};
+use loonfs::{LoonFs, MetadataMaintenanceOptions, Namespace, NamespaceId, Writable};
 use loonfs_api::wire::manifest::{decode_namespace_manifest_json, MetadataRowFamily};
 use loonfs_api::AbsolutePath;
 use loonfs_objectstore::keys::{metadata_manifest_object, metadata_segment_object_key};
@@ -60,10 +57,7 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
         .expect("build maintenance")
         .maintenance(loonfs_test_support::ids::writer_id("coldstat-maintenance"));
     writer
-        .create_namespace(
-            &namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let namespace_writer = writer
@@ -75,10 +69,10 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
     // that sorts past every name looked up below, so range pruning rules it
     // out of those lookups.
     namespace_writer
-        .put_file_bytes(
+        .put_file(
             "/tree/dir-000000/seed.txt",
             b"seed",
-            PutFileOptions::new(loonfs_test_support::test_actor()),
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("seed the first manifest");
@@ -135,9 +129,9 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
         }
         publish_candidates(&namespace_writer, candidates).await;
         maintenance
-            .maintain_metadata(
+            .maintain_metadata_with_options(
                 &namespace_id,
-                MetadataMaintenanceOptions {
+                &MetadataMaintenanceOptions {
                     max_wal_tail_objects: std::num::NonZeroU64::MIN,
                     ..Default::default()
                 },

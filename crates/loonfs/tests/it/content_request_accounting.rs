@@ -8,9 +8,8 @@ use loonfs::publish::{
 };
 use loonfs::uploads::ResolvedUploadCompletion;
 use loonfs::{
-    CommitId, CoreError, CreateDirectoryOptions, CreateNamespaceOptions, DestinationBehavior,
-    Error, ErrorCode, LoonFs, NamespaceId, PutFileOptions, RevisionNo, SharedObjectStore, Writable,
-    CONTENT_READ_CHUNK_BYTES,
+    CommitId, CoreError, DestinationBehavior, Error, ErrorCode, LoonFs, NamespaceId,
+    PutFileOptions, RevisionNo, SharedObjectStore, Writable, CONTENT_READ_CHUNK_BYTES,
 };
 use loonfs_api::ContentId;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -150,18 +149,12 @@ async fn build_initialized_writer(
         .await
         .expect("build writer");
     writer
-        .create_namespace(
-            namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let namespace = writer.open_namespace(namespace_id).expect("open namespace");
     namespace
-        .create_directory(
-            "/catalog-warmup",
-            CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_directory("/catalog-warmup", &loonfs_test_support::test_actor())
         .await
         .expect("warm namespace catalog");
     writer
@@ -239,11 +232,7 @@ async fn put_file_content_ref_validates_content_before_publication() {
     // The convenience method should validate the referenced content exactly
     // once before publishing it.
     namespace
-        .put_file_content_ref(
-            "/file.txt",
-            content_ref,
-            PutFileOptions::new(loonfs_test_support::test_actor()),
-        )
+        .put_file_content_ref("/file.txt", content_ref, &loonfs_test_support::test_actor())
         .await
         .expect("publish content ref");
 
@@ -251,7 +240,7 @@ async fn put_file_content_ref_validates_content_before_publication() {
 }
 
 #[tokio::test]
-async fn prepare_file_bytes_performs_one_content_put_and_no_reads() {
+async fn prepare_content_performs_one_content_put_and_no_reads() {
     let harness = TestHarness::new("prepare-file-bytes").await;
     let namespace = harness
         .writer
@@ -261,7 +250,7 @@ async fn prepare_file_bytes_performs_one_content_put_and_no_reads() {
     harness.recording.reset();
 
     let prepared = namespace
-        .prepare_file_bytes(bytes)
+        .prepare_content(bytes)
         .await
         .expect("prepare file bytes");
 
@@ -279,17 +268,13 @@ async fn put_file_prepared_performs_no_content_io() {
         .open_namespace(&harness.namespace_id)
         .expect("open namespace");
     let prepared = namespace
-        .prepare_file_bytes(b"already prepared")
+        .prepare_content(b"already prepared")
         .await
         .expect("prepare file bytes");
     harness.recording.reset();
 
     namespace
-        .put_file_prepared(
-            "/file.txt",
-            prepared,
-            PutFileOptions::new(loonfs_test_support::test_actor()),
-        )
+        .put_file_prepared("/file.txt", prepared, &loonfs_test_support::test_actor())
         .await
         .expect("publish prepared file");
 
@@ -306,33 +291,23 @@ async fn prepared_content_for_another_store_is_rejected_without_content_io() {
     let writer = build_initialized_writer(store.clone(), &source, "cross-store-writer").await;
     let source_writer = writer.open_namespace(&source).expect("open namespace");
     writer
-        .create_namespace(
-            &target,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&target, &loonfs_test_support::test_actor())
         .await
         .expect("create target namespace");
     let target_writer = writer.open_namespace(&target).expect("open namespace");
     target_writer
-        .create_directory(
-            "/catalog-warmup",
-            CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_directory("/catalog-warmup", &loonfs_test_support::test_actor())
         .await
         .expect("warm target catalog");
     let prepared = source_writer
-        .prepare_file_bytes(b"source-store-only")
+        .prepare_content(b"source-store-only")
         .await
         .expect("prepare source content");
     let content_ref = prepared.content_ref().clone();
     recording.reset();
 
     let error = target_writer
-        .put_file_prepared(
-            "/file.txt",
-            prepared,
-            PutFileOptions::new(loonfs_test_support::test_actor()),
-        )
+        .put_file_prepared("/file.txt", prepared, &loonfs_test_support::test_actor())
         .await
         .expect_err("another store must reject the admission");
     assert!(
@@ -357,34 +332,24 @@ async fn independent_namespaces_sharing_a_store_reject_each_others_prepared_cont
     let writer = build_initialized_writer(store.clone(), &source, "shared-store-writer").await;
     let source_writer = writer.open_namespace(&source).expect("open namespace");
     writer
-        .create_namespace(
-            &target,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_namespace(&target, &loonfs_test_support::test_actor())
         .await
         .expect("create independent target namespace");
     let target_writer = writer.open_namespace(&target).expect("open namespace");
 
     target_writer
-        .create_directory(
-            "/catalog-warmup",
-            CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_directory("/catalog-warmup", &loonfs_test_support::test_actor())
         .await
         .expect("warm shared target catalog");
     let prepared = source_writer
-        .prepare_file_bytes(b"independently shared")
+        .prepare_content(b"independently shared")
         .await
         .expect("prepare through source namespace");
     recording.reset();
 
     let content_ref = prepared.content_ref().clone();
     let error = target_writer
-        .put_file_prepared(
-            "/shared.txt",
-            prepared,
-            PutFileOptions::new(loonfs_test_support::test_actor()),
-        )
+        .put_file_prepared("/shared.txt", prepared, &loonfs_test_support::test_actor())
         .await
         .expect_err("shared-store target must reject source proof");
 
@@ -402,23 +367,16 @@ async fn fork_and_source_reject_each_others_prepared_content() {
     let writer = build_initialized_writer(store, &source, "fork-sharing-writer").await;
     let source_writer = writer.open_namespace(&source).expect("open namespace");
     let prepared_for_fork = source_writer
-        .prepare_file_bytes(b"prepared before fork")
+        .prepare_content(b"prepared before fork")
         .await
         .expect("prepare through source namespace");
     writer
-        .fork_namespace(
-            &source,
-            &fork,
-            loonfs_api::options::ForkNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
+        .fork_namespace(&source, &fork, &loonfs_test_support::test_actor())
         .await
         .expect("fork namespace");
     let fork_writer = writer.open_namespace(&fork).expect("open namespace");
     fork_writer
-        .create_directory(
-            "/fork-catalog-warmup",
-            CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
-        )
+        .create_directory("/fork-catalog-warmup", &loonfs_test_support::test_actor())
         .await
         .expect("warm fork catalog");
     recording.reset();
@@ -428,7 +386,7 @@ async fn fork_and_source_reject_each_others_prepared_content() {
         .put_file_prepared(
             "/from-source.txt",
             prepared_for_fork,
-            PutFileOptions::new(loonfs_test_support::test_actor()),
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect_err("fork must reject source proof");
@@ -436,7 +394,7 @@ async fn fork_and_source_reject_each_others_prepared_content() {
     assert_content_counts(recording.snapshot(), 0, 0, 0, 0);
 
     let prepared_for_source = fork_writer
-        .prepare_file_bytes(b"prepared through fork")
+        .prepare_content(b"prepared through fork")
         .await
         .expect("prepare through fork namespace");
     recording.reset();
@@ -445,7 +403,7 @@ async fn fork_and_source_reject_each_others_prepared_content() {
         .put_file_prepared(
             "/from-fork.txt",
             prepared_for_source,
-            PutFileOptions::new(loonfs_test_support::test_actor()),
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect_err("source must reject fork proof");
@@ -549,11 +507,7 @@ async fn prepare_content_ref_reads_once_and_prepared_publication_reads_nothing()
     harness.recording.reset();
 
     namespace
-        .put_file_prepared(
-            "/file.txt",
-            prepared,
-            PutFileOptions::new(loonfs_test_support::test_actor()),
-        )
+        .put_file_prepared("/file.txt", prepared, &loonfs_test_support::test_actor())
         .await
         .expect("publish prepared content ref");
 
@@ -605,7 +559,7 @@ async fn proxied_upload_completion_proof_publishes_without_additional_content_io
         .put_file_prepared(
             "/uploaded.txt",
             prepared,
-            PutFileOptions::new(loonfs_test_support::test_actor()),
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("publish uploaded content");
@@ -666,11 +620,7 @@ async fn direct_put_completion_avoids_blob_get_and_prepared_publish_uses_no_cont
     harness.recording.reset();
 
     namespace
-        .put_file_prepared(
-            "/direct.txt",
-            prepared,
-            PutFileOptions::new(loonfs_test_support::test_actor()),
-        )
+        .put_file_prepared("/direct.txt", prepared, &loonfs_test_support::test_actor())
         .await
         .expect("publish direct uploaded content");
 
@@ -697,10 +647,10 @@ async fn an_unprepared_external_ref_fails_typed_without_content_io() {
                 .expect("open namespace");
             if behavior == DestinationBehavior::Replace {
                 namespace
-                    .put_file_bytes(
+                    .put_file(
                         "/file.txt",
                         b"first revision",
-                        PutFileOptions::new(loonfs_test_support::test_actor()),
+                        &loonfs_test_support::test_actor(),
                     )
                     .await
                     .expect("seed file");
@@ -727,7 +677,7 @@ async fn an_unprepared_external_ref_fails_typed_without_content_io() {
                     .await
                     .expect_err("an unprepared ref must not publish"),
                 UnpreparedEntryPoint::WriterCreateCommit => namespace
-                    .create_commit(request)
+                    .commit(request)
                     .await
                     .expect_err("an unprepared ref must not publish"),
             };
@@ -753,7 +703,7 @@ async fn prepared_commit_after_concurrent_preparations_uses_no_publication_conte
     .into_iter()
     .map(|bytes| {
         let namespace = namespace.clone();
-        tokio::spawn(async move { namespace.prepare_file_bytes(bytes).await })
+        tokio::spawn(async move { namespace.prepare_content(bytes).await })
     });
     let mut prepared = Vec::new();
     for preparation in preparations {
@@ -811,22 +761,18 @@ async fn restore_revision_uses_retained_metadata_without_content_io() {
         .expect("open namespace");
     let first = b"first revision";
     namespace
-        .put_file_bytes(
-            "/file.txt",
-            first,
-            PutFileOptions::new(loonfs_test_support::test_actor()),
-        )
+        .put_file("/file.txt", first, &loonfs_test_support::test_actor())
         .await
         .expect("put first revision");
     namespace
-        .put_file_bytes(
+        .put_file_with_options(
             "/file.txt",
             b"second revision",
-            PutFileOptions {
+            &loonfs_test_support::test_actor(),
+            &PutFileOptions {
                 behavior: DestinationBehavior::Replace,
                 commit: loonfs_api::options::CommitOptions {
                     preconditions: Vec::new(),
-                    actor_id: loonfs_test_support::test_actor(),
                     commit_id: None,
                     message: None,
                 },
@@ -841,7 +787,7 @@ async fn restore_revision_uses_retained_metadata_without_content_io() {
     // Restore resolves content from retained namespace metadata, so
     // re-downloading the retained blob would prove nothing.
     namespace
-        .create_commit(CommitRequest::single(
+        .commit(CommitRequest::single(
             CommitId::parse("restore-first-revision").expect("valid commit id"),
             loonfs_test_support::test_actor(),
             None,
@@ -857,7 +803,7 @@ async fn restore_revision_uses_retained_metadata_without_content_io() {
 }
 
 #[tokio::test]
-async fn put_file_bytes_publishes_without_reading_content() {
+async fn put_file_publishes_without_reading_content() {
     let harness = TestHarness::new("put-bytes-admission").await;
     let namespace = harness
         .writer
@@ -866,10 +812,10 @@ async fn put_file_bytes_publishes_without_reading_content() {
     harness.recording.reset();
 
     namespace
-        .put_file_bytes(
+        .put_file(
             "/file.txt",
             b"admitted content",
-            PutFileOptions::new(loonfs_test_support::test_actor()),
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("put admitted bytes");

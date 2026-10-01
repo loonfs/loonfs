@@ -203,7 +203,12 @@ async fn http_maintenance_checkpoint_and_retention_are_idempotent_and_soft() {
         .await
         .expect("create namespace");
     client
-        .put_file_bytes(&target, b"hello maintenance\n", &replace_file_options())
+        .put_file_with_options(
+            &target,
+            b"hello maintenance\n",
+            &loonfs_test_support::test_actor(),
+            &replace_file_options(),
+        )
         .await
         .expect("write file");
 
@@ -235,7 +240,7 @@ async fn http_maintenance_checkpoint_and_retention_are_idempotent_and_soft() {
         .fork_namespace(
             &namespace,
             &namespace_id("fork"),
-            &loonfs_client::ForkNamespaceOptions::new(loonfs_test_support::test_actor()),
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("fork namespace");
@@ -340,7 +345,12 @@ async fn http_maintenance_gc_is_explicit_and_retains_young_namespaces() {
         .expect("create namespace");
     let target = NamespacePath::parse("demo", "/docs/hello.txt").expect("target");
     client
-        .put_file_bytes(&target, b"hello gc\n", &replace_file_options())
+        .put_file_with_options(
+            &target,
+            b"hello gc\n",
+            &loonfs_test_support::test_actor(),
+            &replace_file_options(),
+        )
         .await
         .expect("write file");
     post_checkpoint(&server_url, namespace.as_str()).expect("checkpoint");
@@ -392,7 +402,12 @@ async fn http_metadata_run_reports_outcomes_not_errors() {
         .expect("create namespace");
     let target = NamespacePath::parse("demo", "/docs/hello.txt").expect("target");
     client
-        .put_file_bytes(&target, b"hello step\n", &replace_file_options())
+        .put_file_with_options(
+            &target,
+            b"hello step\n",
+            &loonfs_test_support::test_actor(),
+            &replace_file_options(),
+        )
         .await
         .expect("write file");
 
@@ -481,19 +496,12 @@ async fn http_metadata_run_folds_an_idle_tail_unless_the_server_turns_the_idle_r
             .expect("writer");
         let namespace = namespace_id("idle");
         writer
-            .create_namespace(
-                &namespace,
-                loonfs::CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-            )
+            .create_namespace(&namespace, &loonfs_test_support::test_actor())
             .await
             .expect("create namespace");
         let namespace_writer = writer.open_namespace(&namespace).expect("open namespace");
         namespace_writer
-            .put_file_bytes(
-                "/file.txt",
-                b"body",
-                loonfs::PutFileOptions::new(loonfs_test_support::test_actor()),
-            )
+            .put_file("/file.txt", b"body", &loonfs_test_support::test_actor())
             .await
             .expect("write file");
         writer.shutdown().await.expect("writer shutdown");
@@ -593,7 +601,12 @@ async fn http_checkpoint_manifest_consumption_is_strict_when_manifest_is_corrupt
         .await
         .expect("create namespace");
     client
-        .put_file_bytes(&target, b"hello\n", &replace_file_options())
+        .put_file_with_options(
+            &target,
+            b"hello\n",
+            &loonfs_test_support::test_actor(),
+            &replace_file_options(),
+        )
         .await
         .expect("write file");
     post_checkpoint(&server_url, namespace.as_str()).expect("checkpoint");

@@ -21,12 +21,12 @@
 //!     .build()
 //!     .await?;
 //! runtime
-//!     .create_namespace(&namespace_id, CreateNamespaceOptions::new(actor_id.clone()))
+//!     .create_namespace(&namespace_id, &actor_id)
 //!     .await?;
 //!
 //! let namespace = runtime.open_namespace(&namespace_id)?;
 //! namespace
-//!     .put_file_bytes("/hello.txt", b"hello", PutFileOptions::new(actor_id))
+//!     .put_file("/hello.txt", b"hello", &actor_id)
 //!     .await?;
 //! let file = namespace.read_file("/hello.txt").await?;
 //! assert_eq!(file.bytes, b"hello");
@@ -199,11 +199,10 @@ pub use metadata_cache::{
     DEFAULT_MAX_SEGMENT_BYTES,
 };
 pub use options::{
-    CommitOptions, CopyOptions, CreateCheckpointOptions, CreateDirectoryOptions,
-    CreateSnapshotOptions, DeleteOptions, DirectMultipartUploadOptions, ForkNamespaceOptions,
+    AccessState, AttributeChanges, CommitOptions, CopyOptions, CreateCheckpointOptions,
+    CreateDirectoryOptions, DeleteOptions, DirectMultipartUploadOptions, ForkNamespaceOptions,
     ListOptions, MetadataMaintenanceOptions, MoveOptions, PutFileOptions, ReadFileStreamOptions,
-    RestoreRevisionOptions, StatOptions, UndeleteOptions, UpdateAccessOptions,
-    UpdateAttributesOptions,
+    StatOptions, UpdateAccessOptions, UpdateAttributesOptions,
 };
 pub use publisher::{CloseNamespaceReport, NamespaceSessionState};
 pub use trace::{payload_class, TraceMode, TraceStoreKind};

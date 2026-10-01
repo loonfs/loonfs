@@ -8,8 +8,8 @@
 
 use crate::publish::{CommitCandidate, CommitRequest, FilesystemOperation, InlineContent};
 use crate::{
-    CreateDirectoryOptions, CreateNamespaceOptions, DestinationBehavior, LoonFs, NamespaceId,
-    PageRequest, SharedObjectStore,
+    CreateNamespaceOptions, DestinationBehavior, LoonFs, NamespaceId, PageRequest,
+    SharedObjectStore,
 };
 use loonfs_api::wire::manifest::MetadataRowFamily;
 use loonfs_api::{
@@ -100,9 +100,10 @@ async fn create_compacted_directory(
         ))
         .narrow_segment_row_budget(NonZeroUsize::new(ROWS_PER_SEGMENT).expect("nonzero"));
     writer
-        .create_namespace(
+        .create_namespace_with_options(
             namespace_id,
-            CreateNamespaceOptions {
+            &actor,
+            &CreateNamespaceOptions {
                 access: match subject {
                     Some(subject) => NamespaceAccess::Acl {
                         principal_scope: subject.principal_scope.clone(),
@@ -110,7 +111,7 @@ async fn create_compacted_directory(
                     },
                     None => NamespaceAccess::unrestricted(),
                 },
-                ..CreateNamespaceOptions::new(actor.clone())
+                ..Default::default()
             },
         )
         .await
@@ -121,7 +122,7 @@ async fn create_compacted_directory(
     };
     let namespace = writer.open_namespace(namespace_id).expect("open namespace");
     namespace
-        .create_directory("/directory", CreateDirectoryOptions::new(actor.clone()))
+        .create_directory("/directory", &actor)
         .await
         .expect("directory");
     let per_batch = FILES / BATCHES;
