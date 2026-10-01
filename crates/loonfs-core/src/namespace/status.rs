@@ -3,7 +3,7 @@
 #[cfg(any(test, feature = "test-support"))]
 use crate::error::CoreError;
 use crate::error::Result;
-use crate::namespace::read_anchor::load_read_anchor;
+use crate::namespace::read_anchor::{load_live_read_anchor, load_read_anchor, NamespaceReadAnchor};
 use crate::namespace::state::NamespaceReadState;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::ForkBasis;
@@ -106,21 +106,22 @@ pub async fn load_namespace<S: ObjectStore + ?Sized>(
     })
 }
 
+impl From<&NamespaceReadAnchor> for NamespaceStorageDiagnostics {
+    fn from(anchor: &NamespaceReadAnchor) -> Self {
+        Self::new(
+            anchor.read_state.clone(),
+            anchor.retention_floor_seq(),
+            anchor.manifest.state.manifest().manifest_no,
+            anchor.read_state.unfolded_wal_objects(),
+            anchor.tail.newest_commit_at_ms(),
+        )
+    }
+}
+
 pub async fn load_namespace_diagnostics<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace_id: &NamespaceId,
 ) -> Result<NamespaceStorageDiagnostics> {
-    let loaded = load_read_anchor(store, expected_namespace_id).await?;
-    super::control::ensure_namespace_live(&loaded.read_state)?;
-    let wal_tail_objects = loaded.read_state.unfolded_wal_objects();
-    let retention_floor_seq = loaded.retention_floor_seq();
-    let manifest_no = loaded.manifest.state.manifest().manifest_no;
-    let wal_tail_newest_commit_at_ms = loaded.tail.newest_commit_at_ms();
-    Ok(NamespaceStorageDiagnostics::new(
-        loaded.read_state,
-        retention_floor_seq,
-        manifest_no,
-        wal_tail_objects,
-        wal_tail_newest_commit_at_ms,
-    ))
+    let anchor = load_live_read_anchor(store, expected_namespace_id).await?;
+    Ok(NamespaceStorageDiagnostics::from(&anchor))
 }

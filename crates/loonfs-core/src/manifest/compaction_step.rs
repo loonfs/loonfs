@@ -14,14 +14,14 @@ use super::fold::{next_manifest_no_after, next_run_no_after};
 use super::load::load_manifest_segments;
 use super::publish::{encode_manifest, publish_manifest, ManifestPublicationOutcome};
 use super::runs::{
-    delta_run_count, runs_in_merge_order, MetadataFamilyGroup, MetadataLsmPolicy,
-    MetadataRunManifest,
+    delta_run_count, runs_in_merge_order, runs_newest_first, MetadataFamilyGroup,
+    MetadataLsmPolicy, MetadataRunManifest,
 };
 use super::scan::VerifiedMetadataSegments;
 use super::streaming_compaction::{merge_group_in_step, MetadataCompactionSpec};
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::namespace::control::load_current_manifest;
-use crate::namespace::read_anchor::load_read_anchor;
+use crate::namespace::read_anchor::NamespaceReadAnchor;
 use crate::time::{Deadline, StdMonotonicTimer};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::envelope::EncodedEnvelope;
@@ -230,37 +230,30 @@ pub(super) async fn compaction_step_with_deadline<S: ObjectStore + ?Sized>(
     }
 }
 
-/// Checks WAL and manifest descriptors without decoding segment rows.
+/// Checks an anchor's WAL tail and manifest descriptors without reading the
+/// store.
 ///
 /// `wal_tail_due` gets the unfolded WAL object count and the newest tail
 /// commit's `committed_at_ms`, and says whether the tail alone makes
 /// maintenance due.
-pub async fn metadata_maintenance_due<S: ObjectStore + ?Sized>(
-    store: &S,
-    segment_cache: Option<&super::cache::MetadataSegmentCache>,
-    namespace_id: &NamespaceId,
+pub fn metadata_maintenance_due(
+    anchor: &NamespaceReadAnchor,
     wal_tail_due: impl FnOnce(u64, Option<u64>) -> bool,
     compaction_policy: MetadataCompactionPolicy,
-) -> Result<bool> {
-    let anchor = load_read_anchor(store, namespace_id)
-        .await
-        .map_err(CoreError::ControlObjectLoad)?;
-    crate::namespace::control::ensure_namespace_live(&anchor.read_state)?;
+) -> bool {
     if wal_tail_due(
         anchor.read_state.unfolded_wal_objects(),
         anchor.tail.newest_commit_at_ms(),
     ) {
-        return Ok(true);
+        return true;
     }
-    let current_manifest = anchor.manifest;
-    let segments =
-        load_manifest_segments(store, segment_cache, &current_manifest.state.manifest()).await?;
-    Ok(manifest_has_compaction_work(
-        segments.manifest().payload(),
-        segments.scan_runs.as_ref(),
+    let manifest = anchor.manifest.state.envelope.payload();
+    manifest_has_compaction_work(
+        manifest,
+        &runs_newest_first(manifest),
         MetadataLsmPolicy::default(),
         compaction_policy,
-    ))
+    )
 }
 
 pub(super) enum CompactionPlan {

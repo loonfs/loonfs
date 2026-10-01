@@ -141,7 +141,8 @@ pub mod control {
         LoadedManifest,
     };
     pub use crate::namespace::read_anchor::{
-        load_read_anchor, manifest_has_successor, project_anchor_tail, NamespaceReadAnchor,
+        load_live_read_anchor, load_read_anchor, manifest_has_successor, project_anchor_tail,
+        NamespaceReadAnchor,
     };
     pub use crate::namespace::state::NamespaceReadState;
     pub use crate::namespace::MetadataBasis;

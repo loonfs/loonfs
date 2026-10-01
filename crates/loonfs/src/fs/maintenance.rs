@@ -15,8 +15,9 @@ use crate::{
     MetadataCompactionResponse, MetadataMaintenanceOptions, MetadataMaintenanceResponse,
     NamespaceId, PinId, SharedObjectStore, SnapshotSummary, WalFoldStepOutcome,
 };
-use crate::{ChangeSeq, Error, Result};
+use crate::{Error, Result};
 use loonfs_core::cache::NamespaceStorageDiagnostics;
+use loonfs_core::control::NamespaceReadAnchor;
 use loonfs_core::CheckpointPageCursor;
 use loonfs_types::CompactorEpoch;
 use loonfs_types::PageRequest;
@@ -188,11 +189,8 @@ impl Maintenance {
         }
     }
 
-    async fn load_maintenance_status(
-        &self,
-        namespace_id: &NamespaceId,
-    ) -> Result<NamespaceStorageDiagnostics> {
-        Ok(loonfs_core::cache::load_namespace_diagnostics(self.core.store(), namespace_id).await?)
+    async fn load_live_anchor(&self, namespace_id: &NamespaceId) -> Result<NamespaceReadAnchor> {
+        Ok(loonfs_core::control::load_live_read_anchor(self.core.store(), namespace_id).await?)
     }
 
     /// Runs [`Self::maintain_metadata_with_options`] with the default
@@ -230,7 +228,8 @@ impl Maintenance {
         namespace_id: &NamespaceId,
         options: &MetadataMaintenanceOptions,
     ) -> Result<(MetadataMaintenanceResponse, Option<u64>)> {
-        let status = self.load_maintenance_status(namespace_id).await?;
+        let anchor = self.load_live_anchor(namespace_id).await?;
+        let status = NamespaceStorageDiagnostics::from(&anchor);
         let inline_bytes = if status.wal_tail_objects > 0 {
             self.publisher
                 .wal_tail_inline_bytes(namespace_id)
@@ -248,12 +247,7 @@ impl Maintenance {
             .filter(|_| !fold)
             .map(|due_in_ms| now_ms.saturating_add(due_in_ms));
         let response = self
-            .fold_then_compact(
-                namespace_id,
-                fold,
-                status.head_seq,
-                options.compaction_policy,
-            )
+            .fold_then_compact(namespace_id, fold, &anchor, options.compaction_policy)
             .await?;
         tracing::debug!(
             wal_tail_objects_before = status.wal_tail_objects,
@@ -362,36 +356,31 @@ impl Maintenance {
         options: &MetadataMaintenanceOptions,
     ) -> Result<MaintenanceProbe> {
         let now_ms = self.core.now_ms()?;
-        let cache = self.core.metadata_segment_cache();
-        loonfs_core::cache::metadata_maintenance_due(
-            self.core.store(),
-            Some(cache.as_ref()),
-            namespace_id,
+        let anchor = self.load_live_anchor(namespace_id).await?;
+        let due = loonfs_core::cache::metadata_maintenance_due(
+            &anchor,
             |wal_tail_objects, wal_tail_newest_commit_at_ms| {
                 wal_tail_objects >= options.max_wal_tail_objects.get()
                     || options.idle_fold_is_due(wal_tail_newest_commit_at_ms, now_ms)
             },
             options.compaction_policy,
-        )
-        .await
-        .map(|due| {
-            if due {
-                MaintenanceProbe::Due
-            } else {
-                MaintenanceProbe::Idle
-            }
+        );
+        Ok(if due {
+            MaintenanceProbe::Due
+        } else {
+            MaintenanceProbe::Idle
         })
-        .map_err(Error::Core)
     }
 
     /// Optionally folds the WAL tail, then runs one compaction step.
-    /// `observed_head_seq` is reported when concurrent updates prevent every
-    /// fold attempt from publishing.
+    /// `observed` is the anchor the caller decided on. Its head seq is
+    /// reported when concurrent updates prevent every fold attempt from
+    /// publishing.
     async fn fold_then_compact(
         &self,
         namespace_id: &NamespaceId,
         fold: bool,
-        observed_head_seq: ChangeSeq,
+        observed: &NamespaceReadAnchor,
         compaction_policy: loonfs_core::MetadataCompactionPolicy,
     ) -> Result<MetadataMaintenanceResponse> {
         let wal_fold = if fold {
@@ -409,15 +398,19 @@ impl Maintenance {
                     }
                 },
                 Err(Error::Core(error)) if error.code() == ErrorCode::StaleHead => {
-                    WalFoldStepOutcome::RetriesExhausted { observed_head_seq }
+                    WalFoldStepOutcome::RetriesExhausted {
+                        observed_head_seq: observed.read_state.seq,
+                    }
                 }
                 Err(error) => return Err(error),
             }
         } else {
             WalFoldStepOutcome::NotNeeded
         };
+        // A fold attempt can move the manifest, so the step observes it again.
+        let observed = (!fold).then_some(observed);
         let compaction = self
-            .run_compaction_step(namespace_id, compaction_policy)
+            .run_compaction_step(namespace_id, compaction_policy, observed)
             .await?;
         Ok(MetadataMaintenanceResponse {
             namespace_id: namespace_id.clone(),
@@ -434,9 +427,13 @@ impl Maintenance {
         &self,
         namespace_id: &NamespaceId,
         compaction_policy: loonfs_core::MetadataCompactionPolicy,
+        observed: Option<&NamespaceReadAnchor>,
     ) -> Result<CompactionStepOutcome> {
         Ok(
-            match self.compact_once(namespace_id, compaction_policy).await? {
+            match self
+                .compact_once(namespace_id, compaction_policy, observed)
+                .await?
+            {
                 CompactionStep::Concluded(outcome) => outcome,
                 CompactionStep::Fenced => CompactionStepOutcome::Fenced {},
                 CompactionStep::CompactionPlanned(_) => {
@@ -473,28 +470,32 @@ impl Maintenance {
         }
     }
 
+    /// `observed`, when given, was loaded after anything this call published.
     async fn compact_once(
         &self,
         namespace_id: &NamespaceId,
         compaction_policy: loonfs_core::MetadataCompactionPolicy,
+        observed: Option<&NamespaceReadAnchor>,
     ) -> Result<CompactionStep> {
         let claimed = self
             .writer
             .compactor_epochs
             .lock()
             .await
-            .contains_key(namespace_id);
-        if !claimed
-            && !loonfs_core::cache::metadata_maintenance_due(
-                self.core.store(),
-                Some(self.core.metadata_segment_cache().as_ref()),
-                namespace_id,
-                |_, _| false,
-                compaction_policy,
-            )
-            .await
-            .map_err(Error::Core)?
-        {
+            .get(namespace_id)
+            .copied();
+        let due = |anchor: &NamespaceReadAnchor| {
+            loonfs_core::cache::metadata_maintenance_due(anchor, |_, _| false, compaction_policy)
+        };
+        let step_due = match observed {
+            // A claim the manifest no longer carries is a fence the step reports.
+            Some(anchor) => {
+                claimed.is_some_and(|epoch| epoch != anchor.compactor_epoch()) || due(anchor)
+            }
+            // A claimed step reads less than loading an anchor to check first.
+            None => claimed.is_some() || due(&self.load_live_anchor(namespace_id).await?),
+        };
+        if !step_due {
             return Ok(CompactionStep::Concluded(
                 CompactionStepOutcome::NotNeeded {},
             ));
@@ -603,6 +604,7 @@ impl Maintenance {
             planned = self.compact_once(
                 namespace_id,
                 loonfs_core::MetadataCompactionPolicy::CompactImmediately,
+                None,
             ) => planned?,
         };
         let spec = match planned {
@@ -713,10 +715,6 @@ impl Maintenance {
         options: &crate::GcOptions,
     ) -> Result<crate::GcResponse> {
         self.core.record_trace_context(&tracing::Span::current());
-        // Core collection reports an empty pass for a namespace that does not exist.
-        loonfs_core::control::load_namespace_read_state(self.core.store(), namespace_id)
-            .await
-            .map_err(crate::CoreError::ControlObjectLoad)?;
         let report = loonfs_core::gc_namespace(
             self.core.store(),
             namespace_id,
@@ -901,7 +899,7 @@ impl Maintenance {
         namespace_id: &NamespaceId,
     ) -> Result<AdvanceRetentionResponse> {
         self.core.record_trace_context(&tracing::Span::current());
-        self.load_maintenance_status(namespace_id).await?;
+        self.load_live_anchor(namespace_id).await?;
         let result = self
             .engine(namespace_id)
             .advance_retention_floor()

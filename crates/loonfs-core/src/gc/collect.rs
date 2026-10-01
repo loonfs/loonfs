@@ -7,7 +7,6 @@ use super::sweep::Sweep;
 use super::uploads::PublicationView;
 use super::GcOptions;
 use crate::context::MutationContext;
-use crate::control_object::ControlObjectLoadError;
 use crate::error::{CoreError, Result};
 use crate::namespace::read_anchor::load_read_anchor;
 use futures::StreamExt;
@@ -22,11 +21,7 @@ pub async fn gc_namespace<S: ObjectStore + ?Sized>(
 ) -> Result<GcResponse> {
     options.validate()?;
     let mut report = GcResponse::empty(namespace_id.clone());
-    let anchor = match load_read_anchor(store, namespace_id).await {
-        Ok(anchor) => anchor,
-        Err(ControlObjectLoadError::MissingObject { .. }) => return Ok(report),
-        Err(error) => return Err(error.into()),
-    };
+    let anchor = load_read_anchor(store, namespace_id).await?;
     let live = LiveSet::load(
         store,
         namespace_id,

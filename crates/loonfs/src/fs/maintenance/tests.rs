@@ -721,7 +721,7 @@ async fn maintenance_clones_share_one_claim_and_never_reclaim_after_fencing() {
     store.reset();
     assert!(matches!(
         maintenance
-            .compact_once(&namespace, MetadataCompactionPolicy::SizeTiered)
+            .compact_once(&namespace, MetadataCompactionPolicy::SizeTiered, None)
             .await
             .expect("no work"),
         super::CompactionStep::Concluded(CompactionStepOutcome::NotNeeded {})
@@ -762,7 +762,7 @@ async fn maintenance_clones_share_one_claim_and_never_reclaim_after_fencing() {
     );
     assert_eq!(
         maintenance
-            .run_compaction_step(&namespace, MetadataCompactionPolicy::SizeTiered)
+            .run_compaction_step(&namespace, MetadataCompactionPolicy::SizeTiered, None)
             .await
             .expect("fenced compaction"),
         CompactionStepOutcome::Fenced {}
@@ -885,5 +885,158 @@ async fn the_metadata_loop_stops_after_three_lost_races_and_on_a_fenced_step() {
         current_manifest_payload(store.as_ref(), &namespace).await,
         fenced,
         "a fenced loop stops instead of claiming the namespace back"
+    );
+}
+
+/// A wall clock a week ahead, so a collection pass finds everything the test
+/// wrote past every grace window.
+#[derive(Debug)]
+struct WeekAheadClock(u64);
+
+impl crate::WallClock for WeekAheadClock {
+    fn now_ms(&self) -> std::result::Result<u64, crate::CoreError> {
+        Ok(self.0)
+    }
+}
+
+#[tokio::test]
+async fn an_idle_namespace_visit_costs_a_fixed_number_of_requests() {
+    use loonfs_core::time::WallClock;
+    use loonfs_test_support::stores::{KeyPredicate, RecordingStore, StoreCounts};
+
+    /// GET, HEAD, and LIST requests, then every write.
+    fn requests(counts: StoreCounts) -> [usize; 4] {
+        [
+            counts.gets + counts.gets_with_metadata,
+            counts.heads,
+            counts.lists,
+            counts.puts + counts.deletes,
+        ]
+    }
+
+    let directory = tempdir().expect("tempdir");
+    let store = Arc::new(RecordingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::any(),
+    ));
+    let actor = loonfs_test_support::test_actor();
+    let [idle, claimed, retired, missing] =
+        ["idle", "claimed", "retired", "missing"].map(namespace_id);
+    let writer = LoonFs::builder_with_store(store.clone())
+        .writer_id("writer")
+        .build()
+        .await
+        .expect("writer");
+    for namespace in [&idle, &claimed, &retired] {
+        writer
+            .create_namespace(namespace, &actor)
+            .await
+            .expect("create the namespace");
+        writer
+            .open_namespace(namespace)
+            .expect("open the namespace")
+            .put_file("/file", b"body", &actor)
+            .await
+            .expect("put a file");
+    }
+    writer
+        .open_namespace(&retired)
+        .expect("open the namespace")
+        .delete()
+        .await
+        .expect("delete the namespace");
+    writer.shutdown().await.expect("shut down the writer");
+
+    let week_ahead_ms = loonfs_core::time::SystemWallClock
+        .now_ms()
+        .expect("system clock")
+        + 7 * 24 * 60 * 60 * 1000;
+    let maintenance = LoonFs::builder_with_store(store.clone())
+        .writer_id("maintenance")
+        .wall_clock(Arc::new(WeekAheadClock(week_ahead_ms)))
+        .build()
+        .await
+        .expect("maintenance")
+        .maintenance(loonfs_test_support::ids::writer_id("maintenance"));
+    for namespace in [&idle, &claimed] {
+        maintenance
+            .fold_wal(namespace)
+            .await
+            .expect("fold the tail");
+    }
+    maintenance
+        .compactor_epoch(&claimed)
+        .await
+        .expect("claim the namespace");
+    for namespace in [&idle, &claimed, &retired] {
+        maintenance
+            .gc(namespace)
+            .await
+            .expect("collect what the setup left behind");
+    }
+
+    // A read anchor costs five GETs and one HEAD, and a tombstone's costs two
+    // GETs. Collection lists pins and manifests for its live set, then five
+    // families, then a retired namespace's content.
+    for (namespace, metadata_requests, metadata_error, gc_requests, gc_error) in [
+        (&idle, [5, 1, 0, 0], None, [5, 1, 7, 0], None),
+        (&claimed, [5, 1, 0, 0], None, [5, 1, 7, 0], None),
+        (
+            &retired,
+            [2, 0, 0, 0],
+            Some(crate::ErrorCode::NamespaceDeleted),
+            [2, 0, 8, 0],
+            None,
+        ),
+        (
+            &missing,
+            [1, 0, 0, 0],
+            Some(crate::ErrorCode::NamespaceNotFound),
+            [1, 0, 0, 0],
+            Some(crate::ErrorCode::NamespaceNotFound),
+        ),
+    ] {
+        store.reset();
+        let metadata = maintenance
+            .maintain_metadata_while_due(namespace, &crate::MaintenanceCancellation::new())
+            .await;
+        assert_eq!(metadata.err().map(|error| error.code()), metadata_error);
+        assert_eq!(
+            requests(store.counts()),
+            metadata_requests,
+            "the metadata loop on `{namespace}`"
+        );
+        store.reset();
+        let gc = maintenance.gc(namespace).await;
+        assert_eq!(
+            requests(store.counts()),
+            gc_requests,
+            "collection of `{namespace}`"
+        );
+        assert_eq!(gc.as_ref().err().map(|error| error.code()), gc_error);
+        if let Ok(report) = gc {
+            assert_eq!(report.deleted, loonfs_types::DeletedObjectCounts::default());
+        }
+    }
+
+    LoonFs::builder_with_store(store.clone())
+        .writer_id("other")
+        .build()
+        .await
+        .expect("another process")
+        .maintenance(loonfs_test_support::ids::writer_id("other"))
+        .compactor_epoch(&claimed)
+        .await
+        .expect("another process claims the namespace");
+    store.reset();
+    let fenced = maintenance
+        .maintain_metadata(&claimed)
+        .await
+        .expect("a fenced step is an outcome, not an error");
+    assert_eq!(fenced.compaction, CompactionStepOutcome::Fenced {});
+    assert_eq!(
+        requests(store.counts()),
+        [9, 1, 0, 0],
+        "an idle visit runs the step that reports a fence"
     );
 }
