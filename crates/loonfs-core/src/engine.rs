@@ -1402,8 +1402,8 @@ mod tests {
         let context = RuntimeReadContext {
             basis: loaded.basis(),
             head: loaded.read_state,
-            segment_cache: Arc::new(MetadataSegmentCache::new(Default::default())),
-            head_state: Arc::new(HeadStateCache::new(usize::MAX)),
+            segment_cache: Arc::new(MetadataSegmentCache::unshared(usize::MAX)),
+            head_state: Arc::new(HeadStateCache::unshared(usize::MAX)),
         };
         let changes = reader
             .list_changes_after(

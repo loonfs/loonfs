@@ -69,6 +69,14 @@ writer_id = "loonfs-server-local"
 # at most this much at once. Defaults to 64 MiB.
 #max_merge_input_bytes = 67108864
 
+# Minimum interval between checks for a successor to a cached manifest, in
+# milliseconds. Zero checks on every read. Defaults to 1000.
+#manifest_revalidation_interval_ms = 1000
+
+# Metadata blocks one read, publication, or fold keeps for itself on top of
+# the metadata cache. Zero keeps none. Defaults to 64 MiB.
+#max_block_memo_bytes = 67108864
+
 # How old a namespace's newest commit must be before maintenance folds a WAL
 # tail that is below the fold thresholds, in milliseconds. Scheduled
 # maintenance and explicit `metadata` requests use the same period. Zero turns
@@ -81,21 +89,17 @@ writer_id = "loonfs-server-local"
 # local-fs store.
 # Clients gate on `filesystem.uploads.direct_put` in the capability document.
 
-# Optional runtime cache overrides; omitted fields keep the runtime defaults.
-# `max_cached_wal_tail_projection_decoded_bytes` is the head-state budget:
-# namespace head anchors and read-side WAL-tail projections share it, with no
-# limit on how many namespaces stay cached. The WAL-tail projections the
-# writer's namespace publishers retain hold a second total against the same
-# budget. Neither bounds writer sessions: the server keeps one for each
-# namespace it has written since it started.
-#[runtime_cache]
-#manifest_revalidation_interval_ms = 1000
-#max_cached_wal_tail_projection_decoded_bytes = 67108864
-# Decoded-byte budget for the metadata segment cache. Defaults to 256 MiB.
-#metadata_segment_cache_max_decoded_bytes = 268435456
-# Metadata blocks one read, publication, or fold keeps for itself
-# on top of that cache. Zero keeps none. Defaults to 64 MiB.
-#max_block_memo_bytes = 67108864
+# Limits of the one metadata cache this server reads through; omitted fields
+# keep the runtime defaults. `max_segment_bytes` holds decoded metadata
+# blocks and manifests. Defaults to 256 MiB. `max_head_state_bytes` holds
+# namespace head anchors and read-side WAL-tail projections, with no limit on
+# how many namespaces stay cached. Defaults to 64 MiB. The WAL-tail
+# projections the writer's namespace publishers retain hold a second total of
+# the same size outside the cache. Neither bounds writer sessions: the server
+# keeps one for each namespace it has written since it started.
+#[metadata_cache]
+#max_segment_bytes = 268435456
+#max_head_state_bytes = 67108864
 
 # Optional node-local cache of encoded metadata blocks, on this machine's own
 # disk. Omit the table and there is none: every metadata block the decoded

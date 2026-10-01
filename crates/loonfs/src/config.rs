@@ -1,12 +1,10 @@
-//! Runtime limits and cache sizing.
+//! Runtime limits and read policy.
 
 use crate::trace::{TraceMode, TraceStoreKind};
-use crate::MetadataSegmentCacheConfig;
 
-/// Default decoded-byte budget for head state and for the WAL-tail
-/// projections a writer's publishers retain.
-pub(crate) const DEFAULT_MAX_CACHED_WAL_TAIL_PROJECTION_DECODED_BYTES: usize =
-    loonfs_core::cache::DEFAULT_WAL_TAIL_PROJECTION_DECODED_BYTES;
+/// Default minimum interval, in milliseconds, between checks for a successor
+/// to a cached manifest.
+pub(crate) const DEFAULT_MANIFEST_REVALIDATION_INTERVAL_MS: u64 = 1000;
 /// Default minimum interval, in milliseconds, between publication starts
 /// for one namespace (see [`crate::publisher`]). A request to an idle
 /// namespace publishes immediately; the interval only paces requests that
@@ -130,7 +128,7 @@ impl InlineContentOptions {
     }
 }
 
-/// Read and cache configuration shared by all handles.
+/// Read configuration shared by all handles of one runtime.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ReadConfig {
     /// Largest file content the buffered read APIs will materialize for one
@@ -138,65 +136,14 @@ pub(crate) struct ReadConfig {
     /// `None` (the embedded default) reads files of any size; servers set
     /// this so one proxied read cannot buffer arbitrarily large content.
     pub max_read_content_bytes: Option<u64>,
-    /// Cache configuration.
-    pub runtime_cache: RuntimeCacheConfig,
-    /// Budgets for WAL folds and metadata compactions.
+    /// Minimum monotonic interval between checks for a successor to a cached
+    /// manifest. Zero checks on every read.
+    pub manifest_revalidation_interval_ms: u64,
+    /// Budgets for WAL folds and metadata compactions, and the block memo
+    /// budget of every read, publication, and fold.
     pub metadata_lsm_policy: loonfs_core::MetadataLsmPolicy,
     /// Tracing mode label.
     pub trace_mode: TraceMode,
     /// Object-store kind label used by tracing.
     pub trace_store_kind: TraceStoreKind,
-}
-
-/// Cache configuration for the embedded runtime. Every cache disables the
-/// same way: a zero budget.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RuntimeCacheConfig {
-    /// Minimum monotonic interval between checks for a successor to the cached manifest.
-    /// Defaults to 1000 milliseconds; zero checks on every read.
-    pub manifest_revalidation_interval_ms: u64,
-    /// Approximate decoded-byte budget for head state: namespace head
-    /// anchors and read-side WAL-tail projections, least recently used first
-    /// out. Defaults to 64 MiB; zero keeps none. Nothing limits how many
-    /// namespaces it holds.
-    ///
-    /// A writer's publishers hold their own total of retained WAL-tail
-    /// projections against the same budget, so this is the ceiling per side,
-    /// not for the process. The budget also caps one entry: a publish whose
-    /// tail outgrows it keeps nothing, so each later publish replays the tail
-    /// from the store until a fold shortens it. Writer sessions are not
-    /// counted; they live as long as the host holds their writable
-    /// [`Namespace`](crate::Namespace) handles.
-    pub max_cached_wal_tail_projection_decoded_bytes: usize,
-    /// Cache settings for decoded metadata segments. The byte budget
-    /// defaults to 256 MiB. The block memo budget, 64 MiB by default, bounds
-    /// the data blocks one read, publication, or fold keeps for
-    /// itself on top of the shared cache.
-    pub metadata_segment_cache: MetadataSegmentCacheConfig,
-}
-
-impl RuntimeCacheConfig {
-    /// Disables the shared runtime caches by zeroing their budgets. The block
-    /// memo each operation keeps for itself stays at its default.
-    pub fn disabled() -> Self {
-        Self {
-            manifest_revalidation_interval_ms: 1000,
-            max_cached_wal_tail_projection_decoded_bytes: 0,
-            metadata_segment_cache: MetadataSegmentCacheConfig {
-                max_decoded_bytes: 0,
-                ..MetadataSegmentCacheConfig::default()
-            },
-        }
-    }
-}
-
-impl Default for RuntimeCacheConfig {
-    fn default() -> Self {
-        Self {
-            manifest_revalidation_interval_ms: 1000,
-            max_cached_wal_tail_projection_decoded_bytes:
-                DEFAULT_MAX_CACHED_WAL_TAIL_PROJECTION_DECODED_BYTES,
-            metadata_segment_cache: MetadataSegmentCacheConfig::default(),
-        }
-    }
 }

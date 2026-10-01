@@ -873,14 +873,9 @@ async fn retention_passing_a_backfill_checkpoint_never_serves_a_partial_query() 
     // The maintenance handle is a separate runtime. The feed reads the
     // retention floor from the reader's pinned manifest, so the worker must
     // revalidate on every read to observe the advance within this test.
-    let worker = GrepHost::with_runtime_cache(
-        &store,
-        "grep-worker-tests",
-        loonfs::RuntimeCacheConfig {
-            manifest_revalidation_interval_ms: 0,
-            ..Default::default()
-        },
-    )
+    let worker = GrepHost::with_reader(&store, "grep-worker-tests", |builder| {
+        builder.manifest_revalidation_interval_ms(0)
+    })
     .await
     .worker;
     worker.enable(&namespace_id).await.expect("enable");

@@ -6,7 +6,7 @@ mod composition;
 
 use super::serve::{build_handles, serve_on};
 use super::{app, AppOptions, AppState};
-use crate::config::RuntimeCacheConfigOverrides;
+use crate::config::MetadataCacheOverrides;
 use crate::{ServerConfig, StoreConfig};
 use async_trait::async_trait;
 use axum::http::StatusCode;
@@ -1000,7 +1000,7 @@ fn test_config(root: &Path, writer_id: &str) -> ServerConfig {
         max_concurrent_folds: loonfs::DEFAULT_MAX_CONCURRENT_FOLDS,
         publication: Default::default(),
         inline_content: Default::default(),
-        runtime_cache: RuntimeCacheConfigOverrides::default(),
+        metadata_cache: MetadataCacheOverrides::default(),
         local_cache: None,
         grep: crate::config::GrepConfig {
             mode: crate::config::GrepMode::ServeAndMaintain,
@@ -1019,6 +1019,8 @@ fn test_config(root: &Path, writer_id: &str) -> ServerConfig {
         max_concurrent_downloads: 16,
         max_concurrent_maintenance: loonfs::DEFAULT_MAX_CONCURRENT_MAINTENANCE,
         max_merge_input_bytes: loonfs_api::wire::sst_blocks::DEFAULT_MAX_COMPACTION_INPUT_BYTES,
+        manifest_revalidation_interval_ms: None,
+        max_block_memo_bytes: None,
         idle_fold_after_ms: loonfs::MetadataMaintenanceOptions::default().idle_fold_after_ms,
         allow_unauthenticated_remote: false,
         allow_remote_without_tls: false,

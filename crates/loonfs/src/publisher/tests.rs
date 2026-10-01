@@ -13,7 +13,7 @@ use crate::fs::WriterIdentity;
 use crate::metrics::{DefaultMetricsRecorder, MetricValue, RuntimeInstruments};
 use crate::publish::{CommitRequest, ContentPreparationError, FilesystemOperation};
 use crate::{
-    CreateNamespaceOptions, ErrorCode, MaintenanceHint, RuntimeCacheConfig,
+    CreateNamespaceOptions, ErrorCode, MaintenanceHint, MetadataCache,
     SharedObjectStore as SharedStore, TraceMode, TraceStoreKind,
 };
 use async_trait::async_trait;
@@ -203,12 +203,12 @@ fn test_runtime_core(store: SharedStore) -> RuntimeCore {
         store,
         ReadConfig {
             max_read_content_bytes: None,
-            runtime_cache: RuntimeCacheConfig::default(),
+            manifest_revalidation_interval_ms: 1000,
             metadata_lsm_policy: loonfs_core::MetadataLsmPolicy::default(),
             trace_mode: TraceMode::Remote,
             trace_store_kind: TraceStoreKind::LocalFs,
         },
-        None,
+        MetadataCache::default(),
         None,
         RuntimeInstruments::new(None),
         Arc::new(loonfs_api::StdMonotonicTimer::default()),
@@ -261,13 +261,13 @@ async fn test_writer_with_interval(
 
 async fn test_writer_with_cache(
     store: SharedStore,
-    runtime_cache: RuntimeCacheConfig,
+    metadata_cache: MetadataCache,
     recorder: Arc<DefaultMetricsRecorder>,
 ) -> crate::LoonFs<crate::Writable> {
     crate::LoonFs::builder_with_store(store)
         .writer_id("writer-a")
         .min_publish_interval_ms(0)
-        .runtime_cache(runtime_cache)
+        .metadata_cache(metadata_cache)
         .metrics_recorder(recorder)
         .trace_mode(TraceMode::Remote)
         .trace_store_kind(TraceStoreKind::LocalFs)
@@ -2179,7 +2179,12 @@ async fn a_fold_reloads_the_tail_when_no_projection_is_retained() {
     let hints = Arc::new(Mutex::new(Vec::new()));
     let writer = crate::LoonFs::builder_with_store(store.clone())
         .writer_id("writer-a")
-        .runtime_cache(RuntimeCacheConfig::disabled())
+        .metadata_cache(
+            MetadataCache::builder()
+                .max_segment_bytes(0)
+                .max_head_state_bytes(0)
+                .build(),
+        )
         .maintenance_hint_observer({
             let hints = Arc::clone(&hints);
             move |hint| hints.lock().expect("hint log").push(hint)
@@ -2971,10 +2976,9 @@ async fn retained_tail_projections_stay_within_the_shared_byte_budget() {
     let recorder = Arc::new(DefaultMetricsRecorder::new());
     let writer = test_writer_with_cache(
         store,
-        RuntimeCacheConfig {
-            max_cached_wal_tail_projection_decoded_bytes: budget_bytes,
-            ..RuntimeCacheConfig::default()
-        },
+        MetadataCache::builder()
+            .max_head_state_bytes(budget_bytes)
+            .build(),
         recorder.clone(),
     )
     .await;
@@ -3041,7 +3045,7 @@ async fn a_publish_past_the_publish_budget_counts_a_tail_replay() {
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
     let recorder = Arc::new(DefaultMetricsRecorder::new());
     let mut writer =
-        test_writer_with_cache(store, RuntimeCacheConfig::default(), recorder.clone()).await;
+        test_writer_with_cache(store, MetadataCache::default(), recorder.clone()).await;
     let timer = Arc::new(ManualMonotonicTimer::default());
     writer.mode.publisher.timer = timer.clone();
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -3093,12 +3097,19 @@ async fn one_projection_decoded_bytes() -> usize {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn disabled_runtime_caches_retain_no_tail_projections() {
+async fn zero_cache_limits_retain_no_tail_projections() {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
     let recorder = Arc::new(DefaultMetricsRecorder::new());
-    let writer =
-        test_writer_with_cache(store, RuntimeCacheConfig::disabled(), recorder.clone()).await;
+    let writer = test_writer_with_cache(
+        store,
+        MetadataCache::builder()
+            .max_segment_bytes(0)
+            .max_head_state_bytes(0)
+            .build(),
+        recorder.clone(),
+    )
+    .await;
     let registry = writer.mode.publisher.clone();
     let namespaces = test_namespaces(3);
 
@@ -3127,8 +3138,7 @@ async fn a_landed_delete_forgets_the_namespace_projection() {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
     let recorder = Arc::new(DefaultMetricsRecorder::new());
-    let writer =
-        test_writer_with_cache(store, RuntimeCacheConfig::default(), recorder.clone()).await;
+    let writer = test_writer_with_cache(store, MetadataCache::default(), recorder.clone()).await;
     let registry = writer.mode.publisher.clone();
     let namespaces = test_namespaces(2);
 
@@ -3162,10 +3172,9 @@ async fn a_skipped_eviction_leaves_the_namespace_accounted() {
     let recorder = Arc::new(DefaultMetricsRecorder::new());
     let writer = test_writer_with_cache(
         store,
-        RuntimeCacheConfig {
-            max_cached_wal_tail_projection_decoded_bytes: budget_bytes,
-            ..RuntimeCacheConfig::default()
-        },
+        MetadataCache::builder()
+            .max_head_state_bytes(budget_bytes)
+            .build(),
         recorder.clone(),
     )
     .await;

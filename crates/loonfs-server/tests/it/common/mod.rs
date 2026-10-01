@@ -11,7 +11,7 @@ use loonfs_api::{ListCheckpointsResponse, ListPathEntriesResponse, NamespaceId};
 use loonfs_client::{Client, ClientConfig, ListPathEntriesOptions, NamespacePath};
 use loonfs_server::{
     app, serve_with_shutdown, AppOptions, GrepConfig, GrepMode, MaintenanceMode,
-    RuntimeCacheConfigOverrides, ServeError, ServerConfig, StoreConfig, TlsServerConfig,
+    MetadataCacheOverrides, ServeError, ServerConfig, StoreConfig, TlsServerConfig,
 };
 use loonfs_test_support::http::raw_agent;
 use std::collections::BTreeMap;
@@ -304,7 +304,7 @@ pub(crate) fn test_config(
         max_concurrent_folds: loonfs::DEFAULT_MAX_CONCURRENT_FOLDS,
         publication: Default::default(),
         inline_content: Default::default(),
-        runtime_cache: RuntimeCacheConfigOverrides::default(),
+        metadata_cache: MetadataCacheOverrides::default(),
         local_cache: None,
         grep: GrepConfig {
             mode: GrepMode::ServeAndMaintain,
@@ -323,6 +323,8 @@ pub(crate) fn test_config(
         max_concurrent_downloads: 16,
         max_concurrent_maintenance: loonfs::DEFAULT_MAX_CONCURRENT_MAINTENANCE,
         max_merge_input_bytes: loonfs_api::wire::sst_blocks::DEFAULT_MAX_COMPACTION_INPUT_BYTES,
+        manifest_revalidation_interval_ms: None,
+        max_block_memo_bytes: None,
         idle_fold_after_ms: loonfs::MetadataMaintenanceOptions::default().idle_fold_after_ms,
         allow_unauthenticated_remote: false,
         allow_remote_without_tls: false,

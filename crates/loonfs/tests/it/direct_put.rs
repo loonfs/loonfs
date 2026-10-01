@@ -9,8 +9,8 @@ use loonfs::publish::{parse_mutation_path, CommitCandidate, CommitRequest, Files
 use loonfs::uploads::ResolvedUploadCompletion;
 use loonfs::{
     ChangeSeq, ChecksumAlgorithm, CommitId, CreateDirectoryOptions, CreateNamespaceOptions,
-    DestinationBehavior, ErrorCode, NamespaceId, PutFileOptions, RuntimeCacheConfig,
-    SharedObjectStore, UploadMode,
+    DestinationBehavior, ErrorCode, MetadataCache, NamespaceId, PutFileOptions, SharedObjectStore,
+    UploadMode,
 };
 use loonfs_api::v0::{UploadContentClaim, UploadSessionStatus};
 use loonfs_api::Checksum;
@@ -778,7 +778,14 @@ fn begin_upload_rejects_malformed_head_and_lease_when_cache_disabled() {
     let fs = open_runtime_with(
         object_store,
         "begin-upload-malformed-control-test",
-        |builder| builder.runtime_cache(RuntimeCacheConfig::disabled()),
+        |builder| {
+            builder.metadata_cache(
+                MetadataCache::builder()
+                    .max_segment_bytes(0)
+                    .max_head_state_bytes(0)
+                    .build(),
+            )
+        },
     );
 
     let head_bad = NamespaceId::parse("head-bad").expect("valid namespace id");

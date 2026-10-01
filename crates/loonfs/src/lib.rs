@@ -1,7 +1,8 @@
 //! Embedded LoonFS runtime.
 //!
 //! The crate has two nouns. A [`LoonFs`] is the runtime: it owns the store
-//! client, the caches, and the read budgets. A [`Namespace`] handle acts on
+//! client and the read budgets, and reads through a [`MetadataCache`] that
+//! several runtimes may share. A [`Namespace`] handle acts on
 //! one namespace, and its methods take no namespace id. Both have one of two
 //! modes, [`ReadOnly`] or [`Writable`]. A writable runtime also creates and
 //! forks namespaces, opens the writable handle that is a namespace's writer
@@ -48,6 +49,7 @@ mod config;
 mod fs;
 mod handle;
 mod maintenance;
+mod metadata_cache;
 pub mod metrics;
 mod options;
 mod publisher;
@@ -81,9 +83,9 @@ pub use loonfs_api::{
 };
 pub use loonfs_core::cache::{
     DecodedBlock, DecodedBlockCache, DecodedBlockCacheConfig, DecodedBlockCacheObserver,
-    DecodedBlockCacheStats, DecodedSegmentBlock, MetadataSegmentCacheConfig, Recency,
-    SegmentBlockKind, SegmentCacheKey, StoredMetadataBlockCache,
-    StoredMetadataBlockCacheCloseError, StoredMetadataBlockKey, StoredMetadataBlockKind,
+    DecodedBlockCacheStats, DecodedSegmentBlock, Recency, SegmentBlockKind, SegmentCacheKey,
+    StoredMetadataBlockCache, StoredMetadataBlockCacheCloseError, StoredMetadataBlockKey,
+    StoredMetadataBlockKind,
 };
 pub use loonfs_core::limits::{
     DIRECT_TRANSFER_URL_TTL_MS, GC_DEFAULT_GRACE_WINDOW_MS, GC_MIN_GRACE_WINDOW_MS,
@@ -179,11 +181,9 @@ pub use loonfs_objectstore::{
     ByteStream, ObjectStore, ObjectStoreError, SharedObjectStore, StoreConfig,
 };
 
-pub use cache::RuntimeCacheStats;
 pub use config::{
-    InlineContentOptions, PublicationLimits, RuntimeCacheConfig,
-    DEFAULT_MAX_CONCURRENT_COMPACTIONS, DEFAULT_MAX_CONCURRENT_FOLDS,
-    DEFAULT_MAX_CONCURRENT_MAINTENANCE,
+    InlineContentOptions, PublicationLimits, DEFAULT_MAX_CONCURRENT_COMPACTIONS,
+    DEFAULT_MAX_CONCURRENT_FOLDS, DEFAULT_MAX_CONCURRENT_MAINTENANCE,
 };
 pub use fs::{
     ChangesPager, CheckpointsPager, FileRevisionsPager, InodeChildrenPager, PathEntriesPager,
@@ -196,6 +196,10 @@ pub use maintenance::{
     MaintenanceHintReceiver, MaintenanceJob, MaintenanceJobId, MaintenanceProbe,
     MaintenanceRegistry, MaintenanceRunReport, MaintenanceRunner, MaintenanceRunnerBuilder,
     MaintenanceRunnerStats, MetadataCompactionJob, MetadataMaintenanceJob, NamespacePublication,
+};
+pub use metadata_cache::{
+    MetadataCache, MetadataCacheBuilder, MetadataCacheStats, DEFAULT_MAX_HEAD_STATE_BYTES,
+    DEFAULT_MAX_SEGMENT_BYTES,
 };
 pub use options::{
     CommitOptions, CopyOptions, CreateCheckpointOptions, CreateDirectoryOptions,

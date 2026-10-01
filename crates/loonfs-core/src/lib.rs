@@ -103,8 +103,9 @@ pub mod test_support;
 /// Durable timestamps and monotonic publication budgets.
 pub mod time;
 
-/// Cache types and configuration used by runtime read paths. The `loonfs`
-/// runtime owns these caches and their statistics.
+/// Cache types used by runtime read paths. The `loonfs` metadata cache owns
+/// the shared stores and their statistics; each runtime reads through its own
+/// scoped views of them.
 pub mod cache {
     pub use crate::block_cache::{
         DecodedBlock, DecodedBlockCache, DecodedBlockCacheConfig, DecodedBlockCacheObserver,
@@ -115,11 +116,10 @@ pub mod cache {
 
     pub use crate::manifest::metadata_maintenance_due;
     pub use crate::manifest::{
-        CachedReadAnchor, HeadStateCache, HeadStateCacheStats, MetadataSegmentCache,
-        MetadataSegmentCacheConfig, MetadataSegmentCacheStats, NamespaceValidation,
+        CacheScope, CachedReadAnchor, HeadStateCache, HeadStateCacheStats, MetadataSegmentCache,
+        MetadataSegmentCacheStats, NamespaceValidation, SharedHeadState, SharedSegmentBlocks,
         StoredMetadataBlockCache, StoredMetadataBlockCacheCloseError, StoredMetadataBlockKey,
         StoredMetadataBlockKind, WalTailProjectionCacheKey,
-        DEFAULT_WAL_TAIL_PROJECTION_DECODED_BYTES,
     };
     pub use crate::namespace::status::{
         load_namespace, load_namespace_diagnostics, NamespaceStorageDiagnostics,

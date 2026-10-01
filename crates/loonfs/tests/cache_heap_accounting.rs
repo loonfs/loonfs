@@ -13,8 +13,8 @@ use loonfs::publish::{
 };
 use loonfs::{
     ActorId, CommitId, ContentId, CreateNamespaceOptions, DestinationBehavior,
-    ListPathEntriesOptions, LoonFs, MetadataMaintenanceOptions, MetadataSegmentCacheConfig,
-    NamespaceId, PageRequest, ReadOnly, RuntimeCacheConfig, SharedObjectStore, StatPathOptions,
+    ListPathEntriesOptions, LoonFs, MetadataCache, MetadataMaintenanceOptions, NamespaceId,
+    PageRequest, ReadOnly, SharedObjectStore, StatPathOptions, DEFAULT_MAX_HEAD_STATE_BYTES,
 };
 use loonfs_api::{
     AccessGrants, AccessRight, AccessRights, AttributeKey, AttributeValue, NamespaceAccess,
@@ -348,7 +348,7 @@ async fn seed(store: &SharedObjectStore, shape: &Shape) {
 /// after the reader is built.
 async fn retained_heap<F, Fut>(
     root: &Path,
-    cache: RuntimeCacheConfig,
+    cache: MetadataCache,
     read: F,
 ) -> (usize, LoonFs<ReadOnly>)
 where
@@ -357,7 +357,7 @@ where
 {
     let store: SharedObjectStore = Arc::new(LocalFsStore::new(root).expect("local store"));
     let reader = LoonFs::reader_with_store(store)
-        .runtime_cache(cache)
+        .metadata_cache(cache)
         .build()
         .await
         .expect("reader");
@@ -442,55 +442,42 @@ async fn cache_budgets_charge_the_heap_their_contents_hold() {
         seed(&store, shape).await;
         drop(store);
 
-        // The segment cache does not report what it holds, so this fills it
-        // past its budget and compares the heap with the budget. The last
-        // eviction can leave the cache up to one block short of it.
+        // This fills the segment cache past its budget and compares the heap
+        // with the budget. The last eviction can leave the cache up to one
+        // block short of it.
         let (segment_heap, reader) = retained_heap(
             root.path(),
-            RuntimeCacheConfig {
-                max_cached_wal_tail_projection_decoded_bytes: 0,
-                metadata_segment_cache: MetadataSegmentCacheConfig {
-                    max_decoded_bytes: SEGMENT_BUDGET_BYTES,
-                    ..MetadataSegmentCacheConfig::default()
-                },
-                ..RuntimeCacheConfig::default()
-            },
+            MetadataCache::builder()
+                .max_segment_bytes(SEGMENT_BUDGET_BYTES)
+                .max_head_state_bytes(0)
+                .build(),
             |reader| list_every_directory(shape, reader),
         )
         .await;
         assert!(
-            reader
-                .runtime_cache_stats()
-                .metadata_segment_cache_evictions
-                > 0,
+            reader.metadata_cache().stats().segment_evictions > 0,
             "the {} dataset should outgrow the segment budget",
             shape.label
         );
         drop(reader);
 
-        let head_state = RuntimeCacheConfig {
-            metadata_segment_cache: MetadataSegmentCacheConfig {
-                max_decoded_bytes: 0,
-                ..MetadataSegmentCacheConfig::default()
-            },
-            ..RuntimeCacheConfig::default()
+        let head_state = |max_head_state_bytes| {
+            MetadataCache::builder()
+                .max_segment_bytes(0)
+                .max_head_state_bytes(max_head_state_bytes)
+                .build()
         };
-        let (with_head_state, reader) = retained_heap(root.path(), head_state.clone(), |reader| {
-            stat_one_path_per_namespace(shape, reader)
-        })
-        .await;
-        let accounted = reader
-            .runtime_cache_stats()
-            .head_state_cache_cached_decoded_bytes;
-        drop(reader);
-        let (without_head_state, reader) = retained_heap(
+        let (with_head_state, reader) = retained_heap(
             root.path(),
-            RuntimeCacheConfig {
-                max_cached_wal_tail_projection_decoded_bytes: 0,
-                ..head_state
-            },
+            head_state(DEFAULT_MAX_HEAD_STATE_BYTES),
             |reader| stat_one_path_per_namespace(shape, reader),
         )
+        .await;
+        let accounted = reader.metadata_cache().stats().head_state_bytes;
+        drop(reader);
+        let (without_head_state, reader) = retained_heap(root.path(), head_state(0), |reader| {
+            stat_one_path_per_namespace(shape, reader)
+        })
         .await;
         drop(reader);
         let head_state_heap = with_head_state.saturating_sub(without_head_state);

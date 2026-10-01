@@ -16,8 +16,8 @@ fn read_context(head: NamespaceReadState, basis: MetadataBasis) -> RuntimeReadCo
     RuntimeReadContext {
         head,
         basis,
-        segment_cache: Arc::new(MetadataSegmentCache::new(Default::default())),
-        head_state: Arc::new(HeadStateCache::new(usize::MAX)),
+        segment_cache: Arc::new(MetadataSegmentCache::unshared(usize::MAX)),
+        head_state: Arc::new(HeadStateCache::unshared(usize::MAX)),
     }
 }
 

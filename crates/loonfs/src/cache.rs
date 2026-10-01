@@ -2,117 +2,19 @@
 //! WAL probes observe commits; interval checks observe manifest changes.
 
 use crate::fs::RuntimeCore;
-use crate::metrics::RuntimeInstruments;
 use crate::trace::phase_span;
-use crate::{CoreError, NamespaceId, PinId, RuntimeCacheConfig};
+use crate::{CoreError, NamespaceId, PinId};
 use crate::{Result, RuntimeError};
-use loonfs_core::cache::{
-    CachedReadAnchor, HeadStateCacheStats, MetadataSegmentCacheStats, WalTailProjectionCacheKey,
-};
+use loonfs_core::cache::{CachedReadAnchor, WalTailProjectionCacheKey};
 use loonfs_core::control::{
     load_checkpoint_read_basis, load_read_anchor, load_snapshot_read_basis, manifest_has_successor,
     project_anchor_tail, CheckpointReadBasis, NamespaceReadAnchor, VerifiedNamespaceCatalogEntry,
 };
 use loonfs_core::time::Observation;
 use loonfs_core::{MetadataProjectionLoadError, RuntimeReadContext};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tracing::Instrument;
-
-/// Snapshot of runtime cache counters.
-///
-/// These counters are diagnostic. They are useful for tuning cache limits and
-/// understanding read/write warmup behavior.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct RuntimeCacheStats {
-    /// Latest metadata reads served through the metadata-view path.
-    pub latest_metadata_view_reads: usize,
-    /// Snapshot-backed metadata views created by the runtime.
-    pub snapshot_view_reads: usize,
-    /// WAL-tail projection cache hits.
-    pub wal_tail_projection_cache_hits: usize,
-    /// WAL-tail projection cache misses.
-    pub wal_tail_projection_cache_misses: usize,
-    /// WAL-tail projections inserted.
-    pub wal_tail_projection_cache_inserts: usize,
-    /// Head anchors and WAL-tail projections evicted to stay within the
-    /// head-state budget.
-    pub head_state_cache_evictions: usize,
-    /// Decoded bytes dropped with evicted head state.
-    pub head_state_cache_evicted_decoded_bytes: usize,
-    /// Head anchors and WAL-tail projections too heavy to cache at all.
-    pub head_state_cache_rejections: usize,
-    /// Decoded bytes in head state too heavy to cache.
-    pub head_state_cache_rejected_decoded_bytes: usize,
-    /// Decoded bytes currently retained as head anchors and WAL-tail
-    /// projections.
-    pub head_state_cache_cached_decoded_bytes: usize,
-    /// Decoded metadata-segment cache hits.
-    pub metadata_segment_cache_hits: usize,
-    /// Decoded metadata-segment cache misses.
-    pub metadata_segment_cache_misses: usize,
-    /// Blocks inserted into the decoded metadata-segment cache.
-    pub metadata_segment_cache_inserts: usize,
-    /// Blocks evicted from the decoded metadata-segment cache.
-    pub metadata_segment_cache_evictions: usize,
-    /// Segments skipped by their bloom filter before any index or data read.
-    pub metadata_segment_cache_filter_skips: usize,
-    /// Segments whose filter admitted a lookup that matched no rows.
-    pub metadata_segment_cache_filter_false_positives: usize,
-}
-
-pub(crate) struct RuntimeCacheStatsInner {
-    latest_metadata_view_reads: AtomicUsize,
-    snapshot_view_reads: AtomicUsize,
-    instruments: Arc<RuntimeInstruments>,
-}
-
-impl RuntimeCacheStatsInner {
-    pub(crate) fn new(instruments: Arc<RuntimeInstruments>) -> Self {
-        Self {
-            latest_metadata_view_reads: AtomicUsize::new(0),
-            snapshot_view_reads: AtomicUsize::new(0),
-            instruments,
-        }
-    }
-
-    pub(crate) fn snapshot(
-        &self,
-        metadata_segment_cache: MetadataSegmentCacheStats,
-        head_state: HeadStateCacheStats,
-    ) -> RuntimeCacheStats {
-        RuntimeCacheStats {
-            latest_metadata_view_reads: self.latest_metadata_view_reads.load(Ordering::SeqCst),
-            snapshot_view_reads: self.snapshot_view_reads.load(Ordering::SeqCst),
-            wal_tail_projection_cache_hits: head_state.tail_hits,
-            wal_tail_projection_cache_misses: head_state.tail_misses,
-            wal_tail_projection_cache_inserts: head_state.tail_inserts,
-            head_state_cache_evictions: head_state.evictions,
-            head_state_cache_evicted_decoded_bytes: head_state.evicted_decoded_bytes,
-            head_state_cache_rejections: head_state.rejections,
-            head_state_cache_rejected_decoded_bytes: head_state.rejected_decoded_bytes,
-            head_state_cache_cached_decoded_bytes: head_state.cached_decoded_bytes,
-            metadata_segment_cache_hits: metadata_segment_cache.hits,
-            metadata_segment_cache_misses: metadata_segment_cache.misses,
-            metadata_segment_cache_inserts: metadata_segment_cache.inserts,
-            metadata_segment_cache_evictions: metadata_segment_cache.evictions,
-            metadata_segment_cache_filter_skips: metadata_segment_cache.filter_skips,
-            metadata_segment_cache_filter_false_positives: metadata_segment_cache
-                .filter_false_positives,
-        }
-    }
-
-    pub(crate) fn record_latest_metadata_view_read(&self) {
-        self.latest_metadata_view_reads
-            .fetch_add(1, Ordering::SeqCst);
-        self.instruments.latest_metadata_view_read();
-    }
-
-    pub(crate) fn record_snapshot_view_read(&self) {
-        self.snapshot_view_reads.fetch_add(1, Ordering::SeqCst);
-        self.instruments.snapshot_view_read();
-    }
-}
 
 impl RuntimeCore {
     pub(crate) fn cached_read_context(
@@ -127,10 +29,9 @@ impl RuntimeCore {
     /// speculative read peeks first and then loads, so only the load counts.
     fn lookup_namespace_head(&self, namespace_id: &NamespaceId) -> Option<Arc<CachedReadAnchor>> {
         let head = self.inner.head_state.get_anchor(namespace_id);
-        match head {
-            Some(_) => self.inner.instruments.namespace_head_cache_hit(),
-            None => self.inner.instruments.namespace_head_cache_miss(),
-        }
+        self.inner
+            .metadata_cache
+            .record_head_anchor_lookup(head.is_some());
         head
     }
 
@@ -166,7 +67,7 @@ impl RuntimeCore {
             // this shortcut: it may have observed before an intervening
             // write completed. Local publication is not a remote proof.
             let _span = tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "validation_reuse").entered();
-            self.inner.instruments.namespace_head_cache_hit();
+            self.inner.metadata_cache.record_head_anchor_lookup(true);
             return Ok(head);
         }
         // Saturate instead of wrapping: at exhaustion reads simply stop
@@ -211,9 +112,7 @@ impl RuntimeCore {
                 .clone()
                 .filter(Observation::is_within_revalidation_bound)
             {
-                let interval_ms = self
-                    .runtime_cache_config()
-                    .manifest_revalidation_interval_ms;
+                let interval_ms = self.inner.config.manifest_revalidation_interval_ms;
                 let check_due = checked.age_ms() >= interval_ms;
                 let observed = Observation::now(Arc::clone(&self.inner.timer));
                 let matches = !check_due || !manifest_has_successor(self.store(), namespace_id, head.basis.manifest_no())
@@ -266,12 +165,6 @@ impl RuntimeCore {
         self.load_namespace_head_cached(namespace_id)
             .await
             .map_err(RuntimeError::Core)
-    }
-
-    /// The budgets every runtime cache sizes itself from, including the
-    /// publish side's retained tail projections.
-    pub(crate) fn runtime_cache_config(&self) -> &RuntimeCacheConfig {
-        &self.inner.config.runtime_cache
     }
 
     pub(crate) fn runtime_read_context(&self, anchor: &CachedReadAnchor) -> RuntimeReadContext {
@@ -366,7 +259,8 @@ impl RuntimeCore {
         )
     }
 
-    /// Pins the latest metadata view and records the read in cache metrics.
+    /// Pins the latest metadata view and records the read in the view-read
+    /// metric.
     pub(crate) async fn pinned_metadata_read(
         &self,
         namespace_id: &NamespaceId,
@@ -375,7 +269,7 @@ impl RuntimeCore {
         RuntimeReadContext,
     )> {
         let pinned = self.pinned_read(namespace_id).await?;
-        self.inner.cache_stats.record_latest_metadata_view_read();
+        self.inner.instruments.latest_metadata_view_read();
         Ok(pinned)
     }
 

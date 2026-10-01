@@ -19,7 +19,9 @@ mod streaming_compaction;
 
 use super::block_load::DEFAULT_BLOCK_MEMO_BYTES;
 use super::build::{build_manifest_segments, build_manifest_segments_from_rows};
-use super::cache::{MetadataSegmentBlockKind, MetadataSegmentCache, MetadataSegmentCacheConfig};
+use super::cache::{
+    CacheScope, MetadataSegmentBlockKind, MetadataSegmentCache, SharedSegmentBlocks,
+};
 use super::compaction_merge::locality_of;
 use super::error::ManifestLoadError;
 use super::load::{

@@ -1636,7 +1636,7 @@ These are reference producer and runtime defaults. A target size can be exceeded
 | Automatic WAL-fold threshold | 32 WAL objects |
 | Idle WAL-fold period | 15 minutes |
 | Unfolded-tail write rejection threshold | 128 WAL objects |
-| `RuntimeCacheConfig::manifest_revalidation_interval_ms` | 1,000 ms |
+| `LoonFsBuilder::manifest_revalidation_interval_ms` | 1,000 ms |
 | Maximum commit-message size | 4,096 bytes |
 
 `manifest_revalidation_interval_ms` is the minimum monotonic interval between checks for a successor to the cached manifest.

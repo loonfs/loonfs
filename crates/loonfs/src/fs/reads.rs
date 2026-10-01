@@ -504,7 +504,7 @@ impl<M> Namespace<M> {
             .core
             .pinned_read_at_snapshot(&self.namespace_id, snapshot_id)
             .await?;
-        self.core.inner.cache_stats.record_snapshot_view_read();
+        self.core.inner.instruments.snapshot_view_read();
         Ok(self.read_view_from(engine, context, ReadSource::Snapshot(snapshot_id.clone())))
     }
 

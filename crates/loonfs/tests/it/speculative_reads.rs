@@ -3,8 +3,8 @@
 //! replaced file is never served from the reference the cached view named.
 
 use loonfs::{
-    CreateNamespaceOptions, DestinationBehavior, LoonFs, MetadataSegmentCacheConfig, NamespaceId,
-    PutFileOptions, ReadOnly, RuntimeCacheConfig, Writable,
+    CreateNamespaceOptions, DestinationBehavior, LoonFs, MetadataCache, NamespaceId,
+    PutFileOptions, ReadOnly, Writable, DEFAULT_MAX_HEAD_STATE_BYTES,
 };
 use loonfs_core::time::Deadline;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -51,14 +51,12 @@ async fn uncached_segment_reader(
     head_state_bytes: usize,
 ) -> LoonFs<ReadOnly> {
     LoonFs::reader_with_store(store.clone())
-        .runtime_cache(RuntimeCacheConfig {
-            max_cached_wal_tail_projection_decoded_bytes: head_state_bytes,
-            metadata_segment_cache: MetadataSegmentCacheConfig {
-                max_decoded_bytes: 0,
-                ..MetadataSegmentCacheConfig::default()
-            },
-            ..RuntimeCacheConfig::default()
-        })
+        .metadata_cache(
+            MetadataCache::builder()
+                .max_segment_bytes(0)
+                .max_head_state_bytes(head_state_bytes)
+                .build(),
+        )
         .build()
         .await
         .expect("build reader")
@@ -99,11 +97,7 @@ async fn an_unchanged_view_resolves_the_path_once() {
         "resolution should read metadata segments"
     );
 
-    let speculative = uncached_segment_reader(
-        &store,
-        RuntimeCacheConfig::default().max_cached_wal_tail_projection_decoded_bytes,
-    )
-    .await;
+    let speculative = uncached_segment_reader(&store, DEFAULT_MAX_HEAD_STATE_BYTES).await;
     let speculative_namespace = speculative.namespace(&namespace_id);
     speculative_namespace
         .get_file_bytes(PATH)
@@ -231,9 +225,7 @@ async fn buffered_inline_reads_request_no_content_object_on_either_branch() {
         )
         .await;
     assert!(result.results[0].is_ok());
-    let default_head_state_bytes =
-        RuntimeCacheConfig::default().max_cached_wal_tail_projection_decoded_bytes;
-    for head_state_bytes in [0, default_head_state_bytes] {
+    for head_state_bytes in [0, DEFAULT_MAX_HEAD_STATE_BYTES] {
         let reader = uncached_segment_reader(&store, head_state_bytes).await;
         let namespace = reader.namespace(&namespace_id);
         for (index, value) in values.iter().enumerate() {

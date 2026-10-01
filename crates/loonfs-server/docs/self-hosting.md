@@ -292,9 +292,9 @@ namespace.
 | Metric | Type | What moves it |
 | --- | --- | --- |
 | `loonfs.namespace_head_cache.gets` | Counter, `result` label | A read looks up its namespace head: `hit` or `miss`. |
-| `loonfs.head_state_cache.evictions` | Counter | A head anchor or read-side WAL-tail projection is evicted at the `runtime_cache.max_cached_wal_tail_projection_decoded_bytes` budget. |
+| `loonfs.head_state_cache.evictions` | Counter | A head anchor or read-side WAL-tail projection is evicted at the `metadata_cache.max_head_state_bytes` limit. |
 | `loonfs.head_state_cache.retained_decoded_bytes` | Gauge | Decoded bytes of head anchors and read-side WAL-tail projections held now. |
-| `loonfs.metadata_segment_cache.retained_decoded_bytes` | Gauge | Decoded bytes the metadata segment cache holds, up to `runtime_cache.metadata_segment_cache_max_decoded_bytes`. |
+| `loonfs.metadata_segment_cache.retained_decoded_bytes` | Gauge | Decoded bytes the metadata segment cache holds, up to `metadata_cache.max_segment_bytes`. |
 | `loonfs.publisher.projection_evictions` | Counter | A publish-side WAL-tail projection is evicted at the projection budget. |
 | `loonfs.publisher.tail_replays` | Counter | A publish rereads the WAL tail from the store instead of using a retained projection. This happens on a session's first publish, after an eviction or a failed publish, when the namespace's last write was more than a minute ago, and when a fold the publisher did not run has published a new manifest. |
 | `loonfs.publisher.sessions_open` | Gauge | Writer sessions the server holds: one for each namespace it has written since it started, plus any whose admitted work is still finishing. |
@@ -341,13 +341,13 @@ counted in any budget and sit on top.
 
 | Budget | Setting | Default | What it bounds | Kind |
 | --- | --- | --- | --- | --- |
-| Metadata segment cache | `runtime_cache.metadata_segment_cache_max_decoded_bytes` | 256 MiB | Decoded metadata blocks and manifests | Steady |
-| Head state | `runtime_cache.max_cached_wal_tail_projection_decoded_bytes` | 64 MiB | Cached namespace heads and the WAL tails replayed for reads, for any number of namespaces | Steady |
+| Metadata segment cache | `metadata_cache.max_segment_bytes` | 256 MiB | Decoded metadata blocks and manifests | Steady |
+| Head state | `metadata_cache.max_head_state_bytes` | 64 MiB | Cached namespace heads and the WAL tails replayed for reads, for any number of namespaces | Steady |
 | Publish-side WAL-tail projections | The same setting | 64 MiB | WAL tails the namespace publishers keep | Steady |
 | Publication queue | `publication.max_estimated_bytes` | 64 MiB | Estimated bytes of admitted commit requests | Steady |
 | Proxied uploads | `max_concurrent_uploads` | 8 uploads | At most one 8 MiB transfer part per upload body | Per request |
 | Proxied downloads | `max_concurrent_downloads` | 16 streams | One 8 MiB read chunk per content stream | Per request |
-| Block memo | `runtime_cache.max_block_memo_bytes` | 64 MiB | Metadata blocks one read, publication, or fold keeps | Per operation |
+| Block memo | `max_block_memo_bytes` | 64 MiB | Metadata blocks one read, publication, or fold keeps | Per operation |
 | Merge input | `max_merge_input_bytes` | 64 MiB | Decoded blocks one compaction or maintenance step merges | Per operation |
 | Segment output | None | 32 MiB | Encoded segments one fold, compaction, or maintenance step holds while it writes them | Per operation |
 | WAL folds | `max_concurrent_folds` | 2 | Folds running at once | Concurrency |
@@ -415,15 +415,15 @@ max_concurrent_maintenance = 1
 max_concurrent_uploads = 2
 max_concurrent_downloads = 2
 max_merge_input_bytes = 8388608
+max_block_memo_bytes = 8388608
 
 [publication]
 max_estimated_bytes = 8388608
 max_concurrent_publications = 2
 
-[runtime_cache]
-max_cached_wal_tail_projection_decoded_bytes = 16777216
-metadata_segment_cache_max_decoded_bytes = 67108864
-max_block_memo_bytes = 8388608
+[metadata_cache]
+max_segment_bytes = 67108864
+max_head_state_bytes = 16777216
 ```
 
 | Budget | Ceiling |

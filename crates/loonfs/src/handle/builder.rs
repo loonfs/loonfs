@@ -8,8 +8,9 @@ use crate::metrics::{
 };
 use crate::publisher::{NamespaceAdvanceHint, NamespaceAdvanceObserver, PublisherRegistry};
 use crate::{
-    InlineContentOptions, MaintenanceHint, MaintenanceHintObserver, PublicationLimits, Result,
-    RuntimeCacheConfig, RuntimeError, SharedObjectStore, StoreConfig, TraceMode, TraceStoreKind,
+    InlineContentOptions, MaintenanceHint, MaintenanceHintObserver, MetadataCache,
+    PublicationLimits, Result, RuntimeError, SharedObjectStore, StoreConfig, TraceMode,
+    TraceStoreKind,
 };
 use loonfs_core::cache::StoredMetadataBlockCache;
 use loonfs_core::MetadataLsmPolicy;
@@ -44,9 +45,10 @@ enum StoreSource {
 struct CoreSettings {
     source: StoreSource,
     max_read_content_bytes: Option<u64>,
-    runtime_cache: RuntimeCacheConfig,
-    /// Carries the merge input budget; the block memo budget comes from
-    /// `runtime_cache` when the core opens.
+    /// `None` builds a private cache when the core opens.
+    metadata_cache: Option<MetadataCache>,
+    manifest_revalidation_interval_ms: u64,
+    /// Carries the merge input budget and the block memo budget.
     metadata_lsm_policy: MetadataLsmPolicy,
     timer: Arc<dyn loonfs_api::MonotonicTimer>,
     wall_clock: Arc<dyn crate::WallClock>,
@@ -82,7 +84,9 @@ impl<M> LoonFsBuilder<M> {
             core: CoreSettings {
                 source,
                 max_read_content_bytes: None,
-                runtime_cache: RuntimeCacheConfig::default(),
+                metadata_cache: None,
+                manifest_revalidation_interval_ms:
+                    crate::config::DEFAULT_MANIFEST_REVALIDATION_INTERVAL_MS,
                 metadata_lsm_policy: MetadataLsmPolicy::default(),
                 timer: Arc::new(loonfs_api::StdMonotonicTimer::default()),
                 wall_clock: Arc::new(loonfs_core::time::SystemWallClock),
@@ -122,9 +126,35 @@ impl<M> LoonFsBuilder<M> {
         self
     }
 
-    /// Sets runtime cache behavior.
-    pub fn runtime_cache(mut self, runtime_cache: RuntimeCacheConfig) -> Self {
-        self.core.runtime_cache = runtime_cache;
+    /// Reads through `metadata_cache`, which other runtimes may share.
+    ///
+    /// This runtime gets a scope of its own in the cache, so it never sees
+    /// another runtime's entries, and its clones, its read-only view, and its
+    /// maintenance share that scope. The cache reports its metrics to its
+    /// own recorder. Without this setting, the runtime creates a private
+    /// cache with the default limits that reports to
+    /// [`Self::metrics_recorder`].
+    pub fn metadata_cache(mut self, metadata_cache: MetadataCache) -> Self {
+        self.core.metadata_cache = Some(metadata_cache);
+        self
+    }
+
+    /// Sets the minimum interval, in milliseconds, between checks for a
+    /// successor to a cached manifest. Defaults to 1000; zero checks on
+    /// every read.
+    pub fn manifest_revalidation_interval_ms(
+        mut self,
+        manifest_revalidation_interval_ms: u64,
+    ) -> Self {
+        self.core.manifest_revalidation_interval_ms = manifest_revalidation_interval_ms;
+        self
+    }
+
+    /// Sets the data-block bytes one read, publication, or fold keeps in its
+    /// own block memo, on top of the metadata cache. Defaults to 64 MiB; zero
+    /// keeps none.
+    pub fn max_block_memo_bytes(mut self, max_block_memo_bytes: usize) -> Self {
+        self.core.metadata_lsm_policy.max_block_memo_bytes = max_block_memo_bytes;
         self
     }
 
@@ -138,11 +168,13 @@ impl<M> LoonFsBuilder<M> {
         self
     }
 
-    /// Installs a node-local encoded-block cache beneath the decoded cache.
+    /// Installs a node-local encoded-block cache beneath the metadata cache.
     ///
-    /// The read-only view of this runtime shares the decoded cache, and so
-    /// this local cache too. The host owns and closes it; object storage
-    /// remains authoritative.
+    /// Its keys carry no runtime scope, so one tier serves the runtimes over
+    /// one store, one after another across restarts. It must not be given to
+    /// runtimes over different stores. The read-only view of this runtime
+    /// uses it too. The host owns and closes it; object storage remains
+    /// authoritative.
     pub fn stored_metadata_block_cache(
         mut self,
         stored_metadata_block_cache: Arc<dyn StoredMetadataBlockCache>,
@@ -183,10 +215,12 @@ impl<M> LoonFsBuilder<M> {
     /// (see [`crate::metrics`]).
     ///
     /// The runtime registers its instrument set once, here, and reports into
-    /// it from then on. Every mode reports object-store calls and caches. A
-    /// writable runtime and its maintenance also report publications,
-    /// compactions, and collection passes. A runtime built without one
-    /// registers nothing.
+    /// it from then on. Every mode reports object-store calls and metadata
+    /// view reads. A writable runtime and its maintenance also report
+    /// publications, compactions, and collection passes. A runtime built
+    /// without one registers nothing. The private metadata cache a runtime
+    /// creates without [`Self::metadata_cache`] reports here too; a cache
+    /// given to that setting reports only to its own recorder.
     pub fn metrics_recorder(mut self, recorder: Arc<dyn MetricsRecorder>) -> Self {
         self.core.metrics_recorder = Some(recorder);
         self
@@ -351,6 +385,14 @@ impl CoreSettings {
             StoreSource::Shared(store) => (store, TraceStoreKind::Unknown),
         };
         let trace_store_kind = self.trace_store_kind.unwrap_or(derived_kind);
+        let metadata_cache = self.metadata_cache.unwrap_or_else(|| {
+            let builder = MetadataCache::builder();
+            match &self.metrics_recorder {
+                Some(recorder) => builder.metrics_recorder(Arc::clone(recorder)),
+                None => builder,
+            }
+            .build()
+        });
         let instruments = RuntimeInstruments::new(self.metrics_recorder);
         let recorder = fan_out_object_store_recorder(
             self.object_store_metrics_recorder,
@@ -366,18 +408,12 @@ impl CoreSettings {
             store,
             ReadConfig {
                 max_read_content_bytes: self.max_read_content_bytes,
-                metadata_lsm_policy: MetadataLsmPolicy {
-                    max_block_memo_bytes: self
-                        .runtime_cache
-                        .metadata_segment_cache
-                        .max_block_memo_bytes,
-                    ..self.metadata_lsm_policy
-                },
-                runtime_cache: self.runtime_cache,
+                manifest_revalidation_interval_ms: self.manifest_revalidation_interval_ms,
+                metadata_lsm_policy: self.metadata_lsm_policy,
                 trace_mode: self.trace_mode,
                 trace_store_kind,
             },
-            None,
+            metadata_cache,
             self.stored_metadata_block_cache,
             instruments,
             self.timer,

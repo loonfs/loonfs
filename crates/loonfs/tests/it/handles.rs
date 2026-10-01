@@ -10,9 +10,9 @@ use crate::common::collect_path_entries;
 use loonfs::{
     maintenance_hint_relay, CommitId, CreateCheckpointOptions, CreateDirectoryOptions,
     CreateNamespaceOptions, ErrorCode, GarbageCollectionJob, LoonFs, Maintenance,
-    MaintenanceRegistry, MaintenanceRunner, ManifestNo, MetadataCompactionJob,
-    MetadataMaintenanceJob, MetadataMaintenanceOptions, NamespaceId, PutFileOptions,
-    RuntimeCacheConfig, RuntimeError, SharedObjectStore, StoreConfig, Writable,
+    MaintenanceRegistry, MaintenanceRunner, ManifestNo, MetadataCache, MetadataCompactionJob,
+    MetadataMaintenanceJob, MetadataMaintenanceOptions, NamespaceId, PutFileOptions, RuntimeError,
+    SharedObjectStore, StoreConfig, Writable,
 };
 use loonfs_core::test_support::append_wal_objects;
 use loonfs_core::MutationContext;
@@ -61,13 +61,13 @@ async fn writer(root: &Path) -> LoonFs<Writable> {
 
 async fn writer_with_runner(
     root: &Path,
-    runtime_cache: RuntimeCacheConfig,
+    metadata_cache: MetadataCache,
 ) -> (LoonFs<Writable>, Maintenance, MaintenanceRunner) {
     let (observer, receiver) =
         maintenance_hint_relay(NonZeroUsize::new(64).expect("relay capacity is nonzero"));
     let writer = LoonFs::builder(store_config(root))
         .writer_id("handle-test-writer")
-        .runtime_cache(runtime_cache)
+        .metadata_cache(metadata_cache)
         .maintenance_hint_observer(move |hint| observer(hint))
         .build()
         .await
@@ -251,7 +251,7 @@ fn maintenance_invalidates_the_runtimes_shared_read_caches() {
     let namespace_id = namespace_id("demo");
     block_on(async {
         let (writer, maintenance, runner) =
-            writer_with_runner(temp_dir.path(), RuntimeCacheConfig::default()).await;
+            writer_with_runner(temp_dir.path(), MetadataCache::default()).await;
         writer
             .create_namespace(
                 &namespace_id,
@@ -461,15 +461,18 @@ fn manual_only_writer_folds_without_scheduling_maintenance() {
 
 #[test]
 fn a_writer_with_a_runner_maintains_what_it_touches() {
-    for runtime_cache in [
-        RuntimeCacheConfig::default(),
-        RuntimeCacheConfig::disabled(),
+    for metadata_cache in [
+        MetadataCache::default(),
+        MetadataCache::builder()
+            .max_segment_bytes(0)
+            .max_head_state_bytes(0)
+            .build(),
     ] {
         let temp_dir = tempdir().expect("tempdir");
         let namespace_id = namespace_id("demo");
         block_on(async {
             let (writer, maintenance, runner) =
-                writer_with_runner(temp_dir.path(), runtime_cache).await;
+                writer_with_runner(temp_dir.path(), metadata_cache).await;
             writer
                 .create_namespace(
                     &namespace_id,
@@ -1100,10 +1103,7 @@ async fn namespace_deletion_drops_cached_reads_and_schedules_gc_even_when_its_an
         let observed = hints.clone();
         let writer = LoonFs::builder_with_store(store.clone())
             .writer_id("delete-hint")
-            .runtime_cache(RuntimeCacheConfig {
-                manifest_revalidation_interval_ms: u64::MAX,
-                ..Default::default()
-            })
+            .manifest_revalidation_interval_ms(u64::MAX)
             .maintenance_hint_observer(move |hint| observed.lock().expect("hints").push(hint))
             .build()
             .await
