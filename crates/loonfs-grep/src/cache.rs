@@ -2,11 +2,11 @@
 
 use crate::codec::IndexRow;
 use crate::manifest::GrepManifestState;
-use loonfs::metrics::{CounterHandle, MetricsRecorder, RESULT_HIT, RESULT_MISS};
-use loonfs::{
+use loonfs::engine::{
     DecodedBlockCache, DecodedBlockCacheConfig, DecodedBlockCacheObserver, DecodedSegmentBlock,
     SegmentBlockKind, SegmentCacheKey,
 };
+use loonfs::metrics::{CounterHandle, MetricsRecorder, RESULT_HIT, RESULT_MISS};
 use loonfs_api::wire::sst_blocks::DEFAULT_TARGET_BLOCK_BYTES;
 use std::sync::Arc;
 
@@ -129,9 +129,9 @@ mod tests {
     #[test]
     fn cache_activity_reaches_the_metrics_recorder() {
         let recorder = DefaultMetricsRecorder::new();
-        let cache = GrepBlockCache::new(loonfs::DecodedBlockCacheConfig {
+        let cache = GrepBlockCache::new(loonfs::engine::DecodedBlockCacheConfig {
             observer: Some(Arc::new(GrepBlockCacheMetrics::register(&recorder))),
-            ..loonfs::DecodedBlockCacheConfig::with_max_decoded_bytes(1_000)
+            ..loonfs::engine::DecodedBlockCacheConfig::with_max_decoded_bytes(1_000)
         });
         cache.insert(key("a"), block(600));
         cache.insert(key("b"), block(600));
@@ -167,9 +167,9 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_loads_of_one_key_run_one_underlying_load() {
-        let cache = GrepBlockCache::new(loonfs::DecodedBlockCacheConfig::with_max_decoded_bytes(
-            1_000,
-        ));
+        let cache = GrepBlockCache::new(
+            loonfs::engine::DecodedBlockCacheConfig::with_max_decoded_bytes(1_000),
+        );
         let loads = AtomicUsize::new(0);
         let cache_key = key("a");
         let first = cache.get_or_load(&cache_key, || async {

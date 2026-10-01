@@ -1,7 +1,8 @@
 //! Publication confirmation at the metadata budget boundary.
 
 use super::*;
-use loonfs::{CoreError, Deadline, METADATA_PUBLICATION_BUDGET_MS};
+use loonfs::engine::{Deadline, METADATA_PUBLICATION_BUDGET_MS};
+use loonfs::CoreError;
 use loonfs_api::{ManifestNo, RunNo};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::clock::ManualClock;

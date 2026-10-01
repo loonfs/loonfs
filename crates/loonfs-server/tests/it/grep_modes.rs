@@ -1040,8 +1040,8 @@ fn grep_limits() -> [&'static str; 4] {
     ]
 }
 
-fn observation() -> loonfs::Observation {
-    loonfs::Observation::now(Arc::new(
+fn observation() -> loonfs::engine::Observation {
+    loonfs::engine::Observation::now(Arc::new(
         loonfs_objectstore::timing::StdMonotonicTimer::default(),
     ))
 }

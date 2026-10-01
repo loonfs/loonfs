@@ -446,7 +446,7 @@ async fn exhausted_run_numbers_fail_as_server_errors_without_writing_the_manifes
         current_state.segments().to_vec(),
     )
     .expect("valid manifest at the public maximum");
-    let deadline = loonfs::Deadline::start(Arc::new(
+    let deadline = loonfs::engine::Deadline::start(Arc::new(
         loonfs_objectstore::timing::StdMonotonicTimer::default(),
     ));
     let maximum = publish_grep_manifest(&*store, Some(&current), &maximum_state, &deadline)
@@ -2308,7 +2308,7 @@ async fn enable_disable_and_cached_queries_use_numbered_publication() {
 
 #[tokio::test]
 async fn gc_preserves_discovery_and_applies_manifest_and_segment_age_rules() {
-    use loonfs::UNREFERENCED_SEGMENT_MIN_AGE_MS;
+    use loonfs::engine::UNREFERENCED_SEGMENT_MIN_AGE_MS;
     use loonfs_api::ManifestNo;
     use loonfs_grep::manifest::encode_grep_manifest;
     let directory = tempdir().expect("directory");
@@ -2501,7 +2501,7 @@ async fn gc_preserves_discovery_and_applies_manifest_and_segment_age_rules() {
 
 #[tokio::test]
 async fn gc_keeps_a_superseded_manifest_and_its_segments_while_its_successor_is_young() {
-    use loonfs::UNREFERENCED_SEGMENT_MIN_AGE_MS;
+    use loonfs::engine::UNREFERENCED_SEGMENT_MIN_AGE_MS;
     use loonfs_api::ManifestNo;
     use loonfs_grep::manifest::encode_grep_manifest;
     let directory = tempdir().expect("directory");

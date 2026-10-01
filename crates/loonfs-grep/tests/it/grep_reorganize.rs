@@ -2,7 +2,8 @@
 
 use crate::common::GrepHost;
 use bytes::Bytes;
-use loonfs::{Deadline, SegmentBlockKind, SharedObjectStore};
+use loonfs::engine::{Deadline, SegmentBlockKind};
+use loonfs::SharedObjectStore;
 use loonfs_api::wire::sst_blocks::{
     decode_data_block_rows, decode_index_block, BuiltSegmentBlocks, SegmentBlocksBuilder,
 };

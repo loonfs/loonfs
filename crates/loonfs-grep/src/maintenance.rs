@@ -7,9 +7,10 @@
 
 use crate::manifest::{load_current_grep_manifest, GrepIndexStatus};
 use crate::{GramIndexBuildPolicy, GrepBuildOutcome, GrepError, GrepReorganizeOutcome, GrepWorker};
+use loonfs::engine::Observation;
 use loonfs::{
     MaintenanceCancellation, MaintenanceConclusion, MaintenanceJob, MaintenanceJobId,
-    MaintenanceProbe, MaintenanceRunReport, NamespaceId, NamespacePublication, Observation, Result,
+    MaintenanceProbe, MaintenanceRunReport, NamespaceId, NamespacePublication, Result,
 };
 use loonfs_api::{ErrorCode, RunMaintenanceResponse};
 use loonfs_objectstore::timing::StdMonotonicTimer;

@@ -3,7 +3,7 @@
 #![allow(clippy::panic)]
 
 use bytes::Bytes;
-use loonfs::Deadline;
+use loonfs::engine::Deadline;
 use loonfs_api::{ChangeSeq, ErrorCode, ManifestNo, NamespaceId, RunNo};
 use loonfs_grep::keyspace::{grep_prefix, hint_key, manifest_key, manifests_prefix};
 use loonfs_grep::manifest::{
@@ -201,13 +201,13 @@ async fn a_hint_reread_outside_the_revalidation_bound_walks_again_from_the_hint(
         load_current_grep_manifest(
             &store,
             &namespace_id,
-            loonfs::Observation::now(clock.clone())
+            loonfs::engine::Observation::now(clock.clone())
         ),
         async {
             // The successor probe has found nothing; the hint reread is held.
             store.wait_until_blocked().await;
             put_manifest(2).await;
-            clock.advance_ms(loonfs::READ_REVALIDATION_BOUND_MS);
+            clock.advance_ms(loonfs::engine::READ_REVALIDATION_BOUND_MS);
             store.release();
         }
     );
@@ -270,7 +270,7 @@ async fn a_failed_hint_raise_leaves_a_discoverable_publication_and_invalid_candi
     );
     let clock = Arc::new(ManualClock::new(0));
     let expired = Deadline::start(clock.clone());
-    clock.advance_ms(loonfs::METADATA_PUBLICATION_BUDGET_MS + 1);
+    clock.advance_ms(loonfs::engine::METADATA_PUBLICATION_BUDGET_MS + 1);
     let valid = state(namespace_id, ManifestNo(3), RunNo(2));
     assert!(
         publish_grep_manifest(&store, Some(&loaded), &valid, &expired)

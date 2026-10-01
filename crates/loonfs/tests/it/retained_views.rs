@@ -1,13 +1,13 @@
 //! Retained namespace views across metadata maintenance and collection.
 
 use crate::common::*;
+use loonfs::engine::UNREFERENCED_SEGMENT_MIN_AGE_MS;
 use loonfs::AccessState;
 use loonfs::AttributeChanges;
 use loonfs::{
     current_time_ms, CompactionStepOutcome, CreateDirectoryOptions, CreateNamespaceOptions,
     DestinationBehavior, GcOptions, InlineContentPolicy, LoonFs, MetadataCompactionPolicy,
     MetadataMaintenanceOptions, PutFileOptions, WalFoldStepOutcome, GC_DEFAULT_GRACE_WINDOW_MS,
-    UNREFERENCED_SEGMENT_MIN_AGE_MS,
 };
 use loonfs_api::wire::manifest::{MetadataRow, MetadataRowFamily, RunTier};
 use loonfs_api::wire::sst_blocks::{decode_data_block, decode_index_block};

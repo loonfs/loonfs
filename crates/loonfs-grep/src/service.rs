@@ -17,7 +17,8 @@ use crate::query::{plan_pattern, GramPlanOutcome, GramQueryPlan};
 use crate::reads::{published_revision, resolve_batch_size, NamespaceReadView, NamespaceReads};
 use crate::{GrepError, Result};
 use futures::future::{join_all, try_join_all};
-use loonfs::{CoreError, CurrentFileState, Observation};
+use loonfs::engine::Observation;
+use loonfs::{CoreError, CurrentFileState};
 use loonfs_api::wire::hex::hex_decode_bytes;
 use loonfs_api::wire::sst_blocks::{
     decode_filter_block, index_blocks_for_key_range, key_range_may_intersect,
@@ -344,7 +345,7 @@ fn materialized_snapshot_from_state(
 impl Default for GrepService {
     fn default() -> Self {
         Self::new(Arc::new(GrepBlockCache::new(
-            loonfs::DecodedBlockCacheConfig::with_max_decoded_bytes(
+            loonfs::engine::DecodedBlockCacheConfig::with_max_decoded_bytes(
                 DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
             ),
         )))
@@ -1103,7 +1104,7 @@ mod tests {
     #[tokio::test]
     async fn a_cached_manifest_checked_longer_ago_than_the_bound_is_discovered_again() {
         use crate::manifest::{publish_grep_manifest, GrepIndexState};
-        use loonfs::READ_REVALIDATION_BOUND_MS;
+        use loonfs::engine::READ_REVALIDATION_BOUND_MS;
         use loonfs_api::{ManifestNo, RunNo};
         use loonfs_objectstore::local_fs_store::LocalFsStore;
         use loonfs_test_support::clock::ManualClock;
@@ -1111,7 +1112,7 @@ mod tests {
         let directory = tempfile::tempdir().expect("directory");
         let store = LocalFsStore::new(directory.path()).expect("store");
         let namespace_id = loonfs_test_support::ids::namespace_id("grep-revalidation");
-        let deadline = loonfs::Deadline::start(Arc::new(StdMonotonicTimer::default()));
+        let deadline = loonfs::engine::Deadline::start(Arc::new(StdMonotonicTimer::default()));
         let manifest = |manifest_no| {
             GrepManifestState::new(
                 namespace_id.clone(),
